@@ -184,14 +184,16 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
 
-# The upstream SGLang base copies a uv binary into /usr/local/bin, outside any
-# Python distribution, so requirements.sglang.txt cannot refresh it. Replace it
-# with the release carrying the current fix line where the base ships one.
+# The upstream SGLang base ships a uv binary outside any Python distribution, so
+# requirements.sglang.txt cannot refresh it. Replace it with the release carrying
+# the current fix line, wherever the base put it: the cuda base installs it to
+# /usr/local/bin, the xpu base to /root/.local/bin. Overwriting each copy found
+# on PATH covers both and keeps the version assertion below satisfiable.
 # Nothing on the runtime path runs uv.
 RUN --mount=type=bind,from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }},source=/,target=/tmp/uv-image \
-    if [ -e /usr/local/bin/uv ]; then \
-        install -m 0755 /tmp/uv-image/uv /tmp/uv-image/uvx /usr/local/bin/; \
-    fi && \
+    for u in $(which -a uv uvx); do \
+        install -m 0755 "/tmp/uv-image/$(basename "$u")" "$u"; \
+    done && \
     for u in $(which -a uv uvx); do \
         "$u" --version | grep -q '^uvx\{0,1\} {{ context.dynamo.uv_version | replace(".", "\\.") }} ' || { echo "unexpected uv at $u" >&2; exit 1; }; \
     done
