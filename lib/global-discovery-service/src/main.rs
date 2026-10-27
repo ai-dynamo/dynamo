@@ -61,7 +61,12 @@ struct Args {
     routers: Vec<ReplicaEndpoint>,
     /// Kubernetes stores: each PoolRelay Service is named
     /// `<DGD name><suffix>`.
-    #[arg(long, default_value = "-pool-relay")]
+    #[arg(
+        long,
+        default_value = "-pool-relay",
+        allow_hyphen_values = true,
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
     pool_service_suffix: String,
     /// Kubernetes stores: namespace of the Global Router Service.
     #[arg(long)]
@@ -201,4 +206,17 @@ fn cancel_on_signal(shutdown: CancellationToken) -> Result<()> {
         shutdown.cancel();
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pool_service_suffix_can_start_with_a_hyphen_but_not_be_empty() {
+        let args = Args::try_parse_from(["gds", "--pool-service-suffix", "-pool-gateway"]).unwrap();
+        assert_eq!(args.pool_service_suffix, "-pool-gateway");
+        // An empty suffix would make every imported Service a pool.
+        assert!(Args::try_parse_from(["gds", "--pool-service-suffix="]).is_err());
+    }
 }

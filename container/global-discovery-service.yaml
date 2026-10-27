@@ -6,8 +6,14 @@
 #   sed "s#IMAGE#<registry>/global-discovery-service:<tag>#" global-discovery-service.yaml | kubectl apply -f -
 # It needs only read access to EndpointSlices. It lists the pools whose
 # `<DGD name>-pool-relay` Services Karmada imports, and the replicas of the
-# Global Router Service named by the --router-* arguments; change those if
-# the router runs elsewhere.
+# Global Router Service named by the --router-* arguments: set those to the
+# router's namespace, its Service and the port PoolRelays connect to.
+#
+# It reads the imported slices with the pod's credentials, so this cluster
+# needs a ServiceImport for each pool's PoolRelay Service and for the router
+# Service. To read the Karmada control plane instead, which holds every
+# exported Service's slices, mount its kubeconfig from a Secret, point
+# KUBECONFIG at it, and grant the same read access there.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -79,6 +85,11 @@ spec:
               path: /healthz
               port: http
             periodSeconds: 5
+          lifecycle:
+            # Keep serving while the Pod leaves the Service's endpoints.
+            preStop:
+              exec:
+                command: ["sleep", "5"]
           resources:
             requests:
               cpu: 50m
