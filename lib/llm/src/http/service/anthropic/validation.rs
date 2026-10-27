@@ -92,7 +92,33 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
     }
 
     pub(super) fn into_request(self, headers: &HeaderMap) -> Result<T, String> {
-        validate(&self.fields?, headers)?;
+        let fields = self.fields?;
+        let mut versions = headers.get_all("anthropic-version").iter();
+        let version = versions.next();
+        if versions.next().is_some() {
+            return Err("anthropic-version: supply exactly one version header".into());
+        }
+        match version.map(|value| value.to_str()) {
+            None | Some(Ok("2023-06-01")) => {}
+            Some(Ok("2026-10-21")) => {
+                if let Some(parameter) = ["temperature", "top_p", "top_k"]
+                    .into_iter()
+                    .find(|parameter| fields.get(*parameter).is_some())
+                {
+                    return Err(format!(
+                        "{parameter}: not allowed with anthropic-version 2026-10-21; remove the parameter or use 2023-06-01"
+                    ));
+                }
+            }
+            _ => {
+                return Err(
+                    "anthropic-version: supported versions are 2023-06-01 and 2026-10-21".into(),
+                );
+            }
+        }
+
+        validate(&fields, headers)?;
+        drop(fields);
         // Read the original bytes, preserving duplicate-field rejection and Axum's
         // nested field paths. Do not reconstruct the request through a Value.
         Json::<T>::from_bytes(&self.body)

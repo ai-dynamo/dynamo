@@ -9,7 +9,7 @@ use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 use dynamo_runtime::config::environment_names::llm::{
     DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_BODY_LIMIT_MB, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
 };
-use reqwest::StatusCode;
+use reqwest::{StatusCode, header::HeaderValue};
 use serde_json::{Value, json};
 use serial_test::serial;
 
@@ -497,6 +497,204 @@ async fn admission_retains_typed_paths_unknown_fields_and_nonempty_method_errors
         )
         .await;
         assert_eq!(svc.engine.take_requests().await.len(), 1);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn invalid_api_versions_are_rejected_before_generation() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script]).await;
+        let invalid_headers: &[&[&[u8]]] = &[
+            &[b""],
+            &[b"not-a-version"],
+            &[b"2023-01-01"],
+            &[b"2026-10-20"],
+            &[b"2999-01-01"],
+            &[b"2023-06-01, 2026-10-21"],
+            &[b"2023-06-01", b"2026-10-21"],
+            &[b"2026-10-21", b"2023-06-01"],
+            &[b"2023-06-01", b"2023-06-01"],
+            &[b"\xff"],
+        ];
+        for (path, stream) in [
+            ("/v1/messages", false),
+            ("/v1/messages", true),
+            ("/v1/messages/count_tokens", false),
+        ] {
+            for values in invalid_headers {
+                let mut body = request();
+                body["stream"] = stream.into();
+                let mut post = svc
+                    .client
+                    .post(format!("{}{path}", svc.base_url))
+                    .timeout(Duration::from_secs(10))
+                    .json(&body);
+                for value in *values {
+                    post =
+                        post.header("anthropic-version", HeaderValue::from_bytes(value).unwrap());
+                }
+                let response = post.send().await.unwrap();
+                let error =
+                    assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+                assert!(
+                    error["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("anthropic-version")
+                );
+            }
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        assert_eq!(svc.engine.remaining_scripts().await, 1);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn current_api_version_rejects_present_sampling_parameters() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script]).await;
+        for (path, stream) in [
+            ("/v1/messages", false),
+            ("/v1/messages", true),
+            ("/v1/messages/count_tokens", false),
+        ] {
+            for (field, values) in [
+                (
+                    "temperature",
+                    [json!(1.0), json!(0.0), Value::Null, json!("bad")],
+                ),
+                ("top_p", [json!(1.0), json!(0.5), Value::Null, json!({})]),
+                (
+                    "top_k",
+                    [json!(0), json!(1), Value::Null, json!(2147483648_u64)],
+                ),
+            ] {
+                for value in values {
+                    let mut body = request();
+                    body["stream"] = stream.into();
+                    body[field] = value;
+                    let response = svc
+                        .client
+                        .post(format!("{}{path}", svc.base_url))
+                        .timeout(Duration::from_secs(10))
+                        .header("anthropic-version", "2026-10-21")
+                        .json(&body)
+                        .send()
+                        .await
+                        .unwrap();
+                    let error =
+                        assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error")
+                            .await;
+                    let message = error["error"]["message"].as_str().unwrap();
+                    assert!(message.contains(field), "{error}");
+                    assert!(message.contains("2026-10-21"), "{error}");
+                }
+            }
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        assert_eq!(svc.engine.remaining_scripts().await, 1);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn supported_api_versions_preserve_legacy_sampling_and_response_formats() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(std::iter::repeat_n(script, 18)).await;
+        for version in [None, Some("2023-06-01"), Some("2026-10-21")] {
+            for sampling in [
+                json!({}),
+                json!({"temperature": 1.0, "top_p": 1.0, "top_k": 0}),
+                json!({"temperature": 0.0, "top_p": 0.5, "top_k": 1}),
+                json!({"temperature": null, "top_p": null, "top_k": null}),
+            ] {
+                if version == Some("2026-10-21") && sampling.get("temperature").is_some() {
+                    continue;
+                }
+                for (path, stream) in [
+                    ("/v1/messages", false),
+                    ("/v1/messages", true),
+                    ("/v1/messages/count_tokens", false),
+                ] {
+                    let mut body = request();
+                    body.as_object_mut()
+                        .unwrap()
+                        .extend(sampling.as_object().unwrap().clone());
+                    if path == "/v1/messages" {
+                        body["stream"] = stream.into();
+                    } else {
+                        body.as_object_mut().unwrap().remove("max_tokens");
+                    }
+                    let mut post = svc
+                        .client
+                        .post(format!("{}{path}", svc.base_url))
+                        .timeout(Duration::from_secs(10))
+                        .json(&body);
+                    if let Some(version) = version {
+                        post = post.header("anthropic-version", version);
+                    }
+                    let response = post.send().await.unwrap();
+                    assert_eq!(response.status(), StatusCode::OK, "{version:?}: {body}");
+                    let request_id = response.headers()["request-id"]
+                        .to_str()
+                        .unwrap()
+                        .to_owned();
+                    assert!(!request_id.is_empty());
+                    if path == "/v1/messages/count_tokens" {
+                        let count: Value = response.json().await.unwrap();
+                        assert!(count["input_tokens"].is_number());
+                        assert!(svc.engine.take_requests().await.is_empty());
+                        continue;
+                    }
+                    if stream {
+                        assert!(
+                            response.headers()["content-type"]
+                                .to_str()
+                                .unwrap()
+                                .starts_with("text/event-stream")
+                        );
+                        let text = response.text().await.unwrap();
+                        assert!(!text.contains("[DONE]"));
+                        assert!(
+                            text.trim_end()
+                                .ends_with("data: {\"type\":\"message_stop\"}")
+                        );
+                    } else {
+                        let message: Value = response.json().await.unwrap();
+                        assert_eq!(message["type"], "message");
+                    }
+                    let requests = svc.engine.take_requests().await;
+                    assert_eq!(requests.len(), 1);
+                    assert_eq!(
+                        requests[0].inner.temperature,
+                        sampling["temperature"].as_f64().map(|n| n as f32)
+                    );
+                    assert_eq!(
+                        requests[0].inner.top_p,
+                        sampling["top_p"].as_f64().map(|n| n as f32)
+                    );
+                    assert_eq!(
+                        requests[0].common.top_k,
+                        sampling["top_k"].as_i64().map(|n| n as i32)
+                    );
+                    let contexts = svc.engine.take_contexts().await;
+                    assert_eq!(contexts.len(), 1);
+                    assert_eq!(contexts[0].id(), request_id);
+                }
+            }
+        }
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
     })
     .await;
