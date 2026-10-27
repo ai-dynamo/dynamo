@@ -9,12 +9,11 @@
 //! clusters (for example Azure CNI with peered VNets, or the AWS VPC CNI with
 //! peered VPCs), and an MCS implementation, Karmada first.
 //!
-//! The operator creates a `ServiceExport` for each pool's PoolRelay Service,
-//! named `<DGD name>-pool-relay` by default, and the hub exports the router's
-//! Service, so its replicas appear in every importing cluster. A pool is live
-//! while its PoolRelay endpoint is Ready, and its `relay_identity` is that
-//! endpoint's address, which routers on a trusted network use to admit the
-//! PoolRelay.
+//! Each pool's PoolRelay Service, named `<DGD name>-pool-relay` by default,
+//! needs a `ServiceExport`, and so does the router's Service in the hub, so
+//! its replicas appear in every importing cluster. A pool is live while its
+//! PoolRelay endpoint is Ready, and its `relay_identity` is that endpoint's
+//! address, for routers on a trusted network to admit the PoolRelay.
 //!
 //! Create the PoolRelay Service and its `ServiceExport` in the workload
 //! cluster, not through Karmada propagation. Kubernetes copies a Service's
