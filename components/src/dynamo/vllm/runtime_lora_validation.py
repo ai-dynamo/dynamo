@@ -8,9 +8,10 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 from collections.abc import Iterable
-from math import prod
 from pathlib import Path
+from typing import NoReturn
 
 from dynamo.llm import HttpError
 
@@ -18,6 +19,7 @@ _MAX_FILES = 4096
 _MAX_CONFIG_BYTES = 1024 * 1024
 _MAX_JSON_DEPTH = 64
 _MAX_SAFETENSORS_HEADER_BYTES = 16 * 1024 * 1024
+_MAX_USIZE = 2 * sys.maxsize + 1
 _ALLOWED_SNAPSHOT_FILES = frozenset(
     {
         "adapter_config.json",
@@ -48,6 +50,10 @@ def _runtime_error(status: int, code: str) -> HttpError:
     return HttpError(status, code)
 
 
+def _reject_json_constant(_value: str) -> NoReturn:
+    raise _runtime_error(422, "invalid_lora_adapter")
+
+
 def _parse_json(encoded: bytes) -> object:
     text = encoded.decode("utf-8")
     depth = 0
@@ -69,14 +75,30 @@ def _parse_json(encoded: bytes) -> object:
                 raise _runtime_error(422, "invalid_lora_adapter")
         elif char in "]}":
             depth -= 1
-    return json.loads(text)
+    return json.loads(text, parse_constant=_reject_json_constant)
 
 
 def _scan_error(error: OSError) -> None:
     raise error
 
 
-def _validate_safetensors(weights_path: Path) -> frozenset[str]:
+def _safetensors_byte_size(shape: list[int], dtype_bytes: int) -> int:
+    elements = 1
+    for dimension in shape:
+        if dimension > _MAX_USIZE:
+            raise _runtime_error(422, "invalid_lora_adapter")
+        elements *= dimension
+        if elements > _MAX_USIZE:
+            raise _runtime_error(422, "invalid_lora_adapter")
+    size = elements * dtype_bytes
+    if size > _MAX_USIZE:
+        raise _runtime_error(422, "invalid_lora_adapter")
+    return size
+
+
+def _validate_safetensors(
+    weights_path: Path, max_lora_rank: int | None = None
+) -> frozenset[str]:
     try:
         file_size = weights_path.stat().st_size
         with weights_path.open("rb") as weights:
@@ -136,8 +158,20 @@ def _validate_safetensors(weights_path: Path) -> frozenset[str]:
             )
         ):
             raise _runtime_error(422, "invalid_lora_adapter")
+        if max_lora_rank is not None:
+            rank_axis = None
+            if name.endswith((".lora_A.weight", ".lora_embedding_A")):
+                rank_axis = -2
+            elif name.endswith((".lora_B.weight", ".lora_embedding_B")):
+                rank_axis = -1
+            if rank_axis is not None and (
+                len(shape) < 2 or shape[rank_axis] > max_lora_rank
+            ):
+                raise _runtime_error(422, "invalid_lora_adapter")
         start, end = offsets
-        expected_bytes = prod(shape) * _SAFETENSORS_DTYPE_BYTES[tensor["dtype"]]
+        expected_bytes = _safetensors_byte_size(
+            shape, _SAFETENSORS_DTYPE_BYTES[tensor["dtype"]]
+        )
         if (
             start < 0
             or end < start
@@ -277,7 +311,7 @@ def _validate_snapshot(
             raise _runtime_error(422, "invalid_lora_adapter")
     else:
         raise _runtime_error(422, "invalid_lora_adapter")
-    tensor_names = _validate_safetensors(weights_path)
+    tensor_names = _validate_safetensors(weights_path, max_lora_rank)
     embeddings_path = canonical_snapshot / "new_embeddings.safetensors"
     if embeddings_path.exists():
         _validate_safetensors(embeddings_path)

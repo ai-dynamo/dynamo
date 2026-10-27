@@ -3,6 +3,7 @@
 
 import json
 import os
+from math import prod
 from pathlib import Path
 
 import pytest
@@ -427,3 +428,110 @@ def test_snapshot_rejects_invalid_optional_embeddings(tmp_path):
     (snapshot / "new_embeddings.safetensors").write_bytes(b"invalid")
 
     _assert_invalid(snapshot, tmp_path)
+
+
+@pytest.mark.parametrize("constant", [float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize(
+    "artifact", ["adapter_config.json", "adapter_model.safetensors"]
+)
+def test_snapshot_rejects_nonstandard_json_constants(tmp_path, constant, artifact):
+    snapshot = _snapshot(tmp_path)
+    path = snapshot / artifact
+    if artifact.endswith("safetensors"):
+        header = {
+            "q_proj": {
+                "dtype": "F32",
+                "shape": [2],
+                "data_offsets": [0, 8],
+                "extra": constant,
+            }
+        }
+        path.write_bytes(_safetensors_blob(header))
+    else:
+        config = json.loads(path.read_text())
+        path.write_text(json.dumps({**config, "extra": constant}))
+
+    _assert_invalid(snapshot, tmp_path)
+
+
+@pytest.mark.parametrize("shape", [[2**64, 0], [2**40, 2**40, 0]])
+def test_snapshot_rejects_shape_integer_overflow_before_zero(tmp_path, shape):
+    snapshot = _snapshot(tmp_path)
+    header = {
+        "q_proj": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]},
+        "z_proj": {"dtype": "F32", "shape": shape, "data_offsets": [8, 8]},
+    }
+    (snapshot / "adapter_model.safetensors").write_bytes(_safetensors_blob(header))
+
+    _assert_invalid(snapshot, tmp_path)
+
+
+def test_snapshot_accepts_zero_tensor_without_element_product_overflow(tmp_path):
+    snapshot = _snapshot(tmp_path)
+    header = {
+        "q_proj": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]},
+        "z_proj": {"dtype": "F32", "shape": [2**62, 0], "data_offsets": [8, 8]},
+    }
+    (snapshot / "adapter_model.safetensors").write_bytes(_safetensors_blob(header))
+
+    assert validate_snapshot(snapshot, tmp_path, 1024, 64, ("base",)) == snapshot
+
+
+@pytest.mark.parametrize(
+    "suffix,shape_kind",
+    [
+        ("lora_A.weight", "matrix-a"),
+        ("lora_B.weight", "matrix-b"),
+        ("lora_embedding_A", "matrix-a"),
+        ("lora_embedding_B", "matrix-b"),
+        ("lora_A.weight", "experts-a"),
+        ("lora_B.weight", "experts-b"),
+    ],
+)
+@pytest.mark.parametrize(
+    "rank,max_rank,accepted", [(64, 64, True), (128, 64, False), (128, None, True)]
+)
+def test_snapshot_bounds_actual_lora_tensor_rank(
+    tmp_path, suffix, shape_kind, rank, max_rank, accepted
+):
+    snapshot = _snapshot(tmp_path)
+    shape = [rank, 2] if shape_kind.endswith("a") else [2, rank]
+    if shape_kind.startswith("experts"):
+        shape = [2, *shape]
+    size = prod(shape) * 4
+    header = {
+        f"base_model.model.q_proj.{suffix}": {
+            "dtype": "F32",
+            "shape": shape,
+            "data_offsets": [0, size],
+        }
+    }
+    (snapshot / "adapter_model.safetensors").write_bytes(
+        _safetensors_blob(header, bytes(size))
+    )
+
+    if accepted:
+        assert (
+            validate_snapshot(snapshot, tmp_path, 16384, max_rank, ("base",))
+            == snapshot
+        )
+    else:
+        _assert_invalid(snapshot, tmp_path, max_bytes=16384, max_rank=max_rank)
+
+
+def test_snapshot_does_not_treat_expert_count_as_lora_rank(tmp_path):
+    snapshot = _snapshot(tmp_path)
+    shape = [128, 8, 2]
+    size = prod(shape) * 4
+    header = {
+        "base_model.model.q_proj.lora_A.weight": {
+            "dtype": "F32",
+            "shape": shape,
+            "data_offsets": [0, size],
+        }
+    }
+    (snapshot / "adapter_model.safetensors").write_bytes(
+        _safetensors_blob(header, bytes(size))
+    )
+
+    assert validate_snapshot(snapshot, tmp_path, 16384, 64, ("base",)) == snapshot
