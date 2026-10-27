@@ -3,10 +3,7 @@
 
 """E2E coverage for native-gRPC sidecar launch scripts."""
 
-import importlib.util
 import os
-import pathlib
-import runpy
 from dataclasses import dataclass, field
 
 import pytest
@@ -33,9 +30,11 @@ from tests.utils.payload_builder import (
     kv_routing_payload,
     multimodal_payload_default,
     sglang_generate_cancellation_payloads,
+    stop_string_payloads,
 )
 from tests.utils.payloads import KvTransferPayload, OmittedMaxTokensChatPayload
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
+from tests.utils.sidecar_runtime import require_trtllm_openengine
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/vllm"
@@ -45,38 +44,6 @@ sglang_sidecar_dir = os.environ.get("SGLANG_SIDECAR_DIR") or os.path.join(
 )
 trtllm_sidecar_dir = os.environ.get("TRTLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/trtllm"
-)
-
-
-def _trtllm_serves_openengine() -> bool:
-    """Is the installed TensorRT-LLM new enough to serve `openengine.v1`?
-
-    `lib/sidecar/trtllm` speaks OpenEngine, which the servicer provides from
-    release 1.3.0rc27 onward. `container/context.yaml` pins that release, so
-    this passes in the stock container and the case runs; it guards the
-    off-container and downgraded-image paths, where
-    `trtllm-serve --grpc-protocol openengine` does not exist and the launcher
-    cannot come up at all.
-
-    Probing for the servicer module beats comparing version strings: it is the
-    thing the sidecar actually needs, and it tracks the pinned image by itself.
-    `find_spec` on the parent does not import TensorRT-LLM, so this stays cheap
-    and works on a host without a GPU.
-    """
-    spec = importlib.util.find_spec("tensorrt_llm")
-    locations = getattr(spec, "submodule_search_locations", None) if spec else None
-    if not locations:
-        return False
-    return any(
-        (pathlib.Path(root) / "grpc" / "openengine" / "servicer.py").is_file()
-        for root in locations
-    )
-
-
-TRTLLM_OPENENGINE_SKIP_REASON = (
-    "the installed TensorRT-LLM has no OpenEngine servicer; the sidecar needs "
-    "release 1.3.0rc27 or newer, which container/context.yaml pins. Seeing this "
-    "skip in CI means the pin moved backwards."
 )
 
 
@@ -158,7 +125,10 @@ def _on_first_gpu(*names: str) -> dict[str, tuple[int, ...]]:
     return {name: (0,) for name in names}
 
 
-# Text cases stay sequential until their sidecar launch paths are profiled.
+# Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
+# has not been profiled for the sidecar launch path. Add one once measured, to
+# admit these into the parallel stage alongside the equivalent dynamo.{backend}
+# scenarios in tests/serve/test_{vllm,sglang,trtllm}.py.
 sidecar_configs = {
     "vllm_aggregated": SidecarConfig(
         name="vllm_aggregated",
@@ -166,7 +136,6 @@ sidecar_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.vllm,
-            pytest.mark.core,
             pytest.mark.gpu_1,
             # Let the 600s health check report failure before pytest times out.
             pytest.mark.timeout(780),
@@ -179,9 +148,15 @@ sidecar_configs = {
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "VLLM_DATA_PARALLEL_SIZE": "1",
         },
-        request_payloads=_aggregated_payloads(
-            VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
-        ),
+        request_payloads=[
+            *_aggregated_payloads(
+                VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            ),
+            # The frontend matches stop strings; vLLM never receives them.
+            *stop_string_payloads(
+                VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            ),
+        ],
     ),
     "sglang_aggregated": SidecarConfig(
         name="sglang_aggregated",
@@ -190,7 +165,6 @@ sidecar_configs = {
         script_args=["--enable-metrics", "--decode-log-interval", "1"],
         marks=[
             pytest.mark.sglang,
-            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.timeout(780),
             pytest.mark.post_merge,
@@ -226,15 +200,10 @@ sidecar_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.trtllm,
-            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.requested_trtllm_kv_tokens(4096),
             pytest.mark.timeout(780),
             pytest.mark.post_merge,
-            pytest.mark.skipif(
-                not _trtllm_serves_openengine(),
-                reason=TRTLLM_OPENENGINE_SKIP_REASON,
-            ),
         ],
         model="Qwen/Qwen3-0.6B",
         env={
@@ -261,7 +230,7 @@ sidecar_configs = {
             pytest.mark.profiled_vram_gib(12.0),
             pytest.mark.requested_trtllm_kv_tokens(32768),
             pytest.mark.timeout(960),
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         timeout=900,
@@ -281,7 +250,6 @@ sidecar_configs = {
         gpu_env=_on_first_gpu("TRTLLM_PREFILL_GPU", "TRTLLM_DECODE_GPU"),
         marks=[
             pytest.mark.trtllm,
-            pytest.mark.core,
             # Both engines share one GPU: the handoff is what this covers, and
             # a co-resident pair keeps it on the existing 1-GPU sidecar runner.
             # `requested_trtllm_kv_tokens` caps each engine's KV pool so the
@@ -300,10 +268,6 @@ sidecar_configs = {
             # at the single-engine budget and then idle until the kill timer.
             pytest.mark.timeout(1200),
             pytest.mark.post_merge,
-            pytest.mark.skipif(
-                not _trtllm_serves_openengine(),
-                reason=TRTLLM_OPENENGINE_SKIP_REASON,
-            ),
         ],
         model="Qwen/Qwen3-0.6B",
         timeout=1000,
@@ -329,7 +293,6 @@ sidecar_configs = {
         gpu_env=_on_first_gpu("VLLM_PREFILL_GPU", "VLLM_DECODE_GPU"),
         marks=[
             pytest.mark.vllm,
-            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
@@ -363,7 +326,6 @@ sidecar_configs = {
         ],
         marks=[
             pytest.mark.sglang,
-            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
@@ -549,10 +511,8 @@ sidecar_configs = {
 @pytest.fixture(params=params_with_model_mark(sidecar_configs))
 def sidecar_config_test(request, monkeypatch, discovery_backend):
     config = sidecar_configs[request.param]
-    if config.name == "trtllm_aggregated_image" and not _trtllm_serves_openengine():
-        if os.environ.get("DYNAMO_TEST_SIDECAR_BACKEND") == "trtllm":
-            pytest.fail(TRTLLM_OPENENGINE_SKIP_REASON)
-        pytest.skip(TRTLLM_OPENENGINE_SKIP_REASON)
+    if config.name.startswith("trtllm_"):
+        require_trtllm_openengine()
     monkeypatch.setenv("MODEL", config.model)
     monkeypatch.setenv("DYN_DISCOVERY_BACKEND", discovery_backend)
     monkeypatch.setenv("DYN_NAMESPACE", f"sidecar-{generate_random_suffix()}")
@@ -573,6 +533,7 @@ def sidecar_config_test(request, monkeypatch, discovery_backend):
     return config
 
 
+@pytest.mark.core
 @pytest.mark.sidecar
 @pytest.mark.e2e
 @pytest.mark.engine_ports
@@ -586,11 +547,6 @@ def test_serve_deployment(
     predownload_models,
 ):
     """Launch a sidecar deployment and run its configured request payloads."""
-    if sidecar_config_test.name == "trtllm_aggregated_image":
-        runpy.run_path(
-            os.path.join(WORKSPACE_DIR, "tests/utils/trtllm_media_overlay.py"),
-            run_name="__main__",
-        )
     assert (
         num_system_ports >= 2
     ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"

@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,15 +37,18 @@ const (
 )
 
 // DCDDefaulter is a mutating webhook handler for v1beta1 DynamoComponentDeployment.
-type DCDDefaulter struct{}
+type DCDDefaulter struct {
+	OperatorVersion string
+}
 
 // NewDCDDefaulter creates a new DCDDefaulter.
-func NewDCDDefaulter() *DCDDefaulter {
-	return &DCDDefaulter{}
+func NewDCDDefaulter(operatorVersion string) *DCDDefaulter {
+	return &DCDDefaulter{OperatorVersion: operatorVersion}
 }
 
 // Default implements admission.CustomDefaulter.
-// On CREATE, standalone v1beta1 DCDs default spec.name from metadata.name.
+// On CREATE, v1beta1 DCDs default spec.name from metadata.name; standalone
+// resources also record their immutable operator origin.
 // On every operation, explicit multinode roles receive their implied replica
 // counts. UPDATE does not default spec.name because that would rewrite user intent.
 func (d *DCDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
@@ -71,6 +75,15 @@ func (d *DCDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 			"name", dcd.Name,
 			"namespace", dcd.Namespace,
 		)
+	}
+
+	// Only standalone CREATEs acquire a creation origin. Graph children already
+	// carry their parent's origin in the template, even when created much later.
+	if req.Operation == admissionv1.Create && dcd.GetParentGraphDeploymentName() == "" {
+		if dcd.Annotations == nil {
+			dcd.Annotations = map[string]string{}
+		}
+		dcd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = d.OperatorVersion
 	}
 
 	defaultMultinodeRoleReplicas(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
