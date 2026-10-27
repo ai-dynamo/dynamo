@@ -134,6 +134,8 @@ without using it internally:
 
 - `/inference/v1/generate` echoes `request_id`; the `x-request-id` header takes precedence over the body field.
 - The SGLang native `/generate` route echoes `rid`; the body field takes precedence over the header.
+  SGLang itself keys session continuation by `rid` when the body carries `session_params`, so a
+  session request's `rid` must stay unique and must not be shared by concurrent requests.
 
 To follow one request across components, search logs or traces for its `request_id`. To find the
 request a caller is asking about, search for the caller's `x_request_id`. JSONL logs also carry
