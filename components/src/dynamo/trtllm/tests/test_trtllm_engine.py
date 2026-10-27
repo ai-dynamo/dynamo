@@ -14,6 +14,8 @@ if not torch.cuda.is_available():
         "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
         allow_module_level=True,
     )
+import tensorrt_llm.llmapi.llm as trtllm_llm_module
+
 from dynamo.trtllm.engine import TensorRTLLMEngine, get_llm_engine
 
 pytestmark = [
@@ -75,3 +77,21 @@ async def test_get_llm_engine_forwards_backend():
             pass
 
     mocked_engine.assert_called_once_with(engine_args, None)
+    mocked_engine.return_value.start_preprocess_pool.assert_not_awaited()
+
+
+@pytest.mark.multimodal
+@pytest.mark.asyncio
+async def test_get_llm_engine_runs_a_preprocess_pool_on_request():
+    calls = mock.Mock()
+    with (
+        mock.patch(_PYTORCH_LLM_CLS_NAME, return_value=calls.llm),
+        mock.patch(
+            "dynamo.trtllm.engine.PreprocessPool.start", return_value=calls.pool
+        ) as start,
+    ):
+        async with get_llm_engine(engine_args={}, mm_preprocess_processes=4):
+            start.assert_called_once_with(trtllm_llm_module, calls.llm, 4)
+
+    # The pool closes before the LLM shuts down.
+    assert calls.mock_calls == [mock.call.pool.close(), mock.call.llm.shutdown()]
