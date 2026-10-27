@@ -83,7 +83,10 @@ class QwenVideoHandoff:
         """Defer bounded transport cleanup until decode has read the inputs."""
         if not items:
             return
-        task = asyncio.create_task(self._sender.cleanup(items))
+        sender = self._sender
+        if sender is None:
+            raise RuntimeError("Video input transfer sender is not initialized")
+        task = asyncio.create_task(sender.cleanup(items))
         self._cleanup_tasks.add(task)
         task.add_done_callback(self._cleanup_done)
 

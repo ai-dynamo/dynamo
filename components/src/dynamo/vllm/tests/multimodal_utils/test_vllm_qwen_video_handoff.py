@@ -485,6 +485,14 @@ async def test_native_recomputation_retains_video_encoder_inputs(
     assert model.embed_multimodal(**legacy_batch) is None
 
 
+def test_cleanup_requires_a_sender_only_for_nonempty_items():
+    owner = mod.QwenVideoHandoff()
+    owner.release([])
+    assert not owner._cleanup_tasks
+    with pytest.raises(RuntimeError, match="sender is not initialized"):
+        owner.release([object()])
+
+
 @pytest.mark.parametrize("cancelled", [False, True])
 @pytest.mark.asyncio
 async def test_transfer_cleanup_does_not_block_prefill_dispatch(
