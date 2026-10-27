@@ -15,9 +15,12 @@ use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 use super::PrefillError;
-use crate::protocols::{
-    common::llm_backend::{FinishReason, LLMEngineOutput},
-    response_merge::{PREFILL_OUTPUT_ANNOTATION, PrefillNeed},
+use crate::{
+    kv_router::request_lease::RequestAttemptRelease,
+    protocols::{
+        common::llm_backend::{FinishReason, LLMEngineOutput},
+        response_merge::{PREFILL_OUTPUT_ANNOTATION, PrefillNeed},
+    },
 };
 
 /// Prefill's last `engine_data`.
@@ -25,7 +28,10 @@ pub(super) type PrefillOutput = Option<serde_json::Value>;
 
 /// Dropping the observer detaches the task: client disconnects must not abort a
 /// prefill whose KV transfer may still be needed by the decode worker.
-pub(super) struct PrefillTask(JoinHandle<Result<PrefillOutput, PrefillError>>);
+pub(super) struct PrefillTask {
+    task: JoinHandle<Result<PrefillOutput, PrefillError>>,
+    booking: Option<RequestAttemptRelease>,
+}
 
 /// Prefill's output as a stream item tagged with [`PREFILL_OUTPUT_ANNOTATION`].
 fn output_item(output: PrefillOutput) -> Option<Annotated<LLMEngineOutput>> {
@@ -57,7 +63,16 @@ impl PrefillTask {
     pub(super) fn spawn_unlogged(
         future: impl Future<Output = Result<PrefillOutput, PrefillError>> + Send + 'static,
     ) -> Self {
-        Self(tokio::spawn(future.instrument(tracing::Span::current())))
+        Self {
+            task: tokio::spawn(future.instrument(tracing::Span::current())),
+            booking: None,
+        }
+    }
+
+    /// Let a migratable decode failure release this prefill's scheduler booking.
+    pub(super) fn with_retry_release(mut self, booking: Option<RequestAttemptRelease>) -> Self {
+        self.booking = booking;
+        self
     }
 
     /// Keep intentional cancellation quiet without hiding unsolicited failures.
@@ -71,7 +86,7 @@ impl PrefillTask {
 
     /// Return the prefill result, including failures from the observer task.
     pub(super) async fn wait(self) -> Result<PrefillOutput, PrefillError> {
-        self.0.await.map_err(|error| {
+        self.task.await.map_err(|error| {
             tracing::warn!(%error, "Prefill background task did not complete");
             PrefillError::PrefillError(
                 format!("Prefill background task did not complete: {error}"),
@@ -108,13 +123,14 @@ impl PrefillTask {
     /// `output` sends prefill's output into the stream as soon as prefill
     /// finishes (`BeforeLast`), or before any decode output (`BeforeFirst`).
     pub(super) async fn forward_decode(
-        self,
+        mut self,
         decode: impl Future<Output = anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>>>,
         request_context: Arc<dyn AsyncEngineContext>,
         output: PrefillNeed,
         prefill_context: Arc<dyn AsyncEngineContext>,
     ) -> anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> {
         let emit = output != PrefillNeed::None;
+        let booking = self.booking.take();
         let mut completion = Box::pin(self.wait());
         tokio::pin!(decode);
         let mut response = tokio::select! {
@@ -133,6 +149,7 @@ impl PrefillTask {
                 Ok(response) => response,
                 Err(error) => {
                     cancel_prefill_on_decode_rejection(error.as_ref(), prefill_context.as_ref());
+                    release_prefill_booking_for_retry(booking.as_ref(), error.as_ref()).await;
                     return Err(error);
                 }
             },
@@ -155,6 +172,7 @@ impl PrefillTask {
                         if let Some(error) = item.as_ref().and_then(|item| item.err())
                             && cancel_prefill_on_decode_rejection(&error, prefill_context.as_ref())
                         {
+                            release_prefill_booking_for_retry(booking.as_ref(), &error).await;
                             yield item.unwrap();
                             return;
                         }
@@ -218,6 +236,7 @@ impl PrefillTask {
                         }) {
                             if let Some(error) = output.as_ref().and_then(|output| output.err()) {
                                 cancel_prefill_on_decode_rejection(&error, prefill_context.as_ref());
+                                release_prefill_booking_for_retry(booking.as_ref(), &error).await;
                             }
                             yield output.unwrap();
                             return;
@@ -273,6 +292,20 @@ fn cancel_prefill_on_decode_rejection(
         current = cause.source();
     }
     false
+}
+
+/// Migration retries a failed decode under the same request ID, starting again
+/// from prefill, so release this attempt's prefill booking before the error
+/// reaches it. The prefill itself keeps running for any KV transfer in flight.
+async fn release_prefill_booking_for_retry(
+    booking: Option<&RequestAttemptRelease>,
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+) {
+    if let Some(booking) = booking
+        && crate::migration::is_migratable(error)
+    {
+        booking.release().await;
+    }
 }
 
 #[cfg(test)]

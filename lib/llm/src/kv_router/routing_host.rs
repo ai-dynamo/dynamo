@@ -29,7 +29,10 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, to_worker_selection_session_context},
+    kv_router::{
+        KvRouter, metrics::RouterRequestMetrics, request_lease::RequestAttemptRelease,
+        to_worker_selection_session_context,
+    },
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -64,6 +67,15 @@ const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
 /// Bounds the wait for a worker's trailing typed error after a terminal frame.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A dispatched prefill hop.
+pub(crate) struct PrefillDispatch<M> {
+    pub(crate) metadata: M,
+    pub(crate) stream: ManyOut<Annotated<LLMEngineOutput>>,
+    /// Early release for the prefill's scheduler booking, held by `stream`
+    /// until prefill finishes. `None` when the routing policy books nothing.
+    pub(crate) booking: Option<RequestAttemptRelease>,
+}
 
 pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
@@ -796,7 +808,7 @@ impl RoutingHost {
         &self,
         request: SingleIn<PreprocessedRequest>,
         prepare: F,
-    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
+    ) -> Result<PrefillDispatch<M>, Error>
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
@@ -805,8 +817,14 @@ impl RoutingHost {
             RoutingPolicy::Builtin(_)
             | RoutingPolicy::Direct
             | RoutingPolicy::DeviceAwareWeighted => {
-                self.select_and_dispatch_builtin(request, RequestPhase::Prefill, prepare)
-                    .await
+                let (metadata, stream) = self
+                    .select_and_dispatch_builtin(request, RequestPhase::Prefill, prepare)
+                    .await?;
+                Ok(PrefillDispatch {
+                    metadata,
+                    stream,
+                    booking: None,
+                })
             }
         }
     }

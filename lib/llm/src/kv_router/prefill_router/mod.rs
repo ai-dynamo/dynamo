@@ -562,12 +562,18 @@ impl
         let router = &binding.router;
         let endpoint_id = &binding.endpoint_id;
         let mut prefill_completion = None;
+        let mut prefill_booking = None;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
-            let (prepared, prefill_stream) = router
+            let dispatch = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
                     self.prepare_prefill_dispatch(request, target, endpoint_id)
                 })
                 .await?;
+            let (prepared, prefill_stream) = (dispatch.metadata, dispatch.stream);
+            // Only a request Migration can retry needs its prefill booking released early.
+            if req.migration_state.is_some() {
+                prefill_booking = dispatch.booking;
+            }
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
                 prefill_completion =
@@ -698,6 +704,7 @@ impl
         match prefill_completion {
             Some(completion) => {
                 completion
+                    .with_retry_release(prefill_booking)
                     .forward_decode(decode, engine_ctx, output, prefill_engine_ctx)
                     .await
             }

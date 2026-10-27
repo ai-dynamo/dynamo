@@ -430,6 +430,27 @@ impl RequestAttemptLease {
     pub(crate) async fn finish(&self) {
         self.manager.finish(&self.record).await;
     }
+
+    pub(crate) fn release_handle(&self) -> RequestAttemptRelease {
+        RequestAttemptRelease {
+            manager: self.manager.clone(),
+            record: Arc::clone(&self.record),
+        }
+    }
+}
+
+/// Releases one attempt's booking before the lease that owns it completes.
+/// Release is idempotent and scoped to this attempt, so the owner's eventual
+/// completion is a no-op and cannot free a later attempt of the same request.
+pub(crate) struct RequestAttemptRelease {
+    manager: RequestLeaseManager,
+    record: Arc<RequestLeaseRecord>,
+}
+
+impl RequestAttemptRelease {
+    pub(crate) async fn release(&self) {
+        self.manager.finish(&self.record).await;
+    }
 }
 
 impl Drop for RequestAttemptLease {
