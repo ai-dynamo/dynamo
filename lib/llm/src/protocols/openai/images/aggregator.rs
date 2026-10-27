@@ -28,8 +28,9 @@ impl StreamAggregable for NvImagesResponse {
     /// [`ImagesResponseNvExt::merge`](super::ImagesResponseNvExt::merge).
     /// `data` extends. The request-level fields come from the first chunk
     /// that carries images: `created` stays, while `size` and `output_format`
-    /// are cleared when a later chunk disagrees, so the response never claims
-    /// a value that does not hold for every image.
+    /// are cleared when a later chunk disagrees, as are `background` and
+    /// `quality`, so the response never claims a value that does not hold
+    /// for every image.
     fn merge(&mut self, next: Self) {
         if self.usage.is_none() {
             self.usage = next.usage;
