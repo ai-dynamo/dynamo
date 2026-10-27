@@ -208,7 +208,19 @@ fn validate_legacy_jail_nvext_choice_count(
 pub struct PromptReasoningPrefill {
     legacy: bool,
     unified: bool,
+    unified_starting_state: Option<dynamo_parsers_v2::UnifiedParserStartingState>,
     prefix: Option<Arc<str>>,
+}
+
+// Harmony suppresses generated body text if initialization restores a non-assistant role.
+fn gpt_oss_assistant_prefill(prompt: &str) -> Option<&str> {
+    const START: &str = "<|start|>";
+    let start = prompt.rfind(START)?;
+    let prefix = &prompt[start..];
+    let role = prefix[START.len()..]
+        .split(|c: char| c.is_whitespace() || c == '<')
+        .next()?;
+    (role == "assistant").then_some(prefix)
 }
 
 /// Drop plain message bodies from a GPT-OSS parser seed; Harmony retains its init for reset.
@@ -229,6 +241,7 @@ impl std::fmt::Debug for PromptReasoningPrefill {
             .debug_struct("PromptReasoningPrefill")
             .field("legacy", &self.legacy)
             .field("unified", &self.unified)
+            .field("unified_starting_state", &self.unified_starting_state)
             .field(
                 "prefix_bytes",
                 &self.prefix.as_ref().map(|prefix| prefix.len()),
@@ -243,6 +256,7 @@ impl From<bool> for PromptReasoningPrefill {
         Self {
             legacy: value,
             unified: value,
+            unified_starting_state: None,
             prefix: None,
         }
     }
@@ -5407,7 +5421,9 @@ impl OpenAIPreprocessor {
                         starting_state: if bare_guidance {
                             dynamo_parsers_v2::UnifiedParserStartingState::Response
                         } else {
-                            unified_parser::stream_prefill(family, prompt_injected_reasoning)
+                            prompt_prefill.unified_starting_state.unwrap_or_else(|| {
+                                unified_parser::stream_prefill(family, prompt_injected_reasoning)
+                            })
                         },
                         prefix: if bare_guidance {
                             None
@@ -6812,7 +6828,7 @@ impl OpenAIPreprocessor {
                 prompt.ends_with("<|channel>thought") || prompt.ends_with("<|channel>")
             }
             Some("muse" | "muse_glimmer") => prompt.ends_with("assistant to=self<|message|>"),
-            Some("gpt_oss") => prompt.rsplit_once("<|start|>").is_some_and(|(_, message)| {
+            Some("gpt_oss") => gpt_oss_assistant_prefill(prompt).is_some_and(|message| {
                 message
                     .split_once("<|message|>")
                     .is_some_and(|(header, _)| {
@@ -6874,15 +6890,19 @@ impl OpenAIPreprocessor {
             }
             Some("gpt_oss") => formatted_prompt.and_then(|prompt| {
                 // The Harmony parser owns header/body state, including a continued recipient or channel.
-                prompt
-                    .rfind("<|start|>")
-                    .map(|start| Arc::from(compact_gpt_oss_prefill(&prompt[start..])))
+                gpt_oss_assistant_prefill(prompt)
+                    .map(|prefix| Arc::from(compact_gpt_oss_prefill(prefix)))
             }),
             _ => None,
         };
         PromptReasoningPrefill {
             legacy,
             unified: unified || family == Some("gemma4") && prefix.is_some(),
+            // A bare None state synthesizes an unfinished assistant header in ChoiceState.
+            unified_starting_state: (family == Some("gpt_oss")
+                && prefix.is_none()
+                && formatted_prompt.is_some_and(|prompt| prompt.contains("<|start|>")))
+            .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
             prefix,
         }
     }
@@ -9030,6 +9050,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gpt_oss_prefill_only_restores_assistant_messages() {
+        for role in [
+            "assistant",
+            "user",
+            "system",
+            "developer",
+            "tool",
+            "assistant_extra",
+            "assistantx",
+        ] {
+            for metadata in [
+                "",
+                " to=python",
+                "<|channel|>analysis",
+                "<|channel|>final",
+                "<|constrain|>json",
+                " to=python<|channel|>analysis",
+                "<|channel|>analysis to=python",
+            ] {
+                for body in ["Hello", "quoted <|ghissue|>", "partial <|"] {
+                    let prompt = format!(
+                        "<|start|>assistant<|channel|>analysis<|message|>earlier<|end|><|start|>{role}{metadata}<|message|>{body}"
+                    );
+                    let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                        None,
+                        Some("gpt_oss"),
+                        Some(&prompt),
+                    );
+                    assert_eq!(
+                        prefill.prefix.is_some(),
+                        role == "assistant",
+                        "role={role} metadata={metadata} body={body}"
+                    );
+                    assert_eq!(
+                        prefill.unified_starting_state,
+                        (role != "assistant")
+                            .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
+                        "role={role} metadata={metadata}"
+                    );
+                    let reasoning = role == "assistant" && metadata.contains("<|channel|>analysis");
+                    assert_eq!(
+                        prefill.unified, reasoning,
+                        "role={role} metadata={metadata}"
+                    );
+                    assert_eq!(prefill.legacy, reasoning, "role={role} metadata={metadata}");
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn gpt_oss_large_plain_continuation_prefill_supports_multiple_choices() {
         if crate::test_utils::run_isolated(
@@ -9119,9 +9190,18 @@ mod tests {
         let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
         preprocessor.tool_call_parser = Some("harmony".into());
         preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
-        for (channel, input, content, reasoning, structured, forced) in [
-            ("final", " wörld🙂<|return|>", " wörld🙂", "", false, None),
+        for (role, channel, input, content, reasoning, structured, forced) in [
             (
+                "assistant",
+                "final",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "assistant",
                 "analysis",
                 " next<|end|><|start|>assistant<|channel|>final<|message|>answer<|return|>",
                 "answer",
@@ -9130,6 +9210,7 @@ mod tests {
                 None,
             ),
             (
+                "assistant",
                 "analysis",
                 "[1,2]<|end|><|start|>assistant<|channel|>final<|message|>{\"answer\":1}<|return|>",
                 "{\"answer\":1}",
@@ -9138,6 +9219,7 @@ mod tests {
                 None,
             ),
             (
+                "assistant",
                 "analysis",
                 "[1,2]<|end|><|start|>assistant<|channel|>final<|message|>[{\"name\":\"lookup\",\"parameters\":{\"q\":\"x\"}}]<|return|>",
                 "",
@@ -9146,6 +9228,7 @@ mod tests {
                 Some(true),
             ),
             (
+                "assistant",
                 "analysis",
                 "[{\"name\":\"lookup\",\"parameters\":{\"q\":\"x\"}}]",
                 "",
@@ -9153,16 +9236,129 @@ mod tests {
                 false,
                 Some(false),
             ),
+            (
+                "user",
+                "",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "system",
+                "",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "developer",
+                "",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "tool",
+                "",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "user",
+                "analysis",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "system",
+                "analysis",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "developer",
+                "analysis",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "tool",
+                "analysis",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "user",
+                "final",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "user",
+                "",
+                "{\"answer\":1}",
+                "{\"answer\":1}",
+                "",
+                true,
+                None,
+            ),
+            (
+                "user",
+                "",
+                "[{\"name\":\"lookup\",\"parameters\":{\"q\":\"x\"}}]",
+                "",
+                "",
+                false,
+                Some(false),
+            ),
+            (
+                "user",
+                "",
+                "[{\"name\":\"lookup\",\"parameters\":{\"q\":\"x\"}}]",
+                "",
+                "",
+                false,
+                Some(true),
+            ),
         ] {
+            let channel_header = if channel.is_empty() {
+                String::new()
+            } else {
+                format!("<|channel|>{channel}")
+            };
             preprocessor.formatter = test_prompt_formatter(&format!(
-                "{{% for message in messages %}}<|start|>{{{{ message.role }}}}<|channel|>{channel}<|message|>{{{{ message.content }}}}<|return|>{{% endfor %}}"
+                "{{% for message in messages %}}<|start|>{{{{ message.role }}}}{channel_header}<|message|>{{{{ message.content }}}}<|return|>{{% endfor %}}"
             ));
             preprocessor.runtime_config.structural_tag = forced
                 .filter(|enabled| *enabled)
                 .map(|_| Default::default());
             let mut request: NvCreateChatCompletionRequest =
                 serde_json::from_value(serde_json::json!({
-                    "model": "test", "messages": [{"role": "assistant", "content": "Hello"}],
+                    "model": "test", "messages": [{"role": role, "content": "Hello", "tool_call_id": "call_0"}],
                     "continue_final_message": true, "add_generation_prompt": false,
                     "response_format": if structured { serde_json::json!({"type":"json_object"}) } else { serde_json::Value::Null },
                 }))
@@ -9213,7 +9409,7 @@ mod tests {
                 assert_eq!(
                     gpt_oss_stream_text(&output),
                     (content.into(), reasoning.into()),
-                    "channel={channel} split={split}"
+                    "role={role} channel={channel} split={split}"
                 );
                 let choices: Vec<_> = output
                     .iter()
