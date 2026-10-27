@@ -246,11 +246,11 @@ class TestPromptEmbedsE2E:
                 extra_body={"prompt_embeds": invalid_base64},
             )
 
-        assert exc_info.value.status_code == 400
-        error_msg = str(exc_info.value)
+        # The frontend maps backend errors to a fixed public message per error
+        # class, so only the status code reaches the client.
         assert (
-            "Failed to decode prompt_embeds as PyTorch tensor" in error_msg
-        ), f"Expected the worker's tensor decode error, got: {error_msg}"
+            exc_info.value.status_code == 400
+        ), f"Expected 400 for invalid tensor data, got: {exc_info.value}"
 
     def test_usage_prompt_tokens_not_zero(self, dynamo_client):
         """
