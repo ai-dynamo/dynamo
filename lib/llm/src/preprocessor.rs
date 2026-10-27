@@ -160,6 +160,15 @@ pub(crate) struct SystemOneEncodingTooLarge {
 #[error("{0}")]
 pub(crate) struct SystemOneModelIncompatible(pub(crate) &'static str);
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "model tokenizer supports only the first {validated_candidates} of {requested_candidates} candidate labels for this request as distinct single tokens at the answer position; reduce candidates or select another model"
+)]
+pub(crate) struct SystemOneCandidateLabelsIncompatible {
+    pub(crate) validated_candidates: usize,
+    pub(crate) requested_candidates: usize,
+}
+
 /// Build a private validation diagnostic. Callers may attach structured `PublicDetails` only when every value is safe for clients.
 pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
     DynamoError::builder()
@@ -3175,19 +3184,17 @@ impl OpenAIPreprocessor {
         for label in labels {
             let with_label = format!("{}{label}", prompt.as_str());
             let encoded = self.tokenize(&with_label)?.token_ids().to_vec();
-            if encoded.len() != prompt_ids.len() + 1 || encoded[..prompt_ids.len()] != prompt_ids {
-                return Err(SystemOneModelIncompatible(
-                    "answer label is not one token after the chat prompt for this tokenizer",
-                )
+            if encoded.len() != prompt_ids.len() + 1
+                || encoded[..prompt_ids.len()] != prompt_ids
+                || label_ids.contains(&encoded[prompt_ids.len()])
+            {
+                return Err(SystemOneCandidateLabelsIncompatible {
+                    validated_candidates: label_ids.len(),
+                    requested_candidates: labels.len(),
+                }
                 .into());
             }
             let label_id = encoded[prompt_ids.len()];
-            if label_ids.contains(&label_id) {
-                return Err(SystemOneModelIncompatible(
-                    "answer label is not a distinct token after the chat prompt",
-                )
-                .into());
-            }
             label_ids.push(label_id);
         }
         Ok((prompt_ids, label_ids, encoding_bytes))
@@ -10824,7 +10831,11 @@ mod tests {
         assert_eq!(label_ids, vec![29909, 350]);
         assert!(!prompt_ids.is_empty());
 
-        for labels in [vec!["not one token".into()], vec![" A".into(), "▁A".into()]] {
+        for labels in [
+            vec!["not one token".into()],
+            vec![" A".into(), "▁A".into()],
+            vec!["A".into(), "A".into()],
+        ] {
             let error = preprocessor
                 .render_systemone_question(
                     "test-model",
@@ -10834,7 +10845,17 @@ mod tests {
                     (65_536, usize::MAX),
                 )
                 .unwrap_err();
-            assert!(error.downcast_ref::<SystemOneModelIncompatible>().is_some());
+            let incompatible = error
+                .downcast_ref::<SystemOneCandidateLabelsIncompatible>()
+                .unwrap();
+            assert_eq!(incompatible.requested_candidates, labels.len());
+            assert!(incompatible.validated_candidates < labels.len());
+            assert!(error.to_string().contains("for this request"));
+            assert!(error.to_string().contains("reduce candidates"));
+            assert!(!error.to_string().contains("A decision"));
+            if labels == ["A", "A"] {
+                assert_eq!(incompatible.validated_candidates, 1);
+            }
         }
 
         Arc::get_mut(&mut preprocessor).unwrap().formatter = test_prompt_formatter("Answer: ");
@@ -10857,7 +10878,11 @@ mod tests {
                 (65_536, usize::MAX),
             )
             .unwrap_err();
-        assert!(error.downcast_ref::<SystemOneModelIncompatible>().is_some());
+        let incompatible = error
+            .downcast_ref::<SystemOneCandidateLabelsIncompatible>()
+            .unwrap();
+        assert_eq!(incompatible.requested_candidates, 1);
+        assert_eq!(incompatible.validated_candidates, 0);
     }
 
     #[test]

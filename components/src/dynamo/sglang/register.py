@@ -278,9 +278,10 @@ async def _register_model_with_runtime_config(
                 SGLANG_SYSTEMONE_SERIAL_V1, json.dumps(True)
             )
             logging.info(
-                "Published SGLang 0.5.19 System One capability: the entire worker, "
+                "Published SGLang %s System One capability: the entire worker, "
                 "including chat and completions, is serialized with overlap disabled; "
-                "use dedicated decision workers for this low-throughput profile"
+                "use dedicated decision workers for this low-throughput profile",
+                version("sglang"),
             )
     # Configure the Rust frontend's media decoder so it ships pre-decoded
     # media via NIXL RDMA instead of forwarding raw URLs / base64 to us.

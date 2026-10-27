@@ -2048,8 +2048,9 @@ def test_systemone_unqualified_serial_version_warns(monkeypatch, caplog):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("serial", [False, True])
+@pytest.mark.parametrize("installed", ["0.5.19", "0.5.22+cu130"])
 async def test_systemone_serial_capability_published_only_when_isolated(
-    monkeypatch, caplog, serial
+    monkeypatch, caplog, serial, installed
 ):
     if sglang_register is None:
         pytest.skip("dynamo.sglang.register is unavailable")
@@ -2066,7 +2067,7 @@ async def test_systemone_serial_capability_published_only_when_isolated(
 
     monkeypatch.setattr(sglang_register, "get_runtime_config", fake_get_runtime_config)
     monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
-    monkeypatch.setattr(sglang_register, "version", lambda package: "0.5.19")
+    monkeypatch.setattr(sglang_register, "version", lambda package: installed)
     server_args = SimpleNamespace(
         model_path="Qwen/Qwen3-0.6B",
         served_model_name="model",
@@ -2090,6 +2091,8 @@ async def test_systemone_serial_capability_published_only_when_isolated(
     assert published["sglang_generate"] == "true"
     assert published.get("sglang_systemone_serial_v1") == ("true" if serial else None)
     assert ("including chat and completions" in caplog.text) is serial
+    if serial:
+        assert f"Published SGLang {installed} System One capability" in caplog.text
 
 
 def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():
