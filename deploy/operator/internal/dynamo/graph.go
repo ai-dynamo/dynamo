@@ -2166,6 +2166,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			Infrastructure:                 parentContext.Infrastructure,
 			DynamoNamespace:                parentContext.DynamoNamespace,
 			RuntimeVersion:                 resolvedRuntimeVersion,
+			Annotations:                    parentContext.Annotations,
 		}
 
 		frontendDefaults := NewFrontendDefaults()
@@ -2264,6 +2265,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
 		RuntimeVersion:                 resolvedRuntimeVersion,
+		Annotations:                    GetPodTemplateAnnotations(component),
 	}
 
 	// A native sidecar owns the worker runtime identity.

@@ -9,6 +9,8 @@ A `DynamoComponentDeployment` (DCD) describes one component of a Dynamo inferenc
 
 A DCD is rarely authored on its own. Each entry in a [`DynamoGraphDeployment`](dynamo-graph-deployment.mdx) `spec.components` list is a `DynamoComponentDeploymentSharedSpec`, the same shape documented here under [Shared component spec](#shared-component-spec). The operator creates one child DCD per component. Author a standalone DCD only when you want to manage a single component's lifecycle independently; otherwise define components inside a DGD.
 
+The operator records `nvidia.com/dynamo-operator-origin-version` when creating a standalone DCD. The annotation is immutable, including its absence on legacy DCDs. Existing DCDs with a non-semver origin remain updatable when that annotation is unchanged.
+
 This page documents the `nvidia.com/v1beta1` API — the served, current version.
 
 <Info>
