@@ -47,6 +47,7 @@ type DynamoGraphDeploymentRunSetupOptions struct {
 	SetupOptions
 	GPUDiscoveryCache       *gpu.GPUDiscoveryCache
 	GPUDiscovery            *gpu.GPUDiscovery
+	DockerSecretRetriever   DockerSecretRetriever
 	PlannerImage            string
 	DynamoVersion           string
 	OperatorImage           string
@@ -186,6 +187,7 @@ func SetupDynamoGraphDeploymentRunV1beta2(mgr ctrl.Manager, opts DynamoGraphDepl
 				return opts.RuntimeConfig != nil && opts.RuntimeConfig.Gate.Enabled(features.GPUDiscovery)
 			},
 		},
+		DockerSecretRetriever:   opts.DockerSecretRetriever,
 		PlannerImage:            opts.PlannerImage,
 		DynamoVersion:           opts.DynamoVersion,
 		OperatorImage:           opts.OperatorImage,

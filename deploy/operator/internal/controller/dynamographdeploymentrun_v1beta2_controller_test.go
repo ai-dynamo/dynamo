@@ -8,6 +8,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
@@ -36,6 +38,18 @@ type fixedRunHardware struct {
 	info  gpu.GPUInfo
 	err   error
 	calls []nvidiacomv1beta1.GPUSKUType
+}
+
+type fixedRunSecrets struct {
+	byImage map[string][]string
+	err     error
+}
+
+func (f *fixedRunSecrets) GetSecrets(_ string, image string) ([]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return append([]string(nil), f.byImage[image]...), nil
 }
 
 func (f *fixedRunHardware) Discover(_ context.Context, sku nvidiacomv1beta1.GPUSKUType) (*gpu.GPUInfo, error) {
@@ -72,6 +86,7 @@ func newDGDRRunFixture(t *testing.T, hardware dgdrRunHardwareDiscoverer, objects
 		client: c,
 		reconciler: &DynamoGraphDeploymentRunV1beta2Reconciler{
 			Client:                  c,
+			APIReader:               c,
 			Hardware:                hardware,
 			PlannerImage:            "example.com/dynamo-planner:1.2.3",
 			OperatorImage:           "example.com/dynamo-operator:1.2.3",
@@ -139,6 +154,7 @@ func TestV1beta2RunControllerCreatesOneIsolatedAISimulateJob(t *testing.T) {
 			"runtime_image":  "example.com/custom-vllm-runtime:1.2.3",
 			"name":           "native-output-name",
 			"snapshot_dir":   "/work/results",
+			"namespace":      "another-namespace",
 		},
 	})
 	f := newDGDRRunFixture(t, hardware, run)
@@ -153,6 +169,150 @@ func TestV1beta2RunControllerCreatesOneIsolatedAISimulateJob(t *testing.T) {
 	stored := f.run()
 	assertDGDRRunPendingStatus(t, stored, job.Name)
 	assertDGDRRunStatusInputMatchesConfigMap(t, f.client, stored, job)
+}
+
+func TestV1beta2RunControllerFreezesExecutionBeforeCreatingTheJob(t *testing.T) {
+	hardware := &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}
+	run := dgdrRunForTest(t, map[string]any{})
+	f := newDGDRRunFixture(t, hardware, run)
+	f.reconciler.DockerSecretRetriever = &fixedRunSecrets{byImage: map[string][]string{
+		"example.com/dynamo-planner:1.2.3":  {"planner-secret", "shared-secret"},
+		"example.com/dynamo-operator:1.2.3": {"shared-secret", "publisher-secret"},
+	}}
+
+	t.Log("Persist the immutable execution artifact before any Job exists")
+	execution, err := f.reconciler.reconcileInput(t.Context(), run, nil, dgdrRunResourceName(run.Name))
+	if err != nil {
+		t.Fatalf("reconcile input: %v", err)
+	}
+	if execution.PlannerImage != "example.com/dynamo-planner:1.2.3" || execution.PublisherImage != "example.com/dynamo-operator:1.2.3" {
+		t.Fatalf("frozen images = %q/%q", execution.PlannerImage, execution.PublisherImage)
+	}
+
+	t.Log("Simulate an operator upgrade before the next reconciliation")
+	f.reconciler.PlannerImage = "example.com/dynamo-planner:9.9.9"
+	f.reconciler.OperatorImage = "example.com/dynamo-operator:9.9.9"
+	f.reconciler.OperatorImagePullPolicy = corev1.PullNever
+	f.reconciler.DockerSecretRetriever = &fixedRunSecrets{byImage: map[string][]string{
+		"example.com/dynamo-planner:9.9.9": {"new-secret"},
+	}}
+	f.reconcile()
+
+	t.Log("Verify the Job uses only the previously frozen identity and credentials")
+	job := f.job()
+	planner := containerNamed(t, job.Spec.Template.Spec.Containers, dgdrRunSweeperContainer)
+	publisher := containerNamed(t, job.Spec.Template.Spec.Containers, dgdrRunPublisherContainer)
+	if planner.Image != "example.com/dynamo-planner:1.2.3" || publisher.Image != "example.com/dynamo-operator:1.2.3" {
+		t.Fatalf("Job images = %q/%q, want frozen images", planner.Image, publisher.Image)
+	}
+	wantSecrets := []corev1.LocalObjectReference{{Name: "planner-secret"}, {Name: "shared-secret"}, {Name: "publisher-secret"}}
+	if !reflect.DeepEqual(job.Spec.Template.Spec.ImagePullSecrets, wantSecrets) {
+		t.Fatalf("imagePullSecrets = %v, want %v", job.Spec.Template.Spec.ImagePullSecrets, wantSecrets)
+	}
+}
+
+func TestV1beta2RunControllerFailsClosedWithoutExecutionConfig(t *testing.T) {
+	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
+	f.reconcile()
+
+	t.Log("Delete the immutable execution artifact while retaining the Job")
+	job := f.job()
+	configMap := &corev1.ConfigMap{}
+	if err := f.client.Get(t.Context(), client.ObjectKeyFromObject(job), configMap); err != nil {
+		t.Fatalf("get ConfigMap: %v", err)
+	}
+	if err := f.client.Delete(t.Context(), configMap); err != nil {
+		t.Fatalf("delete ConfigMap: %v", err)
+	}
+
+	t.Log("Verify a real deletion fails closed instead of reconstructing or hot-looping")
+	_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+	if err == nil || !strings.Contains(err.Error(), "immutable execution ConfigMap") {
+		t.Fatalf("reconcile error = %v, want missing immutable execution ConfigMap", err)
+	}
+}
+
+func TestV1beta2RunControllerWaitsForExecutionConfigCacheLag(t *testing.T) {
+	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
+	f.reconcile()
+
+	job := f.job()
+	configMap := &corev1.ConfigMap{}
+	if err := f.client.Get(t.Context(), client.ObjectKeyFromObject(job), configMap); err != nil {
+		t.Fatalf("get ConfigMap: %v", err)
+	}
+	directReader := fake.NewClientBuilder().WithScheme(f.client.Scheme()).WithObjects(configMap.DeepCopy()).Build()
+	if err := f.client.Delete(t.Context(), configMap); err != nil {
+		t.Fatalf("remove ConfigMap from simulated cache: %v", err)
+	}
+	f.reconciler.APIReader = directReader
+
+	t.Log("Wait only when the uncached API confirms that the immutable artifact still exists")
+	result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+	if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+		t.Fatalf("reconcile result/error = %+v/%v, want bounded cache-lag retry", result, err)
+	}
+}
+
+func TestV1beta2RunControllerRejectsJobExecutionSkew(t *testing.T) {
+	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
+	f.reconcile()
+
+	t.Log("Mutate the observed Job away from the immutable execution identity")
+	job := f.job()
+	container := &job.Spec.Template.Spec.Containers[0]
+	container.Image = "example.com/dynamo-planner:other"
+	if err := f.client.Update(t.Context(), job); err != nil {
+		t.Fatalf("update Job: %v", err)
+	}
+
+	t.Log("Verify reconciliation detects the inconsistency instead of accepting skew")
+	_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+	if err == nil || !strings.Contains(err.Error(), "planner image identities differ") {
+		t.Fatalf("reconcile error = %v, want planner identity mismatch", err)
+	}
+}
+
+func TestV1beta2RunControllerReportsImagePullSecretErrors(t *testing.T) {
+	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
+	f.reconciler.DockerSecretRetriever = &fixedRunSecrets{err: errors.New("registry index unavailable")}
+
+	t.Log("Verify execution is not frozen without resolving its image credentials")
+	_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+	if err == nil || !strings.Contains(err.Error(), "registry index unavailable") {
+		t.Fatalf("reconcile error = %v, want image pull secret error", err)
+	}
+}
+
+func TestV1beta2RunControllerKeepsPlannerDigestButDerivesRuntimesFromReleaseTag(t *testing.T) {
+	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
+	f.reconciler.PlannerImage = "example.com/dynamo-planner@sha256:0123"
+	f.reconciler.DynamoVersion = "1.7.0"
+
+	t.Log("Reconcile a digest-pinned Planner through the frozen execution artifact")
+	f.reconcile()
+
+	t.Log("Keep the Planner digest while giving sibling runtime derivation a shared release tag")
+	job := f.job()
+	planner := containerNamed(t, job.Spec.Template.Spec.Containers, dgdrRunSweeperContainer)
+	if planner.Image != "example.com/dynamo-planner@sha256:0123" {
+		t.Fatalf("planner image = %q, want configured digest", planner.Image)
+	}
+	configMap := &corev1.ConfigMap{}
+	if err := f.client.Get(t.Context(), client.ObjectKeyFromObject(job), configMap); err != nil {
+		t.Fatalf("get ConfigMap: %v", err)
+	}
+	if got := configMap.Data[dgdrRunRuntimeImageSourceKey]; got != "example.com/dynamo-planner:1.7.0" {
+		t.Fatalf("runtime image source = %q, want shared release tag", got)
+	}
+	var input map[string]any
+	if err := yaml.Unmarshal([]byte(configMap.Data[dgdrRunInputKey]), &input); err != nil {
+		t.Fatalf("decode input: %v", err)
+	}
+	output := input["dgdr_run"].(map[string]any)
+	if output["runtime_image"] != "example.com/dynamo-planner:1.7.0" || output["runtime_version_override"] != "1.7.0" {
+		t.Fatalf("dgdr_run runtime identity = %v", output)
+	}
 }
 
 func assertDGDRRunJobIsolation(
@@ -187,7 +347,7 @@ func assertDGDRRunJobIsolation(
 		"recommend", "--stack", "dynamo",
 		"--config", dgdrRunInputPath,
 		"--output", "dgdr_run",
-		"--output-dir", "/work/results",
+		"--output-dir", dgdrRunSnapshotPath,
 		"--overwrite",
 	}; !reflect.DeepEqual(sweeper.Args, want) {
 		t.Fatalf("sweeper args = %q, want %q", sweeper.Args, want)
@@ -195,15 +355,26 @@ func assertDGDRRunJobIsolation(
 	if publisher.Image != operatorImage || publisher.ImagePullPolicy != corev1.PullAlways {
 		t.Fatalf("publisher image = %q/%s, want configured operator image/Always", publisher.Image, publisher.ImagePullPolicy)
 	}
+	if want := []string{dgdrRunPublisherBinary}; !reflect.DeepEqual(publisher.Command, want) {
+		t.Fatalf("publisher command = %q, want %q", publisher.Command, want)
+	}
+	if want := []string{
+		"--snapshot-dir", dgdrRunSnapshotPath,
+		"--run-name", run.Name,
+		"--run-uid", string(run.UID),
+		"--sweeper-container", dgdrRunSweeperContainer,
+	}; !reflect.DeepEqual(publisher.Args, want) {
+		t.Fatalf("publisher args = %q, want %q", publisher.Args, want)
+	}
 	if hasMount(sweeper.VolumeMounts, dgdrRunServiceAccountVolume) {
 		t.Fatal("sweeper unexpectedly receives the Kubernetes service-account token")
 	}
 	if !hasMount(publisher.VolumeMounts, dgdrRunServiceAccountVolume) {
 		t.Fatal("publisher does not receive its projected Kubernetes credentials")
 	}
-	if !hasMountAt(sweeper.VolumeMounts, dgdrRunSnapshotVolume, "/work/results") ||
-		!hasMountAt(publisher.VolumeMounts, dgdrRunSnapshotVolume, "/work/results") {
-		t.Fatal("sweeper and publisher do not share the parameter-overridden snapshot directory")
+	if !hasMountAt(sweeper.VolumeMounts, dgdrRunSnapshotVolume, dgdrRunSnapshotPath) ||
+		!hasMountAt(publisher.VolumeMounts, dgdrRunSnapshotVolume, dgdrRunSnapshotPath) {
+		t.Fatal("sweeper and publisher do not share the frozen snapshot directory")
 	}
 }
 
@@ -243,16 +414,33 @@ func assertDGDRRunInput(t *testing.T, c client.Client, job *batchv1.Job, hardwar
 	if configMap.Immutable == nil || !*configMap.Immutable {
 		t.Fatal("input ConfigMap is not immutable")
 	}
+	for key, want := range map[string]string{
+		dgdrRunPlannerImageKey:        "example.com/dynamo-planner:1.2.3",
+		dgdrRunPlannerPullPolicyKey:   string(corev1.PullIfNotPresent),
+		dgdrRunRuntimeImageSourceKey:  "example.com/dynamo-planner:1.2.3",
+		dgdrRunPublisherImageKey:      "example.com/dynamo-operator:1.2.3",
+		dgdrRunPublisherPullPolicyKey: string(corev1.PullAlways),
+		dgdrRunDynamoVersionKey:       "1.2.3",
+		dgdrRunGPUsPerNodeKey:         "8",
+		dgdrRunSnapshotPathKey:        dgdrRunSnapshotPath,
+	} {
+		if got := configMap.Data[key]; got != want {
+			t.Fatalf("ConfigMap data[%q] = %q, want %q", key, got, want)
+		}
+	}
 	var input map[string]any
 	if err := yaml.Unmarshal([]byte(configMap.Data[dgdrRunInputKey]), &input); err != nil {
 		t.Fatalf("decode input ConfigMap: %v", err)
 	}
 	output := input["dgdr_run"].(map[string]any)
-	if output["name"] != "native-output-name" || output["snapshot_dir"] != "/work/results" {
-		t.Fatalf("native parameter overrides were not preserved: %v", output)
+	if output["name"] != "search-1" || output["max_candidates"] != float64(2) {
+		t.Fatalf("operator-owned identity and candidate cap were not restored: %v", output)
 	}
-	if output["max_candidates"] != float64(7) || output["runtime_image"] != "example.com/custom-vllm-runtime:1.2.3" {
-		t.Fatalf("native parameter overrides were not preserved: %v", output)
+	if output["snapshot_dir"] != dgdrRunSnapshotPath || output["namespace"] != "default" {
+		t.Fatalf("operator-owned transport overrides were not restored: %v", output)
+	}
+	if output["runtime_image"] != "example.com/dynamo-planner:1.2.3" || output["runtime_version_override"] != "1.2.3" {
+		t.Fatalf("operator-owned runtime identity was not restored: %v", output)
 	}
 	if output["derive_runtime_images"] != true {
 		t.Fatalf("derive_runtime_images = %v, want true for a backend search", output["derive_runtime_images"])
@@ -275,30 +463,42 @@ func TestDGDRRunInputResolvesRuntimeVersion(t *testing.T) {
 		plannerImage  string
 		dynamoVersion string
 		wantOverride  string
+		wantRuntime   string
 		wantErr       bool
 	}{
-		{name: "canonical planner tag", plannerImage: "example.com/dynamo-planner:1.7.0"},
-		{name: "opaque CI tag", plannerImage: "example.com/dynamo-planner:git-sha", dynamoVersion: "1.7.0", wantOverride: "1.7.0"},
+		{name: "canonical planner tag", plannerImage: "example.com/dynamo-planner:1.7.0", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:1.7.0"},
+		{name: "v-prefixed planner tag", plannerImage: "example.com/dynamo-planner:v1.7.0", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:v1.7.0"},
+		{name: "prerelease planner tag", plannerImage: "example.com/dynamo-planner:1.7.0-rc.1", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:1.7.0-rc.1"},
+		{name: "build metadata planner tag", plannerImage: "example.com/dynamo-planner:1.7.0+build.5", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:1.7.0+build.5"},
+		{name: "tag and digest", plannerImage: "example.com/dynamo-planner:v1.7.0-rc.1@sha256:0123", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:v1.7.0-rc.1@sha256:0123"},
+		{name: "digest only", plannerImage: "example.com/dynamo-planner@sha256:0123", dynamoVersion: "1.7.0", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:1.7.0"},
+		{name: "opaque CI tag", plannerImage: "example.com/dynamo-planner:git-sha", dynamoVersion: "1.7.0", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:git-sha"},
+		{name: "untagged planner image", plannerImage: "example.com/dynamo-planner", dynamoVersion: "1.7.0", wantErr: true},
 		{name: "opaque tag without canonical version", plannerImage: "example.com/dynamo-planner:git-sha", dynamoVersion: "1.7", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			run := dgdrRunForTest(t, map[string]any{})
-
-			input, _, err := dgdrRunInput(run, tt.plannerImage, tt.dynamoVersion, 8)
+			version, err := dgdrRunDynamoVersion(tt.plannerImage, tt.dynamoVersion)
+			var runtimeImage string
+			if err == nil {
+				runtimeImage, err = dgdrRunRuntimeImageSource(tt.plannerImage, version)
+			}
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("lower input error = %v, wantErr %t", err, tt.wantErr)
+				t.Fatalf("resolve execution identity error = %v, wantErr %t", err, tt.wantErr)
 			}
 			if tt.wantErr {
 				return
 			}
-			output := input["dgdr_run"].(map[string]any)
-			got, found := output["runtime_version_override"]
-			if tt.wantOverride == "" && found {
-				t.Fatalf("dgdr_run.runtime_version_override = %v, want omitted", got)
+			input, err := dgdrRunInput(dgdrRunForTest(t, map[string]any{}), runtimeImage, version, 8)
+			if err != nil {
+				t.Fatalf("lower input: %v", err)
 			}
-			if tt.wantOverride != "" && got != tt.wantOverride {
+			output := input["dgdr_run"].(map[string]any)
+			if got := output["runtime_version_override"]; got != tt.wantOverride {
 				t.Fatalf("dgdr_run.runtime_version_override = %v, want %s", got, tt.wantOverride)
+			}
+			if got := output["runtime_image"]; got != tt.wantRuntime {
+				t.Fatalf("dgdr_run.runtime_image = %v, want %s", got, tt.wantRuntime)
 			}
 		})
 	}
@@ -441,6 +641,25 @@ func TestDGDRRunResourceNameIsStableAndBounded(t *testing.T) {
 	one, two := dgdrRunResourceName(long), dgdrRunResourceName(long)
 	if one != two || len(one) > dgdrRunMaxJobNameLength || !strings.HasSuffix(one, "-aisimulate") {
 		t.Fatalf("bounded name = %q", one)
+	}
+}
+
+func TestRequireDGDRV1beta2RESTMappingsIncludesCandidates(t *testing.T) {
+	groupVersion := nvidiacomv1beta2.GroupVersion
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{groupVersion})
+	mapper.Add(groupVersion.WithKind("DynamoGraphDeploymentRequest"), meta.RESTScopeNamespace)
+	mapper.Add(groupVersion.WithKind("DynamoGraphDeploymentRun"), meta.RESTScopeNamespace)
+
+	t.Log("Verify startup fails when Candidate publication cannot succeed")
+	err := requireDGDRV1beta2RESTMappings(mapper)
+	if err == nil || !strings.Contains(err.Error(), "DynamoGraphDeploymentCandidate") {
+		t.Fatalf("preflight error = %v, want missing Candidate API", err)
+	}
+
+	t.Log("Register the complete execution API and verify preflight succeeds")
+	mapper.Add(groupVersion.WithKind("DynamoGraphDeploymentCandidate"), meta.RESTScopeNamespace)
+	if err := requireDGDRV1beta2RESTMappings(mapper); err != nil {
+		t.Fatalf("complete API preflight: %v", err)
 	}
 }
 
