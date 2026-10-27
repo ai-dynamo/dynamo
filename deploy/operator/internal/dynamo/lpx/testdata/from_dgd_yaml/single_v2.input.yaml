@@ -74,6 +74,8 @@ spec:
                 value: 'llama3.1'
               - name: NOVA_VOCAB_SIZE
                 value: '128256'
+              - name: NOVA_RESOLVED_PARTITIONS_DIR
+                value: '/configs'
               - name: NOVA_MODEL_BASE_PATHS
                 value: /nfs
               - name: NOVA_NODE_NAME_TEMPLATE
@@ -103,6 +105,8 @@ spec:
               volumeMounts:
               - name: model-storage
                 mountPath: /nfs
+              - name: config
+                mountPath: /configs
               - name: single-v2-ssh-key
                 mountPath: /tmp/dynamo-lpu-ssh
             initContainers:
@@ -140,6 +144,8 @@ spec:
             containers:
             - image: example.invalid/lpu-runtime:test
               name: main
+              args:
+              - --partition-metadata
               env:
               - name: MPI_BTL_TCP_IF_INCLUDE
                 value: 192.0.2.0/24
@@ -160,6 +166,8 @@ spec:
               volumeMounts:
               - mountPath: /nfs
                 name: model-storage
+              - name: config
+                mountPath: /configs
               - name: host-dev
                 mountPath: /dev
               - name: host-sys

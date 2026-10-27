@@ -9,17 +9,20 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // configureHybridCyborg consumes a fresh hybrid clique from an admitted source
 // whose conductor resources were validated during workload selection.
 // agentTemplateName names the workload's Agent template, which Cyborg addresses
 // even when no Agent replicas remain; agentTemplateNames lists the templates with
-// replicas.
+// replicas. cyborgConfigMap is the Agent-address ConfigMap rendered for that
+// workload, or nil when Cyborg derives the addresses from the build's LPU units.
 func configureHybridCyborg(
 	cyborg *grovev1alpha1.PodCliqueTemplateSpec,
 	projection *ModelProjection,
@@ -27,6 +30,8 @@ func configureHybridCyborg(
 	modelStoragePath string,
 	agentTemplateName string,
 	agentTemplateNames []string,
+	cyborgConfigMap *corev1.ConfigMap,
+	cyborgConfigHash string,
 ) error {
 	container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
 
@@ -56,6 +61,10 @@ func configureHybridCyborg(
 		lpxv1alpha1.PodRoleCyborgWorker,
 		workloadDigest,
 	)
+	if cyborgConfigMap != nil {
+		ensureLPUConfigVolume(&cyborg.Spec.PodSpec, cyborgConfigMap.Name)
+		cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash] = cyborgConfigHash
+	}
 	cyborg.Spec.StartsAfter = slices.Clone(agentTemplateNames)
 	return nil
 }

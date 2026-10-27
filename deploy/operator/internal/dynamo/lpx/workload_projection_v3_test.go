@@ -296,9 +296,11 @@ func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T)
 	require.NotEqual(t, first.Digest(), second.Digest())
 	secondSpec := second.RequestSpec(&MaterializationPlan{}, "agents")
 
-	t.Log("Project each manifest extent")
+	t.Log("Project each manifest extent and the updated runtime partition data")
 	require.Equal(t, []int64{16, 1, 1, 1}, *firstSpec.Partitions[0].Extent)
 	require.Equal(t, []int64{16, 2, 1, 1}, *secondSpec.Partitions[0].Extent)
+	data := resolvedPartitionData([]*ModelProjection{second})
+	require.Equal(t, "part-1", data["partition_paths"])
 	require.Empty(t, firstSpec.PropSyncConnectors)
 	require.Empty(t, secondSpec.PropSyncConnectors)
 }

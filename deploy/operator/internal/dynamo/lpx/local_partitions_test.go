@@ -32,25 +32,26 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 		wantAgents      int
 		wantCompilerIDs []int64
 		wantConnectors  int
+		wantRuntimeIDs  string
 		wantLocalIDs    []int
 	}{
 		{
 			name: "independent partition runs locally", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{11}},
 			wantAgents: 9, wantCompilerIDs: []int64{7, 8}, wantConnectors: 1,
-			wantLocalIDs: []int{11},
+			wantRuntimeIDs: "7", wantLocalIDs: []int{11},
 		},
 		{
 			name: "selected chain runs locally as one runtime partition", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{7}},
 			wantAgents: 8, wantCompilerIDs: []int64{11}, wantConnectors: 0,
-			wantLocalIDs: []int{7},
+			wantRuntimeIDs: "11", wantLocalIDs: []int{7},
 		},
 		{
 			name: "every partition runs locally", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
 			wantAgents: 0, wantCompilerIDs: []int64{}, wantConnectors: 0,
-			wantLocalIDs: []int{7, 11},
+			wantRuntimeIDs: "", wantLocalIDs: []int{7, 11},
 		},
 		{
 			name: "chain member is not a runtime partition", pipeline: PipelineHybrid,
@@ -114,7 +115,8 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 			require.Len(t, spec.PropSyncConnectors, test.wantConnectors)
 			require.Equal(t, test.wantAgents, projection.AgentReplicas())
 
-			t.Log("Record the GPU-local runtime partitions that Agents and Cyborg receive")
+			t.Log("Publish only remote runtime partitions to Agents and Cyborg")
+			require.Equal(t, test.wantRuntimeIDs, resolvedPartitionData([]*ModelProjection{projection})["partition_ids"])
 			require.Equal(t, test.wantLocalIDs, projection.localPartitionIDs)
 
 			t.Log("Change the workload digest when partitions move to the GPU")
@@ -252,7 +254,7 @@ func TestRenderHybridLocalPartitions(t *testing.T) {
 			require.NoError(t, err)
 
 			t.Log("Render the hybrid workload")
-			rendered, err := renderSelectedForTest(renderTestPCS(true), projections, RenderInput{
+			rendered, _, err := renderSelectedForTest(renderTestPCS(true), projections, RenderInput{
 				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 			})
 			require.NoError(t, err)
@@ -314,6 +316,7 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 		wantAgents       int
 		wantCompilerIDs  []int64
 		wantConnectors   [][2]string
+		wantRuntimeIDs   string
 		wantLocalIDs     []int
 		wantPartitionMap string
 		wantPropSyncInfo string
@@ -323,7 +326,7 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{1}},
 			wantAgents: 3, wantCompilerIDs: []int64{2, 3, 4},
 			wantConnectors: [][2]string{{"partition-000", "partition-001"}},
-			wantLocalIDs:   []int{1},
+			wantRuntimeIDs: "2\n3\n4", wantLocalIDs: []int{1},
 			wantPartitionMap: `{"num_partitions":3,
 				"2":{"device":"lpu","allocation":[16,1,1,1]},
 				"3":{"device":"lpu","allocation":[16,1,1,1]},
@@ -336,7 +339,7 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			name: "selected chain runs locally as one runtime partition", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{2}},
 			wantAgents: 2, wantCompilerIDs: []int64{1, 4}, wantConnectors: [][2]string{},
-			wantLocalIDs: []int{2},
+			wantRuntimeIDs: "1\n4", wantLocalIDs: []int{2},
 			wantPartitionMap: `{"num_partitions":2,
 				"1":{"device":"lpu","allocation":[16,1,1,1]},
 				"4":{"device":"lpu","allocation":[16,1,1,1]}}`,
@@ -346,7 +349,7 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			name: "every partition runs locally", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
 			wantAgents: 0, wantCompilerIDs: []int64{}, wantConnectors: [][2]string{},
-			wantLocalIDs:     []int{1, 2, 4},
+			wantRuntimeIDs: "", wantLocalIDs: []int{1, 2, 4},
 			wantPartitionMap: `{"num_partitions":0}`,
 			wantPropSyncInfo: `{"version":1,"prop_sync_pairs":[]}`,
 		},
@@ -415,7 +418,8 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			require.JSONEq(t, test.wantPartitionMap, string(metadata.PartitionInfo))
 			require.JSONEq(t, test.wantPropSyncInfo, string(metadata.PropSyncInfo))
 
-			t.Log("Record the GPU-local runtime partitions that Agents and Cyborg receive")
+			t.Log("Publish only remote runtime partitions to Agents and Cyborg")
+			require.Equal(t, test.wantRuntimeIDs, resolvedPartitionData([]*ModelProjection{projection})["partition_ids"])
 			require.Equal(t, test.wantLocalIDs, projection.localPartitionIDs)
 
 			t.Log("Change the workload digest when partitions move to the GPU")

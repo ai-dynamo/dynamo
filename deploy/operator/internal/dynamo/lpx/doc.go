@@ -4,5 +4,5 @@
  */
 
 // Package lpx implements LPU build normalization, workload projection,
-// runtime bindings, and node-local LPX materialization.
+// runtime configuration, and node-local LPX materialization.
 package lpx

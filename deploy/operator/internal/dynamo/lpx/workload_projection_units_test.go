@@ -37,6 +37,17 @@ func projectTestUnits(build *Build, selection *dynamov1beta1.LPXLocalPartitions)
 	})
 }
 
+// renderTestLPUServers renders the legacy hybrid Cyborg Agent addresses for one replica.
+func renderTestLPUServers(t *testing.T, projections []*ModelProjection) string {
+	t.Helper()
+	workload := &Workload{modelProjections: projections, scalingGroupReplicas: 1}
+	plan, err := workload.PlanNodeLocalMaterialization("test-pcs")
+	require.NoError(t, err)
+	configMap, _, err := workload.renderCyborgConfigMap(plan)
+	require.NoError(t, err)
+	return configMap.Data["lpu_servers"]
+}
+
 func TestUnitProjection(t *testing.T) {
 	t.Parallel()
 	const (
@@ -62,6 +73,9 @@ func TestUnitProjection(t *testing.T) {
 		wantConnectors []lpxv1alpha1.PropSyncConnectorRequest
 		wantAgents     int
 		wantLocalIDs   []int
+		// wantRows lists the /configs rows of an LPU-only projection, which a
+		// speculative workload renders when its other build lacks units.
+		wantRows map[string]string
 	}{
 		{
 			name: "LP20 chain joined by an xt8888Gap connector",
@@ -75,6 +89,7 @@ func TestUnitProjection(t *testing.T) {
 			},
 			wantConnectors: []lpxv1alpha1.PropSyncConnectorRequest{{FromPartitionID: "partition-000", ToPartitionID: "partition-001", Requirement: xtGap}},
 			wantAgents:     2,
+			wantRows:       map[string]string{"nodes_per_partition": "1\n1", "partition_ids": "1\n2", "partition_node_offsets": "0\n1", "partition_paths": "part-1\npart-2"},
 		},
 		{
 			name: "LP20 packed chain requests every chip of its hosts",
@@ -85,6 +100,10 @@ func TestUnitProjection(t *testing.T) {
 			wantPartitions: []lpxv1alpha1.PartitionRequest{{ID: "partition-000", Ordinal: 0, CompilerPartitionID: 1, XtShape: new(lpxv1alpha1.Xt8888PartitionShapeC24)}},
 			wantConnectors: []lpxv1alpha1.PropSyncConnectorRequest{},
 			wantAgents:     3,
+			wantRows: map[string]string{
+				"nodes_per_partition": "1\n1\n1\n1\n1\n1", "partition_ids": "1\n2\n3\n4\n5\n6",
+				"partition_node_offsets": "0\n1\n2\n3\n4\n5", "partition_paths": "part-1\npart-2\npart-3\npart-4\npart-5\npart-6",
+			},
 		},
 		{
 			name: "LPU-only CPU embeddings keep partition 0 off LPUs",
@@ -98,6 +117,7 @@ func TestUnitProjection(t *testing.T) {
 			},
 			wantConnectors: []lpxv1alpha1.PropSyncConnectorRequest{{FromPartitionID: "partition-000", ToPartitionID: "partition-001", Requirement: xtGap}},
 			wantAgents:     2,
+			wantRows:       map[string]string{"nodes_per_partition": "1\n1", "partition_ids": "1\n2", "partition_node_offsets": "0\n1", "partition_paths": "part-1\npart-2"},
 		},
 		{
 			name: "LP30 single partition requests its HX extent",
@@ -108,6 +128,7 @@ func TestUnitProjection(t *testing.T) {
 			wantPartitions: []lpxv1alpha1.PartitionRequest{{ID: "partition-000", Ordinal: 0, CompilerPartitionID: 1, Extent: &[]int64{16, 1, 2, 1}}},
 			wantConnectors: []lpxv1alpha1.PropSyncConnectorRequest{},
 			wantAgents:     2,
+			wantRows:       map[string]string{"nodes_per_partition": "2", "partition_ids": "1", "partition_node_offsets": "0", "partition_paths": "part-1"},
 		},
 		{
 			name: "LP30 packed chain requests the packed hosts' extent",
@@ -118,6 +139,7 @@ func TestUnitProjection(t *testing.T) {
 			wantPartitions: []lpxv1alpha1.PartitionRequest{{ID: "partition-000", Ordinal: 0, CompilerPartitionID: 1, Extent: &[]int64{16, 2, 1, 1}}},
 			wantConnectors: []lpxv1alpha1.PropSyncConnectorRequest{},
 			wantAgents:     2,
+			wantRows:       map[string]string{"nodes_per_partition": "1\n1\n1\n1", "partition_ids": "1\n2\n3\n4", "partition_node_offsets": "0\n1\n2\n3", "partition_paths": "part-1\npart-2\npart-3\npart-4"},
 		},
 		{
 			name: "LP30 chain carries the compiler's device pairs",
@@ -142,6 +164,7 @@ func TestUnitProjection(t *testing.T) {
 				},
 			}},
 			wantAgents: 3,
+			wantRows:   map[string]string{"nodes_per_partition": "2\n1", "partition_ids": "1\n2", "partition_node_offsets": "0\n2", "partition_paths": "part-1\npart-2"},
 		},
 		{
 			name:      "LP20 hybrid keeps remote units",
@@ -280,6 +303,10 @@ func TestUnitProjection(t *testing.T) {
 			require.Equal(t, test.wantAgents, projection.AgentReplicas())
 			require.Equal(t, test.wantLocalIDs, projection.localPartitionIDs)
 
+			t.Log("Render legacy /configs rows from LPU-only units for a workload that still reads them")
+			if !test.bundle.hybrid {
+				require.Equal(t, test.wantRows, resolvedPartitionData(projections))
+			}
 		})
 	}
 }
@@ -380,7 +407,9 @@ func TestUnitProjectionDigest(t *testing.T) {
 // requireLegacyParity projects build through its units and through the legacy
 // derivation with the units ignored. Both must request the same LPX partitions
 // and connectors, size the same Agents, and select the same GPU-local partitions.
-// Only HX allocation metadata differs: units send none.
+// LPU-only projections must also render the same /configs rows, which a
+// speculative workload still reads when its other build lacks units. Only HX
+// allocation metadata differs: units send none.
 func requireLegacyParity(t *testing.T, build *Build, selection *dynamov1beta1.LPXLocalPartitions) {
 	t.Helper()
 	require.NotNil(t, build.lpuUnits)
@@ -402,6 +431,9 @@ func requireLegacyParity(t *testing.T, build *Build, selection *dynamov1beta1.LP
 	require.Equal(t, legacySpec, unitSpec)
 	require.Equal(t, legacy.AgentReplicas(), unit.AgentReplicas())
 	require.Equal(t, legacy.localPartitionIDs, unit.localPartitionIDs)
+	if !build.hasCUDAPartitions {
+		require.Equal(t, resolvedPartitionData(legacyProjections), resolvedPartitionData(unitProjections))
+	}
 }
 
 func TestUnitProjectionMatchesLegacy(t *testing.T) {
@@ -607,8 +639,8 @@ func readPlacementFixtureIndex(t *testing.T) placementFixtureIndex {
 // operator checks the fields it owns; runtime-only views such as novaStages and
 // per-pod ranks are ignored. A null lpr means the units path refuses the bundle
 // for the refusal reason. legacy is the legacy projection of the same bundle and
-// scenario with the units ignored; its configMap and lpuServers record the
-// runtime ConfigMaps the operator no longer renders and are ignored.
+// scenario with the units ignored, including the runtime ConfigMaps the operator
+// still renders for builds without units.
 type expectedPlacement struct {
 	CompilationMode string `json:"compilationMode"`
 	Architecture    string `json:"architecture"`
@@ -631,6 +663,8 @@ type expectedPlacement struct {
 	Legacy struct {
 		LPR        *expectedPlacementLPR `json:"lpr"`
 		AgentCount int                   `json:"agentCount"`
+		ConfigMap  map[string]string     `json:"configMap"`
+		LPUServers *string               `json:"lpuServers"`
 	} `json:"legacy"`
 }
 
@@ -789,6 +823,13 @@ func TestUnitProjectionMatchesPlacementFixtures(t *testing.T) {
 			requirePlacementRequest(t, *expected.Legacy.LPR, workloadMode, targetFamily, legacySpec)
 			require.JSONEq(t, string(expected.Legacy.LPR.AllocationMetadata), string(legacySpec.AllocationMetadata.Raw))
 			require.Equal(t, expected.Legacy.AgentCount, legacyProjections[0].AgentReplicas())
+			require.Equal(t, expected.Legacy.ConfigMap, resolvedPartitionData(legacyProjections))
+			if !hybrid {
+				require.Nil(t, expected.Legacy.LPUServers, "an LPU-only workload has no Cyborg")
+			} else {
+				require.NotNil(t, expected.Legacy.LPUServers)
+				require.Equal(t, *expected.Legacy.LPUServers, renderTestLPUServers(t, legacyProjections))
+			}
 
 			t.Log("Project the units, or refuse the bundle for the reviewed reason")
 			projections, err := projectTestUnits(build, selection)
@@ -822,14 +863,16 @@ func TestUnitProjectionMatchesPlacementFixtures(t *testing.T) {
 			}
 			require.Equal(t, wantPodPartitions, podPartitions)
 
+			t.Log("Render the legacy section's /configs rows from LPU-only units, which a speculative workload still reads")
 			if !hybrid {
+				require.Equal(t, expected.Legacy.ConfigMap, resolvedPartitionData(projections))
 				return
 			}
 
 			t.Log("Render the hybrid workload with one Cyborg client per runtime I/O endpoint")
 			pcs := renderTestPCS(true)
 			pcs.Spec.Template.Cliques[0].Spec.Replicas = build.ioFPGACount * build.ioFanoutFactor
-			rendered, err := renderSelectedForTest(pcs, projections, RenderInput{
+			rendered, _, err := renderSelectedForTest(pcs, projections, RenderInput{
 				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 			})
 			require.NoError(t, err)

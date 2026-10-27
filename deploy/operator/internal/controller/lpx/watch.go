@@ -63,7 +63,8 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("register LPR owner UID index: %w", err)
 	}
 
-	return ctrlBuilder.Owns(&corev1.Service{}).
+	return ctrlBuilder.Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Service{}).
 		Owns(&grovev1alpha1.PodCliqueSet{}).
 		Watches(&grovev1alpha1.PodClique{}, handler.EnqueueRequestsFromMapFunc(mapChildToLPXGraphDeployment), builder.WithPredicates(podCliquePredicate())).
 		Watches(&grovev1alpha1.PodCliqueScalingGroup{}, handler.EnqueueRequestsFromMapFunc(mapChildToLPXGraphDeployment), builder.WithPredicates(podCliqueScalingGroupPredicate())).

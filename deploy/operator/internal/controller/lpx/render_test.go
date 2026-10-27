@@ -209,18 +209,25 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 			require.NoError(t, err)
 			before := dgd.DeepCopy()
 
-			t.Log("Render only the optional Services, without runtime ConfigMaps, writes or DGD mutation")
+			t.Log("Render ConfigMaps and optional Services without writing resources or mutating the DGD")
 			pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 			require.NoError(t, err)
 			require.Equal(t, before, dgd)
+			serviceCount, configMapCount := 0, 0
 			for _, resource := range resources {
-				require.IsType(t, &corev1.Service{}, resource)
+				switch resource.(type) {
+				case *corev1.Service:
+					serviceCount++
+				case *corev1.ConfigMap:
+					configMapCount++
+				}
 			}
+			require.Positive(t, configMapCount)
 			if !tc.wantServices {
-				require.Empty(t, resources)
+				require.Zero(t, serviceCount)
 				return
 			}
-			require.Len(t, resources, len(plans))
+			require.Equal(t, len(plans), serviceCount)
 
 			t.Log("An image update retains discovery selectors for both serving revisions")
 			dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.Containers[0].Image += "-next"
@@ -374,6 +381,32 @@ func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 	require.Equal(t, leader.Spec.Containers[0].Args, main.Args)
 }
 
+func TestLPXUnitBuildRejectsUndeclaredConfigMount(t *testing.T) {
+	for _, role := range []string{v1beta1.ComponentRoleLPXAgent, v1beta1.ComponentRoleLPXConductor} {
+		t.Run(role, func(t *testing.T) {
+			t.Log("Load a hybrid workload whose build records LPU units and mount /configs without declaring it")
+			payload, err := os.ReadFile(filepath.Join("../../dynamo/lpx/testdata", "from_dgd_yaml", "node-local-v2-hybrid-units.input.yaml"))
+			require.NoError(t, err)
+			dgd := &v1beta1.DynamoGraphDeployment{}
+			require.NoError(t, yaml.Unmarshal(payload, dgd))
+			template := dgd.GetComponentByName("lpu").ComponentRole(role).PodTemplate
+			template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts,
+				corev1.VolumeMount{Name: "config", MountPath: "/configs"})
+
+			t.Log("Refuse to render a role whose config volume no longer exists")
+			selected, err := lpx.ResolveWorkload(t.Context(), newLPXGPUClient(t), dgd, singleGroupComponents(t, dgd), newTestDataModelRegistry(t, t.TempDir()))
+			require.NoError(t, err)
+			plan := mustPlanSelectedLPX(t, dgd, selected)
+			r := &graphReconciler{Client: newLPXGPUClient(t), config: &configv1alpha1.OperatorConfiguration{}, runtimeConfig: &commoncontroller.RuntimeConfig{}}
+			_, _, err = r.renderPodCliqueSet(t.Context(), newLPXRenderDeployment(t, dgd), dgd,
+				map[string]*lpx.Workload{selected.ServingComponentName(): selected},
+				map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan}, nil)
+			require.ErrorContains(t, err, "container main mounts volume \"config\", which its pod template does not declare; "+
+				"the operator provides /configs only for builds without lpuUnits")
+		})
+	}
+}
+
 func TestLPXRenderingPreservesInputs(t *testing.T) {
 	const mutatedValue = "rendered-change"
 	t.Log("Create compiler builds for each supported runtime shape")
@@ -434,12 +467,14 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 			for _, group := range first.Spec.Template.PodCliqueScalingGroupConfigs {
 				group.Annotations[lpx.WorkloadDigestAnnotation] = mutatedValue
 			}
-			require.NotEmpty(t, firstResources)
 			for _, resource := range firstResources {
 				resource.GetAnnotations()[lpx.DeploymentNameAnnotation] = mutatedValue
-				service, ok := resource.(*corev1.Service)
-				require.True(t, ok)
-				service.Spec.Selector[dynamo.LPXServingLabel] = mutatedValue
+				switch resource := resource.(type) {
+				case *corev1.ConfigMap:
+					resource.Data["rendered-only"] = mutatedValue
+				case *corev1.Service:
+					resource.Spec.Selector[dynamo.LPXServingLabel] = mutatedValue
+				}
 			}
 			require.Equal(t, secondBefore, second)
 			require.Equal(t, resourcesBefore, secondResources)
@@ -617,7 +652,7 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 	require.Equal(t, before, dgd)
 }
 
-func TestRuntimeTemplateEnvironmentKeepsModelPath(t *testing.T) {
+func TestRuntimeTemplateChangesPreservePartitionConfig(t *testing.T) {
 	controllerConfig := &configv1alpha1.OperatorConfiguration{
 		Orchestrators: configv1alpha1.OrchestratorConfiguration{
 			Grove: configv1alpha1.GroveConfiguration{TerminationDelay: metav1.Duration{Duration: 15 * time.Minute}},
@@ -630,6 +665,7 @@ func TestRuntimeTemplateEnvironmentKeepsModelPath(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Log("Render runtime overrides supplied directly by the conductor template")
+	var partitionData map[string]string
 	for _, env := range []corev1.EnvVar{
 		{Name: "NOVA_BATCH_SIZE", Value: "1"},
 		{Name: "NOVA_SEQUENCE_LENGTH", Value: "65536"},
@@ -649,17 +685,27 @@ func TestRuntimeTemplateEnvironmentKeepsModelPath(t *testing.T) {
 		child := newLPXRenderDeployment(t, &deployment)
 		plan := mustPlanSelectedLPX(t, &deployment, selected)
 		r := &graphReconciler{Client: newLPXGPUClient(t), config: controllerConfig, runtimeConfig: &commoncontroller.RuntimeConfig{}}
-		pcs, _, err := r.renderPodCliqueSet(t.Context(), child, &deployment, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan}, nil)
+		pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, &deployment, map[string]*lpx.Workload{selected.ServingComponentName(): selected}, map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan}, nil)
 		require.NoError(t, err)
 
-		t.Log("Keep authored environment values beside the operator's model path")
-		conductor := slices.IndexFunc(pcs.Spec.Template.Cliques, func(clique *grovev1alpha1.PodCliqueTemplateSpec) bool {
-			return clique.Name == plan.ConductorTemplate
-		})
-		require.GreaterOrEqual(t, conductor, 0)
-		rendered := pcs.Spec.Template.Cliques[conductor].Spec.PodSpec.Containers[0].Env
-		require.Contains(t, rendered, corev1.EnvVar{Name: "LPX_MODEL_PATH", Value: filepath.Join("/nfs", buildID)})
-		require.Contains(t, rendered, env)
+		t.Log("Keep authored environment values without changing shared partition files")
+		var hash string
+		for _, clique := range pcs.Spec.Template.Cliques {
+			if clique.Name == plan.ConductorTemplate {
+				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: "LPX_MODEL_PATH", Value: filepath.Join("/nfs", buildID)})
+				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, env)
+				hash = clique.Annotations[v1alpha1.AnnotationExtraResourcesHash]
+			}
+		}
+		require.NotEmpty(t, hash)
+		configMap := getResource[*corev1.ConfigMap](t, resources, fmt.Sprintf("%s-lpu-%.16s", dynamo.PCSNameForLPX(child), hash))
+		require.NotContains(t, configMap.Data, "model_config.toml")
+		require.NotContains(t, configMap.Data, "datacenter.toml")
+		if partitionData == nil {
+			partitionData = configMap.Data
+		} else {
+			require.Equal(t, partitionData, configMap.Data)
+		}
 	}
 }
 

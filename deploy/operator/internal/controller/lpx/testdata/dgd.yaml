@@ -25,6 +25,7 @@ spec:
             command: [/bin/nova]
             volumeMounts: &runtime-mounts
             - {name: model-storage, mountPath: /models}
+            - {name: config, mountPath: /configs}
             - {name: host-dev, mountPath: /dev}
             - {name: host-sys, mountPath: /sys}
             - {name: ssh-secret, mountPath: /ssh-pk, readOnly: true}

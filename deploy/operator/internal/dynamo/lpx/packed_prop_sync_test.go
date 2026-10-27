@@ -184,8 +184,9 @@ func TestPropSyncProjection(t *testing.T) {
 				return
 			}
 
-			t.Log("Pack one physical shape and remove internal connectors")
+			t.Log("Pack one physical shape, preserve every logical source stage and remove internal connectors")
 			require.EqualValues(t, test.physicalNodes, projection.agentReplicas)
+			require.Equal(t, original[test.runtimeStart:], projection.configuredBuild.partitions)
 			request := projection.RequestSpec(&MaterializationPlan{}, "agents")
 			require.Len(t, request.Partitions, 1)
 			require.EqualValues(t, test.family, request.TargetFamily)

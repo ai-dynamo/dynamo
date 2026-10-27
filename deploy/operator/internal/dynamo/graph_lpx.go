@@ -64,7 +64,7 @@ func RenderLPXPodCliqueSet(
 	return pcs, nil
 }
 
-// RenderLPXWorkloadTemplates renders one workload's roles and scaling group.
+// RenderLPXWorkloadTemplates renders one workload's roles, scaling group and resources.
 // Pointer inputs must be non-nil, except secretsRetriever when no secrets are used.
 // Inputs are not mutated.
 func RenderLPXWorkloadTemplates(
@@ -97,6 +97,11 @@ func RenderLPXWorkloadTemplates(
 		if budget, exists := provideroverride.GroveMaxUnavailable(component.ProviderOverride.Value.Raw); exists {
 			rendered.ScalingGroup.RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: new(budget)}
 		}
+	}
+
+	// Scope the rendered resources to the graph's Kubernetes namespace.
+	for _, resource := range rendered.Resources {
+		resource.SetNamespace(source.Namespace)
 	}
 	return rendered, nil
 }
@@ -417,7 +422,8 @@ func renderSelectedLPXRole(
 	// The shared renderer's filesystem-group fallback is not part of the LPX template contract.
 	basePodSpec.SecurityContext = component.PodTemplate.Spec.SecurityContext
 
-	// LPX supplies the generated config volume after merging; discard only inferred PVCs.
+	// An undeclared config mount names the LPX runtime ConfigMap, not a PVC. LPX
+	// adds that volume for builds without lpuUnits and otherwise rejects the mount.
 	explicitVolumes := component.PodTemplate.Spec.Volumes
 	basePodSpec.Volumes = slices.DeleteFunc(basePodSpec.Volumes, func(volume corev1.Volume) bool {
 		return volume.Name == "config" && !slices.ContainsFunc(explicitVolumes,

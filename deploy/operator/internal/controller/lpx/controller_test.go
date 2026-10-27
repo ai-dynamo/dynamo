@@ -583,7 +583,6 @@ func TestLPXWorkloadErrorDoesNotAcknowledgeGeneration(t *testing.T) {
 			ctx := t.Context()
 			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
 			child.Generation, child.Status.ObservedGeneration = 2, 1
-			dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
 			if tc.deadline {
 				dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](60)}
 			}
@@ -596,13 +595,13 @@ func TestLPXWorkloadErrorDoesNotAcknowledgeGeneration(t *testing.T) {
 			pending.Status = newTestPipelineRequest(child, pcs, pending.Name, time.Now(), lpxv1alpha1.RequestPhasePending).Status
 			require.NoError(t, r.Update(ctx, pending))
 
-			t.Log("Fail discovery Service synchronization after the scheduling deadline is derived")
-			readErr, statusErr := errors.New("Service read unavailable"), errors.New("status write unavailable")
+			t.Log("Fail runtime synchronization after the scheduling deadline is derived")
+			readErr, statusErr := errors.New("ConfigMap read unavailable"), errors.New("status write unavailable")
 			failReads, failStatus := !tc.workloadSucceeds, tc.failStatus
 			reads := 0
 			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
 				Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
-					if _, ok := object.(*corev1.Service); ok && failReads {
+					if _, ok := object.(*corev1.ConfigMap); ok && failReads {
 						reads++
 						return readErr
 					}
@@ -948,6 +947,37 @@ func TestPipelineRequestDeadlineHoleWaitsForSchedulingChange(t *testing.T) {
 	current, err := r.getPipelineRequests(ctx, pcs)
 	require.NoError(t, err)
 	require.Empty(t, current)
+}
+
+func TestLPXDeletesOnlyStaleOwnedRuntimeConfigMaps(t *testing.T) {
+	t.Log("Create current, stale, and foreign runtime ConfigMaps")
+	dgd := loadTestDGD(t, lpx.PipelineSingle, "test-build")
+	child := newLPXTestDeployment(t, dgd)
+	owner := []metav1.OwnerReference{*metav1.NewControllerRef(child, v1alpha1.LPXGraphDeploymentGVK)}
+	current := &corev1.ConfigMap{
+		Name: "runtime-current", Namespace: child.Namespace, UID: "current",
+		Labels: map[string]string{deploymentUIDLabel: string(child.UID)}, OwnerReferences: owner}
+	stale := &corev1.ConfigMap{
+		Name: "runtime-stale", Namespace: child.Namespace, UID: "stale",
+		Labels: map[string]string{deploymentUIDLabel: string(child.UID)}, OwnerReferences: owner}
+	foreign := &corev1.ConfigMap{
+		Name: "runtime-foreign", Namespace: child.Namespace, UID: "foreign",
+		Labels:          map[string]string{deploymentUIDLabel: string(child.UID)},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}}
+	r := newLPXTestReconciler(t, nil, child, dgd, current, stale, foreign)
+
+	t.Log("Keep the previous runtime configuration while the replacement is not Ready")
+	require.NoError(t, r.deleteUnusedConfigMaps(t.Context(), child, []client.Object{current}))
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(stale), &corev1.ConfigMap{}))
+
+	t.Log("Delete only the stale ConfigMap owned by the current LPX child")
+	setReadyCondition(child, v1beta1.DGDStateSuccessful, "Replacement is Ready")
+	require.NoError(t, r.deleteUnusedConfigMaps(t.Context(), child, []client.Object{current}))
+
+	t.Log("Preserve the current and foreign ConfigMaps")
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(current), &corev1.ConfigMap{}))
+	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(stale), &corev1.ConfigMap{})))
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(foreign), &corev1.ConfigMap{}))
 }
 
 func TestLPXDownloadsBeforePublication(t *testing.T) {
@@ -1820,21 +1850,19 @@ func TestLPXMaterializationUsesDGDAndChildIdentity(t *testing.T) {
 		require.Equal(t, []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(child)}}, mapChildToLPXGraphDeployment(t.Context(), object))
 	}
 
-	t.Log("Publish the endpoint under the exact LGD owner without runtime ConfigMaps")
+	t.Log("Publish the runtime configuration and endpoint under the exact LGD owner")
 	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
 	require.NoError(t, err)
 
 	root := dynamo.PCSNameForLPX(child)
 	for _, object := range []client.Object{
 		&grovev1alpha1.PodCliqueSet{Name: root, Namespace: child.Namespace},
+		&corev1.ConfigMap{Name: fmt.Sprintf("%s-lpu-%.16s", root, pcs.Spec.Template.Cliques[0].Annotations[v1alpha1.AnnotationExtraResourcesHash]), Namespace: child.Namespace},
 		&corev1.Service{Name: root + "-serve", Namespace: child.Namespace},
 	} {
 		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(object), object))
 		require.True(t, metav1.IsControlledBy(object, child))
 	}
-	configMaps := &corev1.ConfigMapList{}
-	require.NoError(t, r.List(t.Context(), configMaps, client.InNamespace(child.Namespace)))
-	require.Empty(t, configMaps.Items)
 
 	t.Log("Keep scheduler-request provenance rooted in the source DGD, not the independently named child")
 	requests, err := r.getPipelineRequests(t.Context(), pcs)
@@ -3069,7 +3097,8 @@ func TestLPXDisabledPreservesPublishedWorkloadUntilReenabled(t *testing.T) {
 				require.NoError(t, err)
 			}
 			before := []client.ObjectList{
-				&grovev1alpha1.PodCliqueSetList{}, &corev1.ServiceList{}, &lpxv1alpha1.LPUPipelineRequestList{},
+				&grovev1alpha1.PodCliqueSetList{}, &corev1.ConfigMapList{},
+				&corev1.ServiceList{}, &lpxv1alpha1.LPUPipelineRequestList{},
 			}
 			for _, list := range before {
 				require.NoError(t, r.List(ctx, list))
@@ -3712,7 +3741,7 @@ func TestIndependentLPXWorkloadsScaleAndReportReadiness(t *testing.T) {
 	require.Len(t, workloads, 2)
 	pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans, nil)
 	require.NoError(t, err)
-	require.Len(t, resources, 2)
+	require.Len(t, resources, 4)
 	names := make(map[string]bool)
 	for _, resource := range resources {
 		require.NotContains(t, names, resource.GetName())

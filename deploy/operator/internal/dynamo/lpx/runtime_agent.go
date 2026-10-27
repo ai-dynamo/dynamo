@@ -8,9 +8,7 @@ package lpx
 import (
 	"fmt"
 	"slices"
-	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -68,28 +66,4 @@ func applyModelPaths(container *corev1.Container, projections []*ModelProjection
 	}
 	container.Env = env
 	return nil
-}
-
-// lpuModelStoragePath returns the mount path of the model-storage volume in the
-// PodSpec's main container: the root under which runtimes find compiled builds.
-func lpuModelStoragePath(spec corev1.PodSpec) (string, error) {
-	container := common.FindContainerByName(spec.Containers, commonconsts.MainContainerName)
-	mountIndex := slices.IndexFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool {
-		return mount.Name == v1alpha1.ModelStorageVolumeName
-	})
-	if mountIndex < 0 {
-		return "", fmt.Errorf(
-			"selected LPX main container requires model storage volume mount %q",
-			v1alpha1.ModelStorageVolumeName,
-		)
-	}
-	mount := container.VolumeMounts[mountIndex]
-	if strings.TrimSpace(mount.MountPath) == "" {
-		return "", fmt.Errorf("model storage volume %q has no mount path", mount.Name)
-	}
-	volumeIndex := slices.IndexFunc(spec.Volumes, func(volume corev1.Volume) bool { return volume.Name == mount.Name })
-	if volumeIndex < 0 {
-		return "", fmt.Errorf("selected LPX podTemplate has no model storage volume %q", mount.Name)
-	}
-	return mount.MountPath, nil
 }
