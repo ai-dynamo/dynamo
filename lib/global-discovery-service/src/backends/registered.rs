@@ -15,6 +15,7 @@
 //! loses contact with the MCS implementation.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -31,9 +32,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::stream::{EVENT_BUFFER, watch_stream};
 
-/// Joins an MCS pool directory with a registration store. Lists are
-/// `Estimated`: the join does not follow whether its sources' lists are
-/// complete.
+/// Joins an MCS pool directory with a registration store. Lists are `Exact`
+/// while both sources' latest lists are, and `Estimated` otherwise, for
+/// example until a lease has passed since the registration store started.
 ///
 /// One task watches both sources and keeps the join, which serves `list`
 /// and every `list_and_watch` stream. Each event from either source
@@ -86,6 +87,14 @@ impl Drop for RegisteredPoolDirectory {
     }
 }
 
+impl fmt::Debug for RegisteredPoolDirectory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegisteredPoolDirectory")
+            .field("lease", &self.lease)
+            .finish_non_exhaustive()
+    }
+}
+
 #[async_trait]
 impl Directory<PoolListing, PoolKey> for RegisteredPoolDirectory {
     /// From the join once both sources have synced. Before that, joins one
@@ -96,6 +105,8 @@ impl Directory<PoolListing, PoolKey> for RegisteredPoolDirectory {
             return Ok(snapshot);
         }
         let (mcs, registered) = tokio::try_join!(self.mcs.list(), self.registrations.list())?;
+        let both_exact = mcs.completeness == Completeness::Exact
+            && registered.completeness == Completeness::Exact;
         let registered: HashMap<PoolKey, PoolListing> = registered
             .items
             .into_iter()
@@ -107,7 +118,7 @@ impl Directory<PoolListing, PoolKey> for RegisteredPoolDirectory {
                 .iter()
                 .filter_map(|mcs| Some(merge(mcs, registered.get(&mcs.key)?)))
                 .collect(),
-            completeness: Completeness::Estimated,
+            completeness: completeness(both_exact),
         })
     }
 
@@ -122,6 +133,16 @@ impl Directory<PoolListing, PoolKey> for RegisteredPoolDirectory {
             cancel_token.unwrap_or_default(),
             self.stop.clone(),
         ))
+    }
+}
+
+/// A pool missing from either source is missing from the join, so the join
+/// is `Exact` only when both sources are.
+fn completeness(both_exact: bool) -> Completeness {
+    if both_exact {
+        Completeness::Exact
+    } else {
+        Completeness::Estimated
     }
 }
 
@@ -290,6 +311,8 @@ struct JoinState {
 struct SourceView {
     /// The source has sent its first `Resync`.
     synced: bool,
+    /// Its latest `Resync` was `Exact`.
+    exact: bool,
     listings: HashMap<PoolKey, PoolListing>,
 }
 
@@ -306,12 +329,14 @@ impl JoinState {
     fn snapshot(&self) -> Snapshot<PoolListing> {
         Snapshot {
             items: self.pools.values().cloned().collect(),
-            completeness: Completeness::Estimated,
+            completeness: completeness(self.mcs.exact && self.registered.exact),
         }
     }
 
     /// Returns the events to publish. Nothing is published until both
-    /// sources have synced; then one `Resync` starts the join.
+    /// sources have synced; then one `Resync` starts the join. Each later
+    /// `Resync` from a source, such as one that changes its completeness,
+    /// publishes another.
     fn apply(&mut self, source: Source, event: PoolEvent, now: Instant) -> Vec<PoolEvent> {
         let was_synced = self.synced();
         let view = match source {
@@ -329,6 +354,7 @@ impl JoinState {
                 key
             }
             WatchEvent::Resync(snapshot) => {
+                view.exact = snapshot.completeness == Completeness::Exact;
                 view.listings = snapshot
                     .items
                     .into_iter()
@@ -490,6 +516,14 @@ mod tests {
             let _ = self.events.send(WatchEvent::Added(listing));
         }
 
+        /// Lists every pool again, with `completeness`, as the MCS store
+        /// does when its watch keeps failing and when it recovers.
+        fn relist(&self, completeness: Completeness) {
+            let mut snapshot = exact(&self.listings.lock().unwrap());
+            snapshot.completeness = completeness;
+            let _ = self.events.send(WatchEvent::Resync(snapshot));
+        }
+
         fn remove(&self, key: &PoolKey) {
             let mut listings = self.listings.lock().unwrap();
             if listings.remove(key).is_some() {
@@ -639,6 +673,15 @@ mod tests {
         fx.in_mcs("mocker");
         assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(_)))));
 
+        // A heartbeat keeps the pool while the registration store's first
+        // lease passes, and then its lists are complete.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        fx.register("mocker", "m2").await;
+        tokio::time::advance(lease().lease_duration() - Duration::from_secs(10)).await;
+        assert!(
+            matches!(watch.next().await, Some(Ok(WatchEvent::Resync(s))) if s.items.len() == 1)
+        );
+
         // No heartbeat for longer than the lease, as when the pool's cluster
         // is cut off but its imported slices still say Ready: the pool goes
         // within one sweep.
@@ -647,6 +690,38 @@ mod tests {
             matches!(watch.next().await, Some(Ok(WatchEvent::Removed(k))) if k == key("mocker"))
         );
         assert!(find(&*fx.mcs, &key("mocker")).await.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_join_is_complete_once_both_sources_are() {
+        let fx = fixture();
+        fx.in_mcs("mocker");
+        fx.register("mocker", "m1").await;
+        let completeness = || async { fx.directory.list().await.unwrap().completeness };
+        // MCS lists every pool, but until a lease has passed since the
+        // registration store started, a PoolRelay may not have registered.
+        assert_eq!(completeness().await, Completeness::Estimated);
+        let mut watch = fx.directory.list_and_watch(None).await.unwrap();
+        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(_)))));
+        assert!(
+            matches!(watch.next().await, Some(Ok(WatchEvent::Resync(s))) if s.completeness == Completeness::Estimated)
+        );
+
+        // The PoolRelay keeps registering while the first lease passes.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        fx.register("mocker", "m1").await;
+        tokio::time::advance(lease().lease_duration() - Duration::from_secs(10)).await;
+        assert!(
+            matches!(watch.next().await, Some(Ok(WatchEvent::Resync(s))) if s.completeness == Completeness::Exact && s.items.len() == 1)
+        );
+        assert_eq!(completeness().await, Completeness::Exact);
+
+        // A stale MCS view makes the join `Estimated` again.
+        fx.mcs.relist(Completeness::Estimated);
+        assert!(
+            matches!(watch.next().await, Some(Ok(WatchEvent::Resync(s))) if s.completeness == Completeness::Estimated)
+        );
+        assert_eq!(completeness().await, Completeness::Estimated);
     }
 
     #[tokio::test(start_paused = true)]

@@ -67,6 +67,16 @@ impl fmt::Debug for DiscoveryStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DiscoveryStore")
             .field("takes_registrations", &self.registrar.is_some())
+            .field("sharing", &self.sharing)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for Sharing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sharing")
+            .field("instance", &self.instance)
+            .field("synced", &self.synced.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }

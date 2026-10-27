@@ -22,6 +22,7 @@
 //! other over plain HTTP, never through a proxy.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -49,6 +50,15 @@ pub struct PeerSync {
     /// know only its own PoolRelays, so it is not ready.
     synced: Arc<AtomicBool>,
     client: reqwest::Client,
+}
+
+impl fmt::Debug for PeerSync {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PeerSync")
+            .field("instance", &self.instance)
+            .field("every", &self.every)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PeerSync {

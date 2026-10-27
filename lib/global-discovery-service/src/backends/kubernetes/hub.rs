@@ -18,7 +18,7 @@ use kube::{Api, Client};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::cache::{SliceDirectory, SliceIndex, SliceKey, ready_endpoints};
+use super::cache::{SliceDirectory, SliceIndex, SliceKey, ready_endpoints, tcp_port};
 use super::mcs::{self, McsImplementation};
 
 /// One pool per (source cluster, namespace, DGD name), from imported
@@ -34,8 +34,9 @@ pub struct McsPoolDirectory(SliceDirectory<PoolIndex>);
 
 /// The Service in front of a pool's frontends, named `<DGD name><suffix>`
 /// and exported like the PoolRelay Service. Its Ready endpoints on the named
-/// port become the pool's `frontends`: addresses that other clusters can
-/// reach, kept current as frontend pods come and go.
+/// TCP port become the pool's `frontends`, one per pod, at its IPv4 address
+/// on a dual-stack cluster: addresses that other clusters can reach, kept
+/// current as frontend pods come and go.
 #[derive(Clone, Debug)]
 pub struct FrontendService {
     pub suffix: String,
@@ -136,10 +137,20 @@ impl PoolNaming {
                 frontend_port: None,
             });
         }
+        let pool = self.pool_key(slice, &self.frontends.suffix)?;
+        let Some(port) = tcp_port(slice, &self.frontends.port_name) else {
+            // The slice is the frontend Service's, so the name is misconfigured.
+            tracing::warn!(
+                slice = slice.metadata.name.as_deref().unwrap_or_default(),
+                port_name = %self.frontends.port_name,
+                "frontend EndpointSlice has no TCP port of that name; its frontends are not listed"
+            );
+            return None;
+        };
         Some(SliceEntry {
-            pool: self.pool_key(slice, &self.frontends.suffix)?,
+            pool,
             ready: ready_addresses(slice),
-            frontend_port: Some(tcp_port(slice, &self.frontends.port_name)?),
+            frontend_port: Some(port),
         })
     }
 }
@@ -173,28 +184,9 @@ fn ready_addresses(slice: &EndpointSlice) -> Vec<(String, IpAddr)> {
         .collect()
 }
 
-/// A slice's named TCP port. One slice lists one set of ports for all its
-/// endpoints.
-fn tcp_port(slice: &EndpointSlice, name: &str) -> Option<u16> {
-    slice
-        .ports
-        .iter()
-        .flatten()
-        .find(|port| {
-            port.name.as_deref() == Some(name)
-                && port
-                    .protocol
-                    .as_deref()
-                    .is_none_or(|protocol| protocol == "TCP")
-        })
-        .and_then(|port| port.port)
-        .and_then(|port| u16::try_from(port).ok())
-        .filter(|port| *port != 0)
-}
-
 /// Formatted through `SocketAddr`, so IPv6 gets brackets.
-fn frontend_url(address: IpAddr, port: u16) -> Option<Url> {
-    Url::parse(&format!("http://{}/", SocketAddr::new(address, port))).ok()
+fn frontend_url(address: SocketAddr) -> Option<Url> {
+    Url::parse(&format!("http://{address}/")).ok()
 }
 
 struct SliceEntry {
@@ -295,27 +287,32 @@ impl PoolIndex {
     /// the listing changed.
     fn rebuild(&mut self, key: &PoolKey) -> Option<PoolEvent> {
         let state = self.pools.get(key)?;
+        // Each pod's Ready addresses. A dual-stack pod is in two slices, one
+        // per address family.
         let mut relays: BTreeMap<&str, BTreeSet<IpAddr>> = BTreeMap::new();
-        let mut frontends = Vec::new();
+        let mut frontends: BTreeMap<&str, BTreeSet<SocketAddr>> = BTreeMap::new();
         for entry in state
             .slices
             .iter()
             .filter_map(|slice| self.slices.get(slice))
         {
-            match entry.frontend_port {
-                None => {
-                    for (pod, address) in &entry.ready {
-                        relays.entry(pod).or_default().insert(*address);
-                    }
+            for (pod, address) in &entry.ready {
+                if let Some(port) = entry.frontend_port {
+                    frontends
+                        .entry(pod)
+                        .or_default()
+                        .insert(SocketAddr::new(*address, port));
+                } else {
+                    relays.entry(pod).or_default().insert(*address);
                 }
-                Some(port) => frontends.extend(
-                    entry
-                        .ready
-                        .iter()
-                        .filter_map(|(_, address)| frontend_url(*address, port)),
-                ),
             }
         }
+        // One URL per frontend pod, at its lowest address: IPv4 when it has
+        // one.
+        let mut frontends: Vec<Url> = frontends
+            .values()
+            .filter_map(|addresses| frontend_url(*addresses.first()?))
+            .collect();
         frontends.sort_unstable();
         frontends.dedup();
         // A pool is live while a PoolRelay endpoint is Ready. Ready can be
@@ -465,6 +462,19 @@ mod tests {
         slice
     }
 
+    /// Like [`pod_slice`], for `mocker-frontend`.
+    fn frontend_pod_slice(
+        suffix: &str,
+        address_type: &str,
+        endpoints: &[(&str, &str)],
+    ) -> EndpointSlice {
+        let mut slice = frontend_slice("west", "mocker", &[]);
+        slice.metadata.name = Some(format!("imported-west-mocker-frontend-{suffix}"));
+        slice.address_type = address_type.to_owned();
+        slice.endpoints = pod_slice("west", suffix, address_type, endpoints).endpoints;
+        slice
+    }
+
     fn key(cluster: &str, dgd: &str) -> PoolKey {
         PoolKey::new(cluster, "dynamo", dgd).unwrap()
     }
@@ -593,6 +603,35 @@ mod tests {
     }
 
     #[test]
+    fn a_dual_stack_frontend_is_listed_once_at_its_ipv4_address() {
+        let cache = cache();
+        sync(
+            &cache,
+            vec![
+                slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]),
+                frontend_pod_slice(
+                    "f1",
+                    "IPv4",
+                    &[("frontend-a", "10.43.0.7"), ("frontend-b", "10.43.0.2")],
+                ),
+                frontend_pod_slice(
+                    "f2",
+                    "IPv6",
+                    &[("frontend-a", "fd00::7"), ("frontend-b", "fd00::2")],
+                ),
+            ],
+        );
+        let listing = listing(&cache, &key("west", "mocker")).expect("live pool");
+        assert_eq!(
+            listing.frontends,
+            [
+                Url::parse("http://10.43.0.2:8000/").unwrap(),
+                Url::parse("http://10.43.0.7:8000/").unwrap(),
+            ]
+        );
+    }
+
+    #[test]
     fn frontends_come_from_the_frontend_service() {
         // A Service name must not match both suffixes.
         for (frontend, relay) in [
@@ -635,11 +674,9 @@ mod tests {
         );
 
         // A replaced frontend changes the listing. IPv6 gets brackets.
-        cache.apply(watcher::Event::Apply(frontend_slice(
-            "west",
-            "mocker",
-            &[("fd00::2", true)],
-        )));
+        let mut ipv6 = frontend_slice("west", "mocker", &[("fd00::2", true)]);
+        ipv6.address_type = "IPv6".to_owned();
+        cache.apply(watcher::Event::Apply(ipv6));
         let second = listing(&cache, &pool).unwrap();
         assert_ne!(second, first);
         assert_eq!(
