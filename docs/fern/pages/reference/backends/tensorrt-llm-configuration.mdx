@@ -222,6 +222,12 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
   Environment variable: `DYN_TRTLLM_MAX_FILE_SIZE_MB`
 </ParamField>
 
+<ParamField path="--mm-preprocess-processes" type="integer" default="0">
+  Number of processes that run TensorRT-LLM multimodal input preprocessing, each with its own copy of the model's input processor and its own GIL, so that preprocessing does not compete with token streaming in the worker process. `0` runs it on threads of the worker process. Requires `--enable-multimodal`, is not supported on encode workers, and is meant for models whose input processor runs on the CPU.
+
+  Environment variable: `DYN_TRTLLM_MM_PREPROCESS_PROCESSES`
+</ParamField>
+
 <ParamField path="--frontend-decoding" type="boolean" default="false">
   Enable frontend decoding of multimodal images. Images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA, bypassing in-engine HTTP fetch and decode. Engine-specific topology constraints may apply.
 

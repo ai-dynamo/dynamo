@@ -392,6 +392,43 @@ def test_enable_multimodal_rejects_diffusion_modality():
         )
 
 
+@pytest.mark.multimodal
+def test_mm_preprocess_processes_flag_and_env_var(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_MM_PREPROCESS_PROCESSES", raising=False)
+    multimodal = ["--model", "fake-model", "--enable-multimodal"]
+    assert parse_args(multimodal).mm_preprocess_processes == 0
+
+    monkeypatch.setenv("DYN_TRTLLM_MM_PREPROCESS_PROCESSES", "8")
+    assert parse_args(multimodal).mm_preprocess_processes == 8
+    config = parse_args([*multimodal, "--mm-preprocess-processes", "4"])
+    assert config.mm_preprocess_processes == 4
+
+
+@pytest.mark.multimodal
+@pytest.mark.parametrize(
+    ("args", "match"),
+    [
+        (["--enable-multimodal", "--mm-preprocess-processes", "-1"], ">= 0"),
+        (["--mm-preprocess-processes", "2"], "requires --enable-multimodal"),
+        (
+            [
+                "--enable-multimodal",
+                "--disaggregation-mode",
+                "encode",
+                "--mm-preprocess-processes",
+                "2",
+            ],
+            "not supported with --disaggregation-mode encode",
+        ),
+    ],
+    ids=["negative", "text-worker", "encode-worker"],
+)
+def test_mm_preprocess_processes_is_validated(monkeypatch, args, match):
+    monkeypatch.delenv("DYN_TRTLLM_MM_PREPROCESS_PROCESSES", raising=False)
+    with pytest.raises(ValueError, match=match):
+        parse_args(["--model", "fake-model", *args])
+
+
 # ---- Tests for trtllm_utils.deep_update ----
 
 
@@ -923,6 +960,34 @@ async def test_init_llm_worker_creates_multimodal_processor():
                 config=config,
                 shutdown_event=asyncio.Event(),
             )
+
+
+@pytest.mark.multimodal
+@pytest.mark.asyncio
+async def test_init_llm_worker_forwards_mm_preprocess_processes():
+    config = parse_args(
+        "--model fake-model --enable-multimodal --mm-preprocess-processes 3".split()
+    )
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.AutoConfig.from_pretrained"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.MultimodalRequestProcessor"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ) as get_llm_engine,
+    ):
+        with pytest.raises(EngineArgsCaptured):
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    assert get_llm_engine.call_args.kwargs["mm_preprocess_processes"] == 3
 
 
 # ---- Tests for _strip_postprocess_workers ----
