@@ -56,7 +56,7 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 	const poll = 200 * time.Millisecond
 
 	request := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "watched", Namespace: env.Namespace()},
+		Name: "watched", Namespace: env.Namespace(),
 		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
 			NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
 				Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-32B"},

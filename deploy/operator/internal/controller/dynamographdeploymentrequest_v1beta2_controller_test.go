@@ -79,7 +79,7 @@ func (f *dgdrV1beta2Fixture) reconcile() {
 func (f *dgdrV1beta2Fixture) tryReconcile() error {
 	f.t.Helper()
 	_, err := f.reconciler.Reconcile(f.t.Context(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "default", Name: "search"},
+		Namespace: "default", Name: "search",
 	})
 	return err
 }
@@ -160,7 +160,7 @@ func (f *dgdrV1beta2Fixture) bumpGeneration(generation int64) {
 
 func dgdrV1beta2Request(withHardware bool) *nvidiacomv1beta2.DynamoGraphDeploymentRequest {
 	request := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "search", Namespace: "default", UID: "request-uid", Generation: 1},
+		Name: "search", Namespace: "default", UID: "request-uid", Generation: 1,
 	}
 	request.Spec.Model = &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"}
 	if withHardware {
@@ -493,18 +493,16 @@ func dgdrV1beta2OwnedRun(
 	terminal bool,
 ) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
 	run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        fmt.Sprintf("%s-%d", request.Name, generation),
-			Namespace:   request.Namespace,
-			Annotations: map[string]string{dgdrV1beta2GenerationAnnotation: fmt.Sprint(generation)},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: nvidiacomv1beta2.GroupVersion.String(),
-				Kind:       "DynamoGraphDeploymentRequest",
-				Name:       request.Name,
-				UID:        request.UID,
-				Controller: boolPointerForTest(true),
-			}},
-		},
+		Name:        fmt.Sprintf("%s-%d", request.Name, generation),
+		Namespace:   request.Namespace,
+		Annotations: map[string]string{dgdrV1beta2GenerationAnnotation: fmt.Sprint(generation)},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: nvidiacomv1beta2.GroupVersion.String(),
+			Kind:       "DynamoGraphDeploymentRequest",
+			Name:       request.Name,
+			UID:        request.UID,
+			Controller: new(true),
+		}},
 	}
 	if terminal {
 		run.Status.Phase = nvidiacomv1beta2.DGDRRunPhase("Succeeded")
@@ -512,8 +510,6 @@ func dgdrV1beta2OwnedRun(
 	}
 	return run
 }
-
-func boolPointerForTest(value bool) *bool { return &value }
 
 // apiextensionsJSONForTest is a non-empty v1beta1 carrier payload.
 var apiextensionsJSONForTest = apiextensionsv1.JSON{Raw: []byte(`{"model":"carrier"}`)}
@@ -569,22 +565,20 @@ func TestV1beta2RequestControllerReconcilesAnOverlengthRequestToOneRun(t *testin
 
 func TestV1beta2RequestControllerDoesNotAdoptARunOfAnotherOwner(t *testing.T) {
 	stale := &nvidiacomv1beta2.DynamoGraphDeploymentRun{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "search-1",
-			Namespace: "default",
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: nvidiacomv1beta2.GroupVersion.String(),
-				Kind:       "DynamoGraphDeploymentRequest",
-				Name:       "search",
-				UID:        "old-uid",
-				Controller: boolPointerForTest(true),
-			}},
-		},
+		Name:      "search-1",
+		Namespace: "default",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: nvidiacomv1beta2.GroupVersion.String(),
+			Kind:       "DynamoGraphDeploymentRequest",
+			Name:       "search",
+			UID:        "old-uid",
+			Controller: new(true),
+		}},
 	}
 	f := newDGDRV1beta2Fixture(t, dgdrV1beta2Request(true), stale)
 
 	result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "default", Name: "search"},
+		Namespace: "default", Name: "search",
 	})
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
