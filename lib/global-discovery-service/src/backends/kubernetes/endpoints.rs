@@ -18,7 +18,7 @@ use kube::{Api, Client};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::cache::{SliceDirectory, SliceIndex, SliceKey, ready_endpoints};
+use super::cache::{SliceDirectory, SliceIndex, SliceKey, ready_endpoints, tcp_port};
 use super::mcs::{self, McsImplementation};
 
 /// A Service exported through MCS, such as the Global Router's. It need not
@@ -35,13 +35,14 @@ pub struct ExportedService {
 
 /// Ready replicas from a Service's imported slices, named
 /// `<source cluster>/<pod>`, or `<source cluster>/<address>` when a slice
-/// does not name the pod. Lists are `Exact`.
+/// does not name the pod. Lists are `Exact` unless the watch keeps failing.
 #[derive(Debug)]
 pub struct McsReplicaDirectory(SliceDirectory<ReplicaIndex>);
 
 impl McsReplicaDirectory {
     /// The Service's slices as MCS imports them into the cluster `client`
-    /// reaches.
+    /// reaches. The client should read with a timeout under 90 s, so a server
+    /// that stops answering shows up as failures.
     pub fn new(client: Client, service: &ExportedService, mcs: McsImplementation) -> Self {
         Self(SliceDirectory::new(
             Api::namespaced(client, &service.namespace),
@@ -90,19 +91,12 @@ impl ReplicaNaming {
             mcs::warn_unknown_cluster(slice, &self.service);
             return None;
         };
-        let Some(port) = slice
-            .ports
-            .iter()
-            .flatten()
-            .find(|port| port.name.as_deref() == Some(self.port_name.as_str()))
-            .and_then(|port| port.port)
-            .and_then(|port| u16::try_from(port).ok())
-        else {
+        let Some(port) = tcp_port(slice, &self.port_name) else {
             // The slice is the router Service's, so the name is misconfigured.
             tracing::warn!(
                 slice = slice.metadata.name.as_deref().unwrap_or_default(),
                 port_name = %self.port_name,
-                "router EndpointSlice has no port of that name; its replicas are not listed"
+                "router EndpointSlice has no TCP port of that name; its replicas are not listed"
             );
             return None;
         };
@@ -402,8 +396,13 @@ mod tests {
             KUBERNETES_SERVICE_NAME_LABEL.to_owned(),
             "derived-echo".to_owned(),
         );
+        // Only the named TCP port counts, and not port 0.
+        let mut udp = slice("ohio", "g5h6i", &[("10.42.0.7", Some(true), None)]);
+        udp.ports.as_mut().unwrap()[0].protocol = Some("UDP".to_owned());
+        let mut zero = slice("ohio", "j7k8l", &[("10.42.0.8", Some(true), None)]);
+        zero.ports.as_mut().unwrap()[0].port = Some(0);
         let cache = cache();
-        sync(&cache, vec![no_port, other]);
+        sync(&cache, vec![no_port, other, udp, zero]);
         assert!(served(&cache).is_empty());
     }
 

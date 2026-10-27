@@ -7,6 +7,7 @@
 
 use crate::pool_discovery::{Snapshot, WatchEvent, WatchStream};
 use tokio::sync::broadcast;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// Events a slow subscriber may fall behind by before it gets a `Resync`.
@@ -67,6 +68,15 @@ where
             }
         }
     })
+}
+
+/// Sleeps until `at`, or forever without one: a timer branch in `select!`
+/// that is off until it is armed.
+pub(super) async fn wake_at(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
 }
 
 fn initial_events<T: Clone, K>(snapshot: Snapshot<T>) -> Vec<WatchEvent<T, K>> {

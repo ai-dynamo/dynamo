@@ -24,7 +24,7 @@ use tokio::sync::broadcast;
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
-use super::stream::{EVENT_BUFFER, watch_stream};
+use super::stream::{EVENT_BUFFER, wake_at, watch_stream};
 
 /// Pool registrations in memory. A pool expires the lease duration after its
 /// last registration. Reads skip an expired pool at once; a sweep removes it,
@@ -93,6 +93,7 @@ impl MemoryPoolStore {
                 Arc::clone(&self.pools),
                 self.events.clone(),
                 self.lease.heartbeat_interval(),
+                self.started.checked_add(self.lease.lease_duration()),
                 self.stop.clone(),
             ));
         });
@@ -122,11 +123,14 @@ fn completeness(started: Instant, lease: Lease, now: Instant) -> Completeness {
     }
 }
 
-/// Removes expired pools and publishes `Removed` for each.
+/// Removes expired pools and publishes `Removed` for each. At `complete_at`,
+/// once a lease has passed since the store started, publishes a `Resync`, so
+/// watchers learn that its lists are complete.
 async fn sweep(
     pools: Arc<Mutex<Pools>>,
     events: broadcast::Sender<PoolEvent>,
     every: Duration,
+    mut complete_at: Option<Instant>,
     stop: CancellationToken,
 ) {
     let mut ticks = tokio::time::interval(every);
@@ -135,6 +139,14 @@ async fn sweep(
         tokio::select! {
             biased;
             () = stop.cancelled() => return,
+            () = wake_at(complete_at) => {
+                complete_at = None;
+                let pools = pools.lock().unwrap_or_else(PoisonError::into_inner);
+                let complete = pools.snapshot(Instant::now(), Completeness::Exact);
+                // No subscribers is not an error.
+                let _ = events.send(WatchEvent::Resync(complete));
+                continue;
+            }
             _ = ticks.tick() => {}
         }
         let now = Instant::now();
@@ -370,8 +382,13 @@ mod tests {
             store.register(heartbeat).await.unwrap();
         }
         assert_eq!(find(&store, "mocker").await, Some(first));
+        // A lease has passed, so the store's lists are complete; the renewals
+        // published nothing.
+        assert!(
+            matches!(watch.next().await, Some(Ok(WatchEvent::Resync(s))) if s.completeness == Completeness::Exact)
+        );
 
-        // A changed pool is published; the renewals were not.
+        // A changed pool is published.
         store.register(registration("mocker", "m2")).await.unwrap();
         let Some(Ok(WatchEvent::Added(changed))) = watch.next().await else {
             panic!("expected the change");
@@ -393,7 +410,12 @@ mod tests {
         tokio::time::advance(Duration::from_secs(16)).await;
         // Reads skip it before the sweep runs.
         assert!(find(&store, "mocker").await.is_none());
-        // The sweep removes it and tells watchers.
+        // A lease has passed, so the store's lists are complete. Then the
+        // sweep removes the pool and tells watchers.
+        assert!(matches!(
+            watch.next().await,
+            Some(Ok(WatchEvent::Resync(_)))
+        ));
         assert!(
             matches!(watch.next().await, Some(Ok(WatchEvent::Removed(k))) if k == key("mocker"))
         );
@@ -410,9 +432,22 @@ mod tests {
     async fn lists_are_exact_once_a_lease_has_passed() {
         let store = MemoryPoolStore::new(lease());
         let completeness = || async { store.list().await.unwrap().completeness };
+        let mut watch = store.list_and_watch(None).await.unwrap();
+        let Some(Ok(WatchEvent::Resync(first))) = watch.next().await else {
+            panic!("expected the first Resync");
+        };
+        assert_eq!(first.completeness, Completeness::Estimated);
         assert_eq!(completeness().await, Completeness::Estimated);
+
         tokio::time::advance(lease().lease_duration()).await;
         assert_eq!(completeness().await, Completeness::Exact);
+        // Watchers learn it too. With no pools nothing else is published, so
+        // the wait is bounded: a missing Resync fails the test, not hangs it.
+        let next = tokio::time::timeout(Duration::from_secs(1), watch.next()).await;
+        let Ok(Some(Ok(WatchEvent::Resync(complete)))) = next else {
+            panic!("expected a Resync");
+        };
+        assert_eq!(complete.completeness, Completeness::Exact);
     }
 
     #[tokio::test]

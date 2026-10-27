@@ -22,8 +22,8 @@ use super::mcs::{self, McsImplementation};
 
 /// One pool per (source cluster, namespace, DGD name), from imported
 /// EndpointSlices. MCS merges same-named exports from several clusters into
-/// one import, so pools are split by source cluster. Lists are `Exact`. Each
-/// slice event updates one pool.
+/// one import, so pools are split by source cluster. Lists are `Exact` unless
+/// the watch keeps failing. Each slice event updates one pool.
 ///
 /// One watch per directory feeds a cache that serves `list` and every
 /// `list_and_watch` stream. The watch starts on first use and stops when the
@@ -37,7 +37,8 @@ impl McsPoolDirectory {
     /// collects every exported Service's slices, so no per-pool
     /// `ServiceImport` is needed. A member cluster with a `ServiceImport` per
     /// pool also works. Each PoolRelay Service is named
-    /// `<DGD name><pool_service_suffix>`.
+    /// `<DGD name><pool_service_suffix>`. The client should read with a timeout
+    /// under 90 s, so a server that stops answering shows up as failures.
     pub fn new(imports: Client, mcs: McsImplementation, pool_service_suffix: String) -> Self {
         Self(SliceDirectory::new(
             Api::all(imports),
@@ -139,8 +140,6 @@ struct PoolState {
     slices: HashSet<SliceKey>,
     /// `Some` while the pool is live.
     listing: Option<PoolListing>,
-    /// The PoolRelay pod in `listing.relay_identities`.
-    bound: Option<String>,
 }
 
 #[derive(Default)]
@@ -236,28 +235,18 @@ impl PoolIndex {
                 relays.entry(pod).or_default().insert(*address);
             }
         }
-        // Keep the bound pod while it stays Ready, so a rolling update that
-        // briefly shows two Ready PoolRelays does not switch back and forth.
-        // Otherwise bind the pod with the lowest address.
-        let bound = state
-            .bound
-            .as_deref()
-            .filter(|pod| relays.contains_key(*pod))
-            .or_else(|| {
-                relays
-                    .iter()
-                    .min_by_key(|(_, addresses)| addresses.first())
-                    .map(|(pod, _)| *pod)
-            })
-            .map(|pod| {
-                let identities: Vec<String> =
-                    relays[pod].iter().copied().map(address_identity).collect();
-                (pod.to_owned(), identities)
-            });
+        // Bind the Ready PoolRelay pod with the lowest address. The choice
+        // depends only on the current slices, so every service instance binds
+        // the same pod, and routers that ask different instances admit the
+        // same PoolRelay. A rolling update can move the binding to the new
+        // pod while the old one is still Ready.
+        let relay_identities: Option<Vec<String>> = relays
+            .values()
+            .min_by_key(|addresses| addresses.first())
+            .map(|addresses| addresses.iter().copied().map(address_identity).collect());
 
         let state = self.pools.get_mut(key)?;
-        let Some((pod, relay_identities)) = bound else {
-            state.bound = None;
+        let Some(relay_identities) = relay_identities else {
             let was_live = state.listing.take().is_some();
             if state.slices.is_empty() {
                 self.pools.remove(key);
@@ -273,7 +262,6 @@ impl PoolIndex {
             capacity: Vec::new(),
             relay_identities,
         };
-        state.bound = Some(pod);
         if state.listing.as_ref() == Some(&listing) {
             return None;
         }
@@ -392,8 +380,9 @@ mod tests {
         let cache = cache();
         let ready = || slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]);
         sync(&cache, vec![ready()]);
-        // A relist that keeps failing: kube sends `Init` before each attempt,
-        // which is no sign that the watch works.
+        // A relist that keeps failing. kube sends `Init` before each attempt;
+        // the watch drops it (see `retried`), and the cache does not count it
+        // as a working watch either.
         for _ in 0..3 {
             cache.apply(watcher::Event::Init);
             cache.failed();
@@ -578,35 +567,70 @@ mod tests {
     }
 
     #[test]
-    fn bound_relay_stays_during_a_rolling_update() {
-        let cache = cache();
+    fn every_instance_binds_the_same_relay() {
         let pool = key("west", "mocker");
+        let both = || {
+            slice(
+                "west",
+                "mocker",
+                "a1b2c",
+                &[("10.43.0.9", true), ("10.43.0.2", true)],
+            )
+        };
+        // One instance saw the old PoolRelay alone first.
+        let first = cache();
         sync(
-            &cache,
+            &first,
             vec![slice("west", "mocker", "a1b2c", &[("10.43.0.9", true)])],
         );
-        // The new Relay has a lower address and is Ready next to the old one.
-        cache.apply(watcher::Event::Apply(slice(
-            "west",
-            "mocker",
-            "a1b2c",
-            &[("10.43.0.9", true), ("10.43.0.2", true)],
-        )));
+        first.apply(watcher::Event::Apply(both()));
+        // Another started later.
+        let second = cache();
+        sync(&second, vec![both()]);
+        let bound = |cache: &SliceCache<PoolIndex>| listing(cache, &pool).unwrap().relay_identities;
+        assert_eq!(bound(&first), bound(&second));
         assert_eq!(
-            listing(&cache, &pool).unwrap().relay_identities,
-            [address_identity("10.43.0.9".parse().unwrap())]
-        );
-        // The old Relay leaves; the new one is bound.
-        cache.apply(watcher::Event::Apply(slice(
-            "west",
-            "mocker",
-            "a1b2c",
-            &[("10.43.0.2", true)],
-        )));
-        assert_eq!(
-            listing(&cache, &pool).unwrap().relay_identities,
+            bound(&first),
             [address_identity("10.43.0.2".parse().unwrap())]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watchers_learn_when_the_view_turns_stale_and_back() {
+        let cache = cache();
+        let ready = || slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]);
+        sync(&cache, vec![ready()]);
+        let mut events = cache.events.subscribe();
+        let mut next_resync = || match events.try_recv() {
+            Ok(WatchEvent::Resync(snapshot)) => Some(snapshot.completeness),
+            Ok(_) => panic!("expected a Resync"),
+            Err(_) => None,
+        };
+        for _ in 0..3 {
+            cache.failed();
+            tokio::time::advance(STALE_AFTER / 2).await;
+        }
+        assert_eq!(next_resync(), Some(Completeness::Estimated));
+        // Further errors change nothing.
+        cache.failed();
+        assert_eq!(next_resync(), None);
+
+        // Recovered by silence.
+        tokio::time::advance(RECOVERED_AFTER).await;
+        cache.quiet();
+        assert_eq!(next_resync(), Some(Completeness::Exact));
+        assert_eq!(next_resync(), None);
+
+        // Recovered by an event from the API server.
+        for _ in 0..3 {
+            cache.failed();
+            tokio::time::advance(STALE_AFTER / 2).await;
+        }
+        assert_eq!(next_resync(), Some(Completeness::Estimated));
+        cache.apply(watcher::Event::Apply(ready()));
+        assert_eq!(next_resync(), Some(Completeness::Exact));
+        cache.quiet();
+        assert_eq!(next_resync(), None);
     }
 
     #[test]
@@ -637,6 +661,29 @@ mod tests {
             .collect();
         assert_eq!(keys, [key("west", "new")]);
         assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_failed_relist_starts_over() {
+        let cache = cache();
+        sync(&cache, Vec::new());
+        // A relist fails after its first slices, as a paged one could.
+        cache.apply(watcher::Event::InitApply(slice(
+            "west",
+            "gone",
+            "a1b2c",
+            &[("10.43.0.1", true)],
+        )));
+        cache.failed();
+        cache.apply(watcher::Event::InitApply(slice(
+            "west",
+            "kept",
+            "d3e4f",
+            &[("10.43.0.2", true)],
+        )));
+        cache.apply(watcher::Event::InitDone);
+        assert!(listing(&cache, &key("west", "gone")).is_none());
+        assert!(listing(&cache, &key("west", "kept")).is_some());
     }
 
     #[tokio::test]

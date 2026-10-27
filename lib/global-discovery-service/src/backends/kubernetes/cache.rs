@@ -14,7 +14,7 @@ use crate::pool_discovery::{
     Completeness, Directory, DiscoveryError, Snapshot, WatchEvent, WatchStream,
 };
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use k8s_openapi::api::discovery::v1::{Endpoint, EndpointSlice};
 use kube::Api;
 use kube::api::ListParams;
@@ -23,7 +23,7 @@ use tokio::sync::broadcast;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::super::stream::{EVENT_BUFFER, watch_stream};
+use super::super::stream::{EVENT_BUFFER, wake_at, watch_stream};
 
 /// How long the watch may keep failing before the cache reports its last view
 /// as `Estimated`. It keeps serving that view, and the service stays ready.
@@ -31,9 +31,16 @@ pub(super) const STALE_AFTER: Duration = Duration::from_secs(60);
 
 /// How long without an error before a failing watch counts as working again.
 /// kube resumes a watch without an event, so silence is the only sign of it.
-/// While the watch fails, errors come at least every 30 s backoff plus 30 s
-/// connect timeout.
+/// While the watch fails, errors come at least every 30 s backoff plus the
+/// time an attempt takes to fail: within the client's read timeout, which
+/// should be under 90 s (the service's is 75 s), since a watch asks the server
+/// to end it after [`WATCH_TIMEOUT_SECS`].
 pub(super) const RECOVERED_AFTER: Duration = Duration::from_secs(120);
+
+/// Each watch asks the server to end it after this long and starts again, so
+/// a server that stops answering fails within the client's read timeout
+/// rather than kube's default of nearly five minutes.
+const WATCH_TIMEOUT_SECS: u32 = 50;
 
 /// Slices are keyed by (namespace, name).
 pub(super) type SliceKey = (String, String);
@@ -43,6 +50,25 @@ pub(super) fn slice_key(slice: &EndpointSlice) -> SliceKey {
         slice.metadata.namespace.clone().unwrap_or_default(),
         slice.metadata.name.clone().unwrap_or_default(),
     )
+}
+
+/// A slice's named TCP port, unless it is 0. One slice lists one set of ports
+/// for all its endpoints.
+pub(super) fn tcp_port(slice: &EndpointSlice, name: &str) -> Option<u16> {
+    slice
+        .ports
+        .iter()
+        .flatten()
+        .find(|port| {
+            port.name.as_deref() == Some(name)
+                && port
+                    .protocol
+                    .as_deref()
+                    .is_none_or(|protocol| protocol == "TCP")
+        })
+        .and_then(|port| port.port)
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
 }
 
 /// The slice's Ready endpoints. The EndpointSlice API reads a missing `ready`
@@ -88,8 +114,8 @@ pub(super) struct CacheState<I: SliceIndex> {
     pub(super) synced: bool,
     /// The current run of watch errors. `None` while the watch works.
     failures: Option<Failures>,
-    /// Slices listed since the last `Init`; they replace the index at
-    /// `InitDone`.
+    /// Slices listed since the current relist began; they replace the index
+    /// at `InitDone`.
     relist: Option<HashMap<SliceKey, I::Entry>>,
     pub(super) index: I,
 }
@@ -117,6 +143,14 @@ impl<I: SliceIndex> CacheState<I> {
         }
         Some(snapshot)
     }
+
+    /// The index with the given completeness, for a `Resync` that tells
+    /// watchers it changed. `None` until the first list completes.
+    fn resync(&self, completeness: Completeness) -> Option<WatchEvent<I::Item, I::Key>> {
+        let mut snapshot = self.synced.then(|| self.index.snapshot())?;
+        snapshot.completeness = completeness;
+        Some(WatchEvent::Resync(snapshot))
+    }
 }
 
 /// Watch errors no more than `RECOVERED_AFTER` apart.
@@ -127,11 +161,15 @@ struct Failures {
 }
 
 impl Failures {
-    /// The errors span `STALE_AFTER`, and the last one is recent. One error
-    /// followed by silence is a watch that resumed.
+    /// The errors span `STALE_AFTER`, so the view turned `Estimated`.
+    fn long(&self) -> bool {
+        self.last.saturating_duration_since(self.first) >= STALE_AFTER
+    }
+
+    /// A long run whose last error is recent. One error followed by silence
+    /// is a watch that resumed.
     fn stale(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.last) < RECOVERED_AFTER
-            && self.last.saturating_duration_since(self.first) >= STALE_AFTER
+        now.saturating_duration_since(self.last) < RECOVERED_AFTER && self.long()
     }
 }
 
@@ -170,18 +208,21 @@ impl<I: SliceIndex> SliceCache<I> {
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
         // Every event but `Init` came from the API server, so the watch works.
         // kube sends `Init` before each relist attempt, before any request.
-        if !matches!(event, watcher::Event::Init) {
-            state.failures = None;
-        }
+        let ended_long_run = !matches!(event, watcher::Event::Init)
+            && state
+                .failures
+                .take()
+                .is_some_and(|failures| failures.long());
         let mut listed_nothing = false;
-        let events = match event {
+        let mut events = match event {
             watcher::Event::Init => {
                 state.relist = Some(HashMap::new());
                 Vec::new()
             }
             watcher::Event::InitApply(slice) => {
-                // A watcher that streams its lists sends no `Init`, so the
-                // first slice starts the relist too.
+                // The watch drops `Init` (see `retried`), and a watcher that
+                // streams its lists sends none, so the first slice starts the
+                // relist.
                 if let Some(entry) = I::entry(&self.rules, &slice) {
                     state
                         .relist
@@ -206,6 +247,11 @@ impl<I: SliceIndex> SliceCache<I> {
                 state.index.upsert(&self.rules, slice_key(&slice), None)
             }
         };
+        // Watchers learn that the view is complete again, as a relist would
+        // tell them.
+        if ended_long_run && !matches!(events.last(), Some(WatchEvent::Resync(_))) {
+            events.extend(state.resync(Completeness::Exact));
+        }
         for event in events {
             // No subscribers is not an error.
             let _ = self.events.send(event);
@@ -217,20 +263,55 @@ impl<I: SliceIndex> SliceCache<I> {
     pub(super) fn failed(&self) -> Duration {
         let now = Instant::now();
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
-        let failures = match state.failures {
-            Some(failures) if now.saturating_duration_since(failures.last) < RECOVERED_AFTER => {
+        // A relist that failed starts over, so its slices so far are dropped.
+        state.relist = None;
+        let (failures, was_long) = match state.failures {
+            Some(failures) if now.saturating_duration_since(failures.last) < RECOVERED_AFTER => (
                 Failures {
                     last: now,
                     ..failures
-                }
-            }
-            _ => Failures {
-                first: now,
-                last: now,
-            },
+                },
+                failures.long(),
+            ),
+            _ => (
+                Failures {
+                    first: now,
+                    last: now,
+                },
+                false,
+            ),
         };
         state.failures = Some(failures);
+        // Watchers learn that the view turned `Estimated`.
+        if failures.long()
+            && !was_long
+            && let Some(event) = state.resync(Completeness::Estimated)
+        {
+            // No subscribers is not an error.
+            let _ = self.events.send(event);
+        }
         now.saturating_duration_since(failures.first)
+    }
+
+    /// Ends a run of errors that has been quiet for `RECOVERED_AFTER`: kube
+    /// resumed the watch without an event. Watchers learn that the view is
+    /// complete again.
+    pub(super) fn quiet(&self) {
+        let now = Instant::now();
+        let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
+        let Some(failures) = state.failures else {
+            return;
+        };
+        if now.saturating_duration_since(failures.last) < RECOVERED_AFTER {
+            return;
+        }
+        state.failures = None;
+        if failures.long()
+            && let Some(event) = state.resync(Completeness::Exact)
+        {
+            // No subscribers is not an error.
+            let _ = self.events.send(event);
+        }
     }
 
     pub(super) fn subscribe(
@@ -264,25 +345,28 @@ async fn watch_slices<I: SliceIndex>(
     // `resourceVersion=0` only without a page size, so paging is off.
     let config = watcher::Config {
         page_size: None,
-        ..watcher::Config::default().labels(&selector).any_semantic()
+        ..watcher::Config::default()
+            .labels(&selector)
+            .any_semantic()
+            .timeout(WATCH_TIMEOUT_SECS)
     };
-    // kube resets its backoff on every item, and sends `Init` before each
-    // relist attempt, before any request, so a list that keeps failing would
-    // be retried every 800 ms. The cache starts a relist at its first
-    // `InitApply` instead: with paging off, a list's slices arrive together.
-    let mut events = std::pin::pin!(
-        watcher(slices, config)
-            .filter(|event| std::future::ready(!matches!(event, Ok(watcher::Event::Init))))
-            .default_backoff()
-    );
+    let mut events = std::pin::pin!(retried(watcher(slices, config)));
+    // When a run of errors counts as over, unless another error comes first.
+    let mut quiet_at = None;
     loop {
         let event = tokio::select! {
             biased;
             () = stop.cancelled() => return,
+            () = wake_at(quiet_at) => {
+                quiet_at = None;
+                cache.quiet();
+                continue;
+            }
             event = events.next() => event,
         };
         match event {
             Some(Ok(event)) => {
+                quiet_at = None;
                 if cache.apply(event) {
                     tracing::warn!(
                         %selector,
@@ -295,6 +379,7 @@ async fn watch_slices<I: SliceIndex>(
             // `STALE_AFTER`, the view is `Estimated`.
             Some(Err(error)) => {
                 let failing_for = cache.failed();
+                quiet_at = Some(Instant::now() + RECOVERED_AFTER);
                 if failing_for < STALE_AFTER {
                     tracing::warn!(%error, %selector, "EndpointSlice watch error");
                 } else {
@@ -309,6 +394,19 @@ async fn watch_slices<I: SliceIndex>(
             None => return,
         }
     }
+}
+
+/// The watch with kube's backoff. kube resets its backoff on every item, and
+/// sends `Init` before each relist attempt, before any request, so a list that
+/// keeps failing would be retried every 800 ms. `Init` is dropped: the cache
+/// starts a relist at its first `InitApply` instead, which works because, with
+/// paging off, a list's slices arrive together.
+fn retried(
+    events: impl Stream<Item = watcher::Result<watcher::Event<EndpointSlice>>>,
+) -> impl Stream<Item = watcher::Result<watcher::Event<EndpointSlice>>> {
+    events
+        .filter(|event| std::future::ready(!matches!(event, Ok(watcher::Event::Init))))
+        .default_backoff()
 }
 
 /// A [`Directory`] served from one EndpointSlice watch. The watch starts on
@@ -399,4 +497,34 @@ impl<I: SliceIndex> Directory<I::Item, I::Key> for SliceDirectory<I> {
 
 fn unavailable(error: impl Into<anyhow::Error>) -> DiscoveryError {
     DiscoveryError::Unavailable(error.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_relist_that_keeps_failing_backs_off_without_its_init() {
+        let attempts = (0..4).flat_map(|_| {
+            [
+                Ok(watcher::Event::Init),
+                Err(watcher::Error::NoResourceVersion),
+            ]
+        });
+        let mut events = std::pin::pin!(retried(futures::stream::iter(attempts)));
+        let mut last = Instant::now();
+        let mut gaps = Vec::new();
+        while let Some(event) = events.next().await {
+            assert!(event.is_err(), "`Init` is dropped");
+            gaps.push(last.elapsed());
+            last = Instant::now();
+        }
+        // Each retry waits longer, as kube's backoff grows from 800 ms.
+        assert_eq!(gaps.len(), 4);
+        assert_eq!(gaps[0], Duration::ZERO);
+        assert!(
+            gaps.windows(2).skip(1).all(|pair| pair[1] > pair[0]),
+            "{gaps:?}"
+        );
+    }
 }
