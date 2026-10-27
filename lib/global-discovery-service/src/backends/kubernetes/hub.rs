@@ -34,9 +34,9 @@ pub struct McsPoolDirectory(SliceDirectory<PoolIndex>);
 
 /// The Service in front of a pool's frontends, named `<DGD name><suffix>`
 /// and exported like the PoolRelay Service. Its Ready endpoints on the named
-/// TCP port become the pool's `frontends`, one per pod, at its IPv4 address
-/// on a dual-stack cluster: addresses that other clusters can reach, kept
-/// current as frontend pods come and go.
+/// TCP port become the pool's `frontends`, in one address family, IPv4 on a
+/// dual-stack cluster: addresses that other clusters can reach, kept current
+/// as frontend pods come and go.
 #[derive(Clone, Debug)]
 pub struct FrontendService {
     pub suffix: String,
@@ -167,7 +167,9 @@ fn location(cluster: &str) -> PoolLocation {
 
 /// Each Ready address in a slice, with its pod: the endpoint's `targetRef`,
 /// or the address itself when the endpoint has none. A dual-stack pod is in
-/// two slices, one per address family.
+/// two slices, one per address family. Without a `targetRef` its addresses
+/// look like two pods, so such a PoolRelay is bound by its lowest address
+/// alone, and must connect to routers from it.
 fn ready_addresses(slice: &EndpointSlice) -> Vec<(String, IpAddr)> {
     ready_endpoints(slice)
         .flat_map(|endpoint| {
@@ -287,10 +289,10 @@ impl PoolIndex {
     /// the listing changed.
     fn rebuild(&mut self, key: &PoolKey) -> Option<PoolEvent> {
         let state = self.pools.get(key)?;
-        // Each pod's Ready addresses. A dual-stack pod is in two slices, one
-        // per address family.
+        // Each PoolRelay pod's Ready addresses. A dual-stack pod is in two
+        // slices, one per address family.
         let mut relays: BTreeMap<&str, BTreeSet<IpAddr>> = BTreeMap::new();
-        let mut frontends: BTreeMap<&str, BTreeSet<SocketAddr>> = BTreeMap::new();
+        let mut frontends: BTreeSet<SocketAddr> = BTreeSet::new();
         for entry in state
             .slices
             .iter()
@@ -298,23 +300,22 @@ impl PoolIndex {
         {
             for (pod, address) in &entry.ready {
                 if let Some(port) = entry.frontend_port {
-                    frontends
-                        .entry(pod)
-                        .or_default()
-                        .insert(SocketAddr::new(*address, port));
+                    frontends.insert(SocketAddr::new(*address, port));
                 } else {
                     relays.entry(pod).or_default().insert(*address);
                 }
             }
         }
-        // One URL per frontend pod, at its lowest address: IPv4 when it has
-        // one.
+        // One address family, so a dual-stack frontend is listed once: IPv4
+        // when any frontend has an IPv4 address. Slices need not name their
+        // pods, so a pod's two addresses cannot always be matched.
+        let ipv4 = frontends.iter().any(SocketAddr::is_ipv4);
         let mut frontends: Vec<Url> = frontends
-            .values()
-            .filter_map(|addresses| frontend_url(*addresses.first()?))
+            .into_iter()
+            .filter(|address| address.is_ipv4() == ipv4)
+            .filter_map(frontend_url)
             .collect();
         frontends.sort_unstable();
-        frontends.dedup();
         // A pool is live while a PoolRelay endpoint is Ready. Ready can be
         // stale when a cluster loses contact with the MCS implementation, so
         // the runtime also drops a pool whose Relay connection is gone.
@@ -621,14 +622,39 @@ mod tests {
                 ),
             ],
         );
-        let listing = listing(&cache, &key("west", "mocker")).expect("live pool");
-        assert_eq!(
-            listing.frontends,
-            [
-                Url::parse("http://10.43.0.2:8000/").unwrap(),
-                Url::parse("http://10.43.0.7:8000/").unwrap(),
-            ]
+        let ipv4 = [
+            Url::parse("http://10.43.0.2:8000/").unwrap(),
+            Url::parse("http://10.43.0.7:8000/").unwrap(),
+        ];
+        let frontends = |cache: &SliceCache<PoolIndex>| {
+            listing(cache, &key("west", "mocker"))
+                .expect("live pool")
+                .frontends
+        };
+        assert_eq!(frontends(&cache), ipv4);
+
+        // The same when the slices do not name their pods, so a pod's two
+        // addresses cannot be matched.
+        let unnamed = |suffix: &str, address_type: &str, addresses: [&str; 2]| {
+            let mut slice = frontend_pod_slice(suffix, address_type, &[]);
+            slice.endpoints = addresses
+                .iter()
+                .map(|address| Endpoint {
+                    addresses: vec![(*address).to_owned()],
+                    ..Default::default()
+                })
+                .collect();
+            slice
+        };
+        sync(
+            &cache,
+            vec![
+                slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]),
+                unnamed("f1", "IPv4", ["10.43.0.7", "10.43.0.2"]),
+                unnamed("f2", "IPv6", ["fd00::7", "fd00::2"]),
+            ],
         );
+        assert_eq!(frontends(&cache), ipv4);
     }
 
     #[test]

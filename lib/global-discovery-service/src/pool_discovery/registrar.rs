@@ -33,4 +33,9 @@ pub trait RegistrationExchange: Send + Sync {
     /// Keeps a copy of a registration another instance received, for the
     /// `remaining` time it had there.
     fn adopt(&self, registration: PoolRegistration, remaining: Duration);
+
+    /// Whether registrations made with another instance may be missing
+    /// here: one has not answered within a lease, or the list of instances
+    /// may be incomplete. While they may be, lists are `Estimated`.
+    fn set_copies_missing(&self, missing: bool);
 }

@@ -276,7 +276,7 @@ async fn kubernetes_store(
             let (sync, sharing) = PeerSync::new(
                 Arc::new(McsReplicaDirectory::new(client.clone(), &peers, mcs)),
                 registrations.clone(),
-                lease.heartbeat_interval(),
+                lease,
             )
             .context("create the HTTP client for --peer-service")?;
             tokio::spawn(sync.run(shutdown.clone()));

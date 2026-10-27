@@ -21,7 +21,7 @@
 //! EndpointSlices list every Ready instance in every cluster. They ask each
 //! other over plain HTTP, never through a proxy.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,7 +32,10 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::pool_discovery::{RegistrationExchange, ReplicaDirectory, ReplicaEndpoint, ReplicaId};
+use crate::pool_discovery::{
+    Completeness, Lease, RegistrationExchange, ReplicaDirectory, ReplicaEndpoint, ReplicaId,
+    Snapshot,
+};
 use crate::service::{SharedRegistrations, Sharing};
 
 /// Asks the other instances for their registrations, and keeps copies.
@@ -46,6 +49,9 @@ pub struct PeerSync {
     /// How often to ask each instance, and how long to wait for its reply:
     /// half the heartbeat interval.
     every: Duration,
+    /// Copies from an instance's last answer lapse within this, so one that
+    /// has not answered for as long may be missing registrations here.
+    lease_duration: Duration,
     /// Set once every instance has been asked. Until then this instance may
     /// know only its own PoolRelays, so it is not ready.
     synced: Arc<AtomicBool>,
@@ -63,14 +69,15 @@ impl fmt::Debug for PeerSync {
 
 impl PeerSync {
     /// Shares `store`'s registrations with the instances `peers` lists, and
-    /// keeps copies of theirs. Returns the task, to start with [`Self::run`],
-    /// and what the service serves the others, under one new instance name.
+    /// keeps copies of theirs, under the registrations' `lease`. Returns the
+    /// task, to start with [`Self::run`], and what the service serves the
+    /// others, under one new instance name.
     pub fn new(
         peers: Arc<ReplicaDirectory>,
         store: Arc<dyn RegistrationExchange>,
-        heartbeat_interval: Duration,
+        lease: Lease,
     ) -> anyhow::Result<(Self, Sharing)> {
-        let every = heartbeat_interval / 2;
+        let every = lease.heartbeat_interval() / 2;
         let client = reqwest::Client::builder()
             .timeout(every)
             .redirect(reqwest::redirect::Policy::none())
@@ -88,6 +95,7 @@ impl PeerSync {
             store,
             instance,
             every,
+            lease_duration: lease.lease_duration(),
             synced,
             client,
         };
@@ -101,6 +109,8 @@ impl PeerSync {
         let mut unreachable: HashSet<ReplicaId> = HashSet::new();
         // Logged when it changes. Zero means registrations stay local.
         let mut others_reached = None;
+        // When each instance last answered.
+        let mut answered: HashMap<ReplicaId, Instant> = HashMap::new();
         let mut ticks = tokio::time::interval(self.every);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
@@ -110,17 +120,19 @@ impl PeerSync {
                 _ = ticks.tick() => {}
             }
             let peers = match self.peers.list().await {
-                Ok(snapshot) => snapshot.items,
+                Ok(peers) => peers,
                 Err(error) => {
                     tracing::warn!(?error, "cannot list the discovery service instances");
+                    self.store.set_copies_missing(true);
                     continue;
                 }
             };
-            let replies = join_all(peers.iter().map(|peer| fetch(&self.client, peer))).await;
+            let replies = join_all(peers.items.iter().map(|peer| fetch(&self.client, peer))).await;
             let mut reached = 0;
-            for (peer, reply) in peers.iter().zip(replies) {
+            for (peer, reply) in peers.items.iter().zip(replies) {
                 match reply {
                     Ok((reply, received)) => {
+                        answered.insert(peer.replica.clone(), received);
                         if unreachable.remove(&peer.replica) {
                             tracing::info!(
                                 peer = %peer.replica.0,
@@ -144,7 +156,14 @@ impl PeerSync {
                 }
             }
             // Forget instances that left, so one that comes back is logged.
-            unreachable.retain(|id| peers.iter().any(|peer| &peer.replica == id));
+            unreachable.retain(|id| peers.items.iter().any(|peer| &peer.replica == id));
+            answered.retain(|id, _| peers.items.iter().any(|peer| &peer.replica == id));
+            self.store.set_copies_missing(copies_missing(
+                &peers,
+                &answered,
+                self.lease_duration,
+                Instant::now(),
+            ));
             if others_reached != Some(reached) {
                 tracing::info!(reached, "other discovery instances reached");
                 others_reached = Some(reached);
@@ -168,6 +187,23 @@ impl PeerSync {
                 .adopt(registration, remaining.saturating_sub(waited));
         }
     }
+}
+
+/// Whether registrations made with another instance may be missing here: the
+/// list of instances may be incomplete, or one has not answered within
+/// `lease_duration`, by when the copies from its last answer have lapsed.
+fn copies_missing(
+    peers: &Snapshot<ReplicaEndpoint>,
+    answered: &HashMap<ReplicaId, Instant>,
+    lease_duration: Duration,
+    now: Instant,
+) -> bool {
+    peers.completeness != Completeness::Exact
+        || peers.items.iter().any(|peer| {
+            answered
+                .get(&peer.replica)
+                .is_none_or(|at| now.saturating_duration_since(*at) >= lease_duration)
+        })
 }
 
 /// Also returns when the reply arrived.
@@ -220,7 +256,7 @@ mod tests {
         let (sync, sharing) = PeerSync::new(
             Arc::new(StaticReplicaDirectory::new(peers(&url))),
             store.clone(),
-            lease().heartbeat_interval(),
+            lease(),
         )
         .unwrap();
         let pools: Arc<PoolDirectory> = store.clone();
@@ -362,8 +398,59 @@ mod tests {
         // With no more heartbeats, the copy lapses with the original.
         wait_for_models(&a, &[]).await;
         wait_for_models(&b, &[]).await;
+
+        // A lease has passed. A's lists are complete, but B's are not: two
+        // instances never answered it.
+        assert_eq!(a.list().await.unwrap().completeness, Completeness::Exact);
+        assert_eq!(
+            b.list().await.unwrap().completeness,
+            Completeness::Estimated
+        );
         drop(silent);
         stop.cancel();
+    }
+
+    #[test]
+    fn copies_may_be_missing_until_every_instance_answers_within_a_lease() {
+        let lease = lease().lease_duration();
+        let url = Url::parse("http://10.43.0.9:8080/").unwrap();
+        let peers = |completeness| Snapshot {
+            items: vec![peer("a", &url), peer("b", &url)],
+            completeness,
+        };
+        let then = Instant::now();
+        let both = HashMap::from([
+            (ReplicaId("a".to_owned()), then),
+            (ReplicaId("b".to_owned()), then),
+        ]);
+        assert!(!copies_missing(
+            &peers(Completeness::Exact),
+            &both,
+            lease,
+            then + lease / 2
+        ));
+        // A lease after their last answers, their copies have lapsed.
+        assert!(copies_missing(
+            &peers(Completeness::Exact),
+            &both,
+            lease,
+            then + lease
+        ));
+        // One never answered.
+        let only_a = HashMap::from([(ReplicaId("a".to_owned()), then)]);
+        assert!(copies_missing(
+            &peers(Completeness::Exact),
+            &only_a,
+            lease,
+            then
+        ));
+        // The list of instances may be incomplete.
+        assert!(copies_missing(
+            &peers(Completeness::Estimated),
+            &both,
+            lease,
+            then
+        ));
     }
 
     /// A `GET /registrations` reply from `instance`.
@@ -381,7 +468,7 @@ mod tests {
         let (sync, _) = PeerSync::new(
             Arc::new(StaticReplicaDirectory::new(Vec::new())),
             store.clone(),
-            lease().heartbeat_interval(),
+            lease(),
         )
         .unwrap();
 
