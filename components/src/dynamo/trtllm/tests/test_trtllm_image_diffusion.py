@@ -159,6 +159,7 @@ class TestImageHandlerSharedSetup:
     GET_FS = "dynamo.trtllm.request_handlers.diffusion.image_handler.get_fs"
 
     def _make_handler(self, media_output_fs_url, get_fs_mock):
+        """Build an image handler with a patched filesystem lookup and its config."""
         from dynamo.trtllm.request_handlers.diffusion.image_handler import (
             ImageGenerationHandler,
         )
@@ -176,12 +177,14 @@ class TestImageHandlerSharedSetup:
         get_fs_mock.assert_called_once_with(config.media_output_fs_url)
 
     def test_empty_media_output_fs_url_raises(self):
+        """Reject an empty output URL before attempting to build a filesystem."""
         get_fs_mock = MagicMock()
         with pytest.raises(ValueError, match="media_output_fs_url must be set"):
             self._make_handler("", get_fs_mock)
         get_fs_mock.assert_not_called()
 
     def test_each_instance_has_its_own_lock(self, tmp_path):
+        """Give each image handler a separate lock for generation requests."""
         url = (tmp_path / "media").as_uri()
         first, _ = self._make_handler(url, MagicMock())
         second, _ = self._make_handler(url, MagicMock())
