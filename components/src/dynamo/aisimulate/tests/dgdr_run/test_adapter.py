@@ -219,6 +219,59 @@ def test_identity_depends_only_on_the_resolved_parameters() -> None:
     assert candidate_id_for({"a": 1}).startswith("evaluated-point-")
 
 
+def test_aic_name_prefix_is_stable_bounded_and_candidate_specific(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    names: list[str] = []
+
+    def capture_name(candidate: Any, workload: Any, options: Any, **kwargs: Any) -> str:
+        del candidate, workload, options
+        assert kwargs["renderer"] == "aic"
+        names.append(kwargs["dgd_name"])
+        return "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\n"
+
+    monkeypatch.setattr(adapter_module, "render_dgd", capture_name)
+    adapter = DGDRRunOutputAdapter(
+        make_config(tmp_path, name="a" * 63, max_candidates=2), workload=None
+    )
+    adapter.on_candidate(record("first", 2.0))
+    adapter.on_candidate(record("second", 1.0))
+    adapter.close()
+
+    assert len(names) == 2
+    assert len(set(names)) == 2
+    assert all(len(name) <= 28 for name in names)
+    assert all(name[0].isalnum() and name[-1].isalnum() for name in names)
+    assert names[0] == adapter_module._dgd_name(
+        "a" * 63, candidate_id_for(record("first", 2.0).config)
+    )
+
+
+def test_aic_name_prefix_accepts_and_normalizes_a_dotted_run_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    names: list[str] = []
+
+    def capture_name(candidate: Any, workload: Any, options: Any, **kwargs: Any) -> str:
+        del candidate, workload, options
+        names.append(kwargs["dgd_name"])
+        return "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\n"
+
+    monkeypatch.setattr(adapter_module, "render_dgd", capture_name)
+    adapter = DGDRRunOutputAdapter(
+        make_config(tmp_path, name="team.model", max_candidates=1), workload=None
+    )
+    adapter.on_candidate(record("first", 2.0))
+    adapter.close()
+
+    assert len(names) == 1
+    assert "." not in names[0]
+    assert len(names[0]) <= 28
+    assert names[0] == adapter_module._dgd_name(
+        "team.model", candidate_id_for(record("first", 2.0).config)
+    )
+
+
 def test_a_new_better_point_reorders_but_does_not_rematerialize_retained_ones(
     tmp_path: Path, renders: list[str]
 ) -> None:

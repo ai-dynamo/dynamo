@@ -83,6 +83,9 @@ _MAX_RENDER_ATTEMPTS = 3
 _MAX_ERROR_MESSAGE = 500
 _WRITE_RETRY_BACKOFF = 1.0
 _ID_HEX_LENGTH = 12
+# AIC appends component-specific suffixes to the prefix. Keep the same bound as
+# the AIC comparison harness so every generated Kubernetes name remains valid.
+_MAX_DGD_NAME_LENGTH = 28
 # Metric names the adapter derives itself. They are reserved: a measurement AISimulate resolves under
 # one of these names is replaced by the adapter's value (and logged), never merged with it.
 _RESERVED_METRICS = ("score", "usedGpus", "objectives")
@@ -151,6 +154,18 @@ def candidate_id_for(parameters: Mapping[str, Any]) -> str:
     return f"{_ID_PREFIX}{digest[:_ID_HEX_LENGTH]}"
 
 
+def _dgd_name(run_name: str, candidate_id: str) -> str:
+    """Return one stable DNS-safe AIC prefix with room for component suffixes."""
+    candidate_suffix = candidate_id.removeprefix(_ID_PREFIX)
+    requested = f"{run_name}-{candidate_suffix}"
+    normalized = requested.replace(".", "-")
+    if normalized == requested and len(normalized) <= _MAX_DGD_NAME_LENGTH:
+        return normalized
+    digest = hashlib.sha256(requested.encode("utf-8")).hexdigest()[:8]
+    prefix = normalized[: _MAX_DGD_NAME_LENGTH - len(digest) - 1].rstrip("-")
+    return f"{prefix}-{digest}"
+
+
 def _is_feasible(record: CandidateRecordLike) -> bool:
     # By value, not identity: callers may pass aisimulate's CandidateStatus
     # enum, a plain string, or a test double.
@@ -194,7 +209,11 @@ class DGDRRunOutputConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1, pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+    name: str = Field(
+        min_length=1,
+        max_length=253,
+        pattern=r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*$",
+    )
     snapshot_dir: str | None = Field(default=None, min_length=1)
     namespace: str | None = None
     generator: Literal["aic", "direct"] = "aic"
@@ -582,7 +601,7 @@ class DGDRRunOutputAdapter:
                 _RenderInput(config=item.parameters, used_gpus=item.used_gpus),
                 self._workload,
                 self._options,
-                dgd_name=f"{self._config.name}-{item.id.removeprefix(_ID_PREFIX)}",
+                dgd_name=_dgd_name(self._config.name, item.id),
                 renderer=self._config.generator,
             )
             entry = SnapshotCandidate(
