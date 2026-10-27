@@ -87,7 +87,6 @@ pub enum KvEventSourceConfig {
     },
 }
 
-/// Framework-owned tiers the publisher drops, from the env knob.
 fn ignored_framework_tiers_from_env() -> Result<Arc<[StorageTier]>> {
     ignored_framework_tiers(|name| std::env::var_os(name))
 }
@@ -95,32 +94,28 @@ fn ignored_framework_tiers_from_env() -> Result<Arc<[StorageTier]>> {
 fn ignored_framework_tiers(
     get_env: impl FnOnce(&str) -> Option<OsString>,
 ) -> Result<Arc<[StorageTier]>> {
-    let Some(raw) = get_env(IGNORE_FRAMEWORK_TIERS_ENV) else {
-        return Ok(Arc::from([]));
-    };
-    let mut tiers = Vec::new();
-    for name in raw
+    let raw = get_env(IGNORE_FRAMEWORK_TIERS_ENV).unwrap_or_default();
+    let tiers = raw
         .to_string_lossy()
-        .split(|c: char| c == ',' || c.is_whitespace())
+        .split(',')
+        .map(str::trim)
         .filter(|name| !name.is_empty())
-    {
-        let tier: StorageTier = name
-            .parse()
-            .map_err(|error| anyhow::anyhow!("invalid {IGNORE_FRAMEWORK_TIERS_ENV}: {error}"))?;
-        if tier.is_gpu() {
-            anyhow::bail!("{IGNORE_FRAMEWORK_TIERS_ENV} cannot include 'device'");
-        }
-        if !tiers.contains(&tier) {
-            tiers.push(tier);
-        }
-    }
+        .map(|name| match name {
+            "host_pinned" => Ok(StorageTier::HostPinned),
+            "disk" => Ok(StorageTier::Disk),
+            "external" => Ok(StorageTier::External),
+            _ => Err(anyhow::anyhow!(
+                "invalid {IGNORE_FRAMEWORK_TIERS_ENV} entry {name:?}: expected host_pinned, disk or external"
+            )),
+        })
+        .collect::<Result<Arc<[_]>>>()?;
     if !tiers.is_empty() {
         tracing::info!(
             ?tiers,
             "Dropping framework-owned KV events in ignored tiers"
         );
     }
-    Ok(tiers.into())
+    Ok(tiers)
 }
 
 enum KvEventSource {

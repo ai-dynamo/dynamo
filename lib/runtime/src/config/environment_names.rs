@@ -562,12 +562,10 @@ pub mod llm {
     pub const DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS: &str =
         "DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS";
 
-    /// Storage tiers whose framework-owned KV events the worker-side publisher
-    /// and KV state agent drop before publishing, as a comma- or space-separated
-    /// list of `host_pinned`, `disk` and `external`. Routers then do not credit
-    /// those tiers, e.g. an engine's CPU staging buffer. KVCR-owned events are
-    /// always published. Unset or empty publishes every tier; invalid values
-    /// fail startup.
+    /// Comma-separated `host_pinned`, `disk` and `external` tiers whose
+    /// framework-owned KV events the worker publisher and KV state agent drop
+    /// before publishing. KVCR-owned events are always published. Invalid
+    /// values fail startup.
     pub const DYN_KV_EVENTS_IGNORE_FRAMEWORK_TIERS: &str = "DYN_KV_EVENTS_IGNORE_FRAMEWORK_TIERS";
 
     /// Progress-thread delay, in microseconds, of the frontend media loader's NIXL

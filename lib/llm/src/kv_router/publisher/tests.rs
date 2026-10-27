@@ -4353,8 +4353,8 @@ mod test_ignored_framework_tiers {
             &[StorageTier::HostPinned, StorageTier::Disk]
         );
         assert_eq!(
-            &*parse(" host_pinned  host_pinned ").unwrap(),
-            &[StorageTier::HostPinned]
+            &*parse(" host_pinned , external ").unwrap(),
+            &[StorageTier::HostPinned, StorageTier::External]
         );
         assert!(parse("device").is_err());
         assert!(parse("g2").is_err());

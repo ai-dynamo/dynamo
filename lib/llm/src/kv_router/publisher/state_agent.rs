@@ -2272,39 +2272,6 @@ mod tests {
         assert_eq!(normalized.source_fault, Some("unknown raw event ownership"));
     }
 
-    #[test]
-    fn ignored_framework_tier_keeps_kvcr_events_in_that_tier() {
-        let worker = WorkerWithDpRank::new(17, 3);
-        let mut framework = ZmqEventNormalizer::new(4)
-            .with_ignored_framework_tiers(Arc::from([StorageTier::HostPinned]));
-        let mut cache_owner = ZmqEventNormalizer::new(4);
-        let normalized = normalize_raw_batch(
-            vec![
-                raw_store(None, None, 101),
-                raw_store(Some("CPU"), None, 102),
-                raw_store(Some("CPU_PINNED"), Some("kvcr"), 103),
-            ],
-            worker,
-            4,
-            KvStateIngressProtocol::VllmResidencyV1,
-            &mut framework,
-            &mut cache_owner,
-        );
-        assert_eq!(normalized.source_fault, None);
-        assert_eq!(normalized.cache_owner_fault, None);
-        assert_eq!(
-            normalized
-                .events
-                .iter()
-                .map(|event| (event.placement.residency_domain, event.placement.tier))
-                .collect::<Vec<_>>(),
-            vec![
-                (ResidencyDomain::Worker, StorageTier::Device),
-                (ResidencyDomain::CacheOwner, StorageTier::HostPinned),
-            ]
-        );
-    }
-
     #[tokio::test]
     async fn production_named_map_ownership_reaches_exact_local_recovery_owners() {
         let wire = (

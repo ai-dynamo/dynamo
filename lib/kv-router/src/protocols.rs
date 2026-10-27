@@ -916,23 +916,6 @@ impl StorageTier {
     }
 }
 
-impl std::str::FromStr for StorageTier {
-    type Err = String;
-
-    /// Parse the serde name of a tier.
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "device" => Ok(Self::Device),
-            "host_pinned" => Ok(Self::HostPinned),
-            "disk" => Ok(Self::Disk),
-            "external" => Ok(Self::External),
-            _ => Err(format!(
-                "unknown storage tier {value:?}, expected 'device', 'host_pinned', 'disk' or 'external'"
-            )),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum PlacementOwner {
     LocalWorker(WorkerWithDpRank),

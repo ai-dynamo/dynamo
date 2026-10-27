@@ -1570,8 +1570,6 @@ fn test_lower_tier_events_do_not_pollute_cache_namespace_state() {
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
 }
 
-/// Framework events in an ignored tier are dropped; KVCR events in that tier,
-/// framework events in other tiers, and clears still pass.
 #[test]
 fn test_preprocess_drops_ignored_framework_tiers() {
     let worker = WorkerWithDpRank::new(3, 0);
