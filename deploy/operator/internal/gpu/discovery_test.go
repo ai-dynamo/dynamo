@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -980,6 +981,59 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 			t.Fatal("expected parse error, got nil")
 		}
 	})
+}
+
+func TestScrapeMetricsEndpoint_ClosesConnections(t *testing.T) {
+	ctx := context.TODO()
+	const validMetrics = "# TYPE DCGM_FI_DEV_GPU_TEMP gauge\n" +
+		`DCGM_FI_DEV_GPU_TEMP{gpu="0",modelName="NVIDIA A100",Hostname="test-node"} 50` + "\n"
+
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{name: "successful scrape", body: validMetrics},
+		{name: "invalid metrics", body: "not a prometheus format\n", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Start a keep-alive metrics server that counts its open connections")
+			var opened, open atomic.Int32
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, err := fmt.Fprint(w, tt.body)
+				require.NoError(t, err)
+			}))
+			server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+				switch state {
+				case http.StateNew:
+					opened.Add(1)
+					open.Add(1)
+				case http.StateClosed, http.StateHijacked:
+					open.Add(-1)
+				}
+			}
+			server.Start()
+			defer server.Close()
+
+			t.Log("Scrape the endpoint several times")
+			const scrapes = 3
+			for range scrapes {
+				_, err := ScrapeMetricsEndpoint(ctx, server.URL)
+				if tt.wantErr {
+					require.Error(t, err)
+				} else {
+					require.NoError(t, err)
+				}
+			}
+
+			t.Log("Verify that no scrape left its connection open")
+			assert.EqualValues(t, scrapes, opened.Load())
+			assert.Eventually(t, func() bool { return open.Load() == 0 }, 2*time.Second, 10*time.Millisecond,
+				"connections still open after the scrapes returned")
+		})
+	}
 }
 
 func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {

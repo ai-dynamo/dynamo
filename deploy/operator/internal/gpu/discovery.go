@@ -547,7 +547,8 @@ func ScrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, erro
 	// Set a timeout for the request
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	// Create a custom HTTP client with transport-level timeouts
+	// Create a single-use HTTP client with transport-level timeouts. The transport
+	// is discarded after this call, so it must not pool idle connections.
 	client := &http.Client{
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{
@@ -555,6 +556,7 @@ func ScrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, erro
 				KeepAlive: 30 * time.Second, // Keep-alive for connections
 			}).DialContext,
 			TLSHandshakeTimeout: tlsHandshakeTimeout, // TLS handshake timeout
+			DisableKeepAlives:   true,                // Close the connection after the response
 		},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
