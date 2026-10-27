@@ -99,6 +99,21 @@ class BenchTest(unittest.TestCase):
         }
         self.assertEqual(limits, {"global-router": "4Gi", "global-discovery": "512Mi"})
 
+    def test_control_appends_the_configured_ingress_args(self):
+        cfg = {**CONFIG, "ingressArgs": ["--load-measure", "wait"]}
+        items = bench.control_manifest(cfg, REGION, "affinity")["items"]
+        ingress = next(
+            item
+            for item in items
+            if item["kind"] == "Deployment"
+            and item["metadata"]["name"] == "global-router"
+        )
+        container = ingress["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(
+            container["args"][-4:],
+            ["--router-policy", "affinity", "--load-measure", "wait"],
+        )
+
     def test_only_http_servers_get_the_tcp_settings(self):
         for items, servers in (
             (
