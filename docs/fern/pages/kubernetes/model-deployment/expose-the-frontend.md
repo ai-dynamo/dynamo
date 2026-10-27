@@ -85,7 +85,7 @@ spec:
       request: 300s
 ```
 
-Create the route in the DGD namespace, next to the Frontend Service. If the Gateway is in another namespace, add its `namespace` to the `parentRefs` entry and confirm that the Gateway listener allows routes from the DGD namespace. Set `timeouts.request` longer than your slowest expected response; a Gateway implementation's default timeout can cut off long generations.
+Create the route in the DGD namespace, next to the Frontend Service. If the Gateway is in another namespace, add its `namespace` to the `parentRefs` entry and confirm that the Gateway listener allows routes from the DGD namespace. Set `timeouts.request` longer than your slowest expected response; a Gateway implementation's default timeout can cut off long generations. Gateway API marks `timeouts` as an Extended feature, so not every Gateway implementation supports it; if yours does not, set the timeout in the implementation's own configuration.
 
 To serve several deployments behind one Gateway, create an `HTTPRoute` for each Frontend Service and give each route a distinct hostname or header match.
 

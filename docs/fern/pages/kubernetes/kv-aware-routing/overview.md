@@ -93,9 +93,11 @@ For the operator-managed setup and request flow, see
 ## Shared Routing Behavior
 
 Both topologies can use worker-published KV cache events to account for prefix overlap and active
-load. Both can also operate with predicted state when precise KV events are unavailable. The core
-selection algorithm and its tuning concepts are shared, but the Dynamo EPP does not support every
-Frontend feature that shapes a routing decision, such as session affinity and multimodal KV routing.
+load. Both can also operate with predicted state when precise KV events are unavailable, with one
+exception: in an aggregated deployment, the Dynamo EPP does not record its routing decisions, so
+with `DYN_USE_KV_EVENTS=false` repeated prompts get no predicted cache credit. The core selection
+algorithm and its tuning concepts are shared, but the Dynamo EPP does not support every Frontend
+feature that shapes a routing decision, such as session affinity and multimodal KV routing.
 
 For the cost model, see [Routing Concepts](../../developer-guide/knowledge-base/modular-components/router/routing-concepts.md). For shared tuning
 guidance, see [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md).

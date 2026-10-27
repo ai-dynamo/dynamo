@@ -25,7 +25,7 @@ The EPP runs the same Dynamo worker selection service used by a full Dynamo depl
 mode, it runs in-process without a `DynamoGraphDeployment` (DGD) or the Dynamo distributed runtime
 and event plane.
 
-This is still the **Gateway API routing topology** described in
+This is still the **GAIE routing topology** described in
 [KV-Aware Routing on Kubernetes](overview.md). Standalone mode changes who creates the
 resources and how the EPP discovers worker state; it does not add a third request-entry topology.
 
@@ -50,7 +50,7 @@ vLLM's `/v1/chat/completions/render` endpoint to tokenize each routing request. 
 the original request to the selected pod. The render Service is not a separate renderer workload; it
 is a stable Kubernetes Service address for the HTTP endpoint served by the same vLLM pods.
 
-| Concern | Standalone on-ramp | Operator-managed Gateway API routing |
+| Concern | Standalone on-ramp | Operator-managed GAIE routing |
 |---|---|---|
 | Workers | Stock vLLM pods | Dynamo workers and direct-mode Frontend sidecars |
 | Resource lifecycle | User-managed Deployments, Services, RBAC, `InferencePool`, and `HTTPRoute` | DGD and Dynamo operator |
