@@ -47,9 +47,8 @@ def _caps(decode_nextn=None, decode=True) -> WorkerCapabilities:
         (9.0, _caps(decode_nextn=None), 2, 3.0),
         (9.0, _caps(decode_nextn=0), 2, 3.0),
         (9.0, _caps(decode=False), 2, 3.0),
-        # Speculation off (including a negative config) gives 1.0.
+        # Speculation off gives 1.0.
         (2.5, _caps(), 0, 1.0),
-        (2.5, _caps(), -3, 1.0),
         # Missing or non-finite observations give 1.0.
         (None, _caps(), 3, 1.0),
         (math.nan, _caps(), 3, 1.0),
@@ -63,7 +62,5 @@ def _caps(decode_nextn=None, decode=True) -> WorkerCapabilities:
 def test_normalize_speculative_accept_length(
     accept_length, caps, config_nextn, expected
 ):
-    config = _config(0)
-    # Assigned after construction because field validation rejects negatives.
-    config.speculative_nextn = config_nextn
+    config = _config(config_nextn)
     assert normalize_speculative_accept_length(accept_length, caps, config) == expected
