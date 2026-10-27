@@ -28,11 +28,14 @@ async fn changed_instance_fails_startup_and_recovers_as_replacement() {
         .get_or_insert_with(server_info)
         .instance_id = "replacement-instance".into();
     assert!(engine.wait_for_startup().await.is_err());
-    let config = timeout(Duration::from_secs(5), engine.recover_startup())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let Some(EngineRecovery::Replacement(config)) =
+        timeout(Duration::from_secs(5), engine.recover_startup())
+            .await
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("expected a replacement engine")
+    };
     assert_eq!(config.model, "model-source");
     engine.wait_for_startup().await.unwrap();
     engine.cleanup().await.unwrap();

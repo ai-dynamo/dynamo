@@ -181,7 +181,9 @@ impl VllmSidecarEngine {
                 "Discovering vLLM model metadata");
         }
         let model = bootstrap_discover(endpoint, transport, bootstrap_deadline, bootstrap).await?;
-        Self::from_discovered(args, model, vllm_http_url)
+        let (engine, config) = Self::from_discovered(args, model, vllm_http_url)?;
+        engine.start_deadline(bootstrap_deadline);
+        Ok((engine, config))
     }
 
     fn from_discovered(
@@ -807,13 +809,8 @@ impl LLMEngine for VllmSidecarEngine {
 
     async fn recover_startup(
         &self,
-    ) -> Result<Option<dynamo_backend_common::EngineConfig>, DynamoError> {
-        self.reconnect(true).await.map(|recovery| match recovery {
-            dynamo_backend_common::engine::EngineRecovery::Replacement(config) => Some(*config),
-            dynamo_backend_common::engine::EngineRecovery::SameInstance => {
-                unreachable!("startup recreates publishers")
-            }
-        })
+    ) -> Result<Option<dynamo_backend_common::engine::EngineRecovery>, DynamoError> {
+        self.reconnect().await.map(Some)
     }
 
     async fn wait_for_unavailable(&self) -> Result<(), DynamoError> {
@@ -823,7 +820,7 @@ impl LLMEngine for VllmSidecarEngine {
     async fn recover_serving(
         &self,
     ) -> Result<dynamo_backend_common::engine::EngineRecovery, DynamoError> {
-        self.reconnect(false).await
+        self.reconnect().await
     }
 
     async fn on_recovery_complete(&self) -> Result<(), DynamoError> {

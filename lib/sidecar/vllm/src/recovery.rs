@@ -51,6 +51,11 @@ impl VllmSidecarEngine {
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))
     }
 
+    /// Starts the startup budget before metadata bootstrap; registration clears it.
+    pub(super) fn start_deadline(&self, deadline: Instant) {
+        *self.state.deadline.lock() = Some(deadline);
+    }
+
     fn recovery_deadline(&self) -> Result<Instant, DynamoError> {
         let mut deadline = self.state.deadline.lock();
         if let Some(deadline) = *deadline {
@@ -164,6 +169,8 @@ impl VllmSidecarEngine {
         let result = timeout_at(deadline, async {
             let (_, server) = state.client.discover(deadline).await?;
             if server.instance_id != state.model.instance_id() {
+                // This connection now reaches another engine; only a reconnect can recover.
+                state.cancel.cancel();
                 return Err(client::engine_shutdown(
                     "vLLM engine changed during recovery",
                 ));
@@ -173,7 +180,6 @@ impl VllmSidecarEngine {
         .await
         .map_err(|_| client::engine_shutdown("vLLM recovery deadline exceeded"))?;
         if result.is_ok() && self.runtime_endpoint.get().is_none() {
-            *self.state.deadline.lock() = None;
             self.state.is_recovering.store(false, Ordering::Release);
         }
         result
@@ -233,8 +239,9 @@ impl VllmSidecarEngine {
                 Ok(()) => return Ok(()),
                 Err(error) => error,
             };
-            let is_retryable =
-                *state.health.borrow() != EngineHealth::Lost && Instant::now() < deadline;
+            let is_retryable = !state.cancel.is_cancelled()
+                && *state.health.borrow() != EngineHealth::Lost
+                && Instant::now() < deadline;
             if !is_retryable {
                 return Err(error);
             }
@@ -243,11 +250,11 @@ impl VllmSidecarEngine {
         }
     }
 
-    pub(super) async fn reconnect(&self, is_startup: bool) -> Result<EngineRecovery, DynamoError> {
+    pub(super) async fn reconnect(&self) -> Result<EngineRecovery, DynamoError> {
         self.state.is_recovering.store(true, Ordering::Release);
         let old = self.started_state()?;
         let deadline = self.recovery_deadline()?;
-        if !is_startup && *old.health.borrow() != EngineHealth::Lost {
+        if *old.health.borrow() != EngineHealth::Lost {
             match self.recover_in_place(&old, deadline).await {
                 Ok(()) => return Ok(EngineRecovery::SameInstance),
                 Err(error) => {
@@ -256,22 +263,18 @@ impl VllmSidecarEngine {
             }
         }
         old.cancel.cancel();
-        timeout_at(
-            deadline,
-            self.replace_connection(&old, is_startup, deadline),
-        )
-        .await
-        .map_err(|_| {
-            client::engine_shutdown(
-                "vLLM recovery deadline exceeded while waiting for an engine replacement",
-            )
-        })?
+        timeout_at(deadline, self.replace_connection(&old, deadline))
+            .await
+            .map_err(|_| {
+                client::engine_shutdown(
+                    "vLLM recovery deadline exceeded while waiting for an engine replacement",
+                )
+            })?
     }
 
     async fn replace_connection(
         &self,
         old: &Connection,
-        is_startup: bool,
         deadline: Instant,
     ) -> Result<EngineRecovery, DynamoError> {
         self.unpublish_all_loras().await;
@@ -280,7 +283,7 @@ impl VllmSidecarEngine {
         tracing::info!(instance_id = %connection.model.instance_id(), is_replacement = !is_same, "Reconnected to vLLM engine");
         let config = self.engine_config(&connection.model)?;
         *self.state.current.lock() = Some(connection);
-        Ok(if is_same && !is_startup {
+        Ok(if is_same {
             EngineRecovery::SameInstance
         } else {
             EngineRecovery::Replacement(Box::new(config))
