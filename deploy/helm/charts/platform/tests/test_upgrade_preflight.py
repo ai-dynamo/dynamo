@@ -17,10 +17,18 @@ class ValidateTransitionTest(unittest.TestCase):
         for installed, target in (
             ("1.5.0", "1.5.3"),
             ("v1.4.7", "1.5.0-rc.1"),
+            ("1.4.7-rc.1+build.5", "1.5.0+build.7"),
             ("1.5.0", "1.4.7"),
         ):
             with self.subTest(installed=installed, target=target):
                 preflight.validate_transition(installed, target)
+
+    def test_rejects_empty_semantic_version_identifiers(self):
+        for value in ("1.4.7-rc..1", "1.4.7+build..5"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "not a supported semantic version"
+            ):
+                preflight.version(value)
 
     def test_rejects_skipped_minor_upgrade_and_downgrade(self):
         for installed, target, expected in (

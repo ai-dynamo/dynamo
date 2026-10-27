@@ -314,10 +314,12 @@ releases. Upgrade from `N.M` to `N.(M+1)` or downgrade from `N.(M+1)` to `N.M`. 
 intermediate minor release for larger changes. For example, upgrade `1.2.x` to `1.3.x`, then
 `1.3.x` to `1.4.x`; a direct transition from `1.2.x` to `1.4.x` is unsupported.
 
-The Helm chart checks this path in a read-only `pre-install,pre-upgrade` Job before it changes the
-operator Deployment. A first installation has no existing Deployment and passes. Helm and Flux run
-the hook directly; Argo CD maps it to a PreSync hook. Raw `kubectl apply`, Argo CD selective sync,
-or disabled hooks do not enforce the check.
+When `dynamo-operator.enabled=true`, the Helm chart checks this path in a read-only
+`pre-install,pre-upgrade` Job before it changes the operator Deployment. A first installation has
+no existing Deployment and passes. Helm and Flux run the hook directly; Argo CD maps it to a
+PreSync hook. Raw `kubectl apply`, Argo CD selective sync, or disabled hooks do not enforce the
+check. When the operator subchart is disabled, the hook is omitted because the separately managed
+operator release owns its upgrade policy.
 
 If you have separately validated an unsupported forward upgrade, set
 `unsupportedUpgradeOverride` to the currently installed minor version:
