@@ -3,6 +3,7 @@
 
 """Replica-target emission from each native planner mode's ``_apply_effects``."""
 
+import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,8 +19,6 @@ from dynamo.planner.core.adapters import (
 from dynamo.planner.core.types import PlannerEffects, ScalingDecision
 from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.monitoring.worker_info import WorkerInfo
-from tests.utils.constants import DynamoPortRange
-from tests.utils.port_utils import reserved_ports
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -53,8 +52,11 @@ SINGLE_ROLE_MODES = [
 
 @pytest.fixture
 def prometheus_port():
-    with reserved_ports(1, DynamoPortRange.SERVE) as (port,):
-        yield port
+    # start_http_server is patched, so the port is never bound; it only has to
+    # be nonzero to enable gauge publication.
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
 def _make_planner(cls, mode, *, roles_with_info, port, advisory=False):
