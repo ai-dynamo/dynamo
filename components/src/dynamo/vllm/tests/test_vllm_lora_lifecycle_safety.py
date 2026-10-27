@@ -20,8 +20,10 @@ from dynamo.vllm.lora_state import RuntimeLoRAInfo  # noqa: E402
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
+    pytest.mark.timeout(10),
 ]
 
 
@@ -46,6 +48,7 @@ def _make_prefill_handler():
         # size from here (hybrid-attention models inflate it past the CLI's
         # engine_args.block_size=16 above).
         vllm_config=SimpleNamespace(
+            lora_config=None,
             additional_config={DYNAMO_KV_EVENT_BLOCK_SIZE_KEY: 1056},
             cache_config=SimpleNamespace(block_size=16),
         ),
@@ -406,14 +409,20 @@ async def test_admin_hot_swap_remove_error_restores_old_adapter(
     handler._lora_state.loaded_loras["adapterA"] = old_info
     handler._engine_loaded_loras.add("adapterA")
     engine_paths = {123: old_info.path}
+    remove_calls = 0
 
     async def remove_lora(lora_id):
+        nonlocal remove_calls
+        remove_calls += 1
+        if remove_calls > 1:
+            engine_paths.pop(lora_id, None)
+            return True
         if remove_mutates_before_error:
             engine_paths.pop(lora_id, None)
         raise RuntimeError("remove response lost")
 
     async def add_lora(request):
-        engine_paths[request.lora_int_id] = request.lora_path
+        engine_paths.setdefault(request.lora_int_id, request.lora_path)
         return True
 
     handler.engine_client.remove_lora.side_effect = remove_lora
@@ -460,6 +469,8 @@ async def test_admin_load_counts_quarantined_engine_id_against_capacity(monkeypa
 
     assert results[-1]["status"] == "error"
     assert "capacity exceeded" in results[-1]["message"]
+    assert "1 slot(s) quarantined" in results[-1]["message"]
+    assert "restart the worker" in results[-1]["message"]
     manager.download_lora.assert_not_awaited()
     handler.engine_client.add_lora.assert_not_awaited()
 
@@ -760,6 +771,8 @@ async def test_admin_hot_swap_false_prefix_reset_restores_old_adapter(monkeypatc
 
     assert results[-1]["status"] == "error"
     assert "prefix cache reset failed" in results[-1]["message"]
+    assert "KV blocks" in results[-1]["message"]
+    assert "pause generation" in results[-1]["message"]
     assert handler._lora_state.loaded_loras["adapterA"] == original
     assert "adapterA" in handler._engine_loaded_loras
     assert handler.engine_client.remove_lora.await_count == 2
@@ -1012,3 +1025,140 @@ async def test_admin_unload_discovery_error_restores_publication(
     )
     assert "adapterA" in handler._engine_loaded_loras
     handler.engine_client.remove_lora.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["prefix-reset", "add-applied-error"])
+async def test_hot_swap_failed_candidate_remove_keeps_engine_id_quarantined(
+    monkeypatch, failure_stage, caplog
+):
+    handler = _make_prefill_handler()
+    old_info = LoRAInfo(id=123, path="/cache/old")
+    handler._lora_state.loaded_loras["adapterA"] = old_info
+    handler._engine_loaded_loras.add("adapterA")
+    handler._resolve_lora_source_path = AsyncMock(return_value=(True, "/cache/new"))
+    engine_paths = {123: old_info.path}
+    remove_calls = 0
+
+    async def remove_lora(lora_id):
+        nonlocal remove_calls
+        remove_calls += 1
+        if remove_calls > 1:
+            raise RuntimeError("candidate removal response lost")
+        engine_paths.pop(lora_id, None)
+        return True
+
+    async def add_lora(request):
+        engine_paths.setdefault(request.lora_int_id, request.lora_path)
+        if failure_stage == "add-applied-error" and request.lora_path == "/cache/new":
+            raise RuntimeError("candidate add response lost")
+        return True
+
+    handler.engine_client.remove_lora.side_effect = remove_lora
+    handler.engine_client.add_lora.side_effect = add_lora
+    handler.engine_client.reset_prefix_cache.return_value = False
+    monkeypatch.setenv("DYN_LORA_HOTSWAP_ENABLED", "true")
+
+    results = [
+        result
+        async for result in handler.load_lora(
+            {"lora_name": "adapterA", "source": {"uri": "file:///new"}}
+        )
+    ]
+
+    assert results[-1]["status"] == "error"
+    assert engine_paths == {123: "/cache/new"}
+    assert "adapterA" not in handler._lora_state.loaded_loras
+    assert "adapterA" not in handler._engine_loaded_loras
+    assert 123 in handler._lora_state.uncertain_engine_lora_ids
+    assert 123 in handler._lora_state.rollback_reserved_ids
+    handler.engine_client.add_lora.assert_awaited_once()
+    assert "Quarantining LoRA engine ID 123" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_requested", [False, True])
+@pytest.mark.parametrize("remove_applied", [False, True])
+@pytest.mark.parametrize(
+    "recovery", ["restored", "remove-uncertain", "restore-rejected"]
+)
+async def test_admin_unload_remove_error_requires_proven_absence_before_restore(
+    cancel_requested, remove_applied, recovery
+):
+    handler = _make_prefill_handler()
+    old_info = LoRAInfo(id=123, path="/cache/old")
+    handler._lora_state.loaded_loras["adapterA"] = old_info
+    handler._engine_loaded_loras.add("adapterA")
+    published = {"adapterA"}
+    engine_paths = {123: old_info.path}
+    remove_started = asyncio.Event()
+    finish_remove = asyncio.Event()
+    remove_calls = 0
+
+    async def remove_lora(lora_id):
+        nonlocal remove_calls
+        remove_calls += 1
+        if remove_calls == 1:
+            if remove_applied:
+                engine_paths.pop(lora_id, None)
+            remove_started.set()
+            await finish_remove.wait()
+            raise RuntimeError("remove response lost")
+        if recovery == "remove-uncertain":
+            raise RuntimeError("recovery remove response lost")
+        engine_paths.pop(lora_id, None)
+        return True
+
+    async def add_lora(request):
+        if recovery == "restore-rejected":
+            return False
+        engine_paths.setdefault(request.lora_int_id, request.lora_path)
+        return True
+
+    async def unregister(name):
+        published.discard(name)
+
+    async def register(name, _lora_id):
+        published.add(name)
+
+    handler.engine_client.remove_lora.side_effect = remove_lora
+    handler.engine_client.add_lora.side_effect = add_lora
+    handler._unregister_lora_discovery = unregister
+    handler._register_lora_discovery = register
+
+    async def unload():
+        return [
+            result async for result in handler.unload_lora({"lora_name": "adapterA"})
+        ]
+
+    task = asyncio.create_task(unload())
+    try:
+        await remove_started.wait()
+        if cancel_requested:
+            task.cancel()
+            await asyncio.sleep(0)
+        finish_remove.set()
+        if cancel_requested:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            results = await task
+            assert results[-1]["status"] == "error"
+    finally:
+        finish_remove.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert remove_calls == 2
+    if recovery == "restored":
+        assert handler._lora_state.loaded_loras["adapterA"] == old_info
+        assert handler._engine_loaded_loras == {"adapterA"}
+        assert published == {"adapterA"}
+        assert engine_paths == {123: old_info.path}
+        assert 123 not in handler._lora_state.uncertain_engine_lora_ids
+    else:
+        assert "adapterA" not in handler._lora_state.loaded_loras
+        assert "adapterA" not in handler._engine_loaded_loras
+        assert published == set()
+        assert 123 in handler._lora_state.uncertain_engine_lora_ids
+        if recovery == "remove-uncertain":
+            handler.engine_client.add_lora.assert_not_awaited()

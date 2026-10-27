@@ -2627,6 +2627,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """Remove a candidate adapter and restore the previous engine state."""
         cancellation_requested = False
         failure: BaseException | None = None
+        remove_failed = False
         if remove_lora_id is not None:
             cancelled, _removed, error = await run_lora_engine_mutation(
                 self._pause_lock, self.engine_client.remove_lora(remove_lora_id)
@@ -2636,14 +2637,23 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 isinstance(error, Exception) and self._is_lora_not_loaded_error(error)
             ):
                 failure = error
+                remove_failed = True
                 self._lora_state.rollback_reserved_ids.add(remove_lora_id)
                 self._lora_state.uncertain_engine_lora_ids.add(remove_lora_id)
+                logger.error(
+                    "Quarantining LoRA engine ID %s after failed rollback removal",
+                    remove_lora_id,
+                )
             else:
                 self._lora_state.rollback_reserved_ids.discard(remove_lora_id)
                 self._lora_state.uncertain_engine_lora_ids.discard(remove_lora_id)
             self._engine_loaded_loras.discard(lora_name)
 
-        if old_engine_loaded and old_info is not None:
+        if (
+            old_engine_loaded
+            and old_info is not None
+            and not (remove_failed and remove_lora_id == old_info.id)
+        ):
             cancelled, restored, error = await run_lora_engine_mutation(
                 self._pause_lock,
                 self.engine_client.add_lora(
@@ -2659,18 +2669,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 failure = error
                 self._lora_state.rollback_reserved_ids.add(old_info.id)
                 self._lora_state.uncertain_engine_lora_ids.add(old_info.id)
+                logger.error(
+                    "Quarantining LoRA engine ID %s after failed rollback restore",
+                    old_info.id,
+                )
                 self._engine_loaded_loras.discard(lora_name)
             elif restored is not True:
                 failure = RuntimeError("vLLM rejected the rollback adapter")
                 self._lora_state.rollback_reserved_ids.add(old_info.id)
                 self._lora_state.uncertain_engine_lora_ids.add(old_info.id)
+                logger.error(
+                    "Quarantining LoRA engine ID %s after rejected rollback restore",
+                    old_info.id,
+                )
                 self._engine_loaded_loras.discard(lora_name)
             else:
                 self._engine_loaded_loras.add(lora_name)
                 self._lora_state.rollback_reserved_ids.discard(old_info.id)
                 self._lora_state.uncertain_engine_lora_ids.discard(old_info.id)
-                if remove_lora_id is None or remove_lora_id == old_info.id:
-                    failure = None
 
         if failure is None and old_info is not None:
             self._lora_state.loaded_loras[lora_name] = old_info
@@ -2938,7 +2954,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         Concurrent calls for the same LoRA are serialized. Re-loading an already
         loaded LoRA is idempotent by default. Set
         ``DYN_LORA_HOTSWAP_ENABLED=true`` to replace an already loaded LoRA with
-        a new URI.
+        a new URI. Hot swaps require a successful prefix-cache reset; KV blocks
+        held by other requests can prevent this. Pause generation with
+        ``mode=abort`` or drain the worker before retrying a rejected reset.
         """
         try:
             try:
@@ -3115,7 +3133,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 lora_name,
                                 lora,
                                 old_engine_loaded=True,
-                                remove_lora_id=None,
+                                remove_lora_id=lora_id,
                             )
                             register_cancelled = False
                             register_error = None

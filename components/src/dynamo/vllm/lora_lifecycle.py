@@ -242,10 +242,17 @@ class AdminLoRALoadTransaction:
             self.lora_name, lora_capacity
         )
         if reserved_id is None:
+            quarantined = len(self.owner._lora_state.uncertain_engine_lora_ids)
+            detail = (
+                f" ({quarantined} slot(s) quarantined after failed engine rollback; "
+                "restart the worker to reclaim)"
+                if quarantined
+                else ""
+            )
             return self._result(
                 "error",
                 "LoRA capacity exceeded: "
-                f"at most {lora_capacity} adapter(s) may be loaded",
+                f"at most {lora_capacity} adapter(s) may be loaded{detail}",
             )
         self.lora_id = reserved_id
         self.capacity_reserved = True
@@ -302,7 +309,7 @@ class AdminLoRALoadTransaction:
                 self.lora_name,
                 self.old_info,
                 old_engine_loaded=True,
-                remove_lora_id=None,
+                remove_lora_id=self.old_info.id,
             )
             if rollback_error is not None:
                 logger.error(
@@ -422,6 +429,7 @@ class AdminLoRALoadTransaction:
                     "engine+tracking" if self.old_engine_loaded else "tracking only"
                 )
             else:
+                rolled_back = "quarantined"
                 logger.error(
                     "LoRA '%s' hot-swap engine rollback failed: %s",
                     self.lora_name,
@@ -432,7 +440,12 @@ class AdminLoRALoadTransaction:
             self.owner._lora_state.loaded_loras.pop(self.lora_name, None)
         if reset_cancelled or rollback_cancelled:
             raise asyncio.CancelledError
-        failure = reset_error or RuntimeError("vLLM rejected the prefix cache reset")
+        failure = reset_error or RuntimeError(
+            "KV blocks may still be in use by other requests; pause generation "
+            "with mode=abort or drain the worker, then retry"
+            if reset is False
+            else "vLLM rejected the prefix cache reset"
+        )
         logger.error(
             "LoRA '%s' hot-swap rolled back (%s): prefix cache reset failed: %s",
             self.lora_name,
