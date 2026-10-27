@@ -229,6 +229,14 @@ def test_runtime_lora_plugin_serving_and_recovery(runtime_lora_server, request):
         assert all(chunk["model"] == source_a for chunk in chunks)
     assert _calls(calls)[source_a] == 1
 
+    with _request(
+        base_url,
+        source_a,
+        nvext={"agent_hints": {"speculative_prefill": True}},
+    ) as response:
+        assert response.status_code == 400, response.text
+    _assert_chat(base_url, source_a)
+
     _assert_chat(base_url, source_b)
     _assert_chat(base_url, source_a)
     assert _calls(calls)[source_a] == 2
