@@ -2771,9 +2771,7 @@ mod tests {
             .unwrap();
         assert!(stream.next().await.unwrap().err().is_some());
         assert!(
-            router
-                .check_workers_available(instance_id, "after_deadline")
-                .is_ok(),
+            client.instance_ids_avail().contains(&instance_id),
             "a delivered request deadline must leave the worker available"
         );
 
