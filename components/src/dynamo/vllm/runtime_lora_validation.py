@@ -9,7 +9,6 @@ import json
 import os
 import stat
 from collections.abc import Iterable
-from itertools import pairwise
 from math import prod
 from pathlib import Path
 
@@ -151,8 +150,12 @@ def _validate_safetensors(weights_path: Path) -> frozenset[str]:
 
     if not tensor_names:
         raise _runtime_error(422, "invalid_lora_adapter")
-    ranges.sort()
-    if any(previous[1] > current[0] for previous, current in pairwise(ranges)):
+    expected_start = 0
+    for start, end in sorted(ranges):
+        if start != expected_start:
+            raise _runtime_error(422, "invalid_lora_adapter")
+        expected_start = end
+    if expected_start != payload_size:
         raise _runtime_error(422, "invalid_lora_adapter")
     return frozenset(tensor_names)
 
@@ -191,8 +194,10 @@ def _validate_snapshot(
         canonical_snapshot = raw_snapshot.resolve(strict=True)
     except (OSError, RuntimeError):
         raise _runtime_error(422, "invalid_lora_adapter") from None
-    if not canonical_snapshot.is_dir() or not canonical_snapshot.is_relative_to(
-        canonical_root
+    if (
+        not canonical_snapshot.is_dir()
+        or canonical_snapshot == canonical_root
+        or not canonical_snapshot.is_relative_to(canonical_root)
     ):
         raise _runtime_error(422, "invalid_lora_adapter")
 

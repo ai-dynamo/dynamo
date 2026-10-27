@@ -369,6 +369,59 @@ def test_snapshot_rejects_overlapping_tensors(tmp_path):
     _assert_invalid(snapshot, tmp_path)
 
 
+@pytest.mark.parametrize(
+    "kind", ["trailing", "gap", "leading-gap", "utf16", "utf8-bom"]
+)
+def test_snapshot_rejects_noncanonical_safetensors(tmp_path, kind):
+    snapshot = _snapshot(tmp_path)
+    header = {"q_proj": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]}}
+    payload = bytes(8)
+    if kind == "trailing":
+        payload = bytes(16)
+    elif kind == "gap":
+        header = {
+            "q_proj": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
+            "v_proj": {"dtype": "F32", "shape": [1], "data_offsets": [8, 12]},
+        }
+        payload = bytes(12)
+    elif kind == "leading-gap":
+        header["q_proj"]["data_offsets"] = [4, 12]
+        payload = bytes(12)
+    encoded = json.dumps(header).encode("utf-16" if kind == "utf16" else "utf-8")
+    if kind == "utf8-bom":
+        encoded = b"\xef\xbb\xbf" + encoded
+    blob = len(encoded).to_bytes(8, "little") + encoded + payload
+    (snapshot / "adapter_model.safetensors").write_bytes(blob)
+
+    _assert_invalid(snapshot, tmp_path)
+
+
+def test_snapshot_accepts_leading_safetensors_json_whitespace(tmp_path):
+    snapshot = _snapshot(tmp_path)
+    header = {"q_proj": {"dtype": "F32", "shape": [2], "data_offsets": [0, 8]}}
+    encoded = b" " + json.dumps(header).encode()
+    blob = len(encoded).to_bytes(8, "little") + encoded + bytes(8)
+    (snapshot / "adapter_model.safetensors").write_bytes(blob)
+
+    assert validate_snapshot(snapshot, tmp_path, 1024, 64, ("base",)) == snapshot
+
+
+def test_snapshot_requires_distinct_cache_subdirectory(tmp_path):
+    snapshot = _snapshot(tmp_path)
+
+    _assert_invalid(snapshot, snapshot)
+
+
+def test_snapshot_bounds_safetensors_header_before_reading(tmp_path):
+    snapshot = _snapshot(tmp_path)
+    header_bytes = 17 * 1024 * 1024
+    with (snapshot / "adapter_model.safetensors").open("wb") as weights:
+        weights.write(header_bytes.to_bytes(8, "little"))
+        weights.truncate(8 + header_bytes)
+
+    _assert_invalid(snapshot, tmp_path, max_bytes=32 * 1024 * 1024)
+
+
 def test_snapshot_rejects_invalid_optional_embeddings(tmp_path):
     snapshot = _snapshot(tmp_path)
     (snapshot / "new_embeddings.safetensors").write_bytes(b"invalid")
