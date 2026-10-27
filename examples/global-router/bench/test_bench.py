@@ -85,7 +85,19 @@ class BenchTest(unittest.TestCase):
         container = ingress["spec"]["template"]["spec"]["containers"][0]
         self.assertEqual(container["args"][-2:], ["--router-policy", "least-in-flight"])
         self.assertEqual(container["resources"]["limits"]["cpu"], "2")
+        self.assertEqual(container["resources"]["limits"]["memory"], "512Mi")
         self.assertEqual(ingress["spec"]["replicas"], 2)
+
+        cfg = {**CONFIG, "routerMemory": "4Gi"}
+        items = bench.control_manifest(cfg, REGION, "least-in-flight")["items"]
+        limits = {
+            item["metadata"]["name"]: item["spec"]["template"]["spec"]["containers"][0][
+                "resources"
+            ]["limits"]["memory"]
+            for item in items
+            if item["kind"] == "Deployment"
+        }
+        self.assertEqual(limits, {"global-router": "4Gi", "global-discovery": "512Mi"})
 
     def test_only_http_servers_get_the_tcp_settings(self):
         for items, servers in (
@@ -201,11 +213,14 @@ class WindowSummaryTest(unittest.TestCase):
             self.record(105, 125, 3.0),
             self.record(110, 140, 4.0),  # after the window
             self.record(110, 120, 9.0, error={"code": 503}),
+            self.record(110, 120, 9.0, error={"code": 503}),
+            self.record(110, 111, 9.0, error={"type": "ClientConnectorError"}),
         ]
         summary = loadgen_run.window_summary(records, start=110, end=130)
         self.assertEqual(summary["profiling_started"], 100)
         self.assertEqual(summary["completed_requests"], 2)
-        self.assertEqual(summary["profiling_errors"], 1)
+        self.assertEqual(summary["profiling_errors"], 3)
+        self.assertEqual(summary["error_kinds"], {"503": 2, "ClientConnectorError": 1})
         self.assertEqual(summary["requests_per_second"], 0.1)
         self.assertEqual(summary["output_tokens_per_second"], 1.0)
         self.assertEqual(summary["ttft_ms"]["p50"], 3.0)

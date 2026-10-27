@@ -49,7 +49,10 @@ cc -shared -fPIC -Os -s -o libnodelay.so nodelay.c
 
 Write an operator-local JSON file outside Git with:
 
-- `namespace`, `model`, `workerReplicas`, `frontendCpu`, `routerReplicas`, `routerCpu`.
+- `namespace`, `model`, `workerReplicas`, `frontendCpu`, `routerReplicas`, `routerCpu`,
+  and optionally `routerMemory` (the ingress memory limit, 512Mi by default). An
+  ingress holds every open request's prompt, so a backed-up fleet with AgentX
+  prompts needs several GiB.
 - `nodelayShim`: the path of the built `libnodelay.so`.
 - `regions`: `region`, `site` (the Karmada member name), `short`,
   `clusterName`, `kubectlProviderServiceToken`, `kubectlProviderHandlerArn`,

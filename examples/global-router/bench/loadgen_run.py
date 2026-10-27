@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import urllib.request
+from collections import Counter
 from pathlib import Path
 
 RECORDS = Path("/work/artifacts/profile_export.jsonl")
@@ -46,6 +47,14 @@ def metric(record, name):
     if isinstance(value, list):
         value = sum(value) / len(value) if value else None
     return float(value) if isinstance(value, (int, float)) else None
+
+
+def error_kind(error):
+    """A short label for an aiperf record's error: its code and type."""
+    if isinstance(error, dict):
+        parts = (error.get("code"), error.get("type"))
+        return " ".join(str(part) for part in parts if part is not None)
+    return str(error)[:80]
 
 
 def window_summary(records, start, end):
@@ -86,6 +95,9 @@ def window_summary(records, start, end):
         "profiling_started": min(starts) / 1e9,
         "completed_requests": len(finished),
         "profiling_errors": sum(1 for r in profiling if r.get("error")),
+        "error_kinds": dict(
+            Counter(error_kind(r["error"]) for r in profiling if r.get("error"))
+        ),
         "requests_per_second": len(finished) / measure_s,
         "output_tokens_per_second": output_tokens / measure_s,
         "mean_input_tokens": sum(input_tokens) / len(input_tokens)

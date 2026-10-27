@@ -302,6 +302,7 @@ def control_manifest(cfg, member, policy):
         node_selector=NODE_SELECTOR,
         tolerations=[TOLERATION],
         ingress_args=region,
+        router_memory=cfg.get("routerMemory", "512Mi"),
     )
     return tune_http_servers(rendered, cfg, "nodelay-control", {"global-router"})
 

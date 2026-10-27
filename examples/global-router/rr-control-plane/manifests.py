@@ -30,6 +30,7 @@ def render(
     node_selector=None,
     tolerations=(),
     ingress_args=(),
+    router_memory="512Mi",
 ):
     """``ingress_args`` are appended to the Global Ingress arguments, for
     example ``["--region", "us-east-2"]``."""
@@ -125,8 +126,10 @@ def render(
     ]:
         requests = {"cpu": "100m", "memory": "128Mi"}
         limits = {"memory": "512Mi"}
-        if name == "global-router" and router_cpu:
-            requests["cpu"] = limits["cpu"] = router_cpu
+        if name == "global-router":
+            limits["memory"] = router_memory
+            if router_cpu:
+                requests["cpu"] = limits["cpu"] = router_cpu
         pod = {
             "serviceAccountName": "global-discovery"
             if name == "global-discovery"
