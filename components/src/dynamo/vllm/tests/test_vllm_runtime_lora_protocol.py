@@ -96,6 +96,23 @@ def test_runtime_metadata_must_match_model_and_identity():
         )
 
 
+@pytest.mark.parametrize("base", ["", "b" * 513, "é" * 257])
+def test_base_envelope_bounds_are_enforced_in_isolation(base):
+    source = "custom:adapter"
+    request = {
+        "model": base,
+        "routing": {
+            "lora_name": _identity(base, source),
+            "base_model_name": base,
+            "lora_source_uri": source,
+            "lora_resolution_version": 2,
+        },
+    }
+    with pytest.raises(protocol_mod.HttpError, match="invalid_lora_model_id") as error:
+        protocol_mod._parse_request(request)
+    assert error.value.code == 400
+
+
 @pytest.mark.parametrize("value", ["bad", "0", "-1"])
 def test_runtime_settings_reject_invalid_positive_limits(monkeypatch, value):
     monkeypatch.setenv("DYN_LORA_MAX_PENDING_ADMISSIONS", value)
