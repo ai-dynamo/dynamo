@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Unsupported reasoning controls must fail before a backend can silently ignore them.
+//! Messages reasoning controls reach the existing canonical backend fields.
 
 use std::time::Duration;
+
+use dynamo_llm::protocols::common::StopConditionsProvider;
 
 use dynamo_runtime::config::environment_names::llm::{
     DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
@@ -29,11 +31,11 @@ const ENV: [(&str, Option<&str>); 2] = [
 
 #[tokio::test]
 #[serial]
-async fn unsupported_reasoning_controls_reject_before_generation() {
+async fn malformed_reasoning_controls_reject_before_generation() {
     temp_env::async_with_vars(ENV, async {
         let script = load_agent_fixture("text.sse").await.unwrap();
         let svc = HarnessService::start([script]).await;
-        let mut cases: Vec<_> = ["low", "medium", "high", "xhigh", "max", "unknown"]
+        let mut cases: Vec<_> = ["unknown", "none", "minimal"]
             .into_iter()
             .map(|effort| {
                 (
@@ -45,10 +47,10 @@ async fn unsupported_reasoning_controls_reject_before_generation() {
             .collect();
         cases.push((
             "output_config",
-            json!({"effort": null}),
+            json!({"effort": 42}),
             "output_config.effort",
         ));
-        for budget in [1024, 2048] {
+        for budget in [0, 1023, 4096] {
             cases.push((
                 "thinking",
                 json!({"type": "enabled", "budget_tokens": budget}),
@@ -127,6 +129,78 @@ async fn omitted_and_supported_thinking_modes_still_reach_generation() {
             }
         }
         assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn effort_and_manual_budgets_reach_canonical_fields() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(std::iter::repeat_n(script, 20)).await;
+        for stream in [false, true] {
+            for effort in ["low", "medium", "high", "xhigh", "max"] {
+                for budget in [1024, 2048] {
+                    let body = json!({"model": MODEL, "max_tokens": 4096, "stream": stream,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "thinking": {"type": "enabled", "budget_tokens": budget},
+                        "output_config": {"effort": effort, "format": {"type": "json_schema", "schema": {"type": "object"}}}});
+                    let response = svc.client.post(format!("{}/v1/messages", svc.base_url)).json(&body).send().await.unwrap();
+                    assert_eq!(response.status(), reqwest::StatusCode::OK, "{}", response.text().await.unwrap());
+                    let requests = svc.engine.take_requests().await;
+                    assert_eq!(requests.len(), 1);
+                    let request = &requests[0];
+                    assert_eq!(serde_json::to_value(&request.inner.reasoning_effort).unwrap(), effort);
+                    assert_eq!(request.thinking_token_budget, Some(budget));
+                    assert_eq!(request.extract_stop_conditions().unwrap().max_thinking_tokens, Some(budget));
+                    assert!(request.inner.response_format.is_some());
+                    let args = request.chat_template_args.as_ref().unwrap();
+                    assert_eq!(args["reasoning_effort"], effort);
+                    assert_eq!(args["enable_thinking"], true);
+                }
+            }
+        }
+        svc.shutdown().await;
+    }).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_code_default_effort_shape_is_accepted() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script]).await;
+        // Captured Claude Code request shape for a non-Claude model; no live inference.
+        let body = json!({"model": MODEL, "max_tokens": 32000, "stream": true,
+            "messages": [{"role": "user", "content": "ping"}],
+            "thinking": {"type": "adaptive", "display": "omitted"},
+            "output_config": {"effort": "high"}});
+        let response = svc
+            .client
+            .post(format!("{}/v1/messages", svc.base_url))
+            .header(
+                "anthropic-beta",
+                "interleaved-thinking-2025-05-14,effort-2025-11-24",
+            )
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(response.text().await.unwrap().contains("message_stop"));
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(
+            serde_json::to_value(&request.inner.reasoning_effort).unwrap(),
+            "high"
+        );
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args["reasoning_effort"], "high");
+        assert_eq!(args["thinking_mode"], "adaptive");
+        assert!(!args.contains_key("enable_thinking"));
         svc.shutdown().await;
     })
     .await;
