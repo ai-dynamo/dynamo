@@ -8,9 +8,12 @@
 package controller
 
 import (
+	"testing"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
@@ -29,6 +32,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
+	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
 	vcbatchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
@@ -40,10 +44,12 @@ func newClusterTestScheme() *runtime.Scheme {
 	utilruntime.Must(configv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(nvidiacomv1beta1.AddToScheme(scheme))
+	utilruntime.Must(nvidiacomv1beta2.AddToScheme(scheme))
 	utilruntime.Must(grovev1alpha1.AddToScheme(scheme))
 	utilruntime.Must(monitoringv1.AddToScheme(scheme))
 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
 	utilruntime.Must(lwsscheme.AddToScheme(scheme))
+	utilruntime.Must(disaggregatedsetv1.AddToScheme(scheme))
 	utilruntime.Must(gaiev1.Install(scheme))
 	utilruntime.Must(appsv1.AddToScheme(scheme))
 	utilruntime.Must(admissionregistrationv1.AddToScheme(scheme))
@@ -58,6 +64,12 @@ func newClusterTestScheme() *runtime.Scheme {
 	utilruntime.Must(volcanov1beta1.AddToScheme(scheme))
 	utilruntime.Must(vcbatchv1alpha1.AddToScheme(scheme))
 	return scheme
+}
+
+func TestClusterTestSchemeIncludesDGDRV1Beta2(t *testing.T) {
+	if _, err := newClusterTestScheme().New(nvidiacomv1beta2.DynamoGraphDeploymentRequestGVK); err != nil {
+		t.Fatalf("create v1beta2 DynamoGraphDeploymentRequest from cluster-test scheme: %v", err)
+	}
 }
 
 func clusterTestRestrictedConfig(namespace string) *configv1alpha1.OperatorConfiguration {

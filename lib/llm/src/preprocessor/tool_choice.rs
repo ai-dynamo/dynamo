@@ -5,7 +5,9 @@
 
 use std::borrow::Cow;
 
-use crate::preprocessor::structural_tag::requires_native_tool_call_format;
+use crate::preprocessor::structural_tag::{
+    SelectedStructuralTagBuilder, requires_native_tool_call_format,
+};
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::tools::{
@@ -125,6 +127,33 @@ impl OpenAIPreprocessor {
         // If the structural-tag layer did not compose this response format with
         // auto tool calls, it remains the sole assistant-output constraint.
         if !is_forced_tool_choice && has_response_format_constraint {
+            if let Some((parser_name @ "gpt_oss", builder)) =
+                SelectedStructuralTagBuilder::for_unified_parser(
+                    self.tool_call_parser.as_deref(),
+                    self.runtime_config.reasoning_parser.as_deref(),
+                )
+            {
+                let schema = match request.inner.response_format.as_ref() {
+                    Some(ResponseFormat::JsonSchema { json_schema }) => {
+                        Cow::Borrowed(&json_schema.schema)
+                    }
+                    Some(ResponseFormat::JsonObject) => {
+                        Cow::Owned(serde_json::json!({"type": "object"}))
+                    }
+                    Some(ResponseFormat::Text) | None => return Ok(GuidedToolConstraint::None),
+                };
+                // GPT-OSS's engine reasoner does not defer a bare JSON grammar.
+                // The Harmony envelope owns reasoning even without tool-call tags.
+                if self.apply_structured_output_tag(
+                    parser_name,
+                    builder,
+                    &schema,
+                    prompt_injected_reasoning,
+                    common_request,
+                )? {
+                    return Ok(GuidedToolConstraint::StructuralTag);
+                }
+            }
             return Ok(GuidedToolConstraint::None);
         }
 
@@ -148,6 +177,35 @@ impl OpenAIPreprocessor {
             request.inner.parallel_tool_calls,
         ) {
             Ok(Some(guidance)) => {
+                if let ToolChoiceGuidance::Json(schema) = &guidance
+                    && self.runtime_config.structural_tag.is_some()
+                    && super::structural_tag::uses_gpt_oss_required_array(
+                        (
+                            self.tool_call_parser.as_deref(),
+                            self.runtime_config.reasoning_parser.as_deref(),
+                        ),
+                        &parser_tool_choice,
+                        request.inner.parallel_tool_calls,
+                    )
+                    && let Some((parser_name, builder)) =
+                        SelectedStructuralTagBuilder::for_unified_parser(
+                            self.tool_call_parser.as_deref(),
+                            self.runtime_config.reasoning_parser.as_deref(),
+                        )
+                    && self.apply_structured_output_tag(
+                        parser_name,
+                        builder,
+                        schema,
+                        prompt_injected_reasoning,
+                        common_request,
+                    )?
+                {
+                    // TODO: Consider GPT-OSS renderer guidance for required parallel calls.
+                    // Example system prompt: "After reasoning, emit all requested independent calls as one JSON array of {name, parameters} objects."
+                    // The envelope uses structural guidance, but its payload is
+                    // the required-call JSON array rather than native Harmony calls.
+                    return Ok(GuidedToolConstraint::GuidedJsonRequired);
+                }
                 let gd = common_request
                     .sampling_options
                     .guided_decoding
@@ -203,7 +261,9 @@ impl OpenAIPreprocessor {
     }
 }
 
-fn has_explicit_guided_decoding(request: &NvCreateChatCompletionRequest) -> bool {
+/// Whether top-level `guided_*` fields install a grammar; mirrors
+/// `GuidedDecodingOptions::from_optional`.
+pub(super) fn has_explicit_guided_decoding(request: &NvCreateChatCompletionRequest) -> bool {
     request.common.guided_json.is_some()
         || request.common.guided_regex.is_some()
         || request
@@ -421,6 +481,167 @@ mod tests {
             .output_options(OutputOptions::default())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn gpt_oss_response_format_keeps_reasoning_without_tool_call_tags() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_response_format_keeps_reasoning_without_tool_call_tags"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for format in [
+            json!({"type":"json_object"}),
+            json!({"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"]}}}),
+        ] {
+            for (parser, mode, choice) in [
+                ("harmony", StructuralTagMode::Off, "auto"),
+                ("harmony", StructuralTagMode::On, "auto"),
+                ("gpt_oss", StructuralTagMode::Off, "none"),
+                ("qwen3", StructuralTagMode::On, "auto"),
+            ] {
+                let preprocessor = preprocessor(parser, mode);
+                let request = request(json!({"response_format":format,"tool_choice":choice}));
+                let mut common = preprocessed_request();
+                let schema = format
+                    .pointer("/json_schema/schema")
+                    .cloned()
+                    .unwrap_or(json!({"type":"object"}));
+                common
+                    .sampling_options
+                    .guided_decoding
+                    .get_or_insert_default()
+                    .json = Some(schema.clone());
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, false)
+                    .unwrap();
+                let guided = common.sampling_options.guided_decoding.unwrap();
+                if parser == "qwen3" {
+                    assert_eq!(constraint, GuidedToolConstraint::None);
+                    assert_eq!(guided.json, Some(schema));
+                    assert!(guided.structural_tag.is_none());
+                } else {
+                    assert_eq!(constraint, GuidedToolConstraint::StructuralTag);
+                    assert!(guided.json.is_none());
+                    let tag = guided.structural_tag.unwrap();
+                    let encoded = tag.to_string();
+                    assert!(encoded.contains("analysis"));
+                    assert!(encoded.contains("final"));
+                    assert!(encoded.contains(&serde_json::to_string(&schema).unwrap()));
+                }
+            }
+        }
+        let mut preprocessor = preprocessor("harmony", StructuralTagMode::Off);
+        let inner = Arc::get_mut(&mut preprocessor).unwrap();
+        inner.tool_call_parser = None;
+        inner.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        let mut common = preprocessed_request();
+        assert_eq!(
+            preprocessor
+                .apply_tool_choice_guided_decoding(
+                    &request(json!({"response_format":{"type":"json_object"}})),
+                    &mut common,
+                    false,
+                )
+                .unwrap(),
+            GuidedToolConstraint::StructuralTag
+        );
+    }
+
+    #[test]
+    fn gpt_oss_v2_rejects_unsupported_reasoning_effort() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_v2_rejects_unsupported_reasoning_effort"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        let preprocessor = preprocessor("harmony", StructuralTagMode::Off);
+        for effort in ["none", "low", "medium", "high"] {
+            let mut request = request(json!({"reasoning_effort": effort}));
+            request.normalize_reasoning_template_args().unwrap();
+            let result = preprocessor.builder(&request);
+            if effort == "none" {
+                let error = result.err().expect("unsupported effort must be rejected");
+                let error = error.downcast_ref::<DynamoError>().unwrap();
+                assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+                assert!(error.to_string().contains("GPT-OSS does not support"));
+            } else {
+                assert!(result.is_ok(), "{effort}: {:?}", result.err());
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_oss_required_guidance_matches_the_selected_format() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_required_guidance_matches_the_selected_format"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for (parser, mode, parallel) in [
+            ("harmony", StructuralTagMode::Off, true),
+            ("harmony", StructuralTagMode::Off, false),
+            ("harmony", StructuralTagMode::On, true),
+            ("gpt_oss", StructuralTagMode::On, true),
+            ("harmony", StructuralTagMode::On, false),
+        ] {
+            let preprocessor = preprocessor(parser, mode);
+            let request = request(
+                json!({"tools":tools(),"tool_choice":"required","parallel_tool_calls":parallel}),
+            );
+            let mut common = preprocessed_request();
+            let constraint = preprocessor
+                .apply_tool_choice_guided_decoding(&request, &mut common, false)
+                .unwrap();
+            let guided = common.sampling_options.guided_decoding.unwrap();
+            if mode == StructuralTagMode::On {
+                assert_eq!(
+                    constraint,
+                    if parallel {
+                        GuidedToolConstraint::GuidedJsonRequired
+                    } else {
+                        GuidedToolConstraint::StructuralTag
+                    }
+                );
+                assert!(guided.structural_tag.is_some());
+                assert!(guided.json.is_none());
+                if parallel {
+                    let encoded = guided.structural_tag.unwrap().to_string();
+                    assert!(encoded.contains("analysis"));
+                    assert!(encoded.contains("final"));
+                    assert!(encoded.contains("parameters"));
+                    assert_eq!(
+                        guided_tool_constraint(&request, Some(parser), None, false,).unwrap(),
+                        constraint
+                    );
+                }
+            } else {
+                assert_eq!(constraint, GuidedToolConstraint::GuidedJsonRequired);
+                assert!(guided.json.is_some() || guided.regex.is_some());
+                assert!(guided.structural_tag.is_none());
+            }
+        }
     }
 
     #[test]
