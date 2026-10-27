@@ -177,13 +177,10 @@ class ImageLoader:
         self._shared_image_cache = SharedImageCache.from_env()
         self._enable_frontend_decoding = enable_frontend_decoding
         self._url_policy = url_policy or UrlValidationPolicy.from_env()
-        # Lazy-init NIXL connector only when frontend decoding is enabled
         self._nixl_connector = None
         if self._enable_frontend_decoding:
             self._nixl_connector = _create_nixl_connector()
-            run_async(
-                self._nixl_connector.initialize
-            )  # Synchronously wait for async init
+            run_async(self._nixl_connector.warmup)
 
     def _max_bytes(self) -> int:
         if self._configured_max_bytes is not None:
@@ -226,9 +223,9 @@ class ImageLoader:
     @staticmethod
     def _open_image_sync(image_data: BytesIO) -> Image.Image:
         """Open, validate, and decode an image from raw bytes. Runs in a thread."""
+        # formats= is the allowlist. Its JPEG plugin also opens multi-picture JPEGs
+        # (most phone cameras), which report image.format == "MPO".
         image = Image.open(image_data, formats=["JPEG", "PNG", "WEBP"])
-        if image.format not in ("JPEG", "PNG", "WEBP"):
-            raise ValueError(f"Unsupported image format: {image.format}")
         # Image.open() is lazy — convert() forces the actual pixel decode
         return image.convert("RGB")
 
@@ -308,7 +305,7 @@ class ImageLoader:
             )
             raise HttpStatusError(
                 408,
-                f"Timeout loading image: '{image_url}' "
+                f"Timeout loading image: '{describe_media_source(image_url)}' "
                 f"(timeout={self._http_timeout}s)",
                 image_url,
             ) from e
@@ -322,7 +319,8 @@ class ImageLoader:
             )
             raise HttpStatusError(
                 400,
-                f"Connection error loading image: '{image_url}': {e}",
+                "Connection error loading image: "
+                f"'{describe_media_source(image_url)}': {e}",
                 image_url,
             ) from e
         except HttpError as e:
@@ -348,18 +346,14 @@ class ImageLoader:
             )
             raise
         except ValueError as e:
-            if "Unsupported image format" in str(e):
-                logger.error(
-                    "Unsupported image format loading: '%s'",
-                    describe_media_source(image_url),
-                )
-                raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
             logger.error(
                 "%s loading image: '%s'",
                 type(e).__name__,
                 describe_media_source(image_url),
             )
-            raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
+            raise ValueError(
+                f"Failed to load image: '{describe_media_source(image_url)}': {e}"
+            ) from e
         except Exception as e:
             logger.error(
                 "%s loading image: '%s'",
@@ -447,14 +441,6 @@ class ImageLoader:
             except UrlValidationError as e:
                 raise ValueError(f"Failed to decode image: {e}") from e
             except ValueError as e:
-                if "Unsupported image format" in str(e):
-                    logger.error(
-                        "Unsupported image format decoding: '%s'",
-                        describe_media_source(image_url),
-                    )
-                    raise HttpStatusError(
-                        415, "Unsupported Media Type", image_url
-                    ) from e
                 source = describe_media_source(image_url)
                 logger.error("%s decoding image: '%s': %s", type(e).__name__, source, e)
                 raise ValueError(f"Failed to decoding image: '{source}': {e}") from e

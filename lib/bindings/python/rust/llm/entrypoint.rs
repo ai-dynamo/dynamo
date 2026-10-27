@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::future::Future;
 use std::path::PathBuf;
@@ -20,6 +21,7 @@ use dynamo_kv_router::config::{
     KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
     apply_deprecated_overlap_score_weight_override,
 };
+use dynamo_llm::admission_gate::WorkerAdmissionGate;
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
@@ -251,6 +253,49 @@ impl KvRouterConfig {
         self.clone()
     }
 
+    /// Serialize this configuration as JSON that `from_json` accepts.
+    ///
+    /// The serialization is lossy: the process-local fields `router_approximate_cache_policy`,
+    /// `router_prefill_policy`, `router_decode_policy` and the replay model selector are not
+    /// serialized, so `from_json` restores their defaults. Re-serializing the parsed result
+    /// yields the same JSON.
+    fn to_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner).map_err(|e| {
+            PyValueError::new_err(format!("Failed to serialize KvRouterConfig JSON: {e}"))
+        })
+    }
+
+    /// Resolved default-policy parameters a router built from this configuration starts with
+    /// for `worker_type` (`"aggregated"`, `"prefill"` or `"decode"`).
+    ///
+    /// The keys are the `PATCH /router_policy` parameter names. Plain decode workers (decode
+    /// without conditional disaggregation) report zero cache credits. Raises `ValueError` when
+    /// the configuration (or `DYN_ROUTER_WORKER_SELECTION_POLICY`) selects a worker-selection
+    /// policy instance for `worker_type`: its own parameters are not resolved here.
+    fn policy_parameters(&self, worker_type: &str) -> PyResult<BTreeMap<String, f64>> {
+        let role = dynamo_mocker::replay::parse_router_worker_type(worker_type)
+            .map_err(|e| PyValueError::new_err(format!("worker_type: {e}")))?;
+        let selected = self
+            .inner
+            .selected_worker_selection_policy_instance_for(role)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if let Some(instance) = selected {
+            return Err(PyValueError::new_err(format!(
+                "policy_parameters covers the builtin default policy only; this configuration \
+                 selects worker-selection policy instance {instance:?} for {worker_type}"
+            )));
+        }
+        dynamo_custom_policy_builtin::startup_policy_parameters(&self.inner, role)
+            .into_iter()
+            .map(|(name, value)| match value.as_f64() {
+                Some(value) => Ok((name, value)),
+                None => Err(PyValueError::new_err(format!(
+                    "policy parameter {name} is not a number: {value}"
+                ))),
+            })
+            .collect()
+    }
+
     #[getter]
     fn overlap_score_credit(&self) -> f64 {
         self.inner.overlap_score_credit
@@ -469,6 +514,7 @@ pub(crate) struct EntrypointArgs {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    batch_gateway_url: Option<String>,
     metrics_config: Option<MetricsConfig>,
     frontend_api_config: Option<FrontendApiConfig>,
     tls_cert_path: Option<PathBuf>,
@@ -491,7 +537,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -526,6 +572,7 @@ impl EntrypointArgs {
         reasoning_field_name: Option<String>,
         tokenizer_backend: Option<String>,
         tokenizer_fallback: Option<bool>,
+        batch_gateway_url: Option<String>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -596,6 +643,7 @@ impl EntrypointArgs {
             http_host,
             http_port: http_port.unwrap_or(DEFAULT_HTTP_PORT),
             http_metrics_port,
+            batch_gateway_url,
             metrics_config: metrics_prefix.map(|prefix| MetricsConfig::new(Some(prefix))),
             frontend_api_config: FrontendApiConfig::from_optional_flags(
                 enable_anthropic_api,
@@ -655,6 +703,7 @@ pub fn make_engine<'p>(
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
         .http_metrics_port(args.http_metrics_port);
+    builder.batch_gateway_url(args.batch_gateway_url.clone());
     if let Some(metrics_config) = args.metrics_config.clone() {
         builder.metrics_config(metrics_config);
     }
@@ -815,14 +864,22 @@ async fn select_engine(
 
             let endpoint = local_model.endpoint_id().clone();
 
-            let engine =
-                make_mocker_engine(distributed_runtime.inner, endpoint, mocker_args).await?;
+            let engine = make_mocker_engine(
+                distributed_runtime.inner,
+                endpoint,
+                mocker_args,
+                local_model.display_name().to_string(),
+            )
+            .await?;
 
+            // This config is the mocker worker: every endpoint serving it, or a
+            // clone of it, admits through this one gate.
             RsEngineConfig::InProcessTokens {
                 engine,
                 model: Box::new(local_model),
                 is_prefill: args.is_prefill,
                 is_decode: args.is_decode,
+                admission_gate: WorkerAdmissionGate::default(),
             }
         }
     };

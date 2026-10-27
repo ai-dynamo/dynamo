@@ -373,3 +373,89 @@ def test_default_thinking_mode_rejects_invalid_value(monkeypatch):
 
     with pytest.raises(SystemExit):
         _parse_runtime_args(["--dyn-default-thinking-mode", "adaptive"])
+
+
+_CANONICAL_LIMIT_ENV = "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT"
+_LEGACY_LIMIT_ENV = "DYN_ENGINE_REQUEST_LIMIT"
+# Every variable the backend admission gate reads.
+_ADMISSION_ENV = (
+    _CANONICAL_LIMIT_ENV,
+    _LEGACY_LIMIT_ENV,
+    "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT",
+    "DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT",
+    "DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT",
+    "DYN_DYNAMO_REQUEST_QUEUE_LIMIT",
+)
+
+
+@pytest.fixture
+def admission_env(monkeypatch):
+    """Clear the gate's variables, so nothing ambient decides the outcome and
+    whatever validate() writes is restored afterwards."""
+    for name in (*_ADMISSION_ENV, "DYN_RESPONSE_PLANE"):
+        monkeypatch.delenv(name, raising=False)
+    return monkeypatch
+
+
+def _admission_environment(**expected: str) -> dict[str, str | None]:
+    """The gate's variables as they are, or as `expected` says they should be,
+    with every unnamed variable unset."""
+    if expected:
+        return {name: expected.get(name) for name in _ADMISSION_ENV}
+    return {name: os.environ.get(name) for name in _ADMISSION_ENV}
+
+
+def test_engine_request_limit_is_left_to_the_gate_by_default(admission_env):
+    config, _ = _parse_runtime_args([])
+
+    assert config.engine_request_limit is None
+    assert _admission_environment() == dict.fromkeys(_ADMISSION_ENV)
+
+
+def test_engine_request_limit_flag_outranks_both_environment_names(admission_env):
+    """validate() exports the flag under the name the gate reads first, as the
+    full-request limit only."""
+    admission_env.setenv(_CANONICAL_LIMIT_ENV, "5")
+    admission_env.setenv(_LEGACY_LIMIT_ENV, "3")
+
+    config, help_text = _parse_runtime_args(["--engine-request-limit", "7"])
+
+    assert config.engine_request_limit == 7
+    assert _admission_environment() == _admission_environment(
+        **{_CANONICAL_LIMIT_ENV: "7", _LEGACY_LIMIT_ENV: "3"}
+    )
+    # Help text wraps with the terminal width.
+    help_text = " ".join(help_text.split())
+    assert _CANONICAL_LIMIT_ENV in help_text
+    assert _LEGACY_LIMIT_ENV in help_text
+    assert "per DP rank" in help_text
+    assert "max_num_seqs" in help_text
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {_CANONICAL_LIMIT_ENV: "5"},
+        {_LEGACY_LIMIT_ENV: "3"},
+        # An invalid alias shadowed by a valid canonical value is never read.
+        {_CANONICAL_LIMIT_ENV: "5", _LEGACY_LIMIT_ENV: "invalid"},
+        # The waiting limit's former name is the gate's to resolve, too.
+        {"DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT": "4"},
+    ],
+)
+def test_environment_settings_are_resolved_by_the_gate(admission_env, environment):
+    for name, value in environment.items():
+        admission_env.setenv(name, value)
+
+    config, _ = _parse_runtime_args([])
+
+    assert config.engine_request_limit is None
+    assert _admission_environment() == _admission_environment(**environment)
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_engine_request_limit_rejects_non_positive_values(admission_env, value):
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        _parse_runtime_args(["--engine-request-limit", value])
+
+    assert _admission_environment() == dict.fromkeys(_ADMISSION_ENV)

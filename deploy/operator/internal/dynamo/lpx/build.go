@@ -7,23 +7,15 @@ package lpx
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 )
-
-// BuildCompilationMode records the compiler-authored execution mode in a normalized build.
-type BuildCompilationMode string
 
 // BuildFamily identifies the physical LPU target family of a normalized build.
 type BuildFamily string
 
 const (
-	// BuildCompilationModeUnknown represents a build whose compilation mode is not known.
-	BuildCompilationModeUnknown BuildCompilationMode = ""
-	// BuildCompilationModeLPUOnly represents a build executed entirely on LPUs.
-	BuildCompilationModeLPUOnly BuildCompilationMode = "lpuOnly"
-	// BuildCompilationModeHybrid retains the model manifest's historical "lpx" value.
-	BuildCompilationModeHybrid BuildCompilationMode = "lpx"
 	// BuildFamilyXT identifies the XT8888 LPU target family.
 	BuildFamilyXT BuildFamily = "xt8888"
 	// BuildFamilyHX identifies the HX16x8x2x3 LPU target family.
@@ -32,65 +24,83 @@ const (
 
 // Build is the registry's source-independent view of an LPU build.
 //
-// The version 2 Cap'n Proto manifest populates this shape before deployment code
+// The validated compiler contract populates this shape before deployment code
 // derives placement and replica counts.
 type Build struct {
-	// Path is the absolute file or GCS reference of the build payload.
-	Path string
-	// Family is the physical LPU target family.
-	Family BuildFamily
-	// CompilationMode selects the compiler-authored LPU-only or hybrid artifact mode.
-	CompilationMode BuildCompilationMode
-	// Partitions contains the normalized physical compiler partitions.
-	Partitions []BuildPartition
-	// SelectedPropSyncChains contains source partition IDs grouped into selected prop-sync chains.
-	SelectedPropSyncChains [][]int
-	// StandaloneTokenEmbeddings reports whether token embeddings occupy a standalone partition.
-	StandaloneTokenEmbeddings bool
-	// SupportsCPUEmbeddings reports whether standalone token embeddings may run on the CPU.
-	SupportsCPUEmbeddings bool
-	// IOFPGACount is the number of I/O FPGA endpoints described by the build.
-	IOFPGACount int32
-	// IOFanoutFactor is the number of clients assigned to each I/O FPGA transaction.
-	IOFanoutFactor int32
+	// contentID identifies the exact compiler contract used to acquire this build.
+	contentID      string
+	contractFormat buildContractFormat
+	// path is the absolute file or GCS reference of the build payload.
+	path string
+	// family is the physical LPU target family.
+	family BuildFamily
+	// hasCUDAPartitions retains GPU requirements excluded from the LPU partition projection.
+	hasCUDAPartitions bool
+	// partitions contains the normalized physical compiler partitions.
+	partitions []buildPartition
+	// selectedPropSyncChains contains source partition IDs grouped into selected prop-sync chains.
+	selectedPropSyncChains [][]int
+	// standaloneTokenEmbeddings reports whether token embeddings occupy a standalone partition.
+	standaloneTokenEmbeddings bool
+	// supportsCPUEmbeddings reports whether standalone token embeddings may run on the CPU.
+	supportsCPUEmbeddings bool
+	// ioFPGACount is the number of I/O FPGA endpoints described by the build.
+	ioFPGACount int32
+	// ioFanoutFactor is the number of clients assigned to each I/O FPGA transaction.
+	ioFanoutFactor int32
+	// checkpoint is the validated source checkpoint that the deployment contract records, or nil.
+	checkpoint *Checkpoint
+	// checkpointErr rejects the recorded checkpoint. It fails only a workload
+	// that would project the checkpoint, so other workloads keep the build.
+	checkpointErr error
 }
 
-// BuildPartition describes one normalized physical compiler partition.
-type BuildPartition struct {
-	// SourcePartitionID is the compiler partition id used in artifacts and
+// buildPartition describes one normalized physical compiler partition.
+type buildPartition struct {
+	// sourcePartitionID is the compiler partition id used in artifacts and
 	// selected prop-sync chains. It is not the slice index after sorting/filtering.
-	SourcePartitionID int
-	// PartPath is the nonempty relative gas-dir fragment under the build payload.
-	PartPath string
-	// Topology is the scheduler-facing node shape for this partition.
-	Topology Topology
-	// DevicesPerNode is the number of chips per physical node in the compiler manifest.
-	DevicesPerNode int
-	// HXExtent is the scheduler-facing four-dimensional HX allocation.
-	HXExtent []int64
+	sourcePartitionID int
+	// partPath is the nonempty relative gas-dir fragment under the build payload.
+	partPath string
+	// numChips is the chip count declared by the compiler manifest.
+	numChips int
+	// topology identifies compatible subnode stages for PropSync packing.
+	topology string
+	// devicesPerNode is the number of chips per physical node in the compiler manifest.
+	devicesPerNode int
+	// hxExtent is the scheduler-facing four-dimensional HX allocation.
+	hxExtent []int64
 
 	// runtimeNodeCount sums physical endpoints for a collapsed hybrid chain;
-	// Topology retains the original root stage.
+	// numChips retains the original root stage.
 	runtimeNodeCount int
-}
-
-// Topology holds an opaque compiler name and a chip count.
-type Topology struct {
-	ChipCount int
-	Raw       string
 }
 
 // effectiveNodeCount returns the number of Agent endpoints assigned to the
 // partition. Source partitions derive it from topology; collapsed runtime
 // partitions preserve the sum of their physical scheduler endpoints.
-func (p BuildPartition) effectiveNodeCount() int {
+func (p buildPartition) effectiveNodeCount() int {
 	if p.runtimeNodeCount > 0 {
 		return p.runtimeNodeCount
 	}
-	return max(1, p.Topology.ChipCount/p.DevicesPerNode)
+	return max(1, p.numChips/p.devicesPerNode)
 }
 
-func buildRuntimePath(buildPath string, modelStoragePath string) (string, error) {
+// buildRuntimePath resolves a snapshot reference to its runtime filesystem path.
+// A safe relative runtimeRef remaps file-URL snapshots under modelStoragePath;
+// otherwise the snapshot reference remains authoritative.
+func buildRuntimePath(buildPath, runtimeRef, modelStoragePath string) (string, error) {
+	snapshotURL, snapshotErr := url.Parse(buildPath)
+	runtimeRef = strings.TrimSpace(runtimeRef)
+	runtimeURL, runtimeErr := url.Parse(runtimeRef)
+	if snapshotErr == nil && runtimeErr == nil && snapshotURL.Scheme == BuildSchemeFile &&
+		runtimeRef != "" && runtimeURL.Scheme == "" && !filepath.IsAbs(runtimeRef) {
+		cleaned := filepath.Clean(runtimeRef)
+		if cleaned != "." && cleaned != ".." && !strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+			buildPath = (&url.URL{Scheme: BuildSchemeFile, Path: filepath.Join(modelStoragePath, cleaned)}).String()
+		}
+	}
+
 	buildURL, err := parseBuildRef(buildPath)
 	if err != nil {
 		return "", fmt.Errorf("parse build path %q: %w", buildPath, err)

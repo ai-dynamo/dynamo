@@ -12,6 +12,7 @@
 --no-binary imageio-ffmpeg
 
 aiohttp>=3.14.3,<4.0
+certifi==2026.10.23
 grpcio-tools<=1.76.0  # May have platform-specific builds; pins grpcio ecosystem version
 httpx==0.28.1
 
@@ -27,8 +28,10 @@ nvtx==0.2.14
 opentelemetry-api<=1.38.0  # Pinned for tracing support
 opentelemetry-exporter-otlp<=1.38.0
 opentelemetry-sdk<=1.38.0
-# Transitive via imageio/matplotlib; floor keeps images on the current patch line.
-pillow>=12.3.0
+# Transitive via imageio/matplotlib; floor keeps images on the current release line.
+# aiperf caps pillow below this floor; overrides.{frontend,planner}.txt lift the cap.
+pillow>=13.0.0,<14
+pip==26.2.2
 prometheus_client==0.23.1
 protobuf==6.33.6
 pydantic>=2.11.4,<=2.13.5

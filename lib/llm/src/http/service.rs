@@ -19,8 +19,11 @@
 //! The [`service_v2::HttpService`] can be further extended to host any [`axum::Router`] using the [`service_v2::HttpServiceConfigBuilder`].
 
 mod anthropic;
+mod batch_proxy;
 pub mod metadata;
 mod openai;
+mod server;
+mod write_timeout;
 
 pub mod busy_threshold;
 pub mod disconnect;
@@ -31,8 +34,10 @@ pub mod health;
 pub mod metrics;
 pub mod openapi_docs;
 pub mod realtime;
+pub mod router_policy;
 pub mod service_v2;
 pub mod sglang_generate;
+mod worker_metrics;
 
 pub use axum;
 pub use frontend_extension::{
@@ -85,7 +90,10 @@ fn apply_request_tool_call_parsing_options(
         .as_ref()
         .is_some_and(|format| !matches!(format, dynamo_protocols::types::ResponseFormat::Text));
     let uses_structural_tag = crate::preprocessor::structural_tag::structural_tag_decision(
-        parsing_options.tool_call_parser.as_deref(),
+        (
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        ),
         &converted_tool_choice,
         &converted_tools,
         request.inner.parallel_tool_calls,
@@ -431,6 +439,105 @@ mod tests {
         );
     }
 
+    #[test]
+    fn harmony_v1_ignores_advertised_structural_tags_when_reconstructing_tool_constraints() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::harmony_v1_ignores_advertised_structural_tags_when_reconstructing_tool_constraints"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "1",
+            )],
+        ) {
+            return;
+        }
+        for parser in ["harmony", "gpt_oss"] {
+            for (choice, expected) in [
+                (json!("auto"), GuidedToolConstraint::None),
+                (json!("none"), GuidedToolConstraint::None),
+                (json!("required"), GuidedToolConstraint::GuidedJsonRequired),
+                (
+                    json!({"type":"function","function":{"name":"get_weather"}}),
+                    GuidedToolConstraint::GuidedJsonNamed {
+                        tool_name: "get_weather".to_string(),
+                    },
+                ),
+            ] {
+                let options = ParsingOptions {
+                    tool_call_parser: Some(parser.to_string()),
+                    structural_tag: Some(Default::default()),
+                    ..Default::default()
+                };
+                let result =
+                    apply_request_tool_call_parsing_options(options, &request(choice)).unwrap();
+                assert_eq!(result.guided_tool_constraint, expected, "{parser}");
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_oss_v2_reconstructs_required_parallel_arrays_separately_from_native_calls() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_v2_reconstructs_required_parallel_arrays_separately_from_native_calls"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for parser in ["harmony", "gpt_oss"] {
+            for (choice, parallel, expected) in [
+                (
+                    json!("required"),
+                    None,
+                    GuidedToolConstraint::GuidedJsonRequired,
+                ),
+                (
+                    json!("required"),
+                    Some(true),
+                    GuidedToolConstraint::GuidedJsonRequired,
+                ),
+                (
+                    json!("required"),
+                    Some(false),
+                    GuidedToolConstraint::StructuralTag,
+                ),
+                (
+                    json!("auto"),
+                    Some(true),
+                    GuidedToolConstraint::StructuralTag,
+                ),
+                (
+                    json!({"type":"function","function":{"name":"get_weather"}}),
+                    None,
+                    GuidedToolConstraint::StructuralTag,
+                ),
+            ] {
+                let options = ParsingOptions {
+                    tool_call_parser: Some(parser.to_string()),
+                    structural_tag: Some(crate::local_model::runtime_config::StructuralTagConfig {
+                        scope: crate::local_model::runtime_config::StructuralTagScope::Always,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let mut request = request(choice);
+                request.inner.parallel_tool_calls = parallel;
+                let result = apply_request_tool_call_parsing_options(options, &request).unwrap();
+                assert_eq!(
+                    result.guided_tool_constraint, expected,
+                    "{parser} {parallel:?}"
+                );
+            }
+        }
+    }
+
     // The low-level ParsingOptions default remains conservative. Regular
     // workers explicitly publish the deployment-facing On/Always policy;
     // native sidecars without an operator configuration retain optional tags OFF.
@@ -756,11 +863,21 @@ mod tests {
     }
 }
 
-/// Documentation for a route
+/// Handler contract advertised by a route, independent of its configured URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OpenApiRouteKind {
+    ChatCompletions,
+    Completions,
+    Embeddings,
+    Responses,
+}
+
+/// Documentation for a route, with optional handler-specific schema metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RouteDoc {
     method: axum::http::Method,
     path: String,
+    openapi_kind: Option<OpenApiRouteKind>,
 }
 
 impl std::fmt::Display for RouteDoc {
@@ -770,17 +887,33 @@ impl std::fmt::Display for RouteDoc {
 }
 
 impl RouteDoc {
+    /// Describe a method/path without inferring a handler contract from its URL.
     pub fn new<T: Into<String>>(method: axum::http::Method, path: T) -> Self {
         RouteDoc {
             method,
             path: path.into(),
+            openapi_kind: None,
         }
     }
 
+    /// Associate this route with its handler contract, including at custom paths.
+    /// Only POST operations currently consume this metadata.
+    pub fn with_openapi_kind(mut self, kind: OpenApiRouteKind) -> Self {
+        self.openapi_kind = Some(kind);
+        self
+    }
+
+    /// Return the handler contract, if the registering router supplied one.
+    pub fn openapi_kind(&self) -> Option<OpenApiRouteKind> {
+        self.openapi_kind
+    }
+
+    /// Return the registered HTTP method.
     pub fn method(&self) -> &axum::http::Method {
         &self.method
     }
 
+    /// Return the registered URL path, including any operator override.
     pub fn path(&self) -> &str {
         &self.path
     }

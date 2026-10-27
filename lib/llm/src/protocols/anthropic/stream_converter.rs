@@ -16,7 +16,7 @@ use uuid::Uuid;
 use super::types::{
     AnthropicDelta, AnthropicErrorBody, AnthropicMessageDeltaBody, AnthropicMessageResponse,
     AnthropicResponseContentBlock, AnthropicStopReason, AnthropicStreamEvent, AnthropicUsage,
-    completion_usage_to_anthropic, new_tool_use_id,
+    anthropic_stop_fields, completion_usage_to_anthropic, new_tool_use_id,
 };
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use crate::protocols::unified::AnthropicContext;
@@ -54,6 +54,8 @@ pub struct AnthropicStreamConverter {
     next_block_index: u32,
     // Stop reason
     stop_reason: Option<AnthropicStopReason>,
+    stop_sequence: Option<String>,
+    backend_stop_reason: Option<serde_json::Value>,
 }
 
 /// Text that arrived after `after_calls` tool calls had started.
@@ -113,6 +115,8 @@ impl AnthropicStreamConverter {
             tool_flush_requested: false,
             next_block_index: 0,
             stop_reason: None,
+            stop_sequence: None,
+            backend_stop_reason: None,
         }
     }
 
@@ -221,24 +225,21 @@ impl AnthropicStreamConverter {
         let last_call = self.tool_call_states.len().checked_sub(1);
 
         let mut has_emitted = self.tool_call_states.iter().any(|call| call.has_emitted);
-        let call_limit = if self
+        let single_tool = self
             .api_context
             .as_ref()
-            .is_some_and(|ctx| ctx.disable_parallel_tool_use)
-        {
-            usize::from(!has_emitted)
-        } else {
-            usize::MAX
-        };
+            .is_some_and(|ctx| ctx.disable_parallel_tool_use);
 
         for (call_index, tool_call) in self
             .tool_call_states
             .iter_mut()
             .enumerate()
             .filter(|(_, tool_call)| tool_call.is_emit_ready())
-            .take(call_limit)
             .filter(|(_, tool_call)| !tool_call.has_emitted && (is_final || tool_call.needs_flush))
         {
+            if single_tool && has_emitted {
+                break;
+            }
             let raw: String = tool_call
                 .argument_fragments
                 .iter()
@@ -249,7 +250,15 @@ impl AnthropicStreamConverter {
             // the block and discard the fragments that follow, so leave it pending and
             // let the final drain decide.
             if !is_final && raw.is_empty() {
+                if single_tool {
+                    break;
+                }
                 continue;
+            }
+            let parsed = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw);
+            // Keep an earlier incomplete call pending; it may still become valid.
+            if single_tool && !is_final && parsed.as_ref().is_err_and(|error| error.is_eof()) {
+                break;
             }
             tool_call.needs_flush = false;
             let arguments_are_valid = if raw.is_empty() {
@@ -258,7 +267,7 @@ impl AnthropicStreamConverter {
                 // the name. Keep the terminal rule aligned with the unary converter.
                 !(truncated && Some(call_index) == last_call)
             } else {
-                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw).is_ok()
+                parsed.is_ok()
             };
             let repair =
                 is_final && truncated && Some(call_index) == last_call && !arguments_are_valid;
@@ -372,6 +381,14 @@ impl AnthropicStreamConverter {
         self.usage = completion_usage_to_anthropic(usage);
         self.usage.output_tokens = self.usage.output_tokens.max(running);
         self.saw_backend_usage = true;
+    }
+
+    /// Keep the latest backend stop metadata across chunks. A tool parser can
+    /// release it on an earlier chunk than the finish reason.
+    fn record_backend_stop_reason(&mut self, chunk: &NvCreateChatCompletionStreamResponse) {
+        if let Some(stop_reason) = chunk.nvext.as_ref().and_then(|ext| ext.get("stop_reason")) {
+            self.backend_stop_reason = Some(stop_reason.clone());
+        }
     }
 
     /// Serialize an event to SSE, stamping the current cumulative `usage` onto
@@ -492,6 +509,7 @@ impl AnthropicStreamConverter {
         // not the final count at flush time. `self.usage` is stable for the rest
         // of this call (record_usage / the fallback above already ran).
         let usage_snapshot = self.usage.clone();
+        self.record_backend_stop_reason(chunk);
 
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
@@ -503,19 +521,10 @@ impl AnthropicStreamConverter {
                     dynamo_protocols::types::FinishReason::ToolCalls
                         | dynamo_protocols::types::FinishReason::FunctionCall
                 );
-                self.stop_reason = Some(match fr {
-                    dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
-                    dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
-                    dynamo_protocols::types::FinishReason::ToolCalls => {
-                        AnthropicStopReason::ToolUse
-                    }
-                    dynamo_protocols::types::FinishReason::ContentFilter => {
-                        AnthropicStopReason::Refusal
-                    }
-                    dynamo_protocols::types::FinishReason::FunctionCall => {
-                        AnthropicStopReason::ToolUse
-                    }
-                });
+                let (stop_reason, stop_sequence) =
+                    anthropic_stop_fields(fr, self.backend_stop_reason.as_ref());
+                self.stop_reason = Some(stop_reason);
+                self.stop_sequence = stop_sequence;
             }
 
             // Handle reasoning/thinking content deltas
@@ -699,7 +708,7 @@ impl AnthropicStreamConverter {
         let message_delta = AnthropicStreamEvent::MessageDelta {
             delta: AnthropicMessageDeltaBody {
                 stop_reason: self.stop_reason.clone(),
-                stop_sequence: None,
+                stop_sequence: self.stop_sequence.clone(),
             },
             usage: self.usage.clone(),
         };
@@ -863,6 +872,7 @@ impl AnthropicStreamConverter {
         }
 
         let usage_snapshot = self.usage.clone();
+        self.record_backend_stop_reason(chunk);
 
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
@@ -873,19 +883,10 @@ impl AnthropicStreamConverter {
                     dynamo_protocols::types::FinishReason::ToolCalls
                         | dynamo_protocols::types::FinishReason::FunctionCall
                 );
-                self.stop_reason = Some(match fr {
-                    dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
-                    dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
-                    dynamo_protocols::types::FinishReason::ToolCalls => {
-                        AnthropicStopReason::ToolUse
-                    }
-                    dynamo_protocols::types::FinishReason::ContentFilter => {
-                        AnthropicStopReason::Refusal
-                    }
-                    dynamo_protocols::types::FinishReason::FunctionCall => {
-                        AnthropicStopReason::ToolUse
-                    }
-                });
+                let (stop_reason, stop_sequence) =
+                    anthropic_stop_fields(fr, self.backend_stop_reason.as_ref());
+                self.stop_reason = Some(stop_reason);
+                self.stop_sequence = stop_sequence;
             }
 
             // Handle reasoning/thinking content deltas
@@ -1047,7 +1048,7 @@ impl AnthropicStreamConverter {
         let ev = AnthropicStreamEvent::MessageDelta {
             delta: AnthropicMessageDeltaBody {
                 stop_reason: self.stop_reason.clone(),
-                stop_sequence: None,
+                stop_sequence: self.stop_sequence.clone(),
             },
             usage: self.usage.clone(),
         };
@@ -1184,6 +1185,153 @@ mod tests {
             .collect()
     }
 
+    #[tokio::test]
+    async fn test_stream_stop_sequence_metadata() {
+        for (finish, matched, expected_reason, expected_sequence) in [
+            (
+                FinishReason::Stop,
+                serde_json::json!("</answer>"),
+                "stop_sequence",
+                Some("</answer>"),
+            ),
+            (
+                FinishReason::Stop,
+                serde_json::json!("\n\nHuman:"),
+                "stop_sequence",
+                Some("\n\nHuman:"),
+            ),
+            (FinishReason::Stop, serde_json::json!(42), "end_turn", None),
+            (
+                FinishReason::Length,
+                serde_json::json!("</answer>"),
+                "max_tokens",
+                None,
+            ),
+            (
+                FinishReason::ContentFilter,
+                serde_json::json!("</answer>"),
+                "refusal",
+                None,
+            ),
+            (
+                FinishReason::ToolCalls,
+                serde_json::json!("</answer>"),
+                "tool_use",
+                None,
+            ),
+            (
+                FinishReason::FunctionCall,
+                serde_json::json!("</answer>"),
+                "tool_use",
+                None,
+            ),
+        ] {
+            let mut converter = AnthropicStreamConverter::new("test-model".into(), 0);
+            let mut events = converter.emit_start_events();
+            let content = if expected_reason == "tool_use" {
+                tool_call_chunk(0, Some("call-1"), Some("calculate"), Some("{}"))
+            } else {
+                text_chunk("<answer>2 plus 3 is 5")
+            };
+            converter.append_chunk_events(&content, &mut events);
+            let mut terminal = finish_chunk(finish);
+            terminal.nvext = Some(serde_json::json!({"stop_reason": matched}));
+            converter.append_chunk_events(&terminal, &mut events);
+            converter.append_end_events(&mut events);
+            let values = sse_values(events).await;
+            let terminal = values
+                .iter()
+                .find(|event| event["type"] == "message_delta")
+                .unwrap();
+            assert_eq!(
+                terminal["delta"]["stop_reason"], expected_reason,
+                "{finish:?}: {matched}"
+            );
+            assert_eq!(
+                terminal["delta"]["stop_sequence"],
+                serde_json::json!(expected_sequence),
+                "{finish:?}: {matched}"
+            );
+            assert_eq!(
+                values
+                    .iter()
+                    .filter(|event| event["type"] == "message_delta")
+                    .count(),
+                1
+            );
+            assert_eq!(values.last().unwrap()["type"], "message_stop");
+        }
+    }
+
+    /// A tool parser can hold a possible call opener past the chunk that
+    /// carries the matched stop, then release it with the finish reason.
+    #[tokio::test]
+    async fn test_stream_stop_sequence_survives_tool_parser_split() {
+        use crate::model_card::ModelDeploymentCard;
+        use crate::preprocessor::OpenAIPreprocessor;
+        use dynamo_runtime::protocols::annotated::Annotated;
+        use futures::StreamExt;
+
+        let request: crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true,
+                "tools": [{"type": "function", "function": {"name": "calculate"}}]
+            }))
+            .unwrap();
+        for parser in ["hermes", "glm47"] {
+            for text in ["hello<", "hello<tool"] {
+                let mut card = ModelDeploymentCard::load_from_disk(
+                    "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                    None,
+                )
+                .unwrap();
+                card.runtime_config.tool_call_parser = Some(parser.to_string());
+                let mut terminal = text_chunk(text);
+                terminal.inner.choices[0].finish_reason = Some(FinishReason::Stop);
+                terminal.nvext = Some(serde_json::json!({"stop_reason": "</answer>"}));
+                let parsed: Vec<_> = OpenAIPreprocessor::new(card)
+                    .unwrap()
+                    .postprocessor_parsing_stream(
+                        futures::stream::iter([Annotated::from_data(terminal)]),
+                        &request,
+                        false,
+                        false,
+                    )
+                    .unwrap()
+                    .filter_map(|chunk| async move { chunk.data })
+                    .collect()
+                    .await;
+
+                let mut converter = AnthropicStreamConverter::new("test-model".into(), 0);
+                let mut events = converter.emit_start_events();
+                for chunk in &parsed {
+                    converter.append_chunk_events(chunk, &mut events);
+                }
+                converter.append_end_events(&mut events);
+                let values = sse_values(events).await;
+                let streamed: String = values
+                    .iter()
+                    .filter_map(|event| event["delta"]["text"].as_str())
+                    .collect();
+                assert_eq!(streamed, text, "{parser}");
+                let terminal = values
+                    .iter()
+                    .find(|event| event["type"] == "message_delta")
+                    .unwrap();
+                assert_eq!(
+                    terminal["delta"]["stop_reason"], "stop_sequence",
+                    "{parser}: {text}"
+                );
+                assert_eq!(
+                    terminal["delta"]["stop_sequence"], "</answer>",
+                    "{parser}: {text}"
+                );
+            }
+        }
+    }
+
     #[rstest::rstest]
     #[case(FinishReason::ToolCalls)]
     #[case(FinishReason::FunctionCall)]
@@ -1256,6 +1404,58 @@ mod tests {
         assert_eq!(values[0]["delta"]["stop_reason"], "tool_use");
         assert_eq!(values[0]["usage"]["output_tokens"], 9);
         assert_eq!(values[1]["type"], "message_stop");
+    }
+
+    #[test]
+    fn test_single_valid_tool_limit_survives_multiple_flushes() {
+        let mut conv = AnthropicStreamConverter::with_context(
+            "test-model".into(),
+            0,
+            AnthropicContext {
+                disable_parallel_tool_use: true,
+                ..Default::default()
+            },
+        );
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call_0"),
+            Some("invalid"),
+            Some("[]"),
+        ));
+        conv.process_chunk_tagged(&tool_call_chunk(
+            1,
+            Some("call_1"),
+            Some("valid"),
+            Some("{}"),
+        ));
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        let names: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.data {
+                AnthropicStreamEvent::ContentBlockStart {
+                    content_block: AnthropicResponseContentBlock::ToolUse { name, .. },
+                    ..
+                } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["valid"]);
+        let later = conv.process_chunk_tagged(&tool_call_chunk(
+            2,
+            Some("call_2"),
+            Some("later"),
+            Some("{}"),
+        ));
+        assert!(later.is_empty());
+        events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        assert!(events.is_empty());
+        events.extend(conv.emit_end_events_tagged());
+        assert!(
+            events.iter().all(|event| !matches!(
+                &event.data,
+                AnthropicStreamEvent::ContentBlockStart { .. }
+            ))
+        );
     }
 
     #[rstest::rstest]

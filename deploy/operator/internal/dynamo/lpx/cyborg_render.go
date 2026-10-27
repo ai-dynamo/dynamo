@@ -46,15 +46,14 @@ func configureHybridCyborg(
 		return err
 	}
 	applyLocalPartitionIDs(container, projection)
+	applyCyborgWeightsPath(container, projection, modelStoragePath)
 
 	cyborg.Annotations = roleAnnotations(
 		cyborg.Annotations,
 		lpxv1alpha1.PodRoleCyborgWorker,
 		workloadDigest,
 	)
-	if err := withLPUConfigVolume(&cyborg.Spec.PodSpec, cyborgConfigMap.Name, true); err != nil {
-		return err
-	}
+	ensureLPUConfigVolume(&cyborg.Spec.PodSpec, cyborgConfigMap.Name)
 	cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash] = cyborgConfigHash
 	cyborg.Spec.StartsAfter = slices.Clone(agentTemplateNames)
 	return nil

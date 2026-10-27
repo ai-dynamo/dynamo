@@ -107,7 +107,7 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 		if conductor := spec.ComponentRole(v1beta1.ComponentRoleLPXConductor); conductor != nil {
 			conductor.Replicas = nil
 		} else {
-			spec.Replicas = ptr.To(ptr.Deref(dcd.Spec.Replicas, 1))
+			spec.Replicas = new(ptr.Deref(dcd.Spec.Replicas, 1))
 		}
 	}
 
@@ -244,6 +244,7 @@ func workerTemplateProviderOverride(override *v1beta1.ProviderOverride) *v1beta1
 		return override
 	}
 	delete(value, "minAvailable")
+	delete(value, "rollingUpdate")
 	if raw, exists := value["spec"]; exists {
 		var spec map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &spec); err == nil && spec != nil {

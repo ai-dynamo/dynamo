@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 
+use super::hint::hint_capable_partition;
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
 use crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
@@ -128,6 +129,11 @@ impl SelectionCore {
     }
 
     fn prepare_worker(&self, record: &mut WorkerCatalogRecord) -> Result<(), SelectionError> {
+        if record.dp_start().checked_add(record.dp_size()).is_none() {
+            return Err(SelectionError::BadRequest(
+                "data parallel rank range overflows u32".to_string(),
+            ));
+        }
         // Reject before any per-rank work so an oversized range cannot allocate per rank.
         if record.dp_size() > MAX_DATA_PARALLEL_RANKS_PER_WORKER {
             return Err(SelectionError::BadRequest(format!(
@@ -169,6 +175,14 @@ impl SelectionCore {
         previous: Option<WorkerCatalogRecord>,
         deferred: Option<&mut HashSet<RoutingPartitionId>>,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
+        // A cancelled removal can leave a committed Draining record. Finish
+        // withdrawing its indexer registration before reusing the worker ID.
+        if let Some(old) = previous
+            .as_ref()
+            .filter(|old| old.lifecycle == WorkerLifecycle::Draining)
+        {
+            self.cleanup_indexer_registration(old).await;
+        }
         let previous = previous.filter(|old| old.lifecycle == WorkerLifecycle::Schedulable);
         let moved_partition = previous
             .as_ref()
@@ -329,6 +343,9 @@ impl SelectionCore {
                     self.worker_type,
                     key.as_ref(),
                 );
+                let scores_kv_transfer =
+                    WorkerSelector::<SelectionWorkerConfig>::required_worker_inputs(&selector)
+                        .contains(WorkerInputs::KV_TRANSFER);
                 let profile = self
                     .kv_router_config
                     .policy_profile(Some(&key.model_name))
@@ -357,6 +374,8 @@ impl SelectionCore {
                     is_eagle,
                     indexer,
                     workers_tx,
+                    hint_capable_workers: AtomicBool::new(false),
+                    scores_kv_transfer,
                     scheduler,
                     replica_inbox,
                     affinity: OnceCell::new(),
@@ -398,6 +417,10 @@ impl SelectionCore {
             return;
         };
         let workers = self.catalog.scheduler_configs_for_key(key);
+        // Selections read this per request instead of scanning the map.
+        entry
+            .hint_capable_workers
+            .store(hint_capable_partition(&workers), Ordering::Relaxed);
         // Lifecycle transitions between non-schedulable states publish the same
         // map; skipping them saves the scheduler a wake and a full map clone.
         let modified = entry.workers_tx.send_if_modified(|current| {
@@ -408,11 +431,10 @@ impl SelectionCore {
                 true
             }
         });
-        #[cfg(test)]
         if modified {
+            entry.scheduler.apply_published_worker_configs();
+            #[cfg(test)]
             self.publish_count.fetch_add(1, Ordering::SeqCst);
         }
-        #[cfg(not(test))]
-        let _ = modified;
     }
 }
