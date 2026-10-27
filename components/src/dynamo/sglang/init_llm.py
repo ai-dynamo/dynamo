@@ -80,7 +80,10 @@ async def init_decode(
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    if server_args.node_rank >= 1:
+    if (
+        server_args.node_rank >= 1
+        or getattr(server_args, "ep_join_mode", None) == "auto"
+    ):
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
     generate_endpoint = runtime.endpoint(

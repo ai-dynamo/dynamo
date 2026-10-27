@@ -68,6 +68,8 @@ func (r groveEngineGroupRenderer) Render(
 		return nil, grove.PodCliqueScalingGroupConfig{}, err
 	}
 	switch backend {
+	case BackendFrameworkSGLang:
+		return r.renderSGLang(ctx, dgd, component, queueName, topologyDomains, restart, restartAnnotations)
 	default:
 		return nil, grove.PodCliqueScalingGroupConfig{}, fmt.Errorf("Engine Group Grove rendering is not implemented for backend %q", backend)
 	}

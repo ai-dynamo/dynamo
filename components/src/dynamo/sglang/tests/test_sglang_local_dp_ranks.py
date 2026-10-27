@@ -18,6 +18,7 @@ from dynamo.sglang.capacity import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -32,6 +33,33 @@ def test_model_card_registration_keeps_global_dp_range():
     )
 
     assert model_card_dp_rank_bounds(server_args) == (0, 16)
+
+
+@pytest.mark.parametrize(
+    "index,width,expected",
+    [(0, 4, (0, 4)), (1, 4, (4, 8)), (2, 4, (8, 12)), (2, 1, (2, 3))],
+)
+def test_native_elastic_allocation_uses_its_global_member_range(index, width, expected):
+    args = _args(
+        dp_size=1,
+        attn_dp_size=width if index == 2 else 2 * width,
+        nnodes=2,
+        node_rank=0 if index == 0 else 1,
+        elastic_ep_allocation_index=index,
+        elastic_ep_allocation_width=width,
+    )
+    assert local_dp_rank_bounds(args) == expected
+    assert model_card_dp_rank_bounds(args) == (0, 1)
+    assert publishes_kv_events(args)
+
+
+def test_modern_attention_dp_preserves_global_registration_and_local_metrics():
+    args = _args(
+        dp_size=1, attn_dp_size=8, nnodes=2, node_rank=1, max_running_requests=128
+    )
+    assert model_card_dp_rank_bounds(args) == (0, 8)
+    assert local_dp_rank_bounds(args) == (4, 8)
+    assert per_rank_max_running_requests(args) == 16
 
 
 def _args(**kwargs) -> SimpleNamespace:

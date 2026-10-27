@@ -175,6 +175,8 @@ func (v *sharedValidation) validateComponentEngineGroupSpec(
 	// Backend-owned resolvers prove the effective geometry; neither runtime is a fallback for the other.
 	var err error
 	switch dynamo.BackendFramework(options.backendFramework) {
+	case dynamo.BackendFrameworkSGLang:
+		_, err = dynamo.ResolveSGLangComponentEngineGroup(options.component, options.parentEnv)
 	default:
 		allErrs = append(allErrs, field.Forbidden(fldPath, "Engine Groups require a supported SGLang or vLLM backend"))
 	}
