@@ -446,6 +446,28 @@ async fn handler_anthropic_messages(
         AnthropicHandlerError::from_request_validation(error)
             .into_marked_response(&mut inflight_guard)
     })?;
+    // These controls have no declared backend/model capability contract on
+    // Messages yet. Do not accept them while conversion silently drops them.
+    if request
+        .output_config
+        .as_ref()
+        .is_some_and(|config| config.get("effort").is_some())
+    {
+        return Err(AnthropicHandlerError::validation(
+            "output_config.effort is not supported by the Dynamo Messages endpoint; omit this field",
+        )
+        .into_marked_response(&mut inflight_guard));
+    }
+    if request
+        .thinking
+        .as_ref()
+        .is_some_and(|thinking| thinking.budget_tokens.is_some())
+    {
+        return Err(AnthropicHandlerError::validation(
+            "thinking.budget_tokens is not supported by the Dynamo Messages endpoint; use thinking.type adaptive or disabled without a budget",
+        )
+        .into_marked_response(&mut inflight_guard));
+    }
     if request.max_tokens == 0 {
         return Err(
             AnthropicHandlerError::validation("max_tokens: must be greater than 0")
