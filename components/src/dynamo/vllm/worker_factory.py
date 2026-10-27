@@ -20,8 +20,9 @@ from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
+from dynamo.common.lora.runtime import RuntimeLoRAConfigurationError
 from dynamo.common.model_taints import register_model_taint_route
-from dynamo.common.rl import first_endpoint_response, register_rl_routes
+from dynamo.common.rl import env_bool, first_endpoint_response, register_rl_routes
 from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
@@ -1803,6 +1804,13 @@ class WorkerFactory:
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
+
+        if env_bool("DYN_LORA_RUNTIME_LOAD_ENABLED") and (
+            config.realtime or config.embedding_worker or config.classify_worker
+        ):
+            raise RuntimeLoRAConfigurationError(
+                "runtime LoRA protocol version 2 requires tokenized chat/completions workers"
+            )
 
         if config.realtime:
             await self._create_realtime_worker(

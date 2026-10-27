@@ -1002,6 +1002,26 @@ class TestCreate:
 
     # Tests for non-legacy worker config, 'route_to_encode' is worker internal config
     # so either case should hit creation function.
+    @pytest.mark.parametrize(
+        "surface", ["realtime", "embedding_worker", "classify_worker"]
+    )
+    async def test_runtime_lora_rejects_unsupported_surface_before_engine_setup(
+        self, factory: WorkerFactory, monkeypatch, surface
+    ) -> None:
+        from dynamo.common.lora.runtime import RuntimeLoRAConfigurationError
+
+        monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", "true")
+        config = _make_config(**{surface: True})
+
+        with pytest.raises(RuntimeLoRAConfigurationError, match="tokenized chat"):
+            await factory.create(Mock(), config, asyncio.Event(), [])
+
+        factory.setup_vllm_engine.assert_not_called()
+        factory.register_vllm_model.assert_not_awaited()
+        factory._create_realtime_worker.assert_not_awaited()
+        factory._create_embedding_worker.assert_not_awaited()
+        factory._create_classify_worker.assert_not_awaited()
+
     @pytest.mark.parametrize("route_to_encode", [True, False])
     async def test_aggregated(
         self, factory: WorkerFactory, route_to_encode: bool
