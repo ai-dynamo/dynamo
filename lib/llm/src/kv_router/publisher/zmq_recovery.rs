@@ -87,15 +87,21 @@ impl ReplayCursor {
 }
 
 /// Replay recovery for one rank; listeners without it keep the ordinary live-only policy.
+///
+/// A completed ZMQ handshake does not prove that the engine has activated the live
+/// subscription. A batch published in that window appears as a gap at the next live batch,
+/// which replay repairs; with no later batch the index stays behind until one arrives.
+/// Positive confirmation needs an engine-side subscription acknowledgement or sync marker.
 pub struct ZmqRecoveryConfig {
     pub replay_endpoint: String,
     pub dp_rank: u32,
-    /// Deadline for each recovery round; retries within a round never extend it.
-    pub timeout: Duration,
+    /// The owner's deadline; it caps the first recovery round.
+    pub deadline: Instant,
     pub status: tokio::sync::watch::Sender<KvStreamStatus>,
     pub commands: mpsc::Receiver<KvStreamCommand>,
 }
 
+/// Only a `Failed` round that ran out of transport retries accepts `Restart`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KvStreamStatus {
     Recovering,
@@ -106,10 +112,11 @@ pub enum KvStreamStatus {
 
 #[derive(Debug)]
 pub enum KvStreamCommand {
-    /// Pause recovery while the sidecar checks the engine identity; the index and cursor are kept.
-    Suspend,
-    /// The engine is unchanged: start a new recovery round from the cursor.
-    Resume(tokio::sync::oneshot::Sender<()>),
+    /// Starts a new round from the cursor, capped by `deadline`; a refusal drops `accepted`.
+    Restart {
+        deadline: Instant,
+        accepted: tokio::sync::oneshot::Sender<()>,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -122,8 +129,8 @@ struct MissingHistory {
 const LIMIT: usize = 32 * 1024 * 1024;
 const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_BACKOFF: Duration = Duration::from_millis(500);
-/// Delay before the replay that covers the live subscription becoming active.
-const CONFIRMATION_DELAY: Duration = Duration::from_secs(1);
+const ROUND_TIMEOUT: Duration = Duration::from_secs(120);
+const INDEX_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn connected(monitor: &mut tmq::pair::Pair) -> Result<()> {
     let event = monitor
@@ -187,9 +194,8 @@ fn set_status(status: &tokio::sync::watch::Sender<KvStreamStatus>, value: KvStre
     });
 }
 
-enum SessionEnd {
-    Suspended,
-    Resumed,
+fn round_deadline(cap: Instant) -> Instant {
+    (Instant::now() + ROUND_TIMEOUT).min(cap)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -206,31 +212,17 @@ pub(super) async fn recovering_listener(
 ) {
     let mut cursor = ReplayCursor::new(LIMIT);
     // `None` while recovery has succeeded; otherwise the current round's deadline.
-    let mut deadline = Some(Instant::now() + config.timeout);
+    let mut deadline = Some(round_deadline(config.deadline));
     let outcome = loop {
         set_status(&config.status, KvStreamStatus::Recovering);
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => return,
             result = recovery_session(
-                endpoint, topic, &mut config, &mut cursor, &mut deadline, normalizer, tx, next_event_id, worker_id, expected_rank,
+                endpoint, topic, &config, &mut cursor, &mut deadline, normalizer, tx, next_event_id, worker_id, expected_rank,
             ) => result,
         };
-        let error = match result {
-            Ok(SessionEnd::Resumed) => {
-                deadline = Some(Instant::now() + config.timeout);
-                continue;
-            }
-            Ok(SessionEnd::Suspended) => {
-                set_status(&config.status, KvStreamStatus::Recovering);
-                if !wait_for_resume(&mut config, &cancel).await {
-                    return;
-                }
-                deadline = Some(Instant::now() + config.timeout);
-                continue;
-            }
-            Err(error) => error,
-        };
+        let Err(error) = result;
         if let Some(missing) = error.downcast_ref::<MissingHistory>() {
             tracing::warn!(dp_rank = config.dp_rank, %error, "KV replay confirms missing history");
             break KvStreamStatus::MissingHistory {
@@ -245,38 +237,44 @@ pub(super) async fn recovering_listener(
             };
         }
         // A transient failure after success starts a new round; within a round it keeps the deadline.
-        let round_deadline = *deadline.get_or_insert_with(|| Instant::now() + config.timeout);
+        let round_end = *deadline.get_or_insert_with(|| Instant::now() + ROUND_TIMEOUT);
         set_status(&config.status, KvStreamStatus::Recovering);
-        if Instant::now() >= round_deadline {
-            tracing::warn!(dp_rank = config.dp_rank, %error, "KV recovery deadline exceeded");
-            break KvStreamStatus::Failed {
-                reason: format!("KV recovery deadline exceeded: {error}"),
-            };
+        if Instant::now() < round_end {
+            tracing::warn!(dp_rank = config.dp_rank, %error, "KV recovery interrupted; retrying");
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep_until(round_end.min(Instant::now() + RETRY_BACKOFF)) => {}
+            }
+            continue;
         }
-        tracing::warn!(dp_rank = config.dp_rank, %error, "KV recovery interrupted; retrying");
-        tokio::select! {
+        tracing::warn!(dp_rank = config.dp_rank, %error, "KV recovery round exhausted; awaiting restart");
+        set_status(
+            &config.status,
+            KvStreamStatus::Failed {
+                reason: format!("KV recovery round exhausted: {error}"),
+            },
+        );
+        // The sockets are closed; the cursor and index wait for the owner to restart replay.
+        let command = tokio::select! {
             biased;
             _ = cancel.cancelled() => return,
-            command = config.commands.recv() => match command {
-                Some(KvStreamCommand::Suspend) => {
-                    if !wait_for_resume(&mut config, &cancel).await {
-                        return;
-                    }
-                    deadline = Some(Instant::now() + config.timeout);
-                }
-                Some(KvStreamCommand::Resume(accepted)) => {
-                    let _ = accepted.send(());
-                    deadline = Some(Instant::now() + config.timeout);
-                }
-                None => break KvStreamStatus::Failed {
-                    reason: "KV recovery controller stopped".to_string(),
-                },
-            },
-            _ = tokio::time::sleep_until(round_deadline.min(Instant::now() + RETRY_BACKOFF)) => {}
-        }
+            command = config.commands.recv() => command,
+        };
+        let Some(KvStreamCommand::Restart {
+            deadline: cap,
+            accepted,
+        }) = command
+        else {
+            cancel.cancelled().await;
+            return;
+        };
+        deadline = Some(round_deadline(cap));
+        set_status(&config.status, KvStreamStatus::Recovering);
+        let _ = accepted.send(());
     };
     set_status(&config.status, outcome);
-    // Hold the final status until the owner stops this source rather than ending the listener.
+    // Hold the final status, refusing restarts, until the owner stops this source.
     loop {
         tokio::select! {
             biased;
@@ -286,47 +284,8 @@ pub(super) async fn recovering_listener(
     }
 }
 
-/// Waits for `Resume` while suspended; returns false once cancelled.
-async fn wait_for_resume(
-    config: &mut ZmqRecoveryConfig,
-    cancel: &tokio_util::sync::CancellationToken,
-) -> bool {
-    loop {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return false,
-            command = config.commands.recv() => match command {
-                Some(KvStreamCommand::Resume(accepted)) => {
-                    let _ = accepted.send(());
-                    return true;
-                }
-                Some(KvStreamCommand::Suspend) => {}
-                None => {
-                    cancel.cancelled().await;
-                    return false;
-                }
-            },
-        }
-    }
-}
-
-fn command_end(command: Option<KvStreamCommand>) -> Result<SessionEnd> {
-    match command {
-        Some(KvStreamCommand::Suspend) => Ok(SessionEnd::Suspended),
-        Some(KvStreamCommand::Resume(accepted)) => {
-            let _ = accepted.send(());
-            Ok(SessionEnd::Resumed)
-        }
-        None => Err(terminal(anyhow::anyhow!("KV recovery controller stopped"))),
-    }
-}
-
-fn revoke(
-    status: &tokio::sync::watch::Sender<KvStreamStatus>,
-    deadline: &mut Option<Instant>,
-    timeout: Duration,
-) {
-    *deadline = Some(Instant::now() + timeout);
+fn revoke(status: &tokio::sync::watch::Sender<KvStreamStatus>, deadline: &mut Option<Instant>) {
+    *deadline = Some(Instant::now() + ROUND_TIMEOUT);
     set_status(status, KvStreamStatus::Recovering);
 }
 
@@ -334,7 +293,7 @@ fn revoke(
 async fn recovery_session(
     endpoint: &str,
     topic: &str,
-    config: &mut ZmqRecoveryConfig,
+    config: &ZmqRecoveryConfig,
     cursor: &mut ReplayCursor,
     deadline: &mut Option<Instant>,
     normalizer: &mut ZmqEventNormalizer,
@@ -342,7 +301,7 @@ async fn recovery_session(
     next_event_id: &AtomicU64,
     worker_id: WorkerId,
     expected_rank: Option<u32>,
-) -> Result<SessionEnd> {
+) -> Result<std::convert::Infallible> {
     // Replay from the cursor refills anything buffered by an earlier connection.
     cursor.clear_pending();
     let connect = async {
@@ -368,14 +327,11 @@ async fn recovery_session(
     };
     let (mut live, mut live_monitor, mut replay, mut replay_monitor) = tokio::select! {
         biased;
-        command = config.commands.recv() => return command_end(command),
         _ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => bail!("KV recovery deadline exceeded while connecting"),
         result = tokio::time::timeout(INACTIVITY_TIMEOUT, connect) => result??,
     };
     let worker = WorkerWithDpRank::new(worker_id, config.dp_rank);
-    let timeout = config.timeout;
     let mut is_success = false;
-    let mut needs_confirmation = true;
     let mut is_replaying = false;
     let mut requested = 0;
     let mut replay_first = None;
@@ -386,7 +342,6 @@ async fn recovery_session(
     loop {
         tokio::select! {
             biased;
-            command = config.commands.recv() => return command_end(command),
             _ = live_monitor.next() => bail!("KV live connection lost"),
             _ = replay_monitor.next() => bail!("KV replay connection lost"),
             _ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => bail!("KV recovery deadline exceeded"),
@@ -415,14 +370,14 @@ async fn recovery_session(
                         if !is_reply_truncated {
                             if sequence > cursor.next() && is_success {
                                 is_success = false;
-                                revoke(&config.status, deadline, timeout);
+                                revoke(&config.status, deadline);
                             }
                             apply_in_order(cursor, sequence, payload, normalizer, tx, next_event_id, worker, expected_rank, true).await?;
                         }
                     }
                     ReplayFrame::End => {
                         is_replaying = false;
-                        // Bound each drain so a busy producer cannot starve lifecycle commands.
+                        // Bound each drain so a busy producer cannot starve cancellation or the round deadline.
                         for _ in 0..4096 {
                             let Some(message) = live.next().now_or_never() else { break };
                             let message = message.ok_or_else(|| anyhow::anyhow!("KV live socket ended"))??;
@@ -437,21 +392,17 @@ async fn recovery_session(
                         if cursor.gap().is_some() || is_reply_truncated {
                             if is_success {
                                 is_success = false;
-                                revoke(&config.status, deadline, timeout);
+                                revoke(&config.status, deadline);
                             }
                             next_replay = Some(Instant::now());
                         } else {
                             if !is_success {
                                 // Report success only after the index has applied everything.
-                                tokio::time::timeout(INACTIVITY_TIMEOUT, apply(tx, Vec::new())).await
+                                tokio::time::timeout(INDEX_ACK_TIMEOUT, apply(tx, Vec::new())).await
                                     .map_err(|error| terminal(error.into()))?.map_err(terminal)?;
                                 is_success = true;
                                 *deadline = None;
                                 set_status(&config.status, KvStreamStatus::Success);
-                            }
-                            if needs_confirmation {
-                                needs_confirmation = false;
-                                next_replay = Some(Instant::now() + CONFIRMATION_DELAY);
                             }
                         }
                     }
@@ -462,7 +413,7 @@ async fn recovery_session(
                 let Some((sequence, payload)) = live_batch(message) else { continue };
                 if sequence > cursor.next() && is_success {
                     is_success = false;
-                    revoke(&config.status, deadline, timeout);
+                    revoke(&config.status, deadline);
                     next_replay = Some(Instant::now());
                 }
                 apply_in_order(cursor, sequence, payload, normalizer, tx, next_event_id, worker, expected_rank, !is_success).await?;
@@ -500,7 +451,7 @@ async fn apply_in_order(
             Ok(decoded) => {
                 let events = normalize_batch(decoded.batch, normalizer, worker, next_event_id);
                 if needs_ack {
-                    tokio::time::timeout(INACTIVITY_TIMEOUT, apply(tx, events))
+                    tokio::time::timeout(INDEX_ACK_TIMEOUT, apply(tx, events))
                         .await
                         .map_err(|_| {
                             terminal(anyhow::anyhow!("KV index did not confirm batch {sequence}"))
@@ -571,7 +522,7 @@ mod socket_tests {
                 Some(ZmqRecoveryConfig {
                     replay_endpoint: replay.get_socket().get_last_endpoint().unwrap().unwrap(),
                     dp_rank: 0,
-                    timeout,
+                    deadline: Instant::now() + timeout,
                     status,
                     commands: receiver,
                 }),
@@ -716,7 +667,7 @@ mod socket_tests {
     }
 
     #[tokio::test]
-    async fn complete_replay_succeeds_without_live_events_and_is_confirmed() {
+    async fn complete_replay_succeeds_without_live_events() {
         for is_empty in [true, false] {
             let mut f = Fixture::new(Duration::from_secs(5));
             let id = f.request(0).await;
@@ -727,31 +678,25 @@ mod socket_tests {
             f.send(&id, -1, vec![]).await;
             f.ack().await;
             f.status(KvStreamStatus::Success).await;
-            // One confirmation replay covers the live subscription becoming active.
-            let id = f.request(u64::from(!is_empty)).await;
-            f.send(&id, -1, vec![]).await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            assert_eq!(*f.updates.borrow(), KvStreamStatus::Success);
         }
     }
 
     #[tokio::test]
-    async fn confirmation_replay_and_live_gaps_repair_without_reapplying_history() {
+    async fn live_gap_after_success_is_repaired_without_reapplying_history() {
         let mut f = Fixture::new(Duration::from_secs(5));
         f.succeed().await;
-        // A batch lost while the live subscription became active is applied without revoking success.
+        // A live gap revokes success until replay fills it; republish until the subscription is active.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while *f.updates.borrow() != KvStreamStatus::Recovering {
+                f.live(2).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
         let id = f.request(1).await;
         f.send(&id, 1, payload(0)).await;
-        assert_eq!(f.ack().await.len(), 1);
-        f.send(&id, -1, vec![]).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(*f.updates.borrow(), KvStreamStatus::Success);
-        // A live gap revokes success until replay fills it.
-        f.live(3).await;
-        f.status(KvStreamStatus::Recovering).await;
-        let id = f.request(2).await;
         f.send(&id, 2, payload(0)).await;
-        f.send(&id, 3, payload(0)).await;
         f.send(&id, -1, vec![]).await;
         assert_eq!(f.ack().await.len(), 1);
         assert_eq!(f.ack().await.len(), 1);
@@ -759,25 +704,40 @@ mod socket_tests {
         f.status(KvStreamStatus::Success).await;
     }
 
+    async fn restart(f: &mut Fixture) -> Result<(), oneshot::error::RecvError> {
+        let (accepted, acknowledgement) = oneshot::channel();
+        f.commands
+            .send(KvStreamCommand::Restart {
+                deadline: Instant::now() + Duration::from_secs(5),
+                accepted,
+            })
+            .await
+            .unwrap();
+        acknowledgement.await
+    }
+
     #[tokio::test]
-    async fn transient_reconnect_and_resume_keep_the_cursor() {
-        let mut f = Fixture::new(Duration::from_secs(5));
-        f.succeed().await;
-        f.restart_replay().await;
-        f.status(KvStreamStatus::Recovering).await;
-        // The listener reconnects by itself and continues from its cursor.
+    async fn exhausted_round_restarts_and_reconnects_keep_the_cursor() {
+        let mut f = Fixture::new(Duration::from_secs(1));
+        let id = f.request(0).await;
+        f.send(&id, 0, payload(0)).await;
+        f.ack().await;
+        // Without an end marker the round runs out; the cursor waits for a restart.
+        let KvStreamStatus::Failed { reason } = f.final_status().await else {
+            panic!("expected an exhausted round")
+        };
+        assert!(
+            reason.starts_with("KV recovery round exhausted"),
+            "{reason}"
+        );
+        restart(&mut f).await.unwrap();
         let id = f.request(1).await;
         f.send(&id, -1, vec![]).await;
         f.ack().await;
         f.status(KvStreamStatus::Success).await;
-        f.commands.send(KvStreamCommand::Suspend).await.unwrap();
+        f.restart_replay().await;
         f.status(KvStreamStatus::Recovering).await;
-        let (accepted, acknowledgement) = oneshot::channel();
-        f.commands
-            .send(KvStreamCommand::Resume(accepted))
-            .await
-            .unwrap();
-        acknowledgement.await.unwrap();
+        // The listener reconnects by itself and continues from its cursor.
         let id = f.request(1).await;
         f.send(&id, -1, vec![]).await;
         f.ack().await;
@@ -810,6 +770,7 @@ mod socket_tests {
             f.final_status().await,
             KvStreamStatus::Failed { .. }
         ));
+        assert!(restart(&mut f).await.is_err());
     }
 
     #[tokio::test]

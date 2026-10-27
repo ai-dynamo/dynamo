@@ -10,6 +10,8 @@ processor publishes normalized events through the configured event plane.
   placement-aware events.
 - `zmq_recovery.rs`: opt-in replay recovery that catches a ZMQ source up from
   the engine's replay buffer and reports whether the local index is complete.
+  A completed handshake does not prove the live subscription is active; a batch
+  lost in that window is repaired at the next live gap (see `ZmqRecoveryConfig`).
 - `event_processor.rs`: owns the async receive loop and preserves event ordering.
 - `batching.rs`: coalesces adjacent store/remove events before publish.
 - `dedup.rs`: gates duplicate removes with per-rank, per-tier refcounts.
