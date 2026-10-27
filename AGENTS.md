@@ -67,6 +67,10 @@ response projection, read the
 [protocol field handling contract](docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/protocol-field-handling.md).
 Identify every semantic owner and preserve the field's documented end-to-end behavior.
 
+When you add, rename, deprecate, or remove a metric, update its row in the
+[Metrics Inventory](docs/fern/pages/reference/observability/metrics-inventory.md) in the same
+pull request. Every metric Dynamo defines has a row there.
+
 **For deploying and operating Dynamo:**
 
 - `synthesize-user-workload` — interview the user, capture their confirmed baseline DGD, and create the canonical workload contract

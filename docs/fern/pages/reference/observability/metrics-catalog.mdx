@@ -5,7 +5,7 @@ title: Metrics Catalog
 subtitle: Every dynamo_* metric emitted by the frontend, backend workers, and router — name, type, and meaning.
 ---
 
-Dynamo exposes metrics in Prometheus exposition format at the `/metrics` HTTP endpoint. All Dynamo-generated metrics use the `dynamo_*` prefix and carry the hierarchy labels documented in [Metric Labels](metric-labels.mdx). This page is the field catalog; for setup and dashboards see the [Metrics guide](../../cli/operations/observability.mdx#view-metrics-and-dashboards).
+Dynamo exposes metrics in Prometheus exposition format at the `/metrics` HTTP endpoint. Most Dynamo-generated metrics use the `dynamo_*` prefix; [Metric Labels](metric-labels.mdx) documents the labels they carry. This page is the field catalog; for setup and dashboards see the [Metrics guide](../../cli/operations/observability.mdx#view-metrics-and-dashboards). For a one-line entry for every metric Dynamo defines, including the planner, KV indexer, and runtime metrics, see the [Metrics Inventory](metrics-inventory.md).
 
 ## Metric types
 
@@ -24,14 +24,14 @@ The `type` on each field below is a [Prometheus metric type](https://prometheus.
 | Family | Emitted by | Scrape endpoint |
 |--------|------------|-----------------|
 | `dynamo_frontend_*` | HTTP frontend (`python -m dynamo.frontend`) | `/metrics` on `DYN_HTTP_PORT` (default 8000) |
-| `dynamo_component_*` | Backend workers, standalone router | `/metrics` on `DYN_SYSTEM_PORT` (must be set) |
-| `dynamo_router_overhead_*` | Frontend with KV routing | `/metrics` on `DYN_HTTP_PORT` |
+| `dynamo_component_*` | Backend workers, standalone router, and the frontend's router and runtime metrics | `/metrics` on `DYN_SYSTEM_PORT` (must be set); `/metrics` on `DYN_HTTP_PORT` for the frontend |
+| `dynamo_router_overhead_*` | Frontend | `/metrics` on `DYN_HTTP_PORT` |
 | `dynamo_epp_*` | Endpoint picker (Gateway API Inference Extension routing) | `/metrics` on `DYN_EPP_METRICS_PORT` (default 9090) |
 | `dynamo_operator_*` | Kubernetes operator | See [Operator Metrics](operator-metrics.mdx) |
 
 Backend workers expose `dynamo_component_*` only when `DYN_SYSTEM_PORT` is set (disabled by default; the Kubernetes operator typically sets `9090`, local examples use `8081`). See [Environment Variables](environment-variables.mdx#system-and-metrics).
 
-Engine pass-through metrics (`vllm:*`, `sglang:*`, `trtllm_*`) are emitted by the backend engines themselves and are cataloged separately — see [Metrics Comparison](metrics-comparison.md). NIXL transfer metrics are exposed on their own port and owned by the [upstream NIXL project](https://github.com/ai-dynamo/nixl/blob/main/docs/telemetry.md).
+Engine pass-through metrics (`vllm:*`, `sglang:*`, `trtllm_*`) are emitted by the backend engines themselves — see [Engine metrics](#engine-metrics). NIXL transfer metrics are exposed on their own port and owned by the [upstream NIXL project](https://github.com/ai-dynamo/nixl/blob/main/docs/telemetry.md).
 
 ## Frontend metrics
 
@@ -163,7 +163,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 
 `dynamo_frontend_worker_*` gauges appear once workers register and begin serving. They live on the frontend's local registry (not component-scoped) and do **not** carry `dynamo_namespace` or `dynamo_component` labels. Frontend-only — not available on the standalone router. Labeled by `worker_id`, `dp_rank`, and `worker_type`.
 
-At each HTTP scrape, these six gauges include only workers in the current committed router membership that pass hard availability checks, and only their current data-parallel (DP) ranks. The timing gauges also allow `dp_rank="none"` when the rank is unknown, provided the worker remains available. The `worker_type` label describes serving attribution: an Encode worker serving Chat/Completions reports its load and timing samples as `decode`, while the inventory metrics below retain its `encode` topology role. Removed or excluded workers disappear from the output; late request completions or load updates cannot restore their exposed series.
+Only the KV router writes the three `dynamo_frontend_worker_active_*` gauges, so they have no series in other router modes; the three `dynamo_frontend_worker_last_*` gauges are populated in every mode. At each HTTP scrape, these six gauges include only workers in the current committed router membership that pass hard availability checks, and only their current data-parallel (DP) ranks. The timing gauges also allow `dp_rank="none"` when the rank is unknown, provided the worker remains available. The `worker_type` label describes serving attribution: an Encode worker serving Chat/Completions reports its load and timing samples as `decode`, while the inventory metrics below retain its `encode` topology role. Removed or excluded workers disappear from the output; late request completions or load updates cannot restore their exposed series.
 
 <ParamField path="dynamo_frontend_worker_active_decode_blocks" type="gauge">
   Active KV cache decode blocks per worker.
@@ -288,7 +288,7 @@ The remaining model gauges are populated from worker backend registration. When 
 
 ## Component metrics
 
-Emitted by backend workers (`python -m dynamo.vllm`, `python -m dynamo.sglang`, etc.) at `/metrics` on `DYN_SYSTEM_PORT`. All carry the hierarchy labels (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`) — see [Runtime-injected labels](metric-labels.mdx#runtime-injected-labels).
+Emitted by backend workers (`python -m dynamo.vllm`, `python -m dynamo.sglang`, etc.) at `/metrics` on `DYN_SYSTEM_PORT`. Metrics registered on an endpoint carry the hierarchy labels (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`) and `worker_id` — see [Runtime-injected labels](metric-labels.mdx#runtime-injected-labels). The exceptions: `dynamo_component_uptime_seconds` carries only `worker_id`, `dynamo_backend_admission_*` has no `dynamo_endpoint`, and `dynamo_work_handler_*` has no labels.
 
 <ParamField path="dynamo_component_inflight_requests" type="gauge">
   Requests currently being processed by the component.
@@ -398,7 +398,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 
 ### Router request metrics
 
-`dynamo_component_router_*` histograms and counters for aggregate request-level statistics. On the frontend, exposed at `/metrics` on the HTTP port; on the standalone router, exposed on `DYN_SYSTEM_PORT`. Populated per-request when `--router-mode kv` is active; registered with zero values in non-KV modes.
+`dynamo_component_router_*` histograms and counters for aggregate request-level statistics. On the frontend, exposed at `/metrics` on the HTTP port; on the standalone router, exposed on `DYN_SYSTEM_PORT`. Populated per request in every router mode. The KV-specific metrics (`kv_hit_rate`, the [KV-cache reuse](#kv-cache-reuse-telemetry) counters, `non_max_overlap_selections_total`, and `overlap_blocks_lost`) are recorded only with `--router-mode kv`.
 
 <ParamField path="dynamo_component_router_requests_started_total" type="counter">
   Requests admitted by the router scheduler.
@@ -413,7 +413,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_inter_token_latency_seconds" type="histogram">
-  Average inter-token latency in seconds.
+  Average inter-token latency in seconds. With `--router-mode kv`, recorded only when `--router-track-output-blocks` is set; otherwise the histogram stays empty.
 </ParamField>
 
 <ParamField path="dynamo_component_router_input_sequence_tokens" type="histogram">
@@ -464,7 +464,7 @@ vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of 
 
 ### Per-request routing overhead
 
-`dynamo_router_overhead_*` histograms (milliseconds) track time spent in each phase of the routing decision. Registered on the frontend port with a `router_id` label (the frontend's discovery instance ID). Created only when the frontend has DRT discovery enabled (`--router-mode kv`); absent in non-KV modes and on the standalone router.
+`dynamo_router_overhead_*` histograms (milliseconds) track time spent in each phase of the routing decision. Registered on the frontend port with a `router_id` label (the frontend's discovery instance ID). Registered on every frontend and recorded only for KV routing decisions, so they stay at zero in non-KV modes. Not created on the standalone router.
 
 <ParamField path="dynamo_router_overhead_block_hashing_ms" type="histogram">
   Time computing block hashes.
@@ -488,7 +488,7 @@ vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of 
 
 ### Router queue metrics
 
-The frontend registers these metrics when queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`. With policy-family or cache-bucket configuration, `policy_class` is the resolved physical queue.
+These metrics have series once a KV router starts, whether or not queueing is enabled; the values stay at zero unless queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`. With policy-family or cache-bucket configuration, `policy_class` is the resolved physical queue.
 
 <ParamField path="dynamo_frontend_router_queue_pending_requests" type="gauge">
   Requests pending in the router scheduler queue.
@@ -524,12 +524,12 @@ Not all router metrics appear in every deployment. This matrix shows which group
 
 | Metric group | Frontend + KV (agg) | Frontend + KV (disagg) | Frontend + non-KV | Standalone router |
 |---|---|---|---|---|
-| `dynamo_component_router_*` | Registered and populated | Registered and populated | Registered, **always zero** | Populated (on `DYN_SYSTEM_PORT`) |
-| `dynamo_router_overhead_*` | Registered and populated | Registered and populated | **Not registered** | **Not created** |
+| `dynamo_component_router_*` | Registered and populated | Registered and populated | Request, latency, and sequence-length metrics populated; KV-specific metrics **always zero** | Populated (on `DYN_SYSTEM_PORT`) |
+| `dynamo_router_overhead_*` | Registered and populated | Registered and populated | Registered, **always zero** | **Not created** |
 | `dynamo_frontend_router_queue_*` | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** |
 | `dynamo_component_kv_cache_events_applied` | Populated when KV events received | Populated when KV events received | **Not registered** | Populated when KV events received |
 | `dynamo_component_ckf_mutation_total` | Registered, **always zero** | Registered, **always zero** | **Not registered** | Registered, **always zero** |
-| `dynamo_frontend_worker_*` | Registered and populated | Registered and populated (`worker_type` = `prefill`/`decode`) | Registered and populated (`worker_type` = `decode`) | **Not created** |
+| `dynamo_frontend_worker_*` | Registered and populated | Registered and populated (`worker_type` = `prefill`/`decode`) | `worker_last_*` populated (`worker_type` = `decode`); `worker_active_*` absent | **Not created** |
 
 **Key:**
 
@@ -547,8 +547,21 @@ Emitted by the endpoint picker (EPP) when routing through the Gateway API Infere
 
 Requires the client to request usage accounting on streaming calls (`"stream_options": {"include_usage": true}`); without it the response carries no usage block and nothing is recorded.
 
+## Engine metrics
+
+Backend workers also expose their inference engine's own metrics at `/metrics` on `DYN_SYSTEM_PORT`. The engine defines these metrics, so their names, types, and meanings follow the engine version you run. Dynamo passes them through unchanged and adds the `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, `worker_id`, `model`, and `model_name` labels.
+
+| Engine | Prefix | Enabled by | Engine reference | Dynamo guide |
+|--------|--------|------------|------------------|--------------|
+| vLLM | `vllm:`, plus `lmcache:` with LMCache | On by default; `--disable-log-stats` turns it off | [vLLM Production Metrics](https://docs.vllm.ai/en/stable/usage/metrics.html) | [vLLM Observability](../../developer-guide/knowledge-base/modular-components/backends/vllm/observability.md) |
+| SGLang | `sglang:` | `--enable-metrics` | [SGLang Production Metrics](https://docs.sglang.io/docs/references/production_metrics) | [SGLang Observability](../../developer-guide/knowledge-base/modular-components/backends/sglang/observability.md) |
+| TensorRT-LLM | `trtllm_` | `--publish-metrics` | [TensorRT-LLM metrics collector](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py) | [TensorRT-LLM Observability](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/observability.md) |
+
+Some `trtllm_*` metrics are computed by Dynamo, not by TensorRT-LLM; see [TensorRT-LLM Metrics Computed by Dynamo](metrics-inventory.md#tensorrt-llm-metrics-computed-by-dynamo). To compare equivalent metrics across engines, see [Metrics Comparison](metrics-comparison.md).
+
 ## Related
 
+- [Metrics Inventory](metrics-inventory.md) — every metric Dynamo defines, in one list.
 - [Metric Labels](metric-labels.mdx) — the dimensions attached to these metrics.
 - [Environment Variables](environment-variables.mdx) — variables that enable and configure metric emission.
 - [Operator Metrics](operator-metrics.mdx) — Kubernetes operator metrics catalog.

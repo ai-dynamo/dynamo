@@ -91,4 +91,7 @@ request's shared `RequestMetrics` handle. Create a model's series when it
 registers, never from the publish path, which only reads. Before adding or
 changing a frontend metric, name its reader, check it is not a query over
 existing metrics or a sibling that should be a label, write its series count in
-the pull request, and add it to the Metrics Catalog.
+the pull request, and add it to the
+[Metrics Inventory](../../docs/fern/pages/reference/observability/metrics-inventory.md).
+If one table row cannot describe its behavior, also describe it in the Metrics
+Catalog.

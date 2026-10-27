@@ -1298,6 +1298,8 @@ navigation:
             path: pages/reference/observability/environment-variables.mdx
           - page: Metrics Catalog
             path: pages/reference/observability/metrics-catalog.mdx
+          - page: Metrics Inventory
+            path: pages/reference/observability/metrics-inventory.md
           - page: OTLP Metrics Export
             path: pages/reference/observability/otlp-metrics-export.mdx
           - page: Metrics Comparison
