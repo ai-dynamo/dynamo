@@ -47,3 +47,9 @@ optimization:
   target: goodput
   constraints: {max_candidate_gpus: 1}
 optimizer: {algorithm: random, max_trials: 2, parallelism: 1, candidate_timeout_seconds: 30.0, seed: 24}
+# AISimulate's default 60 s initialization window covers child startup and the
+# first wave of spawned workers (and later waves when it misses a short-lived
+# wave's readiness), so a slow CI runner can exceed it with exit 124. Keep this
+# below the test's 180 s subprocess timeout.
+execution:
+  resources: {initialization_timeout_seconds: 150.0}
