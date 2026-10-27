@@ -133,6 +133,60 @@ fn mm_routing_hashes_are_not_used_as_engine_cache_uuids() {
 }
 
 #[test]
+fn image_routing_hints_require_capability_and_exact_frontend_metadata() {
+    let mut req = request();
+    add_images(&mut req, ["https://example.com/first.png"]);
+    req.extra_args = Some(json!({"mm_hashes": ["0123456789abcdef"]}));
+    req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+        routing_token_ids: vec![11, 22, 33],
+        expanded_prompt_len: 3,
+        ..Default::default()
+    });
+    let mut enabled = image_limits(4096).unwrap();
+    enabled.supports_image_routing = true;
+    let proto = build_generate_request(req.clone(), "req", "model", Some(enabled), AGG).unwrap();
+    assert_eq!(proto.media[0].uuid, "dynamo-image-v1:0123456789abcdef");
+
+    let proto =
+        build_generate_request(req.clone(), "req", "model", image_limits(4096), AGG).unwrap();
+    assert!(proto.media[0].uuid.is_empty());
+    let mut no_routing = req.clone();
+    no_routing.mm_routing_info = None;
+    let proto = build_generate_request(no_routing, "req", "model", Some(enabled), AGG).unwrap();
+    assert!(proto.media[0].uuid.is_empty());
+
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![Some("caller-owned".to_string())],
+    )]));
+    let proto = build_generate_request(req, "req", "model", Some(enabled), AGG).unwrap();
+    assert_eq!(proto.media[0].uuid, "caller-owned");
+}
+
+#[test]
+fn malformed_image_routing_hashes_are_rejected_before_dispatch() {
+    for hashes in [
+        json!([]),
+        json!([""]),
+        json!(["not-a-valid-hash"]),
+        json!("bad"),
+        json!([null]),
+    ] {
+        let mut req = request();
+        add_images(&mut req, ["https://example.com/first.png"]);
+        req.extra_args = Some(json!({"mm_hashes": hashes}));
+        req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+            routing_token_ids: vec![11],
+            expanded_prompt_len: 1,
+            ..Default::default()
+        });
+        let mut limits = image_limits(4096).unwrap();
+        limits.supports_image_routing = true;
+        assert!(build_generate_request(req, "req", "model", Some(limits), AGG).is_err());
+    }
+}
+
+#[test]
 fn image_media_requires_the_loaded_models_advertised_capability() {
     let mut req = request();
     add_images(&mut req, ["https://example.com/image.png"]);

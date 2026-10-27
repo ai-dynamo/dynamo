@@ -275,7 +275,36 @@ fn image_media(
         ));
     }
 
-    let uuids = user_image_uuids.unwrap_or_else(|| vec![None; images.len()]);
+    let mut uuids = user_image_uuids.unwrap_or_else(|| vec![None; images.len()]);
+    if limits.is_some_and(|limits| limits.supports_image_routing)
+        && request
+            .mm_routing_info
+            .as_ref()
+            .is_some_and(|info| !info.routing_token_ids.is_empty() && info.expanded_prompt_len > 0)
+        && uuids.iter().all(Option::is_none)
+        && let Some(hashes) = request
+            .extra_args
+            .as_ref()
+            .and_then(|extra| extra.get("mm_hashes"))
+    {
+        let hashes = hashes.as_array().ok_or_else(|| {
+            client::invalid_argument("extra_args.mm_hashes must be an array for image routing")
+        })?;
+        if hashes.len() != images.len() {
+            return Err(client::invalid_argument(
+                "image routing hash count must match image count",
+            ));
+        }
+        for (uuid, hash) in uuids.iter_mut().zip(hashes) {
+            let hash = hash
+                .as_str()
+                .filter(|s| s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                .ok_or_else(|| {
+                    client::invalid_argument("image routing hashes must be 16 hexadecimal digits")
+                })?;
+            *uuid = Some(format!("dynamo-image-v1:{}", hash.to_ascii_lowercase()));
+        }
+    }
     images
         .into_iter()
         .zip(uuids)
@@ -300,7 +329,6 @@ fn image_media(
                 source: Some(source),
                 // MIME metadata belongs to raw_bytes, which this client does not send.
                 mime_type: String::new(),
-                // Do not substitute router-owned mm_hashes for caller cache identities.
                 uuid: uuid.unwrap_or_default(),
             })
         })
