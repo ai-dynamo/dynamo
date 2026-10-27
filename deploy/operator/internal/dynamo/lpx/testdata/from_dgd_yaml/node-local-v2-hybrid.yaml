@@ -13,6 +13,38 @@ metadata:
   namespace: test
 ---
 data:
+  agent-agt-0: |
+    partition_row=0
+    partition_index=0
+    partition_id=0
+    partition_path=part-0
+    node_count=4
+    node_offset=0
+    rank=0
+  agent-agt-1: |
+    partition_row=0
+    partition_index=0
+    partition_id=0
+    partition_path=part-0
+    node_count=4
+    node_offset=0
+    rank=1
+  agent-agt-2: |
+    partition_row=0
+    partition_index=0
+    partition_id=0
+    partition_path=part-0
+    node_count=4
+    node_offset=0
+    rank=2
+  agent-agt-3: |
+    partition_row=0
+    partition_index=0
+    partition_id=0
+    partition_path=part-0
+    node_count=4
+    node_offset=0
+    rank=3
   nodes_per_partition: "4"
   partition_ids: "0"
   partition_node_offsets: "0"
@@ -23,7 +55,7 @@ metadata:
     lpx.nvidia.com/deployment-name: node-local-v2-hybrid
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-hybrid-9d06-lpu-8d6eca440bc0b75b
+  name: node-local-v2-hybrid-9d06-lpu-a6c9b4cbbdce8314
   namespace: test
 ---
 metadata:
@@ -41,7 +73,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid
-        nvidia.com/extra-resources-hash: 8d6eca440bc0b75bbfa1bce8f7b6fc05ede250bfe9fbc1679683cc9cc0d51bae
+        nvidia.com/extra-resources-hash: a6c9b4cbbdce831464b53b95f555ff382613ddd29dc44ad4fcd8a6106464a213
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:854ab24e6fc14c78d58e9ec555076b7989fb69313e3fa5b904e4862171805846
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:2c4af29ceff09a818bd40a75337da3523c304cc3a9c0a3b04ce5b44c99ad8922
         scheduling.lpu.nvidia.com/model: default
@@ -64,6 +96,8 @@ spec:
             command:
             - /opt/dynamo-lpu
             env:
+            - name: LPX_AGENT_CONFIG_KEY
+              value: agent-agt-$(GROVE_PCLQ_POD_INDEX)
             - name: LPX_MODEL_PATH
               value: /nfs/node-local-v2-connected-lpx
             - name: DYN_COMPONENT
@@ -195,7 +229,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-hybrid-9d06-lpu-8d6eca440bc0b75b
+              name: node-local-v2-hybrid-9d06-lpu-a6c9b4cbbdce8314
             name: config
         replicas: 4
         roleName: agt

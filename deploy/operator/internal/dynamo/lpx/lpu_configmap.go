@@ -79,6 +79,13 @@ func lpuModelStoragePath(spec corev1.PodSpec) (string, error) {
 	return mount.MountPath, nil
 }
 
+// resolvedPartitionData renders the shared partition columns. Each row is one
+// runtime partition; Agent pods find theirs by matching GROVE_PCLQ_POD_INDEX
+// against the node counts and offsets of their model's rows.
+//
+// Deployed Hydra and Quasar images read these columns through lpx-runtime's
+// load_partition_metadata. Remove them once both read the per-pod records from
+// agentPartitionRecords instead.
 func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 	keys := [...]string{"nodes_per_partition", "partition_indices", "partition_ids", "partition_models",
 		"partition_node_offsets", "partition_paths"}
@@ -114,6 +121,60 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 		data[key] = strings.TrimSuffix(columns[column].String(), "\n")
 	}
 	return data
+}
+
+// agentPartitionRecords renders one record per Agent pod, keyed by
+// agentConfigKeyPrefix(templateName) plus the pod's clique index. Each value holds
+// newline-terminated key=value lines describing the row that resolvedPartitionData
+// renders for the pod, so a runtime reads its partition without scanning rows:
+//
+//	partition_row=<row in the shared columns>
+//	partition_index=<partition index within the model>
+//	partition_id=<compiler partition id>
+//	partition_path=<partition path under the build>
+//	node_count=<Agent pods in the partition>
+//	node_offset=<clique index of the partition's first pod>
+//	rank=<pod index minus node_offset>
+//
+// projections and agents are parallel, as in MaterializationPlan.Agents. Every
+// Agent clique's replicas must equal its model's runtime node count.
+//
+// Each record is at most about 120 bytes plus the partition path, so a
+// 1024-pod model with 64-byte paths adds about 185 KiB to the ConfigMap's 1 MiB budget.
+func agentPartitionRecords(projections []*ModelProjection, agents []ExpectedAgent) (map[string]string, error) {
+	records := make(map[string]string)
+	row := 0
+	for index, projection := range projections {
+		agent := agents[index]
+		prefix := agentConfigKeyPrefix(agent.TemplateName)
+
+		// Assign every pod of the model's clique to the row covering its index.
+		offset := 0
+		for partitionIndex, partition := range projection.configuredBuild.partitions {
+			nodeCount := partition.effectiveNodeCount()
+			for rank := range nodeCount {
+				records[prefix+strconv.Itoa(offset+rank)] = fmt.Sprintf(
+					"partition_row=%d\npartition_index=%d\npartition_id=%d\npartition_path=%s\nnode_count=%d\nnode_offset=%d\nrank=%d\n",
+					row, partitionIndex, uint32(partition.sourcePartitionID), partition.partPath, nodeCount, offset, rank,
+				)
+			}
+			offset += nodeCount
+			row++
+		}
+		if offset != agent.Replicas {
+			return nil, fmt.Errorf(
+				"model %q runtime partitions cover %d Agent pods, but clique %q has %d replicas",
+				projection.model, offset, agent.TemplateName, agent.Replicas,
+			)
+		}
+	}
+	return records, nil
+}
+
+// agentConfigKeyPrefix returns the ConfigMap key prefix of an Agent clique's
+// per-pod records; the pod's clique index completes the key.
+func agentConfigKeyPrefix(templateName string) string {
+	return "agent-" + templateName + "-"
 }
 
 // ensureLPUConfigVolume adds the generated configuration only when the nonnil

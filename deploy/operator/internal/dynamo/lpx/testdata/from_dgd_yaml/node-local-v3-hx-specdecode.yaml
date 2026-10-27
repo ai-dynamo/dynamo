@@ -2,6 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 
 data:
+  agent-agt0-0: |
+    partition_row=0
+    partition_index=0
+    partition_id=1
+    partition_path=part-1
+    node_count=1
+    node_offset=0
+    rank=0
+  agent-agt1-0: |
+    partition_row=1
+    partition_index=0
+    partition_id=1
+    partition_path=part-1
+    node_count=1
+    node_offset=0
+    rank=0
+  agent-agt2-0: |
+    partition_row=2
+    partition_index=0
+    partition_id=1
+    partition_path=part-1
+    node_count=1
+    node_offset=0
+    rank=0
   nodes_per_partition: |-
     1
     1
@@ -32,7 +56,7 @@ metadata:
     lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v3-hx-specdecode-1f7a-lpu-03a7edb74f46c6be
+  name: node-local-v3-hx-specdecode-1f7a-lpu-f71d02c2be3575a1
   namespace: test
 ---
 metadata:
@@ -50,7 +74,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
-        nvidia.com/extra-resources-hash: 03a7edb74f46c6bee8d8436c085fe960e4971f4286f2d9e924ca1298f6ba19d6
+        nvidia.com/extra-resources-hash: f71d02c2be3575a1ff60b56f67fe7c092e4a38c9a367caee23b160df5a6071d9
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:bc120b1293705f1fd0dc54a150b0e898343a27c61305df4e7762c6730de8f395
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:0286f6abd5ae05f82a5c1b77d706f54c54315b75ad83b9a300d80abcccf606ef
         scheduling.lpu.nvidia.com/model: draft0
@@ -71,6 +95,8 @@ spec:
           - command:
             - /bin/quasar-entrypoint
             env:
+            - name: LPX_AGENT_CONFIG_KEY
+              value: agent-agt0-$(GROVE_PCLQ_POD_INDEX)
             - name: LPX_DRAFT_MODEL_PATH
               value: /nfs/node-local-v3-hx-sd-draft
             - name: LPX_TARGET_MODEL_PATH
@@ -156,6 +182,8 @@ spec:
           - command:
             - /bin/lp30-agent-v2-init
             env:
+            - name: LPX_AGENT_CONFIG_KEY
+              value: agent-agt0-$(GROVE_PCLQ_POD_INDEX)
             - name: LPX_DRAFT_MODEL_PATH
               value: /nfs/node-local-v3-hx-sd-draft
             - name: LPX_TARGET_MODEL_PATH
@@ -204,13 +232,13 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v3-hx-specdecode-1f7a-lpu-03a7edb74f46c6be
+              name: node-local-v3-hx-specdecode-1f7a-lpu-f71d02c2be3575a1
             name: config
         replicas: 1
         roleName: agt0
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
-        nvidia.com/extra-resources-hash: 03a7edb74f46c6bee8d8436c085fe960e4971f4286f2d9e924ca1298f6ba19d6
+        nvidia.com/extra-resources-hash: f71d02c2be3575a1ff60b56f67fe7c092e4a38c9a367caee23b160df5a6071d9
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:bc120b1293705f1fd0dc54a150b0e898343a27c61305df4e7762c6730de8f395
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:9b679919624acb2116b553248857ee0e9523e14307a1aee998042aed11fb490a
         scheduling.lpu.nvidia.com/model: draft1
@@ -231,6 +259,8 @@ spec:
           - command:
             - /bin/quasar-entrypoint
             env:
+            - name: LPX_AGENT_CONFIG_KEY
+              value: agent-agt1-$(GROVE_PCLQ_POD_INDEX)
             - name: LPX_DRAFT_MODEL_PATH
               value: /nfs/node-local-v3-hx-sd-draft
             - name: LPX_TARGET_MODEL_PATH
@@ -316,6 +346,8 @@ spec:
           - command:
             - /bin/lp30-agent-v2-init
             env:
+            - name: LPX_AGENT_CONFIG_KEY
+              value: agent-agt1-$(GROVE_PCLQ_POD_INDEX)
             - name: LPX_DRAFT_MODEL_PATH
               value: /nfs/node-local-v3-hx-sd-draft
             - name: LPX_TARGET_MODEL_PATH
@@ -364,13 +396,13 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v3-hx-specdecode-1f7a-lpu-03a7edb74f46c6be
+              name: node-local-v3-hx-specdecode-1f7a-lpu-f71d02c2be3575a1
             name: config
         replicas: 1
         roleName: agt1
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
-        nvidia.com/extra-resources-hash: 03a7edb74f46c6bee8d8436c085fe960e4971f4286f2d9e924ca1298f6ba19d6
+        nvidia.com/extra-resources-hash: f71d02c2be3575a1ff60b56f67fe7c092e4a38c9a367caee23b160df5a6071d9
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:bc120b1293705f1fd0dc54a150b0e898343a27c61305df4e7762c6730de8f395
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:dc1bde98e28d538b0364c9e0897f868ad33cc518190ce660a6d18c493224cdfd
         scheduling.lpu.nvidia.com/model: target
@@ -391,6 +423,8 @@ spec:
           - command:
             - /bin/quasar-entrypoint
             env:
+            - name: LPX_AGENT_CONFIG_KEY
+              value: agent-agt2-$(GROVE_PCLQ_POD_INDEX)
             - name: LPX_DRAFT_MODEL_PATH
               value: /nfs/node-local-v3-hx-sd-draft
             - name: LPX_TARGET_MODEL_PATH
@@ -476,6 +510,8 @@ spec:
           - command:
             - /bin/lp30-agent-v2-init
             env:
+            - name: LPX_AGENT_CONFIG_KEY
+              value: agent-agt2-$(GROVE_PCLQ_POD_INDEX)
             - name: LPX_DRAFT_MODEL_PATH
               value: /nfs/node-local-v3-hx-sd-draft
             - name: LPX_TARGET_MODEL_PATH
@@ -524,13 +560,13 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v3-hx-specdecode-1f7a-lpu-03a7edb74f46c6be
+              name: node-local-v3-hx-specdecode-1f7a-lpu-f71d02c2be3575a1
             name: config
         replicas: 1
         roleName: agt2
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
-        nvidia.com/extra-resources-hash: 03a7edb74f46c6bee8d8436c085fe960e4971f4286f2d9e924ca1298f6ba19d6
+        nvidia.com/extra-resources-hash: f71d02c2be3575a1ff60b56f67fe7c092e4a38c9a367caee23b160df5a6071d9
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:16f320c88886458db865a3dc777302b02b8c7d0db3bc870f4cb9a7157ba0cfb3
         scheduling.lpu.nvidia.com/role: conductor
       labels:
@@ -725,7 +761,7 @@ spec:
               defaultMode: 384
               secretName: ssh-secret
           - configMap:
-              name: node-local-v3-hx-specdecode-1f7a-lpu-03a7edb74f46c6be
+              name: node-local-v3-hx-specdecode-1f7a-lpu-f71d02c2be3575a1
             name: config
         replicas: 1
         roleName: cond

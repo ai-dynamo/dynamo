@@ -134,6 +134,27 @@ own value; rename that variable before upgrading.
 **Existing deployments:** Reconciliation rolls each LPX workload once without an
 authored manifest change.
 
+##### LPX agent partition records
+
+**Change:** The LPU runtime ConfigMap gains one key per agent pod,
+`agent-<clique template name>-<pod index>`. Its value lists `key=value` lines:
+`partition_row`, `partition_index`, `partition_id`, `partition_path`, `node_count`,
+`node_offset`, and `rank`. Every regular and init container of each agent role gets
+`LPX_AGENT_CONFIG_KEY=agent-<clique template name>-$(GROVE_PCLQ_POD_INDEX)`, so the
+pod reads its own partition without scanning the shared partition columns. The
+operator's value replaces any value authored under this name. The shared columns
+are unchanged.
+
+**Affected:** Every DGD with an LPX component that runs at least one agent pod.
+
+**Action:** Plan for a one-time rollout of LPX workloads when upgrading to v1.7.0.
+No manifest change is needed unless a container sets `LPX_AGENT_CONFIG_KEY` to its
+own value; rename that variable before upgrading.
+
+**Existing deployments:** Reconciliation rolls each LPX workload once without an
+authored manifest change, because the ConfigMap content and agent pod templates
+change.
+
 #### New behavior
 
 ##### LWS no longer requires Volcano

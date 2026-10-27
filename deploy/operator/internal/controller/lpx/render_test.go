@@ -264,13 +264,15 @@ func TestLPXAgentRuntimeSidecarRendering(t *testing.T) {
 	require.Equal(t, ptr.To(corev1.ContainerRestartPolicyAlways), runtime.RestartPolicy)
 	require.Equal(t, []corev1.LocalObjectReference{{Name: "sidecar-pull-secret"}}, pod.ImagePullSecrets)
 
-	t.Log("The model path precedes every other binding")
+	t.Log("The Agent's config key and the model path precede every other binding")
+	agentConfigKey := corev1.EnvVar{Name: "LPX_AGENT_CONFIG_KEY", Value: "agent-agt-$(GROVE_PCLQ_POD_INDEX)"}
 	modelPath := corev1.EnvVar{Name: "LPX_MODEL_PATH", Value: "/nfs/node-local-v3-hx-connected"}
-	require.Equal(t, modelPath, main.Env[0])
-	require.Equal(t, modelPath, runtime.Env[0])
+	require.Equal(t, []corev1.EnvVar{agentConfigKey, modelPath}, main.Env[:2])
+	require.Equal(t, []corev1.EnvVar{agentConfigKey, modelPath}, runtime.Env[:2])
 
-	t.Log("The LPU-only engine keeps only its authored env, graph env, and model path")
+	t.Log("The LPU-only engine keeps only its authored env, graph env, config key, and model path")
 	require.Equal(t, []corev1.EnvVar{
+		agentConfigKey,
 		modelPath,
 		{Name: "GRAPH_SETTING", Value: "shared"},
 		{Name: "LPU_IE_MODEL_PATH", Value: "$(LPX_MODEL_PATH)"},
@@ -281,6 +283,7 @@ func TestLPXAgentRuntimeSidecarRendering(t *testing.T) {
 	require.NoError(t, err)
 	namespace := dgd.GetDynamoNamespaceForComponent(dgd.GetComponentByName("lpu"))
 	require.Equal(t, []corev1.EnvVar{
+		agentConfigKey,
 		modelPath,
 		{Name: consts.DynamoComponentEnvVar, Value: "lpx"},
 		{Name: consts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},

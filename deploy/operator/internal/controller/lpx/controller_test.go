@@ -3065,10 +3065,13 @@ func TestLPXPodCliqueSetListOrder(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, originalUID, pcs.UID)
 
-	t.Log("Preserve the complete authored init containers with the model path prepended")
+	t.Log("Preserve the complete authored init containers with the Agent config key and model path prepended")
 	expectedInit := agent.PodTemplate.Spec.DeepCopy().InitContainers
 	for i := range expectedInit {
-		expectedInit[i].Env = append([]corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "/models/build-v2"}}, expectedInit[i].Env...)
+		expectedInit[i].Env = append([]corev1.EnvVar{
+			{Name: "LPX_AGENT_CONFIG_KEY", Value: "agent-agt-$(GROVE_PCLQ_POD_INDEX)"},
+			{Name: "LPX_MODEL_PATH", Value: "/models/build-v2"},
+		}, expectedInit[i].Env...)
 	}
 	for _, clique := range pcs.Spec.Template.Cliques {
 		if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleAgent {

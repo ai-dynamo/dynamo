@@ -106,6 +106,68 @@ func TestResolvedPartitionDataUsesModelCount(t *testing.T) {
 	}
 }
 
+func TestAgentPartitionRecords(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Cover one model, rows continuing across models, and a clique that disagrees with its partitions")
+	for _, test := range []struct {
+		name    string
+		models  []string
+		agents  []ExpectedAgent
+		want    map[string]string
+		wantErr string
+	}{
+		{
+			name: "single model", models: []string{"default"}, agents: []ExpectedAgent{{TemplateName: "agt", Replicas: 3}},
+			want: map[string]string{
+				"agent-agt-0": "partition_row=0\npartition_index=0\npartition_id=7\npartition_path=part-7\nnode_count=2\nnode_offset=0\nrank=0\n",
+				"agent-agt-1": "partition_row=0\npartition_index=0\npartition_id=7\npartition_path=part-7\nnode_count=2\nnode_offset=0\nrank=1\n",
+				"agent-agt-2": "partition_row=1\npartition_index=1\npartition_id=9\npartition_path=part-9\nnode_count=1\nnode_offset=2\nrank=0\n",
+			},
+		},
+		{
+			name: "multiple models", models: []string{"draft0", "target"},
+			agents: []ExpectedAgent{{TemplateName: "agt0", Replicas: 3}, {TemplateName: "agt1", Replicas: 3}},
+			want: map[string]string{
+				"agent-agt0-0": "partition_row=0\npartition_index=0\npartition_id=7\npartition_path=part-7\nnode_count=2\nnode_offset=0\nrank=0\n",
+				"agent-agt0-1": "partition_row=0\npartition_index=0\npartition_id=7\npartition_path=part-7\nnode_count=2\nnode_offset=0\nrank=1\n",
+				"agent-agt0-2": "partition_row=1\npartition_index=1\npartition_id=9\npartition_path=part-9\nnode_count=1\nnode_offset=2\nrank=0\n",
+				"agent-agt1-0": "partition_row=2\npartition_index=0\npartition_id=7\npartition_path=part-7\nnode_count=2\nnode_offset=0\nrank=0\n",
+				"agent-agt1-1": "partition_row=2\npartition_index=0\npartition_id=7\npartition_path=part-7\nnode_count=2\nnode_offset=0\nrank=1\n",
+				"agent-agt1-2": "partition_row=3\npartition_index=1\npartition_id=9\npartition_path=part-9\nnode_count=1\nnode_offset=2\nrank=0\n",
+			},
+		},
+		{
+			name: "replica mismatch", models: []string{"default"}, agents: []ExpectedAgent{{TemplateName: "agt", Replicas: 4}},
+			wantErr: `model "default" runtime partitions cover 3 Agent pods, but clique "agt" has 4 replicas`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Construct one projection per configured model")
+			projections := make([]*ModelProjection, len(test.models))
+			for index, model := range test.models {
+				projection := &ModelProjection{model: model}
+				projection.configuredBuild.partitions = []buildPartition{
+					{sourcePartitionID: 7, partPath: "part-7", numChips: 16, topology: "topology-7", devicesPerNode: 8},
+					{sourcePartitionID: 9, partPath: "part-9", numChips: 8, topology: "topology-9", devicesPerNode: 8},
+				}
+				projections[index] = projection
+			}
+
+			t.Log("Key each Agent pod's record by clique and pod index, matching the shared column rows")
+			records, err := agentPartitionRecords(projections, test.agents)
+			if test.wantErr != "" {
+				require.EqualError(t, err, test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, test.want, records)
+		})
+	}
+}
+
 func TestLPUConfigVolumePreservesAuthoredSource(t *testing.T) {
 	for _, test := range []struct {
 		name   string

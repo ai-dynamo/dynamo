@@ -2,6 +2,142 @@
 # SPDX-License-Identifier: Apache-2.0
 
 data:
+  agent-agt-0: |
+    partition_row=0
+    partition_index=0
+    partition_id=0
+    partition_path=part-0
+    node_count=1
+    node_offset=0
+    rank=0
+  agent-agt-1: |
+    partition_row=1
+    partition_index=1
+    partition_id=1
+    partition_path=part-1
+    node_count=1
+    node_offset=1
+    rank=0
+  agent-agt-2: |
+    partition_row=2
+    partition_index=2
+    partition_id=2
+    partition_path=part-2
+    node_count=1
+    node_offset=2
+    rank=0
+  agent-agt-3: |
+    partition_row=3
+    partition_index=3
+    partition_id=3
+    partition_path=part-3
+    node_count=1
+    node_offset=3
+    rank=0
+  agent-agt-4: |
+    partition_row=4
+    partition_index=4
+    partition_id=4
+    partition_path=part-4
+    node_count=1
+    node_offset=4
+    rank=0
+  agent-agt-5: |
+    partition_row=5
+    partition_index=5
+    partition_id=5
+    partition_path=part-5
+    node_count=1
+    node_offset=5
+    rank=0
+  agent-agt-6: |
+    partition_row=6
+    partition_index=6
+    partition_id=6
+    partition_path=part-6
+    node_count=1
+    node_offset=6
+    rank=0
+  agent-agt-7: |
+    partition_row=7
+    partition_index=7
+    partition_id=7
+    partition_path=part-7
+    node_count=1
+    node_offset=7
+    rank=0
+  agent-agt-8: |
+    partition_row=8
+    partition_index=8
+    partition_id=8
+    partition_path=part-8
+    node_count=1
+    node_offset=8
+    rank=0
+  agent-agt-9: |
+    partition_row=9
+    partition_index=9
+    partition_id=9
+    partition_path=part-9
+    node_count=1
+    node_offset=9
+    rank=0
+  agent-agt-10: |
+    partition_row=10
+    partition_index=10
+    partition_id=10
+    partition_path=part-10
+    node_count=1
+    node_offset=10
+    rank=0
+  agent-agt-11: |
+    partition_row=11
+    partition_index=11
+    partition_id=11
+    partition_path=part-11
+    node_count=1
+    node_offset=11
+    rank=0
+  agent-agt-12: |
+    partition_row=12
+    partition_index=12
+    partition_id=12
+    partition_path=part-12
+    node_count=1
+    node_offset=12
+    rank=0
+  agent-agt-13: |
+    partition_row=13
+    partition_index=13
+    partition_id=13
+    partition_path=part-13
+    node_count=1
+    node_offset=13
+    rank=0
+  agent-agt-14: |
+    partition_row=14
+    partition_index=14
+    partition_id=14
+    partition_path=part-14
+    node_count=1
+    node_offset=14
+    rank=0
+  agent-agt-15: |
+    partition_row=15
+    partition_index=15
+    partition_id=15
+    partition_path=part-15
+    node_count=1
+    node_offset=15
+    rank=0
+  agent-agt-16: |
+    partition_row=16
+    partition_index=16
+    partition_id=16
+    partition_path=part-16
+    node_count=1
+    node_offset=16
+    rank=0
   nodes_per_partition: |-
     1
     1
@@ -80,7 +216,7 @@ metadata:
     lpx.nvidia.com/deployment-name: dgd-single-v2
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: dgd-single-v2-3a98-lpu-343835eab3097dc0
+  name: dgd-single-v2-3a98-lpu-d40868132c8e0110
   namespace: inference-engine
 ---
 metadata:
@@ -98,7 +234,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-single-v2
-        nvidia.com/extra-resources-hash: 343835eab3097dc01883d5b3bc8ae14d7ac5d716bb79d83604c10e35d3eaa151
+        nvidia.com/extra-resources-hash: d40868132c8e01104960af2a476d39fe028a49f4ce4f47f2dffecc01839d9f4c
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:3a7c446413c1bbe88ab04670c79251b253f98ab2000e4f446e000116bd9824b6
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:10dbe27c9e53b73621ee50c7e4d9633352c32c6fb854c448d0e2a53cbdec774a
         scheduling.lpu.nvidia.com/model: default
@@ -121,6 +257,8 @@ spec:
             command:
             - /bin/quasar-entrypoint
             env:
+            - name: LPX_AGENT_CONFIG_KEY
+              value: agent-agt-$(GROVE_PCLQ_POD_INDEX)
             - name: LPX_MODEL_PATH
               value: /nfs/llama3_2-1b-lpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             - name: DYN_COMPONENT
@@ -231,13 +369,13 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: dgd-single-v2-3a98-lpu-343835eab3097dc0
+              name: dgd-single-v2-3a98-lpu-d40868132c8e0110
             name: config
         replicas: 17
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-single-v2
-        nvidia.com/extra-resources-hash: 343835eab3097dc01883d5b3bc8ae14d7ac5d716bb79d83604c10e35d3eaa151
+        nvidia.com/extra-resources-hash: d40868132c8e01104960af2a476d39fe028a49f4ce4f47f2dffecc01839d9f4c
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:10dbe27c9e53b73621ee50c7e4d9633352c32c6fb854c448d0e2a53cbdec774a
         scheduling.lpu.nvidia.com/role: conductor
       labels:
@@ -422,7 +560,7 @@ spec:
               defaultMode: 384
               secretName: ssh-secret
           - configMap:
-              name: dgd-single-v2-3a98-lpu-343835eab3097dc0
+              name: dgd-single-v2-3a98-lpu-d40868132c8e0110
             name: config
         replicas: 1
         roleName: cond
