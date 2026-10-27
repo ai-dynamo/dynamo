@@ -896,7 +896,7 @@ model-specific progress updates or hosted tool execution.
 Forwarding does not guarantee identical behavior across models. Effort needs a model
 and chat template that understand the selected grade. Budget enforcement needs backend
 support: vLLM uses its thinking-budget sampling field when available; SGLang requires
-its strict-thinking configuration and reasoning parser. Other backend configurations
+`--enable-strict-thinking` and a reasoning parser. Other backend configurations
 may ignore the budget. This endpoint does not implement Anthropic's hosted reasoning
 or interleaved-turn execution lifecycle. Omitting controls preserves the model defaults.
 

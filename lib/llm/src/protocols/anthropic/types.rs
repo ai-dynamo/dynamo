@@ -3214,6 +3214,10 @@ mod thinking_control_tests {
             serde_json::from_value::<AnthropicCreateMessageRequest>(value).unwrap(),
         )
         .unwrap();
+        // Match the production handler: fold canonical thinking into template
+        // arguments before comparing the unaffected history and tool fields.
+        disabled.normalize_reasoning_template_args().unwrap();
+        assert!(disabled.thinking.is_none());
         assert_eq!(
             disabled.chat_template_args.as_ref().unwrap()["enable_thinking"],
             false
