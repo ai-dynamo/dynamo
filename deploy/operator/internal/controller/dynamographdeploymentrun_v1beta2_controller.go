@@ -107,6 +107,8 @@ type DynamoGraphDeploymentRunV1beta2Reconciler struct {
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentruns,verbs=get;list;watch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentruns/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentcandidates,verbs=get;list;watch;create;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentcandidates/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
@@ -576,16 +578,16 @@ func dgdrRunContainer(containers []corev1.Container, name string) (corev1.Contai
 }
 
 func dgdrRunStatusInput(contents string) (*runtime.RawExtension, error) {
-	var input map[string]any
-	if err := yaml.Unmarshal([]byte(contents), &input); err != nil {
+	raw, err := yaml.YAMLToJSON([]byte(contents))
+	if err != nil {
+		return nil, fmt.Errorf("decode AISimulate input: %w", err)
+	}
+	var input map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &input); err != nil {
 		return nil, fmt.Errorf("decode AISimulate input: %w", err)
 	}
 	if input == nil {
 		return nil, errors.New("decode AISimulate input: expected an object")
-	}
-	raw, err := json.Marshal(input)
-	if err != nil {
-		return nil, fmt.Errorf("encode AISimulate status input: %w", err)
 	}
 	return &runtime.RawExtension{Raw: raw}, nil
 }
