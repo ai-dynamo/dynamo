@@ -1,0 +1,44 @@
+{
+  "fixture": "f8-lp30-packed-6x8c",
+  "description": "LP30 LPU-only packed chain (llama3.2-1b-4k-quasar-6x8c-1u-lp30). Partitions 1-6 have 8 chips each (extent [8, 1, 1, 1]) on 16-device nodes; 8 < 16 and 16 % 8 == 0, so the chain [1..6] packs into one reservation of ceil(6 * 8 / 16) = 3 hosts. Three hosts is at most 8, so the size is hx {3, 1, 1} and the LPX partition extent is [16, 3, 1, 1]. Two stages share each host: stage k sits on host floor(k / 2).",
+  "architecture": "lp30",
+  "compilationMode": "lpuOnly",
+  "devicesPerNode": 16,
+  "localPartitions": null,
+  "units": [
+    {"reservations": [{"partitionIds": [1, 2, 3, 4, 5, 6], "size": {"hx": {"traysPerHemisphere": 3, "hemispheres": 1, "racks": 1}}}], "connectors": []}
+  ],
+  "localPartitionIds": [],
+  "lpr": {
+    "partitions": [
+      {"id": "partition-000", "ordinal": 0, "compilerPartitionId": 1, "extent": [16, 3, 1, 1]}
+    ],
+    "propSyncConnectors": []
+  },
+  "agentCount": 3,
+  "agentPods": [
+    {"podIndex": 0, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 0, "groupSize": 3, "leaderPodIndex": 0},
+    {"podIndex": 1, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 1, "groupSize": 3, "leaderPodIndex": 0},
+    {"podIndex": 2, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 2, "groupSize": 3, "leaderPodIndex": 0}
+  ],
+  "novaStages": [
+    {"partitionId": 1, "nodeCount": 1, "podIndices": [0]},
+    {"partitionId": 2, "nodeCount": 1, "podIndices": [0]},
+    {"partitionId": 3, "nodeCount": 1, "podIndices": [1]},
+    {"partitionId": 4, "nodeCount": 1, "podIndices": [1]},
+    {"partitionId": 5, "nodeCount": 1, "podIndices": [2]},
+    {"partitionId": 6, "nodeCount": 1, "podIndices": [2]}
+  ],
+  "legacy": {
+    "lpr": {
+      "partitions": [
+        {"id": "partition-000", "ordinal": 0, "compilerPartitionId": 1, "extent": [16, 3, 1, 1]}
+      ],
+      "propSyncConnectors": [],
+      "allocationMetadata": {"arch": "lp30", "metadata_version": 1, "partition_info": {"1": {"allocation": [16, 3, 1, 1], "device": "lpu"}, "num_partitions": 1}, "prop_sync_info": {"prop_sync_pairs": [], "version": 1}, "topology": "lyra"}
+    },
+    "agentCount": 3,
+    "configMap": {"nodes_per_partition": "1\n1\n1\n1\n1\n1", "partition_ids": "1\n2\n3\n4\n5\n6", "partition_node_offsets": "0\n1\n2\n3\n4\n5", "partition_paths": "part-1\npart-2\npart-3\npart-4\npart-5\npart-6"},
+    "lpuServers": null
+  }
+}

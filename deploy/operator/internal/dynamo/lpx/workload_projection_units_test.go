@@ -6,12 +6,23 @@
 package lpx
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // projectTestUnits projects one model of build, choosing the pipeline from its
@@ -25,6 +36,20 @@ func projectTestUnits(build *Build, selection *dynamov1beta1.LPXLocalPartitions)
 		Pipeline: pipeline, Models: []string{"default"}, RuntimeBuildRef: "model-build",
 		Build: build, LocalPartitions: selection,
 	})
+}
+
+// renderTestLPUServers renders the legacy hybrid Cyborg Agent addresses for one replica.
+func renderTestLPUServers(t *testing.T, projections []*ModelProjection) string {
+	t.Helper()
+	workload := &Workload{modelProjections: projections, scalingGroupReplicas: 1}
+	serving := &dynamov1beta1.DynamoComponentDeploymentSharedSpec{
+		Roles: []dynamov1beta1.ComponentRoleSpec{{Name: dynamov1beta1.ComponentRoleLPXConductor}},
+	}
+	plan, err := workload.PlanNodeLocalMaterialization("test-pcs", serving)
+	require.NoError(t, err)
+	configMap, _, err := workload.renderCyborgConfigMap(plan)
+	require.NoError(t, err)
+	return configMap.Data["lpu_servers"]
 }
 
 func TestUnitProjection(t *testing.T) {
@@ -578,4 +603,364 @@ func TestUnitProjectionMatchesLegacy(t *testing.T) {
 			requireLegacyParity(t, build, test.selection)
 		})
 	}
+}
+
+// placementFixtureRoot holds the vendored copy of the shared lpx_placement
+// contract fixtures. Copy the canonical set into it unchanged; never edit it here.
+const placementFixtureRoot = "testdata/lpx_placement"
+
+// placementFixtureIndex is the fixture set's fixtures.json: one entry per
+// fixture directory with the sha256 of every file in it.
+type placementFixtureIndex struct {
+	Fixtures []struct {
+		Name  string            `json:"name"`
+		Files map[string]string `json:"files"`
+	} `json:"fixtures"`
+}
+
+// readPlacementFixtureIndex reads the vendored fixtures.json, which must list
+// at least one fixture.
+func readPlacementFixtureIndex(t *testing.T) placementFixtureIndex {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(placementFixtureRoot, "fixtures.json"))
+	require.NoError(t, err)
+	var index placementFixtureIndex
+	require.NoError(t, json.Unmarshal(data, &index))
+	require.NotEmpty(t, index.Fixtures)
+	return index
+}
+
+// expectedPlacement is a fixture's hand-reviewed expected-placement.json. The
+// operator checks the fields it owns; runtime-only views such as novaStages and
+// per-pod ranks are ignored. A null lpr means the units path refuses the bundle
+// for the refusal reason. legacy is the legacy projection of the same bundle and
+// scenario with the units ignored, including the runtime ConfigMaps the operator
+// still renders for builds without units.
+type expectedPlacement struct {
+	CompilationMode string `json:"compilationMode"`
+	Architecture    string `json:"architecture"`
+	DevicesPerNode  int    `json:"devicesPerNode"`
+	LocalPartitions *struct {
+		Mode string  `json:"mode"`
+		IDs  []int64 `json:"ids"`
+	} `json:"localPartitions"`
+	Units             []expectedPlacementUnit `json:"units"`
+	LocalPartitionIDs []int                   `json:"localPartitionIds"`
+	LPR               *expectedPlacementLPR   `json:"lpr"`
+	Refusal           *struct {
+		Operator string `json:"operator"`
+	} `json:"refusal"`
+	AgentCount int `json:"agentCount"`
+	AgentPods  []struct {
+		PodIndex       int    `json:"podIndex"`
+		LPRPartitionID string `json:"lprPartitionId"`
+	} `json:"agentPods"`
+	Legacy struct {
+		LPR        *expectedPlacementLPR `json:"lpr"`
+		AgentCount int                   `json:"agentCount"`
+		ConfigMap  map[string]string     `json:"configMap"`
+		LPUServers *string               `json:"lpuServers"`
+	} `json:"legacy"`
+}
+
+// expectedPlacementLPR is a reviewed LPX pipeline request placement. The units
+// path lpr omits allocationMetadata because units always send {}.
+type expectedPlacementLPR struct {
+	Partitions         []lpxv1alpha1.PartitionRequest         `json:"partitions"`
+	PropSyncConnectors []lpxv1alpha1.PropSyncConnectorRequest `json:"propSyncConnectors"`
+	AllocationMetadata json.RawMessage                        `json:"allocationMetadata"`
+}
+
+// expectedPlacementUnit mirrors one config.lpuUnits entry with capnp field names.
+type expectedPlacementUnit struct {
+	Reservations []struct {
+		PartitionIDs []int `json:"partitionIds"`
+		Size         struct {
+			Nodes *int `json:"nodes"`
+			HX    *struct {
+				TraysPerHemisphere int64 `json:"traysPerHemisphere"`
+				Hemispheres        int64 `json:"hemispheres"`
+				Racks              int64 `json:"racks"`
+			} `json:"hx"`
+		} `json:"size"`
+	} `json:"reservations"`
+	Connectors []struct {
+		Xt8888Gap *struct {
+			MaxInterPartitionOffset int64 `json:"maxInterPartitionOffset"`
+		} `json:"xt8888Gap"`
+		HxPropSyncV1 *struct {
+			Connections []struct {
+				FromDevice int64 `json:"fromDevice"`
+				ToDevice   int64 `json:"toDevice"`
+			} `json:"connections"`
+			AcceptableLaneMultiplicities []int64 `json:"acceptableLaneMultiplicities"`
+			TopologyDimension            *uint8  `json:"topologyDimension"`
+		} `json:"hxPropSyncV1"`
+	} `json:"connectors"`
+}
+
+// TestPlacementFixturesMatchIndex requires the vendored lpx_placement set to be
+// an unedited copy of the shared set: the index and README, one directory per
+// indexed fixture, and in each exactly the indexed files with their sha256.
+func TestPlacementFixturesMatchIndex(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Read the fixture index and the vendored directory")
+	index := readPlacementFixtureIndex(t)
+	entries, err := os.ReadDir(placementFixtureRoot)
+	require.NoError(t, err)
+
+	t.Log("Require the index, the README and exactly one directory per indexed fixture")
+	var rootFiles, fixtureDirs, indexed []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			fixtureDirs = append(fixtureDirs, entry.Name())
+		} else {
+			rootFiles = append(rootFiles, entry.Name())
+		}
+	}
+	for _, fixture := range index.Fixtures {
+		indexed = append(indexed, fixture.Name)
+	}
+	require.ElementsMatch(t, []string{"README.md", "fixtures.json"}, rootFiles)
+	require.ElementsMatch(t, indexed, fixtureDirs)
+
+	for _, fixture := range index.Fixtures {
+		t.Run(fixture.Name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Require exactly the indexed files, including the deployment contract and the reviewed placement")
+			dir := filepath.Join(placementFixtureRoot, fixture.Name)
+			files, err := os.ReadDir(dir)
+			require.NoError(t, err)
+			names := make([]string, 0, len(files))
+			for _, file := range files {
+				names = append(names, file.Name())
+			}
+			require.ElementsMatch(t, slices.Collect(maps.Keys(fixture.Files)), names)
+			require.Contains(t, fixture.Files, gbuildDeploymentV1CapnpFile)
+			require.Contains(t, fixture.Files, "expected-placement.json")
+
+			t.Log("Require every vendored file to have its indexed sha256")
+			for name, want := range fixture.Files {
+				data, err := os.ReadFile(filepath.Join(dir, name))
+				require.NoError(t, err)
+				sum := sha256.Sum256(data)
+				require.Equal(t, want, hex.EncodeToString(sum[:]), "sha256 of %s/%s", fixture.Name, name)
+			}
+		})
+	}
+}
+
+// TestUnitProjectionMatchesPlacementFixtures projects every compiler-written
+// bundle of the shared lpx_placement set for its scenario through the legacy
+// derivation with the units ignored and through the units, and checks each
+// against the fixture's hand-reviewed placement.
+func TestUnitProjectionMatchesPlacementFixtures(t *testing.T) {
+	t.Parallel()
+	workloadModes := map[string]lpxv1alpha1.WorkloadMode{
+		"lp20/lpuOnly": lpxv1alpha1.WorkloadModeV2LPUOnly,
+		"lp20/lpx":     lpxv1alpha1.WorkloadModeV2StrictHybrid,
+		"lp30/lpuOnly": lpxv1alpha1.WorkloadModeV3HxLPUOnly,
+		"lp30/lpx":     lpxv1alpha1.WorkloadModeV3HxStrictHybrid,
+	}
+	targetFamilies := map[string]lpxv1alpha1.TargetFamily{
+		"lp20": lpxv1alpha1.TargetFamilyXt8888,
+		"lp30": lpxv1alpha1.TargetFamilyHx16x8x2x3,
+	}
+	for _, fixture := range readPlacementFixtureIndex(t).Fixtures {
+		t.Run(fixture.Name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Read the reviewed placement and resolve its scenario")
+			dir, err := filepath.Abs(filepath.Join(placementFixtureRoot, fixture.Name))
+			require.NoError(t, err)
+			data, err := os.ReadFile(filepath.Join(dir, "expected-placement.json"))
+			require.NoError(t, err)
+			var expected expectedPlacement
+			require.NoError(t, json.Unmarshal(data, &expected))
+			workloadMode := workloadModes[expected.Architecture+"/"+expected.CompilationMode]
+			targetFamily := targetFamilies[expected.Architecture]
+			require.NotEmpty(t, workloadMode, "architecture %q, compilationMode %q", expected.Architecture, expected.CompilationMode)
+			hybrid := expected.CompilationMode == "lpx"
+			var selection *dynamov1beta1.LPXLocalPartitions
+			if scenario := expected.LocalPartitions; scenario != nil {
+				switch scenario.Mode {
+				case "all":
+					selection = &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll}
+				case "ids":
+					selection = &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: scenario.IDs}
+				default:
+					require.Failf(t, "unsupported localPartitions mode", "%q", scenario.Mode)
+				}
+			}
+
+			t.Log("Acquire the bundle and decode the compiler's units")
+			registry, err := NewModelRegistry("", nil)
+			require.NoError(t, err)
+			build, err := registry.AcquireBuild(t.Context(), dir)
+			require.NoError(t, err)
+			require.Equal(t, string(targetFamily), string(build.family))
+			require.Equal(t, expected.DevicesPerNode, build.partitions[0].devicesPerNode)
+			require.Equal(t, hybrid, build.hasCUDAPartitions)
+			wantUnits := make([]lpuUnit, len(expected.Units))
+			for index, unit := range expected.Units {
+				wantUnits[index] = unit.lpuUnit(t, build.family, expected.DevicesPerNode)
+			}
+			require.Equal(t, wantUnits, build.lpuUnits)
+
+			t.Log("Reproduce the legacy section, allocation metadata included, with the units ignored")
+			require.NotNil(t, expected.Legacy.LPR)
+			legacyBuild := *build
+			legacyBuild.lpuUnits = nil
+			legacyProjections, err := projectTestUnits(&legacyBuild, selection)
+			require.NoError(t, err)
+			legacySpec := legacyProjections[0].RequestSpec(&MaterializationPlan{}, "agents")
+			requirePlacementRequest(t, *expected.Legacy.LPR, workloadMode, targetFamily, legacySpec)
+			require.JSONEq(t, string(expected.Legacy.LPR.AllocationMetadata), string(legacySpec.AllocationMetadata.Raw))
+			require.Equal(t, expected.Legacy.AgentCount, legacyProjections[0].AgentReplicas())
+			require.Equal(t, expected.Legacy.ConfigMap, resolvedPartitionData(legacyProjections))
+			if !hybrid {
+				require.Nil(t, expected.Legacy.LPUServers, "an LPU-only workload has no Cyborg")
+			} else {
+				require.NotNil(t, expected.Legacy.LPUServers)
+				require.Equal(t, *expected.Legacy.LPUServers, renderTestLPUServers(t, legacyProjections))
+			}
+
+			t.Log("Project the units, or refuse the bundle for the reviewed reason")
+			projections, err := projectTestUnits(build, selection)
+			if expected.LPR == nil {
+				require.NotNil(t, expected.Refusal)
+				require.ErrorIs(t, err, ErrUnsupportedRuntime)
+				require.ErrorContains(t, err, expected.Refusal.Operator)
+				return
+			}
+			require.NoError(t, err)
+			projection := projections[0]
+
+			t.Log("Request the reviewed LPX partitions and connectors without allocation metadata for the reviewed Agents")
+			spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
+			requirePlacementRequest(t, *expected.LPR, workloadMode, targetFamily, spec)
+			require.JSONEq(t, `{}`, string(spec.AllocationMetadata.Raw))
+			require.Equal(t, expected.AgentCount, projection.AgentReplicas())
+			require.Equal(t, expected.LocalPartitionIDs, append([]int{}, projection.localPartitionIDs...))
+
+			t.Log("Place each reviewed Agent pod in its LPX partition, walking partitions in Agent order")
+			wantPodPartitions := make([]string, 0, len(expected.AgentPods))
+			for index, pod := range expected.AgentPods {
+				require.Equal(t, index, pod.PodIndex)
+				wantPodPartitions = append(wantPodPartitions, pod.LPRPartitionID)
+			}
+			podPartitions := make([]string, 0, projection.AgentReplicas())
+			for ordinal, partition := range projection.partitions {
+				for range partition.effectiveNodeCount() {
+					podPartitions = append(podPartitions, spec.Partitions[ordinal].ID)
+				}
+			}
+			require.Equal(t, wantPodPartitions, podPartitions)
+
+			t.Log("Render the legacy section's /configs rows from LPU-only units, which a speculative workload still reads")
+			if !hybrid {
+				require.Equal(t, expected.Legacy.ConfigMap, resolvedPartitionData(projections))
+				return
+			}
+
+			t.Log("Render the hybrid workload, from templates without /configs, with one Cyborg client per runtime I/O endpoint")
+			agentSpec := renderTestPodSpec()
+			agentSpec.Containers[0].VolumeMounts = withoutConfigMount(agentSpec.Containers[0].VolumeMounts, false)
+			pcs := renderTestPCS(true)
+			pcs.Spec.Template.Cliques[0].Spec.Replicas = build.ioFPGACount * build.ioFanoutFactor
+			cyborgContainer := &pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0]
+			cyborgContainer.VolumeMounts = withoutConfigMount(cyborgContainer.VolumeMounts, false)
+			rendered, resources, err := renderSelectedForTest(pcs, projections, RenderInput{
+				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: agentSpec}},
+			})
+			require.NoError(t, err)
+
+			t.Log("Render no runtime ConfigMap, config volume or extra-resources hash for the units")
+			require.Empty(t, resources)
+			for _, clique := range rendered.Spec.Template.Cliques {
+				require.False(t, slices.ContainsFunc(clique.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == lpuConfigVolumeName }), clique.Name)
+				require.NotContains(t, clique.Annotations, v1alpha1.AnnotationExtraResourcesHash, clique.Name)
+			}
+
+			t.Log("Publish the local unit roots to Agents and Cyborg, and the Agent template to Cyborg")
+			roots := make([]string, len(expected.LocalPartitionIDs))
+			for index, id := range expected.LocalPartitionIDs {
+				roots[index] = strconv.Itoa(id)
+			}
+			localRoots := corev1.EnvVar{Name: localPartitionIDsEnv, Value: strings.Join(roots, ",")}
+			agent := namedClique(t, rendered, testAgentTemplateName)
+			require.Equal(t, int32(expected.AgentCount), agent.Spec.Replicas)
+			require.Equal(t, []corev1.EnvVar{localRoots}, placementEnv(agent.Spec.PodSpec.Containers[0].Env))
+			require.Equal(t, []corev1.EnvVar{{Name: allocationEnvVar, Value: testAgentTemplateName}, localRoots},
+				placementEnv(namedClique(t, rendered, "cond").Spec.PodSpec.Containers[0].Env))
+		})
+	}
+}
+
+// requirePlacementRequest requires spec to request the reviewed LPX partitions
+// and connectors for workloadMode and targetFamily.
+func requirePlacementRequest(
+	t *testing.T,
+	want expectedPlacementLPR,
+	workloadMode lpxv1alpha1.WorkloadMode,
+	targetFamily lpxv1alpha1.TargetFamily,
+	spec lpxv1alpha1.LPUPipelineRequestSpec,
+) {
+	t.Helper()
+	require.Equal(t, workloadMode, spec.WorkloadMode)
+	require.Equal(t, targetFamily, spec.TargetFamily)
+	require.Equal(t, want.Partitions, spec.Partitions)
+	if len(want.PropSyncConnectors) == 0 {
+		require.Empty(t, spec.PropSyncConnectors)
+		return
+	}
+	require.Equal(t, want.PropSyncConnectors, spec.PropSyncConnectors)
+}
+
+// lpuUnit converts the reviewed unit to the decoded form for family and
+// devicesPerNode by SPEC rule 5: an LP20 reservation runs on size.nodes hosts,
+// and an LP30 reservation on the product of its size.hx dimensions with extent
+// [devicesPerNode, traysPerHemisphere, hemispheres, racks]. The operator refuses
+// an LP30 reservation sized in nodes, and no reviewed fixture has one.
+func (u expectedPlacementUnit) lpuUnit(t *testing.T, family BuildFamily, devicesPerNode int) lpuUnit {
+	t.Helper()
+	unit := lpuUnit{Connectors: []lpxv1alpha1.PropSyncConnectorRequirement{}}
+	for _, reservation := range u.Reservations {
+		decoded := lpuReservation{PartitionIDs: reservation.PartitionIDs}
+		switch nodes, hx := reservation.Size.Nodes, reservation.Size.HX; {
+		case family == BuildFamilyXT && nodes != nil && hx == nil:
+			decoded.Hosts = *nodes
+		case family == BuildFamilyHX && nodes == nil && hx != nil:
+			decoded.Hosts = int(hx.TraysPerHemisphere * hx.Hemispheres * hx.Racks)
+			decoded.HXExtent = []int64{int64(devicesPerNode), hx.TraysPerHemisphere, hx.Hemispheres, hx.Racks}
+		default:
+			require.Failf(t, "unsupported reviewed reservation size", "%s reservation of partitions %v", family, reservation.PartitionIDs)
+		}
+		unit.Reservations = append(unit.Reservations, decoded)
+	}
+	for _, connector := range u.Connectors {
+		if gap := connector.Xt8888Gap; gap != nil {
+			unit.Connectors = append(unit.Connectors, lpxv1alpha1.PropSyncConnectorRequirement{
+				Kind: lpxv1alpha1.PropSyncConnectorKindXt8888Gap, MaxInterPartitionOffset: new(gap.MaxInterPartitionOffset),
+			})
+			continue
+		}
+		require.NotNil(t, connector.HxPropSyncV1, "reviewed connector has no variant")
+		// The operator deploys only HX connectors compiled at dimension 1 and
+		// drops the dimension after decode, so the reviewed value is checked here.
+		require.NotNil(t, connector.HxPropSyncV1.TopologyDimension, "reviewed HX connector has no topologyDimension")
+		require.Equal(t, uint8(1), *connector.HxPropSyncV1.TopologyDimension, "reviewed HX connector topologyDimension")
+		connections := make([]lpxv1alpha1.HxLogicalConnection, 0, len(connector.HxPropSyncV1.Connections))
+		for _, pair := range connector.HxPropSyncV1.Connections {
+			connections = append(connections, lpxv1alpha1.HxLogicalConnection{FromLogicalDevice: pair.FromDevice, ToLogicalDevice: pair.ToDevice})
+		}
+		unit.Connectors = append(unit.Connectors, lpxv1alpha1.PropSyncConnectorRequirement{
+			Kind:                         lpxv1alpha1.PropSyncConnectorKindHxPropSyncV1,
+			Connections:                  &connections,
+			AcceptableLaneMultiplicities: new(connector.HxPropSyncV1.AcceptableLaneMultiplicities),
+		})
+	}
+	return unit
 }

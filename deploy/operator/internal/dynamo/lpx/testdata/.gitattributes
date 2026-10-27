@@ -1,0 +1,3 @@
+# Compiler contract fixtures are byte-exact Cap'n Proto messages: the repository-wide
+# text normalization would rewrite any CRLF byte pair and break their sha256.
+*.capnp.bin binary
