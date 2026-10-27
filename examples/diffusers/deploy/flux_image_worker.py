@@ -266,8 +266,9 @@ class FluxImageBackend:
         nvext = request.nvext
         if nvext and nvext.negative_prompt is not None:
             raise InvalidArgument("negative_prompt is not supported by this example")
-        if request.background is not None:
-            raise InvalidArgument("background is not supported by this example")
+        for field in ("background", "quality", "style", "moderation"):
+            if getattr(request, field) is not None:
+                raise InvalidArgument(f"{field} is not supported by this example")
         try:
             width, height = self._parse_size(request.size)
         except ValueError as exc:
