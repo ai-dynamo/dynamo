@@ -580,6 +580,14 @@ class MultimodalRequestProcessor:
                             item if isinstance(item, dict) else {"Url": item}
                         )
 
+                if audio_items and embedding_paths:
+                    raise HttpStatusError(
+                        400,
+                        "Audio with precomputed image embeddings is not supported "
+                        "by TensorRT-LLM",
+                        "audio_url",
+                    )
+
                 # Load regular images as PIL Images for TRT-LLM's input processor
                 # TRT-LLM will auto-detect this and compute mrope_config
                 if image_urls:
@@ -761,13 +769,6 @@ class MultimodalRequestProcessor:
             if videos:
                 processed_mm_data["video"] = videos
                 logging.info("Loaded %d video(s)", len(videos))
-
-            if loaded_embeddings and audio_items:
-                raise HttpStatusError(
-                    400,
-                    "Audio with precomputed image embeddings is not supported by TensorRT-LLM",
-                    "audio_url",
-                )
 
             if audio_items:
                 processed_mm_data["audio"] = [

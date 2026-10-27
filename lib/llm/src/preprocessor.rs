@@ -1617,9 +1617,9 @@ fn attach_request_context_metadata(
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
 /// `function.arguments` when the model opts in (GLM-5.2), and appends
 /// HuggingFace's unique continue-final-message marker when that flag is set.
-/// Audio content parts are rendered as the model's audio placeholder.
-/// Other trait methods delegate to the inner request, rendering must use
-/// the transformed messages rather than the original slice.
+/// `input_audio` content parts are rendered as the model's audio placeholder.
+/// Other trait methods delegate to the inner request, except typed_messages:
+/// rendering must use the transformed messages rather than the original slice.
 struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
@@ -1641,10 +1641,7 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
             for message in messages {
                 if let Some(parts) = message.get_mut("content").and_then(|v| v.as_array_mut()) {
                     for part in parts {
-                        if matches!(
-                            part.get("type").and_then(|v| v.as_str()),
-                            Some("input_audio" | "audio_url")
-                        ) {
+                        if part.get("type").and_then(|v| v.as_str()) == Some("input_audio") {
                             *part = serde_json::json!({"type": "audio"});
                         }
                     }
@@ -3561,9 +3558,6 @@ impl OpenAIPreprocessor {
                             part,
                             MultimodalContentPart::User(
                                 ChatCompletionRequestUserMessageContentPart::InputAudio(_)
-                                    | ChatCompletionRequestUserMessageContentPart::AudioUrl(_)
-                            ) | MultimodalContentPart::Tool(
-                                ChatCompletionRequestToolMessageContentPart::AudioUrl(_)
                             )
                         )
                     })
@@ -8564,7 +8558,7 @@ mod strip_tests {
     use dynamo_renderer::OAIChatLikeRequest;
 
     #[test]
-    fn audio_parts_render_as_audio_placeholders() {
+    fn input_audio_parts_render_as_audio_placeholders() {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",
             "messages": [{
@@ -8591,7 +8585,7 @@ mod strip_tests {
         );
         assert_eq!(
             messages[0]["content"][2],
-            serde_json::json!({"type": "audio"})
+            serde_json::json!({"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}})
         );
     }
 
@@ -13986,6 +13980,50 @@ mod tests {
         .unwrap()
         {
             dynamo_renderer::PromptFormatter::OAI(formatter) => formatter,
+        }
+    }
+
+    #[test]
+    fn audio_urls_and_input_audio_render_as_placeholders() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let tokenizer = mdc.tokenizer().unwrap();
+        let formatter = test_prompt_formatter(
+            "{% for m in messages %}{% for part in m.content %}{{ part.type }};{% endfor %}{% endfor %}",
+        );
+        let preprocessor = OpenAIPreprocessor::new_with_parts(mdc, formatter, tokenizer).unwrap();
+        let audio_url = serde_json::json!({
+            "type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}
+        });
+        for (messages, expected) in [
+            (
+                serde_json::json!([{"role": "user", "content": [audio_url.clone()]}]),
+                "audio;",
+            ),
+            (
+                serde_json::json!([{
+                    "role": "tool", "tool_call_id": "call-1", "content": [audio_url.clone()]
+                }]),
+                "audio;",
+            ),
+            (
+                serde_json::json!([{"role": "user", "content": [
+                    {"type": "input_audio", "input_audio": {"data": "AA==", "format": "wav"}},
+                    audio_url
+                ]}]),
+                "audio;audio;",
+            ),
+        ] {
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test-model", "messages": messages
+                }))
+                .unwrap();
+            let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert_eq!(rendered.as_str(), expected);
         }
     }
 
