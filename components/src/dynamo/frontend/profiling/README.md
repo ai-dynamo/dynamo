@@ -110,22 +110,35 @@ traces) or `"nsys"` (Nsight Systems). Each worker is launched for one of them;
      vLLM exports the trace inside `stop_profile` on the engine loop, so the
      stopped replica pauses for the export. Without Python stacks and gzip the
      pause drops from about a minute to seconds; the bundle compresses offline.
-   - SGLang: no launch flag. The coordinator passes the worker's `start_options`
-     to SGLang's `start_profile`; set `"start_options": {"output_dir": "<artifact_location>"}`.
+   - SGLang: no launch flag. SGLang picks the profiler per `start_profile`
+     request from its `activities`; left unset, as the coordinator does in this
+     mode, it runs `torch.profiler` (CPU and GPU). The coordinator passes the
+     worker's `start_options`; set
+     `"start_options": {"output_dir": "<artifact_location>", "with_stack": false}`.
+     SGLang also exports inside `stop_profile`, in the scheduler loop, and always
+     gzips the trace, so the worker stops serving for the export. SGLang records
+     Python stacks unless `with_stack` is false; turning them off roughly halved
+     the pause in our runs (34 s to 14 s for a 3 s capture).
 2. **Configure the worker entry**: `artifact_location` as above, and
    `expected_rank_ids` with one ID per engine rank as it appears in the trace
    file names: vLLM `dp0_pp0_tp0_dcp0_ep0_rank0`, SGLang `TP-0` (with `-DP-<n>`,
-   `-PP-<n>` or `-EP-<n>` when that dimension is larger than one). The
+   `-PP-<n>` or `-EP-<n>` when that dimension is larger than one, e.g. `TP-0-DP-0`
+   and `TP-1-DP-1` for TP2 with two DP-attention ranks). The
    coordinator gives each session a unique `profile_prefix`, so files from other
    sessions never count.
 3. **Frontend**: a `torch_profile` session also records the frontend with Linux
    perf unless `frontend_perf_enabled` is false. Set it to false where
    `perf_event_paranoid` denies attaching perf.
-4. **No data parallelism.** Do not use Kineto with vLLM data parallelism
-   (DP > 1, including DP attention and wide EP): the export runs synchronously in
-   `stop_profile` and serializes across the DP group's ranks, stalling the whole
-   group. Profile those deployments with Nsight. SGLang with DP > 1 has not been
-   checked. The coordinator does not enforce this.
+4. **Data parallelism.** The export pauses every data-parallel rank, so prefer
+   Nsight for DP deployments. The coordinator does not enforce this.
+   - vLLM (DP > 1, including DP attention and wide EP): do not use Kineto. The
+     export runs synchronously in `stop_profile` and serializes across the DP
+     group's ranks, stalling the whole group for the sum of the exports.
+   - SGLang (`--dp-size`, with or without `--enable-dp-attention`): the stop
+     reaches all DP ranks at once and they export concurrently, so the pause is
+     one rank's export, but every rank stops serving for it (about 30 s with
+     stacks in our two-rank runs). Use Kineto only if that pause is acceptable,
+     with `with_stack: false` and a short `duration_ms`.
 
 ### Nsight Systems (`"mode": "nsys"`)
 
@@ -143,8 +156,10 @@ traces) or `"nsys"` (Nsight Systems). Each worker is launched for one of them;
 
    vLLM workers also need `--profiler-config '{"profiler": "cuda"}'` so that
    `start_profile`/`stop_profile` open and close the CUDA profiler range; such a
-   launch cannot serve Torch capture. SGLang needs no flag: the coordinator sends
-   `activities: ["CUDA_PROFILER"]`.
+   launch cannot serve Torch capture. SGLang needs no flag: in this mode the
+   coordinator sends `activities: ["CUDA_PROFILER"]`, so `start_profile` calls
+   `cudaProfilerStart`/`cudaProfilerStop` instead of the Torch profiler. One SGLang
+   launch under Nsight can therefore serve both modes.
 2. **Configure** `nsys_frontend_output_prefix` (absolute) in the config and
    `nsys_output_prefix` (absolute) per worker, matching the launches.
 3. **Frontend**: install `ai-dynamo[profiling]` (NVTX) and use the embedded host.
