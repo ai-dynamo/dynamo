@@ -131,8 +131,7 @@ func ensureModelsDownloaded(
 	return downloaded, len(downloaded) == len(builds), err
 }
 
-// ensureDownloaded checks the items whose keys are not in existing, in order,
-// within one shared budget. It returns the downloaded and pending keys.
+// ensureDownloaded includes cached items when dividing the shared timeout budget.
 func ensureDownloaded[T any](
 	ctx context.Context,
 	items []T,
@@ -154,7 +153,6 @@ func ensureDownloaded[T any](
 	ctx, cancel := context.WithTimeout(ctx, modelDownloadCheckTimeout)
 	defer cancel()
 
-	// Cached items count toward the divisor, so each check gets the same share.
 	perItemTimeout := modelDownloadCheckTimeout / time.Duration(len(items))
 
 	for _, item := range items {
