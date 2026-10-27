@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
     engine::AsyncEngine,
+    error::{DynamoError, ErrorType},
     pipeline::{
         Context, ManyOut, Operator, PushRouter, RouterMode, ServerStreamingEngine, SingleIn,
         async_trait,
@@ -389,6 +390,18 @@ impl
         {
             return next.generate(context.map(|_| request)).await;
         }
+        if request
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.lora_resolution_version)
+            .is_some()
+        {
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message("runtime_lora_encoder_unsupported")
+                .build()
+                .into());
+        }
 
         let encode_context = Context::with_id_and_metadata(
             request.clone(),
@@ -430,7 +443,7 @@ impl
 mod tests {
     use std::{
         collections::{HashMap, HashSet},
-        sync::Mutex,
+        sync::{Mutex, atomic::AtomicUsize},
         time::Duration,
     };
 
@@ -501,7 +514,7 @@ mod tests {
             .unwrap()
     }
 
-    struct EncodeWorker(u64);
+    struct EncodeWorker(u64, Arc<AtomicUsize>);
 
     #[async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
@@ -511,6 +524,7 @@ mod tests {
             &self,
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            self.1.fetch_add(1, Ordering::SeqCst);
             let output = LLMEngineOutput::encode_terminal(
                 json!({"worker_id": self.0}).as_object().unwrap().clone(),
             );
@@ -580,6 +594,7 @@ mod tests {
         let namespace = format!("encoder-admission-{}", uuid::Uuid::new_v4());
         let mut workers = Vec::new();
         let mut runtimes = Vec::new();
+        let encode_calls = Arc::new(AtomicUsize::new(0));
         for _ in 0..3 {
             let drt = DistributedRuntime::new(runtime.clone(), config())
                 .await
@@ -592,7 +607,13 @@ mod tests {
                 .endpoint("encode");
             let worker = endpoint
                 .endpoint_builder()
-                .handler(Ingress::for_engine(Arc::new(EncodeWorker(drt.connection_id()))).unwrap())
+                .handler(
+                    Ingress::for_engine(Arc::new(EncodeWorker(
+                        drt.connection_id(),
+                        encode_calls.clone(),
+                    )))
+                    .unwrap(),
+                )
                 .start_with_registration()
                 .await
                 .unwrap();
@@ -655,6 +676,45 @@ mod tests {
                 .available_worker_ids_for("other-group", &endpoint.id())
                 .is_none()
         );
+        let calls_before = encode_calls.load(Ordering::SeqCst);
+        let downstream = Arc::new(CaptureEngine::default());
+        let mut runtime_request = multimodal_request();
+        runtime_request.routing_mut().lora_resolution_version =
+            Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION);
+        let result = router
+            .generate(SingleIn::new(runtime_request.clone()), downstream.clone())
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("runtime LoRA must not dispatch to an encoder"),
+        };
+        assert!(dynamo_runtime::error::match_error_chain(
+            error.as_ref(),
+            &[dynamo_runtime::error::ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("runtime_lora_encoder_unsupported")
+        );
+        assert_eq!(encode_calls.load(Ordering::SeqCst), calls_before);
+        assert!(downstream.request.lock().unwrap().is_none());
+
+        runtime_request.multi_modal_data = None;
+        router
+            .generate(SingleIn::new(runtime_request), downstream.clone())
+            .await
+            .unwrap();
+        assert_eq!(encode_calls.load(Ordering::SeqCst), calls_before);
+        let text_request = downstream.request.lock().unwrap().take().unwrap();
+        assert_eq!(
+            text_request.routing.unwrap().lora_resolution_version,
+            Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION)
+        );
+        assert!(text_request.encoder_result.is_none());
+        assert_eq!(encoded_worker(&router).await, Some(ids[0]));
+        assert_eq!(encode_calls.load(Ordering::SeqCst), calls_before + 1);
         for _ in 0..6 {
             assert_eq!(encoded_worker(&router).await, Some(ids[0]));
         }
