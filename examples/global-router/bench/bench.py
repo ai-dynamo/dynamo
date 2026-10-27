@@ -471,7 +471,8 @@ def loadgen_manifest(cfg, member, label, concurrency, start_at):
                 "metadata": meta,
                 "spec": {
                     "backoffLimit": 0,
-                    "activeDeadlineSeconds": 3600,
+                    # Install, the lead to the start, the day, and aiperf's export.
+                    "activeDeadlineSeconds": 3600 + int(load.get("dayS", 0)),
                     "template": {
                         "metadata": {"labels": {"app": name}},
                         "spec": {
