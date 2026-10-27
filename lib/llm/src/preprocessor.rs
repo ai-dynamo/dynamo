@@ -7124,7 +7124,8 @@ impl OpenAIPreprocessor {
     /// For Mistral: disabled unless `reasoning_effort` is present and not `none`.
     /// For Gemma 4: reasoning is opt-in and disabled unless chat_template_args
     ///   explicitly enables thinking. Gemma 4's chat template injects reasoning
-    ///   markers only when enable_thinking=true.
+    ///   markers only when enable_thinking=true. The exception is a deployment
+    ///   that also runs the Gemma 4 tool-call parser: see `is_gemma4_tool_parser`.
     /// For MiniMax M3: disabled when chat_template_args contains
     ///   "thinking_mode": "disabled", matching SGLang's MiniMax M3 request
     ///   convention.
@@ -7159,14 +7160,29 @@ impl OpenAIPreprocessor {
             return match family {
                 // GPT-OSS cannot disable reasoning; unsupported aliases must not expose it as answer text.
                 "gpt_oss" => false,
-                "gemma4" => thinking != Some(true),
+                "gemma4" => thinking != Some(true) && !Self::is_gemma4_tool_parser(tool_parser),
                 "deepseek_v4" | "deepseek_v41" => {
                     !Self::deepseek_renderer_reasoning_enabled(chat_template_args.as_ref(), true)
                 }
                 _ => thinking == Some(false),
             };
         }
+        if Self::is_gemma4_tool_parser(tool_parser)
+            && matches!(reasoning_parser, Some("gemma4" | "gemma-4"))
+        {
+            return false;
+        }
         Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args.as_ref())
+    }
+
+    /// With the Gemma 4 tool-call parser, Gemma 4 reasoning parsing stays on even when
+    /// the request leaves thinking off. The chat template then prefills an empty
+    /// `<|channel>thought\n<channel|>` on every turn but the one after a tool response,
+    /// where the model writes it itself; the reasoning parser takes it out of `content`,
+    /// as vLLM's gemma4 reasoning parser does. Other turns carry no channel markers and
+    /// pass through unchanged.
+    fn is_gemma4_tool_parser(tool_parser: Option<&str>) -> bool {
+        matches!(tool_parser, Some("gemma4" | "gemma-4"))
     }
 
     fn is_reasoning_disabled_by_request(

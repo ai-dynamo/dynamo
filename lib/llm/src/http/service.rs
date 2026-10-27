@@ -125,8 +125,8 @@ mod tests {
 
     #[test]
     fn raw_batch_reasoning_policy_respects_deployment_default_and_client_override() {
-        let mut options =
-            ParsingOptions::new(Some("gemma4".to_string()), Some("gemma4".to_string()));
+        // Reasoning selector only: the Gemma 4 tool-call parser keeps reasoning on.
+        let mut options = ParsingOptions::new(None, Some("gemma4".to_string()));
         options.default_thinking_mode = Some("enabled".to_string());
         assert!(
             !apply_request_tool_call_parsing_options(options.clone(), &request(json!("auto")))
@@ -225,7 +225,8 @@ mod tests {
                         result.reasoning_disabled,
                         match family {
                             "gpt_oss" => false,
-                            "gemma4" => thinking != Some(true),
+                            // Kept on with the Gemma 4 tool-call parser.
+                            "gemma4" => thinking != Some(true) && tool.is_none(),
                             _ => thinking == Some(false),
                         },
                         "{selector} {tool:?} {reasoning:?} {thinking:?}"

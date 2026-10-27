@@ -3789,7 +3789,8 @@ async fn all_unified_families_honor_normalized_request_controls_for_all_selector
                         .unwrap();
                     let out = drain_stream(output).await;
                     let disabled = if family == "gemma4" {
-                        thinking != Some(true)
+                        // Kept on with the Gemma 4 tool-call parser.
+                        thinking != Some(true) && tool.is_none()
                     } else {
                         thinking == Some(false)
                     };
@@ -3815,8 +3816,31 @@ async fn all_unified_families_honor_normalized_request_controls_for_all_selector
     }
 }
 
-#[tokio::test]
-async fn gemma4_without_enable_thinking_keeps_parser_markers_as_content() {
+/// Gemma 4 with thinking off. With only the reasoning selector, the parser stays gated
+/// off and channel markers are literal content. With the Gemma 4 tool-call parser it
+/// stays on, so the empty thought channel the model writes itself on the turn after a
+/// tool response leaves `content`, and a tool call after it still parses, on both the
+/// legacy and the unified route.
+async fn assert_gemma4_without_enable_thinking() {
+    let call = "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>";
+    let empty_then_call = format!("<|channel>thought\n<channel|>{call}");
+    // (raw output, reasoning and content when parsed, tool calls)
+    let cases = [
+        ("final answer", "", "final answer", 0),
+        (
+            "<|channel>thought\n<channel|>final answer",
+            "",
+            "final answer",
+            0,
+        ),
+        (
+            "<|channel>thought\nprivate<channel|>final answer",
+            "private",
+            "final answer",
+            0,
+        ),
+        (empty_then_call.as_str(), "", "", 1),
+    ];
     for (reasoning_selector, tool_selector) in [
         (Some("gemma4"), None),
         (None, Some("gemma4")),
@@ -3824,40 +3848,88 @@ async fn gemma4_without_enable_thinking_keeps_parser_markers_as_content() {
         (None, Some("gemma-4")),
     ] {
         let preprocessor = build_preprocessor(reasoning_selector, tool_selector);
-
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "dummy-gemma4-model",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "answer plainly"
-                }
-            ],
-            "stream": true
+            "messages": [{"role": "user", "content": "answer plainly"}],
+            "stream": true,
+            "tools": [{"type": "function", "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {
+                    "city": {"type": "string"}
+                }, "required": ["city"]}
+            }}]
         }))
         .unwrap();
-
-        let text = "<|channel>thought\nshould stay plain<channel|>final answer";
-        let input_stream = stream::iter(
-            vec![mock_content_chunk(text), mock_final_chunk()]
-                .into_iter()
-                .map(Annotated::from_data),
-        );
-
-        let output_stream = preprocessor
-            .postprocessor_parsing_stream(input_stream, &request, false, false)
-            .expect("postprocessor_parsing_stream should build");
-
-        let DrainOutput {
-            reasoning, content, ..
-        } = drain_stream(output_stream).await;
-
-        assert!(
-            reasoning.is_empty(),
-            "Gemma 4 reasoning parser must be gated off without enable_thinking=true, got: {reasoning:?}"
-        );
-        assert_eq!(content, text);
+        let parsed = tool_selector.is_some();
+        for (text, parsed_reasoning, parsed_content, expected_calls) in cases {
+            if expected_calls > 0 && tool_selector.is_none() {
+                continue;
+            }
+            for split in 0..=text.len() {
+                let input_stream = stream::iter(
+                    vec![
+                        mock_content_chunk(&text[..split]),
+                        mock_content_chunk(&text[split..]),
+                        mock_final_chunk(),
+                    ]
+                    .into_iter()
+                    .map(Annotated::from_data),
+                );
+                let output_stream = preprocessor
+                    .postprocessor_parsing_stream(input_stream, &request, false, false)
+                    .expect("postprocessor_parsing_stream should build");
+                let DrainOutput {
+                    reasoning,
+                    content,
+                    tool_calls,
+                    ..
+                } = drain_stream(output_stream).await;
+                let label =
+                    format!("{text:?} {reasoning_selector:?} {tool_selector:?} split{split}");
+                assert_eq!(tool_calls.len(), expected_calls, "{label}: {tool_calls:?}");
+                if expected_calls > 0 {
+                    assert_eq!(
+                        tool_calls[0].name.as_deref(),
+                        Some("get_weather"),
+                        "{label}"
+                    );
+                    assert_eq!(
+                        serde_json::from_str::<Value>(&tool_calls[0].arguments).unwrap(),
+                        serde_json::json!({"city": "Paris"}),
+                        "{label}"
+                    );
+                }
+                if parsed {
+                    assert_eq!(reasoning, parsed_reasoning, "{label}");
+                    assert_eq!(content, parsed_content, "{label}");
+                } else {
+                    assert!(reasoning.is_empty(), "{label}: {reasoning:?}");
+                    if expected_calls == 0 {
+                        assert_eq!(content, text, "{label}");
+                    }
+                }
+            }
+        }
     }
+}
+
+#[tokio::test]
+async fn gemma4_without_enable_thinking_parses_only_with_gemma4_tool_parser() {
+    assert_gemma4_without_enable_thinking().await;
+}
+
+#[tokio::test]
+async fn gemma4_without_enable_thinking_parses_only_with_gemma4_tool_parser_parser_v2() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::gemma4_without_enable_thinking_parses_only_with_gemma4_tool_parser_parser_v2"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
+    assert_gemma4_without_enable_thinking().await;
 }
 
 /// MiniMax append-think is a force-reasoning parser that is not yet proven to
