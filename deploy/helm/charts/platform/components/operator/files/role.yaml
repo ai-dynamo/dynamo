@@ -392,15 +392,3 @@ rules:
   verbs:
   - get
   - list
-- apiGroups:
-  - scheduling.volcano.sh
-  resources:
-  - podgroups
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch

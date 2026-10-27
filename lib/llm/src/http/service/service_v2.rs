@@ -12,7 +12,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::Response;
+use axum::http::{Response, Version, header};
 use axum::response::IntoResponse;
 
 use super::Metrics;
@@ -100,6 +100,19 @@ fn path_within_namespace(path: &str, namespace: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
+fn draining_inference_response(version: Version) -> axum::response::Response {
+    let mut response = super::openai::ErrorMessage::_service_unavailable().into_response();
+    if version <= Version::HTTP_11 {
+        *response.version_mut() = version;
+        // Do not let connection pools keep sending requests to a retiring frontend.
+        response.headers_mut().insert(
+            header::CONNECTION,
+            header::HeaderValue::from_static("close"),
+        );
+    }
+    response
+}
+
 async fn track_inflight_inference(
     axum::extract::State(state): axum::extract::State<Arc<State>>,
     request: axum::extract::Request,
@@ -108,8 +121,10 @@ async fn track_inflight_inference(
     use futures::StreamExt;
 
     // Requests rejected during draining should not extend the drain window.
+    // Quiescing still admits inference so endpoint removal can propagate;
+    // only Draining and Stopping close the connection.
     if !state.accepts_inference() {
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return draining_inference_response(request.version());
     }
 
     let permit = state.acquire_inflight();
@@ -117,7 +132,7 @@ async fn track_inflight_inference(
     // before this request is counted as inflight.
     if !state.accepts_inference() {
         drop(permit);
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return draining_inference_response(request.version());
     }
 
     let response = next.run(request).await;
