@@ -4,6 +4,7 @@
 # ruff: noqa: E402 - optional vLLM dependency is checked before Dynamo imports
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -223,3 +224,63 @@ async def test_artifact_budget_is_not_reserved_during_adapter_resolution(
         await handler.aclose()
     assert chunks[-1]["engine_data"]["metadata_upload"]["mode"] == "inline_base64"
     assert budget.used == 0
+
+
+@pytest.mark.asyncio
+async def test_owned_pending_admission_survives_waiting_on_engine_pause_lock(
+    monkeypatch, tmp_path
+):
+    snapshot = _snapshot(tmp_path)
+    state_handler, coordinator = _coordinator(
+        monkeypatch, tmp_path, ResolvedLoRA(snapshot, "digest:immutable")
+    )
+    request = _token_request()
+    handler = _token_handler(state_handler, coordinator, request)
+    await coordinator.ensure_from_request(request, "prime")
+    await coordinator.release_pending_admission("prime")
+    coordinator._settings = replace(
+        coordinator.settings, pending_admission_timeout_seconds=0
+    )
+    recorded = asyncio.Event()
+    original_record = coordinator._record_pending_admission_locked
+
+    def record(*args, **kwargs):
+        original_record(*args, **kwargs)
+        recorded.set()
+
+    monkeypatch.setattr(coordinator, "_record_pending_admission_locked", record)
+
+    async def responses(*_args, **_kwargs):
+        yield _request_output(
+            [_output([1], finish_reason="length")],
+            prompt_token_ids=request["token_ids"],
+        )
+
+    handler.engine_client.generate = responses
+    await handler._pause_lock.acquire()
+    pause_owned = True
+    stream = handler._generate_token_mode(request, _Context(), "request")
+    waiter = asyncio.create_task(anext(stream))
+    try:
+        await asyncio.wait_for(recorded.wait(), timeout=2)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        key = request["routing"]["lora_name"]
+        assert state_handler._lora_state.runtime_pending_leases == {key: 1}
+        assert not waiter.done()
+        handler._pause_lock.release()
+        pause_owned = False
+        first = await asyncio.wait_for(waiter, timeout=1)
+        assert first["token_ids"] == [1]
+        assert state_handler._lora_state.runtime_active_leases == {key: 1}
+        assert not state_handler._lora_state.runtime_pending_admissions
+        assert [chunk async for chunk in stream] == []
+        assert not state_handler._lora_state.runtime_active_leases
+    finally:
+        if pause_owned:
+            handler._pause_lock.release()
+        if not waiter.done():
+            waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await stream.aclose()
+        await handler.aclose()
