@@ -154,6 +154,30 @@ class BenchTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             bench.backend_manifest(cfg, REGION)
 
+    def test_the_day_and_its_preparation_cap_the_same_traces(self):
+        load = {
+            "dataset": "semianalysis_cc_traces_weka_no_subagents",
+            "entries": 98,
+            "maxContextLength": 128000,
+            "cacheBust": "system_suffix",
+            "schedule": "daytime",
+            "dayS": 2160,
+            "peakQps": 3,
+            "nightFraction": 0.15,
+            "peakHour": 14,
+            "startHourUtc": 0,
+            "maxInFlight": 512,
+            "graceS": 60,
+            "profilingS": 420,
+            "warmupRequests": 32,
+            "aiperfWorkers": 10,
+            "recordProcessors": 3,
+        }
+        cfg = {**CONFIG, "load": load}
+        member = {**REGION, "utcOffset": -4}
+        for config in (bench.day_config(cfg, member), bench.prepare_config(cfg)):
+            self.assertEqual(config["benchmark"]["dataset"]["maxContextLength"], 128000)
+
     def test_daytime_rates_peak_at_two_in_the_afternoon_local_time(self):
         load = {
             "schedule": "daytime",

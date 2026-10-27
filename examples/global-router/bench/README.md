@@ -117,6 +117,13 @@ day instead of a fixed concurrency:
   `startHourUtc`, `maxInFlight` (a safety cap), `graceS`, and `cacheBust` (an
   aiperf cache-bust target, for example `system_suffix`). Every region's rate
   follows its own local time, so regions take turns being busy.
+- Use a dataset without subagents, such as `semianalysis_cc_traces_weka_no_subagents`.
+  aiperf paces each main-agent turn on the schedule, but sends subagent turns
+  as soon as the previous one returns. A subagent chain lasts minutes, which is
+  hours of a compressed day, so with subagents the load stays flat instead of
+  following local time. That dataset's prompts average 240k tokens, so set
+  `maxContextLength` (for example 128000, which keeps 22 traces with a 62k mean
+  prompt) to drop traces whose context grows past it.
 - Requests carry `X-Dynamo-Session-ID`. Before the shared start, a one-request
   run builds aiperf's dataset cache, so every region's day starts within
   seconds of the others; `start_skew_s` in the summary records the offset.

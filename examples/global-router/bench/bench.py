@@ -332,6 +332,12 @@ def aiperf_config(cfg, concurrency):
                 "entries": load["entries"],
                 "sampling": "sequential",
                 "ignoreTraceDelays": True,
+                # Drops traces whose context ever exceeds this many tokens.
+                **(
+                    {"maxContextLength": load["maxContextLength"]}
+                    if "maxContextLength" in load
+                    else {}
+                ),
             },
             "tokenizer": {"name": cfg["model"]},
             "warmup": {
