@@ -4579,10 +4579,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             mm_processor_kwargs=mm_processor_kwargs,
         )
         if video_handoff is not None:
-            if video_handoff["prompt_token_ids"] == list(res.prompt_token_ids or []):
+            state = video_handoff.state
+            if state["layout"]["prompt_token_ids"] == list(res.prompt_token_ids or []):
                 embedding_params = {
                     **(embedding_params or {}),
-                    QWEN_VIDEO_HANDOFF_KEY: video_handoff,
+                    QWEN_VIDEO_HANDOFF_KEY: state,
                 }
             else:
                 logger.warning(
@@ -4617,15 +4618,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         )
 
         _apply_nvext_cache_salt(request, prompt)
-
-        video_handoff = None
-        if multi_modal_data and "video" in multi_modal_data:
-            (
-                prompt,
-                video_handoff,
-            ) = await self._multimodal_request_processor.prepare_prefill_video_prompt(
-                prompt, multi_modal_data
-            )
 
         # Prefill generates only 1 token. Cap it before the builder, whose vLLM
         # checks reject a client min_tokens above max_tokens=1.
@@ -4665,7 +4657,19 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         session_id = session_id_from_request(request)
         kv_hints = _build_vllm_kv_hints(request)
 
-        async with self._abort_monitor(context, request_id, is_prefill=True):
+        video_handoff = None
+        if multi_modal_data and "video" in multi_modal_data:
+            (
+                prompt,
+                video_handoff,
+            ) = await self._multimodal_request_processor.prepare_prefill_video_prompt(
+                prompt, multi_modal_data
+            )
+
+        async with (
+            self._abort_monitor(context, request_id, is_prefill=True),
+            video_handoff if video_handoff is not None else nullcontext(),
+        ):
             try:
                 gen = self._generate_with_lora_admission_lock(
                     lora_request,

@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import copy
 import json
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import torch
@@ -15,10 +16,15 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalFieldElem,
     MultiModalKwargsItem,
+    MultiModalKwargsItems,
     PlaceholderRange,
 )
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.request import Request, RequestStatus
 
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.multimodal.mm_kwargs_transfer import encode_mm_kwargs_item
+from dynamo.vllm.handlers import build_sampling_params
 from dynamo.vllm.multimodal_utils.models import qwen_video_handoff as mod
 from dynamo.vllm.multimodal_utils.request_processor import (
     MissingMultimodalHandoffError,
@@ -61,7 +67,10 @@ def processed():
                         ),
                         "timestamps": MultiModalFieldElem(data=[0.1, 0.3], field=field),
                         "pixel_values_videos": MultiModalFieldElem(
-                            data=torch.ones(8, 16), field=field
+                            data=torch.ones(8, 16),
+                            field=MultiModalFieldConfig.flat_from_sizes(
+                                "video", torch.tensor([8])
+                            ).field,
                         ),
                     }
                 )
@@ -355,7 +364,199 @@ def test_returned_metadata_does_not_mutate_cached_values(processed):
 
 
 @pytest.fixture
-def processor(processed):
+def transfer_transport(monkeypatch):
+    payloads = {}
+
+    async def prepare(features, modality):
+        specs = []
+        for feature in features:
+            key = str(len(payloads))
+            payloads[key] = encode_mm_kwargs_item(feature.data)
+            specs.append(
+                {
+                    "field_name": "__pickled_kwargs_item__",
+                    "shape": [len(payloads[key])],
+                    "dtype_str": "uint8",
+                    "serialized_request": key,
+                }
+            )
+        return {
+            "mm_kwargs_nixl": {
+                "modality": modality,
+                "tensor_specs": specs,
+                "mm_hashes": [feature.mm_hash for feature in features],
+            }
+        }, [spec["serialized_request"] for spec in specs]
+
+    async def receive(metadata):
+        return {
+            "__pickled_kwargs_item__": [
+                bytearray(payloads[spec.serialized_request])
+                for spec in metadata.tensor_specs
+            ]
+        }
+
+    sender = SimpleNamespace(
+        prepare=AsyncMock(side_effect=prepare), cleanup=AsyncMock()
+    )
+    receiver = SimpleNamespace(receive=AsyncMock(side_effect=receive))
+    monkeypatch.setattr(mod, "MmKwargsNixlSender", lambda: sender)
+    monkeypatch.setattr(mod, "MmKwargsNixlReceiver", lambda: receiver)
+    return SimpleNamespace(sender=sender, receiver=receiver)
+
+
+@pytest.mark.parametrize(
+    "reason,prompt_logprobs",
+    [("prompt_logprobs", 0), ("prompt_logprobs", 1), ("preemption", None)],
+)
+@pytest.mark.asyncio
+async def test_native_recomputation_retains_video_encoder_inputs(
+    processed, transfer_transport, reason, prompt_logprobs
+):
+    owner = mod.QwenVideoHandoff()
+    handoff = await owner.prepare(processed)
+    restored = await owner.restore_for_decode(
+        handoff.state,
+        max_model_len=128,
+        media_counts={"video": 1},
+        spatial_merge_size=2,
+    )
+    feature = MultiModalFeatureSpec(
+        data=restored["mm_kwargs"]["video"][0],
+        modality="video",
+        identifier=restored["mm_hashes"]["video"][0],
+        mm_position=restored["mm_placeholders"]["video"][0],
+    )
+    params = build_sampling_params(
+        {
+            "token_ids": restored["prompt_token_ids"],
+            "stop_conditions": {"max_tokens": 8},
+            "output_options": {"prompt_logprobs": prompt_logprobs}
+            if reason == "prompt_logprobs"
+            else {},
+        },
+        {},
+    )
+    request = Request(
+        "recompute", restored["prompt_token_ids"], params, None, mm_features=[feature]
+    )
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.is_encoder_decoder = False
+    scheduler.scheduler_config = SimpleNamespace(disable_chunked_mm_input=False)
+    scheduler.ec_connector = None
+    scheduler.aux_output_connector = None
+    scheduler.encoder_cache_manager = SimpleNamespace(
+        free=MagicMock(),
+        get_cached_num_encoder_embeds=MagicMock(return_value=None),
+        check_and_update_cache=MagicMock(return_value=False),
+        can_allocate=MagicMock(return_value=True),
+    )
+    scheduler._free_request_blocks = MagicMock()
+    scheduler._inflight_prefills = set()
+    scheduler.log_stats = False
+    scheduler.waiting = MagicMock()
+    scheduler.reset_preempted_req_ids = set()
+    if reason == "preemption":
+        request.status = RequestStatus.RUNNING
+        request.num_computed_tokens = len(restored["prompt_token_ids"])
+        request.kv_transfer_params = {"do_remote_prefill": False}
+        scheduler._preempt_request(request, 0.0)
+        assert request.status == RequestStatus.PREEMPTED
+        assert request.num_computed_tokens == 0
+        scheduler.encoder_cache_manager.free.assert_called_once_with(request)
+    else:
+        assert request.get_skip_reading_prefix_cache()
+    scheduled, _, _, _, _ = scheduler._try_schedule_encoder_inputs(
+        request, request.num_computed_tokens, request.num_tokens, 128
+    )
+    assert scheduled == [0]
+    batched = MultiModalKwargsItems({"video": [request.mm_features[0].data]}).get_data(
+        device="cpu"
+    )
+    model = Qwen3VLForConditionalGeneration.__new__(Qwen3VLForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    model.is_multimodal_pruning_enabled = False
+    model._process_video_input = MagicMock(return_value=(torch.ones(2, 4),))
+    embeddings = model.embed_multimodal(**batched)
+    assert embeddings is not None and len(embeddings) == 1
+    model._process_video_input.assert_called_once()
+    legacy = restore(owner.capture(processed))
+    legacy_batch = MultiModalKwargsItems(legacy["mm_kwargs"]).get_data(device="cpu")
+    assert model.embed_multimodal(**legacy_batch) is None
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+@pytest.mark.asyncio
+async def test_transfer_cleanup_does_not_block_prefill_dispatch(
+    processed, transfer_transport, cancelled
+):
+    owner = mod.QwenVideoHandoff()
+    handoff = await owner.prepare(processed)
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            async with handoff:
+                raise asyncio.CancelledError
+    else:
+        async with handoff:
+            transfer_transport.sender.cleanup.assert_not_awaited()
+    await asyncio.gather(*owner._cleanup_tasks)
+    transfer_transport.sender.cleanup.assert_awaited_once_with(handoff.cleanup_items)
+
+
+@pytest.mark.asyncio
+async def test_unavailable_transport_keeps_legacy_loading(
+    processed, transfer_transport
+):
+    transfer_transport.sender.prepare.return_value = (None, [])
+    transfer_transport.sender.prepare.side_effect = None
+    assert await mod.QwenVideoHandoff().prepare(processed) is None
+
+
+@pytest.mark.asyncio
+async def test_transfer_hash_mismatch_is_rejected_before_read(
+    processed, transfer_transport
+):
+    owner = mod.QwenVideoHandoff()
+    handoff = await owner.prepare(processed)
+    handoff.state["inputs"]["video"]["mm_hashes"] = ["wrong-video"]
+    with pytest.raises(ValueError, match="items do not match"):
+        await owner.restore_for_decode(
+            handoff.state,
+            max_model_len=128,
+            media_counts={"video": 1},
+            spatial_merge_size=2,
+        )
+    transfer_transport.receiver.receive.assert_not_awaited()
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+@pytest.mark.asyncio
+async def test_received_metadata_without_encoder_inputs_is_rejected(
+    processed, transfer_transport, explicit_null
+):
+    owner = mod.QwenVideoHandoff()
+    handoff = await owner.prepare(processed)
+    metadata_only = restore(owner.capture(processed))["mm_kwargs"]["video"][0]
+    if explicit_null:
+        metadata_only["pixel_values_videos"] = MultiModalFieldElem(
+            data=None,
+            field=processed["mm_kwargs"]["video"][0]["pixel_values_videos"].field,
+        )
+    transfer_transport.receiver.receive.side_effect = None
+    transfer_transport.receiver.receive.return_value = {
+        "__pickled_kwargs_item__": [bytearray(encode_mm_kwargs_item(metadata_only))]
+    }
+    with pytest.raises(ValueError, match="missing encoder inputs"):
+        await owner.restore_for_decode(
+            handoff.state,
+            max_model_len=128,
+            media_counts={"video": 1},
+            spatial_merge_size=2,
+        )
+
+
+@pytest.fixture
+def processor(processed, transfer_transport):
     renderer = SimpleNamespace(render_cmpl_async=AsyncMock(return_value=[processed]))
     engine = SimpleNamespace(
         input_processor=SimpleNamespace(renderer=renderer),
@@ -388,9 +589,9 @@ async def test_prefill_renders_once_and_retains_native_layout(processor, process
         prompt, {"video": object()}
     )
     assert rendered is processed
-    assert state["prompt_token_ids"] == processed["prompt_token_ids"]
+    assert state.state["layout"]["prompt_token_ids"] == processed["prompt_token_ids"]
     processor.engine_client.input_processor.renderer.render_cmpl_async.assert_awaited_once_with(
-        [prompt]
+        [prompt], skip_mm_cache=True
     )
 
 
@@ -414,7 +615,8 @@ async def test_decode_skips_every_media_loader_with_valid_handoff(
         processed["mm_placeholders"]["video"][0] = replace(
             span, offset=len(processed["prompt_token_ids"]) - span.length
         )
-    state = mod.QwenVideoHandoff().capture(processed)
+    handoff = await processor._qwen_video_handoff.prepare(processed)
+    state = handoff.state
     request = {
         "token_ids": [1, 2],
         "multi_modal_data": {"video_url": [{"Url": "must-not-be-fetched"}]},
@@ -431,18 +633,24 @@ async def test_decode_skips_every_media_loader_with_valid_handoff(
     assert (
         result.pre_rendered_prompt["prompt_token_ids"] == processed["prompt_token_ids"]
     )
+    assert torch.equal(
+        result.pre_rendered_prompt["mm_kwargs"]["video"][0]["pixel_values_videos"].data,
+        processed["mm_kwargs"]["video"][0]["pixel_values_videos"].data,
+    )
     processor.video_loader.load_video_batch.assert_not_awaited()
     processor.image_loader.load_image_batch.assert_not_awaited()
     processor.audio_loader.load_audio_batch.assert_not_awaited()
 
 
-@pytest.mark.parametrize("reason", ["unknown_version", "visual_tail", "unmasked_tail"])
+@pytest.mark.parametrize(
+    "reason", ["unknown_version", "legacy", "visual_tail", "unmasked_tail"]
+)
 @pytest.mark.asyncio
 async def test_unusable_handoff_falls_back_to_real_video(processor, processed, reason):
     state = mod.QwenVideoHandoff().capture(processed)
     if reason == "unknown_version":
-        state["version"] = 2
-    else:
+        state["version"] = 3
+    elif reason != "legacy":
         state["mm_placeholders"]["video"][0].update(offset=5)
         state["mm_placeholders"]["video"][0]["is_embed"] = (
             [True] * 7 if reason == "visual_tail" else None

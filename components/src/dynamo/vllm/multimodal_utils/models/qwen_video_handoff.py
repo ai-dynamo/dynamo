@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Portable Qwen3-VL input metadata for KV-backed disaggregated decode."""
+"""Portable Qwen3-VL inputs for KV reuse and disaggregated recomputation."""
 
+import asyncio
 import json
+import logging
 import math
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
@@ -11,11 +13,22 @@ from typing import Any
 
 import torch
 from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalFieldElem,
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+
+from dynamo.common.multimodal.mm_kwargs_transfer import (
+    MM_NIXL_CLEANUP_TIMEOUT_S,
+    MmKwargsNixlReceiver,
+    MmKwargsNixlSender,
+    MmKwargsTransferMetadata,
+    decode_mm_kwargs_item,
+)
+
+logger = logging.getLogger(__name__)
 
 QWEN_VIDEO_HANDOFF_KEY = "qwen_video_input"
 _MAX_HANDOFF_BYTES = 2 * 1024 * 1024
@@ -23,6 +36,10 @@ _MAX_METADATA_CACHE_BYTES = 8 * 1024 * 1024
 _METADATA_FIELDS = {
     "image": ("image_grid_thw",),
     "video": ("video_grid_thw", "timestamps"),
+}
+_ENCODER_FIELDS = {
+    "image": ("pixel_values", "image_embeds"),
+    "video": ("pixel_values_videos", "video_embeds"),
 }
 
 
@@ -35,12 +52,153 @@ class _Handoff:
     metadata: dict[str, list[dict[str, Any]]]
 
 
+@dataclass
+class PreparedVideoHandoff:
+    """Request-scoped inputs registered until decode completes its READ."""
+
+    state: dict[str, Any]
+    owner: "QwenVideoHandoff"
+    cleanup_items: list[Any]
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        # Decode is dispatched only after the prefill stream closes. Waiting
+        # for its READ here would deadlock that dispatch.
+        self.owner.release(self.cleanup_items)
+
+
 class QwenVideoHandoff:
-    """Keep small item metadata when vLLM suppresses tensors on cache hits."""
+    """Transfer native video inputs and preserve their exact prompt layout."""
 
     def __init__(self) -> None:
         self._metadata: OrderedDict[tuple[str, str], bytes] = OrderedDict()
         self._cache_bytes = 0
+        self._sender: MmKwargsNixlSender | None = None
+        self._receiver: MmKwargsNixlReceiver | None = None
+        self._cleanup_tasks: set[asyncio.Task] = set()
+
+    def release(self, items: list[Any]) -> None:
+        """Defer bounded transport cleanup until decode has read the inputs."""
+        if not items:
+            return
+        task = asyncio.create_task(self._sender.cleanup(items))
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_done)
+
+    def _cleanup_done(self, task: asyncio.Task) -> None:
+        self._cleanup_tasks.discard(task)
+        error = None if task.cancelled() else task.exception()
+        if error is not None:
+            # Cleanup runs after the response; it cannot fail that request.
+            logger.error(
+                "Video input transfer cleanup failed",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    async def prepare(self, processed: dict[str, Any]) -> PreparedVideoHandoff | None:
+        """Stage full native inputs so decode can also survive KV recomputation."""
+        layout = self.capture(processed)
+        if layout is None or any(
+            item is None
+            or not any(
+                name in item and item[name].data is not None
+                for name in _ENCODER_FIELDS[modality]
+            )
+            for modality, items in processed["mm_kwargs"].items()
+            for item in items
+        ):
+            return None
+        if self._sender is None:
+            self._sender = MmKwargsNixlSender()
+        transfers = {}
+        cleanup_items = []
+        try:
+            for modality, hashes in processed["mm_hashes"].items():
+                features = [
+                    MultiModalFeatureSpec(
+                        data=item,
+                        modality=modality,
+                        identifier=identity,
+                        mm_hash=identity,
+                        mm_position=span,
+                    )
+                    for identity, item, span in zip(
+                        hashes,
+                        processed["mm_kwargs"][modality],
+                        processed["mm_placeholders"][modality],
+                        strict=True,
+                    )
+                ]
+                extra_args, items = await self._sender.prepare(features, modality)
+                cleanup_items.extend(items)
+                if not extra_args:
+                    return None
+                transfers[modality] = extra_args["mm_kwargs_nixl"]
+            state = {"version": 2, "layout": layout, "inputs": transfers}
+            if len(json.dumps(state, allow_nan=False).encode()) > _MAX_HANDOFF_BYTES:
+                return None
+            handoff = PreparedVideoHandoff(state, self, cleanup_items)
+            cleanup_items = []
+            return handoff
+        finally:
+            self.release(cleanup_items)
+
+    async def restore_for_decode(self, state: Any, **kwargs) -> dict[str, Any] | None:
+        """Receive native inputs before submission, including recomputation data."""
+        if not isinstance(state, dict) or state.get("version") != 2:
+            # Version 1 has no pixels/embeddings and cannot survive preemption.
+            self.restore(state, **kwargs)
+            return None
+        if type(state["version"]) is not int:
+            raise ValueError("Invalid Qwen video handoff version")
+        if len(json.dumps(state, allow_nan=False).encode()) > _MAX_HANDOFF_BYTES:
+            raise ValueError("Qwen video handoff exceeds the metadata limit")
+        restored = self.restore(state["layout"], **kwargs)
+        if restored is None:
+            return None
+        transfers = state["inputs"]
+        if set(transfers) != set(restored["mm_hashes"]):
+            raise ValueError("Video input transfer modalities do not match")
+        metadata = {}
+        for modality, raw in transfers.items():
+            transfer = MmKwargsTransferMetadata.model_validate(raw)
+            if (
+                transfer.modality != modality
+                or transfer.mm_hashes != restored["mm_hashes"][modality]
+                or len(transfer.tensor_specs) != len(transfer.mm_hashes)
+                or any(
+                    spec.field_name != "__pickled_kwargs_item__"
+                    for spec in transfer.tensor_specs
+                )
+            ):
+                raise ValueError("Video input transfer items do not match the layout")
+            metadata[modality] = transfer
+        if self._receiver is None:
+            self._receiver = MmKwargsNixlReceiver()
+        for modality, transfer in metadata.items():
+            received = await asyncio.wait_for(
+                self._receiver.receive(transfer), timeout=MM_NIXL_CLEANUP_TIMEOUT_S
+            )
+            payloads = received["__pickled_kwargs_item__"]
+            if len(payloads) != len(transfer.mm_hashes):
+                raise ValueError("Video input transfer returned the wrong item count")
+            items = [decode_mm_kwargs_item(payload) for payload in payloads]
+            for item, expected in zip(
+                items, restored["mm_kwargs"][modality], strict=True
+            ):
+                if not any(
+                    name in item and item[name].data is not None
+                    for name in _ENCODER_FIELDS[modality]
+                ):
+                    raise ValueError("Video input transfer is missing encoder inputs")
+                for name, field in expected.items():
+                    value = torch.as_tensor(item[name].data, dtype=field.data.dtype)
+                    if not torch.equal(value, field.data):
+                        raise ValueError("Video input transfer metadata does not match")
+            restored["mm_kwargs"][modality] = items
+        return restored
 
     @staticmethod
     def _entry_size(key: tuple[str, str], encoded: bytes) -> int:
@@ -120,7 +278,7 @@ class QwenVideoHandoff:
         media_counts: dict[str, int],
         spatial_merge_size: int,
     ) -> dict[str, Any] | None:
-        """Validate a known handoff and construct a metadata-only EngineInput."""
+        """Validate the layout; engine submission also requires the full inputs."""
         if not isinstance(state, dict) or state.get("version") != 1:
             return None
         if type(state["version"]) is not int:

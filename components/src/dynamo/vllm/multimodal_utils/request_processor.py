@@ -47,7 +47,11 @@ from .models.qwen import (
     build_qwen_embedding_params,
     load_qwen_grid_params,
 )
-from .models.qwen_video_handoff import QWEN_VIDEO_HANDOFF_KEY, QwenVideoHandoff
+from .models.qwen_video_handoff import (
+    QWEN_VIDEO_HANDOFF_KEY,
+    PreparedVideoHandoff,
+    QwenVideoHandoff,
+)
 from .prefill_worker_utils import parse_image_item
 
 logger = logging.getLogger(__name__)
@@ -606,8 +610,8 @@ class VllmMultimodalRequestProcessor:
 
     async def prepare_prefill_video_prompt(
         self, prompt: Any, multi_modal_data: Optional[dict[str, Any]]
-    ) -> tuple[Any, Optional[dict[str, Any]]]:
-        """Render supported video prompts once and retain their native layout."""
+    ) -> tuple[Any, Optional[PreparedVideoHandoff]]:
+        """Render once and stage native inputs for KV reuse or recomputation."""
         if (
             not multi_modal_data
             or "video" not in multi_modal_data
@@ -616,8 +620,8 @@ class VllmMultimodalRequestProcessor:
         ):
             return prompt, None
         renderer = self.engine_client.input_processor.renderer
-        (processed,) = await renderer.render_cmpl_async([prompt])
-        return processed, self._qwen_video_handoff.capture(processed)
+        (processed,) = await renderer.render_cmpl_async([prompt], skip_mm_cache=True)
+        return processed, await self._qwen_video_handoff.prepare(processed)
 
     async def extract_multimodal_data(
         self,
@@ -970,7 +974,7 @@ class VllmMultimodalRequestProcessor:
                 mm_map = request.get("multi_modal_data") or {}
                 model_config = self.engine_client.vllm_config.model_config
                 try:
-                    pre_rendered = self._qwen_video_handoff.restore(
+                    pre_rendered = await self._qwen_video_handoff.restore_for_decode(
                         video_state,
                         max_model_len=model_config.max_model_len,
                         spatial_merge_size=(
@@ -985,6 +989,12 @@ class VllmMultimodalRequestProcessor:
                 except (ValueError, TypeError, KeyError) as exc:
                     raise MissingMultimodalHandoffError(
                         f"Invalid Qwen video decode handoff: {exc}"
+                    ) from exc
+                except (RuntimeError, TimeoutError) as exc:
+                    raise MultimodalTransferError(
+                        "nixl",
+                        "prefill video inputs could not be received",
+                        guidance="Verify NIXL connectivity between prefill and decode.",
                     ) from exc
                 if pre_rendered is not None:
                     return PreparedMultimodalInput(
