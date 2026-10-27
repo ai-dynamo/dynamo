@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -170,8 +172,15 @@ func RenderNodeLocal(
 				continue
 			}
 
-			// Agent and conductor storage must agree on the published model paths.
-			if !hybrid {
+			// Unit placement publishes the GPU-local units to hybrid Agents.
+			// Otherwise, Agent and conductor storage must agree on the published
+			// model paths.
+			if hybrid {
+				if projection.placesLPUUnits() {
+					container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
+					applyLocalPartitionIDs(container, projection)
+				}
+			} else {
 				storagePath, err := lpuModelStoragePath(template.Spec)
 				if err != nil {
 					return nil, fmt.Errorf("stage %s: %w", stage, err)
@@ -227,6 +236,7 @@ func RenderNodeLocal(
 			projections[0],
 			workloadDigest,
 			modelStoragePath,
+			plan.Agents[0].TemplateName,
 			agentTemplateNames,
 			cyborgConfigMap,
 			cyborgConfigHash,

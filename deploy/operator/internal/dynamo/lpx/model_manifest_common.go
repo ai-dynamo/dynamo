@@ -126,8 +126,7 @@ func buildHXPartition[M lpuTopologyMetadata, P lpuPartitionArtifact[M]](subject,
 	// A partial-node shape describes its logical chips; physical HX reservations use full nodes.
 	subnode := len(extent) == 4 && extent[0] > 0 && extent[0] < int64(devicesPerNode) &&
 		int64(devicesPerNode)%extent[0] == 0 && extent[1] == 1 && extent[2] == 1 && extent[3] == 1
-	if !subnode && (len(extent) != 4 || extent[0] != int64(devicesPerNode) || extent[1] < 1 || extent[1] > 8 ||
-		(!((extent[2] == 1 || extent[2] == 2) && extent[3] == 1) && !(extent[1] == 8 && extent[2] == 2 && extent[3] == 2))) {
+	if !subnode && (len(extent) != 4 || extent[0] != int64(devicesPerNode) || !supportedHXExtent(extent[1], extent[2], extent[3])) {
 		return buildPartition{}, fmt.Errorf("V3 %s has unsupported HX extent %v", subject, extent)
 	}
 
@@ -139,6 +138,16 @@ func buildHXPartition[M lpuTopologyMetadata, P lpuPartitionArtifact[M]](subject,
 	extent[0] = int64(devicesPerNode)
 	partition.hxExtent = extent
 	return partition, nil
+}
+
+// supportedHXExtent reports whether whole-node HX dimensions name a scheduler
+// shape: up to eight trays in one or two hemispheres of one rack, or two full racks.
+func supportedHXExtent(traysPerHemisphere, hemispheres, racks int64) bool {
+	if traysPerHemisphere < 1 || traysPerHemisphere > 8 {
+		return false
+	}
+	return ((hemispheres == 1 || hemispheres == 2) && racks == 1) ||
+		(traysPerHemisphere == 8 && hemispheres == 2 && racks == 2)
 }
 
 // decodePropSyncChain normalizes one selected-chain list from the compiler manifest.

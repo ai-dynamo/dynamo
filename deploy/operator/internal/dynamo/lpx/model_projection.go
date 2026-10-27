@@ -66,8 +66,8 @@ type ModelProjection struct {
 	partitions []buildPartition
 	connectors []lpxv1alpha1.PropSyncConnectorRequest
 	// propSyncEdges lists each position in partitions whose successor continues
-	// a selected prop-sync chain. Only unpacked HX projections set it; XT
-	// collapses selected chains in configuredBuild instead.
+	// a selected prop-sync chain. Only unpacked HX projections, including unit
+	// projections, set it; XT collapses selected chains in configuredBuild instead.
 	propSyncEdges []int
 	agentReplicas int
 	// localPartitionIDs lists the runtime partitions that run on the Cyborg GPU, in build order.
@@ -77,6 +77,12 @@ type ModelProjection struct {
 	// contentID still hashes the whole deployment contract, so a rebuild whose
 	// recorded checkpoint differs has a new digest and rolls the workload.
 	checkpoint *Checkpoint
+}
+
+// placesLPUUnits reports whether the projection placed the compiler-owned LPU
+// units of its build rather than deriving placement from partitions and chains.
+func (p *ModelProjection) placesLPUUnits() bool {
+	return p.configuredBuild.lpuUnits != nil
 }
 
 func (p *ModelProjection) Checkpoint() *Checkpoint {
