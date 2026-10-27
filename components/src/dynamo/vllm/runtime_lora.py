@@ -62,6 +62,7 @@ class RuntimeLoRACoordinator:
         self._reconciliation_lock = asyncio.Lock()
         self._initial_waiters: dict[str, int] = {}
         self._snapshot_identities: dict[str, tuple[bytes, str, str]] = {}
+        self._resolution_admitted: set[str] = set()
         self._settings = (
             (
                 getattr(handler.config, "runtime_lora_settings", None)
@@ -176,6 +177,8 @@ class RuntimeLoRACoordinator:
             except TimeoutError:
                 if not timeout.expired():
                     raise
+                if key not in self._resolution_admitted:
+                    raise _runtime_error(429, "lora_capacity_exceeded") from None
                 raise _runtime_error(504, "runtime_lora_resolve_timeout") from None
             resident = await self._lease_resident(metadata, admission_id)
             if resident is None:
@@ -216,6 +219,7 @@ class RuntimeLoRACoordinator:
         if state.runtime_load_tasks.get(adapter_key) is task:
             state.runtime_load_tasks.pop(adapter_key, None)
             state.runtime_load_digests.pop(adapter_key, None)
+            self._resolution_admitted.discard(adapter_key)
         if not task.cancelled():
             task.exception()
 
@@ -452,6 +456,7 @@ class RuntimeLoRACoordinator:
         except TimeoutError:
             raise _runtime_error(429, "lora_capacity_exceeded") from None
 
+        self._resolution_admitted.add(metadata.adapter_key)
         try:
             loop = asyncio.get_running_loop()
             deadline = loop.time() + self._active_settings.resolve_timeout_seconds
