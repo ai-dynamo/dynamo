@@ -13,10 +13,23 @@ import requests
 def post_with_capacity_retry(url, payload):
     for attempt in range(3):
         response = requests.post(url, json=payload, timeout=60)
-        if response.status_code != 429 or attempt == 2:
+        if not _is_capacity_rejection(response) or attempt == 2:
             return response
         assert response.headers.get("retry-after") == "1", response.text
         time.sleep(1)
+
+
+def _is_capacity_rejection(response):
+    if response.status_code not in (429, 503, 529):
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error", body)
+    return isinstance(error, dict) and error.get("code") == "rate_limit_exceeded"
 
 
 def decision_payload(model, dialect="oai"):

@@ -31,6 +31,14 @@ async fn native_abort_preserves_retry_status_and_cancels_pending_peer() {
             status == 429
         );
         let body = response_body(response).await;
+        assert_eq!(
+            body["code"],
+            if status == 429 {
+                "rate_limit_exceeded"
+            } else {
+                "server_error"
+            }
+        );
         assert!(body.get("answers").is_none());
         assert!(!body.to_string().contains("private worker detail"));
         assert!(parent.is_killed());

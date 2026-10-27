@@ -4,6 +4,8 @@
 """Decision API contracts over the SGLang mocker transport."""
 
 import math
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 import requests
@@ -14,6 +16,7 @@ from tests.utils.decision_api import (
     assert_decision_body,
     assert_request_headers,
     decision_payload,
+    post_with_capacity_retry,
 )
 from tests.utils.managed_process import DynamoFrontendProcess
 
@@ -182,6 +185,41 @@ def test_systemone_impossible_admission_and_recovery(systemone_server):
     recovered = requests.post(url, json=payload, timeout=30)
     assert recovered.status_code == 200, recovered.text
     assert list(recovered.json()["answers"]) == ["urgent"]
+
+
+@pytest.mark.parametrize(
+    "systemone_server",
+    [{"branch_limit": 3, "overload_status": status} for status in (429, 503, 529)],
+    indirect=True,
+)
+def test_decision_capacity_errors_and_recovery(systemone_server, request):
+    expected_status = request.node.callspec.params["systemone_server"][
+        "overload_status"
+    ]
+    for dialect, route in (("oai", "decisions"), ("systemone", "systemone")):
+        url = f"{systemone_server}/v1/{route}"
+        payload = decision_payload(QWEN, dialect)
+        barrier = Barrier(8)
+
+        def post(_, barrier=barrier, url=url, payload=payload):
+            barrier.wait(timeout=30)
+            return requests.post(url, json=payload, timeout=30)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            responses = list(pool.map(post, range(8)))
+        rejected = [response for response in responses if response.status_code != 200]
+        assert rejected, "concurrent requests must exercise bounded admission"
+        assert any(response.status_code == 200 for response in responses)
+        for response in rejected:
+            assert response.status_code == expected_status, response.text
+            assert response.headers["retry-after"] == "1"
+            assert_request_headers(response)
+            body = response.json()
+            error = body if dialect == "systemone" else body["error"]
+            assert error["code"] == "rate_limit_exceeded"
+        recovered = post_with_capacity_retry(url, payload)
+        assert recovered.status_code == 200, recovered.text
+        assert_decision_body(recovered.json(), QWEN, dialect)
 
 
 def test_decisions_and_systemone_preserve_their_contracts(systemone_server):
