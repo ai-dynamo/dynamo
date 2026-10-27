@@ -14,7 +14,7 @@ use crate::pool_discovery::{
 };
 use async_trait::async_trait;
 use futures::StreamExt;
-use k8s_openapi::api::discovery::v1::EndpointSlice;
+use k8s_openapi::api::discovery::v1::{Endpoint, EndpointSlice};
 use kube::Api;
 use kube::api::ListParams;
 use kube::runtime::{WatchStreamExt, watcher};
@@ -36,6 +36,18 @@ pub(super) fn slice_key(slice: &EndpointSlice) -> SliceKey {
         slice.metadata.namespace.clone().unwrap_or_default(),
         slice.metadata.name.clone().unwrap_or_default(),
     )
+}
+
+/// The slice's Ready endpoints. The EndpointSlice API reads a missing `ready`
+/// as ready.
+pub(super) fn ready_endpoints(slice: &EndpointSlice) -> impl Iterator<Item = &Endpoint> {
+    slice.endpoints.iter().filter(|endpoint| {
+        endpoint
+            .conditions
+            .as_ref()
+            .and_then(|conditions| conditions.ready)
+            .unwrap_or(true)
+    })
 }
 
 /// What a directory derives from slices.
@@ -203,7 +215,9 @@ async fn watch_slices<I: SliceIndex>(
     cache: Arc<SliceCache<I>>,
     stop: CancellationToken,
 ) {
-    let config = watcher::Config::default().labels(&selector);
+    // Lists come from the API server's cache rather than a quorum read from
+    // etcd: the watch catches up from there, and discovery needs no more.
+    let config = watcher::Config::default().labels(&selector).any_semantic();
     let mut events = std::pin::pin!(watcher(slices, config).default_backoff());
     loop {
         let event = tokio::select! {
@@ -289,8 +303,8 @@ impl<I: SliceIndex> Drop for SliceDirectory<I> {
 
 #[async_trait]
 impl<I: SliceIndex> Directory<I::Item, I::Key> for SliceDirectory<I> {
-    /// From the cache once it has synced. Before that, one list from the
-    /// API, so a caller never waits for the watch to start.
+    /// From the cache once it has synced. Before that, one list from the API
+    /// server's cache, so a caller never waits for the watch to start.
     async fn list(&self) -> Result<Snapshot<I::Item>, PoolDiscoveryError> {
         self.ensure_watching();
         if let Some(snapshot) = self.cache.snapshot() {
@@ -298,7 +312,7 @@ impl<I: SliceIndex> Directory<I::Item, I::Key> for SliceDirectory<I> {
         }
         let listed = self
             .slices
-            .list(&ListParams::default().labels(&self.selector))
+            .list(&ListParams::default().labels(&self.selector).match_any())
             .await
             .map_err(unavailable)?;
         let entries = listed

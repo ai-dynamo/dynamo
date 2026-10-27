@@ -18,7 +18,7 @@ use kube::{Api, Client};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::cache::{SliceDirectory, SliceIndex, SliceKey};
+use super::cache::{SliceDirectory, SliceIndex, SliceKey, ready_endpoints};
 use super::mcs::{self, McsImplementation};
 
 /// A Service exported through MCS, such as the Global Router's. It need not
@@ -102,17 +102,7 @@ impl ReplicaNaming {
             );
             return None;
         };
-        let replicas = slice
-            .endpoints
-            .iter()
-            // The EndpointSlice API reads a missing `ready` as ready.
-            .filter(|endpoint| {
-                endpoint
-                    .conditions
-                    .as_ref()
-                    .and_then(|conditions| conditions.ready)
-                    .unwrap_or(true)
-            })
+        let replicas = ready_endpoints(slice)
             .filter_map(|endpoint| {
                 // An endpoint's addresses are interchangeable, so the first is
                 // enough.

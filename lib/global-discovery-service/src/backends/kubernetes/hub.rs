@@ -17,7 +17,7 @@ use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{Api, Client};
 use tokio_util::sync::CancellationToken;
 
-use super::cache::{SliceDirectory, SliceIndex, SliceKey};
+use super::cache::{SliceDirectory, SliceIndex, SliceKey, ready_endpoints};
 use super::mcs::{self, McsImplementation};
 
 /// One pool per (source cluster, namespace, DGD name), from imported
@@ -105,17 +105,7 @@ fn location(cluster: &str) -> PoolLocation {
 /// when a cluster loses contact with the MCS implementation, so the runtime
 /// also drops a pool whose Relay connection is gone.
 fn ready_addresses(slice: &EndpointSlice) -> Vec<IpAddr> {
-    slice
-        .endpoints
-        .iter()
-        // The EndpointSlice API reads a missing `ready` as ready.
-        .filter(|endpoint| {
-            endpoint
-                .conditions
-                .as_ref()
-                .and_then(|conditions| conditions.ready)
-                .unwrap_or(true)
-        })
+    ready_endpoints(slice)
         .flat_map(|endpoint| {
             endpoint
                 .addresses
