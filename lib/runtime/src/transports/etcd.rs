@@ -1402,6 +1402,70 @@ mod unit_tests {
         );
     }
 
+    #[rstest::rstest]
+    #[case::attempt(true)]
+    #[case::backoff(false)]
+    #[tokio::test]
+    async fn cancellation_interrupts_startup(#[case] during_attempt: bool) {
+        use futures::FutureExt;
+        use tokio::io::AsyncReadExt;
+
+        let runtime = Runtime::from_current().unwrap();
+        let token = runtime.primary_token();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = if during_attempt {
+            format!("http://{}", listener.local_addr().unwrap())
+        } else {
+            // An invalid URI fails synchronously, so polling startup once
+            // reaches the retry backoff without a timing-dependent sleep.
+            "invalid uri".to_string()
+        };
+        let options = Client::builder()
+            .etcd_url(vec![endpoint])
+            .startup_connect_timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        if !during_attempt {
+            assert!(
+                Client::connect_startup_attempt(&options, &runtime)
+                    .now_or_never()
+                    .expect("invalid URI must fail without waiting")
+                    .is_err()
+            );
+        }
+        let connection = Client::connect_with_startup_retry(&options, runtime);
+        tokio::pin!(connection);
+
+        // Keep the unresponsive peer alive until after cancellation: a
+        // disconnect must not be what wakes the pending connection attempt.
+        let _peer = if during_attempt {
+            let (mut stream, _) = tokio::select! {
+                _ = &mut connection => panic!("startup completed before cancellation"),
+                accepted = listener.accept() => accepted.unwrap(),
+                _ = tokio::time::sleep(Duration::from_secs(5)) => panic!("startup did not connect"),
+            };
+            let mut bytes = [0; 24];
+            tokio::select! {
+                _ = &mut connection => panic!("startup completed before cancellation"),
+                received = stream.read(&mut bytes) => assert!(received.unwrap() > 0),
+                _ = tokio::time::sleep(Duration::from_secs(5)) => panic!("startup sent no protocol bytes"),
+            }
+            Some(stream)
+        } else {
+            assert!(futures::poll!(&mut connection).is_pending());
+            None
+        };
+
+        token.cancel();
+        let result = tokio::time::timeout(Duration::from_millis(500), &mut connection)
+            .await
+            .expect("cancellation must interrupt startup before its deadline or retry backoff");
+        match result {
+            Err(error) => assert_eq!(error.to_string(), "etcd startup connection cancelled"),
+            Ok(_) => panic!("cancelled startup unexpectedly succeeded"),
+        }
+    }
+
     #[test]
     fn classifies_etcd_connection_errors() {
         let err = anyhow::Error::new(etcd_client::Error::EndpointError(
