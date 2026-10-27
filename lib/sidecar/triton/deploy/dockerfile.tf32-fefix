@@ -1,0 +1,29 @@
+﻿# Overlay dockerfile: adds a TF32 TensorRT plan on top of a Dynamo frontend
+# base image that carries the FE event-loop stall fixes (#16454 health
+# status-only, #16470 reconcile off the runtime). Without those two PRs,
+# a TF32 plan running through the sidecar hits an FE stall that pushes p99
+# into the hundreds of ms.
+#
+# Build:
+#   docker build -f lib/sidecar/triton/deploy/dockerfile.tf32-fefix \
+#     -t <registry>/<repo>:sidecar-tf32 <build-context>
+#
+# Replace the COPY paths with your own model layout.
+FROM <registry>/<repo>:dynamo-frontend-fefix-base
+
+USER root
+# tokenizers: Triton python backend tokenizer step.
+# aiohttp: async HTTP client used by your sweep driver.
+# perf_analyzer: required on PATH by the client role script even on the
+# classify path (binary resolution runs before dispatch).
+RUN python3 -m pip install --no-cache-dir tokenizers==0.19.1 aiohttp==3.10.5 perf_analyzer==2.60.0
+USER dynamo
+
+# Model repo. The FE-fix base image ships without /models, so everything
+# below has to be copied in (no overwrite). Swap in your own plan + model
+# layout. The TF32 plan goes at the discriminator version slot.
+COPY ./model/discriminator/config.pbtxt /models/discriminator/config.pbtxt
+COPY ./model/discriminator_tf32/1/model.plan /models/discriminator/1/model.plan
+COPY ./model/tokenizer /models/tokenizer
+COPY ./model/ensemble /models/ensemble
+COPY ./model/hf_model/tokenizer.json /models/tokenizer/1/tokenizer.json
