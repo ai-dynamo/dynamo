@@ -755,8 +755,6 @@ fn convert_tools(tools: &[Tool], names: &ToolNameMap) -> anyhow::Result<Vec<Chat
     Ok(converted)
 }
 
-/// Identify an unsupported tool or choice by its serialized type and return
-/// `InvalidArgument` with the affected request field and supported alternatives.
 /// Returns the SDK tools wrapped by request tools, for the converter and the echoed response.
 /// The wrapper's only extra data is a namespace `defer_loading` flag, which Dynamo ignores.
 pub(crate) fn sdk_tools(tools: Option<&[RequestTool]>) -> Option<Vec<Tool>> {
@@ -777,6 +775,8 @@ pub(crate) fn sdk_tool_choice(
     }
 }
 
+/// Identify an unsupported tool or choice by its serialized type and return
+/// `InvalidArgument` with the affected request field and supported alternatives.
 fn unsupported_tool<T>(tool: &impl serde::Serialize, field: &str) -> anyhow::Result<T> {
     let value = serde_json::to_value(tool)?;
     let tool_type = value["type"].as_str().unwrap_or("unknown");
