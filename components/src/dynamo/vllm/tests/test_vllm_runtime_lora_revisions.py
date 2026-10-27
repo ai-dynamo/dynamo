@@ -11,6 +11,7 @@ pytest.importorskip("vllm.lora.request")
 
 from dynamo.common.lora.runtime import ResolvedLoRA
 from dynamo.llm import HttpError
+from dynamo.vllm import runtime_lora as runtime_mod
 from dynamo.vllm.tests.test_vllm_runtime_lora import _coordinator, _request, _snapshot
 
 pytestmark = [
@@ -59,4 +60,37 @@ async def test_evicted_source_keeps_worker_lifetime_snapshot_identity(
         assert handler.engine_client.add_lora.await_count == 2
         assert handler.engine_client.remove_lora.await_count == 1
 
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_identity_history_is_bounded_without_forgetting_evicted_keys(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(runtime_mod, "_MAX_RUNTIME_IDENTITIES", 2, raising=False)
+    monkeypatch.setenv("DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS", "1")
+    snapshot = _snapshot(tmp_path)
+    resolutions = []
+
+    async def resolve(**kwargs):
+        resolutions.append(kwargs["source_uri"])
+        return ResolvedLoRA(snapshot, "digest:immutable")
+
+    _handler, coordinator = _coordinator(monkeypatch, tmp_path, resolve)
+    first_source = "wandb-artifact:///entity/project/first:v1"
+    for index, source in enumerate(
+        [first_source, "wandb-artifact:///entity/project/second:v1"]
+    ):
+        await coordinator.ensure_from_request(_request(source), str(index))
+        await coordinator.release_pending_admission(str(index))
+    with pytest.raises(HttpError, match="lora_capacity_exceeded"):
+        await coordinator.ensure_from_request(
+            _request("wandb-artifact:///entity/project/third:v1"), "third"
+        )
+    assert len(coordinator._snapshot_identities) == 2
+    assert len(resolutions) == 2
+    result = await coordinator.ensure_from_request(_request(first_source), "reload")
+    assert result.lora_name == _request(first_source)["routing"]["lora_name"]
+    assert len(coordinator._snapshot_identities) == 2
+    assert len(resolutions) == 3
     await coordinator.close()

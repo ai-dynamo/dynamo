@@ -39,6 +39,7 @@ from .runtime_lora_protocol import (
 from .runtime_lora_validation import validate_snapshot
 
 logger = logging.getLogger(__name__)
+_MAX_RUNTIME_IDENTITIES = 4096
 
 
 def _lora_request(record: RuntimeLoRAInfo) -> LoRARequest:
@@ -115,6 +116,27 @@ class RuntimeLoRACoordinator:
             raise _runtime_error(503, "lora_resolver_unavailable")
         self._validate_worker_capability(metadata)
 
+        timeout = asyncio.timeout(self._active_settings.resolve_timeout_seconds)
+        try:
+            async with timeout:
+                return await self._ensure_runtime_admission(
+                    metadata, request_id, admission_id
+                )
+        except TimeoutError:
+            if not timeout.expired():
+                raise
+            key = metadata.adapter_key
+            state = self._handler._lora_state
+            if key in state.runtime_load_tasks and key not in self._resolution_admitted:
+                raise _runtime_error(429, "lora_capacity_exceeded") from None
+            raise _runtime_error(504, "runtime_lora_resolve_timeout") from None
+
+    async def _ensure_runtime_admission(
+        self,
+        metadata: _RuntimeRequest,
+        request_id: str,
+        admission_id: str | None,
+    ) -> LoRARequest:
         admission_id = request_id if admission_id is None else admission_id
         resident = await self._lease_resident(metadata, admission_id)
         if resident is not None:
@@ -141,6 +163,16 @@ class RuntimeLoRACoordinator:
                 raise _runtime_error(429, "lora_capacity_exceeded")
             task = state.runtime_load_tasks.get(metadata.adapter_key)
             if task is None:
+                reserved_identities = sum(
+                    key not in self._snapshot_identities
+                    for key in state.runtime_load_tasks
+                )
+                if (
+                    metadata.adapter_key not in self._snapshot_identities
+                    and len(self._snapshot_identities) + reserved_identities
+                    >= _MAX_RUNTIME_IDENTITIES
+                ):
+                    raise _runtime_error(429, "lora_capacity_exceeded")
                 if (
                     len(state.runtime_load_tasks)
                     >= self._active_settings.max_pending_runtime_keys
@@ -171,16 +203,8 @@ class RuntimeLoRACoordinator:
             key = metadata.adapter_key
             self._initial_waiters[key] = self._initial_waiters.get(key, 0) + 1
         try:
-            timeout = asyncio.timeout(self._active_settings.resolve_timeout_seconds)
             try:
-                async with timeout:
-                    await asyncio.shield(task)
-            except TimeoutError:
-                if not timeout.expired():
-                    raise
-                if key not in self._resolution_admitted:
-                    raise _runtime_error(429, "lora_capacity_exceeded") from None
-                raise _runtime_error(504, "runtime_lora_resolve_timeout") from None
+                await asyncio.shield(task)
             except asyncio.CancelledError:
                 current = asyncio.current_task()
                 if (
@@ -794,6 +818,11 @@ class RuntimeLoRACoordinator:
         state = self._handler._lora_state
         lock = state.get_lock(metadata.adapter_key)
         async with lock:
+            if (
+                metadata.adapter_key not in self._snapshot_identities
+                and len(self._snapshot_identities) >= _MAX_RUNTIME_IDENTITIES
+            ):
+                raise _runtime_error(429, "lora_capacity_exceeded")
             snapshot_identity = (
                 metadata.identity_digest,
                 source_revision,

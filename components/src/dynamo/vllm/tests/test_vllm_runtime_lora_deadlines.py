@@ -68,6 +68,35 @@ async def test_cold_load_timeout_retains_engine_ownership_until_late_completion(
 
 
 @pytest.mark.asyncio
+async def test_admission_timeout_includes_initial_eviction_transition_wait(
+    monkeypatch, tmp_path
+):
+    snapshot = _snapshot(tmp_path)
+    handler, coordinator = _coordinator(
+        monkeypatch, tmp_path, ResolvedLoRA(snapshot, "digest:immutable")
+    )
+    coordinator._settings = replace(coordinator.settings, resolve_timeout_seconds=0.05)
+    request = _request("wandb-artifact:///entity/project/adapter:v1")
+    key = request["routing"]["lora_name"]
+    transition = asyncio.Event()
+    handler._lora_state.runtime_eviction_events[key] = transition
+    try:
+        with pytest.raises(HttpError, match="runtime_lora_resolve_timeout") as error:
+            await asyncio.wait_for(
+                coordinator.ensure_from_request(request, "request"), timeout=1
+            )
+        assert error.value.code == 504
+        assert handler._lora_state.runtime_eviction_events[key] is transition
+        assert not transition.is_set()
+        assert not handler._lora_state.runtime_pending_admissions
+        assert not handler._lora_state.runtime_load_tasks
+    finally:
+        transition.set()
+        handler._lora_state.runtime_eviction_events.pop(key)
+        await coordinator.close()
+
+
+@pytest.mark.asyncio
 async def test_cold_load_wait_preserves_task_timeout_error(monkeypatch, tmp_path):
     snapshot = _snapshot(tmp_path)
     _handler, coordinator = _coordinator(
