@@ -35,6 +35,11 @@
 !.github/scripts/helm_chart_version.py
 !.github/scripts/retry_kubectl.sh
 !.github/scripts/collect_vcluster_diagnostics.sh
+!.github/actions
+.github/actions/*
+!.github/actions/connect-vcluster
+.github/actions/connect-vcluster/*
+!.github/actions/connect-vcluster/port-forward-watchdog.sh
 **/*backup*/
 .dockerignore
 **/target/*
