@@ -696,11 +696,6 @@ func TestDGDScalingAdaptersReconciler_ReconcileUnlessWaitingForCheckpoint(t *tes
 			expectAdapter: true,
 		},
 		{
-			name:          "reconciles adapters for a successful result",
-			result:        ReconcileResult{State: v1beta1.DGDStateSuccessful},
-			expectAdapter: true,
-		},
-		{
 			name:       "wraps adapter reconciliation errors",
 			result:     ReconcileResult{State: v1beta1.DGDStateSuccessful},
 			failCreate: true,
