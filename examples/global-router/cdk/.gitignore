@@ -13,10 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-cdk.out/
+cdk.out*/
 cdk.context.json
 dist/
-node_modules/
+node_modules
 
 # Operator-specific settings and credentials.
 config/*.local.json
