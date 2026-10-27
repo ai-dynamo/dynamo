@@ -52,15 +52,15 @@ Exclude tests, documentation, comments, and whitespace from this count, as they 
 
 - Frontend: [frontend review prompt](../../../.github/review-prompts/frontend.md)
 - Runtime: [runtime review prompt](../../../.github/review-prompts/runtime.md)
-- Rust: `graham-code-review`
+- Rust: the `graham-code-review` skill
 - Python: [Python guidelines](../../../.ai/python-guidelines.md)
 - Tests: [pytest guidelines](../../../.ai/pytest-guidelines.md) and [test model size guardrails](../../../.ai/test-model-size-guardrails.md)
-- Docs, examples, and recipes: `dynamo-docs`
+- Docs, examples, and recipes: the `dynamo-docs` skill
 - Any directory: its nearest `AGENTS.md`
 
 ## 2. Performance
 
-Analyze any change to the hot path (per-request or per-token code) statically for locks, copies, and allocations (`dynamo-clone-hotpath-audit` covers Rust clones), and measure it empirically, ideally with mockers (`dynamo-frontend-benchmark`).
+Analyze any change to the hot path (per-request or per-token code) statically for locks, copies, and allocations (the `dynamo-clone-hotpath-audit` skill covers Rust clones), and measure it empirically, ideally with mockers (the `dynamo-frontend-benchmark` skill).
 
 ## 3. Testing and Validation
 
@@ -92,4 +92,4 @@ Fill in every section of `.github/pull_request_template.md`, and title the PR pe
 
 **Validation.** Back each claim with evidence, ideally a table with one row per behavior: the case, what happened before, and what happens now. For bug fixes, explain what caused the problem and why the fix addresses it. Include performance data when the change claims or risks a performance impact. Name each key test added and the regression it catches. Do not list routine test runs, clippy or linter checks, or unnecessary detail.
 
-**Issues and Ongoing Work.** Reference the GitHub or Linear issue the PR implements, for example `Closes #8480` or `Closes DYN-1234`. List any similar PRs, issues, or code on `main` that the Existing work check found, each with one line on how this PR differs; if the search found nothing, say so. As the final step, run `dynamo-issue-first` to validate the issue and its reference.
+**Issues and Ongoing Work.** Reference the GitHub or Linear issue the PR implements, for example `Closes #8480` or `Closes DYN-1234`. List any similar PRs, issues, or code on `main` that the Existing work check found, each with one line on how this PR differs; if the search found nothing, say so. As the final step, run the `dynamo-issue-first` skill to validate the issue and its reference.
