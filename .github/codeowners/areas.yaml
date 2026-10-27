@@ -892,6 +892,10 @@ shared:
   owners:
   - planner
   - operator
+- glob: components/src/dynamo/aisimulate/tests/dgd/
+  owners:
+  - planner
+  - operator
 - glob: components/src/dynamo/planner/connectors/kubernetes.py
   owners:
   - planner
