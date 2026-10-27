@@ -88,13 +88,15 @@ to `/v1/images/edits`. Use a model that supports image conditioning; text-to-ima
 alone does not establish editing support. This example uses `black-forest-labs/FLUX.2-klein-4B`
 with vLLM 0.31.0 and vLLM-Omni 0.31.0rc1.
 
-> [!IMPORTANT]
-> Image-edit uploads and multiple references are **unreleased**. Use frontend and
-> Omni worker builds containing [multipart image-edit support](https://github.com/ai-dynamo/dynamo/pull/16455);
-> Dynamo v1.6.0 and earlier do not include it. The single-reference JSON example
-> requires the [image-reference forwarding fix](https://github.com/ai-dynamo/dynamo/pull/15390),
-> which is also absent from v1.5.1 and v1.6.0. Those releases ignore image-edit references.
-> See the [Image Edits API](../../../reference/api/image-edits.mdx) for the request contract.
+Both the frontend and Omni worker must meet the Dynamo version requirement for the
+input format you use:
+
+| Feature | Minimum Dynamo version |
+|---|---|
+| Single-reference JSON edits | First release containing [image-reference forwarding (#15390)](https://github.com/ai-dynamo/dynamo/pull/15390); absent from v1.5.1 and v1.6.0 |
+| Multipart uploads, multiple references | First release containing [multipart image-edit support (#16455)](https://github.com/ai-dynamo/dynamo/pull/16455) |
+
+See the [Image Edits API](../../../reference/api/image-edits.mdx) for the request contract.
 
 Launch the reference-capable model from the repository root:
 
