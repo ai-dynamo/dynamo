@@ -50,10 +50,8 @@ class DiffusionHandlerBase(BaseGenerativeHandler):
             )
         self.media_output_fs = get_fs(config.media_output_fs_url)
         self.media_output_http_url = config.media_output_http_url
-        # Serialize pipeline access — the diffusion pipeline is not thread-safe
-        # (mutable instance state, unprotected CUDA graph cache).
-        # asyncio.Lock suspends waiting coroutines cooperatively so the event
-        # loop stays free for health checks and signal handling.
+        # The diffusion pipeline is not thread-safe; asyncio.Lock serializes
+        # access while keeping the event loop free for health checks.
         self._generate_lock = asyncio.Lock()
 
     def _parse_size(self, size: Optional[str]) -> tuple[int, int]:
