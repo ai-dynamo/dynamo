@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
@@ -869,13 +870,24 @@ func TestUnitProjectionMatchesPlacementFixtures(t *testing.T) {
 				return
 			}
 
-			t.Log("Render the hybrid workload with one Cyborg client per runtime I/O endpoint")
+			t.Log("Render the hybrid workload, from templates without /configs, with one Cyborg client per runtime I/O endpoint")
+			agentSpec := renderTestPodSpec()
+			agentSpec.Containers[0].VolumeMounts = withoutConfigMount(agentSpec.Containers[0].VolumeMounts, false)
 			pcs := renderTestPCS(true)
 			pcs.Spec.Template.Cliques[0].Spec.Replicas = build.ioFPGACount * build.ioFanoutFactor
-			rendered, _, err := renderSelectedForTest(pcs, projections, RenderInput{
-				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
+			cyborgContainer := &pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0]
+			cyborgContainer.VolumeMounts = withoutConfigMount(cyborgContainer.VolumeMounts, false)
+			rendered, resources, err := renderSelectedForTest(pcs, projections, RenderInput{
+				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: agentSpec}},
 			})
 			require.NoError(t, err)
+
+			t.Log("Render no runtime ConfigMap, config volume or extra-resources hash for the units")
+			require.Empty(t, resources)
+			for _, clique := range rendered.Spec.Template.Cliques {
+				require.False(t, slices.ContainsFunc(clique.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == lpuConfigVolumeName }), clique.Name)
+				require.NotContains(t, clique.Annotations, v1alpha1.AnnotationExtraResourcesHash, clique.Name)
+			}
 
 			t.Log("Publish the local unit roots to Agents and Cyborg, and the Agent template to Cyborg")
 			roots := make([]string, len(expected.LocalPartitionIDs))
