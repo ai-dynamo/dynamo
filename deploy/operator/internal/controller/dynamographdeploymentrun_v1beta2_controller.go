@@ -186,14 +186,14 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcilePublisherAccess(
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
 	name string,
 ) error {
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: run.Namespace}}
+	sa := &corev1.ServiceAccount{Name: name, Namespace: run.Namespace}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, sa, func() error {
 		return controllerutil.SetControllerReference(run, sa, r.Scheme())
 	}); err != nil {
 		return fmt.Errorf("reconcile ServiceAccount %q: %w", name, err)
 	}
 
-	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: run.Namespace}}
+	role := &rbacv1.Role{Name: name, Namespace: run.Namespace}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, role, func() error {
 		role.Rules = dgdrRunPublisherRules(run.Name)
 		return controllerutil.SetControllerReference(run, role, r.Scheme())
@@ -201,7 +201,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcilePublisherAccess(
 		return fmt.Errorf("reconcile Role %q: %w", name, err)
 	}
 
-	binding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: run.Namespace}}
+	binding := &rbacv1.RoleBinding{Name: name, Namespace: run.Namespace}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, binding, func() error {
 		binding.RoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name}
 		binding.Subjects = []rbacv1.Subject{{Kind: "ServiceAccount", Name: name, Namespace: run.Namespace}}
@@ -338,15 +338,13 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 	}
 
 	configMap = &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: run.Namespace,
-			Annotations: map[string]string{
-				dgdrRunGPUsPerNodeAnnotation:  strconv.Itoa(execution.GPUsPerNode),
-				dgdrRunSnapshotPathAnnotation: execution.SnapshotPath,
-			},
+		Name:      name,
+		Namespace: run.Namespace,
+		Annotations: map[string]string{
+			dgdrRunGPUsPerNodeAnnotation:  strconv.Itoa(execution.GPUsPerNode),
+			dgdrRunSnapshotPathAnnotation: execution.SnapshotPath,
 		},
-		Immutable: ptr.To(true),
+		Immutable: new(true),
 		Data: map[string]string{
 			dgdrRunInputKey:               string(contents),
 			dgdrRunPlannerImageKey:        execution.PlannerImage,
@@ -453,16 +451,12 @@ func dgdrRunDynamoVersion(plannerImage, dynamoVersion string) (string, error) {
 
 func dgdrRunRuntimeImageSource(plannerImage, dynamoVersion string) (string, error) {
 	ref := strings.TrimSpace(plannerImage)
-	digest := strings.Index(ref, "@")
-	nameAndTag := ref
-	if digest >= 0 {
-		nameAndTag = ref[:digest]
-	}
+	nameAndTag, _, hasDigest := strings.Cut(ref, "@")
 	lastSlash, lastColon := strings.LastIndex(nameAndTag, "/"), strings.LastIndex(nameAndTag, ":")
 	if lastColon > lastSlash && lastColon < len(nameAndTag)-1 {
 		return ref, nil
 	}
-	if digest >= 0 && nameAndTag != "" {
+	if hasDigest && nameAndTag != "" {
 		return nameAndTag + ":" + dynamoVersion, nil
 	}
 	return "", fmt.Errorf(
@@ -614,20 +608,18 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 	execution dgdrRunExecution,
 ) *batchv1.Job {
 	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: run.Namespace,
-			Annotations: map[string]string{
-				dgdrRunGPUsPerNodeAnnotation:  strconv.Itoa(execution.GPUsPerNode),
-				dgdrRunSnapshotPathAnnotation: execution.SnapshotPath,
-			},
+		Name:      name,
+		Namespace: run.Namespace,
+		Annotations: map[string]string{
+			dgdrRunGPUsPerNodeAnnotation:  strconv.Itoa(execution.GPUsPerNode),
+			dgdrRunSnapshotPathAnnotation: execution.SnapshotPath,
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: ptr.To[int32](0),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					ServiceAccountName:           name,
-					AutomountServiceAccountToken: ptr.To(false),
+					AutomountServiceAccountToken: new(false),
 					RestartPolicy:                corev1.RestartPolicyNever,
 					SecurityContext:              &corev1.PodSecurityContext{FSGroup: ptr.To[int64](65532)},
 					ImagePullSecrets:             append([]corev1.LocalObjectReference(nil), execution.ImagePullSecrets...),
@@ -673,11 +665,11 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 					Volumes: []corev1.Volume{
 						{
 							Name: dgdrRunInputVolume,
-							VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-								LocalObjectReference: corev1.LocalObjectReference{Name: name},
-							}},
+							ConfigMap: &corev1.ConfigMapVolumeSource{
+								Name: name,
+							},
 						},
-						{Name: dgdrRunSnapshotVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+						{Name: dgdrRunSnapshotVolume, EmptyDir: &corev1.EmptyDirVolumeSource{}},
 						dgdrRunPublisherKubeAPIVolume(),
 					},
 				},
@@ -690,20 +682,20 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 func dgdrRunPublisherKubeAPIVolume() corev1.Volume {
 	return corev1.Volume{
 		Name: dgdrRunServiceAccountVolume,
-		VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+		Projected: &corev1.ProjectedVolumeSource{
 			Sources: []corev1.VolumeProjection{
 				{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-					Path: "token", ExpirationSeconds: ptr.To(dgdrRunServiceAccountTokenTTL),
+					Path: "token", ExpirationSeconds: new(dgdrRunServiceAccountTokenTTL),
 				}},
 				{ConfigMap: &corev1.ConfigMapProjection{
-					LocalObjectReference: corev1.LocalObjectReference{Name: ConfigMapNameKubeRootCA},
-					Items:                []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
+					Name:  ConfigMapNameKubeRootCA,
+					Items: []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
 				}},
 				{DownwardAPI: &corev1.DownwardAPIProjection{Items: []corev1.DownwardAPIVolumeFile{{
 					Path: "namespace", FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.namespace"},
 				}}}},
 			},
-		}},
+		},
 	}
 }
 

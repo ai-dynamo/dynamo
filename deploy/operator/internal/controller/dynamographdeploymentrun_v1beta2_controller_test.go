@@ -97,9 +97,8 @@ func newDGDRRunFixture(t *testing.T, hardware dgdrRunHardwareDiscoverer, objects
 
 func (f *dgdrRunFixture) reconcile() {
 	f.t.Helper()
-	if _, err := f.reconciler.Reconcile(f.t.Context(), ctrl.Request{NamespacedName: types.NamespacedName{
-		Namespace: "default", Name: "search-1",
-	}}); err != nil {
+	if _, err := f.reconciler.Reconcile(f.t.Context(), ctrl.Request{
+		Namespace: "default", Name: "search-1"}); err != nil {
 		f.t.Fatalf("reconcile: %v", err)
 	}
 }
@@ -132,11 +131,11 @@ func dgdrRunForTest(t *testing.T, inputOverrides map[string]any) *nvidiacomv1bet
 		t.Fatalf("marshal parameters: %v", err)
 	}
 	return &nvidiacomv1beta2.DynamoGraphDeploymentRun{
-		ObjectMeta: metav1.ObjectMeta{Name: "search-1", Namespace: "default", UID: "run-uid", Generation: 1},
+		Name: "search-1", Namespace: "default", UID: "run-uid", Generation: 1,
 		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRunSpec{NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
 			Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"},
 			Hardware: &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{
-				SKU: ptr.To("h200_sxm"), Budget: ptr.To[int32](16),
+				SKU: new("h200_sxm"), Budget: ptr.To[int32](16),
 			}},
 			AISimulate:     &nvidiacomv1beta2.AISimulateSpec{InputOverrides: &runtime.RawExtension{Raw: raw}},
 			Recommendation: &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: 2},
@@ -579,15 +578,13 @@ func TestV1beta2RunControllerClassifiesPublisherProtocolFailure(t *testing.T) {
 	f.reconcile()
 	job := f.job()
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      job.Name + "-pod",
-			Namespace: job.Namespace,
-			Labels:    map[string]string{batchv1.JobNameLabel: job.Name},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: job.Name, UID: job.UID,
-				Controller: ptr.To(true),
-			}},
-		},
+		Name:      job.Name + "-pod",
+		Namespace: job.Namespace,
+		Labels:    map[string]string{batchv1.JobNameLabel: job.Name},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: job.Name, UID: job.UID,
+			Controller: new(true),
+		}},
 	}
 	if err := f.client.Create(t.Context(), pod); err != nil {
 		t.Fatalf("create Job pod: %v", err)

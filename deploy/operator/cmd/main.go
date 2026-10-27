@@ -169,8 +169,13 @@ func main() {
 	)
 	flag.StringVar(&operatorImagePullPolicy, "operator-image-pull-policy", string(corev1.PullIfNotPresent),
 		"Image pull policy for operator helper init containers")
-	flag.StringVar(&dgdrDefaultImage, "dgdr-default-image", "",
-		"Planner image used by v1beta2 Runs and as the v1beta1 spec.image default; empty derives dynamo-planner:<operator-version>")
+	flag.StringVar(
+		&dgdrDefaultImage,
+		"dgdr-default-image",
+		"",
+		"Planner image used by v1beta2 Runs and as the v1beta1 spec.image default; "+
+			"empty derives dynamo-planner:<operator-version>",
+	)
 	flag.BoolVar(&dgdrV1beta2Enabled, "dgdr-v1beta2-enabled", false,
 		"Reconcile native v1beta2 DGDRs; requires the v1beta2 Request and Run CRDs to be installed")
 	opts := zap.Options{
@@ -199,7 +204,12 @@ func main() {
 			"provided", operatorVersion, "error", err.Error())
 		os.Exit(1)
 	}
-	dynamoVersion := fmt.Sprintf("%d.%d.%d", parsedOperatorVersion.Major(), parsedOperatorVersion.Minor(), parsedOperatorVersion.Patch())
+	dynamoVersion := fmt.Sprintf(
+		"%d.%d.%d",
+		parsedOperatorVersion.Major(),
+		parsedOperatorVersion.Minor(),
+		parsedOperatorVersion.Patch(),
+	)
 	setupLog.Info("Operator version configured", "version", operatorVersion)
 
 	pullPolicy := corev1.PullPolicy(operatorImagePullPolicy)
