@@ -7,7 +7,7 @@ metadata:
   annotations:
     nvidia.com/last-applied-generation: "1"
     nvidia.com/last-applied-hash: 34e96cf8e119cf04f640cdcd6ec059f6eab0316bb325ca3c60b574fb7409642c
-  creationTimestamp: "2026-10-27T09:18:37Z"
+  creationTimestamp: "2000-01-01T00:00:00Z"
   generation: 1
   labels:
     nvidia.com/dynamo-graph-deployment-name: workers
@@ -19,9 +19,9 @@ metadata:
       controller: true
       kind: DynamoGraphDeployment
       name: workers
-      uid: 4ceb6061-7b94-41e8-b102-86143ef0a43e
-  resourceVersion: "3778"
-  uid: 3b951941-74ad-4f35-801d-2cc9def38cd2
+      uid: 00000000-0000-0000-0000-000000000000
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000
 spec:
   replicas: 1
   template:
@@ -359,14 +359,14 @@ metadata:
     nvidia.com/dynamo-operator-origin-version: 1.6.0
     nvidia.com/enable-grove: "true"
     nvidia.com/workload-provider: grove
-  creationTimestamp: "2026-10-27T09:18:36Z"
+  creationTimestamp: "2000-01-01T00:00:00Z"
   finalizers:
     - nvidia.com/finalizer
   generation: 1
   name: workers
   namespace: upgrade-history-1-6-0-vllm-aggregated-multi-grove
-  resourceVersion: "3791"
-  uid: 4ceb6061-7b94-41e8-b102-86143ef0a43e
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000
 spec:
   backendFramework: vllm
   components:
@@ -438,7 +438,7 @@ metadata:
   annotations:
     nvidia.com/last-applied-generation: "1"
     nvidia.com/last-applied-hash: 0d454cc8266ac38ed6453ee2ef3cf6d9dd237faebc63af22f67ca911e106796c
-  creationTimestamp: "2026-10-27T09:18:37Z"
+  creationTimestamp: "2000-01-01T00:00:00Z"
   labels:
     app.kubernetes.io/component: rbac
     app.kubernetes.io/managed-by: dynamo-operator
@@ -451,9 +451,9 @@ metadata:
       controller: true
       kind: DynamoGraphDeployment
       name: workers
-      uid: 4ceb6061-7b94-41e8-b102-86143ef0a43e
-  resourceVersion: "3772"
-  uid: ec3b03b8-23e5-4584-89ff-67bb5b39052e
+      uid: 00000000-0000-0000-0000-000000000000
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000
 rules:
   - apiGroups:
       - ""
@@ -491,7 +491,7 @@ metadata:
   annotations:
     nvidia.com/last-applied-generation: "1"
     nvidia.com/last-applied-hash: 79afc7f1980466dfa2a584e9055ff5059005fa48ecf35ddff41b453f67cc3859
-  creationTimestamp: "2026-10-27T09:18:37Z"
+  creationTimestamp: "2000-01-01T00:00:00Z"
   labels:
     app.kubernetes.io/component: rbac
     app.kubernetes.io/managed-by: dynamo-operator
@@ -504,9 +504,9 @@ metadata:
       controller: true
       kind: DynamoGraphDeployment
       name: workers
-      uid: 4ceb6061-7b94-41e8-b102-86143ef0a43e
-  resourceVersion: "3774"
-  uid: 730293e9-30c2-437a-b074-381740171760
+      uid: 00000000-0000-0000-0000-000000000000
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -600,7 +600,7 @@ metadata:
   annotations:
     nvidia.com/last-applied-generation: "1"
     nvidia.com/last-applied-hash: a615bfc016f57bef619ea5c67d88da24755349bb07efff9da0b2c79f18d6d076
-  creationTimestamp: "2026-10-27T09:18:37Z"
+  creationTimestamp: "2000-01-01T00:00:00Z"
   labels:
     nvidia.com/dynamo-graph-deployment-name: workers
   name: workers-wait-leader-script
@@ -611,9 +611,9 @@ metadata:
       controller: true
       kind: DynamoGraphDeployment
       name: workers
-      uid: 4ceb6061-7b94-41e8-b102-86143ef0a43e
-  resourceVersion: "3776"
-  uid: c6bf6fe4-4dba-415d-83dd-393b75878dcd
+      uid: 00000000-0000-0000-0000-000000000000
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000
 ---
 apiVersion: v1
 kind: Service
@@ -621,7 +621,7 @@ metadata:
   annotations:
     nvidia.com/last-applied-generation: "1"
     nvidia.com/last-applied-hash: 5894aaccc47d353cf243b8af801035c1c143a4fe647c0cb9ba2157b01057d4ee
-  creationTimestamp: "2026-10-27T09:18:37Z"
+  creationTimestamp: "2000-01-01T00:00:00Z"
   labels:
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: "true"
@@ -633,9 +633,9 @@ metadata:
       controller: true
       kind: DynamoGraphDeployment
       name: workers
-      uid: 4ceb6061-7b94-41e8-b102-86143ef0a43e
-  resourceVersion: "3781"
-  uid: fdf36af4-6568-43f8-a326-a8ff7019fff4
+      uid: 00000000-0000-0000-0000-000000000000
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000
 spec:
   clusterIP: 10.96.49.188
   clusterIPs:
@@ -664,7 +664,7 @@ metadata:
   annotations:
     nvidia.com/last-applied-generation: "1"
     nvidia.com/last-applied-hash: de69f3f5cebc1ce02e6bc4e40203b9aec5297743d387adc1ddb1043fa34d8e46
-  creationTimestamp: "2026-10-27T09:18:37Z"
+  creationTimestamp: "2000-01-01T00:00:00Z"
   labels:
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: "true"
@@ -677,9 +677,9 @@ metadata:
       controller: true
       kind: DynamoGraphDeployment
       name: workers
-      uid: 4ceb6061-7b94-41e8-b102-86143ef0a43e
-  resourceVersion: "3786"
-  uid: d8ab5d2f-62c2-42b3-862d-4f68bf2a08a5
+      uid: 00000000-0000-0000-0000-000000000000
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000
 spec:
   clusterIP: 10.96.119.11
   clusterIPs:
@@ -708,7 +708,7 @@ metadata:
   annotations:
     nvidia.com/last-applied-generation: "1"
     nvidia.com/last-applied-hash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
-  creationTimestamp: "2026-10-27T09:18:36Z"
+  creationTimestamp: "2000-01-01T00:00:00Z"
   labels:
     app.kubernetes.io/component: rbac
     app.kubernetes.io/managed-by: dynamo-operator
@@ -721,6 +721,6 @@ metadata:
       controller: true
       kind: DynamoGraphDeployment
       name: workers
-      uid: 4ceb6061-7b94-41e8-b102-86143ef0a43e
-  resourceVersion: "3770"
-  uid: 271a06e0-1568-43cc-80da-c3d6fddaf0fb
+      uid: 00000000-0000-0000-0000-000000000000
+  resourceVersion: "1"
+  uid: 00000000-0000-0000-0000-000000000000

@@ -49,9 +49,9 @@ The captured ownership closure includes DGD, PCS, Services, ServiceAccount, Role
 RoleBinding, and any other operator-owned kinds discovered from the API. Native
 Component scenarios include DCDs and their immediate workloads. Expected output
 does not determine which kinds are observed. Kubernetes/Grove descendants are
-excluded. Server metadata, Service addresses and condition timestamps are
-normalized only as documented by the matcher; historical origins, worker hashes
-and namespace suffixes remain concrete.
+excluded. Expected outputs normalize server metadata, Service addresses and condition
+timestamps as documented by the matcher; historical origins, worker hashes and
+namespace suffixes remain concrete.
 
 ## Storage and production lifecycle
 
@@ -93,6 +93,21 @@ For an already prepared exclusively owned cluster, set `KUBECONFIG` and
 `clustertest-upgrade-contract-in-cluster`. The in-cluster targets never select
 an implicit current context. CI uses the same replay and retains logs and `.new`
 differences.
+
+## Stable capture metadata
+
+The Go capture writer uses the same YAML formatting for recapture and promotion.
+Before input hashes are computed, it replaces only top-level `metadata.uid` and
+owner-reference UIDs with `00000000-0000-0000-0000-000000000000`,
+`metadata.resourceVersion` with the string `"1"`, and `metadata.creationTimestamp`
+with `"2000-01-01T00:00:00Z"`. It omits `metadata.managedFields`. These are concrete
+values, not golden directives. Generation, generation annotations, origins,
+hashes, workload templates and status remain unchanged by recording.
+
+Snapshot restoration identifies owners by namespace, API version, kind and name,
+then replaces their placeholder UIDs with the referenced objects' actual API
+UIDs. Missing owners and duplicate object identities are rejected. Several
+objects may share the same recorded UID without losing their ownership graph.
 
 ## Provenance and release boundaries
 

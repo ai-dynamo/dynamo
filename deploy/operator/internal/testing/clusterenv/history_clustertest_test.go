@@ -62,11 +62,7 @@ func TestClusterHistoryStorage(t *testing.T) {
 		return false
 	}, 20*time.Second, 100*time.Millisecond)
 	original := crd.Spec.DeepCopy()
-	for _, broken := range []bool{false, true} {
-		name := "stored"
-		if broken {
-			name = "unresolved-owner"
-		}
+	for _, name := range []string{"stored", "unresolved-owner", "duplicate-identity"} {
 		t.Run(name, func(t *testing.T) {
 			ns := "upgrade-storage-" + name
 			record := unstructured.Unstructured{Object: map[string]any{
@@ -79,14 +75,18 @@ func TestClusterHistoryStorage(t *testing.T) {
 				"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "child", "namespace": ns, "uid": "old-child"}, "data": map[string]any{"key": "value"},
 			}}
 			owner := metav1.OwnerReference{APIVersion: "upgrade.example.com/v1", Kind: "Record", Name: "old", UID: "old-parent"}
-			if broken {
-				owner.UID = "missing"
+			if name == "unresolved-owner" {
+				owner.Name = "missing"
 			}
 			child.SetOwnerReferences([]metav1.OwnerReference{owner})
 			path := filepath.Join(t.TempDir(), "input.yaml")
 			require.NoError(t, golden.WriteManifests(path, []unstructured.Unstructured{record, child}))
 			snapshot, err := golden.ReadManifests(path)
 			require.NoError(t, err)
+			require.Equal(t, snapshot[0].GetUID(), snapshot[1].GetUID(), "recording uses a shared UID placeholder")
+			if name == "duplicate-identity" {
+				snapshot = append(snapshot, *snapshot[0].DeepCopy())
+			}
 			cleanup, prepareErr := PrepareHistory(t.Context(), c, map[string][]unstructured.Unstructured{ns: snapshot})
 			require.NotNil(t, cleanup)
 			t.Cleanup(func() {
@@ -97,8 +97,10 @@ func TestClusterHistoryStorage(t *testing.T) {
 				require.Equal(t, original, &crd.Spec)
 			})
 			// PrepareHistory verifies exact historical spec/status before schema restoration.
-			if broken {
+			if name == "unresolved-owner" {
 				require.ErrorContains(t, prepareErr, "unresolved owner")
+			} else if name == "duplicate-identity" {
+				require.ErrorContains(t, prepareErr, "duplicate captured identity")
 			} else {
 				require.NoError(t, prepareErr)
 				require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(&record), &record))
@@ -106,7 +108,7 @@ func TestClusterHistoryStorage(t *testing.T) {
 				require.NoError(t, err)
 				require.False(t, found, "candidate schema should now prune the historical field on reads")
 				require.Equal(t, map[string]any{"observed": "historical"}, record.Object["status"])
-				require.NotEqual(t, "old-parent", string(record.GetUID()))
+				require.NotEqual(t, snapshot[0].GetUID(), record.GetUID())
 				require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(&child), &child))
 				require.Equal(t, record.GetUID(), child.GetOwnerReferences()[0].UID)
 			}
