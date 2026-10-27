@@ -2476,6 +2476,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-global-common"
+version = "1.7.0"
+
+[[package]]
 name = "dynamo-global-discovery-client"
 version = "1.7.0"
 dependencies = [
@@ -2487,6 +2491,26 @@ dependencies = [
  "tokio",
  "url",
 ]
+
+[[package]]
+name = "dynamo-global-discovery-service"
+version = "1.7.0"
+
+[[package]]
+name = "dynamo-global-frontend"
+version = "1.7.0"
+
+[[package]]
+name = "dynamo-global-router"
+version = "1.7.0"
+
+[[package]]
+name = "dynamo-global-view-broadcaster"
+version = "1.7.0"
+
+[[package]]
+name = "dynamo-global-view-receiver"
+version = "1.7.0"
 
 [[package]]
 name = "dynamo-kv-hashing"
@@ -2675,6 +2699,31 @@ dependencies = [
  "validator",
  "video-rs",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-lpx-sidecar"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum 0.8.4",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-runtime",
+ "dynamo-sidecar-common",
+ "dynamo-trtllm-sidecar",
+ "futures",
+ "prost-types 0.13.5",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3004,10 +3053,14 @@ dependencies = [
  "prost-types 0.14.3",
  "serde_json",
  "temp-env",
+ "tempfile",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
+ "tonic-health 0.13.1",
+ "tower 0.5.3",
  "tracing",
  "url",
 ]
@@ -3020,6 +3073,7 @@ dependencies = [
  "async-stream",
  "dynamo-backend-common",
  "dynamo-llm",
+ "dynamo-lpx-sidecar",
  "dynamo-mocker",
  "dynamo-runtime",
  "dynamo-sglang-mocker",

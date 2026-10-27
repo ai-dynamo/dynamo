@@ -76,7 +76,7 @@ areas:
   - docs/fern/pages/kubernetes/kv-aware-routing/kv-dc-relay.md
   - docs/fern/pages/reference/components/kv-dc-relay-configuration.md
   - lib/bindings/python/rust/llm/kv_dc_relay.rs
-  - lib/global-discovery-client/
+  - lib/global-*/**
   - lib/llm/src/kv_dc_relay.rs
   - lib/llm/src/kv_dc_relay/
   - lib/llm/tests/fixtures/relay-sources-canonical.json
@@ -454,6 +454,7 @@ areas:
   path_globs:
   - deploy/operator/internal/controller/lpx/
   - deploy/operator/internal/dynamo/lpx/
+  - lib/sidecar/lpx/
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
   path_globs:
@@ -892,6 +893,10 @@ shared:
   owners:
   - planner
   - operator
+- glob: components/src/dynamo/aisimulate/tests/dgd/
+  owners:
+  - planner
+  - operator
 - glob: components/src/dynamo/planner/connectors/kubernetes.py
   owners:
   - planner
@@ -1123,6 +1128,11 @@ shared:
   - runtime
   - backend-sglang
   - sidecar
+- glob: lib/sidecar/testkit/tests/support/lpx.rs
+  owners:
+  - runtime
+  - lpx
+  - sidecar
 - glob: components/src/dynamo/sglang/sidecar.py
   owners:
   - backend-sglang
@@ -1162,6 +1172,10 @@ shared:
 - glob: lib/sidecar/dynamo-sidecar
   owners:
   - runtime
+  - sidecar
+- glob: lib/sidecar/lpx/
+  owners:
+  - lpx
   - sidecar
 - glob: lib/sidecar/sglang/
   owners:
