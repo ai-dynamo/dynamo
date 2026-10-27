@@ -65,8 +65,6 @@ def load_module(monkeypatch):
 
 
 class _NvtxImportRecorder(importlib.abc.MetaPathFinder):
-    """Records (and optionally blocks) attempts to import ``nvtx``."""
-
     def __init__(self, block: bool):
         self.block = block
         self.attempts = 0
@@ -220,10 +218,7 @@ class TestEnvParsing:
     """DYN_NVTX parses the same way in Python and in the Rust runtime.
 
     Both accept 1/true/on/yes and 0/false/off/no, trimmed and case-insensitive
-    (``dynamo_truthy::is_truthy``). Two regressions are guarded here: the
-    original ``bool(int(...))``, under which ``true`` raised a bare
-    ``ValueError``; and a later ``env_bool`` form, under which ``on`` silently
-    recorded nothing while the Rust half of the same capture was enabled.
+    (``dynamo_truthy::is_truthy``).
     """
 
     @pytest.mark.parametrize("value", ["1", "true", "yes", "on", "TRUE", " on "])
@@ -256,8 +251,6 @@ class TestEnvParsing:
 
 
 class _StubDomain:
-    """Minimal stand-in for ``nvtx.Domain``."""
-
     def __init__(self, name):
         self.name = name
         self.created_attributes = []
@@ -279,8 +272,6 @@ class _StubDomain:
 
 
 class _StubAnnotate:
-    """Stand-in for ``nvtx.annotate``: decorator and context manager."""
-
     instances: ClassVar[list] = []
 
     def __init__(self, message="", color="white", domain=None):
