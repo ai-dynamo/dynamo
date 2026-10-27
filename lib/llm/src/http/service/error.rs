@@ -38,7 +38,7 @@ pub struct HttpError {
     pub message: String,
 }
 
-/// Frontend-owned HTTP disposition derived only from semantic error class.
+/// Frontend-owned HTTP disposition derived from semantic error identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClientErrorAction {
     NoDelivery,
@@ -95,6 +95,14 @@ pub(crate) fn http_action_for_class(class: dynamo_runtime::error::ErrorClass) ->
 }
 
 pub(crate) fn http_action_for_error(error: &DynamoError) -> ClientErrorAction {
+    if error.class() == dynamo_runtime::error::ErrorClass::InvalidRequest
+        && error.reason().as_str() == "request.unprocessable_entity"
+    {
+        return ClientErrorAction::Respond {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            public_message: "Unprocessable Entity",
+        };
+    }
     http_action_for_class(error.class())
 }
 

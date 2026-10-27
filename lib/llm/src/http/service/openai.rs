@@ -7452,6 +7452,70 @@ mod tests {
     }
 
     #[test]
+    fn explicit_backend_status_survives_semantic_wire_and_legacy_rendering() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, ErrorType};
+
+        let message = "private backend detail token=secret";
+        for (code, class) in [
+            (400, ErrorClass::InvalidRequest),
+            (404, ErrorClass::NotFound),
+            (422, ErrorClass::InvalidRequest),
+            (429, ErrorClass::RateLimited),
+            (503, ErrorClass::Unavailable),
+            (504, ErrorClass::DeadlineExceeded),
+            (500, ErrorClass::Internal),
+        ] {
+            let diagnostic = serde_json::json!({"message": message, "code": code}).to_string();
+            let error = DynamoError::builder()
+                .class(class)
+                .diagnostic(&diagnostic)
+                .build();
+            let mut wire = serde_json::to_value(error).unwrap();
+            if code == 422 {
+                wire["reason"] = serde_json::json!("request.unprocessable_entity");
+            }
+            let semantic: DynamoError = serde_json::from_value(wire).unwrap();
+            let unary = ErrorMessage::from_anyhow(anyhow::Error::new(semantic.clone()), "failed");
+            let streaming = |error| {
+                let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+                    data: None,
+                    id: None,
+                    event: Some("error".to_string()),
+                    comment: None,
+                    error: Some(error),
+                };
+                backend_error_response(extract_backend_error_if_present(&event).unwrap(), false)
+            };
+            let legacy = DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(diagnostic)
+                .build();
+            let direct = ErrorMessage::from_backend_http_error(HttpError {
+                code,
+                message: message.to_string(),
+            });
+            for (path, response) in [
+                ("semantic unary", unary),
+                ("semantic streaming", streaming(semantic)),
+                ("legacy streaming", streaming(legacy)),
+                ("direct HTTP", direct),
+            ] {
+                assert_eq!(response.0.as_u16(), code, "{path} {code}");
+                assert_eq!(response.1.code, code, "{path} {code}");
+                if code == 422 {
+                    assert!(response.1.details.is_none(), "{path} {code}");
+                }
+                assert!(
+                    !serde_json::to_string(&response.1.0)
+                        .unwrap()
+                        .contains("secret"),
+                    "{path} {code}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn backend_resolver_timeout_keeps_sanitized_gateway_status() {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 

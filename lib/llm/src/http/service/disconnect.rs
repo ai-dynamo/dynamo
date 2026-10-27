@@ -407,7 +407,8 @@ fn openai_semantic_stream_error(error: &DynamoError) -> (ErrorType, String) {
             StatusCode::BAD_REQUEST
             | StatusCode::CONFLICT
             | StatusCode::PAYLOAD_TOO_LARGE
-            | StatusCode::UNSUPPORTED_MEDIA_TYPE => "invalid_request_error",
+            | StatusCode::UNSUPPORTED_MEDIA_TYPE
+            | StatusCode::UNPROCESSABLE_ENTITY => "invalid_request_error",
             StatusCode::UNAUTHORIZED => "authentication_error",
             StatusCode::FORBIDDEN => "permission_error",
             StatusCode::NOT_FOUND => "not_found_error",
@@ -1315,6 +1316,22 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn unprocessable_request_stream_error_keeps_status_and_validation_type() {
+        let error: DynamoError = serde_json::from_value(serde_json::json!({
+            "class": "InvalidRequest",
+            "error_type": "InvalidArgument",
+            "reason": "request.unprocessable_entity",
+            "diagnostic": "private token=secret",
+        }))
+        .unwrap();
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["error"]["code"], 422);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert!(!body.to_string().contains("secret"));
     }
 
     #[test]

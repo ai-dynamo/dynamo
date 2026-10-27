@@ -417,14 +417,19 @@ impl ErrorReason {
         &self.0
     }
 
+    pub fn unprocessable_entity() -> Self {
+        Self::from_static("request.unprocessable_entity")
+    }
+
     fn catalog_class(value: &str) -> Option<ErrorClass> {
         match value {
             "runtime.unclassified" | "runtime.invalid_error" | "runtime.internal" => {
                 Some(ErrorClass::Internal)
             }
-            "request.invalid_argument" | "backend.invalid_argument" | "request.invalid" => {
-                Some(ErrorClass::InvalidRequest)
-            }
+            "request.invalid_argument"
+            | "backend.invalid_argument"
+            | "request.invalid"
+            | "request.unprocessable_entity" => Some(ErrorClass::InvalidRequest),
             "transport.cannot_connect"
             | "transport.disconnected"
             | "backend.unavailable"
