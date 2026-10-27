@@ -45,11 +45,27 @@ impl Default for Overload {
     }
 }
 
+/// When a request leaves the pool a session-aware selector would otherwise
+/// send it to: the session's pinned or home pool.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum SpillRule {
+    /// Leave the pool only while it is overloaded (see [`Overload`]).
+    #[default]
+    FleetRatio,
+    /// Leave the pool for the cheapest other pool when that one is at least
+    /// `margin` cheaper. A pool's cost is the round trip to its region plus
+    /// its expected wait, so it needs [`LoadMeasure::Wait`]. Coming back
+    /// takes the same margin the other way, so a session does not flip
+    /// between pools that cost about the same.
+    Cheapest { margin: Duration },
+}
+
 /// How the session-aware selectors decide when a request leaves its pool.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Spill {
     pub measure: LoadMeasure,
     pub overload: Overload,
+    pub rule: SpillRule,
 }
 
 /// A reachable pool, with what the session-aware selectors weigh.
@@ -205,6 +221,44 @@ pub(crate) fn least_loaded<'a, 'b>(candidates: &'b [Candidate<'a>]) -> Option<&'
         .min_by(|left, right| by_load(left, right).then_with(|| by_distance(left, right)))
 }
 
+/// What a request to the pool costs, in seconds: the round trip to its
+/// region plus its expected wait. `None` unless both are known.
+fn cost(candidate: &Candidate<'_>) -> Option<f64> {
+    Some(candidate.distance?.as_secs_f64() + candidate.busy?)
+}
+
+/// For [`SpillRule::Cheapest`]: `default`, unless the cheapest other pool
+/// is at least `margin` cheaper, or `default`'s cost is unknown; then that
+/// pool. Without a default, the cheapest pool. When no other pool's cost
+/// is known, `default`, or else the nearest pool.
+pub(crate) fn cheapest<'a, 'b>(
+    candidates: &'b [Candidate<'a>],
+    default: Option<&'b Candidate<'a>>,
+    margin: Duration,
+) -> Option<&'b Candidate<'a>> {
+    let best = candidates
+        .iter()
+        .filter(|candidate| default.is_none_or(|default| default.pool.id != candidate.pool.id))
+        .filter_map(|candidate| Some((cost(candidate)?, candidate)))
+        .min_by(|(left_cost, left), (right_cost, right)| {
+            left_cost
+                .total_cmp(right_cost)
+                .then_with(|| by_distance(left, right))
+                .then_with(|| left.pool.name.cmp(&right.pool.name))
+        });
+    match (default, best) {
+        (Some(default), Some((best_cost, best))) => match cost(default) {
+            Some(own) if own - best_cost < margin.as_secs_f64() => Some(default),
+            _ => Some(best),
+        },
+        (Some(default), None) => Some(default),
+        (None, Some((_, best))) => Some(best),
+        (None, None) => candidates
+            .iter()
+            .min_by(|left, right| by_distance(left, right)),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::sync::Arc;
@@ -283,6 +337,16 @@ pub(crate) mod tests {
         Spill {
             measure: LoadMeasure::Wait,
             ..Spill::default()
+        }
+    }
+
+    /// By wait, leaving a pool only for one at least 1 s cheaper.
+    pub(crate) fn by_cost() -> Spill {
+        Spill {
+            rule: SpillRule::Cheapest {
+                margin: Duration::from_secs(1),
+            },
+            ..by_wait()
         }
     }
 

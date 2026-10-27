@@ -4,7 +4,8 @@
 //! Selectors that keep a session's turns on one pool, so the pool's KV cache
 //! for the session is reused, and that prefer the region a request entered.
 //! Both read each pool's load from [`PoolSignals`] and leave a pool only when
-//! it is overloaded (see [`Spill`]).
+//! [`Spill`] says to: while it is overloaded, or, with
+//! [`SpillRule::Cheapest`], for a pool enough cheaper.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,7 +17,7 @@ use dynamo_runtime::pipeline::BuiltinRoutePicker;
 use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
 
 use crate::catalog::Pool;
-use crate::placement::{Spill, by_distance, cost_order, least_loaded, place};
+use crate::placement::{Spill, SpillRule, by_distance, cheapest, cost_order, least_loaded, place};
 use crate::selector::{PoolSelector, PoolTarget, RoutingRequest, target};
 use crate::signals::PoolSignals;
 
@@ -33,7 +34,8 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// overloaded, so a session leaves its home pool only while home is
 /// overloaded, and returns as soon as it is not. A request without a session
 /// ID is hashed on a counter instead, which spreads such requests over the
-/// nearest region's pools.
+/// nearest region's pools. With [`SpillRule::Cheapest`], a request leaves
+/// home only for a pool enough cheaper.
 #[derive(Debug)]
 pub struct RendezvousSelector {
     signals: Arc<PoolSignals>,
@@ -67,10 +69,14 @@ impl PoolSelector for RendezvousSelector {
         placed.sort_by(|left, right| {
             by_distance(left, right).then_with(|| score(right.pool).cmp(&score(left.pool)))
         });
-        let choice = placed
-            .iter()
-            .find(|candidate| !candidate.overloaded)
-            .or_else(|| least_loaded(&placed))?;
+        let choice = match self.spill.rule {
+            SpillRule::FleetRatio => placed
+                .iter()
+                .find(|candidate| !candidate.overloaded)
+                .or_else(|| least_loaded(&placed)),
+            // Home is the first pool in hash order.
+            SpillRule::Cheapest { margin } => cheapest(&placed, placed.first(), margin),
+        }?;
         target(&self.frontends, choice.pool)
     }
 }
@@ -84,8 +90,10 @@ impl PoolSelector for RendezvousSelector {
 /// turns go to the pinned pool while it is not overloaded, even if it is in
 /// another region, since the session's cache is there. When the pinned pool
 /// is overloaded, the turn goes to the first other pool in cost order that
-/// is not, and the pin moves there. Pins belong to this process and expire
-/// after `idle` without a request.
+/// is not, and the pin moves there. With [`SpillRule::Cheapest`], a turn
+/// leaves the pinned pool only for a pool enough cheaper, and the pin moves
+/// there. Pins belong to this process and expire after `idle` without a
+/// request.
 #[derive(Debug)]
 pub struct AffinitySelector {
     signals: Arc<PoolSignals>,
@@ -164,15 +172,26 @@ impl PoolSelector for AffinitySelector {
         cost_order(&mut placed);
         let pinned = request.session.and_then(|session| self.pinned(session));
         let is_pinned = |pool: &Pool| pinned.as_ref() == Some(&pool.id);
-        let choice = placed
-            .iter()
-            .find(|candidate| is_pinned(candidate.pool) && !candidate.overloaded)
-            .or_else(|| {
-                placed
+        let choice = match self.spill.rule {
+            SpillRule::FleetRatio => placed
+                .iter()
+                .find(|candidate| is_pinned(candidate.pool) && !candidate.overloaded)
+                .or_else(|| {
+                    placed
+                        .iter()
+                        .find(|candidate| !is_pinned(candidate.pool) && !candidate.overloaded)
+                })
+                .or_else(|| least_loaded(&placed)),
+            // Without a pin, the first pool in cost order: the least busy
+            // pool in the nearest region.
+            SpillRule::Cheapest { margin } => {
+                let default = placed
                     .iter()
-                    .find(|candidate| !is_pinned(candidate.pool) && !candidate.overloaded)
-            })
-            .or_else(|| least_loaded(&placed))?;
+                    .find(|candidate| is_pinned(candidate.pool))
+                    .or_else(|| placed.first());
+                cheapest(&placed, default, margin)
+            }
+        }?;
         if let Some(session) = request.session {
             self.pin(session, &choice.pool.id);
         }
@@ -183,7 +202,7 @@ impl PoolSelector for AffinitySelector {
 
 #[cfg(test)]
 mod tests {
-    use crate::placement::tests::{OHIO, by_wait, fleet, set_loads, set_waits};
+    use crate::placement::tests::{OHIO, by_cost, by_wait, fleet, set_loads, set_waits};
 
     use super::*;
 
@@ -300,6 +319,71 @@ mod tests {
 
         let wait = AffinitySelector::new(signals, OHIO.into(), by_wait(), idle);
         assert_eq!(pick(&wait, &pools, Some("s")), "ohio-b");
+    }
+
+    // Waits below are (requests waiting, requests started per second): 4 and
+    // 8 is 0.5 s. From Ohio, Oregon is 50 ms away and Tokyo 135 ms.
+
+    #[test]
+    fn affinity_by_cost_moves_only_for_a_margin_and_does_not_flip_back() {
+        let (pools, signals) = fleet();
+        let idle = Duration::from_secs(60);
+        let selector = AffinitySelector::new(signals.clone(), OHIO.into(), by_cost(), idle);
+        set_waits(&pools, &signals, [(4, 8); 4]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+
+        // Ohio-a 1.2 s against Ohio-b 0.5 s: under the 1 s margin, stay.
+        set_waits(&pools, &signals, [(6, 5), (4, 8), (4, 8), (4, 8)]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        // Ohio-a 2 s: Ohio-b is 1.5 s cheaper, so the pin moves.
+        set_waits(&pools, &signals, [(8, 4), (4, 8), (4, 8), (4, 8)]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        // The gap reverses, but by less than the margin: no flip back.
+        set_waits(&pools, &signals, [(4, 8), (6, 5), (4, 8), (4, 8)]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+
+        // Ohio-b 3 s, Ohio-a 1.5 s: Oregon (0.2 s + 50 ms) is cheapest.
+        set_waits(&pools, &signals, [(6, 4), (9, 3), (1, 5), (1, 5)]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "oregon-a");
+        // Oregon's Relay goes quiet: its cost is unknown, so the turn goes
+        // to the cheapest pool whose cost is known, Tokyo.
+        signals.forget_load(&pools[2].id);
+        assert_eq!(pick(&selector, &pools, Some("s")), "tokyo-a");
+    }
+
+    #[test]
+    fn affinity_by_cost_starts_sessions_locally_unless_a_pool_is_a_margin_cheaper() {
+        let (pools, signals) = fleet();
+        let idle = Duration::from_secs(60);
+        let selector = AffinitySelector::new(signals.clone(), OHIO.into(), by_cost(), idle);
+        // Ohio-b is the cheaper local pool at 1 s; Oregon, at 0.25 s, is
+        // under a margin cheaper.
+        set_waits(&pools, &signals, [(8, 4), (4, 4), (1, 5), (8, 4)]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        // Ohio-b at 1.5 s: Oregon is 1.25 s cheaper.
+        set_waits(&pools, &signals, [(8, 4), (6, 4), (1, 5), (8, 4)]);
+        assert_eq!(pick(&selector, &pools, Some("t")), "oregon-a");
+    }
+
+    #[test]
+    fn rendezvous_by_cost_leaves_home_for_a_margin_and_comes_back() {
+        let (pools, signals) = fleet();
+        let selector = RendezvousSelector::new(signals.clone(), OHIO.into(), by_cost());
+        set_waits(&pools, &signals, [(4, 8); 4]);
+        let home = pick(&selector, &pools, Some("s"));
+        let (index, other) = match home.as_str() {
+            "ohio-a" => (0, "ohio-b"),
+            _ => (1, "ohio-a"),
+        };
+
+        // Home waits 3 s, the other Ohio pool 0.5 s.
+        let mut waits = [(4, 8); 4];
+        waits[index] = (9, 3);
+        set_waits(&pools, &signals, waits);
+        assert_eq!(pick(&selector, &pools, Some("s")), other);
+
+        set_waits(&pools, &signals, [(4, 8); 4]);
+        assert_eq!(pick(&selector, &pools, Some("s")), home);
     }
 
     #[test]

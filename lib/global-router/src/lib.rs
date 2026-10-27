@@ -20,7 +20,7 @@ mod signals;
 pub use catalog::{Pool, PoolCatalog, PoolSnapshot, StaticPoolCatalog};
 pub use discovery::DiscoveryPoolCatalog;
 pub use load::{InFlightGuard, InFlightTracker};
-pub use placement::{LoadMeasure, Overload, Spill};
+pub use placement::{LoadMeasure, Overload, Spill, SpillRule};
 pub use selector::{
     LeastInFlightSelector, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
 };

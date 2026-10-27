@@ -25,7 +25,7 @@ use dynamo_global_ingress::{
 use dynamo_global_router::{
     AffinitySelector, DiscoveryPoolCatalog, InFlightTracker, LeastInFlightSelector, LoadMeasure,
     Overload, Pool, PoolCatalog, PoolSelector, PoolSignals, RendezvousSelector, RoundRobinSelector,
-    Spill, StaticPoolCatalog,
+    Spill, SpillRule, StaticPoolCatalog,
 };
 use dynamo_global_router_shared::{PoolIdDeriver, PoolKey, PoolLocation, V1PoolIdDeriver};
 use dynamo_llm::http::service::axum;
@@ -91,6 +91,12 @@ struct Args {
     /// ...or, with `--load-measure wait`, by at least this much wait.
     #[arg(long, default_value_t = Overload::default().wait_floor.as_millis() as u64)]
     overload_wait_floor_ms: u64,
+    /// `rendezvous` and `affinity`: when a request leaves its session's pool.
+    #[arg(long, value_enum, default_value_t = Rule::FleetRatio)]
+    spill_rule: Rule,
+    /// `--spill-rule cheapest`: how much cheaper another pool must be.
+    #[arg(long, default_value_t = 1000)]
+    switch_margin_ms: u64,
     /// `affinity`: forget a session's pool after this long without a request.
     #[arg(long, default_value_t = 1800)]
     pin_idle_secs: u64,
@@ -111,6 +117,16 @@ enum RouterPolicy {
     /// Pin each session to a pool; move the pin to the nearest pool with
     /// room when the pinned pool is overloaded.
     Affinity,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Rule {
+    /// While the pool is overloaded.
+    FleetRatio,
+    /// For the cheapest other pool, by round trip plus expected wait, when
+    /// it is at least `--switch-margin-ms` cheaper. Needs
+    /// `--load-measure wait`.
+    Cheapest,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -199,7 +215,16 @@ async fn main() -> Result<()> {
             floor: args.overload_floor,
             wait_floor: Duration::from_millis(args.overload_wait_floor_ms),
         },
+        rule: match args.spill_rule {
+            Rule::FleetRatio => SpillRule::FleetRatio,
+            Rule::Cheapest => SpillRule::Cheapest {
+                margin: Duration::from_millis(args.switch_margin_ms),
+            },
+        },
     };
+    if matches!(spill.rule, SpillRule::Cheapest { .. }) && spill.measure != LoadMeasure::Wait {
+        bail!("--spill-rule cheapest needs --load-measure wait");
+    }
     let region = || {
         args.region
             .clone()
