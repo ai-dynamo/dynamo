@@ -77,6 +77,10 @@ The Job uses Python's standard library and read-only Deployment access. Configur
 Jobs are retained for log inspection. The supporting ServiceAccount, Role, and RoleBinding persist
 until the next attempt and require manual removal when retiring the release.
 
+Settings under `upgradePreflight.job` are shared defaults. A check can override individual fields
+under `upgradePreflight.checks.<checkName>.job`. Unspecified fields inherit the shared value;
+`affinity`, `podSecurityContext`, and `imagePullSecrets` replace the shared field as a whole.
+
 Releases are listed newest first. Read bottom-up through releases newer than your installed version,
 up to your target version. Each entry describes changes introduced in that release. Releases and
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
@@ -589,6 +593,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.upgradePreflight.job.activeDeadlineSeconds | int | `120` | Maximum duration of each preflight Job in seconds, including retries. |
 | dynamo-operator.upgradePreflight.job.affinity | object | `{}` | Independent preflight affinity. Does not inherit controllerManager.affinity. |
 | dynamo-operator.upgradePreflight.job.podSecurityContext | string | `nil` | Full replacement of the preflight pod security context. Null uses secure defaults. Omit runAsUser on OpenShift for admission to assign the namespace UID. |
+| dynamo-operator.upgradePreflight.checks.upgradePath.job | object | `{}` | Per-check overrides of upgradePreflight.job. Unspecified fields inherit the shared defaults; affinity, podSecurityContext, and imagePullSecrets replace them as whole values. |
 | dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride | string | `""` | Installed minor (N.M) allowed to make one otherwise unsupported forward upgrade. The value is ignored after the installed minor changes and never bypasses other checks. |
 | dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride | string | `""` | Installed minor (N.M) allowed to make one otherwise unsupported downgrade. The value is ignored after the installed minor changes and never bypasses other checks. |
 | dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2 Request API with conversion and install the Run and Candidate APIs. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. When true, the operator reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate planner Job with a publisher sidecar that persists deployment Candidates. |

@@ -47,6 +47,30 @@ tests:
       - equal: {path: 'spec.template.spec.containers[0].args[4]', value: "1.2"}
       - equal: {path: 'spec.template.spec.containers[0].args[5]', value: "1.5"}
 
+  - it: overlays check-specific Job settings by field
+    set:
+      dynamo-operator.upgradePreflight.job.image: registry.example.com/shared-preflight:v1
+      dynamo-operator.upgradePreflight.job.affinity:
+        nodeAffinity: {shared: default}
+      dynamo-operator.upgradePreflight.checks.upgradePath.job:
+        image: registry.example.com/upgrade-path:v2
+        activeDeadlineSeconds: 600
+        affinity:
+          podAffinity: {check: override}
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal: {path: 'spec.template.spec.containers[0].image', value: registry.example.com/upgrade-path:v2}
+      - equal: {path: spec.activeDeadlineSeconds, value: 600}
+      - equal: {path: spec.template.spec.affinity.podAffinity.check, value: override}
+      - notExists: {path: spec.template.spec.affinity.nodeAffinity}
+
+  - it: rejects Job overrides outside the shared execution contract
+    set:
+      dynamo-operator.upgradePreflight.checks.upgradePath.job.command: [sh]
+    asserts:
+      - failedTemplate:
+          errorMessage: upgradePreflight check upgrade-path has unsupported job override command
+
   - it: retains secure pod defaults
     documentSelector: {path: kind, value: Job}
     asserts:

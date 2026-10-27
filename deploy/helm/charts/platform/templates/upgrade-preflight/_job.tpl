@@ -15,7 +15,14 @@ metadata:
 {{- define "dynamo-platform.upgradePreflight.job" -}}
 {{- $root := .root -}}
 {{- $operator := .operator -}}
-{{- $config := $operator.upgradePreflight.job -}}
+{{- $config := deepCopy $operator.upgradePreflight.job -}}
+{{- $overrides := .check.job | default dict -}}
+{{- range $field, $value := $overrides -}}
+{{- if not (hasKey $config $field) -}}
+{{- fail (printf "upgradePreflight check %s has unsupported job override %s" $.checkID $field) -}}
+{{- end -}}
+{{- $_ := set $config $field $value -}}
+{{- end -}}
 {{- $podSecurityContext := $config.podSecurityContext -}}
 {{- if eq $podSecurityContext nil -}}
 {{- $podSecurityContext = dict "runAsNonRoot" true "runAsUser" 65532 "seccompProfile" (dict "type" "RuntimeDefault") -}}
