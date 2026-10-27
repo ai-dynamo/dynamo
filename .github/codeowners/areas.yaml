@@ -45,7 +45,6 @@ areas:
 - label: router
   github_team: '@ai-dynamo/dynamo-router-codeowners'
   path_globs:
-  - components/src/dynamo/kv_dc_relay/
   - components/src/dynamo/squeeze_evolve/
   - components/src/dynamo/kv_state_agent/
   - components/src/dynamo/global_router/
@@ -69,9 +68,22 @@ areas:
   - lib/router-plugins/
   - examples/router/policy-class-queues.yaml
   - examples/router/custom-policy-example/
+- label: global-router
+  github_team: '@ai-dynamo/dynamo-global-router-codeowners'
+  path_globs:
+  - components/src/dynamo/kv_dc_relay/
+  - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
+  - docs/fern/pages/kubernetes/kv-aware-routing/kv-dc-relay.md
+  - docs/fern/pages/reference/components/kv-dc-relay-configuration.md
+  - lib/bindings/python/rust/llm/kv_dc_relay.rs
+  - lib/llm/src/kv_dc_relay.rs
+  - lib/llm/src/kv_dc_relay/
+  - lib/llm/tests/fixtures/relay-sources-canonical.json
+  - tests/router/test_kv_dc_relay_e2e.py
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:
+  - components/src/dynamo/artifacts/vllm/
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
@@ -88,6 +100,7 @@ areas:
   - components/src/dynamo/trtllm/utils/
   - components/src/dynamo/trtllm/workers/
   - examples/backends/trtllm/
+  - lib/mocker/servers/trtllm/
   - lib/sidecar/trtllm/
 - label: backend-sglang
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
@@ -103,6 +116,9 @@ areas:
   path_globs:
   - components/src/dynamo/triton/**
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
+- label: sidecar
+  github_team: '@ai-dynamo/dynamo-sidecar-codeowners'
+  path_globs: []
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:
@@ -190,6 +206,7 @@ areas:
   - benchmarks/omni/
   - components/src/dynamo/common/multimodal/
   - examples/custom_encoder/
+  - examples/nemotron_speech_cascaded_pipeline/
   - components/src/dynamo/trtllm/multimodal/
   - components/src/dynamo/vllm/multimodal_handlers/
   - components/src/dynamo/vllm/multimodal_utils/
@@ -207,6 +224,7 @@ areas:
 - label: planner
   github_team: '@ai-dynamo/dynamo-planner-codeowners'
   path_globs:
+  - components/src/dynamo/aisimulate/
   - components/src/dynamo/global_planner/
   - components/src/dynamo/global_planner/tests/
   - components/src/dynamo/planner/
@@ -221,9 +239,11 @@ areas:
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
   - examples/power-aware-budget/
+  - gyms/planner-gym/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
+  - components/src/dynamo/artifacts/
   - components/src/dynamo/common/
   - components/src/dynamo/common/backend/
   - components/src/dynamo/common/config_dump/
@@ -234,7 +254,6 @@ areas:
   - components/src/dynamo/common/utils/
   - components/src/dynamo/experimental/
   - examples/backends/sample/
-  - examples/backends/tritonserver/
   - examples/common/
   - examples/custom_backend/
   - lib/backend-common/
@@ -242,6 +261,7 @@ areas:
   - lib/sidecar/dynamo-sidecar
   - lib/sidecar/README.md
   - lib/sidecar/common/
+  - lib/sidecar/testkit/
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/
@@ -424,14 +444,21 @@ areas:
   - deploy/utils/manifests/
   - deploy/utils/tests/
   - examples/deployments/
+  - examples/gpu-sharing/
+  - recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json
+  - recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json
   - tests/deploy/
+- label: lpx
+  github_team: '@ai-dynamo/dynamo-lpx-codeowners'
+  path_globs:
+  - deploy/operator/internal/controller/lpx/
+  - deploy/operator/internal/dynamo/lpx/
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
   path_globs:
   - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
   - components/src/dynamo/common/tests/test_snapshot*
-  - deploy/checkpoint-placeholder/
   - deploy/operator/internal/checkpoint/
   - deploy/operator/internal/gms/
   - lib/gpu_memory_service/
@@ -455,6 +482,7 @@ areas:
   path_globs:
   - components/src/dynamo/tokenspeed/
   - components/src/dynamo/tokenspeed/tests/
+  - examples/backends/tokenspeed/
 - label: rl
   github_team: '@ai-dynamo/dynamo-rl-codeowners'
   path_globs:
@@ -471,8 +499,7 @@ areas:
   - benchmarks/frontend/
   - benchmarks/incluster/
   - benchmarks/mocker/README.md
-  - benchmarks/mocker/bench_aic_concurrency.py
-  - benchmarks/mocker/bench_aic_rust_callback.py
+  - benchmarks/mocker/bench_ais_concurrency.py
   - benchmarks/nat_trace/
   - benchmarks/prefix_data_generator/
   - benchmarks/pyproject.toml
@@ -553,45 +580,18 @@ shared:
   owners:
   - ops
   - runtime
-# CODEOWNERS is a generated artifact, so co-ownership here is about who may
-# approve it, not who reviews its contents. Every area is listed because under
-# "any one approves" any single team satisfies the gate: without this, adding a
-# file in an uncovered location needs an areas.yaml edit (ops) AND the
-# regenerated CODEOWNERS (process), two approvals to land one file. The
-# artifact cannot drift from the reviewed source -- emit_codeowners.py is a
-# pure function of areas.yaml, and the workflow's regenerate-and-diff step
-# fails on any hand-edit -- so widening approval here costs no safety.
-- glob: CODEOWNERS
-  owners:
-  - process
-  - agents
-  - backend-sglang
-  - backend-trtllm
-  - backend-vllm
-  - diffusion
-  - docs
-  - epp
-  - fault-tolerance
-  - frontend
-  - gms
-  - kv-memory
-  - multimodal
-  - observability
-  - operator
-  - ops
-  - performance
-  - planner
-  - rl
-  - router
-  - runtime
-  - tokenspeed
-  - xpu
-# areas.yaml is the routing decision itself, not a generated artifact, so it
-# does not get the wide list above: nothing stops a rule here from re-routing
-# review authority away from a team, and the strict gate only proves coverage,
-# not that the owner is the right one. Ops and process both hold repo-wide
-# process authority, and under "any one approves" either can unblock a routing
-# change without a third team having to weigh in on paths it does not own.
+# CODEOWNERS stays on the process area alone. GitHub requests every team on
+# the matching line, even when one approval satisfies the gate, so listing
+# every area here pages every codeowner group for a generated-file edit.
+# areas.yaml is already shared by ops and process, so one process review
+# still covers the source and the artifact.
+# areas.yaml is the routing decision itself, not a generated artifact.
+# Nothing stops a rule here from re-routing review authority away from a
+# team, and the strict gate only proves coverage, not that the owner is the
+# right one. Ops and process both hold repo-wide process authority, but a
+# routing change also regenerates CODEOWNERS, which process owns alone, so a
+# process approval is required. No third team has to weigh in on paths it
+# does not own.
 - glob: .github/codeowners/areas.yaml
   owners:
   - ops
@@ -887,6 +887,10 @@ shared:
   owners:
   - performance
   - planner
+- glob: components/src/dynamo/aisimulate/output/dgd/
+  owners:
+  - planner
+  - operator
 - glob: components/src/dynamo/planner/connectors/kubernetes.py
   owners:
   - planner
@@ -976,10 +980,18 @@ shared:
   owners:
   - operator
   - planner
-- glob: deploy/operator/internal/gpu/discovery.go
+- glob: deploy/operator/internal/controller/lpx/
   owners:
   - operator
-  - observability
+  - lpx
+- glob: deploy/operator/internal/dynamo/lpx/
+  owners:
+  - operator
+  - lpx
+- glob: deploy/**/*lpx*
+  owners: [operator]
+- glob: deploy/helm/**/*lpx*
+  owners: [operator, lpx]
 - glob: deploy/operator/internal/controller/*checkpoint*
   owners:
   - operator
@@ -1020,6 +1032,11 @@ shared:
   owners:
   - performance
   - router
+- glob: lib/bench/kv_router/dc_ckf_relay_bench.rs
+  owners:
+  - performance
+  - router
+  - global-router
 - glob: lib/kv-router/src/services/shared_cache/
   owners:
   - router
@@ -1085,10 +1102,86 @@ shared:
   owners:
   - performance
   - backend-sglang
+  - sidecar
+- glob: lib/mocker/servers/trtllm/
+  owners:
+  - performance
+  - backend-trtllm
+  - sidecar
 - glob: lib/runtime/src/nvtx.rs
   owners:
   - runtime
   - performance
+- glob: lib/sidecar/testkit/tests/support/vllm.rs
+  owners:
+  - runtime
+  - backend-vllm
+  - sidecar
+- glob: lib/sidecar/testkit/tests/support/sglang.rs
+  owners:
+  - runtime
+  - backend-sglang
+  - sidecar
+- glob: components/src/dynamo/sglang/sidecar.py
+  owners:
+  - backend-sglang
+  - sidecar
+- glob: components/src/dynamo/trtllm/sidecar.py
+  owners:
+  - backend-trtllm
+  - sidecar
+- glob: components/src/dynamo/vllm/sidecar.py
+  owners:
+  - backend-vllm
+  - sidecar
+- glob: docs/fern/**/*sidecar*
+  owners:
+  - docs
+  - sidecar
+- glob: lib/bindings/python/tests/test_sidecar_startup.py
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/mocker/servers/
+  owners:
+  - performance
+  - sidecar
+- glob: lib/sidecar/Dockerfile
+  owners:
+  - ops
+  - sidecar
+- glob: lib/sidecar/README.md
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/common/
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/dynamo-sidecar
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/sglang/
+  owners:
+  - backend-sglang
+  - sidecar
+- glob: lib/sidecar/testkit/
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/trtllm/
+  owners:
+  - backend-trtllm
+  - sidecar
+- glob: lib/sidecar/vllm/
+  owners:
+  - backend-vllm
+  - sidecar
+- glob: tests/serve/test_sidecar.py
+  owners:
+  - runtime
+  - sidecar
 - glob: tests/deploy/
   owners:
   - ops
@@ -1276,10 +1369,6 @@ shared:
   owners:
   - ops
   - backend-vllm
-- glob: examples/backends/tritonserver/Dockerfile
-  owners:
-  - runtime
-  - ops
 - glob: examples/diffusers/Dockerfile
   owners:
   - diffusion
@@ -1423,10 +1512,6 @@ shared:
   owners:
   - runtime
   - ops
-- glob: tests/dependencies/test_kvbm_imports.py
-  owners:
-  - runtime
-  - kv-memory
 - glob: .github/workflows/pr-xpu.yaml
   owners:
   - xpu

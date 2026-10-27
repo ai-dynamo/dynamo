@@ -143,8 +143,6 @@ navigation:
         contents:
           - page: Introduction
             path: pages/kubernetes/model-deployment/introduction.mdx
-          - page: Sidecar Backends (Experimental)
-            path: pages/kubernetes/model-deployment/sidecar-backends.md
           - page: Deploy with DGD
             path: pages/kubernetes/model-deployment/deploy-with-dgd.md
           - page: Expose the Frontend
@@ -156,6 +154,8 @@ navigation:
             contents:
               - page: Fast Model Loading
                 path: pages/kubernetes/model-deployment/model-loading/fast-model-loading.mdx
+              - page: Dynamo Snapshot (Experimental)
+                path: pages/kubernetes/model-deployment/model-loading/snapshot.mdx
               - page: MatrixHub
                 path: pages/kubernetes/model-deployment/model-loading/matrixhub.md
 
@@ -204,6 +204,8 @@ navigation:
             path: pages/kubernetes/fault-tolerance/request-migration.md
           - page: Request Rejection
             path: pages/kubernetes/fault-tolerance/request-rejection.md
+          - page: Admission Control
+            path: pages/kubernetes/fault-tolerance/admission-control.md
           - page: Graceful Shutdown
             path: pages/kubernetes/fault-tolerance/graceful-shutdown.md
 
@@ -353,9 +355,8 @@ navigation:
                   - page: Simulate a Kubernetes Deployment
                     slug: kubernetes-mocker
                     path: pages/kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx
-                  - page: Benchmark Planner Decisions
-                    slug: planner-replay
-                    path: pages/kubernetes/operations/simulation-with-dynosim/dynosim-planner-replay.mdx
+                  - link: Simulate Planner Decisions (AISimulate)
+                    href: /dynamo/dev/knowledge-base/modular-components/planner/aisimulate-planner-replay
                   - section: AISimulate (Experimental)
                     slug: ai-simulate
                     collapsed: true
@@ -401,6 +402,8 @@ navigation:
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md
                   - page: Request Rejection Architecture
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md
+                  - page: Admission Control Architecture
+                    path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md
                   - page: Graceful Shutdown Architecture
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/graceful-shutdown-architecture.md
                   - page: Fault Tolerance Testing
@@ -416,6 +419,10 @@ navigation:
                 contents:
                   - page: Overview
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/overview.md
+                  - page: Protocol Field Handling
+                    path: pages/developer-guide/knowledge-base/modular-components/frontend/protocol-field-handling.md
+                  - page: OpenAPI Request-Contract Comparison
+                    path: pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md
                   - page: KServe gRPC Frontend
                     slug: kserve-grpc-frontend
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/frontend-guide.md
@@ -486,6 +493,8 @@ navigation:
                       - page: Write Custom Routing Strategies
                         slug: write-custom-routing-strategies
                         path: pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx
+                      - page: Write an Admission Control Plugin
+                        path: pages/developer-guide/knowledge-base/modular-components/router/custom-admission-control.md
                       - page: Router Examples
                         path: pages/developer-guide/knowledge-base/modular-components/router/router-examples.md
                       - page: Router Testing
@@ -505,6 +514,9 @@ navigation:
                     path: pages/developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md
                   - page: Planner Examples
                     path: pages/developer-guide/knowledge-base/modular-components/planner/planner-examples.md
+                  - page: Simulate Planner Decisions (AISimulate)
+                    slug: aisimulate-planner-replay
+                    path: pages/developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx
                   - page: Planner Design
                     path: pages/developer-guide/knowledge-base/modular-components/planner/planner-design.md
               - section: Profiler
@@ -659,6 +671,8 @@ navigation:
                 path: pages/developer-guide/additional-resources/speculative-decoding/overview.md
               - page: Speculative Decoding with vLLM
                 path: pages/developer-guide/additional-resources/speculative-decoding/speculative-decoding-with-vllm.md
+              - page: Speculative Decoding with SGLang
+                path: pages/developer-guide/additional-resources/speculative-decoding/speculative-decoding-with-sglang.md
 
   - tab: use-cases
     layout:
@@ -714,6 +728,8 @@ navigation:
         contents:
           - page: Overview
             path: pages/use-cases/multimodal-serving/overview.md
+          - page: Voice Pipelines
+            path: pages/use-cases/multimodal-serving/voice.md
           - page: Parallel Media Decoding
             path: pages/use-cases/multimodal-serving/parallel-media-decoding.md
           - page: Custom Vision Encoders
@@ -775,6 +791,23 @@ navigation:
             path: pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.md
           - page: Troubleshooting Tool Calls
             path: pages/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
+      - section: Many-Model Serving
+        collapsed: true
+        icon: layer-group
+        slug: many-model-serving
+        contents:
+          - page: Interpreting GPU Sharing Results
+            path: pages/use-cases/gpu-sharing/gpu-sharing-results.mdx
+          - page: Deploy the Baseline Experiment
+            path: pages/use-cases/gpu-sharing/deploy-baseline.md
+          - page: Deploy the KAI + HAMi Experiment
+            path: pages/use-cases/gpu-sharing/deploy-kai-hami.md
+          - page: Build the KAI-Scheduler and GPU Fractioning Forks
+            path: pages/use-cases/gpu-sharing/build-gpu-fractioning-forks.md
+          - page: Deploy the KAI + GPU Fractions Experiment
+            path: pages/use-cases/gpu-sharing/deploy-kai-gpu-fractions.md
+          - page: Per-GPU Compute and Memory Limits with MPS
+            path: pages/use-cases/gpu-sharing/mps-per-gpu-limits.md
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================
@@ -785,8 +818,10 @@ navigation:
           - page: Overview
             path: pages/recipes/model-recipes/overview.mdx
             slug: browse
-          # Grouped by model provider. Each group uses skip-slug so page URLs
-          # stay /recipes/<slug>; within a group, newest models come first.
+          # Grouped by model provider; each group uses skip-slug so page URLs
+          # stay /recipes/<slug>. Edit the recipe catalog and providers.yaml
+          # under pages/recipes/_catalog/, not this list.
+          # recipe-nav:begin — generated by scripts/gen_recipe_nav.py, do not edit
           - section: Z.ai
             skip-slug: true
             collapsed: true
@@ -855,6 +890,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Nemotron 3.5 Super VL
+                path: pages/recipes/model-recipes/nemotron-3-5-super-vl-120b-a12b.mdx
+                slug: nemotron-3-5-super-vl
               - page: Nemotron 3.5 Lightning
                 path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
                 slug: nemotron-3-5-lightning
@@ -906,6 +944,38 @@ navigation:
               - page: Solar Open2 250B
                 path: pages/recipes/model-recipes/solar-open2-250b.mdx
                 slug: solar-open2-250b
+          - section: Meta
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Muse-Spark-Open-816B-A42B
+                path: pages/recipes/model-recipes/Muse-Spark-Open.mdx
+                slug: Muse-Spark-Open
+          - section: MiniMax
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: MiniMax M3.1
+                path: pages/recipes/model-recipes/minimax-m3-1.mdx
+                slug: minimax-m3-1
+              - page: MiniMax M3
+                path: pages/recipes/model-recipes/minimax-m3.mdx
+                slug: minimax-m3
+          - section: Motif Technologies
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Motif-3 NVFP4
+                path: pages/recipes/model-recipes/motif-3.mdx
+                slug: motif-3
+          - section: Reflection
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Beam-1.0-501B-A23B
+                path: pages/recipes/model-recipes/beam-1-0-501b.mdx
+                slug: beam-1-0-501b
+          # recipe-nav:end
 
       # ==================== Kubernetes Templates ====================
       - section: Kubernetes Templates
@@ -1021,6 +1091,9 @@ navigation:
         path: pages/reference/general/releases/release-history.mdx
         collapsed: true
         contents:
+          - page: Dynamo v1.6.0
+            path: pages/reference/general/releases/dynamo-v1-6-0.mdx
+            slug: v1-6-0
           - page: Dynamo v1.5.0
             path: pages/reference/general/releases/dynamo-v1-5-0.mdx
             slug: v1-5-0
@@ -1256,7 +1329,7 @@ navigation:
             path: pages/enterprise/overview.mdx
             slug: overview
           - page: Supported Artifacts
-            path: pages/enterprise/supported-artifacts.mdx
+            path: pages/reference/general/enterprise-supported-artifacts.mdx
             slug: supported-artifacts
           - page: Install
             path: pages/enterprise/install.mdx
@@ -1297,6 +1370,12 @@ navigation:
         contents:
           # Keep this archive in reverse chronological order. Publication dates are
           # rendered in each article header and on the custom landing page.
+          - page: "AIPerf Benchmarking"
+            path: pages/blog/2026/aiperf-benchmarking.mdx
+            slug: aiperf-benchmarking
+          - page: "When to use EPD Disaggregation for Multimodal Serving"
+            path: pages/blog/2026/epd-disaggregation-multimodal.mdx
+            slug: epd-disaggregation-multimodal
           - page: "Dynamo Agent Optimization Skills"
             path: pages/blog/2026/agent-optimization-skills.mdx
             slug: agent-optimization-skills

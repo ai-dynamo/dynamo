@@ -155,7 +155,10 @@ impl SelectionServiceBuilder {
         self
     }
 
-    pub async fn build(self) -> anyhow::Result<SelectionService> {
+    pub async fn build(mut self) -> anyhow::Result<SelectionService> {
+        self.kv_router_config
+            .apply_policy_config()
+            .map_err(anyhow::Error::msg)?;
         if let Some(ttl) = self.session_affinity_ttl {
             super::affinity::SessionAffinity::validate_ttl(ttl)?;
         }
@@ -227,7 +230,7 @@ impl SelectionServiceBuilder {
         let peer_manager = if replica_runtime.is_some() {
             let weak_core = Arc::downgrade(&core);
             let affinity_core = Arc::downgrade(&core);
-            Some(PeerManager::start_with_affinity(
+            Some(Arc::new(PeerManager::start_with_affinity(
                 self.replica_sync_peers,
                 cancel_token.child_token(),
                 move |event| {
@@ -242,7 +245,7 @@ impl SelectionServiceBuilder {
                         }
                     }
                 }),
-            )?)
+            )?))
         } else {
             None
         };
@@ -310,7 +313,7 @@ impl Drop for StartupGuard {
 
 pub struct SelectionService {
     core: Arc<SelectionCore>,
-    peer_manager: Option<PeerManager>,
+    peer_manager: Option<Arc<PeerManager>>,
     replica_runtime: Option<ReplicaSyncRuntime>,
     replica_sync_port: Option<u16>,
     cancel_token: CancellationToken,
@@ -507,8 +510,12 @@ impl SelectionService {
     pub fn list_replica_peers(&self) -> Vec<String> {
         self.peer_manager
             .as_ref()
-            .map(PeerManager::list_peers)
+            .map(|peer_manager| peer_manager.list_peers())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn peer_manager(&self) -> Option<Arc<PeerManager>> {
+        self.peer_manager.clone()
     }
 
     pub async fn indexer_snapshot(&self) -> serde_json::Value {
@@ -705,19 +712,18 @@ worker_selection:
         );
     }
 
+    async fn build(port: u16) -> anyhow::Result<SelectionService> {
+        SelectionServiceBuilder::new(test_config(), WorkerType::Aggregated, test_registry())
+            .indexer_threads(1)
+            .replica_sync(port, Vec::new())
+            .build()
+            .await
+    }
+
     async fn build_on_port(port: u16) -> SelectionService {
         tokio::time::timeout(Duration::from_secs(5), async move {
             loop {
-                match SelectionServiceBuilder::new(
-                    test_config(),
-                    WorkerType::Aggregated,
-                    test_registry(),
-                )
-                .indexer_threads(1)
-                .replica_sync(port, Vec::new())
-                .build()
-                .await
-                {
+                match build(port).await {
                     Ok(service) => return service,
                     Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
                 }
@@ -742,7 +748,9 @@ worker_selection:
         assert_eq!(service.replica_sync_port(), Some(port));
         let weak_core = Arc::downgrade(&service.core);
         service.shutdown().await;
-        let replacement = build_on_port(port).await;
+        let replacement = build(port)
+            .await
+            .expect("shutdown releases the replica port");
         drop(service);
         assert!(weak_core.upgrade().is_none());
         replacement.shutdown().await;

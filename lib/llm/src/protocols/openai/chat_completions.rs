@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 use serde::{Deserialize, Serialize};
@@ -12,11 +12,12 @@ use crate::engines::ValidateRequest;
 
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
-    common_ext::{CommonExt, CommonExtProvider},
+    common_ext::{ChatCommonExt, CommonExt, CommonExtProvider},
     validate,
 };
 use crate::protocols::common::extensions::{
     NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
+    validate_metadata_upload_single_choice, validate_metadata_upload_stop_strings,
 };
 
 pub mod aggregator;
@@ -28,10 +29,13 @@ pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
 
 use dynamo_parsers::tool_calling::{ToolCallResponse, ToolCallResponseChunk};
+#[cfg(test)]
 use dynamo_protocols::types::{
-    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
-    ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta, FinishReason,
-    FunctionCall, FunctionCallStream, FunctionType,
+    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta, FinishReason,
+};
+use dynamo_protocols::types::{
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk, FunctionCall,
+    FunctionCallStream, FunctionType,
 };
 
 /// Map a parser-native [`ToolCallResponse`] onto the protocol/wire
@@ -87,10 +91,10 @@ pub(crate) fn tool_call_response_chunk_to_protocol(
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone, Default)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
-    #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateChatCompletionRequest,
 
     #[serde(flatten, default)]
+    #[schema(value_type = ChatCommonExt)]
     pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -274,26 +278,107 @@ fn openai_thinking_mode(value: &serde_json::Value) -> anyhow::Result<Option<Open
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
 /// `CreateChatCompletionResponse` with optional NVIDIA extension metadata.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NvCreateChatCompletionResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
 }
 
+/// Parser lifecycle evidence carried between serving components, never to OpenAI clients.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallCompletion {
+    pub choice_index: u32,
+    pub tool_index: u32,
+    pub complete: bool,
+}
+
 /// A response structure for streamed chat completions, embedding OpenAI's
 /// `CreateChatCompletionStreamResponse` with optional NVIDIA extension metadata.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NvCreateChatCompletionStreamResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+    /// Internal prompt logprobs payload for non-streaming response aggregation.
+    /// This must never be serialized to client-facing streams.
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "deserialize_prompt_logprobs"
+    )]
+    pub prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
     /// Internal frontend metrics payload. This must never be serialized to
     /// client-facing OpenAI-compatible streams.
-    #[serde(skip)]
+    #[serde(default, skip_serializing)]
+    #[schema(ignore)]
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
+    /// Internal transport evidence; the HTTP chat converter removes it before SSE serialization.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(ignore)]
+    pub tool_call_completion: Vec<ToolCallCompletion>,
+}
+
+fn deserialize_prompt_logprobs<'de, D>(
+    deserializer: D,
+) -> Result<Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use crate::protocols::common::llm_backend::PromptLogprobEntry;
+
+    #[derive(Deserialize)]
+    #[serde(transparent)]
+    struct Position(
+        #[serde(deserialize_with = "deserialize_position")] HashMap<u32, PromptLogprobEntry>,
+    );
+
+    fn deserialize_position<'de, D>(
+        deserializer: D,
+    ) -> Result<HashMap<u32, PromptLogprobEntry>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct PositionVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for PositionVisitor {
+            type Value = HashMap<u32, PromptLogprobEntry>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a map from string token IDs to prompt logprobs")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut position = HashMap::with_capacity(map.size_hint().unwrap_or(0));
+                // pythonize does not coerce string map keys to integers like serde_json.
+                while let Some(token_id) = map.next_key::<String>()? {
+                    let token_id = token_id.parse().map_err(serde::de::Error::custom)?;
+                    position.insert(token_id, map.next_value()?);
+                }
+                Ok(position)
+            }
+        }
+
+        deserializer.deserialize_map(PositionVisitor)
+    }
+
+    Option::<Vec<Option<Position>>>::deserialize(deserializer).map(|positions| {
+        positions.map(|positions| {
+            Arc::new(
+                positions
+                    .into_iter()
+                    .map(|position| position.map(|position| position.0))
+                    .collect(),
+            )
+        })
+    })
 }
 
 /// Synthetic chunks reuse a real response envelope but consume no backend data.
@@ -307,15 +392,14 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     let data = response.data.as_mut()?;
     data.inner.usage = None;
     data.llm_metrics = None;
+    data.tool_call_completion.clear();
     data.nvext = None;
+    data.prompt_logprobs = None;
     Some(())
 }
 
-/// Build one synthetic stream choice from an existing response template.
-///
-/// Both streaming tool-call paths use this constructor when an engine omits a
-/// terminal choice. Accounting data belongs only on the usage chunk and must
-/// not be copied onto the synthetic choice.
+/// Synthetic terminal choices must not repeat accounting from the template's usage chunk.
+#[cfg(test)]
 pub(super) fn stream_choice_chunk_from_template(
     template: &NvCreateChatCompletionStreamResponse,
     index: u32,
@@ -429,6 +513,22 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
     /// Retrieves the best_of parameter, if set.
     fn get_best_of(&self) -> Option<u8> {
         None // Not supported in chat completions
+    }
+
+    /// Retrieves the logit_bias map with string token-ID keys converted to
+    /// `u32`. Validation rejects non-numeric keys before extraction.
+    fn get_logit_bias(&self) -> Option<HashMap<u32, f32>> {
+        self.inner
+            .logit_bias
+            .as_ref()
+            .filter(|bias| !bias.is_empty())
+            .map(|bias| {
+                bias.iter()
+                    .filter_map(|(token, value)| {
+                        Some((token.parse::<u32>().ok()?, value.as_f64()? as f32))
+                    })
+                    .collect()
+            })
     }
 }
 
@@ -626,6 +726,14 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_n(self.inner.n)?;
         validate_completion_token_ids_single_choice(
             self.inner.n.unwrap_or(1) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_single_choice(
+            self.inner.n.unwrap_or(1) as usize,
+            self.nvext.as_ref(),
+        )?;
+        validate_metadata_upload_stop_strings(
+            self.get_stop().is_some_and(|stop| !stop.is_empty()),
             self.nvext.as_ref(),
         )?;
         // none for modalities
@@ -1070,6 +1178,23 @@ mod tests {
 
         let err = ValidateRequest::validate(&request).expect_err("multi-choice token ids");
         assert!(err.to_string().contains("completion_token_ids"));
+    }
+
+    #[test]
+    fn test_logit_bias_reaches_sampling_options() {
+        let request = chat_request_with(&json!({"logit_bias": {"18": -100, "42": 5.5}}));
+        ValidateRequest::validate(&request).expect("valid logit_bias must pass validation");
+
+        let sampling_options = request
+            .extract_sampling_options()
+            .expect("logit_bias extraction failed");
+        let logit_bias = sampling_options
+            .logit_bias
+            .expect("logit_bias must survive extraction");
+
+        assert_eq!(logit_bias.len(), 2);
+        assert_eq!(logit_bias.get(&18), Some(&-100.0));
+        assert_eq!(logit_bias.get(&42), Some(&5.5));
     }
 
     #[test]
@@ -1645,13 +1770,24 @@ mod tests {
             make_tool("func-name_v2"),
             make_tool("FuncName"),
             make_tool("Func_Name-123"),
+            make_tool("my-tool.v2"),
         ];
         assert!(validate::validate_tools(&Some(&tools)).is_ok());
     }
 
     #[test]
     fn test_validate_tools_invalid_names() {
-        for name in ["<func_name>", "func name", "func@name", "func,name", ""] {
+        for name in [
+            "<func_name>",
+            "func name",
+            "func@name",
+            "func,name",
+            "func=name",
+            "func\"name",
+            "func:name",
+            "func/name",
+            "",
+        ] {
             let tools = vec![ChatCompletionTool {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionObject {
@@ -1704,6 +1840,41 @@ mod tests {
 
         validate::validate_tools(&Some(&tools))
             .expect("omitted function parameters should remain valid");
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_tools_array() {
+        const EMPTY_TOOLS: &str =
+            "tools array cannot be empty; omit the field entirely to disable tool use";
+
+        for tool_choice in [None, Some("required")] {
+            let mut request_json = json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "tools": []
+            });
+            if let Some(tool_choice) = tool_choice {
+                request_json["tool_choice"] = tool_choice.into();
+            }
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+            let err = ValidateRequest::validate(&request).expect_err("empty tools must fail");
+            assert_eq!(err.to_string(), EMPTY_TOOLS, "tool_choice={tool_choice:?}");
+        }
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "system", "content": "", "tools": [{"name": "lookup"}]},
+                {"role": "user", "content": "Hello"}
+            ],
+            "tools": [],
+            "tool_choice": "required"
+        }))
+        .expect("Failed to deserialize request");
+        ValidateRequest::validate(&request)
+            .expect("empty tools with system-message tools should validate");
     }
 
     #[test]

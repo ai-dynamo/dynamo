@@ -76,6 +76,8 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         self.shutdown_event = shutdown_event
 
         self._lora_state = LoRAState()
+        self._paused = False
+        self._pause_lock = asyncio.Lock()
         # Properties loaded_loras, _lora_load_locks, _lora_load_locks_guard are now
         # available through LoRAState. No direct assignment needed since properties
         # are backed by _lora_state after initialization.

@@ -20,6 +20,7 @@ KV routing events are advisory:
 - Ordinary Store/Remove events use queue-admission semantics, not completion
   acknowledgements.
 - Raw sequence gaps and ordinary local/publication failures warn and continue.
+- A legacy ZMQ source that explicitly configures negotiated heartbeat liveness opts into clearing its residency on sequence discontinuities or heartbeat expiry. Sources without liveness configuration, and the state-agent pipeline, retain advisory gap handling.
 - Outbound IDs remain monotonic and are never reused.
 - Do not add per-event or per-chunk acknowledgements or publication retries.
 

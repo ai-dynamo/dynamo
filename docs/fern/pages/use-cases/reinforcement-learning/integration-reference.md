@@ -216,7 +216,7 @@ curl http://10.0.0.12:8081/engine/get_weight_version \
 {"status": "ok", "version": "42", "version_declared": true}
 ```
 
-A worker tracks only the versions declared to it. `version_declared` is `false`, with `version` set to `null`, until something declares one, either through a `/engine/` weight-update route that carries `weight_version` or through `set_weight_version`. Branch on `version_declared` rather than comparing `version` against a placeholder string: any string, including `"initial"`, is a legal version tag that a caller can declare.
+A worker tracks only the versions declared to it. `version_declared` is `false`, with `version` set to `null`, until something declares one through a supported ModelExpress RL startup, a `/engine/` weight-update route that carries `weight_version`, or `set_weight_version`. Branch on `version_declared` rather than comparing `version` against a placeholder string: any string, including `"initial"`, is a legal version tag that a caller can declare.
 
 For each Python vLLM worker, check that `routes` from `GET /v1/rl/workers` includes `set_weight_version` before relying on `version_declared`. Older workers omit both that route and the response field; treat a missing `version_declared` as unsupported declaration tracking, not as `false`, because their `"initial"` version cannot distinguish an undeclared worker from an explicit declaration.
 
@@ -225,7 +225,7 @@ Version declarations accept any JSON value, including `null`. An explicit `{"wei
 A successful weight-update reply includes `version_declared` to indicate whether that update declared a version. If the request omits `weight_version`, the reply contains `"version": "unknown"` and `"version_declared": false`, and the previous declaration remains unchanged. An explicit `{"weight_version": "unknown"}` returns the same version with `"version_declared": true`. In an update reply, this flag describes the update; in `get_weight_version`, it describes the stored declaration. A worker with no previous declaration remains undeclared after an update that omits the version. Pass `weight_version` on every update whose version you want the worker to report.
 
 > [!WARNING]
-> A worker reports the last version declared to it, not the weights loaded in its GPU memory. Dynamo observes only the weight updates that traverse its own `/engine/` routes. Loading weights by another path, such as calling `collective_rpc` on the engine object directly, leaves the reported version stale unless the loader declares the new version.
+> A worker reports the last version declared to it, not the weights loaded in its GPU memory. Dynamo observes weight updates that traverse its own `/engine/` routes and supported ModelExpress RL startup. Loading weights by another path, such as calling `collective_rpc` on the engine object directly, leaves the reported version stale unless the loader declares the new version.
 
 When an RL framework loads weights outside Dynamo, declare the resulting version so the worker reports it. `set_weight_version` records the version without loading weights:
 
@@ -241,6 +241,8 @@ curl http://10.0.0.12:8081/engine/set_weight_version \
 
 The route requires `weight_version` in the body and returns `{"status": "error"}` when it is missing. It neither pauses generation nor invalidates the prefix cache, so a caller that changed the weights must handle both itself.
 
+A worker that uses a ModelExpress build with the RL cold-start policy declares the loaded version at startup. With `--load-format modelexpress` (or `mx`), `MX_LOAD_STRATEGY_CHAIN=RL`, and `MX_REFIT_DESIRED_VERSION_UID` set, that policy fails engine startup unless every rank loaded the desired version, so the worker starts with `version_declared: true` and `version` set to that UID. With the default `INFERENCE` chain, or a ModelExpress build that does not expose the RL cold-start policy, the worker starts undeclared. Setting the RL environment variables alone does not declare a version.
+
 ## Framework Compatibility
 
 | Framework | Status | Current Dynamo path | Key boundary |
@@ -249,7 +251,7 @@ The route requires `weight_version` in the body and returns `{"status": "error"}
 | [NeMo RL](nemo-rl.md) | Experimental | NeMo RL-managed Dynamo/vLLM fleet on Slurm and Ray | Fixed non-colocated fleet with framework-owned NCCL refit; not an external Dynamo deployment. |
 | [Slime](slime.md) | Experimental fixed worker set | Dynamo sidecars manage stock SGLang engines for [streaming external rollouts](https://github.com/THUDM/slime/pull/2272) | The [fixed-worker-set example](https://github.com/ai-dynamo/dynamo/blob/main/examples/README.md#integration-examples) sends generation through the Dynamo frontend. Slime uses static engine Services for control and weight updates. The example does not support elastic discovery or external-engine recovery. |
 | [Prime-RL](https://github.com/PrimeIntellect-ai/prime-rl) | Router available; full integration in progress | Prime-RL documents the Dynamo router as a drop-in option; a proposed Dynamo/vLLM sidecar adds worker discovery and external updates | Routing can be evaluated today, but the full adapter remains in upstream development and is not a released compatibility surface. |
-| [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF), [Miles](https://github.com/fleet-ai/miles-fleet), [SkyRL](https://github.com/NovaSky-AI/SkyRL), and [Polar](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server) | No Dynamo guide | No maintained Dynamo adapter was found in the reviewed public sources | Add a guide only after a maintained integration completes the same generation, update, failure, and ownership checks. |
+| [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF), [Miles](https://github.com/radixark/miles), [SkyRL](https://github.com/NovaSky-AI/SkyRL), and [Polar](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server) | No Dynamo guide | No maintained Dynamo adapter was found in the reviewed public sources | Add a guide only after a maintained integration completes the same generation, update, failure, and ownership checks. |
 
 A status reflects the documented integration, not whether the framework can call a generic HTTP endpoint.
 

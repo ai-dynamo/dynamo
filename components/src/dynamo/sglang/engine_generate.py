@@ -12,8 +12,6 @@ from uuid import uuid4
 from pydantic import TypeAdapter
 from sglang.srt.managers.io_struct import GenerateReqInput
 
-from dynamo.common.backend import logprobs as _shared_logprobs
-
 SGLANG_GENERATE_CAPABILITY = "sglang_generate"
 DISAGG_PREFILL_CANCEL_ANYTIME_V1 = "disagg_prefill_cancel_anytime_v1"
 _PAYLOAD_KEY = "sglang_tito"
@@ -48,6 +46,7 @@ def build_native_generate_request(
     bootstrap_room: int | None = None,
     external_trace_header: dict[str, str] | None = None,
     routed_dp_rank: int | None = None,
+    prefill_dp_rank: int | None = None,
     lora_path: str | None = None,
     cache_salt: str | None = None,
 ) -> GenerateReqInput:
@@ -105,13 +104,13 @@ def build_native_generate_request(
     ):
         if value is not None:
             payload[name] = value
+    if (
+        prefill_dp_rank is not None
+        and "disagg_prefill_dp_rank" in GenerateReqInput.__dataclass_fields__
+    ):
+        payload["disagg_prefill_dp_rank"] = prefill_dp_rank
 
-    native_request = _GENERATE_REQUEST_ADAPTER.validate_python(payload)
-    _shared_logprobs.validate_sglang_top_logprobs(
-        native_request.top_logprobs_num,
-        allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
-    )
-    return native_request
+    return _GENERATE_REQUEST_ADAPTER.validate_python(payload)
 
 
 async def native_generate_stream(
@@ -119,4 +118,8 @@ async def native_generate_stream(
 ) -> AsyncIterator[dict[str, Any]]:
     """Dispatch exactly as SGLang native ``/generate`` handler does."""
     async for response in engine.tokenizer_manager.generate_request(request, None):
-        yield {"token_ids": [], "engine_data": {"sglang_response": response}}
+        # The router counts output from token_ids; clients get the opaque response.
+        yield {
+            "token_ids": response.get("output_ids") or [],
+            "engine_data": {"sglang_response": response},
+        }

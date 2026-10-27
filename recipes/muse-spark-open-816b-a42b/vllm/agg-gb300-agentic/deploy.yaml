@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Muse-Spark-open-816B-A42B NVFP4 aggregate serving on one GB300 node. The worker uses TP4;
+# vLLM derives EP4 from TP4 x DP1 when expert parallelism is enabled.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: muse-spark-vllm-aggregate-gb300
+  labels:
+    app.kubernetes.io/name: muse-spark-vllm-aggregate-gb300
+    app.kubernetes.io/part-of: dynamo
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      runtimeVersionOverride: 1.5.0
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-muse-spark-open-dev.1@sha256:59417925f0e6f5762e44f1359212bde9ec033e17758c51dbbb61251dddbfec1f
+              imagePullPolicy: IfNotPresent
+              command: [python3]
+              args:
+                - -m
+                - dynamo.frontend
+                - --http-port
+                - "8000"
+                - --model-name
+                - Muse-Spark-open-816B-A42B
+                - --model-path
+                - /model
+                - --trust-remote-code
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: DYN_VLLM_FRONTEND_DECODING
+                  value: "true"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+              volumeMounts:
+                - name: model
+                  mountPath: /model
+                  readOnly: true
+          volumes:
+            - name: model
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+    - name: worker
+      type: worker
+      replicas: 1
+      runtimeVersionOverride: 1.5.0
+      sharedMemorySize: 128Gi
+      podTemplate:
+        metadata:
+          annotations:
+            nvidia.com/vllm-distributed-executor-backend: mp
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-muse-spark-open-dev.1@sha256:59417925f0e6f5762e44f1359212bde9ec033e17758c51dbbb61251dddbfec1f
+              imagePullPolicy: IfNotPresent
+              command: [python3]
+              args:
+                - -m
+                - dynamo.vllm
+                - --model
+                - /model
+                - --served-model-name
+                - meta-models/Muse-Spark-Open-816B-A42B-NVFP4
+                - --trust-remote-code
+                - --tensor-parallel-size
+                - "4"
+                - --distributed-executor-backend
+                - mp
+                - --enable-expert-parallel
+                - --enable-multimodal
+                - --reasoning-parser
+                - musespark1x
+                - --dyn-reasoning-parser
+                - muse_spark
+                - --custom-jinja-template
+                - /model/chat_template.jinja
+                - --gpu-memory-utilization
+                - "0.90"
+                - --max-model-len
+                - "1048576"
+                - --kv-cache-dtype
+                - fp8
+                - --structured-outputs-config
+                - '{"enable_in_reasoning": true}'
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: DYN_VLLM_FRONTEND_DECODING
+                  value: "true"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: "3600"
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              resources:
+                requests:
+                  cpu: "64"
+                  memory: 512Gi
+                  nvidia.com/gpu: "4"
+                limits:
+                  cpu: "128"
+                  memory: 850Gi
+                  nvidia.com/gpu: "4"
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 10
+                timeoutSeconds: 5
+                failureThreshold: 720
+              volumeMounts:
+                - name: model
+                  mountPath: /model
+                  readOnly: true
+          volumes:
+            - name: model
+              persistentVolumeClaim:
+                claimName: shared-model-cache

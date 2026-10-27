@@ -15,9 +15,23 @@ pub(super) struct RequestBooking {
     pub(super) attempt_id: AttemptId,
 }
 
+/// Booking plus whether `request_to_lora` holds an entry for the request, so
+/// lifecycle paths skip the LoRA map entirely for requests without an adapter.
+#[derive(Debug, Clone, Copy)]
+struct BookingEntry {
+    booking: RequestBooking,
+    has_lora: bool,
+}
+
+/// A booking removed from the index together with the LoRA name it carried.
+#[derive(Debug)]
+pub(super) struct RemovedBooking {
+    pub(super) lora_name: Option<String>,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct RequestIndex {
-    request_to_booking: DashMap<RequestId, RequestBooking>,
+    request_to_booking: DashMap<RequestId, BookingEntry>,
     request_to_lora: DashMap<RequestId, String>,
     next_attempt_id: AtomicU64,
 }
@@ -30,11 +44,14 @@ impl RequestIndex {
         lora_name: Option<String>,
     ) -> Result<AttemptId, WorkerWithDpRank> {
         match self.request_to_booking.entry(request_id.clone()) {
-            Entry::Occupied(entry) => Err(entry.get().worker),
+            Entry::Occupied(entry) => Err(entry.get().booking.worker),
             Entry::Vacant(entry) => {
                 let attempt_id =
                     AttemptId::new(self.next_attempt_id.fetch_add(1, Ordering::Relaxed) + 1);
-                entry.insert(RequestBooking { worker, attempt_id });
+                entry.insert(BookingEntry {
+                    booking: RequestBooking { worker, attempt_id },
+                    has_lora: lora_name.is_some(),
+                });
                 if let Some(lora_name) = lora_name {
                     self.request_to_lora.insert(request_id, lora_name);
                 }
@@ -51,8 +68,13 @@ impl RequestIndex {
         lora_name: Option<String>,
     ) {
         let attempt_id = AttemptId::new(self.next_attempt_id.fetch_add(1, Ordering::Relaxed) + 1);
-        self.request_to_booking
-            .insert(request_id.clone(), RequestBooking { worker, attempt_id });
+        self.request_to_booking.insert(
+            request_id.clone(),
+            BookingEntry {
+                booking: RequestBooking { worker, attempt_id },
+                has_lora: lora_name.is_some(),
+            },
+        );
         if let Some(lora_name) = lora_name {
             self.request_to_lora.insert(request_id, lora_name);
         } else {
@@ -65,7 +87,9 @@ impl RequestIndex {
     }
 
     pub(super) fn booking_for(&self, request_id: &str) -> Option<RequestBooking> {
-        self.request_to_booking.get(request_id).map(|entry| *entry)
+        self.request_to_booking
+            .get(request_id)
+            .map(|entry| entry.booking)
     }
 
     pub(super) fn lora_for(&self, request_id: &RequestId) -> Option<String> {
@@ -75,29 +99,23 @@ impl RequestIndex {
     }
 
     pub(super) fn remove_request(&self, request_id: &RequestId) -> Option<WorkerWithDpRank> {
-        let worker = self
-            .request_to_booking
-            .remove(request_id)
-            .map(|(_request_id, booking)| booking.worker);
-        self.request_to_lora.remove(request_id);
-        worker
+        let (_, entry) = self.request_to_booking.remove(request_id)?;
+        self.take_lora(request_id, entry);
+        Some(entry.booking.worker)
     }
 
     /// Drop the mapping for `request_id` only if it still points at `worker`.
-    /// Returns whether the entry was removed.
     pub(super) fn remove_request_if_worker(
         &self,
         request_id: &RequestId,
         worker: WorkerWithDpRank,
-    ) -> bool {
-        let removed = self
+    ) -> Option<RemovedBooking> {
+        let (_, entry) = self
             .request_to_booking
-            .remove_if(request_id, |_, booking| booking.worker == worker)
-            .is_some();
-        if removed {
-            self.request_to_lora.remove(request_id);
-        }
-        removed
+            .remove_if(request_id, |_, entry| entry.booking.worker == worker)?;
+        Some(RemovedBooking {
+            lora_name: self.take_lora(request_id, entry),
+        })
     }
 
     /// Drop the mapping only when it still belongs to the captured attempt.
@@ -106,17 +124,23 @@ impl RequestIndex {
         request_id: &RequestId,
         worker: WorkerWithDpRank,
         attempt_id: AttemptId,
-    ) -> bool {
-        let removed = self
+    ) -> Option<RemovedBooking> {
+        let expected = RequestBooking { worker, attempt_id };
+        let (_, entry) = self
             .request_to_booking
-            .remove_if(request_id, |_, booking| {
-                booking.worker == worker && booking.attempt_id == attempt_id
-            })
-            .is_some();
-        if removed {
-            self.request_to_lora.remove(request_id);
+            .remove_if(request_id, |_, entry| entry.booking == expected)?;
+        Some(RemovedBooking {
+            lora_name: self.take_lora(request_id, entry),
+        })
+    }
+
+    fn take_lora(&self, request_id: &RequestId, removed: BookingEntry) -> Option<String> {
+        if !removed.has_lora {
+            return None;
         }
-        removed
+        self.request_to_lora
+            .remove(request_id)
+            .map(|(_request_id, lora_name)| lora_name)
     }
 
     pub(super) fn remove_requests<'a>(&self, request_ids: impl IntoIterator<Item = &'a RequestId>) {
@@ -129,7 +153,7 @@ impl RequestIndex {
         let request_ids: Vec<_> = self
             .request_to_booking
             .iter()
-            .filter(|entry| entry.value().worker == worker)
+            .filter(|entry| entry.value().booking.worker == worker)
             .map(|entry| entry.key().clone())
             .collect();
         self.remove_requests(request_ids.iter());

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use dynamo_tokens::SequenceHash;
@@ -12,11 +12,11 @@ use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
 use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
-use crate::kv_hints::KvTransferCandidates;
+use crate::kv_hints::{KvTransferCandidates, KvTransferSourceChoice};
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
-    WorkerId, WorkerWithDpRank,
+    LocalBlockHash, RoutingConstraints, SelectionTrace, SharedCacheHits, WorkerAffinityTarget,
+    WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
@@ -152,10 +152,20 @@ pub struct SchedulingResponse {
     pub best_worker: WorkerWithDpRank,
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
+    /// Greatest raw router-visible overlap among eligible workers, in tokens,
+    /// for tracked requests.
+    pub max_raw_cached_tokens: Option<usize>,
+    /// Raw prefix overlap for the selected worker and DP rank, in tokens.
+    pub selected_raw_cached_tokens: Option<usize>,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
-    pub target_cached_prefix_blocks: u32,
+    /// The source `best_worker` fetches its KV prefix from; see
+    /// [`crate::protocols::WorkerSelectionResult::kv_transfer_source`].
+    pub kv_transfer_source: Option<KvTransferSourceChoice>,
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub potential_decode_blocks: usize,
+    /// Per-candidate costs, present only when the scheduler has a selection
+    /// trace spec installed and this selection was admitted.
+    pub selection_trace: Option<SelectionTrace>,
 }
 
 /// Internal result that pairs a public scheduling response with its attempt identity.
@@ -322,6 +332,7 @@ pub struct SessionContext {
     parent_session_id: Option<String>,
     session_final: Option<bool>,
     input_trigger: Option<WorkerSelectionInputTrigger>,
+    agent_headers: Option<Arc<BTreeMap<String, Vec<String>>>>,
 }
 
 impl SessionContext {
@@ -337,6 +348,7 @@ impl SessionContext {
             parent_session_id,
             session_final,
             input_trigger,
+            agent_headers: None,
         }
     }
 
@@ -361,6 +373,27 @@ impl SessionContext {
     /// Return the event that caused this request, when supplied.
     pub fn input_trigger(&self) -> Option<WorkerSelectionInputTrigger> {
         self.input_trigger
+    }
+
+    /// Attach request-scoped opaque headers captured by the protocol ingress.
+    /// The map is shared with the request envelope without copying its values.
+    pub fn with_agent_headers(mut self, headers: Arc<BTreeMap<String, Vec<String>>>) -> Self {
+        self.agent_headers = Some(headers);
+        self
+    }
+
+    /// Return raw coding-agent observations for this request, without normalization.
+    ///
+    /// HTTP ingress lowercases names and preserves repeated text values in order.
+    /// It omits sensitive/non-text values and values exceeding its capture limits
+    /// (64 values, 16 KiB/value, 32 KiB including names). An empty map or missing
+    /// key means no observation was captured, not that a lifecycle event did not
+    /// occur. Values are untrusted; plugins own parsing and harness semantics.
+    /// This request-level input needs no worker signal group and is never weighted
+    /// or interpreted by the default policy.
+    pub fn agent_headers(&self) -> &BTreeMap<String, Vec<String>> {
+        static EMPTY: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        self.agent_headers.as_deref().unwrap_or(&EMPTY)
     }
 }
 
@@ -514,6 +547,27 @@ impl SchedulingRequest {
             .unwrap_or(0)
     }
 
+    pub(crate) fn raw_cached_tokens_for(&self, worker: WorkerWithDpRank, block_size: u32) -> usize {
+        let tiers = &self.overlap.tier_overlap_blocks;
+        let blocks = tiers
+            .device
+            .get(&worker)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(tiers.host_pinned.get(&worker).copied().unwrap_or(0))
+            .saturating_add(tiers.disk.get(&worker).copied().unwrap_or(0));
+        blocks.saturating_mul(block_size as usize)
+    }
+
+    /// The prefix a KV fetch would extend on `worker`: its device and
+    /// host-pinned overlap. Disk is not counted.
+    pub(crate) fn transfer_local_prefix_blocks_for(&self, worker: WorkerWithDpRank) -> usize {
+        let tiers = &self.overlap.tier_overlap_blocks;
+        let device = tiers.device.get(&worker).copied().unwrap_or(0);
+        let host_pinned = tiers.host_pinned.get(&worker).copied().unwrap_or(0);
+        device.saturating_add(host_pinned)
+    }
+
     pub(crate) fn effective_overlap_blocks_for(&self, worker: WorkerWithDpRank) -> f64 {
         self.overlap
             .effective_overlap_blocks
@@ -523,7 +577,16 @@ impl SchedulingRequest {
     }
 
     pub fn worker_load_for(&self, worker: WorkerWithDpRank) -> WorkerLoadProjection {
-        self.worker_loads.get(&worker).copied().unwrap_or_default()
+        self.worker_loads
+            .get(&worker)
+            .copied()
+            .unwrap_or_else(|| WorkerLoadProjection {
+                // A configured worker can precede its load projection. With no
+                // active-prefix evidence, count the full tracked request rather
+                // than treating its blocks as already present on that worker.
+                additional_active_blocks: self.token_seq.as_ref().map_or(0, Vec::len),
+                ..Default::default()
+            })
     }
 
     pub(crate) fn request_blocks(&self, block_size: u32) -> u64 {
@@ -636,6 +699,19 @@ mod tests {
                 request.potential_decode_blocks_after_admission(worker, 16),
                 expected,
                 "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_worker_projection_counts_the_full_request() {
+        let projected_worker = WorkerWithDpRank::new(0, 0);
+        let new_worker = WorkerWithDpRank::new(1, 0);
+        for (isl, tracked_blocks, expected) in [(32, None, 2), (32, Some(2), 2), (33, Some(2), 3)] {
+            let request = request_with_decode_load(isl, tracked_blocks, 100, 0, projected_worker);
+            assert_eq!(
+                request.potential_decode_blocks_after_admission(new_worker, 16),
+                expected
             );
         }
     }

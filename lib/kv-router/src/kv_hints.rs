@@ -3,12 +3,19 @@
 
 //! Typed KV-cache hints attached to selected backend requests.
 
+mod sources;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
 use crate::protocols::{
     ExternalSequenceBlockHash, ResidencyOwnerKey, ResidencyRoutingSnapshot, WorkerWithDpRank,
+};
+
+pub use sources::{
+    CacheOwnerKvTransferKeys, KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary,
+    KvTransferTarget, WorkerKvTransferKeys, WorkerKvTransferKeysCache,
 };
 
 /// The selected worker can consume a `TRANSFER` hint with the v1 payload.
@@ -114,32 +121,6 @@ pub struct KvTransferCandidates {
     pub routing_snapshot: Option<Arc<ResidencyRoutingSnapshot>>,
 }
 
-impl KvTransferCandidates {
-    pub fn best_source<F>(
-        &self,
-        prefix_blocks_to_beat: usize,
-        mut is_eligible_source: F,
-    ) -> Option<(KvTransferCandidateSource, Vec<ExternalSequenceBlockHash>)>
-    where
-        F: FnMut(KvTransferCandidateSource) -> bool,
-    {
-        let (source, prefix_blocks) = self
-            .owner_prefix_blocks
-            .iter()
-            .copied()
-            .filter(|(source, blocks)| {
-                *blocks > prefix_blocks_to_beat && is_eligible_source(*source)
-            })
-            .max_by(|(left_source, left_blocks), (right_source, right_blocks)| {
-                left_blocks
-                    .cmp(right_blocks)
-                    .then_with(|| right_source.cmp(left_source))
-            })?;
-
-        Some((source, self.block_hashes.get(..prefix_blocks)?.to_vec()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,84 +179,5 @@ mod tests {
 
         assert_eq!(hint.actions[0].action_type, "kv.future_action");
         assert_eq!(serde_json::to_value(hint).unwrap(), value);
-    }
-
-    #[test]
-    fn best_source_selects_longest_eligible_prefix() {
-        let worker_a = WorkerWithDpRank::new(7, 0);
-        let worker_b = WorkerWithDpRank::new(8, 0);
-        let excluded = WorkerWithDpRank::new(9, 0);
-        let candidates = KvTransferCandidates {
-            block_hashes: vec![
-                ExternalSequenceBlockHash(101),
-                ExternalSequenceBlockHash(102),
-                ExternalSequenceBlockHash(103),
-            ],
-            owner_prefix_blocks: vec![
-                (worker_b.into(), 2),
-                (excluded.into(), 3),
-                (worker_a.into(), 3),
-            ],
-            routing_snapshot: None,
-        };
-
-        let selected = candidates.best_source(0, |source| source != excluded.into());
-
-        assert_eq!(
-            selected,
-            Some((
-                worker_a.into(),
-                vec![
-                    ExternalSequenceBlockHash(101),
-                    ExternalSequenceBlockHash(102),
-                    ExternalSequenceBlockHash(103),
-                ],
-            ))
-        );
-    }
-
-    #[test]
-    fn best_source_fails_closed_on_invalid_prefix_length() {
-        let candidates = KvTransferCandidates {
-            block_hashes: vec![ExternalSequenceBlockHash(101)],
-            owner_prefix_blocks: vec![(WorkerWithDpRank::new(7, 0).into(), 2)],
-            routing_snapshot: None,
-        };
-
-        assert!(candidates.best_source(0, |_| true).is_none());
-    }
-
-    #[test]
-    fn best_source_requires_prefix_longer_than_threshold() {
-        let worker_a = WorkerWithDpRank::new(7, 0);
-        let worker_b = WorkerWithDpRank::new(8, 0);
-        let candidates = KvTransferCandidates {
-            block_hashes: vec![
-                ExternalSequenceBlockHash(101),
-                ExternalSequenceBlockHash(102),
-                ExternalSequenceBlockHash(103),
-                ExternalSequenceBlockHash(104),
-            ],
-            owner_prefix_blocks: vec![(worker_a.into(), 3), (worker_b.into(), 4)],
-            routing_snapshot: None,
-        };
-
-        assert!(
-            candidates
-                .best_source(3, |source| source == worker_a.into())
-                .is_none()
-        );
-        assert_eq!(
-            candidates.best_source(3, |_| true),
-            Some((
-                worker_b.into(),
-                vec![
-                    ExternalSequenceBlockHash(101),
-                    ExternalSequenceBlockHash(102),
-                    ExternalSequenceBlockHash(103),
-                    ExternalSequenceBlockHash(104),
-                ],
-            ))
-        );
     }
 }

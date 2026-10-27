@@ -17,17 +17,44 @@
 
 package compatibility
 
-import semver "github.com/Masterminds/semver/v3"
+import (
+	semver "github.com/Masterminds/semver/v3"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+)
 
 // Feature gates gated on the operator origin version (the operator version that
 // first reconciled / created the DGD resource).
 
 var (
+	// FrontendStartupProbe requires runtime support and pins defaults to new workloads.
+	// The published 1.6 operator did not render this default, even for 1.6 runtimes.
+	FrontendStartupProbe = RuntimeGate{
+		Name:              "FrontendStartupProbe",
+		MinOriginVersion:  *semver.MustParse("1.7.0"),
+		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 6},
+	}
+
+	// GroveNativeMinAvailable enables native availability defaults for newly created Grove workloads.
+	// Existing graphs retain their persisted minimum form. This gate does not select a rollout strategy.
+	GroveNativeMinAvailable = Gate{
+		Name:             "GroveNativeMinAvailable",
+		MinOriginVersion: *semver.MustParse("1.6.0"),
+	}
+
 	// VLLMMultiprocessing gates the use of vLLM native multiprocessing (mp)
 	// instead of Ray for multi-node deployments. Enabled for DGDs originally
 	// created by operator >= 1.0.0.
 	VLLMMultiprocessing = Gate{
 		Name:             "VLLMMultiprocessing",
 		MinOriginVersion: *semver.MustParse("1.0.0"),
+	}
+
+	// MultinodeTopologyAliases gates the injection of backend-independent rank
+	// and leader-address environment variables. Enabled for DGDs originally
+	// created by operator >= 1.6.0 so an operator upgrade does not roll existing
+	// multinode workloads solely to add the aliases.
+	MultinodeTopologyAliases = Gate{
+		Name:             "MultinodeTopologyAliases",
+		MinOriginVersion: *semver.MustParse("1.6.0"),
 	}
 )

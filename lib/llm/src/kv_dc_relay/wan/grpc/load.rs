@@ -5,50 +5,69 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::identity::{producer_to_wire, relay_identity_to_wire, unix_timestamp};
 use super::protocol as proto;
-use super::source::GrpcPublicationSource;
 use crate::kv_dc_relay::identity::DcRelayIdentity;
 use crate::kv_dc_relay::load::PoolLoadSnapshot;
 
-#[derive(Clone)]
-pub(super) struct LoadUpdateHub {
-    updates: broadcast::Sender<proto::KvPoolLoadUpdate>,
-    current: Arc<RwLock<proto::KvPoolLoadUpdate>>,
+/// A complete load window published by [`run_load_publisher`].
+pub(super) trait LoadWindow: Clone + Send + Sync + 'static {
+    fn window_sequence(&self) -> u64;
 }
 
-impl LoadUpdateHub {
-    pub(super) fn new(source: &GrpcPublicationSource, window: Duration, capacity: usize) -> Self {
+impl LoadWindow for proto::KvPoolLoadUpdate {
+    fn window_sequence(&self) -> u64 {
+        self.window_sequence
+    }
+}
+
+impl LoadWindow for proto::ServingLoadUpdate {
+    fn window_sequence(&self) -> u64 {
+        self.window_sequence
+    }
+}
+
+/// Latest window plus bounded fanout of the following ones.
+#[derive(Clone)]
+pub(super) struct LoadUpdateHub<T> {
+    updates: broadcast::Sender<T>,
+    /// `None` until the first window, so no subscriber sees a placeholder
+    /// that would read as every pool gone.
+    current: Arc<RwLock<Option<T>>>,
+}
+
+impl<T: LoadWindow> LoadUpdateHub<T> {
+    pub(super) fn new(capacity: usize) -> Self {
         let (updates, _) = broadcast::channel(capacity);
-        let current = load_update(source.relay_identity(), source.load_snapshots(), window, 0);
         Self {
             updates,
-            current: Arc::new(RwLock::new(current)),
+            current: Arc::new(RwLock::new(None)),
         }
     }
 
-    pub(super) fn subscribe(&self) -> broadcast::Receiver<proto::KvPoolLoadUpdate> {
+    pub(super) fn subscribe(&self) -> broadcast::Receiver<T> {
         self.updates.subscribe()
     }
 
-    pub(super) fn current(&self) -> proto::KvPoolLoadUpdate {
+    pub(super) fn current(&self) -> Option<T> {
         self.current.read().clone()
     }
 
-    fn publish(&self, update: proto::KvPoolLoadUpdate) {
-        *self.current.write() = update.clone();
+    fn publish(&self, update: T) {
+        *self.current.write() = Some(update.clone());
         let _ = self.updates.send(update);
     }
 }
 
-pub(super) async fn run_load_publisher(
-    source: GrpcPublicationSource,
+/// Publishes `window_update(sequence)` every `window`, starting at sequence 1.
+pub(super) async fn run_load_publisher<T: LoadWindow>(
     window: Duration,
-    updates: LoadUpdateHub,
+    updates: LoadUpdateHub<T>,
     cancel: CancellationToken,
+    mut window_update: impl FnMut(u64) -> T,
 ) -> anyhow::Result<()> {
     let first_tick = tokio::time::Instant::now() + window;
     let mut tick = tokio::time::interval_at(first_tick, window);
@@ -60,16 +79,54 @@ pub(super) async fn run_load_publisher(
             _ = cancel.cancelled() => return Ok(()),
             _ = tick.tick() => {}
         }
-        sequence = sequence
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("KV Relay load window sequence exhausted"))?;
-        let snapshots = source.load_snapshots();
-        let update = load_update(source.relay_identity(), snapshots, window, sequence);
-        updates.publish(update);
+        sequence = next_sequence(sequence)?;
+        updates.publish(window_update(sequence));
     }
 }
 
-fn load_update(
+/// Publishes `window_update(snapshot, sequence)` for every snapshot `source`
+/// produces, starting at sequence 1, so windows follow the source's cadence.
+/// Fails once the source's sender is dropped, unless already cancelled.
+pub(super) async fn run_snapshot_publisher<S: Clone, T: LoadWindow>(
+    mut source: watch::Receiver<Option<S>>,
+    updates: LoadUpdateHub<T>,
+    cancel: CancellationToken,
+    mut window_update: impl FnMut(&S, u64) -> T,
+) -> anyhow::Result<()> {
+    let mut sequence = 0u64;
+    loop {
+        let changed = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(()),
+            changed = source.changed() => changed,
+        };
+        if changed.is_err() {
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            anyhow::bail!("KV Relay load source stopped");
+        }
+        // Clone out of the borrow so the source's sender is not blocked while
+        // the window is built.
+        let Some(snapshot) = source.borrow_and_update().clone() else {
+            continue;
+        };
+        sequence = next_sequence(sequence)?;
+        updates.publish(window_update(&snapshot, sequence));
+    }
+}
+
+fn next_sequence(sequence: u64) -> anyhow::Result<u64> {
+    sequence
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("KV Relay load window sequence exhausted"))
+}
+
+pub(super) fn window_ms(window: Duration) -> u64 {
+    u64::try_from(window.as_millis()).unwrap_or(u64::MAX)
+}
+
+pub(super) fn load_update(
     relay: DcRelayIdentity,
     snapshots: Vec<PoolLoadSnapshot>,
     window: Duration,
@@ -80,7 +137,7 @@ fn load_update(
         relay: Some(relay_identity_to_wire(relay)),
         window_sequence: sequence,
         observed_ms: unix_timestamp::<1_000>(),
-        window_ms: u64::try_from(window.as_millis()).unwrap_or(u64::MAX),
+        window_ms: window_ms(window),
         pools: snapshots.into_iter().map(load_entry_to_wire).collect(),
         contract_marker: proto::RELAY_CONTRACT_MARKER,
     }
@@ -125,6 +182,34 @@ mod tests {
             11,
             format,
         )
+    }
+
+    /// One window per snapshot, none before the first; a stopped source
+    /// fails the publisher unless it was cancelled.
+    #[tokio::test]
+    async fn snapshot_publisher_follows_its_source() {
+        let window = Duration::from_millis(10);
+        let relay = DcRelayIdentity::new(1, 2);
+        let hub = LoadUpdateHub::new(4);
+        let (source, receiver) = watch::channel(None::<Vec<PoolLoadSnapshot>>);
+        let publisher = tokio::spawn(run_snapshot_publisher(
+            receiver,
+            hub.clone(),
+            CancellationToken::new(),
+            move |snapshots: &Vec<PoolLoadSnapshot>, sequence| {
+                load_update(relay, snapshots.clone(), window, sequence)
+            },
+        ));
+        let mut updates = hub.subscribe();
+
+        source.send_replace(Some(Vec::new()));
+        assert_eq!(updates.recv().await.unwrap().window_sequence, 1);
+        source.send_replace(Some(Vec::new()));
+        assert_eq!(updates.recv().await.unwrap().window_sequence, 2);
+
+        drop(source);
+        let error = publisher.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("stopped"));
     }
 
     #[test]

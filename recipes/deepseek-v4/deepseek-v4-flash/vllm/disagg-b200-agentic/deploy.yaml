@@ -132,7 +132,7 @@ spec:
               --dyn-reasoning-parser deepseek_v4 \
               --kv-transfer-config '{
                   "kv_connector": "NixlConnector",
-                  "kv_role": "kv_both",
+                  "kv_role": "kv_producer",
                   "kv_buffer_device": "cuda"
                 }' \
               --disaggregation-mode prefill \
@@ -257,7 +257,7 @@ spec:
                 }' \
               --kv-transfer-config '{
                   "kv_connector": "NixlConnector",
-                  "kv_role": "kv_both",
+                  "kv_role": "kv_consumer",
                   "kv_buffer_device": "cuda",
                   "kv_connector_extra_config": {
                     "num_threads": 8

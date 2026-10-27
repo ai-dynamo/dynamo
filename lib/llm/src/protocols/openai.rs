@@ -29,6 +29,7 @@ pub mod pooling;
 pub mod rerank;
 pub mod responses;
 pub mod stream_aggregator;
+mod strict_schema;
 pub mod tools;
 pub mod validate;
 pub mod videos;
@@ -91,6 +92,10 @@ pub(crate) trait OpenAISamplingOptionsProvider {
 
     fn get_best_of(&self) -> Option<u8>;
 
+    fn get_logit_bias(&self) -> Option<std::collections::HashMap<u32, f32>> {
+        None
+    }
+
     fn nvext(&self) -> Option<&NvExt>;
 }
 
@@ -141,6 +146,10 @@ pub(crate) trait OpenAIOutputOptionsProvider {
     fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
         None
     }
+
+    fn get_no_stop_trim(&self) -> Option<bool> {
+        None
+    }
 }
 
 impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvider for T {
@@ -173,6 +182,8 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
 
         let min_p = validate_range(CommonExtProvider::get_min_p(self), &MIN_P_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating min_p: {}", e))?;
+
+        let logit_bias = self.get_logit_bias();
 
         if let Some(nvext) = self.nvext() {
             let greedy = nvext.greed_sampling.unwrap_or(false);
@@ -210,6 +221,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             seed,
             use_beam_search: None,
             length_penalty: None,
+            logit_bias,
             guided_decoding,
             include_stop_str_in_output,
         })
@@ -275,6 +287,7 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
             skip_special_tokens,
             formatted_prompt,
             return_tokens_as_token_ids,
+            no_stop_trim: self.get_no_stop_trim(),
         })
     }
 }
@@ -400,9 +413,23 @@ impl GuidedToolConstraint {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ParsingOptions {
+    /// Request mode retained so stream and batch use the same native-family eligibility.
+    #[serde(default)]
+    pub tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
+
+    /// A disabled thinking request must not regain a reasoning channel during raw batch recovery.
+    #[serde(default)]
+    pub reasoning_disabled: bool,
+
+    /// JSON response formatting is a content contract, separate from guided tool JSON.
+    #[serde(default)]
+    pub structured_response: bool,
+
+    #[serde(default)]
+    pub default_thinking_mode: Option<String>,
 
     /// Final request policy for tool output. Some model parsers (currently
     /// Harmony) must still run during non-streaming aggregation to remove
@@ -433,16 +460,11 @@ pub struct ParsingOptions {
     #[serde(default)]
     pub move_reasoning_to_content_when_empty: bool,
 
-    /// The worker's operator-configured structural-tag policy. Carried through so
-    /// the HTTP-layer tool-call-gate reconstruction
-    /// (`http::service::apply_request_tool_call_parsing_options`) can consult the
-    /// same structural-tag contract the real preprocessing path uses, instead of
-    /// only recognizing intrinsically-forced model families.
-    #[serde(default)]
-    pub structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode,
-
-    #[serde(default)]
-    pub structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope,
+    /// The worker's structural-tag policy. Carried through so the HTTP-layer
+    /// tool-call-gate reconstruction consults the same configuration as the
+    /// request preprocessor. Presence enables operator-controlled tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_tag: Option<crate::local_model::runtime_config::StructuralTagConfig>,
 
     #[serde(
         default = "crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none"
@@ -472,12 +494,15 @@ impl ParsingOptions {
         Self {
             tool_call_parser,
             reasoning_parser,
+            reasoning_disabled: false,
+            structured_response: false,
+            default_thinking_mode: None,
+            tool_choice: None,
             suppress_tool_calls: false,
             guided_tool_constraint: GuidedToolConstraint::None,
             parallel_tool_calls: None,
             move_reasoning_to_content_when_empty: false,
-            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::default(),
-            structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope::default(),
+            structural_tag: None,
             exclude_tools_when_tool_choice_none:
                 crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none(),
             tools: Vec::new(),
@@ -509,17 +534,21 @@ impl ParsingOptions {
                 self.tool_call_parser.as_deref(),
                 Some("harmony" | "kimi_k3" | "kimi-k3")
             )
-                || chat_completions::unified_parser::selected_batch_family(
-                    self.tool_call_parser.as_deref(),
-                    self.reasoning_parser.as_deref(),
-                )
-                .is_some()
-                || chat_completions::tool_parser_v2::unified_family(
+                || chat_completions::unified_parser::selected_content_decoder_family(
                     self.tool_call_parser.as_deref(),
                     self.reasoning_parser.as_deref(),
                 )
                 .is_some();
-            if !whole_response_decoder {
+            // Removing an incompatible tool parser must not manufacture a reasoning-only V2 route.
+            // TODO: Separate pair identity from legacy decoder activation: with suppressed calls,
+            // hermes + qwen3 must retain literal tool-call text in batch as streaming does.
+            let reasoning_would_select_v2 =
+                chat_completions::unified_parser::selected_content_decoder_family(
+                    None,
+                    self.reasoning_parser.as_deref(),
+                )
+                .is_some();
+            if !whole_response_decoder && !reasoning_would_select_v2 {
                 self.tool_call_parser = None;
             }
             self.guided_tool_constraint = GuidedToolConstraint::None;
@@ -553,7 +582,19 @@ mod parsing_options_tests {
         let options = ParsingOptions::new(Some("hermes".to_string()), Some("qwen3".to_string()))
             .with_tool_call_parsing_enabled(false);
 
-        assert_eq!(options.tool_call_parser, None);
+        let would_select_v2 =
+            super::chat_completions::unified_parser::selected_family(None, Some("qwen3")).is_some();
+        assert_eq!(
+            options.tool_call_parser.as_deref(),
+            would_select_v2.then_some("hermes")
+        );
+        assert_eq!(
+            super::chat_completions::unified_parser::selected_batch_family(
+                options.tool_call_parser.as_deref(),
+                options.reasoning_parser.as_deref()
+            ),
+            None
+        );
         assert_eq!(options.reasoning_parser.as_deref(), Some("qwen3"));
         assert!(options.suppress_tool_calls);
     }
@@ -601,8 +642,11 @@ mod parsing_options_tests {
 
         assert_eq!(
             options.tool_call_parser.as_deref(),
-            crate::protocols::openai::chat_completions::tool_parser_v2::enabled()
-                .then_some("qwen3_coder")
+            crate::protocols::openai::chat_completions::unified_parser::selected_family(
+                Some("qwen3_coder"),
+                Some("qwen3")
+            )
+            .map(|_| "qwen3_coder")
         );
         assert_eq!(options.reasoning_parser.as_deref(), Some("qwen3"));
         assert!(options.suppress_tool_calls);

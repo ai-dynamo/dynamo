@@ -30,7 +30,7 @@ engine:
       timing: {type: fixed, prefill_ms: 1, decode_ms: 1}
 router:
   policy: kv_router
-  prefill_load_model: {type: aic}
+  prefill_load_model: {type: ais}
   overlap_score_credit: {choices: [0.5, 1.0]}
   prefill_load_scale: {choices: [0.5, 1.0, 2.0]}
   temperature: {choices: [0.0, 0.2]}

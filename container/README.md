@@ -37,7 +37,6 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /usr/local/ucx/ | Built from source (→ runtime)
 |  /opt/nvidia/nvda_nixl/ | Built from source (→ runtime)
 |  /opt/nvidia/nvda_nixl/lib64/ | Built from source (→ runtime)
-|  /opt/dynamo/target/ | Cargo build output (→ runtime)
 |  /opt/dynamo/dist/*.whl | Built wheels (→ runtime)
 |  /opt/dynamo/dist/nixl/ | Built nixl wheels (→ runtime)
 | **STAGE: runtime** | **FROM ${RUNTIME_IMAGE} (multi-arch upstream runtime image)** |
@@ -253,9 +252,9 @@ docker build -t dynamo:latest-sglang-xpu-runtime -f container/sglang-runtime-xpu
 # Build Triton runtime image (prebuilt Dynamo wheels from PyPI on the upstream
 # Triton release image). --network=host lets the build reach PyPI.
 # The Triton release is selected with --build-arg RUNTIME_IMAGE_TAG=<tag>
-# (defaults to 26.08-py3); pick any nvcr.io/nvidia/tritonserver:<tag>.
+# (defaults to 26.09-py3); pick any nvcr.io/nvidia/tritonserver:<tag>.
 container/render.py --framework=triton --target=runtime --output-short-filename
-docker build --network=host --build-arg RUNTIME_IMAGE_TAG=26.08-py3 -t dynamo:latest-triton-runtime -f container/rendered.Dockerfile .
+docker build --network=host --build-arg RUNTIME_IMAGE_TAG=26.09-py3 -t dynamo:latest-triton-runtime -f container/rendered.Dockerfile .
 ```
 
 The `--device` flag selects the accelerator backend. It defaults to `cuda`; pass `--device=xpu`

@@ -10,8 +10,8 @@ import (
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
+	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 const (
@@ -56,22 +56,18 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 
 	// gRPC-based probes
 	container.LivenessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			GRPC: &corev1.GRPCAction{
-				Port:    9003,
-				Service: ptr.To("inference-extension"),
-			},
+		GRPC: &corev1.GRPCAction{
+			Port:    9003,
+			Service: new("inference-extension"),
 		},
 		InitialDelaySeconds: 5,
 		PeriodSeconds:       10,
 	}
 
 	container.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			GRPC: &corev1.GRPCAction{
-				Port:    9003,
-				Service: ptr.To("inference-extension"),
-			},
+		GRPC: &corev1.GRPCAction{
+			Port:    9003,
+			Service: new("inference-extension"),
 		},
 		InitialDelaySeconds: 5,
 		PeriodSeconds:       10,
@@ -81,11 +77,9 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 	// EPP waits indefinitely for discovery to find workers, so this probe is the
 	// only timeout mechanism. Default: 30 minutes (10s × 180 = 1800s).
 	container.StartupProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			GRPC: &corev1.GRPCAction{
-				Port:    9003,
-				Service: ptr.To("inference-extension"),
-			},
+		GRPC: &corev1.GRPCAction{
+			Port:    9003,
+			Service: new("inference-extension"),
 		},
 		PeriodSeconds:    10,
 		FailureThreshold: 180,
@@ -134,6 +128,13 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		_, volumeMount := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
 		container.VolumeMounts = append(container.VolumeMounts, volumeMount)
 	} else {
+		if runtimefeatures.StrictNamespacePrefix.Enabled(context.RuntimeVersion) {
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name:  commonconsts.DynamoNamespacePrefixStrictEnvVar,
+				Value: "true",
+			})
+		}
+
 		// Native Rust EPP: configured through DYN_* env vars, serves
 		// ext_proc/health on fixed ports, takes no CLI flags, and reads no
 		// config file. Leave Args empty and let the image ENTRYPOINT run.
@@ -205,7 +206,7 @@ func (e *EPPDefaults) GetBasePodSpec(context ComponentContext) (corev1.PodSpec, 
 	podSpec.ServiceAccountName = commonconsts.EPPServiceAccountName
 
 	// EPP needs longer grace period for graceful shutdown
-	podSpec.TerminationGracePeriodSeconds = ptr.To(int64(130))
+	podSpec.TerminationGracePeriodSeconds = new(int64(130))
 
 	if epp.IsLegacyGoEPP(context.EPPConfig) {
 		volume, _ := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
@@ -214,10 +215,8 @@ func (e *EPPDefaults) GetBasePodSpec(context ComponentContext) (corev1.PodSpec, 
 		// Backs the model-config cache mounted in GetBaseContainer, which is
 		// native Rust EPP only; see there for why the legacy path goes without.
 		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-			Name: "hf-cache",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
+			Name:     "hf-cache",
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		})
 	}
 

@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import builtins
+import importlib
 import json
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
@@ -22,6 +25,24 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+def test_engine_generate_metadata_imports_without_vllm(monkeypatch):
+    module_name = "dynamo.vllm.engine_generate"
+    loaded_module = sys.modules.pop(module_name)
+    original_import = builtins.__import__
+
+    def reject_vllm_import(name, *args, **kwargs):
+        if name == "vllm" or name.startswith("vllm."):
+            raise ModuleNotFoundError("vLLM is not installed", name=name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_vllm_import)
+    try:
+        metadata_module = importlib.import_module(module_name)
+        assert metadata_module.VLLM_GENERATE_CAPABILITY
+    finally:
+        sys.modules[module_name] = loaded_module
 
 
 def test_spec_decode_runtime_data_uses_vllm_speculative_config():
@@ -65,8 +86,34 @@ def test_vllm_token_budget_matches_rejection_policy():
     assert json.loads(value) == {
         "combined_limit": 4096,
         "reject_prompt_overflow": True,
-        "reject_total_overflow": True,
+        "reject_total_overflow": False,
     }
+
+
+def test_build_sampling_params_caps_oversized_max_tokens():
+    from dynamo.vllm.handlers import build_sampling_params
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 100},
+        "output_options": {},
+    }
+    assert build_sampling_params(request, {}, 100).max_tokens == 97
+
+
+def test_build_sampling_params_rejects_max_tokens_above_model_length():
+    from dynamo.llm.exceptions import InvalidArgument
+    from dynamo.vllm.handlers import build_sampling_params
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 101},
+        "output_options": {},
+    }
+    with pytest.raises(InvalidArgument, match="cannot be greater than"):
+        build_sampling_params(request, {}, 100)
 
 
 @pytest.mark.parametrize(
@@ -78,7 +125,7 @@ def test_vllm_token_budget_matches_rejection_policy():
         "expected",
     ),
     [
-        (ModelInput.Tokens, ModelType.Prefill, WorkerType.Prefill, False, True),
+        (ModelInput.Tokens, ModelType.Prefill, WorkerType.Prefill, False, False),
         (ModelInput.Tokens, ModelType.Chat, WorkerType.Decode, True, True),
         (
             ModelInput.Tokens,
