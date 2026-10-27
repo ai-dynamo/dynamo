@@ -29,6 +29,11 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+/// The longest lease the service grants. `Lease` itself has no upper bound,
+/// and the stores add the lease to the current time, which a lease near
+/// `u64::MAX` seconds would overflow.
+const MAX_LEASE_DURATION_SECS: u64 = 86_400;
+
 #[derive(Parser)]
 #[command(about = "Serve Global Router pool discovery over HTTP")]
 struct Args {
@@ -53,7 +58,11 @@ struct Args {
     heartbeat_interval_secs: u64,
     /// Memory store: how long a registration lasts. Longer than the
     /// heartbeat interval, and at most a day.
-    #[arg(long, default_value_t = 15)]
+    #[arg(
+        long,
+        default_value_t = 15,
+        value_parser = clap::value_parser!(u64).range(..=MAX_LEASE_DURATION_SECS)
+    )]
     lease_duration_secs: u64,
     /// Memory store: a Global Router replica as `<id>=<url>`. Repeat it for
     /// each replica.
@@ -218,5 +227,13 @@ mod tests {
         assert_eq!(args.pool_service_suffix, "-pool-gateway");
         // An empty suffix would make every imported Service a pool.
         assert!(Args::try_parse_from(["gds", "--pool-service-suffix="]).is_err());
+    }
+
+    #[test]
+    fn a_lease_is_at_most_a_day() {
+        let day = MAX_LEASE_DURATION_SECS.to_string();
+        assert!(Args::try_parse_from(["gds", "--lease-duration-secs", &day]).is_ok());
+        let longer = (MAX_LEASE_DURATION_SECS + 1).to_string();
+        assert!(Args::try_parse_from(["gds", "--lease-duration-secs", &longer]).is_err());
     }
 }
