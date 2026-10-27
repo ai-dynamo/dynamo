@@ -3,6 +3,7 @@
 
 import asyncio
 import base64
+import binascii
 import functools
 import importlib
 import inspect
@@ -1031,7 +1032,7 @@ def _build_vllm_kv_hints(request: Mapping[str, Any]) -> Any | None:
     if raw_envelope is None:
         return None
     if not isinstance(raw_envelope, Mapping):
-        raise InvalidArgument("kv_hint must be an object")
+        raise ValueError("kv_hint must be an object")
 
     kv_hints_types = _vllm_kv_hints_types()
     if kv_hints_types is None:
@@ -1042,14 +1043,14 @@ def _build_vllm_kv_hints(request: Mapping[str, Any]) -> Any | None:
 
     raw_actions = raw_envelope.get("actions")
     if not isinstance(raw_actions, list):
-        raise InvalidArgument("kv_hint.actions must be a list")
+        raise ValueError("kv_hint.actions must be a list")
     actions = []
     for raw_action in raw_actions:
         if not isinstance(raw_action, Mapping):
-            raise InvalidArgument("each kv_hint action must be an object")
+            raise ValueError("each kv_hint action must be an object")
         payload = raw_action.get("payload")
         if not isinstance(payload, Mapping):
-            raise InvalidArgument("kv_hint action payload must be an object")
+            raise ValueError("kv_hint action payload must be an object")
         actions.append(
             action_type(
                 action_id=str(raw_action["action_id"]),
@@ -2588,7 +2589,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
         """Return a LoRARequest for loaded adapters, or None for base model names.
 
-        Raises ValueError for unknown non-base names when LoRA is enabled.
+        Raises InvalidArgument for unknown non-base names when LoRA is enabled.
 
         **Contract for subclasses**: This method requires the following attributes
         to be defined by subclasses:
@@ -3289,11 +3290,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             torch.Tensor: Decoded prompt embeddings with dim == 2
 
         Raises:
-            ValueError: If the input is not a string
-            InvalidArgument: If the payload cannot be decoded as a PyTorch tensor
+            InvalidArgument: If the payload is not valid base64 or the loader
+                rejects it as a client input fault.
+            ValueError: If the input is not a string (internal contract).
+            RuntimeError: If ModelConfig is unavailable.
         """
+        from vllm.exceptions import VLLMClientError
+
         if not isinstance(prompt_embeds_base64, str):
-            raise InvalidArgument(
+            raise ValueError(
                 f"Prompt embeds must be base64 encoded string. Got {type(prompt_embeds_base64)}."
             )
 
@@ -3310,13 +3315,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # Resource failures are server-side faults. Preserve their type so
             # the bindings return a retryable 5xx instead of a client 400.
             raise
-        except Exception as e:
-            logger.error(f"Failed to decode prompt_embeds: {e}")
-            # Static message keeps library-internal decoder text (logged above)
-            # private; a plain ValueError would reach the client as "Invalid request".
+        except VLLMClientError as e:
             raise InvalidArgument(
-                "Failed to decode prompt_embeds as PyTorch tensor"
+                f"Invalid prompt_embeds: {e}"
             ) from e
+        except binascii.Error as e:
+            raise InvalidArgument("prompt_embeds is not valid base64") from e
+        except Exception:
+            logger.error("Failed to decode prompt_embeds", exc_info=True)
+            raise
 
     def _create_prompt_from_embeddings(
         self, prompt_embeds_base64: str
@@ -3338,7 +3345,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         embeddings_tensor = self._decode_prompt_embeds(prompt_embeds_base64)
         if embeddings_tensor.dim() != 2:
-            raise InvalidArgument(
+            raise ValueError(
                 f"prompt embeds should have dim 2 after vllm processing, but found dim {embeddings_tensor.dim()}"
             )
 
@@ -3370,8 +3377,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             The vLLM prompt built from prompt embeddings or token IDs.
 
         Raises:
-            InvalidArgument: Prompt embeddings are disabled or cannot be decoded.
-            ValueError: Prompt embeddings fail type or shape validation.
+            InvalidArgument: Prompt embeddings are disabled or fail payload
+                validation.
         """
         if "prompt_embeds" in request and request["prompt_embeds"]:
             if not self.config.engine_args.enable_prompt_embeds:
