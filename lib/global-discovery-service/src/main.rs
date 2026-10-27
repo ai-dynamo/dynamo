@@ -94,7 +94,12 @@ struct Args {
     pool_service_suffix: String,
     /// Kubernetes stores: each pool's frontend Service is named
     /// `<DGD name><suffix>`.
-    #[arg(long, default_value = "-frontend")]
+    #[arg(
+        long,
+        default_value = "-frontend",
+        allow_hyphen_values = true,
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
     frontend_service_suffix: String,
     /// Kubernetes stores: the frontend Service's named port for HTTP.
     #[arg(long, default_value = "http")]
@@ -335,11 +340,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pool_service_suffix_can_start_with_a_hyphen_but_not_be_empty() {
-        let args = Args::try_parse_from(["gds", "--pool-service-suffix", "-pool-gateway"]).unwrap();
+    fn service_suffixes_can_start_with_a_hyphen_but_not_be_empty() {
+        let args = Args::try_parse_from([
+            "gds",
+            "--pool-service-suffix",
+            "-pool-gateway",
+            "--frontend-service-suffix",
+            "-web",
+        ])
+        .unwrap();
         assert_eq!(args.pool_service_suffix, "-pool-gateway");
+        assert_eq!(args.frontend_service_suffix, "-web");
         // An empty suffix would make every imported Service a pool.
         assert!(Args::try_parse_from(["gds", "--pool-service-suffix="]).is_err());
+        assert!(Args::try_parse_from(["gds", "--frontend-service-suffix="]).is_err());
     }
 
     #[test]
