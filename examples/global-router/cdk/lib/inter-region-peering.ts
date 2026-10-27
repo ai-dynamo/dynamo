@@ -21,7 +21,7 @@ import type { Construct } from "constructs";
 import type { PeeringRegionConfig } from "./config";
 
 /**
- * Add inter-Region peering and private routes in dedicated stacks. Keeping the
+ * Add inter-Region peering and its routes in dedicated stacks. Keeping the
  * routes outside the VPC stacks avoids a cross-Region CloudFormation cycle.
  */
 export function addInterRegionPeering(
@@ -39,10 +39,18 @@ export function addInterRegionPeering(
   if (ohioVpc.vpcId === westVpc.vpcId) {
     throw new Error("Inter-Region VPC peering requires distinct VPC IDs.");
   }
+  for (const vpc of [ohioVpc, westVpc]) {
+    const publicIds = vpc.publicRouteTableIds ?? [];
+    if (publicIds.some((id) => vpc.privateRouteTableIds.includes(id))) {
+      throw new Error(
+        `VPC ${vpc.vpcId} lists a route table as both private and public.`,
+      );
+    }
+  }
 
   const peeringRoutesStack = new Stack(scope, "OhioWestPeeringRoutes", {
     crossRegionReferences: true,
-    description: "Ohio to West VPC peering and Ohio private routes",
+    description: "Ohio to West VPC peering and Ohio routes",
     env: { account, region: ohioVpc.region },
   });
   const peering = new ec2.CfnVPCPeeringConnection(
@@ -58,29 +66,45 @@ export function addInterRegionPeering(
       vpcId: ohioVpc.vpcId,
     },
   );
-  addPrivateRoutes(
+  addRoutes(
     peeringRoutesStack,
     ohioVpc.privateRouteTableIds,
     westVpc.cidrBlock,
     peering.attrId,
-    "OhioToWest",
+    "OhioToWestPrivate",
+  );
+  addRoutes(
+    peeringRoutesStack,
+    ohioVpc.publicRouteTableIds ?? [],
+    westVpc.cidrBlock,
+    peering.attrId,
+    "OhioToWestPublic",
   );
 
+  // The ID predates the public routes; renaming it would replace the stack.
   const westRoutesStack = new Stack(scope, "WestPrivateRoutes", {
     crossRegionReferences: true,
-    description: "West private routes to the Ohio VPC over peering",
+    description: "West routes to the Ohio VPC over peering",
     env: { account, region: westVpc.region },
   });
-  addPrivateRoutes(
+  addRoutes(
     westRoutesStack,
     westVpc.privateRouteTableIds,
     ohioVpc.cidrBlock,
     peering.attrId,
-    "WestToOhio",
+    "WestToOhioPrivate",
+  );
+  addRoutes(
+    westRoutesStack,
+    westVpc.publicRouteTableIds ?? [],
+    ohioVpc.cidrBlock,
+    peering.attrId,
+    "WestToOhioPublic",
   );
 }
 
-function addPrivateRoutes(
+/** Logical IDs are `<prefix>Route<n>`, so existing private routes keep theirs. */
+function addRoutes(
   stack: Stack,
   routeTableIds: readonly string[],
   destinationCidr: string,
@@ -88,7 +112,7 @@ function addPrivateRoutes(
   idPrefix: string,
 ): void {
   for (const [index, routeTableId] of routeTableIds.entries()) {
-    new ec2.CfnRoute(stack, `${idPrefix}PrivateRoute${index + 1}`, {
+    new ec2.CfnRoute(stack, `${idPrefix}Route${index + 1}`, {
       destinationCidrBlock: destinationCidr,
       routeTableId,
       vpcPeeringConnectionId: peeringId,
