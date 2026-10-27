@@ -4,15 +4,16 @@
 # Note to AI agents: keep this page minimal (intro, support matrix, launch example,
 # Kubernetes example, topologies). Do not edit it unless the user explicitly asks.
 title: SGLang Sidecar
-subtitle: Run Dynamo beside a stock SGLang engine through native gRPC.
+subtitle: Run Dynamo beside SGLang's Rust server through native gRPC.
 ---
 
 > [!WARNING]
 > **Experimental.** The sidecars and their deployment examples are
 > experimental. Manifests, flags, and behavior may change without notice.
 
-`dynamo-sglang-sidecar` connects a Dynamo worker to SGLang's native gRPC
-server. See [Sidecar Backends](../../../concepts/system-architecture/sidecar-backends.md)
+`dynamo-sglang-sidecar` connects a Dynamo worker to SGLang's Rust server
+(`SGLANG_RUST_SERVER=1`) through its native gRPC service, `sglang.api.v1`. See
+[Sidecar Backends](../../../concepts/system-architecture/sidecar-backends.md)
 for the architecture.
 
 > [!TIP]
@@ -26,6 +27,7 @@ for the architecture.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Data parallelism (DP>1) | Not yet |
 
 ## Launch Locally
 
@@ -36,6 +38,8 @@ for all topologies. For example, aggregated serving on one GPU:
 export DYN_DISCOVERY_BACKEND=file   # single host: no etcd or NATS needed
 ./lib/sidecar/sglang/launch/agg.sh
 ```
+
+The scripts start SGLang with `SGLANG_RUST_SERVER=1`.
 
 In a second terminal:
 
@@ -80,10 +84,6 @@ node holds the remaining TP ranks.
 
 ![When one SGLang engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../../../../assets/img/sidecar-sglang-multinode-tp.svg)
 
-### Multi-Node DP
+### Data Parallelism
 
-The leader sidecar registers every DP rank and serves all requests; SGLang
-dispatches each one to the right scheduler. The follower sidecar
-accepts no requests and relays its node's KV events directly to the frontend.
-
-![SGLang data parallelism across two nodes. Only the leader sidecar serves requests: the Dynamo Frontend router picks a DP rank and sends requests over the request plane to the node 0 Dynamo Sidecar, which registers DP ranks 0-3 and calls its local SGLang over native gRPC.](../../../../../../assets/img/sidecar-sglang-multinode-dp.svg)
+Not supported yet; see the [support matrix](#support-matrix).

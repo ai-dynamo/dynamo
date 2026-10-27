@@ -13,7 +13,7 @@ instead.
 
 The contract was copied from SGLang upstream `main`
 `8cd3c494a3aa3ae56dfd76f51bab6912234914dc` plus sgl-project/sglang#45859,
-#45883 and #45996, which are not yet merged upstream.
+#45883, #45996, #46635, #46636 and #46637, which are not yet merged upstream.
 The upstream files' SHA-256s are:
 
 | File | SHA-256 |
