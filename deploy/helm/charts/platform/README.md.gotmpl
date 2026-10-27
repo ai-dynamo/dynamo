@@ -136,6 +136,25 @@ Without separately configured gang scheduling or group admission
 (e.g., through Kueue), multinode DGD/DCD workloads using LWS may remain
 partially scheduled.
 
+##### Bundled KAI Queue creation waits for the queue webhook
+
+**Change:** With `global.kai-scheduler.install=true`, a `post-install,post-upgrade` Job holds the
+`dynamo-default` and `dynamo` Queue hooks until KAI's `queue-controller` is Available and its
+webhook admits a server-side dry-run Queue. This fixes `helm install --wait` failing with
+`failed calling webhook "queue-validation.kai.scheduler"`.
+
+**Affected:** Bundled KAI installations whose queue-controller is enabled and whose `kai-config`
+is applied by the chart (the default `kaiConfigDeployer`, or `kaiConfig.render=true`).
+
+**Action:** Mirror `kaiQueueWait.image` (`registry.k8s.io/kubectl`) for restricted registries.
+Set `kaiQueueWait.enabled=false` only when the queue webhook is known to be serving. The Job
+waits up to `kaiQueueWait.activeDeadlineSeconds` (600), within Helm's `--timeout`.
+
+**Existing deployments:** Successful runs delete the Job and its ServiceAccount, Role,
+ClusterRole, bindings, and ConfigMap. After a failure they persist for diagnosis until the next
+install or upgrade replaces them. `helm uninstall` does not remove them, so delete them manually
+when retiring a failed release.
+
 ### v1.6.0
 
 #### Runtime Compatibility

@@ -9,7 +9,9 @@
 {{- $kai := index .Values.global "kai-scheduler" | default dict -}}
 {{- $kaiValues := index .Values "kai-scheduler" | default dict -}}
 {{- $config := .Values.kaiQueueWait | default dict -}}
-{{- if and ($kai.install | default false) (ne (dig "enabled" true $config) false) (ne (dig "queuecontroller" "enabled" true $kaiValues) false) -}}
+{{- /* With kai-config managed outside the chart, queue-controller may never appear during install. */ -}}
+{{- $kaiConfigApplied := or (ne (dig "kaiConfigDeployer" "enabled" true $kaiValues) false) (dig "kaiConfig" "render" false $kaiValues) -}}
+{{- if and ($kai.install | default false) (ne (dig "enabled" true $config) false) (ne (dig "queuecontroller" "enabled" true $kaiValues) false) $kaiConfigApplied -}}
 {{- $name := printf "%s-kai-queue-wait" (.Release.Name | trunc 48 | trimSuffix "-") -}}
 {{- $identity := printf "%s/%s" .Release.Namespace .Release.Name | sha256sum | trunc 8 -}}
 {{- $clusterRbac := printf "%s-%s" ($name | trunc 54 | trimSuffix "-") $identity -}}
@@ -126,6 +128,7 @@ spec:
       {{- with $podSecurityContext }}
       securityContext: {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- /* A dry-run passes with no webhook registered; KAI registers it in the reconcile that creates queue-controller. */}}
       initContainers:
         - name: wait-for-create
           {{- include "dynamo-platform.kaiQueueWaitContainer" (dict "config" $config) | nindent 10 }}

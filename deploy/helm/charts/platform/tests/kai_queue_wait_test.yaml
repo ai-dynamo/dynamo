@@ -27,6 +27,17 @@ tests:
     set: {global.kai-scheduler.install: true, kai-scheduler.queuecontroller.enabled: false}
     asserts:
       - hasDocuments: {count: 0}
+  - it: omits the hook when kai-config is managed outside the chart
+    set: {global.kai-scheduler.install: true, kai-scheduler.kaiConfigDeployer.enabled: false}
+    asserts:
+      - hasDocuments: {count: 0}
+  - it: renders the hook when kai-config is rendered as a release resource
+    set:
+      global.kai-scheduler.install: true
+      kai-scheduler.kaiConfigDeployer.enabled: false
+      kai-scheduler.kaiConfig.render: true
+    asserts:
+      - hasDocuments: {count: 7}
   - it: renders with template defaults when values predate kaiQueueWait (helm upgrade --reuse-values)
     set: {global.kai-scheduler.install: true, kaiQueueWait: null}
     documentSelector: {path: kind, value: Job}
