@@ -54,11 +54,14 @@ data:
       free_gpu_memory_fraction: 0.85
       # Nemotron-H uses a Mamba hybrid cache. Block reuse is unsupported.
       enable_block_reuse: false
+      # The C++ transceiver required by UCX runs on KV cache manager v1.
+      use_kv_cache_manager_v2: false
     moe_config:
       backend: TRTLLM
     cache_transceiver_config:
       # UCX is required because NIXL/MOONCAKE do not support Mamba SSM transfer.
       backend: UCX
+      transceiver_runtime: CPP
     cuda_graph_config:
       enable_padding: true
       max_batch_size: 16
@@ -85,11 +88,14 @@ data:
       free_gpu_memory_fraction: 0.85
       # Nemotron-H uses a Mamba hybrid cache. Block reuse is unsupported.
       enable_block_reuse: false
+      # The C++ transceiver required by UCX runs on KV cache manager v1.
+      use_kv_cache_manager_v2: false
     moe_config:
       backend: TRTLLM
     cache_transceiver_config:
       # UCX is required because NIXL/MOONCAKE do not support Mamba SSM transfer.
       backend: UCX
+      transceiver_runtime: CPP
     cuda_graph_config:
       enable_padding: true
       max_batch_size: 16
