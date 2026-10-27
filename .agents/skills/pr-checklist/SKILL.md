@@ -20,7 +20,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Usage
 
-Use this skill when making a pull request to Dynamo or reviewing one. Run the review with multiple agents that investigate each section below, plus an adversarial agent that presses on the weakest areas. Report what needs to change.
+Use this skill when making a pull request to Dynamo or reviewing one. Run the review with multiple agents that investigate each section below, plus an adversarial agent that presses on the weakest areas. Report what needs to change. Keep the PR description up to date as new commits change the PR or address review comments.
 
 ## 1. Design Fit
 
