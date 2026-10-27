@@ -14,6 +14,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -88,6 +89,15 @@ func TestRootMarshal_PreservesEmptyMetadata(t *testing.T) {
 			obj: &DynamoGraphDeploymentRequest{
 				APIVersion: "nvidia.com/v1beta1",
 				Kind:       "DynamoGraphDeploymentRequest",
+			},
+		},
+		{
+			name: "DynamoGraphDeploymentEngineGroup",
+			obj: &DynamoGraphDeploymentEngineGroup{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "nvidia.com/v1beta1",
+					Kind:       "DynamoGraphDeploymentEngineGroup",
+				},
 			},
 		},
 		{
