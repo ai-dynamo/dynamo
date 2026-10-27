@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 
+	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -35,6 +36,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
@@ -49,16 +51,14 @@ func (v *sharedValidation) validatePodTemplateSpec(template *corev1.PodTemplateS
 	return append(allErrs, v.validatePodSpec(&template.Spec, fldPath.Child("spec"), role)...)
 }
 
-// validatePodSpec protects LPX-owned container names, addressing, and placement.
+// validatePodSpec requires an LPX runtime container and protects controller-owned addressing and placement.
 // spec and fldPath are non-nil; Kubernetes schema validation runs before this method.
 func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.Path, role string) field.ErrorList {
 	var allErrs field.ErrorList
-	agent := role == nvidiacomv1beta1.ComponentRoleLPXAgent
 	if !hasContainerNamed(spec.Containers, consts.MainContainerName) {
 		allErrs = append(allErrs, field.Required(fldPath.Child("containers"), fmt.Sprintf("LPX %s component requires a %q runtime container", role, consts.MainContainerName)))
 	}
 
-	// Agent names are build-independent; conductor names depend on the compiled execution mode.
 	for _, group := range []struct {
 		name       string
 		containers []corev1.Container
@@ -69,9 +69,6 @@ func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.
 		for index, container := range group.containers {
 			if strings.TrimSpace(container.Image) == "" {
 				allErrs = append(allErrs, field.Required(fldPath.Child(group.name).Index(index).Child("image"), "must specify a non-empty image"))
-			}
-			if agent && container.Name == nvidiacomv1beta1.ComponentRoleLPXAgent {
-				allErrs = append(allErrs, field.Forbidden(fldPath.Child(group.name).Index(index).Child("name"), fmt.Sprintf("LPX reserves %q for the materialized role container", container.Name)))
 			}
 		}
 	}
@@ -90,7 +87,7 @@ func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.
 	if len(spec.TopologySpreadConstraints) != 0 {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("topologySpreadConstraints"), "LPX owns role placement"))
 	}
-	if !agent {
+	if role != nvidiacomv1beta1.ComponentRoleLPXAgent {
 		return allErrs
 	}
 
@@ -1517,4 +1514,48 @@ func (v *sharedValidation) validateGroveSpecUpdate(
 		newForced,
 		fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", ownerKind.Kind),
 	)}
+}
+
+// validateObjectMeta checks creation provenance, preserving unchanged legacy DCD origins.
+// objectMeta and fldPath are non-nil. A nil oldObjectMeta disables legacy-value ratcheting.
+func (v *sharedValidation) validateObjectMeta(objectMeta, oldObjectMeta *metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	annotationsPath := fldPath.Child("annotations")
+	var oldOrigin string
+	var hasOldOrigin bool
+	if oldObjectMeta != nil {
+		oldOrigin, hasOldOrigin = oldObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
+	}
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; exists && (!hasOldOrigin || value != oldOrigin) {
+		if _, err := semver.NewVersion(value); err != nil {
+			allErrs = append(allErrs, field.Invalid(
+				annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),
+				value,
+				"must be valid semver",
+			))
+		}
+	}
+	return allErrs
+}
+
+// validateObjectMetaUpdate preserves creation provenance, including legacy absence.
+// newObjectMeta, oldObjectMeta, and fldPath are non-nil.
+func (v *sharedValidation) validateObjectMetaUpdate(newObjectMeta, oldObjectMeta *metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	annotationsPath := fldPath.Child("annotations")
+	newOrigin, newOriginExists := newObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
+	oldOrigin, oldOriginExists := oldObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
+	if newOriginExists != oldOriginExists || newOrigin != oldOrigin {
+		var invalidValue any
+		if newOriginExists {
+			invalidValue = newOrigin
+		}
+		allErrs = append(allErrs, field.Invalid(
+			annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),
+			invalidValue,
+			apivalidation.FieldImmutableErrorMsg,
+		))
+	}
+
+	return allErrs
 }

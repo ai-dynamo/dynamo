@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, RlAdminBaseUrl, RuntimeConfig, WorkerConfig, usage,
+    LLMEngineOutput, LLMEngineOutputExt, RlAdminBaseUrl, RuntimeConfig, WorkerConfig,
 };
 use dynamo_llm::lora::{LoRADownloader, lora_serving_enabled};
 use dynamo_runtime::component::Endpoint;
@@ -26,7 +26,7 @@ use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{
     ResponseState, build_generate_request, consume_reasoning_parser_args, data_parallel_rank,
-    normalize_response_options, request_has_multimodal_input,
+    normalize_response_options, request_has_multimodal_input, require_proto_0_6_controls,
 };
 use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, resolve_source_path};
 use crate::model::DiscoveredModel;
@@ -45,13 +45,14 @@ pub struct VllmSidecarEngine {
     lifecycle: lora::LoraLifecycle,
     routing_image_token_id: OnceCell<Option<u32>>,
     cancel: CancellationToken,
+    /// vLLM's reasoning parser decides when Dynamo's tool grammars apply, so
+    /// they exclude the reasoning phase; set by `from_discovered`.
+    engine_gates_reasoning: bool,
 }
 
 fn cancelled(state: &ResponseState) -> LLMEngineOutput {
-    LLMEngineOutput::cancelled().with_usage(usage(
-        state.prompt_tokens(),
-        state.reported_completion_tokens(),
-    ))
+    LLMEngineOutput::cancelled()
+        .with_usage(state.completion_usage(state.reported_completion_tokens(), None))
 }
 
 impl VllmSidecarEngine {
@@ -74,6 +75,7 @@ impl VllmSidecarEngine {
             lifecycle: lora::LoraLifecycle::default(),
             routing_image_token_id: OnceCell::new(),
             cancel: CancellationToken::new(),
+            engine_gates_reasoning: false,
         }
     }
 
@@ -184,14 +186,43 @@ impl VllmSidecarEngine {
         model: DiscoveredModel,
         vllm_http_url: Option<RlAdminBaseUrl>,
     ) -> Result<(Self, WorkerConfig), DynamoError> {
-        let dynamo_parsers = args.sidecar.common.dyn_tool_call_parser.is_some()
-            || args.sidecar.common.dyn_reasoning_parser.is_some();
-        if dynamo_parsers && let Some(parser) = model.reasoning_parser() {
-            // vLLM's own reasoning parser gates structured output on request
-            // settings that the gRPC protocol cannot carry.
+        let dynamo_reasoning_parser = args.sidecar.common.dyn_reasoning_parser.is_some();
+        let dynamo_parsers =
+            dynamo_reasoning_parser || args.sidecar.common.dyn_tool_call_parser.is_some();
+        let proto_version = match model.proto_version() {
+            "" => "unreported",
+            version => version,
+        };
+        // vLLM's reasoning parser decides when structured output starts, and
+        // needs Dynamo's per-request reasoning gate to decide correctly. Older
+        // servers can't receive the gate, and they would reject every request
+        // that carries it.
+        if dynamo_parsers
+            && let Some(parser) = model.reasoning_parser()
+            && !model.reports_proto_0_6()
+        {
             return Err(client::invalid_argument(format!(
-                "Dynamo parsers need vLLM without its own reasoning parser, but vLLM runs `{parser}`; start vllm-rs with `--reasoning-parser none`"
+                "vLLM runs reasoning parser `{parser}`, but its gRPC server (vllm-proto {proto_version}) predates 0.6.0 and cannot receive Dynamo's reasoning gate; start vllm-rs with `--reasoning-parser none` or upgrade vLLM"
             )));
+        }
+        match model.reasoning_parser() {
+            None if dynamo_parsers => {
+                let advice = if model.reports_proto_0_6() {
+                    "start vllm-rs with `--reasoning-parser <name>`, or drop `--reasoning-parser none` so vllm-rs picks the model's parser (its default, `auto`)"
+                } else {
+                    "upgrade to a vLLM gRPC server that reports vllm-proto 0.6.0 or later and start it with `--reasoning-parser <name>`"
+                };
+                tracing::warn!(
+                    proto_version,
+                    "vLLM runs no reasoning parser, so tool and structured-output grammars apply from the first generated token and thinking budgets are rejected. To let the engine gate grammars on reasoning, {advice}"
+                );
+            }
+            // The frontend sends the gate only from its own reasoning parser.
+            Some(parser) if !dynamo_reasoning_parser => tracing::warn!(
+                parser,
+                "vLLM runs a reasoning parser, but Dynamo has none, so per-request thinking settings never reach vLLM. vLLM then guesses from the prompt alone when reasoning ends before it applies tool-call and structured-output grammars, and the guess can be wrong. For models that don't emit think tags, such as Qwen3-Coder, the grammar may never apply and tool calls come back unconstrained. For models whose thinking mode depends on chat-template settings, the grammar can start too early and cut reasoning short. Set `--dyn-reasoning-parser` to this model's Dynamo reasoning parser, or, if the model doesn't reason, start vllm-rs with `--reasoning-parser none`"
+            ),
+            _ => {}
         }
         let endpoint = args.sidecar.grpc_endpoint;
         let enable_rl = args.sidecar.common.enable_rl;
@@ -207,7 +238,11 @@ impl VllmSidecarEngine {
         let rl_metadata = enable_rl
             .then(|| model.rl_worker_metadata(vllm_http_url, vllm_rl_world_size))
             .transpose()?;
-        let engine = Self::new(endpoint, model.clone(), mode, transport);
+        let mut engine = Self::new(endpoint, model.clone(), mode, transport);
+        engine.engine_gates_reasoning =
+            model.reports_proto_0_6() && model.reasoning_parser().is_some();
+        // Off by default until vLLM's gRPC server uses xgrammar (vllm-project/vllm#61892).
+        let structural_tag = args.sidecar.common.structural_tag(false);
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
@@ -225,6 +260,7 @@ impl VllmSidecarEngine {
             served_model_name: Some(model.served_name.clone()),
             tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
             reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
+            structural_tag,
             exclude_tools_when_tool_choice_none: args
                 .sidecar
                 .common
@@ -767,7 +803,15 @@ impl LLMEngine for VllmSidecarEngine {
         let (model, server) = client.discover(startup_deadline).await?;
         let observed = DiscoveredModel::from_proto(model, server)?;
         self.model.ensure_startup_compatible(&observed)?;
-        let engine_config = observed.engine_config(!self.mode.is_encode())?;
+        let mut engine_config = observed.engine_config(!self.mode.is_encode())?;
+        if self.engine_gates_reasoning {
+            // vLLM applies the tool grammar after reasoning ends, so the
+            // frontend must not include a second reasoning phase in it.
+            engine_config.runtime_data.insert(
+                dynamo_llm::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY.to_string(),
+                Value::Bool(true),
+            );
+        }
         let routing_image_token_id =
             resolve_routing_image_token_id(&observed, startup_deadline).await;
         self.routing_image_token_id
@@ -805,12 +849,36 @@ impl LLMEngine for VllmSidecarEngine {
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
         let mut request = normalize_response_options(request)?;
-        if self.model.reasoning_parser().is_none() {
-            consume_reasoning_parser_args(&mut request.extra_args);
+        if !self.model.reports_proto_0_6()
+            && consume_reasoning_parser_args(&mut request.extra_args)
+            && let Some(parser) = self.model.reasoning_parser()
+        {
+            // Without the settings, vLLM's parser guesses from the prompt where
+            // reasoning ends. Nothing reads them when vLLM runs no parser.
+            return Err(client::invalid_argument(format!(
+                "vLLM runs reasoning parser `{parser}`, but its gRPC server predates vllm-proto 0.6.0 and cannot receive this request's reasoning settings; start vllm-rs with `--reasoning-parser none` or upgrade vLLM"
+            )));
+        }
+        // Fail on the prefill leg too, before it computes KV that decode would
+        // reject. Encode never samples.
+        let checks_controls = !self.mode.is_encode();
+        if checks_controls
+            && request.stop_conditions.max_thinking_tokens.is_some()
+            && self.model.reports_proto_0_6()
+            && self.model.reasoning_parser().is_none()
+        {
+            // The native gRPC path skips vLLM's frontend check and would
+            // otherwise ignore the budget.
+            return Err(client::invalid_argument(
+                "max_thinking_tokens requires vLLM to run a reasoning parser",
+            ));
         }
         let mut state = ResponseState::new(&request, self.mode);
         let data_parallel_rank = data_parallel_rank(&request, self.mode);
         let mut proto_request = build_generate_request(request, request_id, self.mode)?;
+        if checks_controls && !self.model.reports_proto_0_6() {
+            require_proto_0_6_controls(&proto_request, self.model.proto_version())?;
+        }
         proto_request.model.clone_from(&self.model.served_name);
         if self.model.is_base_model_name(&proto_request.lora_name) {
             // Routers may address the base model by name through the adapter field.
@@ -1196,6 +1264,7 @@ impl LLMEngine for VllmSidecarEngine {
                 ));
             }
             sources.push(KvEventSource::Zmq {
+                heartbeat_timeout: None,
                 endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint),
                 topic: source.topic,
                 dp_rank,
@@ -1540,16 +1609,74 @@ mod tests {
         .unwrap();
         let vllm_http_url = VllmSidecarEngine::validate_args(&args).unwrap();
         // Native parser names differ from the explicit Dynamo configuration.
-        let mut info = model_info();
-        info.reasoning_parser = String::new();
-        let model = DiscoveredModel::from_proto(info, server_info()).unwrap();
+        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
         let (_, config) = VllmSidecarEngine::from_discovered(args, model, vllm_http_url).unwrap();
         assert_eq!(config.tool_call_parser.as_deref(), Some("qwen3_coder"));
         assert_eq!(config.reasoning_parser.as_deref(), Some("qwen3"));
     }
 
     #[test]
-    fn dynamo_parsers_need_an_engine_without_a_reasoning_parser() {
+    fn engine_reasoning_parser_with_dynamo_parsers_requires_proto_0_6() {
+        let mut old_server = server_info();
+        old_server.proto_version.clear();
+        // The fixture engine runs vLLM's `deepseek_r1` reasoning parser.
+        for (dyn_flags, server, expected) in [
+            (
+                &["--dyn-reasoning-parser", "qwen3"][..],
+                old_server.clone(),
+                Err("predates 0.6.0"),
+            ),
+            (
+                &["--dyn-tool-call-parser", "qwen3_coder"][..],
+                old_server.clone(),
+                Err("predates 0.6.0"),
+            ),
+            // Without a Dynamo reasoning parser, startup only warns.
+            (
+                &["--dyn-tool-call-parser", "qwen3_coder"][..],
+                server_info(),
+                Ok(true),
+            ),
+            (
+                &["--dyn-reasoning-parser", "qwen3"][..],
+                server_info(),
+                Ok(true),
+            ),
+            (&[][..], server_info(), Ok(true)),
+            (&[][..], old_server, Ok(false)),
+        ] {
+            let args = Args::try_parse_from(
+                ["sidecar", "--grpc-endpoint", "127.0.0.1:12345"]
+                    .iter()
+                    .chain(dyn_flags),
+            )
+            .unwrap();
+            let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
+            match (
+                VllmSidecarEngine::from_discovered(args, model, None),
+                expected,
+            ) {
+                (Ok((engine, _)), Ok(gates)) => assert_eq!(engine.engine_gates_reasoning, gates),
+                (Err(error), Err(expected)) => {
+                    assert!(
+                        error.to_string().contains(expected),
+                        "{dyn_flags:?}: {error}"
+                    )
+                }
+                (result, expected) => panic!(
+                    "{dyn_flags:?}: expected {expected:?}, got error {:?}",
+                    result.err()
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn old_server_without_engine_reasoning_parser_runs_degraded() {
+        let mut server = server_info();
+        server.proto_version.clear();
+        let mut info = model_info();
+        info.reasoning_parser.clear();
         let args = Args::try_parse_from([
             "sidecar",
             "--grpc-endpoint",
@@ -1558,13 +1685,10 @@ mod tests {
             "qwen3",
         ])
         .unwrap();
-        let vllm_http_url = VllmSidecarEngine::validate_args(&args).unwrap();
-        // The fixture engine runs vLLM's `deepseek_r1` reasoning parser.
-        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
-        let error = VllmSidecarEngine::from_discovered(args, model, vllm_http_url)
-            .err()
-            .expect("startup must fail");
-        assert!(error.to_string().contains("--reasoning-parser none"));
+        let model = DiscoveredModel::from_proto(info, server).unwrap();
+        let (engine, config) = VllmSidecarEngine::from_discovered(args, model, None).unwrap();
+        assert!(!engine.engine_gates_reasoning);
+        assert_eq!(config.reasoning_parser.as_deref(), Some("qwen3"));
     }
 
     #[test]

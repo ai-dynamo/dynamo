@@ -27,21 +27,21 @@ func selectRemotePartitions(
 	selection *dynamov1beta1.LPXLocalPartitions,
 	pipeline Pipeline,
 	build *Build,
-	partitions []BuildPartition,
-) ([]BuildPartition, []int, error) {
+	partitions []buildPartition,
+) ([]buildPartition, []int, error) {
 	if selection == nil {
 		return partitions, nil, nil
 	}
-	if pipeline != PipelineLPX {
+	if pipeline != PipelineHybrid {
 		return nil, nil, fmt.Errorf("%w: localPartitions requires a hybrid build with a Cyborg conductor", ErrUnsupportedRuntime)
 	}
 
 	// A selected prop-sync chain is one runtime partition owned by its first member.
-	runtimeOwner := make(map[int]int, len(build.Partitions))
-	for _, partition := range build.Partitions {
-		runtimeOwner[partition.SourcePartitionID] = partition.SourcePartitionID
+	runtimeOwner := make(map[int]int, len(build.partitions))
+	for _, partition := range build.partitions {
+		runtimeOwner[partition.sourcePartitionID] = partition.sourcePartitionID
 	}
-	for _, chain := range build.SelectedPropSyncChains {
+	for _, chain := range build.selectedPropSyncChains {
 		for _, member := range chain {
 			runtimeOwner[member] = chain[0]
 		}
@@ -72,9 +72,9 @@ func selectRemotePartitions(
 		return nil, nil, fmt.Errorf("localPartitions has unsupported mode %q", selection.Mode)
 	}
 
-	remote := make([]BuildPartition, 0, len(partitions))
+	remote := make([]buildPartition, 0, len(partitions))
 	for _, partition := range partitions {
-		if !local[runtimeOwner[partition.SourcePartitionID]] {
+		if !local[runtimeOwner[partition.sourcePartitionID]] {
 			remote = append(remote, partition)
 		}
 	}

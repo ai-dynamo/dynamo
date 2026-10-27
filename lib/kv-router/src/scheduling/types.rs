@@ -12,11 +12,11 @@ use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
 use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
-use crate::kv_hints::KvTransferCandidates;
+use crate::kv_hints::{KvTransferCandidates, KvTransferSourceChoice};
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
-    WorkerId, WorkerWithDpRank,
+    LocalBlockHash, RoutingConstraints, SelectionTrace, SharedCacheHits, WorkerAffinityTarget,
+    WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
@@ -158,9 +158,14 @@ pub struct SchedulingResponse {
     /// Raw prefix overlap for the selected worker and DP rank, in tokens.
     pub selected_raw_cached_tokens: Option<usize>,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
-    pub target_cached_prefix_blocks: u32,
+    /// The source `best_worker` fetches its KV prefix from; see
+    /// [`crate::protocols::WorkerSelectionResult::kv_transfer_source`].
+    pub kv_transfer_source: Option<KvTransferSourceChoice>,
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub potential_decode_blocks: usize,
+    /// Per-candidate costs, present only when the scheduler has a selection
+    /// trace spec installed and this selection was admitted.
+    pub selection_trace: Option<SelectionTrace>,
 }
 
 /// Internal result that pairs a public scheduling response with its attempt identity.
@@ -554,6 +559,15 @@ impl SchedulingRequest {
         blocks.saturating_mul(block_size as usize)
     }
 
+    /// The prefix a KV fetch would extend on `worker`: its device and
+    /// host-pinned overlap. Disk is not counted.
+    pub(crate) fn transfer_local_prefix_blocks_for(&self, worker: WorkerWithDpRank) -> usize {
+        let tiers = &self.overlap.tier_overlap_blocks;
+        let device = tiers.device.get(&worker).copied().unwrap_or(0);
+        let host_pinned = tiers.host_pinned.get(&worker).copied().unwrap_or(0);
+        device.saturating_add(host_pinned)
+    }
+
     pub(crate) fn effective_overlap_blocks_for(&self, worker: WorkerWithDpRank) -> f64 {
         self.overlap
             .effective_overlap_blocks
@@ -563,7 +577,16 @@ impl SchedulingRequest {
     }
 
     pub fn worker_load_for(&self, worker: WorkerWithDpRank) -> WorkerLoadProjection {
-        self.worker_loads.get(&worker).copied().unwrap_or_default()
+        self.worker_loads
+            .get(&worker)
+            .copied()
+            .unwrap_or_else(|| WorkerLoadProjection {
+                // A configured worker can precede its load projection. With no
+                // active-prefix evidence, count the full tracked request rather
+                // than treating its blocks as already present on that worker.
+                additional_active_blocks: self.token_seq.as_ref().map_or(0, Vec::len),
+                ..Default::default()
+            })
     }
 
     pub(crate) fn request_blocks(&self, block_size: u32) -> u64 {
@@ -676,6 +699,19 @@ mod tests {
                 request.potential_decode_blocks_after_admission(worker, 16),
                 expected,
                 "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_worker_projection_counts_the_full_request() {
+        let projected_worker = WorkerWithDpRank::new(0, 0);
+        let new_worker = WorkerWithDpRank::new(1, 0);
+        for (isl, tracked_blocks, expected) in [(32, None, 2), (32, Some(2), 2), (33, Some(2), 3)] {
+            let request = request_with_decode_load(isl, tracked_blocks, 100, 0, projected_worker);
+            assert_eq!(
+                request.potential_decode_blocks_after_admission(new_worker, 16),
+                expected
             );
         }
     }

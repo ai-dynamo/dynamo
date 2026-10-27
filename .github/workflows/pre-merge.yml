@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   changed-files:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
       examples: ${{ steps.changes.outputs.examples }}
@@ -62,7 +62,7 @@ jobs:
     name: Docs Lint
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -72,7 +72,7 @@ jobs:
       run: python3 docs/fern/scripts/docs_lint.py --scan docs --github
 
   pre-merge-status-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [changed-files, pre-commit, planner-gym, recipe-check, api-docs, fern-check, fern-broken-links, docs-lint, operator, rust-tests, rust-clippy, docs-website-composition]
     if: always()
     steps:
@@ -81,7 +81,7 @@ jobs:
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   pre-commit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -94,7 +94,7 @@ jobs:
     name: Planner Gym CPU, adapters excluded (Python ${{ matrix.python }})
     needs: changed-files
     if: needs.changed-files.outputs.planner_gym == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -123,7 +123,7 @@ jobs:
     name: Recipe Check
     needs: changed-files
     if: needs.changed-files.outputs.examples == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -153,13 +153,13 @@ jobs:
     - name: Check generated recipe manifests
       run: python3 scripts/kustomize-matrix.py check
     - name: Test recipe generators and docs artifacts
-      run: python3 -m pytest --noconftest tests/test_kustomize_matrix.py tests/test_generate_kustomize_openapi.py docs/tests/
+      run: python3 -m pytest --noconftest tests/test_kustomize_matrix.py tests/test_generate_kustomize_openapi.py docs/tests/ tests/deploy/test_batch_profile_values.py
 
   api-docs:
     name: Generated API References
     needs: changed-files
     if: needs.changed-files.outputs.api_docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -191,7 +191,9 @@ jobs:
           docs/fern/scripts/tests/test_gen_rust_api.py \
           docs/fern/scripts/tests/test_gen_kubernetes_api.py \
           docs/fern/scripts/tests/test_api_reference_regressions.py \
-          docs/fern/scripts/tests/test_api_freshness.py
+          docs/fern/scripts/tests/test_api_freshness.py \
+          docs/fern/scripts/tests/test_relink_shared_reference.py \
+          docs/fern/scripts/tests/test_resolve_translation_links.py
     - name: Generate API references from source
       # The Python/Rust references are publish-time artifacts (generated in
       # fern-docs.yml against the branch being published), not committed
@@ -235,7 +237,7 @@ jobs:
     name: Fern Configuration Check
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -319,7 +321,7 @@ jobs:
     name: Docs Website Composition Check
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -365,7 +367,7 @@ jobs:
     name: Fern Broken Links Check
     needs: changed-files
     if: needs.changed-files.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -388,12 +390,13 @@ jobs:
       run: npm install -g fern-api
     - name: Check for broken links
       working-directory: docs/fern
-      run: fern docs broken-links
+      # Without --strict the command reports errors and still exits 0.
+      run: fern docs broken-links --strict
 
   operator:
     needs: changed-files
     if: needs.changed-files.outputs.operator == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -416,7 +419,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
       contents: read
     steps:
@@ -465,6 +468,30 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Generate frontend OpenAPI specification
+      if: matrix.dir == '.'
+      # The preceding integration-test build also builds the normal binary.
+      # Run it directly: cargo run -p changes workspace feature selection and rebuilds.
+      run: |
+        set -euo pipefail
+        target/debug/generate-frontend-openapi
+        git rev-parse HEAD > docs/frontends/source-revision.txt
+        cp Cargo.lock docs/frontends/Cargo.lock
+        echo 'cargo test --locked --all-targets && target/debug/generate-frontend-openapi' > docs/frontends/generation-command.txt
+        (cd docs/frontends && sha256sum openapi.json Cargo.lock > checksums.sha256)
+    - name: Retain generated frontend OpenAPI specification
+      if: matrix.dir == '.'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: frontend-openapi-${{ github.sha }}
+        path: |
+          docs/frontends/openapi.json
+          docs/frontends/source-revision.txt
+          docs/frontends/Cargo.lock
+          docs/frontends/generation-command.txt
+          docs/frontends/checksums.sha256
+        if-no-files-found: error
+        retention-days: 14
     - name: Check isolated kv-router feature builds
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -522,7 +549,7 @@ jobs:
     runs-on:
       group: Fastchecker
     strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
       contents: read
     steps:

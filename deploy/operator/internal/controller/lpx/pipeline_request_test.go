@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -17,13 +18,201 @@ import (
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
+
+func TestRemoveReleasedAgentPods(t *testing.T) {
+	for _, tc := range []struct {
+		name, change                                  string
+		reason                                        lpxv1alpha1.ReleaseReason
+		remove, wantError, deleteError, missingClique bool
+	}{
+		{name: "dependency changed", remove: true},
+		{name: "request changed", reason: lpxv1alpha1.ReleaseReasonRequestChanged, remove: true},
+		{name: "binding failed", reason: lpxv1alpha1.ReleaseReasonBindingFailed, remove: true},
+		{name: "unbound target", change: "target", remove: true},
+		{name: "old-only predecessor", change: "old-only", remove: true},
+		{name: "request deleted", reason: lpxv1alpha1.ReleaseReasonRequestDeleted},
+		{name: "unknown reason", reason: "unknown"},
+		{name: "no status", change: "scheduler-status"},
+		{name: "no commitment", change: "committed"},
+		{name: "no node-local execution", change: "nodeLocal"},
+		{name: "no release journal", change: "release"},
+		{name: "bound request", change: "bound"},
+		{name: "deleting request", change: "deleting"},
+		{name: "cross-namespace reference", change: "namespace", wantError: true},
+		{name: "empty journal UID", change: "uid", wantError: true},
+		{name: "same-name successor", change: "successor"},
+		{name: "foreign graph in same namespace", change: "foreign-group", wantError: true},
+		{name: "replaced PodClique", change: "stale-clique", wantError: true},
+		{name: "replaced scaling group", change: "stale-group", wantError: true},
+		{name: "ownerless Pod", change: "pod-owner", wantError: true},
+		{name: "ownerless PodClique", change: "clique-owner", wantError: true},
+		{name: "Pod owner is not a controller", change: "controller", wantError: true},
+		{name: "Pod owner has wrong kind", change: "kind", wantError: true},
+		{name: "PodClique owner has foreign API", change: "api", wantError: true},
+		{name: "terminating PodClique", change: "terminating", remove: true},
+		{name: "PodClique cache miss retries", missingClique: true, wantError: true},
+		{name: "delete failure retries", deleteError: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Observe one released Agent Pod and its ownership beneath a trusted scaling group")
+			pcsgs, pclq, pod := newLPXTestAgentHierarchy()
+			request := newLPXTestReleaseRequest(pod)
+			execution := &request.Status.Committed.Execution
+			if tc.reason != "" {
+				execution.Release.Reason = tc.reason
+			}
+			switch tc.change {
+			case "target":
+				row := &execution.NodeLocal.PartitionSelections[0].SelectedRows[0]
+				row.Target, row.Current = &lpxv1alpha1.BindingTarget{PodRef: row.Current.PodRef}, nil
+			case "old-only":
+				execution.NodeLocal.PlanReplacement = &lpxv1alpha1.NodeLocalPlanReplacement{RealizeMembers: []lpxv1alpha1.RealizeMember{{
+					Predecessor: lpxv1alpha1.RealizeMemberPredecessor{OldOnly: &lpxv1alpha1.OldOnlyMember{Current: *execution.NodeLocal.PartitionSelections[0].SelectedRows[0].Current}},
+				}}}
+				execution.NodeLocal.PartitionSelections = nil
+			case "scheduler-status":
+				request.Status = nil
+			case "committed":
+				request.Status.Committed = nil
+			case "nodeLocal":
+				execution.NodeLocal = nil
+			case "release":
+				execution.Release = nil
+			case "bound":
+				request.Status.Phase = lpxv1alpha1.RequestPhaseBound
+			case "deleting":
+				request.DeletionTimestamp = new(metav1.Now())
+			case "namespace":
+				execution.NodeLocal.PartitionSelections[0].SelectedRows[0].Current.PodRef.Namespace = "other"
+			case "uid":
+				execution.NodeLocal.PartitionSelections[0].SelectedRows[0].Current.PodRef.UID = ""
+			case "successor":
+				pod.UID = "successor-uid"
+			case "foreign-group":
+				pclq.OwnerReferences[0].Name = "other-graph-engines"
+			case "stale-clique":
+				pclq.UID = "replacement-clique-uid"
+			case "stale-group":
+				pclq.OwnerReferences[0].UID = "previous-group-uid"
+			case "pod-owner":
+				pod.OwnerReferences = nil
+			case "clique-owner":
+				pclq.OwnerReferences = nil
+			case "controller":
+				pod.OwnerReferences[0].Controller = new(false)
+			case "kind":
+				pod.OwnerReferences[0].Kind = "PodCliqueSet"
+			case "api":
+				pclq.OwnerReferences[0].APIVersion = "other.example.com/v1alpha1"
+			case "terminating":
+				pclq.DeletionTimestamp, pclq.Finalizers = new(metav1.Now()), []string{"example.com/cleanup"}
+			}
+			objects := []client.Object{pod}
+			if !tc.missingClique {
+				objects = append(objects, pclq)
+			}
+			base := newLPXTestClient(t, objects...)
+			r := &graphReconciler{Client: interceptor.NewClient(base, interceptor.Funcs{
+				Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+					if tc.deleteError {
+						return errors.New("delete temporarily unavailable")
+					}
+					return delegated.Delete(ctx, object, opts...)
+				},
+			})}
+			requests := map[string]*lpxv1alpha1.LPUPipelineRequest{request.Name: request}
+
+			t.Log("Remove only an eligible, exact, owned Pod and preserve it when observation fails")
+			err := r.removeReleasedAgentPods(t.Context(), pcsgs, requests)
+			if tc.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			err = base.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{})
+			if tc.remove {
+				require.True(t, apierrors.IsNotFound(err))
+			} else {
+				require.NoError(t, err)
+			}
+
+			if tc.deleteError || tc.missingClique {
+				t.Log("Complete cleanup after the transient failure clears")
+				r.Client = base
+				if tc.missingClique {
+					require.NoError(t, base.Create(t.Context(), pclq))
+				}
+				require.NoError(t, r.removeReleasedAgentPods(t.Context(), pcsgs, requests))
+				require.True(t, apierrors.IsNotFound(base.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{})))
+			}
+		})
+	}
+}
+
+func TestRemoveReleasedAgentPodsContinuesAfterMissingPod(t *testing.T) {
+	t.Log("Keep a disappeared current Pod before a live target in the release journal")
+	pcsgs, pclq, pod := newLPXTestAgentHierarchy()
+	request := newLPXTestReleaseRequest(pod)
+	row := &request.Status.Committed.Execution.NodeLocal.PartitionSelections[0].SelectedRows[0]
+	row.Target = &lpxv1alpha1.BindingTarget{PodRef: row.Current.PodRef}
+	row.Current.PodRef.Name, row.Current.PodRef.UID = "already-gone", "already-gone-uid"
+	r := &graphReconciler{Client: newLPXTestClient(t, pclq, pod)}
+
+	t.Log("Request a retry for the missing observation while removing the remaining owned target")
+	err := r.removeReleasedAgentPods(t.Context(), pcsgs, map[string]*lpxv1alpha1.LPUPipelineRequest{request.Name: request})
+	require.Error(t, err)
+	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{})))
+}
+
+func TestRemoveReleasedAgentPodsConcurrentOwnershipChange(t *testing.T) {
+	t.Log("Observe an owned Pod, then change its owner immediately before deletion")
+	pcsgs, pclq, pod := newLPXTestAgentHierarchy()
+	request := newLPXTestReleaseRequest(pod)
+	requests := map[string]*lpxv1alpha1.LPUPipelineRequest{request.Name: request}
+	base := newLPXTestClient(t, pclq, pod)
+	r := &graphReconciler{Client: interceptor.NewClient(base, interceptor.Funcs{
+		Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+			live := &corev1.Pod{}
+			require.NoError(t, delegated.Get(ctx, client.ObjectKeyFromObject(object), live))
+			live.OwnerReferences[0].UID = "foreign-clique-uid"
+			require.NoError(t, delegated.Update(ctx, live))
+			return delegated.Delete(ctx, object, opts...)
+		},
+	})}
+
+	t.Log("The resource-version precondition refuses deletion and returns the conflict for retry")
+	err := r.removeReleasedAgentPods(t.Context(), pcsgs, requests)
+	require.True(t, apierrors.IsConflict(err), "expected delete conflict, got %v", err)
+	require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
+}
+
+func newLPXTestAgentHierarchy() (map[string]*grovev1alpha1.PodCliqueScalingGroup, *grovev1alpha1.PodClique, *corev1.Pod) {
+	pcsg := &grovev1alpha1.PodCliqueScalingGroup{Namespace: "test", Name: "engines", UID: "engines-uid"}
+	pclq := &grovev1alpha1.PodClique{
+		Namespace: pcsg.Namespace, Name: "old-agent-clique", UID: "old-agent-clique-uid",
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcsg, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueScalingGroup"))}}
+	pod := &corev1.Pod{
+		Namespace: pcsg.Namespace, Name: "agent", UID: "agent-uid",
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pclq, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))}}
+	return map[string]*grovev1alpha1.PodCliqueScalingGroup{pcsg.Name: pcsg}, pclq, pod
+}
+
+func newLPXTestReleaseRequest(pod *corev1.Pod) *lpxv1alpha1.LPUPipelineRequest {
+	committed := committedLPXTestPod(pod)
+	committed.Execution.Release = &lpxv1alpha1.ReleaseJournal{Reason: lpxv1alpha1.ReleaseReasonDependencyChanged, RequestedAtGeneration: 1}
+	return &lpxv1alpha1.LPUPipelineRequest{
+		Namespace: pod.Namespace, Name: "request", Generation: 1,
+		Status: &lpxv1alpha1.LPUPipelineRequestStatus{Phase: lpxv1alpha1.RequestPhaseReleasing, Committed: committed},
+	}
+}
 
 func TestGetPipelineRequests(t *testing.T) {
 	for _, tc := range []struct {
@@ -49,16 +238,15 @@ func TestGetPipelineRequests(t *testing.T) {
 				{"other-owner", "default", "other-uid"},
 				{"other-namespace", "other", "pcs-uid"},
 			} {
-				objects = append(objects, &lpxv1alpha1.LPUPipelineRequest{ObjectMeta: metav1.ObjectMeta{
+				objects = append(objects, &lpxv1alpha1.LPUPipelineRequest{
 					Name: request.name, Namespace: request.namespace,
 					OwnerReferences: []metav1.OwnerReference{{
 						APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Kind: "PodCliqueSet",
-						Name: "pcs", UID: request.uid, Controller: ptr.To(true),
-					}},
-				}})
+						Name: "pcs", UID: request.uid, Controller: new(true),
+					}}})
 			}
 			r := &graphReconciler{Client: newLPXTestClient(t, objects...)}
-			pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: "pcs", Namespace: tc.namespace, UID: tc.uid}}
+			pcs := &grovev1alpha1.PodCliqueSet{Name: "pcs", Namespace: tc.namespace, UID: tc.uid}
 
 			t.Log("Return only this PCS's requests")
 			requests, err := r.getPipelineRequests(t.Context(), pcs)
@@ -75,7 +263,7 @@ func TestGetPipelineRequests(t *testing.T) {
 func TestImplicitV2LPXConductorlessGroveIdentityPublishesRequest(t *testing.T) {
 	t.Log("Publish the implicit hybrid runtime")
 	ctx := t.Context()
-	deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+	deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 	reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, deployment, dgd)
 	require.Empty(t, desired.plan.ConductorTemplate)
 	require.NotEmpty(t, desired.plan.CyborgClique)
@@ -219,7 +407,7 @@ func TestNodeLocalSpecDecodePublishesOneRequestAndAgentCliquePerModelProjection(
 		projection := &desired.requests[index]
 		clique := getResource[*grovev1alpha1.PodClique](t, objects, expected.CliqueName)
 		require.Equal(t, int32(expected.Replicas), clique.Spec.Replicas)
-		require.Equal(t, ptr.To(int32(expected.Replicas)), clique.Spec.MinAvailable)
+		require.Equal(t, new(int32(expected.Replicas)), clique.Spec.MinAvailable)
 		require.Equal(t, projection.Annotations[lpx.WorkloadDigestAnnotation], clique.Annotations[lpx.WorkloadDigestAnnotation])
 		require.Equal(t, projection.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation], clique.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
 		require.Equal(t, projection.Annotations[pipelineRequestModelAnnotation], clique.Annotations[lpxv1alpha1.PodModelAnnotation])
@@ -308,7 +496,7 @@ func TestPipelineRequestsPendingDeletion(t *testing.T) {
 					desired[request.Name] = request
 				}
 				if slices.Contains(tc.terminating, request.Name) {
-					request.DeletionTimestamp = ptr.To(metav1.Now())
+					request.DeletionTimestamp = new(metav1.Now())
 				}
 			}
 
@@ -372,7 +560,7 @@ func TestResolvePipelineRequestsRequestsOnlyRemotePartitions(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Resolve a hybrid workload with the selected local partitions")
-			deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+			deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineHybrid)
 			dgd.Spec.Components[0].LPX.Experimental = &v1beta1.LPXExperimentalSpec{LocalPartitions: tc.localPartitions}
 			desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
 

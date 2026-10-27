@@ -17,6 +17,43 @@ use crate::live::{LiveEngine, LiveEngineOptions};
 
 use super::*;
 
+#[test]
+fn host_loop_is_rejected_before_live_tasks_start() {
+    let args = MockerConfig::from_value(serde_json::json!({
+        "engine": {"backend": "sglang", "sglang": {"host_loop": true}}
+    }))
+    .unwrap();
+    let grouped = create_grouped_scheduler(
+        args.clone(),
+        vec![GroupedSchedulerRankSinks::default()],
+        None,
+    );
+    assert!(
+        grouped
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("sglang.host_loop")
+    );
+    let single = create_single_rank_scheduler_with_rank_sink(
+        args,
+        0,
+        RankSinks {
+            output: RankOutputSink::None,
+            kv_event_publishers: KvEventPublishers::default(),
+            fpm_publisher: FpmPublisher::default(),
+        },
+        None,
+    );
+    assert!(
+        single
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("sglang.host_loop")
+    );
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CapturedEffect {
     KvStored,
@@ -128,7 +165,9 @@ async fn noop_cancellation_only_cleans_metadata_when_output_is_discarded() {
         engine_args.kv_transfer_bytes_per_token = Some(1_000_000);
         let compatibility = CompatibilityState::new(engine_args);
         let request_id = Uuid::from_u128(10 + u128::from(suppressed_pending_output));
-        compatibility.native_request(request(request_id.as_u128(), 0));
+        compatibility
+            .native_request(request(request_id.as_u128(), 0))
+            .unwrap();
 
         let (lifecycle_tx, _lifecycle_rx) = mpsc::channel(1);
         let (metrics_tx, _metrics_rx) = watch::channel(MockerMetrics::new(0, 0, 128));
