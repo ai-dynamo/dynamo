@@ -12,6 +12,248 @@ use std::collections::{HashMap, HashSet};
 use support::*;
 
 #[test]
+fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
+    use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyError, RuntimePolicyUpdate};
+    use serde_json::json;
+
+    let (workers, mut request) = fixture(2, 160);
+    for (worker, load) in &mut request.worker_loads {
+        load.active_prefill_tokens = 0;
+        load.active_requests = 0;
+        load.active_decode_blocks = if worker.worker_id == 0 { 8 } else { 0 };
+        load.additional_active_blocks = 0;
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(*worker, if worker.worker_id == 0 { 10 } else { 0 });
+    }
+    let config = KvRouterConfig {
+        overlap_score_credit: 2.0,
+        host_cache_hit_weight: 0.0,
+        disk_cache_hit_weight: 0.0,
+        router_temperature: 0.0,
+        ..Default::default()
+    };
+    let mut policy = default_policy(config, "prefill");
+    let select = |policy: &WorkerSelectionPolicy| {
+        policy
+            .select_worker(selection_input(&workers, &request, 16))
+            .unwrap()
+            .worker
+            .worker_id
+    };
+    assert_eq!(select(&policy), 0);
+    let initial = policy.runtime_config().unwrap();
+    let patch = json!({"overlap_score_credit": 0.0})
+        .as_object()
+        .unwrap()
+        .clone();
+    let changed = policy
+        .update_runtime_config(RuntimePolicyUpdate::patch(
+            initial.revision(),
+            patch.clone(),
+        ))
+        .unwrap();
+    assert_eq!(select(&policy), 1);
+    assert_eq!(changed.revision(), 1);
+    assert!(matches!(
+        policy.update_runtime_config(RuntimePolicyUpdate::patch(0, patch)),
+        Err(RuntimePolicyError::Conflict { .. })
+    ));
+    for invalid in [
+        json!({"overlap_score_credit": 2.0, "router_temperature": -1.0}),
+        json!({"router_temperature": "1"}),
+        json!({"tp": 2}),
+    ] {
+        assert!(
+            policy
+                .update_runtime_config(RuntimePolicyUpdate::patch(
+                    1,
+                    invalid.as_object().unwrap().clone()
+                ))
+                .is_err()
+        );
+        assert_eq!(policy.runtime_config().unwrap(), changed);
+        assert_eq!(select(&policy), 1);
+    }
+    policy
+        .update_runtime_config(RuntimePolicyUpdate::patch(
+            1,
+            json!({"overlap_score_credit": null})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ))
+        .unwrap();
+    assert_eq!(select(&policy), 0);
+    policy
+        .update_runtime_config(RuntimePolicyUpdate::patch(
+            2,
+            json!({"overlap_score_credit": 0.0, "prefill_load_scale": 3.0})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ))
+        .unwrap();
+    assert_eq!(select(&policy), 1);
+    let reset = policy
+        .update_runtime_config(RuntimePolicyUpdate::reset(3))
+        .unwrap();
+    assert_eq!(reset.parameters(), initial.parameters());
+    assert_eq!(reset.revision(), 4);
+    assert_eq!(select(&policy), 0);
+}
+
+#[test]
+fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
+    use dynamo_kv_router::plugins::worker_selection::{RuntimePolicyError, RuntimePolicyUpdate};
+    for (config, role) in [
+        (
+            KvRouterConfig {
+                overlap_score_credit: 0.0,
+                host_cache_hit_weight: 0.0,
+                disk_cache_hit_weight: 0.0,
+                shared_cache_multiplier: Some(0.0),
+                ..Default::default()
+            },
+            WorkerType::Prefill,
+        ),
+        // Legacy load-only configs retain nonzero tier weights in host accounting.
+        (
+            KvRouterConfig {
+                overlap_score_credit: 0.0,
+                shared_cache_multiplier: Some(0.5),
+                ..Default::default()
+            },
+            WorkerType::Aggregated,
+        ),
+        (KvRouterConfig::default(), WorkerType::Decode),
+    ] {
+        let mut policy = dynamo_custom_policy_builtin::default_factory()(
+            &config,
+            role,
+            RoutingPartitionRef::new("model", "default"),
+        );
+        assert!(
+            !<WorkerSelectionPolicy as WorkerSelector<TestWorker>>::required_worker_inputs(&policy)
+                .contains(WorkerInputs::CACHE)
+        );
+        let initial = policy.runtime_config().unwrap();
+        for name in [
+            "overlap_score_credit",
+            "host_cache_hit_weight",
+            "disk_cache_hit_weight",
+            "shared_cache_multiplier",
+        ] {
+            assert_eq!(initial.parameters()[name], 0.0);
+            assert!(
+                matches!(
+                    policy.update_runtime_config(RuntimePolicyUpdate::patch(
+                        0,
+                        serde_json::Map::from_iter([(name.to_owned(), 1.0.into())]),
+                    )),
+                    Err(RuntimePolicyError::InvalidParameters(_))
+                ),
+                "role={role:?} parameter={name}"
+            );
+            assert_eq!(policy.runtime_config().unwrap(), initial);
+        }
+    }
+}
+
+#[test]
+fn runtime_cache_tier_weights_change_selection_without_device_credit() {
+    use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate;
+
+    for role in [WorkerType::Prefill, WorkerType::Decode] {
+        for name in [
+            "host_cache_hit_weight",
+            "disk_cache_hit_weight",
+            "shared_cache_multiplier",
+        ] {
+            let (workers, mut request) = fixture(2, 160);
+            request.overlap = Default::default();
+            request.track_prefill_tokens = role != WorkerType::Decode;
+            for (worker, load) in &mut request.worker_loads {
+                *load = Default::default();
+                load.active_decode_blocks = if worker.worker_id == 0 { 14 } else { 8 };
+                let overlap = if worker.worker_id == 0 { 10 } else { 0 };
+                match name {
+                    "host_cache_hit_weight" => {
+                        request
+                            .overlap
+                            .tier_overlap_blocks
+                            .host_pinned
+                            .insert(*worker, overlap);
+                    }
+                    "disk_cache_hit_weight" => {
+                        request
+                            .overlap
+                            .tier_overlap_blocks
+                            .disk
+                            .insert(*worker, overlap);
+                    }
+                    _ => {
+                        request
+                            .overlap
+                            .tier_overlap_blocks
+                            .device
+                            .insert(*worker, 10 - overlap);
+                    }
+                }
+            }
+            if name == "shared_cache_multiplier" {
+                request.shared_cache_hits = Some(dynamo_kv_router::SharedCacheHits::from_ranges(
+                    std::iter::once(0..10).collect(),
+                ));
+            }
+            // A nonzero multiplier also reads fetch inputs, which updates cannot add, so the
+            // shared case starts with a credit too small to change the choice.
+            let config = KvRouterConfig {
+                conditional_disagg_enabled: role == WorkerType::Decode,
+                overlap_score_credit: 1.0,
+                host_cache_hit_weight: 0.0,
+                disk_cache_hit_weight: 0.0,
+                shared_cache_multiplier: Some(if name == "shared_cache_multiplier" {
+                    0.5
+                } else {
+                    0.0
+                }),
+                ..Default::default()
+            };
+            let mut policy = dynamo_custom_policy_builtin::default_factory()(
+                &config,
+                role,
+                RoutingPartitionRef::new("model", "default"),
+            );
+            let select = |policy: &WorkerSelectionPolicy| {
+                policy
+                    .select_worker(selection_input(&workers, &request, 16))
+                    .unwrap()
+                    .worker
+                    .worker_id
+            };
+            assert_eq!(select(&policy), 1, "{name}");
+            policy
+                .update_runtime_config(RuntimePolicyUpdate::patch(
+                    0,
+                    serde_json::Map::from_iter([
+                        ("overlap_score_credit".to_owned(), 0.0.into()),
+                        (name.to_owned(), 1.0.into()),
+                    ]),
+                ))
+                .unwrap();
+            assert_eq!(select(&policy), 0, "{name}");
+            policy
+                .update_runtime_config(RuntimePolicyUpdate::reset(1))
+                .unwrap();
+            assert_eq!(select(&policy), 1, "{name}");
+        }
+    }
+}
+
+#[test]
 fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
     for temperature in [0.0, 0.7] {
         for prompt in [1, 17, 127, 2048] {
@@ -409,6 +651,8 @@ fn named_default_parameters_resolve_and_reject_invalid_values() {
     for (parameter, succeeds) in [
         ("overlap_score_credit: 2.0", true),
         ("overlap_score_credit: -1.0", false),
+        ("router_temperature: .inf", false),
+        ("router_temperature: .nan", false),
         ("unknown: 1", false),
     ] {
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -461,6 +705,11 @@ fn yaml_parameters_override_legacy_config_and_omissions_inherit_it() {
     dynamo_custom_policy_builtin::register(&mut registry).unwrap();
     for (parameters, expected_worker, expects_cache) in [
         ("{}", 0, true),
+        (
+            "{overlap_score_credit: 0, host_cache_hit_weight: 1}",
+            1,
+            true,
+        ),
         (
             "{overlap_score_credit: 0, shared_cache_multiplier: 0}",
             1,
@@ -556,6 +805,124 @@ fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
         );
         if parameters == "{}" {
             assert_eq!(select(default_policy(config, "prefill")), expected_worker);
+        }
+    }
+}
+
+fn patch(parameters: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    parameters.as_object().unwrap().clone()
+}
+
+#[test]
+fn selector_runtime_update_keeps_the_seeded_random_stream() {
+    use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate;
+
+    let (workers, request) = fixture(16, 2048);
+    let config = KvRouterConfig {
+        router_temperature: 0.7,
+        overlap_score_credit_decay: 0.6,
+        ..Default::default()
+    };
+    let fixed = DefaultWorkerSelector::new_seeded(Some(config.clone()), "prefill", 42);
+    let updated = DefaultWorkerSelector::new_seeded(Some(config), "prefill", 42);
+    // Sampling at a nonzero temperature draws from the seeded stream on every selection, so the
+    // rebuilt policy must keep drawing from the same stream to stay in lockstep.
+    let applied = updated
+        .runtime_control()
+        .update_runtime_config(RuntimePolicyUpdate::patch(
+            0,
+            patch(serde_json::json!({"router_temperature": 0.7})),
+        ))
+        .unwrap();
+    assert_eq!(applied.revision(), 1);
+    for round in 0..64 {
+        let input = selection_input(&workers, &request, 16);
+        assert_eq!(
+            updated.select_worker(input).unwrap().worker,
+            fixed.select_worker(input).unwrap().worker,
+            "round={round}"
+        );
+    }
+}
+
+#[test]
+fn selector_controls_share_runtime_state_and_clones_start_fresh() {
+    use dynamo_kv_router::plugins::worker_selection::RuntimePolicyUpdate;
+
+    let config = KvRouterConfig {
+        router_temperature: 0.5,
+        ..Default::default()
+    };
+    let selector = DefaultWorkerSelector::new(Some(config), "replay");
+    let control = selector.runtime_control();
+    let initial = control.runtime_config().unwrap();
+    assert_eq!(initial.revision(), 0);
+
+    control
+        .update_runtime_config(RuntimePolicyUpdate::patch(
+            0,
+            patch(serde_json::json!({"router_temperature": 1.5})),
+        ))
+        .unwrap();
+    // A handle taken later reads the same policy.
+    let after = selector.runtime_control().runtime_config().unwrap();
+    assert_eq!(after.revision(), 1);
+    assert_eq!(after.parameters()["router_temperature"], 1.5);
+
+    let clone = selector.clone();
+    assert_eq!(clone.runtime_control().runtime_config().unwrap(), initial);
+    assert_eq!(control.runtime_config().unwrap().revision(), 1);
+}
+
+#[test]
+fn startup_policy_parameters_match_the_default_factory_for_every_role() {
+    use dynamo_custom_policy_builtin::startup_policy_parameters;
+
+    for conditional_disagg_enabled in [false, true] {
+        for config in [
+            KvRouterConfig::default(),
+            KvRouterConfig {
+                overlap_score_credit: 1.5,
+                overlap_score_credit_decay: 0.3,
+                prefill_load_scale: 2.0,
+                decode_active_request_weight: 0.4,
+                host_cache_hit_weight: 0.5,
+                disk_cache_hit_weight: 0.2,
+                shared_cache_multiplier: Some(0.3),
+                router_temperature: 0.7,
+                ..Default::default()
+            },
+            // Zero credit zeroes the inherited cache-tier weights.
+            KvRouterConfig {
+                overlap_score_credit: 0.0,
+                shared_cache_multiplier: Some(0.5),
+                ..Default::default()
+            },
+        ] {
+            let config = KvRouterConfig {
+                conditional_disagg_enabled,
+                ..config
+            };
+            for role in [
+                WorkerType::Aggregated,
+                WorkerType::Prefill,
+                WorkerType::Decode,
+            ] {
+                let policy = dynamo_custom_policy_builtin::default_factory()(
+                    &config,
+                    role,
+                    RoutingPartitionRef::new("model", "default"),
+                );
+                let expected = policy.runtime_config().unwrap();
+                let startup = startup_policy_parameters(&config, role);
+                assert_eq!(
+                    &startup,
+                    expected.parameters(),
+                    "role={role:?} conditional_disagg={conditional_disagg_enabled}"
+                );
+                assert_eq!(startup.len(), 8);
+                assert!(startup.values().all(serde_json::Value::is_number));
+            }
         }
     }
 }

@@ -1,36 +1,32 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Tool calls routed through the `dynamo-parsers-v2` streaming parser, bypassing the jail.
-//!
-//! The families in `V2_FAMILIES` (Qwen3-Coder, DeepSeek-V4) stream
-//! straight through their `dynamo_parsers_v2` parser instead of
-//! `JailedStream`: the v2 parser owns incremental
-//! tool-call emission and drops a parameter value truncated at EOF rather than
-//! guessing it. The jail is never built for these families in either path
-//! (`apply_stream` for streaming, `parse_complete` for batch). Within this legacy
-//! route, other families and non-`auto` tool_choice use the v1 jail / aggregate-
-//! finalize path. Requests selected for UnifiedParser use a separate route in
-//! `preprocessor.rs` and do not depend on this module's gate. The parser is selected
-//! by family name via `dynamo_parsers_v2::create_tool_parser_for_family`, so adding
-//! a family is a one-line change here plus support in that crate.
+//! Parser-generation validation and legacy guided-JSON conversion.
+//! Compatible families use `unified_parser` for streaming and batch.
 
+#[cfg(test)]
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
 use async_stream::stream;
+#[cfg(test)]
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk, FinishReason,
     FunctionCallStream, FunctionType,
 };
 use dynamo_runtime::config::environment_names::llm as env_llm;
+#[cfg(test)]
 use dynamo_runtime::protocols::annotated::Annotated;
+#[cfg(test)]
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
 
 use dynamo_parsers::tool_calling::{
     CalledFunction, ToolCallResponse, ToolCallType, ToolDefinition,
 };
-use dynamo_parsers_v2::{Tool as ToolV2, ToolCallDelta, ToolParser, create_tool_parser_for_family};
+use dynamo_parsers_v2::create_tool_parser_for_family;
+#[cfg(test)]
+use dynamo_parsers_v2::{Tool as ToolV2, ToolCallDelta, ToolParser};
 
 #[cfg(test)]
 use dynamo_parsers_v2::{
@@ -39,6 +35,7 @@ use dynamo_parsers_v2::{
 
 use crate::protocols::openai::GuidedToolConstraint;
 
+#[cfg(test)]
 use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_template};
 
 // TODO: when glm47 is added here,
@@ -305,6 +302,7 @@ pub(crate) fn parse_complete_guided_json(
 /// later deltas for that index carry only argument fragments (`id`/`type`/`name`
 /// `None`), matching the OpenAI streaming tool-call contract. `opened` tracks the
 /// indices already opened; shared by the tool-only and unified streaming states.
+#[cfg(test)]
 fn emit_tool_chunks(
     opened: &mut HashSet<usize>,
     calls: Vec<ToolCallDelta>,
@@ -332,11 +330,13 @@ fn emit_tool_chunks(
 
 /// Per-choice streaming state: one parser plus the set of tool indices whose
 /// opening delta (id + type + function name) has already been emitted.
+#[cfg(test)]
 struct ChoiceState {
     parser: Box<dyn ToolParser>,
     opened: HashSet<usize>,
 }
 
+#[cfg(test)]
 impl ChoiceState {
     fn new(family: &str, tools: &[ToolV2]) -> anyhow::Result<Self> {
         Ok(Self {
@@ -359,6 +359,7 @@ type UnifiedChoiceState = super::unified_parser::ChoiceState;
 
 /// Finish every choice that has not received an upstream finish reason. This is
 /// called before a usage-only chunk when one exists, with EOF as a fallback.
+#[cfg(test)]
 fn finish_unterminated_choices(
     states: &mut HashMap<u32, ChoiceState>,
     finished: &mut HashSet<u32>,
@@ -474,6 +475,7 @@ fn response_with_choice(
 /// content and its tool-call deltas become OpenAI tool-call chunks. The jail is never
 /// built. `finish()` runs on a choice's terminating chunk (and again at stream end as
 /// a backstop) so a value truncated mid-stream is dropped instead of leaking markup.
+#[cfg(test)]
 pub(crate) fn apply_stream<S>(
     stream_in: S,
     tool_definitions: Option<Vec<ToolDefinition>>,
@@ -1475,18 +1477,18 @@ mod tests {
         for parser in ["muse_glimmer", "muse"] {
             assert_eq!(
                 unified_family(Some(parser), None).as_deref(),
-                enabled().then_some("muse_glimmer"),
-                "explicit V2 selects Muse; its auto exception is request-mode dependent"
+                (selected_version().unwrap() != ParserVersion::V1).then_some("muse_glimmer"),
+                "compatible Muse configurations select V2 unless V1 is explicit"
             );
             assert_eq!(
                 unified_family(None, Some(parser)).as_deref(),
-                enabled().then_some("muse_glimmer"),
-                "explicit V2 selects Muse; its auto exception is request-mode dependent"
+                (selected_version().unwrap() != ParserVersion::V1).then_some("muse_glimmer"),
+                "compatible Muse configurations select V2 unless V1 is explicit"
             );
         }
         assert_eq!(
             unified_family(Some("qwen3_coder"), None).as_deref(),
-            enabled().then_some("qwen3")
+            (selected_version().unwrap() != ParserVersion::V1).then_some("qwen3")
         );
         assert_eq!(unified_family(Some("muse"), Some("qwen3")), None);
         assert_eq!(unified_family(None, None), None);
@@ -1672,7 +1674,7 @@ mod tests {
     // Unregistered families stay on their existing route.
     #[test]
     fn unified_family_returns_none_for_other_families() {
-        for other in ["harmony", "nemotron_deci"] {
+        for other in ["hermes", "nemotron_deci"] {
             assert_eq!(unified_family(Some(other), None), None, "{other} tool");
             assert_eq!(unified_family(None, Some(other)), None, "{other} reasoning");
         }

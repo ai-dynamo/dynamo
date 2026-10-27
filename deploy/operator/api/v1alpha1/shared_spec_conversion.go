@@ -46,7 +46,6 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
@@ -243,7 +242,7 @@ func restoreSharedAlphaOnlySimpleFields(dst *DynamoComponentDeploymentSharedSpec
 		dst.SubComponentType = preserved.SubComponentType
 	}
 	if dst.DynamoNamespace == nil && preserved.DynamoNamespace != nil {
-		dst.DynamoNamespace = ptr.To(*preserved.DynamoNamespace)
+		dst.DynamoNamespace = new(*preserved.DynamoNamespace)
 	}
 	if dst.Autoscaling == nil && preserved.Autoscaling != nil {
 		cp := *preserved.Autoscaling
@@ -331,7 +330,7 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 		hasSave = true
 	}
 	if src.DynamoNamespace != nil {
-		save.DynamoNamespace = ptr.To(*src.DynamoNamespace)
+		save.DynamoNamespace = new(*src.DynamoNamespace)
 		hasSave = true
 	}
 	if src.Autoscaling != nil {
@@ -351,7 +350,7 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 		hasSave = true
 	}
 	if src.EnvFromSecret != nil {
-		save.EnvFromSecret = ptr.To(*src.EnvFromSecret)
+		save.EnvFromSecret = new(*src.EnvFromSecret)
 		hasSave = true
 	}
 	if resourcesNeedPreservation(src.Resources) {
@@ -463,7 +462,7 @@ func saveSharedMainContainerOrigins(src, save *DynamoComponentDeploymentSharedSp
 	}
 	if src.EnvFromSecret != nil || len(main.EnvFrom) > 0 {
 		if src.EnvFromSecret != nil {
-			save.EnvFromSecret = ptr.To(*src.EnvFromSecret)
+			save.EnvFromSecret = new(*src.EnvFromSecret)
 		}
 		ensureExtraPodSpecMainContainer(save).EnvFrom = slices.Clone(main.EnvFrom)
 	}
@@ -610,7 +609,7 @@ func saveSharedHubOnlySpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, con
 		return nil
 	}
 	if sharedFrontendSidecarNeedsPreservation(src, converted) {
-		save.FrontendSidecar = ptr.To(*src.FrontendSidecar)
+		save.FrontendSidecar = new(*src.FrontendSidecar)
 	}
 	if src.PodTemplate != nil {
 		if err := saveSharedPodTemplateHubOnlyFields(src, converted, save); err != nil {
@@ -1442,7 +1441,8 @@ func convertExperimentalFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec
 // fields (Resources, Envs, Probes, EnvFromSecret, ExtraPodSpec,
 // ExtraPodMetadata, FrontendSidecar) following the same merge precedence the
 // v1alpha1 controller uses at reconcile time: ExtraPodSpec.MainContainer wins
-// over dedicated fields, except for env and volumeMounts which are additive.
+// over dedicated fields, except for env, envFrom, and volumeMounts which are
+// additive.
 func buildPodTemplateToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, ctx DynamoComponentDeploymentSharedSpecConversionContext) error {
 	podTpl, err := buildSharedPodTemplateFromAlpha(src, ctx.PodTemplateOrigin, false)
 	if err != nil {
@@ -1490,6 +1490,9 @@ func buildBasePodTemplate(src *DynamoComponentDeploymentSharedSpec) *corev1.PodT
 	return podTpl
 }
 
+// mergeExtraPodSpecMainContainer merges src's main-container fields into mainBase,
+// preserving the v1alpha1 renderer's additive env, envFrom, and volumeMounts rules.
+// Both arguments must be non-nil; mainBase is mutated and src is left unchanged.
 func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, mainBase *corev1.Container) error {
 	if src.ExtraPodSpec == nil || src.ExtraPodSpec.MainContainer == nil {
 		return nil
@@ -1497,6 +1500,7 @@ func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, ma
 	main := src.ExtraPodSpec.MainContainer.DeepCopy()
 	baseEnvs := mainBase.Env
 	dedicatedVolumeMounts := slices.Clone(mainBase.VolumeMounts)
+	dedicatedEnvFrom := slices.Clone(mainBase.EnvFrom)
 	// Name must be "main" regardless of what MainContainer carried.
 	main.Name = mainContainerName
 	if err := mergo.Merge(mainBase, *main, mergo.WithOverride); err != nil {
@@ -1507,6 +1511,10 @@ func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, ma
 	// appended the dedicated service-level mounts. Preserve that ordering rather
 	// than allowing mergo to replace the VolumeMounts slice.
 	mainBase.VolumeMounts = append(slices.Clone(main.VolumeMounts), dedicatedVolumeMounts...)
+	// The v1alpha1 renderer likewise appended envFromSecret after
+	// extraPodSpec.mainContainer.envFrom. Keep duplicates: the last source wins
+	// when two sources define the same key.
+	mainBase.EnvFrom = append(slices.Clone(main.EnvFrom), dedicatedEnvFrom...)
 	if main.Ports != nil {
 		mainBase.Ports = main.Ports
 	}
@@ -1550,7 +1558,7 @@ func buildSharedPodTemplateFromAlpha(src *DynamoComponentDeploymentSharedSpec, p
 
 func setFrontendSidecarReferenceToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec) {
 	if src.FrontendSidecar != nil {
-		dst.FrontendSidecar = ptr.To(defaultFrontendSidecarContainerName)
+		dst.FrontendSidecar = new(defaultFrontendSidecarContainerName)
 	}
 }
 
@@ -1567,7 +1575,7 @@ func buildMainContainerFromDedicated(src *DynamoComponentDeploymentSharedSpec) c
 	if src.EnvFromSecret != nil && *src.EnvFromSecret != "" {
 		ctr.EnvFrom = append(ctr.EnvFrom, corev1.EnvFromSource{
 			SecretRef: &corev1.SecretEnvSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: *src.EnvFromSecret},
+				Name: *src.EnvFromSecret,
 			},
 		})
 	}
@@ -1725,7 +1733,7 @@ func restoreSharedHubOnlyFrontendSidecar(dst, preserved *v1beta1.DynamoComponent
 		!podTemplateHasContainer(dst.PodTemplate, *preserved.FrontendSidecar) {
 		return
 	}
-	dst.FrontendSidecar = ptr.To(*preserved.FrontendSidecar)
+	dst.FrontendSidecar = new(*preserved.FrontendSidecar)
 }
 
 func sharedFrontendSidecarHasPreservedPodTemplateContainer(preserved *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
@@ -2239,7 +2247,7 @@ func appendFrontendSidecar(podTpl *corev1.PodTemplateSpec, fs *FrontendSidecarSp
 	if fs.EnvFromSecret != nil && *fs.EnvFromSecret != "" {
 		ctr.EnvFrom = append(ctr.EnvFrom, corev1.EnvFromSource{
 			SecretRef: &corev1.SecretEnvSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: *fs.EnvFromSecret},
+				Name: *fs.EnvFromSecret,
 			},
 		})
 	}
@@ -2264,9 +2272,9 @@ func frontendSidecarSpecFromContainer(ctr corev1.Container, origin *FrontendSide
 	out.Args = slices.Clone(ctr.Args)
 	out.Envs = slices.Clone(ctr.Env)
 	if secretName, ok := frontendSidecarEnvFromSecret(ctr.EnvFrom); ok {
-		out.EnvFromSecret = ptr.To(secretName)
+		out.EnvFromSecret = new(secretName)
 	} else if origin != nil && origin.EnvFromSecret != nil && *origin.EnvFromSecret == "" {
-		out.EnvFromSecret = ptr.To("")
+		out.EnvFromSecret = new("")
 	} else {
 		out.EnvFromSecret = nil
 	}
@@ -2345,12 +2353,15 @@ func extraPodSpecOnlyPreservesMainContainerName(eps *ExtraPodSpec) bool {
 	return containerIsEmpty(main)
 }
 
+// restoreEnvFromSecretFromPreserved restores the dedicated field in dst when its
+// saved Secret exactly matches the trailing current envFrom entry. A saved empty
+// string is restored directly. Nil dst or preserved values require no restoration.
 func restoreEnvFromSecretFromPreserved(dst, preserved *DynamoComponentDeploymentSharedSpec, mainContainerPresent bool) {
 	if dst == nil || preserved == nil || dst.EnvFromSecret != nil || preserved.EnvFromSecret == nil {
 		return
 	}
 	if *preserved.EnvFromSecret == "" {
-		dst.EnvFromSecret = ptr.To("")
+		dst.EnvFromSecret = new("")
 		return
 	}
 	if !mainContainerPresent {
@@ -2359,11 +2370,19 @@ func restoreEnvFromSecretFromPreserved(dst, preserved *DynamoComponentDeployment
 	if dst.ExtraPodSpec == nil || dst.ExtraPodSpec.MainContainer == nil {
 		return
 	}
-	if !envFromSecretMatches(dst.ExtraPodSpec.MainContainer.EnvFrom, *preserved.EnvFromSecret) {
+
+	// The v1alpha1 renderer appends envFromSecret last, so only an exact
+	// trailing entry can still be the dedicated field; other entries come from
+	// the current v1beta1 list.
+	envFrom := dst.ExtraPodSpec.MainContainer.EnvFrom
+	if len(envFrom) == 0 || !envFromSecretMatches(envFrom[len(envFrom)-1], *preserved.EnvFromSecret) {
 		return
 	}
-	dst.EnvFromSecret = ptr.To(*preserved.EnvFromSecret)
-	dst.ExtraPodSpec.MainContainer.EnvFrom = nil
+	dst.EnvFromSecret = new(*preserved.EnvFromSecret)
+	dst.ExtraPodSpec.MainContainer.EnvFrom = slices.Clone(envFrom[:len(envFrom)-1])
+	if len(dst.ExtraPodSpec.MainContainer.EnvFrom) == 0 {
+		dst.ExtraPodSpec.MainContainer.EnvFrom = nil
+	}
 }
 
 func sharedHasMainContainer(src *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
@@ -2395,6 +2414,9 @@ func restoredExtraPodSpec(restored *DynamoComponentDeploymentSharedSpec) *ExtraP
 	return restored.ExtraPodSpec
 }
 
+// restoreMainContainerFieldOrigins restores field placement in dst when current
+// values still match the saved alpha projection. It leaves edited values intact;
+// envFromSecret is handled separately. Nil dst or preserved values are ignored.
 func restoreMainContainerFieldOrigins(dst, preserved *DynamoComponentDeploymentSharedSpec, mainContainerPresent bool) {
 	if !mainContainerPresent ||
 		dst == nil ||
@@ -2411,9 +2433,6 @@ func restoreMainContainerFieldOrigins(dst, preserved *DynamoComponentDeploymentS
 		(len(preserved.Envs) > 0 || len(preservedMain.Env) > 0) {
 		dst.Envs = slices.Clone(preserved.Envs)
 		ensureExtraPodSpecMainContainer(dst).Env = slices.Clone(preservedMain.Env)
-	}
-	if apiequality.Semantic.DeepEqual(currentMain.EnvFrom, preservedSemanticMain.EnvFrom) && preserved.EnvFromSecret != nil {
-		dst.EnvFromSecret = ptr.To(*preserved.EnvFromSecret)
 	}
 	if resourceRequirementsEqual(currentMain.Resources, preservedSemanticMain.Resources) &&
 		(preserved.Resources != nil || !resourceRequirementsEqual(preservedMain.Resources, corev1.ResourceRequirements{})) {
@@ -2696,12 +2715,14 @@ func appendMissingVolumeMounts(dst []VolumeMount, mounts []VolumeMount) []Volume
 	return dst
 }
 
-func envFromSecretMatches(envFrom []corev1.EnvFromSource, name string) bool {
-	return apiequality.Semantic.DeepEqual(envFrom, []corev1.EnvFromSource{{
+// envFromSecretMatches checks the complete source against a dedicated Secret
+// reference, including the absence of a prefix or an explicit optional setting.
+func envFromSecretMatches(envFrom corev1.EnvFromSource, name string) bool {
+	return apiequality.Semantic.DeepEqual(envFrom, corev1.EnvFromSource{
 		SecretRef: &corev1.SecretEnvSource{
-			LocalObjectReference: corev1.LocalObjectReference{Name: name},
+			Name: name,
 		},
-	}})
+	})
 }
 
 // ---------------------------------------------------------------------------

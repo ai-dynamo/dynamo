@@ -12,6 +12,7 @@ pub(crate) struct CandidateData {
     pub(crate) inputs: WorkerInputs,
     pub(crate) cache: WorkerCacheData,
     pub(crate) load: WorkerLoadInput,
+    pub(crate) transfer: Option<WorkerTransferInput>,
     pub(crate) preferred_taint_multiplier: Option<f64>,
 }
 
@@ -56,6 +57,18 @@ impl<'a> WorkerCandidate<'a> {
         self.inputs
             .contains(WorkerInputs::LOAD)
             .then_some(&self.data.load)
+    }
+
+    /// The KV prefix this worker could fetch, only for a scorer that declared
+    /// KV_TRANSFER; filters and pickers do not receive it. None also means the
+    /// host has no transfer data for this request: no worker in the partition
+    /// consumes router hints, or the indexer cannot retain the matched block chain.
+    pub fn kv_transfer(self) -> Option<WorkerTransferInput> {
+        if self.inputs.contains(WorkerInputs::KV_TRANSFER) {
+            self.data.transfer
+        } else {
+            None
+        }
     }
 
     /// Preferred-taint cost multiplier, only when this component declared PREFERRED_TAINT.
@@ -142,6 +155,8 @@ impl WorkerInputs {
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
     /// Request host-owned active-request counts.
     pub const OCCUPANCY: Self = Self(1 << 5);
+    /// Request the KV prefix each worker could fetch from another worker or cache.
+    pub const KV_TRANSFER: Self = Self(1 << 6);
     #[cfg(any(test, feature = "bench"))]
     pub(crate) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
 
@@ -232,6 +247,11 @@ pub struct WorkerLoadInput {
     pub(crate) active_requests: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorkerTransferInput {
+    pub(crate) source_prefix_blocks: Option<u32>,
+}
+
 /// Borrowed, index-aligned view of one custom picker's requested worker inputs.
 #[derive(Clone, Copy)]
 pub struct WorkerInputView<'a> {
@@ -264,6 +284,8 @@ impl CandidateData {
             } else {
                 WorkerLoadInput::default()
             },
+            // Filled for scorers once every row is built.
+            transfer: None,
             preferred_taint_multiplier: self
                 .preferred_taint_multiplier
                 .or(additional.preferred_taint_multiplier),
@@ -351,6 +373,23 @@ impl WorkerLoadInput {
     /// Return this worker's active request count.
     pub fn active_requests(&self) -> usize {
         self.active_requests
+    }
+}
+
+impl WorkerTransferInput {
+    /// Root-aligned prefix, in blocks, held by the source this worker would
+    /// fetch from, and so the prefix it holds after the fetch. None when no
+    /// eligible source holds more than this worker's device and host-pinned
+    /// prefix, the `CACHE` inputs' `device_overlap_blocks() + host_overlap_blocks()`.
+    ///
+    /// The host chooses the source by its router-hint rules: the same hint
+    /// worker type, neither this worker nor a cache owner attached to it, and,
+    /// when this worker sets a KV transfer domain, its topology island
+    /// (`preferred` enforcement falls back to another island). Booking this
+    /// worker attaches a fetch hint for that source. Fetches are best effort:
+    /// the source may no longer hold the blocks when the request runs.
+    pub fn source_prefix_blocks(&self) -> Option<u32> {
+        self.source_prefix_blocks
     }
 }
 
