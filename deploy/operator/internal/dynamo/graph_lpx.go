@@ -443,7 +443,8 @@ func renderSelectedLPXRole(
 		}
 	}
 
-	// LPX supplies the generated config volume after merging; discard only inferred PVCs.
+	// An undeclared config mount names the LPX runtime ConfigMap, not a PVC. LPX
+	// adds that volume for builds without lpuUnits and otherwise rejects the mount.
 	explicitVolumes := component.PodTemplate.Spec.Volumes
 	basePodSpec.Volumes = slices.DeleteFunc(basePodSpec.Volumes, func(volume corev1.Volume) bool {
 		return volume.Name == "config" && !slices.ContainsFunc(explicitVolumes,

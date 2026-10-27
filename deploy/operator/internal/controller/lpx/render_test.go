@@ -601,6 +601,32 @@ func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 	require.Equal(t, leader.Spec.Containers[0].Args, main.Args)
 }
 
+func TestLPXUnitBuildRejectsUndeclaredConfigMount(t *testing.T) {
+	for _, role := range []string{v1beta1.ComponentRoleLPXAgent, v1beta1.ComponentRoleLPXConductor} {
+		t.Run(role, func(t *testing.T) {
+			t.Log("Load a hybrid workload whose build records LPU units and mount /configs without declaring it")
+			payload, err := os.ReadFile(filepath.Join("../../dynamo/lpx/testdata", "from_dgd_yaml", "node-local-v2-hybrid-units.input.yaml"))
+			require.NoError(t, err)
+			dgd := &v1beta1.DynamoGraphDeployment{}
+			require.NoError(t, yaml.Unmarshal(payload, dgd))
+			template := dgd.GetComponentByName("lpu").ComponentRole(role).PodTemplate
+			template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts,
+				corev1.VolumeMount{Name: "config", MountPath: "/configs"})
+
+			t.Log("Refuse to render a role whose config volume no longer exists")
+			selected, err := lpx.ResolveWorkload(t.Context(), newLPXGPUClient(t), dgd, singleGroupComponents(t, dgd), newTestDataModelRegistry(t, t.TempDir()))
+			require.NoError(t, err)
+			plan := mustPlanSelectedLPX(t, dgd, selected)
+			r := &graphReconciler{Client: newLPXGPUClient(t), config: &configv1alpha1.OperatorConfiguration{}, runtimeConfig: &commoncontroller.RuntimeConfig{}}
+			_, _, err = r.renderPodCliqueSet(t.Context(), newLPXRenderDeployment(t, dgd), dgd,
+				map[string]*lpx.Workload{selected.ServingComponentName(): selected},
+				map[string]*lpx.MaterializationPlan{selected.ServingComponentName(): plan}, nil)
+			require.ErrorContains(t, err, "container main mounts volume \"config\", which its pod template does not declare; "+
+				"the operator provides /configs only for builds without lpuUnits")
+		})
+	}
+}
+
 func TestLPXRenderingPreservesInputs(t *testing.T) {
 	const mutatedValue = "rendered-change"
 	t.Log("Create compiler builds for each supported runtime shape")

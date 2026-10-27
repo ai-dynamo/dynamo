@@ -89,7 +89,7 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 	for _, projection := range projections {
 		// Render runtime partitions, including XT's collapsed prop-sync chains.
 		offset := int64(0)
-		for index, partition := range projection.configuredBuild.partitions {
+		for index, partition := range projection.runtimePartitions() {
 			endpointCount := int64(partition.effectiveNodeCount())
 			row := [len(keys)]string{strconv.FormatInt(endpointCount, 10), strconv.Itoa(index),
 				strconv.FormatUint(uint64(uint32(partition.sourcePartitionID)), 10), projection.model,
@@ -114,6 +114,40 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 		data[key] = strings.TrimSuffix(columns[column].String(), "\n")
 	}
 	return data
+}
+
+// runtimePartitions returns the /configs rows of the nonnil projection. A unit
+// projection reaches the rows only from a speculative workload whose other build
+// lacks units, so it is LPU-only. Its rows follow the compiler's unit sizes: one
+// row per partition, sized by its reservation's hosts, where each stage of a
+// packed reservation counts one shared host. For the sizes GBuild writes these
+// equal the legacy rows of the same bundle, which the units parity tests check.
+func (p *ModelProjection) runtimePartitions() []buildPartition {
+	if !p.placesLPUUnits() {
+		return p.configuredBuild.partitions
+	}
+
+	// Index the source partitions that the reservations name.
+	sourcePartitions := make(map[int]buildPartition, len(p.configuredBuild.partitions))
+	for _, partition := range p.configuredBuild.partitions {
+		sourcePartitions[partition.sourcePartitionID] = partition
+	}
+
+	// List every reserved partition in unit order.
+	var rows []buildPartition
+	for _, unit := range p.configuredBuild.lpuUnits {
+		for _, reservation := range unit.Reservations {
+			for _, id := range reservation.PartitionIDs {
+				row := sourcePartitions[id]
+				row.runtimeNodeCount = reservation.Hosts
+				if len(reservation.PartitionIDs) > 1 {
+					row.runtimeNodeCount = 1
+				}
+				rows = append(rows, row)
+			}
+		}
+	}
+	return rows
 }
 
 // ensureLPUConfigVolume adds the generated configuration only when the nonnil

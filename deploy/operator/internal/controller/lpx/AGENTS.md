@@ -249,9 +249,17 @@ SPDX-License-Identifier: Apache-2.0
   renewing `LastCheckedAt`. Check new or expired builds. Only a Ready deployment
   whose generation has been observed may ignore a failed periodic refresh.
 - Runtime ConfigMaps are immutable, content-addressed, LPXGD-owned, and labeled
-  with its UID. Find obsolete maps by label, verify ownership before deletion,
+  with its UID. Render them and inject the `config` volume only for workloads
+  with a build that lacks `lpuUnits`; other workloads reject an undeclared
+  `config` mount. Find obsolete maps by label, verify ownership before deletion,
   and retain desired names. Delete obsolete maps only after readiness, not during
   PCS replacement, so existing pods keep their configuration.
+- The per-workload ConfigMap rendering is a bridge for builds without
+  `lpuUnits` (manifest.v2, deployment.v1 from GBuild before units, and the
+  legacy build of a mixed speculative workload). Remove the rendering, the
+  `config` volume injection and the units-derived rows once the operator
+  refuses builds without `lpuUnits`; keep the obsolete-map cleanup until
+  upgraded deployments no longer own such maps.
 
 # Tests
 
