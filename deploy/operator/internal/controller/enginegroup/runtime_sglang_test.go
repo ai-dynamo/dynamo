@@ -24,8 +24,79 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func TestSGLangRetentionIsPreparedOutsideResolution(t *testing.T) {
+	t.Log("declare external retirement with an explicit deletion-retention readiness gate")
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, grovev1alpha1.AddToScheme(scheme))
+	primary := testSGLangPrimaryPod()
+	primary.Spec.Containers[0].Args = append(primary.Spec.Containers[0].Args, "--elastic-ep-retiree-lifecycle=external")
+	primary.Spec.ReadinessGates = []corev1.PodReadinessGate{{ConditionType: corev1.PodConditionType(consts.EngineGroupRetainedReadinessGate)}}
+	clique := testSGLangMemberClique(primary)
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}).WithObjects(primary, clique).Build()
+	group := &nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup{
+		Name: "group", Namespace: "test", UID: "logical-world",
+		Labels:      map[string]string{consts.KubeLabelDynamoEngineGroupRuntime: consts.KubeLabelDynamoEngineGroupSGLang},
+		Annotations: map[string]string{consts.KubeAnnotationDynamoEngineGroupPodClique: clique.Name, consts.KubeAnnotationDynamoEngineGroupPodCliqueUID: string(clique.UID)}}
+	provider := &groveRuntimeProvider{Client: kube, HTTP: &http.Client{}}
+
+	t.Log("resolve the adapters without changing the Pod or its conditions")
+	resolved, err := provider.Resolve(t.Context(), group)
+	require.NoError(t, err)
+	observed := &corev1.Pod{}
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(primary), observed))
+	assert.Empty(t, observed.Status.Conditions)
+	assert.Equal(t, primary.ResourceVersion, observed.ResourceVersion)
+	capacity := resolved.Capacity.(*SGLangGroveCapacity)
+	assert.True(t, capacity.Grove.ReadinessScaleIn)
+	assert.True(t, resolved.Planner.(sglangScalePlanner).retirementEnabled)
+
+	t.Log("prepare capacity through the existing reconciliation hook, without granting serving admission")
+	var initial InitialCapacityReconciler = capacity
+	require.NoError(t, initial.ReconcileInitialCapacity(t.Context(), "logical-world"))
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(primary), observed))
+	require.Len(t, observed.Status.Conditions, 1)
+	assert.Equal(t, corev1.PodConditionType(consts.EngineGroupRetainedReadinessGate), observed.Status.Conditions[0].Type)
+	assert.Equal(t, corev1.ConditionTrue, observed.Status.Conditions[0].Status)
+}
+
+func TestSGLangScalePlannerRetiresOnlyTheHighestCompleteAllocation(t *testing.T) {
+	t.Log("start from two committed packed allocations and retain the complete initial allocation")
+	planner := sglangScalePlanner{profileFingerprint: "profile-v1", worldUID: "world", membersPerReplica: 2, initialReplicas: 1, retirementEnabled: true}
+	status := domain.GroupStatus{Membership: domain.MembershipStatus{Observed: domain.MembershipObservation{
+		CommittedTopology: domain.MembershipTopology{Generation: 2, Replicas: []domain.ReplicaMembership{
+			{ReplicaID: "replica-0", Members: []domain.NativeMemberIncarnation{{ID: "dp-0", RuntimeIncarnation: "pod-0/dp-0"}, {ID: "dp-1", RuntimeIncarnation: "pod-0/dp-1"}}},
+			{ReplicaID: "replica-1", Members: []domain.NativeMemberIncarnation{{ID: "dp-2", RuntimeIncarnation: "pod-1/dp-2"}, {ID: "dp-3", RuntimeIncarnation: "pod-1/dp-3"}}},
+		}},
+	}}}
+
+	t.Log("request native graceful retirement for the complete suffix, followed by survivor verification")
+	resolution, err := planner.ResolveScalePlan(t.Context(), "group", 1, status)
+	require.NoError(t, err)
+	require.NotNil(t, resolution.Plan)
+	assert.Equal(t, []domain.ReplicaID{"replica-1"}, resolution.Plan.Change.Retire.Replicas)
+	assert.Equal(t, domain.TrafficRequirementEngineManagedDrain, resolution.Plan.TrafficRequirement)
+	assert.Equal(t, domain.VerificationRequirementRequired, resolution.Plan.VerificationRequirement)
+
+	t.Log("retain the complete configured initial world even when the native API could shrink further")
+	planner.initialReplicas = 2
+	resolution, err = planner.ResolveScalePlan(t.Context(), "group", 1, status)
+	require.NoError(t, err)
+	require.NotNil(t, resolution.Rejection)
+	assert.Equal(t, "InitialWorldMinimum", resolution.Rejection.Reason)
+	planner.initialReplicas = 1
+
+	t.Log("refuse retirement when the workload has not opted into external release")
+	planner.retirementEnabled = false
+	resolution, err = planner.ResolveScalePlan(t.Context(), "group", 1, status)
+	require.NoError(t, err)
+	require.NotNil(t, resolution.Rejection)
+	assert.Equal(t, "SGLangShrinkUnsupported", resolution.Rejection.Reason)
+}
 
 func TestGroveRuntimeJournalsArePhysicalLifetimeScoped(t *testing.T) {
 	t.Log("resolve one logical group against its initial physical world")

@@ -32,8 +32,8 @@ const (
 	defaultSGLangServingPort = 8000
 )
 
-// sglangRuntimeProvider composes Grove capacity with SGLang growth control.
-// Its traffic projection does not independently observe discovery registration or drain.
+// sglangRuntimeProvider composes Grove capacity with native SGLang membership and drain.
+// Its traffic projection does not independently observe discovery registration.
 type sglangRuntimeProvider struct {
 	client     client.Client
 	httpClient *http.Client
@@ -87,6 +87,8 @@ func (p *sglangRuntimeProvider) Resolve(
 	if argumentValue(main.Args, "--elastic-ep-join-mode") != "auto" {
 		return Runtime{}, fmt.Errorf("SGLang Engine Groups require native automatic bootstrap")
 	}
+	// External retirement keeps the shared process tree alive until exact Pod release.
+	capacity.Grove.ReadinessScaleIn = argumentValue(main.Args, "--elastic-ep-retiree-lifecycle") == "external"
 	workloadRevision := primary.Labels[grovecommon.LabelPodTemplateHash]
 	if workloadRevision == "" {
 		return Runtime{}, fmt.Errorf(
@@ -132,7 +134,7 @@ func (p *sglangRuntimeProvider) Resolve(
 		return Runtime{}, err
 	}
 
-	// Growth-only control cannot reduce the world below its configured initial membership.
+	// This profile retains the complete initial world; only appended allocations may retire.
 	profile := nvidiacomv1beta1.EngineGroupProfileStatus{
 		Backend:                     resolved.Geometry.Backend,
 		Fingerprint:                 resolved.Geometry.Fingerprint,
@@ -153,9 +155,10 @@ func (p *sglangRuntimeProvider) Resolve(
 		Journal:            groveRuntimeJournal(p.client, group, "sglang-membership"),
 	}
 	traffic := &sglangruntime.TrafficProjection{
-		Client:   control,
-		Capacity: capacity,
-		Journal:  groveRuntimeJournal(p.client, group, "sglang-traffic"),
+		Client:     control,
+		Capacity:   capacity,
+		Journal:    groveRuntimeJournal(p.client, group, "sglang-traffic"),
+		Membership: membership,
 	}
 	return Runtime{
 		ReadinessSteeredRelease: capacity.Grove.ReadinessScaleIn,
@@ -164,7 +167,13 @@ func (p *sglangRuntimeProvider) Resolve(
 		Membership:              membership,
 		Traffic:                 traffic,
 		Verifier:                verifier,
-		Planner:                 sglangScalePlanner{profileFingerprint: profile.Fingerprint, worldUID: types.UID(cliqueUID), membersPerReplica: resolved.NativeMembersPerReplica},
+		Planner: sglangScalePlanner{
+			profileFingerprint: profile.Fingerprint,
+			worldUID:           types.UID(cliqueUID),
+			membersPerReplica:  resolved.NativeMembersPerReplica,
+			initialReplicas:    resolved.InitialReplicas,
+			retirementEnabled:  capacity.Grove.ReadinessScaleIn,
+		},
 	}, nil
 }
 
@@ -202,6 +211,8 @@ type sglangScalePlanner struct {
 	profileFingerprint string
 	worldUID           types.UID
 	membersPerReplica  int32
+	initialReplicas    int32
+	retirementEnabled  bool
 }
 
 func (p sglangScalePlanner) ResolveScalePlan(
@@ -210,7 +221,7 @@ func (p sglangScalePlanner) ResolveScalePlan(
 	targetReplicas int32,
 	status domain.GroupStatus,
 ) (ScalePlanResolution, error) {
-	// An unresolved operation owns the collective; newer targets wait behind it.
+	// An unresolved operation owns the current collective; a newer target may only queue behind it.
 	if status.Transition != nil && status.Transition.Outcome != domain.TransitionOutcomeCompleted &&
 		status.Transition.Outcome != domain.TransitionOutcomeRolledBack {
 		return ScalePlanResolution{}, nil
@@ -222,19 +233,38 @@ func (p sglangScalePlanner) ResolveScalePlan(
 		return ScalePlanResolution{}, nil
 	}
 
-	// Growth does not establish safe whole-world drain or retirement.
+	// Retiring the primary would destroy control authority and requires whole-world retirement.
 	if targetReplicas == 0 {
 		return ScalePlanResolution{Rejection: &domain.Failure{
 			Classification: domain.FailureClassificationTerminal,
 			Reason:         "SGLangRetirementUnsupported",
-			Message:        "the growth-only SGLang adapter cannot safely retire a live engine world",
+			Message:        "the SGLang adapter cannot safely retire the primary engine world",
 		}}, nil
 	}
 	if targetReplicas < current {
-		return ScalePlanResolution{Rejection: &domain.Failure{
-			Classification: domain.FailureClassificationTerminal,
-			Reason:         "SGLangShrinkUnsupported",
-			Message:        "the merged SGLang Elastic EP path currently supports growth only",
+		if !p.retirementEnabled {
+			return ScalePlanResolution{Rejection: &domain.Failure{
+				Classification: domain.FailureClassificationTerminal,
+				Reason:         "SGLangShrinkUnsupported",
+				Message:        "planned shrink requires explicit native external retiree lifecycle and a retention gate",
+			}}, nil
+		}
+		if targetReplicas < p.initialReplicas {
+			return ScalePlanResolution{Rejection: &domain.Failure{
+				Classification: domain.FailureClassificationTerminal,
+				Reason:         "InitialWorldMinimum",
+				Message:        "SGLang planned shrink retains the complete initial world",
+			}}, nil
+		}
+		return ScalePlanResolution{Plan: &domain.ResolvedPlan{
+			ID:                      fmt.Sprintf("sglang-retire-%s-%d-%d", p.worldUID, base.Generation, current-1),
+			ProfileFingerprint:      p.profileFingerprint,
+			ProcessLifecycleOwner:   domain.ProcessLifecycleOwnerOrchestrator,
+			TrafficRequirement:      domain.TrafficRequirementEngineManagedDrain,
+			VerificationRequirement: domain.VerificationRequirementRequired,
+			Change: domain.ResolvedChange{Kind: domain.PlanKindRetire,
+				Retire: &domain.RetireChange{Replicas: []domain.ReplicaID{domain.ReplicaID(fmt.Sprintf("replica-%d", current-1))}},
+			},
 		}}, nil
 	}
 	// Each native append admits one complete allocation; larger absolute targets converge through separate commits.

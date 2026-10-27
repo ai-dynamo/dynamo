@@ -3,10 +3,10 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# SGLang Engine Group growth
+# SGLang Engine Group Elastic EP
 
 One opted-in DGD component creates one Engine Group and one Grove PCSG world
-containing a member PodClique. Scaling the child grows that clique. Grove owns
+containing a member PodClique. Scaling the child resizes that clique. Grove owns
 Pod creation and placement; SGLang owns bootstrap, membership and internal admission.
 
 ## Native contract
@@ -14,6 +14,11 @@ Pod creation and placement; SGLang owns bootstrap, membership and internal admis
 The runtime image must include [SGLang #39834](https://github.com/sgl-project/sglang/pull/39834)
 and the Dynamo worker integration in this branch. Released growth APIs without
 runtime, operation and joining-allocation correlation are insufficient.
+
+Healthy suffix retirement additionally requires [SGLang #33111](https://github.com/sgl-project/sglang/pull/33111)
+composed with the same native runtime/operation correlation. The engine must expose
+`retiree_lifecycle: external` and `safe_to_terminate_ranks`. An uncorrelated shrink
+API is insufficient, even when its reported EP size reaches the requested count.
 
 Every Pod runs `python3 -m dynamo.sglang` from one template using native
 `--elastic-ep-join-mode auto`. Standard operator rendering supplies infrastructure
@@ -64,8 +69,9 @@ capacity advertisement are not established by this integration.
 
 ## Correlation and safety
 
-`GrowthAdapter` sends the operation ID, expected runtime instance and exact joining
-Pod UID. It observes before replay and retries only the identical request. A native
+`MembershipAdapter` sends the operation ID, expected runtime instance and exact joining
+Pod UID for growth. Retirement carries no joining allocation. The adapter observes
+before replay and retries only the identical request. A native
 terminal success, matching operation/target/allocation IDs, and the effective size
 are required to commit the result. A transport error or unsuccessful response with
 pending work is not a definitive rejection.
@@ -91,20 +97,50 @@ Unsupported recovery blocks reconciliation without rewriting a committed resize;
 missing or unknown runtime health also fails closed.
 
 `TrafficProjection` represents engine-internal admission, not independently observed
-discovery registration or drain. The verifier checks a real frontend completion;
-its proof does not grant registration. Healthy growth does not establish shrink,
-failure recovery, slot reuse, multi-Pod allocations or whole-world retirement.
+discovery registration. The verifier checks a real frontend completion; its proof
+does not grant registration.
+
+## Healthy shrink
+
+Declare `--elastic-ep-retiree-lifecycle=external` and the
+`dynamo.nvidia.com/retained` Pod readiness gate in the shared template. The engine
+parks retirees after graceful drain instead of exiting the shared process tree.
+The controller initializes the retention gate during capacity reconciliation,
+without changing launch arguments or granting inference admission.
+
+Each operation retires one complete highest-rank allocation. Native commit and
+terminal drain for **every** retiring native member must precede Pod release.
+Survivor serving verification is required before the transition completes.
+Drain proof binds to the native operation, runtime,
+and frozen process incarnations and survives controller restart and physical release.
+An EP-size change alone is never drain proof.
+
+The shared Grove capacity adapter marks only that retired Pod NotReady, scales
+its member clique, and checks the released Pod UID. This is single-victim
+readiness steering, not a Grove authorized-release API. Other unavailable Pods
+or a different victim fail closed.
+
+The complete initial world remains the lower bound. Native automatic bootstrap
+cannot yet refill occupied rank slots: growth after shrink is rejected before
+creating replacement capacity. Failure recovery, packed partial survival, slot
+reuse, multi-Pod allocations, and whole-world retirement remain unsupported.
 
 ## Validation
 
 CPU tests cover declarative geometry, native request/result forwarding, one- and
 four-member allocations, ambiguous submission, exact replay after restart, native
-runtime changes and real API-server Scale/Pod identity behavior.
+runtime changes and real API-server Scale/Pod identity behavior. Retirement tests
+prove that one safe member cannot release a multi-member Pod and retain exact
+all-member drain evidence across restart.
 
 GPU validation requires a newly built runtime image containing #39834. The
 [`growth-test.yaml`](growth-test.yaml) manual fixture uses `${IMAGE}` for that image
 and requires three B200 GPUs, working NIXL/Mooncake networking and the indicated
 model PVC. Render the image variable before applying it in an isolated vcluster.
+The [`packed-test.yaml`](packed-test.yaml) fixture uses two GPUs/members per Pod
+and tests EP2 -> EP4 -> EP2 with four B200 GPUs. It requires both native PRs and
+the correlated retirement contract above. The network-selection environment
+is specific to the manual test image, not operator-injected launch behavior.
 These CPU tests do not establish GPU serving, idle growth or failure recovery.
 
 Packed GPU growth was validated separately with two GPUs/members per Pod:
@@ -112,3 +148,9 @@ one DGD completed EP2 -> EP4 with 24/24 recorded requests successful, preserving
 the original Pod UID, native runtime, PodClique and shared template with no
 container restarts. The image contained native #39834; this bounded functional
 run does not establish an availability/performance SLO or failure recovery.
+
+The full EP2 -> EP4 -> EP2 cycle passed with 32/32 recorded requests successful.
+Both retiring members had correlated terminal drain evidence before release
+of their exact Pod UID. This run used a local native composition of #39834 and
+#33111 with shrink-correlation and warm-up integration fixes, not the two
+unmodified PR heads. Those native changes remain an upstream prerequisite.
