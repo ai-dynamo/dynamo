@@ -114,6 +114,52 @@ class BenchTest(unittest.TestCase):
                     ["tcp-sysctl"] if tuned else [],
                 )
 
+    def test_pool_relay_pools_route_on_kv_and_fit_the_relay_filter(self):
+        args = ["--max-num-seqs", "16", "--num-gpu-blocks-override", "65536"]
+        cfg = {
+            **CONFIG,
+            "relay": "pool",
+            "routerMode": "kv",
+            "pools": [{"stem": "a", "mockerArgs": args}],
+        }
+        items = bench.backend_manifest(cfg, REGION)["items"]
+        pods = {
+            item["metadata"]["name"]: item["spec"]["template"]["spec"]
+            for item in items
+            if item["kind"] == "Deployment"
+        }
+        frontend = pods["a-frontend"]["containers"][0]
+        self.assertEqual(frontend["args"][-2:], ["--router-mode", "kv"])
+        self.assertIn(
+            {"name": "DYN_SERVING_LOAD_PUBLISH", "value": "1"}, frontend["env"]
+        )
+        relay = pods["a-pool-relay"]["containers"][0]
+        self.assertEqual(relay["command"], ["python3", "-m", "dynamo.pool_relay"])
+        ports = [item["spec"]["ports"] for item in items if item["kind"] == "Service"]
+        self.assertIn([{"name": "wan-grpc", "port": 50051, "targetPort": 50051}], ports)
+
+        args[-1] = "262144"
+        with self.assertRaises(ValueError):
+            bench.backend_manifest(cfg, REGION)
+
+    def test_daytime_rates_peak_at_two_in_the_afternoon_local_time(self):
+        load = {
+            "schedule": "daytime",
+            "dayS": 2160,
+            "peakQps": 10,
+            "nightFraction": 0.15,
+            "peakHour": 14,
+            "startHourUtc": 0,
+        }
+        ohio = bench.rate_points(load, -4)
+        tokyo = bench.rate_points(load, 9)
+        self.assertEqual((ohio[0]["timeS"], ohio[-1]["timeS"]), (0, 2160))
+        # Points every simulated quarter hour: 14:00 in Ohio is 18:00 UTC.
+        self.assertEqual(max(ohio, key=lambda p: p["qps"]), ohio[18 * 4])
+        self.assertEqual(ohio[18 * 4]["qps"], 10)
+        self.assertEqual(min(p["qps"] for p in ohio), 1.5)
+        self.assertEqual(max(tokyo, key=lambda p: p["qps"]), tokyo[5 * 4])
+
     def test_nodegroup_copies_the_gpu_groups(self):
         settings = {"instanceType": "m7i.4xlarge", "count": 2, "diskGiB": 100}
         gpu = {"nodeRole": "arn:role", "subnets": ["subnet-1"]}
@@ -163,6 +209,42 @@ class WindowSummaryTest(unittest.TestCase):
         self.assertEqual(summary["requests_per_second"], 0.1)
         self.assertEqual(summary["output_tokens_per_second"], 1.0)
         self.assertEqual(summary["ttft_ms"]["p50"], 3.0)
+
+
+class DaySummaryTest(unittest.TestCase):
+    def test_hours_bucket_requests_by_when_they_were_sent(self):
+        def record(start_s, ttft, error=None):
+            return {
+                "metadata": {"request_start_ns": int(start_s * 1e9)},
+                "metrics": {"time_to_first_token": {"value": ttft}},
+                "error": error,
+            }
+
+        records = [
+            record(1000, 5.0),
+            record(1089, 7.0),
+            record(1090, 9.0, {"code": 503}),
+        ]
+        hours = loadgen_run.hourly_summary(records, day_start=1000, hour_s=90)
+        self.assertEqual(len(hours), 24)
+        self.assertEqual(
+            hours[0],
+            {"sent": 2, "completed": 2, "errors": 0, "ttft_p50": 7.0, "ttft_p99": 7.0},
+        )
+        self.assertEqual((hours[1]["sent"], hours[1]["errors"]), (1, 1))
+
+    def test_router_deltas_subtract_consecutive_snapshots(self):
+        def snapshot(requests, same_pool, routed):
+            counts = dict.fromkeys(loadgen_run.ROUTER_COUNTS, 0)
+            counts.update(requests=requests, same_pool=same_pool)
+            return {**counts, "pools": [{"name": "ohio/a", "routed": routed}]}
+
+        deltas = loadgen_run.router_deltas(
+            [snapshot(0, 0, 0), snapshot(10, 4, 6), snapshot(25, 9, 6)]
+        )
+        self.assertEqual([d["requests"] for d in deltas], [10, 15])
+        self.assertEqual([d["same_pool"] for d in deltas], [4, 5])
+        self.assertEqual([d["pools"]["ohio/a"] for d in deltas], [6, 0])
 
 
 if __name__ == "__main__":

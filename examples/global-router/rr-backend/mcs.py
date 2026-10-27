@@ -19,13 +19,21 @@ import argparse
 import json
 
 
-def render(namespace, stems, members):
+def render(namespace, stems, members, relay_stats_port=True):
+    """``relay_stats_port`` exports the KV DC Relay POC's stats port; the Pool
+    Relay serves only the WAN port."""
     services = {}
     for stem in stems:
-        services[f"{stem}-frontend"] = [{"name": "http", "port": 8000, "protocol": "TCP"}]
+        services[f"{stem}-frontend"] = [
+            {"name": "http", "port": 8000, "protocol": "TCP"}
+        ]
         services[f"{stem}-pool-relay"] = [
             {"name": "wan-grpc", "port": 50051, "protocol": "TCP"},
-            {"name": "stats-grpc", "port": 50052, "protocol": "TCP"},
+            *(
+                [{"name": "stats-grpc", "port": 50052, "protocol": "TCP"}]
+                if relay_stats_port
+                else []
+            ),
         ]
     services["global-router"] = [{"name": "http", "port": 8000, "protocol": "TCP"}]
     mcs_api = "multicluster.x-k8s.io/v1alpha1"

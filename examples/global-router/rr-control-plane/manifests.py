@@ -29,7 +29,10 @@ def render(
     router_cpu=None,
     node_selector=None,
     tolerations=(),
+    ingress_args=(),
 ):
+    """``ingress_args`` are appended to the Global Ingress arguments, for
+    example ``["--region", "us-east-2"]``."""
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", namespace):
         raise ValueError("namespace must be a DNS label")
     if "@sha256:" not in image:
@@ -115,6 +118,7 @@ def render(
                 "--discovery-interval-secs",
                 "2",
                 *(["--router-policy", router_policy] if router_policy else []),
+                *ingress_args,
             ],
             "/health",
         ),

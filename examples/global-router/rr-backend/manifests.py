@@ -37,13 +37,24 @@ def render(
     mocker_args=(),
     tolerations=(),
     frontend_cpu=None,
+    router_mode="round-robin",
+    publish_serving_load=False,
+    relay="poc",
 ):
+    """``relay`` is ``"poc"`` for the standalone KV DC Relay POC image
+    (``relay_image``), or ``"pool"`` for the Pool Relay that ships in the
+    planner image (``python -m dynamo.pool_relay``), which serves one WAN
+    port and needs no ``relay_image``. ``publish_serving_load`` makes the
+    frontend publish the request and scheduler load the Pool Relay streams."""
     for value in (namespace, stem):
         if len(value) > 40 or not re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", value):
             raise ValueError(
                 "namespace and stem must be DNS labels of at most 40 characters"
             )
-    for image in (planner_image, relay_image):
+    if relay not in ("poc", "pool"):
+        raise ValueError("relay must be 'poc' or 'pool'")
+    images = (planner_image, relay_image) if relay == "poc" else (planner_image,)
+    for image in images:
         if not re.search(r"@sha256:[a-f0-9]{64}$", image):
             raise ValueError(
                 "planner and Relay images must use immutable sha256 digests"
@@ -191,11 +202,16 @@ def render(
         "name": "frontend",
         "image": planner_image,
         "command": ["python3", "-m", "dynamo.frontend"],
-        "args": ["--http-port", "8000", "--router-mode", "round-robin"],
+        "args": ["--http-port", "8000", "--router-mode", router_mode],
         "env": [
             *env,
             {"name": "DYN_NAMESPACE_PREFIX", "value": stem},
             {"name": "MODEL_NAME", "value": model},
+            *(
+                [{"name": "DYN_SERVING_LOAD_PUBLISH", "value": "1"}]
+                if publish_serving_load
+                else []
+            ),
         ],
         "ports": [{"name": "http", "containerPort": 8000}],
         "startupProbe": {
@@ -220,7 +236,7 @@ def render(
         "stats_listen": "0.0.0.0:50052",
         "stats_allow_non_loopback": True,
     }
-    relay = {
+    relay_container = {
         "name": "pool-relay",
         "image": relay_image,
         "args": ["/etc/relay/config.json"],
@@ -245,18 +261,69 @@ def render(
             {"name": "config", "mountPath": "/etc/relay", "readOnly": True}
         ],
     }
+    wan_port = {"name": "wan-grpc", "port": 50051, "targetPort": 50051}
+    relay_configs = []
+    if relay == "pool":
+        relay_items = [
+            deploy(
+                "pool-relay",
+                {
+                    "name": "pool-relay",
+                    "image": planner_image,
+                    "command": ["python3", "-m", "dynamo.pool_relay"],
+                    "args": [
+                        "--cluster-id",
+                        f"{site_id}-{stem}",
+                        "--namespaces",
+                        stem,
+                        "--bind",
+                        "0.0.0.0:50051",
+                    ],
+                    "env": env,
+                    "ports": [{"name": "wan-grpc", "containerPort": 50051}],
+                    "startupProbe": {
+                        "tcpSocket": {"port": 50051},
+                        "periodSeconds": 5,
+                        "failureThreshold": 120,
+                    },
+                    "readinessProbe": tcp_probe(50051),
+                    "resources": resources("250m", "256Mi", "2", "2Gi"),
+                },
+            ),
+            service("pool-relay", [wan_port]),
+        ]
+    else:
+        relay_configs = [
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": meta(f"{stem}-relay-config"),
+                "data": {"config.json": json.dumps(relay_config)},
+            }
+        ]
+        relay_items = [
+            deploy(
+                "pool-relay",
+                relay_container,
+                volumes=[
+                    {"name": "config", "configMap": {"name": f"{stem}-relay-config"}}
+                ],
+            ),
+            service(
+                "pool-relay",
+                [
+                    wan_port,
+                    {"name": "stats-grpc", "port": 50052, "targetPort": 50052},
+                ],
+            ),
+        ]
     items = [
         {
             "apiVersion": "v1",
             "kind": "Namespace",
             "metadata": {"name": namespace, "labels": shared},
         },
-        {
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": meta(f"{stem}-relay-config"),
-            "data": {"config.json": json.dumps(relay_config)},
-        },
+        *relay_configs,
         deploy(
             "etcd", etcd, volumes=[{"name": "data", "emptyDir": {"sizeLimit": "1Gi"}}]
         ),
@@ -264,18 +331,7 @@ def render(
         deploy("worker", worker, replicas=worker_replicas),
         deploy("frontend", frontend),
         service("frontend", [{"name": "http", "port": 8000, "targetPort": 8000}]),
-        deploy(
-            "pool-relay",
-            relay,
-            volumes=[{"name": "config", "configMap": {"name": f"{stem}-relay-config"}}],
-        ),
-        service(
-            "pool-relay",
-            [
-                {"name": "wan-grpc", "port": 50051, "targetPort": 50051},
-                {"name": "stats-grpc", "port": 50052, "targetPort": 50052},
-            ],
-        ),
+        *relay_items,
     ]
     return {"apiVersion": "v1", "kind": "List", "items": items}
 
@@ -305,9 +361,7 @@ def main():
         default=[],
         help="Extra Mocker argument; repeat for each token, e.g. --mocker-arg=--max-num-seqs --mocker-arg=16",
     )
-    parser.add_argument(
-        "--frontend-cpu", help="Frontend CPU request and limit, e.g. 2"
-    )
+    parser.add_argument("--frontend-cpu", help="Frontend CPU request and limit, e.g. 2")
     args = parser.parse_args()
     selectors = dict(value.split("=", 1) for value in args.node_selector)
     print(

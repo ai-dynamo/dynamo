@@ -14,6 +14,7 @@ import argparse
 import base64
 import importlib.util
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -49,6 +50,9 @@ LOADGEN_IMAGE = (
 )
 SLOW_START_SYSCTL = "net.ipv4.tcp_slow_start_after_idle"
 NODELAY_DIR = "/opt/nodelay"
+# The Pool Relay's default KV filter size (`--expected-unique-blocks`).
+RELAY_EXPECTED_BLOCKS = 1_048_576
+POLICIES = ["none", "round-robin", "least-in-flight", "rendezvous", "affinity"]
 
 
 def stack(member, suffix):
@@ -214,22 +218,42 @@ def tune_http_servers(manifest, cfg, configmap, names):
 # Kubernetes workloads ---------------------------------------------------------------
 
 
+def check_relay_capacity(cfg, pool):
+    """The Pool Relay drops a pool's KV filter once the filter overflows, so
+    the pool's workers must not be able to hold more blocks than it fits."""
+    args = pool["mockerArgs"]
+    if "--num-gpu-blocks-override" not in args:
+        raise ValueError(f"pool {pool['stem']}: set --num-gpu-blocks-override")
+    blocks = int(args[args.index("--num-gpu-blocks-override") + 1])
+    if cfg["workerReplicas"] * blocks > 0.75 * RELAY_EXPECTED_BLOCKS:
+        raise ValueError(
+            f"pool {pool['stem']}: {cfg['workerReplicas']} workers x {blocks} blocks"
+            f" can overflow the Relay's {RELAY_EXPECTED_BLOCKS}-block KV filter"
+        )
+
+
 def backend_manifest(cfg, member):
     """Both pools of a region in one list, with their shared Namespace once."""
+    relay = cfg.get("relay", "poc")
     items = {}
     for pool in cfg["pools"]:
+        if relay == "pool":
+            check_relay_capacity(cfg, pool)
         rendered = backend.render(
             cfg["namespace"],
             pool["stem"],
             member["site"],
             member["plannerImage"],
-            member["relayImage"],
+            member.get("relayImage"),
             cfg["model"],
             NODE_SELECTOR,
             worker_replicas=cfg["workerReplicas"],
             mocker_args=pool["mockerArgs"],
             tolerations=[TOLERATION],
             frontend_cpu=cfg["frontendCpu"],
+            router_mode=cfg.get("routerMode", "round-robin"),
+            publish_serving_load=relay == "pool",
+            relay=relay,
         )
         for item in rendered["items"]:
             items[(item["kind"], item["metadata"]["name"])] = item
@@ -259,6 +283,8 @@ def routing_config(cfg):
 
 
 def control_manifest(cfg, member, policy):
+    # Images from before the session-aware policies take no --region.
+    region = ["--region", member["region"]] if cfg.get("relay") == "pool" else []
     rendered = control.render(
         cfg["namespace"],
         member["controlImage"],
@@ -268,6 +294,7 @@ def control_manifest(cfg, member, policy):
         router_cpu=cfg["routerCpu"],
         node_selector=NODE_SELECTOR,
         tolerations=[TOLERATION],
+        ingress_args=region,
     )
     return tune_http_servers(rendered, cfg, "nodelay-control", {"global-router"})
 
@@ -326,9 +353,66 @@ def aiperf_config(cfg, concurrency):
     }
 
 
-def loadgen_manifest(cfg, label, concurrency, start_at):
+def rate_points(load, utc_offset):
+    """The request rate one region offers through a compressed day, every
+    simulated quarter hour. A smooth daily curve on the region's local time,
+    peaking at ``peakHour`` and falling to ``nightFraction`` of ``peakQps`` at
+    night; the day starts at ``startHourUtc``. With ``schedule: ramp``, a
+    straight line from ``rampFrom`` to ``rampTo`` instead, for calibration."""
+    steps = 24 * 4
+    points = []
+    for step in range(steps + 1):
+        if load["schedule"] == "ramp":
+            qps = load["rampFrom"] + (load["rampTo"] - load["rampFrom"]) * step / steps
+        else:
+            local_hour = load["startHourUtc"] + step / 4 + utc_offset
+            shape = (
+                1 + math.cos(2 * math.pi * (local_hour - load["peakHour"]) / 24)
+            ) / 2
+            night = load["nightFraction"]
+            qps = load["peakQps"] * (night + (1 - night) * shape)
+        time_s = load["dayS"] * step / steps
+        points.append({"timeS": round(time_s, 3), "qps": round(qps, 4)})
+    return points
+
+
+def day_config(cfg, member):
+    """One compressed day of AgentX sessions at the region's rate schedule.
+    Sessions carry ``X-Dynamo-Session-ID`` (set by the Job's environment),
+    and a per-session cache-bust marker keeps replays of the same trace from
+    sharing prefixes. In-flight requests are capped as a safety limit."""
+    load = cfg["load"]
+    config = aiperf_config(cfg, 1)
+    benchmark = config["benchmark"]
+    del benchmark["warmup"]
+    benchmark["dataset"]["cacheBust"] = {"target": load["cacheBust"]}
+    benchmark["profiling"] = {
+        "type": "poisson",
+        "rateSeries": rate_points(load, member["utcOffset"]),
+        "duration": load["dayS"],
+        "concurrency": load["maxInFlight"],
+        "gracePeriod": load["graceS"],
+    }
+    return config
+
+
+def prepare_config(cfg):
+    """The day's dataset with one request. Run before the shared start, it
+    leaves the rebuilt traces in aiperf's cache, so every region's day starts
+    within seconds of the start time."""
+    config = aiperf_config(cfg, 1)
+    benchmark = config["benchmark"]
+    del benchmark["warmup"]
+    benchmark["dataset"]["cacheBust"] = {"target": cfg["load"]["cacheBust"]}
+    benchmark["profiling"] = {"type": "concurrency", "requests": 1, "concurrency": 1}
+    benchmark["artifacts"]["dir"] = "/work/prepare"
+    return config
+
+
+def loadgen_manifest(cfg, member, label, concurrency, start_at):
     load = cfg["load"]
     name = f"loadgen-{label}"
+    day = "schedule" in load
     env = {
         "AIPERF_VERSION": AIPERF_VERSION,
         "DATASET_REPO": load["datasetRepo"],
@@ -342,7 +426,20 @@ def loadgen_manifest(cfg, label, concurrency, start_at):
         ),
         "HF_HOME": "/work/hf",
         "PYTHONUNBUFFERED": "1",
+        "AIPERF_DATASET_MMAP_CACHE_DIR": "/work/mmap",
     }
+    files = {"run.py": (HERE / "loadgen_run.py").read_text()}
+    if day:
+        env.update(
+            DAY_S=str(load["dayS"]),
+            GRACE_S=str(load["graceS"]),
+            STATS_URL="http://global-router:8000/global-router/stats",
+            AIPERF_HTTP_X_DYNAMO_SESSION_ID_FROM_CORRELATION_ID="true",
+        )
+        files["aiperf.json"] = json.dumps(day_config(cfg, member))
+        files["prepare.json"] = json.dumps(prepare_config(cfg))
+    else:
+        files["aiperf.json"] = json.dumps(aiperf_config(cfg, concurrency))
     meta = {"name": name, "namespace": cfg["namespace"]}
     manifest = {
         "apiVersion": "v1",
@@ -352,10 +449,7 @@ def loadgen_manifest(cfg, label, concurrency, start_at):
                 "apiVersion": "v1",
                 "kind": "ConfigMap",
                 "metadata": meta,
-                "data": {
-                    "aiperf.json": json.dumps(aiperf_config(cfg, concurrency)),
-                    "run.py": (HERE / "loadgen_run.py").read_text(),
-                },
+                "data": files,
             },
             {
                 "apiVersion": "batch/v1",
@@ -498,10 +592,10 @@ print("BENCH_CPU " + json.dumps(peak, sort_keys=True))
 PY"""
 
 
-def summary_script(namespace, label):
+def summary_script(namespace, label, marker="BENCH_SUMMARY"):
     return (
-        f"grep -h 'BENCH_SUMMARY ' /var/log/pods/{namespace}_loadgen-{label}-*/loadgen/*.log"
-        " | tail -n 1 | sed 's/^.*BENCH_SUMMARY //'"
+        f"grep -h '{marker} ' /var/log/pods/{namespace}_loadgen-{label}-*/loadgen/*.log"
+        f" | tail -n 1 | sed 's/^.*{marker} //'"
     )
 
 
@@ -662,6 +756,7 @@ def combine(results):
     """One row per region plus a total, from each region's collected result."""
     rows = []
     totals = {"rps": 0.0, "tps": 0.0, "completed": 0, "errors": 0, "pools": {}}
+    routing = {}
     weighted = {"ttft_p50": 0.0, "ttft_p99": 0.0, "itl_p50": 0.0}
     for region, result in sorted(results.items()):
         client = result["summary"]["client"]
@@ -675,6 +770,7 @@ def combine(results):
                 "itl_p50": client["itl_ms"]["p50"],
                 "completed": client["completed_requests"],
                 "errors": client["profiling_errors"],
+                **routing_shares(result["summary"].get("router", {})),
             }
         )
         totals["rps"] += client["requests_per_second"] or 0.0
@@ -687,6 +783,9 @@ def combine(results):
                 weighted[key] += value * client["completed_requests"]
         for stem, count in result["summary"]["pool_requests"].items():
             totals["pools"][f"{region}/{stem}"] = count
+        for key, count in result["summary"].get("router", {}).items():
+            if key != "pools":
+                routing[key] = routing.get(key, 0) + count
     completed = max(totals["completed"], 1)
     rows.append(
         {
@@ -696,9 +795,25 @@ def combine(results):
             **{key: value / completed for key, value in weighted.items()},
             "completed": totals["completed"],
             "errors": totals["errors"],
+            **routing_shares(routing),
         }
     )
     return rows, totals["pools"]
+
+
+def routing_shares(counts):
+    """Where the Global Ingress sent requests, as shares: of requests, those
+    kept in the region they entered and those with a session ID; of a
+    session's later turns, those sent to the same pool as the turn before."""
+    if not counts.get("requests"):
+        return {}
+    shares = {
+        "in_region": counts["in_region"] / counts["requests"],
+        "with_session": counts["with_session"] / counts["requests"],
+    }
+    if counts.get("later_turns"):
+        shares["same_pool"] = counts["same_pool"] / counts["later_turns"]
+    return shares
 
 
 def frontend_ips(cfg, evidence):
@@ -766,6 +881,32 @@ def from_every_node(cfg, script, marker, timeout_s):
     return out
 
 
+def router_stats(cfg, evidence):
+    """Each region's ingress stats, read from a bench node: the stats route
+    is served on the ingress pod, which only the cluster can reach."""
+    stats = {}
+    for member in cfg["regions"]:
+        pods = cluster.read(member, "pods", cfg["namespace"], "", ".items", evidence)
+        ips = [
+            pod["status"]["podIP"]
+            for pod in pods or []
+            if pod["metadata"]["name"].startswith("global-router-")
+            and pod["status"].get("podIP")
+        ]
+        script = "\n".join(
+            f"echo BENCH_ROUTER $(curl -s -m 5 http://{ip}:8000/global-router/stats)"
+            for ip in ips
+        )
+        node = bench_nodes(member)[0]
+        output = ssm_output(member, ssm_send(member, [node], script, 60), node)
+        stats[member["short"]] = [
+            json.loads(line.removeprefix("BENCH_ROUTER "))
+            for line in output["StandardOutputContent"].splitlines()
+            if line.startswith("BENCH_ROUTER {")
+        ]
+    return stats
+
+
 def write_matrix(path, targets, matrix):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"targets": targets, "from": matrix}, indent=2))
@@ -788,7 +929,7 @@ def main():
         if name == "control":
             sub.add_argument(
                 "--policy",
-                choices=["none", "round-robin", "least-in-flight"],
+                choices=POLICIES,
                 required=True,
                 help="none passes no --router-policy, for images that predate it",
             )
@@ -824,6 +965,10 @@ def main():
     )
     commands.add_parser(
         "tcp-check", help="whether every HTTP server pod has the bench's TCP settings"
+    )
+    commands.add_parser(
+        "router-stats",
+        help="each region's Global Ingress routing stats, with pool loads and round trips",
     )
     args = parser.parse_args()
 
@@ -862,7 +1007,12 @@ def main():
     if args.command == "hub":
         members = [member["site"] for member in cfg["regions"]]
         stems = [pool["stem"] for pool in cfg["pools"]]
-        print(json.dumps(mcs.render(cfg["namespace"], stems, members), indent=2))
+        relay_stats_port = cfg.get("relay", "poc") == "poc"
+        rendered = mcs.render(cfg["namespace"], stems, members, relay_stats_port)
+        print(json.dumps(rendered, indent=2))
+        return
+    if args.command == "router-stats":
+        print(json.dumps(router_stats(cfg, args.evidence), indent=2))
         return
     if args.command == "table":
         directory = args.evidence / "results" / args.label
@@ -947,15 +1097,24 @@ def main():
             )
             print(f"deleting {name}")
             return
-        if args.concurrency is None or args.start_at is None:
-            sys.exit("loadgen up needs --concurrency and --start-at")
-        manifest = loadgen_manifest(cfg, args.label, args.concurrency, args.start_at)
+        load = cfg["load"]
+        day = "schedule" in load
+        if args.start_at is None or (args.concurrency is None and not day):
+            sys.exit(
+                "loadgen up needs --start-at, and --concurrency without a schedule"
+            )
+        manifest = loadgen_manifest(
+            cfg, member, args.label, args.concurrency, args.start_at
+        )
         print(json.dumps(cluster.deploy(member, name, manifest, args.evidence)))
         # Sample pod CPU on the bench nodes over the measurement window only:
-        # aiperf's trace rebuild before it uses every core it has.
-        load = cfg["load"]
-        delay = max(0, int(args.start_at + load["windowOffsetS"] - time.time()))
-        samples = load["measureS"] // 15
+        # aiperf's trace rebuild before it uses every core it has. A day is
+        # measured whole, from the shared start.
+        offset, measure = (
+            (0, load["dayS"]) if day else (load["windowOffsetS"], load["measureS"])
+        )
+        delay = max(0, int(args.start_at + offset - time.time()))
+        samples = measure // 15
         script = f"sleep {delay}\n" + cpu_sampler_script(cfg["namespace"], samples, 15)
         command_id = ssm_send(
             member, bench_nodes(member), script, delay + samples * 15 + 600
@@ -981,6 +1140,19 @@ def main():
                 summary = json.loads(text)
         if summary is None:
             sys.exit(f"no BENCH_SUMMARY for {args.label} in {member['region']}")
+        if "schedule" in cfg["load"]:
+            command_id = ssm_send(
+                member,
+                instances,
+                summary_script(cfg["namespace"], args.label, "BENCH_HOURLY"),
+                120,
+            )
+            for instance in instances:
+                text = ssm_output(member, command_id, instance)[
+                    "StandardOutputContent"
+                ].strip()
+                if text:
+                    summary["hourly"] = json.loads(text)
         cpu = {}
         cpu_command = (
             (directory / f"{member['region']}.cpu-command").read_text().strip()
