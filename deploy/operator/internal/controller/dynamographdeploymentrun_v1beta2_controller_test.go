@@ -393,6 +393,19 @@ func assertDGDRRunStatusInputMatchesConfigMap(
 	}
 }
 
+func TestDGDRRunStatusInputPreservesLargeIntegers(t *testing.T) {
+	const seed = "9007199254740993"
+
+	t.Log("Project the frozen YAML input into status without decoding numbers through float64")
+	input, err := dgdrRunStatusInput("optimizer:\n  seed: " + seed + "\n")
+	if err != nil {
+		t.Fatalf("project status input: %v", err)
+	}
+	if got := string(input.Raw); !strings.Contains(got, `"seed":`+seed) {
+		t.Fatalf("status input lost integer precision: %s", got)
+	}
+}
+
 func assertDGDRRunInput(t *testing.T, c client.Client, job *batchv1.Job, hardware *fixedRunHardware) {
 	t.Helper()
 	configMap := &corev1.ConfigMap{}

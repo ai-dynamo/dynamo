@@ -312,6 +312,7 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/status
+  - dynamographdeploymentcandidates/status
   - dynamographdeploymentrequests/status
   - dynamographdeploymentruns/status
   - dynamographdeployments/status
@@ -322,6 +323,18 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamographdeploymentcandidates
+  - snapshotjobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - watch
 - apiGroups:
   - nvidia.com
   resources:
@@ -337,17 +350,6 @@ rules:
   resources:
   - podsnapshots
   verbs:
-  - delete
-  - get
-  - list
-  - patch
-  - watch
-- apiGroups:
-  - nvidia.com
-  resources:
-  - snapshotjobs
-  verbs:
-  - create
   - delete
   - get
   - list
