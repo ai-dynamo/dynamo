@@ -228,4 +228,4 @@ strip = false
 
 # Draft prerequisite: replace with its published release before readiness.
 [patch.crates-io]
-dynamo-protocols = { git = "https://github.com/maheshrbapatu/frontend-crates", rev = "366210633dd84179b495926b9133d647f6ace1e2" }
+dynamo-protocols = { git = "https://github.com/maheshrbapatu/frontend-crates", rev = "bc547588eac8890bfeda2e206bc559959b273f72" }
