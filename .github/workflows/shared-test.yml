@@ -272,7 +272,6 @@ jobs:
           install -m755 "sidecar-artifact/dynamo-${SIDECAR_BACKEND}-sidecar" \
             "${bin_dir}/dynamo-${SIDECAR_BACKEND}-sidecar"
           echo "DYNAMO_SIDECAR_BIN=${bin_dir}/dynamo-${SIDECAR_BACKEND}-sidecar" >> "${GITHUB_ENV}"
-          echo "DYNAMO_TEST_SIDECAR_BACKEND=${SIDECAR_BACKEND}" >> "${GITHUB_ENV}"
           if [ -z "${CONTAINER_WORKSPACE}" ]; then
             echo "::error::container_workspace is empty; refusing to replace test files"
             exit 1
