@@ -61,6 +61,12 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
     fn try_from(mut req: AnthropicCreateMessageRequest) -> Result<Self, Self::Error> {
+        if let Some(thinking) = &req.thinking
+            && thinking.display.is_some()
+            && !matches!(thinking.thinking_type.as_str(), "enabled" | "adaptive")
+        {
+            anyhow::bail!("thinking.display requires thinking.type enabled or adaptive");
+        }
         let mut messages = Vec::new();
 
         // Prepend system message if present
@@ -258,17 +264,39 @@ fn convert_user_blocks(
             AnthropicContentBlock::ToolResult {
                 tool_use_id,
                 content,
+                is_error,
                 ..
             } => {
                 // Flush any accumulated content parts before the tool result message.
                 flush_user_content_parts(&mut content_parts, has_image, messages);
                 has_image = false;
 
-                let content = content
+                let mut content = content
                     .as_ref()
                     .map(convert_tool_result_content)
                     .transpose()?
                     .unwrap_or_default();
+                if *is_error == Some(true) {
+                    // Chat tool messages have no error flag. Keep the failure
+                    // visible to the model without losing the original content.
+                    const ERROR_PREFIX: &str = "[Tool execution failed]\n";
+                    match &mut content {
+                        ChatCompletionRequestToolMessageContent::Text(text) => {
+                            text.insert_str(0, ERROR_PREFIX);
+                        }
+                        ChatCompletionRequestToolMessageContent::Array(parts) => {
+                            parts.insert(
+                                0,
+                                ChatCompletionRequestToolMessageContentPart::Text(
+                                    ChatCompletionRequestMessageContentPartText {
+                                        text: ERROR_PREFIX.to_string(),
+                                        ..Default::default()
+                                    },
+                                ),
+                            );
+                        }
+                    }
+                }
                 messages.push(ChatCompletionRequestMessage::Tool(
                     ChatCompletionRequestToolMessage {
                         content,
@@ -296,14 +324,10 @@ fn convert_user_blocks(
 fn convert_image(
     source: &AnthropicImageSource,
 ) -> Result<dynamo_protocols::types::ChatCompletionRequestMessageContentPartImage, anyhow::Error> {
-    if source.source_type != "base64" {
-        anyhow::bail!(
-            "unsupported image source type {:?}; only base64 is supported",
-            source.source_type
-        );
-    }
-
-    let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
+    let AnthropicImageSource::Base64 { media_type, data } = source else {
+        anyhow::bail!("unsupported image source type; only base64 is supported");
+    };
+    let data_uri = format!("data:{media_type};base64,{data}");
     let url =
         url::Url::parse(&data_uri).map_err(|e| anyhow::anyhow!("invalid image data URI: {e}"))?;
     let image_url = ImageUrl::from(url.to_string());
@@ -868,7 +892,11 @@ pub fn chat_completion_to_anthropic_response(
             content.insert(
                 0,
                 AnthropicResponseContentBlock::Thinking {
-                    thinking,
+                    thinking: if api_context.is_some_and(|ctx| ctx.omit_thinking()) {
+                        String::new()
+                    } else {
+                        thinking
+                    },
                     signature: String::new(),
                 },
             );
@@ -2560,8 +2588,7 @@ mod tests {
                             cache_control: None,
                         },
                         AnthropicContentBlock::Image {
-                            source: AnthropicImageSource {
-                                source_type: "base64".into(),
+                            source: AnthropicImageSource::Base64 {
                                 media_type: "image/png".into(),
                                 data: "iVBORw0KGgo=".into(), // tiny valid-ish base64
                             },
@@ -2705,8 +2732,7 @@ mod tests {
                     content: AnthropicMessageContent::Blocks {
                         content: vec![
                             AnthropicContentBlock::Image {
-                                source: AnthropicImageSource {
-                                    source_type: "base64".into(),
+                                source: AnthropicImageSource::Base64 {
                                     media_type: "image/jpeg".into(),
                                     data: "/9j/4AAQ".into(),
                                 },

@@ -551,7 +551,15 @@ impl AnthropicStreamConverter {
                 let block_delta = AnthropicStreamEvent::ContentBlockDelta {
                     index: self.thinking_block_index,
                     delta: AnthropicDelta::ThinkingDelta {
-                        thinking: reasoning.clone(),
+                        thinking: if self
+                            .api_context
+                            .as_ref()
+                            .is_some_and(|ctx| ctx.omit_thinking())
+                        {
+                            String::new()
+                        } else {
+                            reasoning.clone()
+                        },
                     },
                 };
                 events.push(self.serialize_event("content_block_delta", &block_delta));

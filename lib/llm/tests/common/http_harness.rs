@@ -284,7 +284,7 @@ pub async fn parse_responses_sse(body: &str) -> Result<Vec<JsonSseEvent>> {
     }
 }
 
-async fn parse_json_sse_events(body: &str) -> Result<Vec<JsonSseEvent>> {
+pub async fn parse_json_sse_events(body: &str) -> Result<Vec<JsonSseEvent>> {
     let mut messages = create_message_stream(body);
     let mut events = Vec::new();
 
