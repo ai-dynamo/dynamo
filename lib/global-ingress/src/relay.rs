@@ -4,8 +4,8 @@
 //! Pool load from each pool's Relay.
 //!
 //! One task per pool subscribes to its Relay's serving-load stream and
-//! records the pool's requests in flight and live workers in
-//! [`PoolSignals`]. A pool's Relay address comes from the catalog; when it
+//! records the pool's requests in flight, live workers, and the counts its
+//! expected wait comes from in [`PoolSignals`]. A pool's Relay address comes from the catalog; when it
 //! changes or the pool leaves, the subscription is replaced or ends.
 
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use dynamo_global_router::{PoolLoad, PoolSignals, PoolSnapshot};
+use dynamo_global_router::{LoadReport, PoolLoad, PoolSignals, PoolSnapshot};
 use dynamo_global_router_shared::PoolId;
 use dynamo_llm::pool_relay::wan::grpc::protocol::{
     KvEventRelayClient, RELAY_CONTRACT_MARKER, ServingLoadUpdate, SubscribeServingLoadRequest,
@@ -145,8 +145,8 @@ async fn stream_load(
         let Some(update) = update else {
             bail!("the Relay closed the stream");
         };
-        match pool_load(&update, model) {
-            Some(load) => signals.record_load(pool, load),
+        match pool_report(&update, model) {
+            Some(report) => signals.record_load(pool, report),
             None => {
                 tracing::debug!(pool = %name, "the Relay's load is incomplete");
                 signals.forget_load(pool);
@@ -156,11 +156,12 @@ async fn stream_load(
 }
 
 /// The pool's requests in flight (waiting for a first token or generating)
-/// for `model`, and its live workers. `None` unless every part is reported:
+/// for `model`, its live workers, the requests waiting and started so far,
+/// and when the Relay observed them. `None` unless every part is reported:
 /// the Relay leaves a value unset when its view is incomplete, and unset
 /// does not mean zero. A Relay watching one pool reports one model; a model
 /// it names differently from the catalog still counts.
-fn pool_load(update: &ServingLoadUpdate, model: &str) -> Option<PoolLoad> {
+fn pool_report(update: &ServingLoadUpdate, model: &str) -> Option<LoadReport> {
     let workers = update
         .pools
         .iter()
@@ -179,14 +180,20 @@ fn pool_load(update: &ServingLoadUpdate, model: &str) -> Option<PoolLoad> {
     if models.is_empty() {
         return None;
     }
-    let in_flight = models
-        .into_iter()
-        .map(|entry| {
-            let requests = entry.load.as_ref()?.requests.as_ref()?;
-            Some(requests.requests_awaiting_first_token? + requests.requests_generating?)
-        })
-        .sum::<Option<u64>>()?;
-    Some(PoolLoad { in_flight, workers })
+    let (mut in_flight, mut awaiting, mut started_total) = (0, 0, 0);
+    for entry in models {
+        let requests = entry.load.as_ref()?.requests.as_ref()?;
+        let waiting = requests.requests_awaiting_first_token?;
+        in_flight += waiting + requests.requests_generating?;
+        awaiting += waiting;
+        started_total += requests.requests_started_total;
+    }
+    Some(LoadReport {
+        load: PoolLoad { in_flight, workers },
+        awaiting,
+        started_total,
+        observed_ms: update.observed_ms,
+    })
 }
 
 #[cfg(test)]
@@ -197,11 +204,14 @@ mod tests {
 
     use super::*;
 
+    /// An update observed at 5 s, with each model's requests waiting,
+    /// generating, and started so far.
     fn update(
         workers: Option<u64>,
-        models: &[(&str, Option<u64>, Option<u64>)],
+        models: &[(&str, Option<u64>, Option<u64>, u64)],
     ) -> ServingLoadUpdate {
         ServingLoadUpdate {
+            observed_ms: 5000,
             pools: vec![PoolServingLoad {
                 deployment: Some(PoolDeploymentStatus {
                     live_workers: workers,
@@ -211,10 +221,11 @@ mod tests {
             }],
             models: models
                 .iter()
-                .map(|(name, awaiting, generating)| ModelServingLoad {
+                .map(|(name, awaiting, generating, started)| ModelServingLoad {
                     canonical_model_id: (*name).to_owned(),
                     load: Some(LoadView {
                         requests: Some(RequestLifecycleStats {
+                            requests_started_total: *started,
                             requests_awaiting_first_token: *awaiting,
                             requests_generating: *generating,
                             ..Default::default()
@@ -230,32 +241,40 @@ mod tests {
 
     #[test]
     fn counts_waiting_and_generating_requests_over_live_workers() {
-        let load = pool_load(&update(Some(8), &[("qwen", Some(3), Some(20))]), "qwen");
+        let report = pool_report(
+            &update(Some(8), &[("qwen", Some(3), Some(20), 900)]),
+            "qwen",
+        );
         assert_eq!(
-            load,
-            Some(PoolLoad {
-                in_flight: 23,
-                workers: 8
+            report,
+            Some(LoadReport {
+                load: PoolLoad {
+                    in_flight: 23,
+                    workers: 8
+                },
+                awaiting: 3,
+                started_total: 900,
+                observed_ms: 5000,
             })
         );
         // A Relay naming the model differently still reports its pool.
-        let load = pool_load(
-            &update(Some(8), &[("Qwen/Qwen3", Some(1), Some(1))]),
+        let report = pool_report(
+            &update(Some(8), &[("Qwen/Qwen3", Some(1), Some(1), 7)]),
             "qwen",
         );
-        assert_eq!(load.map(|load| load.in_flight), Some(2));
+        assert_eq!(report.map(|report| report.load.in_flight), Some(2));
     }
 
     #[test]
     fn incomplete_views_are_unknown_not_zero() {
         assert_eq!(
-            pool_load(&update(None, &[("qwen", Some(1), Some(1))]), "qwen"),
+            pool_report(&update(None, &[("qwen", Some(1), Some(1), 0)]), "qwen"),
             None
         );
         assert_eq!(
-            pool_load(&update(Some(8), &[("qwen", None, Some(1))]), "qwen"),
+            pool_report(&update(Some(8), &[("qwen", None, Some(1), 0)]), "qwen"),
             None
         );
-        assert_eq!(pool_load(&update(Some(8), &[]), "qwen"), None);
+        assert_eq!(pool_report(&update(Some(8), &[]), "qwen"), None);
     }
 }

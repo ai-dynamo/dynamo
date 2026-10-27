@@ -23,9 +23,9 @@ use dynamo_global_ingress::{
     ModelSync, PoolForwardingEngine, RoutingStats, follow_relays, measure_round_trips,
 };
 use dynamo_global_router::{
-    AffinitySelector, DiscoveryPoolCatalog, InFlightTracker, LeastInFlightSelector, Overload, Pool,
-    PoolCatalog, PoolSelector, PoolSignals, RendezvousSelector, RoundRobinSelector,
-    StaticPoolCatalog,
+    AffinitySelector, DiscoveryPoolCatalog, InFlightTracker, LeastInFlightSelector, LoadMeasure,
+    Overload, Pool, PoolCatalog, PoolSelector, PoolSignals, RendezvousSelector, RoundRobinSelector,
+    Spill, StaticPoolCatalog,
 };
 use dynamo_global_router_shared::{PoolIdDeriver, PoolKey, PoolLocation, V1PoolIdDeriver};
 use dynamo_llm::http::service::axum;
@@ -74,13 +74,23 @@ struct Args {
     /// A pool's Relay load older than this is not used.
     #[arg(long, default_value_t = 3000)]
     load_max_age_ms: u64,
-    /// A pool is overloaded when its requests in flight per worker exceed
-    /// this multiple of the fleet's...
+    /// `rendezvous` and `affinity`: how to measure how busy a pool is.
+    #[arg(long, value_enum, default_value_t = Measure::PerWorker)]
+    load_measure: Measure,
+    /// How far back a pool's expected wait looks.
+    #[arg(long, default_value_t = 10)]
+    wait_window_secs: u64,
+    /// A pool is overloaded when its load exceeds this multiple of the
+    /// fleet's...
     #[arg(long, default_value_t = Overload::default().ratio)]
     overload_ratio: f64,
-    /// ...and exceed the fleet's by at least this many per worker.
+    /// ...and, with `--load-measure per-worker`, exceeds the fleet's by at
+    /// least this many requests per worker...
     #[arg(long, default_value_t = Overload::default().floor)]
     overload_floor: f64,
+    /// ...or, with `--load-measure wait`, by at least this much wait.
+    #[arg(long, default_value_t = Overload::default().wait_floor.as_millis() as u64)]
+    overload_wait_floor_ms: u64,
     /// `affinity`: forget a session's pool after this long without a request.
     #[arg(long, default_value_t = 1800)]
     pin_idle_secs: u64,
@@ -101,6 +111,15 @@ enum RouterPolicy {
     /// Pin each session to a pool; move the pin to the nearest pool with
     /// room when the pinned pool is overloaded.
     Affinity,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Measure {
+    /// Requests in flight per worker.
+    PerWorker,
+    /// Expected wait for a first token, from the pool's waiting requests
+    /// and the rate it starts requests.
+    Wait,
 }
 
 fn parse_pool(value: &str) -> Result<Pool, String> {
@@ -162,14 +181,24 @@ async fn main() -> Result<()> {
         None => Box::new(StaticPoolCatalog::new(args.pools)),
     };
     let in_flight = Arc::new(InFlightTracker::new());
-    let signals = Arc::new(PoolSignals::new(
-        in_flight.clone(),
-        Duration::from_millis(args.load_max_age_ms),
-    ));
+    let signals = Arc::new(
+        PoolSignals::new(
+            in_flight.clone(),
+            Duration::from_millis(args.load_max_age_ms),
+        )
+        .with_wait_window(Duration::from_secs(args.wait_window_secs)),
+    );
     let stats = Arc::new(RoutingStats::new(args.region.clone()));
-    let overload = Overload {
-        ratio: args.overload_ratio,
-        floor: args.overload_floor,
+    let spill = Spill {
+        measure: match args.load_measure {
+            Measure::PerWorker => LoadMeasure::PerWorker,
+            Measure::Wait => LoadMeasure::Wait,
+        },
+        overload: Overload {
+            ratio: args.overload_ratio,
+            floor: args.overload_floor,
+            wait_floor: Duration::from_millis(args.overload_wait_floor_ms),
+        },
     };
     let region = || {
         args.region
@@ -179,15 +208,13 @@ async fn main() -> Result<()> {
     let selector: Arc<dyn PoolSelector> = match args.router_policy {
         RouterPolicy::RoundRobin => Arc::new(RoundRobinSelector::new()),
         RouterPolicy::LeastInFlight => Arc::new(LeastInFlightSelector::new(in_flight.clone())),
-        RouterPolicy::Rendezvous => Arc::new(RendezvousSelector::new(
-            signals.clone(),
-            region()?,
-            overload,
-        )),
+        RouterPolicy::Rendezvous => {
+            Arc::new(RendezvousSelector::new(signals.clone(), region()?, spill))
+        }
         RouterPolicy::Affinity => Arc::new(AffinitySelector::new(
             signals.clone(),
             region()?,
-            overload,
+            spill,
             Duration::from_secs(args.pin_idle_secs),
         )),
     };

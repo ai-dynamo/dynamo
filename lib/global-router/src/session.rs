@@ -4,7 +4,7 @@
 //! Selectors that keep a session's turns on one pool, so the pool's KV cache
 //! for the session is reused, and that prefer the region a request entered.
 //! Both read each pool's load from [`PoolSignals`] and leave a pool only when
-//! it is overloaded (see [`Overload`]).
+//! it is overloaded (see [`Spill`]).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,7 +16,7 @@ use dynamo_runtime::pipeline::BuiltinRoutePicker;
 use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
 
 use crate::catalog::Pool;
-use crate::placement::{Overload, by_distance, cost_order, least_loaded, place};
+use crate::placement::{Spill, by_distance, cost_order, least_loaded, place};
 use crate::selector::{PoolSelector, PoolTarget, RoutingRequest, target};
 use crate::signals::PoolSignals;
 
@@ -38,18 +38,18 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 pub struct RendezvousSelector {
     signals: Arc<PoolSignals>,
     region: String,
-    overload: Overload,
+    spill: Spill,
     unkeyed: AtomicU64,
     frontends: DashMap<PoolId, BuiltinRoutePicker>,
 }
 
 impl RendezvousSelector {
     /// `region` is the region of this process, which every request enters.
-    pub fn new(signals: Arc<PoolSignals>, region: String, overload: Overload) -> Self {
+    pub fn new(signals: Arc<PoolSignals>, region: String, spill: Spill) -> Self {
         Self {
             signals,
             region,
-            overload,
+            spill,
             unkeyed: AtomicU64::new(0),
             frontends: DashMap::new(),
         }
@@ -58,7 +58,7 @@ impl RendezvousSelector {
 
 impl PoolSelector for RendezvousSelector {
     fn select(&self, request: &RoutingRequest<'_>, candidates: &[&Pool]) -> Option<PoolTarget> {
-        let mut placed = place(candidates, &self.region, &self.signals, self.overload);
+        let mut placed = place(candidates, &self.region, &self.signals, self.spill);
         let key = match request.session {
             Some(session) => xxh3_64(session.as_bytes()),
             None => self.unkeyed.fetch_add(1, Ordering::Relaxed),
@@ -79,8 +79,8 @@ impl PoolSelector for RendezvousSelector {
 /// overloaded.
 ///
 /// A new session goes to the first pool in cost order that is not
-/// overloaded: nearest region first, then lower load per worker, which is
-/// usually the less loaded pool in the region the request entered. Later
+/// overloaded: nearest region first, then less busy, which is usually the
+/// less busy pool in the region the request entered. Later
 /// turns go to the pinned pool while it is not overloaded, even if it is in
 /// another region, since the session's cache is there. When the pinned pool
 /// is overloaded, the turn goes to the first other pool in cost order that
@@ -90,7 +90,7 @@ impl PoolSelector for RendezvousSelector {
 pub struct AffinitySelector {
     signals: Arc<PoolSignals>,
     region: String,
-    overload: Overload,
+    spill: Spill,
     idle: Duration,
     pins: DashMap<String, Pin>,
     swept: Mutex<Instant>,
@@ -105,16 +105,11 @@ struct Pin {
 
 impl AffinitySelector {
     /// `region` is the region of this process, which every request enters.
-    pub fn new(
-        signals: Arc<PoolSignals>,
-        region: String,
-        overload: Overload,
-        idle: Duration,
-    ) -> Self {
+    pub fn new(signals: Arc<PoolSignals>, region: String, spill: Spill, idle: Duration) -> Self {
         Self {
             signals,
             region,
-            overload,
+            spill,
             idle,
             pins: DashMap::new(),
             swept: Mutex::new(Instant::now()),
@@ -165,7 +160,7 @@ impl AffinitySelector {
 
 impl PoolSelector for AffinitySelector {
     fn select(&self, request: &RoutingRequest<'_>, candidates: &[&Pool]) -> Option<PoolTarget> {
-        let mut placed = place(candidates, &self.region, &self.signals, self.overload);
+        let mut placed = place(candidates, &self.region, &self.signals, self.spill);
         cost_order(&mut placed);
         let pinned = request.session.and_then(|session| self.pinned(session));
         let is_pinned = |pool: &Pool| pinned.as_ref() == Some(&pool.id);
@@ -188,7 +183,7 @@ impl PoolSelector for AffinitySelector {
 
 #[cfg(test)]
 mod tests {
-    use crate::placement::tests::{OHIO, fleet, set_loads};
+    use crate::placement::tests::{OHIO, by_wait, fleet, set_loads, set_waits};
 
     use super::*;
 
@@ -204,8 +199,8 @@ mod tests {
     fn rendezvous_keeps_each_session_on_one_local_pool_on_every_replica() {
         let (pools, signals) = fleet();
         set_loads(&pools, &signals, [10, 10, 10, 10]);
-        let first = RendezvousSelector::new(signals.clone(), OHIO.into(), Overload::default());
-        let second = RendezvousSelector::new(signals, OHIO.into(), Overload::default());
+        let first = RendezvousSelector::new(signals.clone(), OHIO.into(), Spill::default());
+        let second = RendezvousSelector::new(signals, OHIO.into(), Spill::default());
 
         let homes = (0..64)
             .map(|n| {
@@ -223,7 +218,7 @@ mod tests {
     #[test]
     fn rendezvous_spills_to_the_nearest_region_with_room_and_comes_home() {
         let (pools, signals) = fleet();
-        let selector = RendezvousSelector::new(signals.clone(), OHIO.into(), Overload::default());
+        let selector = RendezvousSelector::new(signals.clone(), OHIO.into(), Spill::default());
         set_loads(&pools, &signals, [10, 10, 10, 10]);
         let home = pick(&selector, &pools, Some("s"));
 
@@ -245,7 +240,7 @@ mod tests {
         let selector = AffinitySelector::new(
             signals.clone(),
             OHIO.into(),
-            Overload::default(),
+            Spill::default(),
             Duration::from_secs(60),
         );
         set_loads(&pools, &signals, [40, 20, 30, 30]);
@@ -267,7 +262,7 @@ mod tests {
         let selector = AffinitySelector::new(
             signals.clone(),
             OHIO.into(),
-            Overload::default(),
+            Spill::default(),
             Duration::from_secs(60),
         );
         set_loads(&pools, &signals, [10, 20, 20, 20]);
@@ -292,12 +287,28 @@ mod tests {
     }
 
     #[test]
+    fn affinity_by_wait_pins_new_sessions_to_the_pool_that_answers_sooner() {
+        let (pools, signals) = fleet();
+        // Both Ohio pools hold 5 requests per worker, but Ohio-a waits 2 s
+        // and Ohio-b 0.25 s.
+        set_waits(&pools, &signals, [(8, 4), (2, 8), (2, 8), (2, 8)]);
+        let idle = Duration::from_secs(60);
+
+        let per_worker =
+            AffinitySelector::new(signals.clone(), OHIO.into(), Spill::default(), idle);
+        assert_eq!(pick(&per_worker, &pools, Some("s")), "ohio-a");
+
+        let wait = AffinitySelector::new(signals, OHIO.into(), by_wait(), idle);
+        assert_eq!(pick(&wait, &pools, Some("s")), "ohio-b");
+    }
+
+    #[test]
     fn affinity_forgets_idle_pins() {
         let (pools, signals) = fleet();
         let selector = AffinitySelector::new(
             signals.clone(),
             OHIO.into(),
-            Overload::default(),
+            Spill::default(),
             Duration::from_millis(20),
         );
         set_loads(&pools, &signals, [10, 20, 20, 20]);

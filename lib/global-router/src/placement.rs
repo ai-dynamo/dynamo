@@ -1,25 +1,38 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! What the session-aware selectors share: which pools are overloaded, how
-//! far each pool's region is from the region a request entered, and the
-//! order to try pools in.
+//! What the session-aware selectors share: how busy each pool is, which
+//! pools are overloaded, how far each pool's region is from the region a
+//! request entered, and the order to try pools in.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::catalog::Pool;
-use crate::signals::{PoolLoad, PoolSignals};
+use crate::signals::PoolSignals;
 
-/// When a pool counts as overloaded: its requests in flight per worker are
-/// more than `ratio` times the fleet's, and at least `floor` more per worker
-/// than the fleet's. The floor keeps nearly idle pools from counting as
-/// overloaded over a request or two.
+/// How the session-aware selectors measure how busy a pool is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LoadMeasure {
+    /// Requests in flight per worker. Pools differ in size, so loads are
+    /// compared per worker; it assumes every worker serves as many.
+    #[default]
+    PerWorker,
+    /// The expected wait for a first token (see [`PoolSignals::wait`]),
+    /// which also compares pools whose workers differ in speed or size.
+    Wait,
+}
+
+/// When a pool counts as overloaded: its load is more than `ratio` times
+/// the fleet's, and more than the fleet's by at least a floor: `floor`
+/// requests per worker, or `wait_floor` of expected wait. The floor keeps
+/// nearly idle pools from counting as overloaded over a request or two.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Overload {
     pub ratio: f64,
     pub floor: f64,
+    pub wait_floor: Duration,
 }
 
 impl Default for Overload {
@@ -27,15 +40,25 @@ impl Default for Overload {
         Self {
             ratio: 1.25,
             floor: 1.0,
+            wait_floor: Duration::from_millis(500),
         }
     }
+}
+
+/// How the session-aware selectors decide when a request leaves its pool.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spill {
+    pub measure: LoadMeasure,
+    pub overload: Overload,
 }
 
 /// A reachable pool, with what the session-aware selectors weigh.
 #[derive(Debug)]
 pub(crate) struct Candidate<'a> {
     pub pool: &'a Pool,
-    pub load: Option<PoolLoad>,
+    /// How busy the pool is by the [`LoadMeasure`] in use: requests per
+    /// worker, or seconds of expected wait. `None` without a fresh report.
+    pub busy: Option<f64>,
     /// Round trip to the pool's region: zero for the region the request
     /// entered, otherwise the median round trip measured to that region's
     /// pools. `None` until one is measured.
@@ -45,16 +68,17 @@ pub(crate) struct Candidate<'a> {
 
 /// The candidates that have a frontend, for a request entering `region`.
 ///
-/// The fleet's load per worker is all requests in flight over all workers,
-/// among the pools with a fresh load. A pool without a fresh load counts as
-/// overloaded, so it is tried only after the pools known to have room. When
-/// no pool has a fresh load, none is overloaded and distance alone orders
-/// them.
+/// The fleet's load is taken over the pools with a fresh report: all
+/// requests in flight over all workers, or, for [`LoadMeasure::Wait`], all
+/// waiting requests over all the requests started per second. A pool
+/// without a fresh report counts as overloaded, so it is tried only after
+/// the pools known to have room. When no pool has a fresh report, none is
+/// overloaded and distance alone orders them.
 pub(crate) fn place<'a>(
     candidates: &[&'a Pool],
     region: &str,
     signals: &PoolSignals,
-    overload: Overload,
+    spill: Spill,
 ) -> Vec<Candidate<'a>> {
     let pools = candidates
         .iter()
@@ -65,29 +89,59 @@ pub(crate) fn place<'a>(
         .iter()
         .map(|pool| signals.load(&pool.id))
         .collect::<Vec<_>>();
-    let (in_flight, workers) = loads
+    let waits = pools
         .iter()
-        .flatten()
-        .fold((0, 0), |(in_flight, workers), load| {
-            (in_flight + load.in_flight, workers + load.workers)
-        });
-    let fleet = (workers > 0).then(|| in_flight as f64 / workers as f64);
+        .map(|pool| match spill.measure {
+            LoadMeasure::PerWorker => None,
+            LoadMeasure::Wait => signals.wait(&pool.id),
+        })
+        .collect::<Vec<_>>();
+    let (busy, fleet, floor) = match spill.measure {
+        LoadMeasure::PerWorker => {
+            let (in_flight, workers) = loads
+                .iter()
+                .flatten()
+                .fold((0, 0), |(in_flight, workers), load| {
+                    (in_flight + load.in_flight, workers + load.workers)
+                });
+            let busy = loads
+                .iter()
+                .map(|load| load.map(|load| load.per_worker()))
+                .collect::<Vec<_>>();
+            let fleet = (workers > 0).then(|| in_flight as f64 / workers as f64);
+            (busy, fleet, spill.overload.floor)
+        }
+        LoadMeasure::Wait => {
+            let (awaiting, arrivals) =
+                waits
+                    .iter()
+                    .flatten()
+                    .fold((0.0, 0.0), |(awaiting, arrivals), wait| {
+                        (awaiting + wait.awaiting, arrivals + wait.arrivals_per_s)
+                    });
+            let busy = waits
+                .iter()
+                .map(|wait| wait.map(|wait| wait.wait.as_secs_f64()))
+                .collect::<Vec<_>>();
+            let fleet = (arrivals > 0.0).then(|| awaiting / arrivals);
+            (busy, fleet, spill.overload.wait_floor.as_secs_f64())
+        }
+    };
     let distances = region_distances(&pools, region, signals);
     pools
         .into_iter()
-        .zip(loads)
-        .map(|(pool, load)| {
-            let overloaded = match (load, fleet) {
-                (Some(load), Some(fleet)) => {
-                    let per_worker = load.per_worker();
-                    per_worker > overload.ratio * fleet && per_worker - fleet >= overload.floor
+        .zip(busy)
+        .map(|(pool, busy)| {
+            let overloaded = match (busy, fleet) {
+                (Some(busy), Some(fleet)) => {
+                    busy > spill.overload.ratio * fleet && busy - fleet >= floor
                 }
                 (None, Some(_)) => true,
                 (_, None) => false,
             };
             Candidate {
                 pool,
-                load,
+                busy,
                 distance: distances[pool.location.region.as_str()],
                 overloaded,
             }
@@ -129,24 +183,22 @@ pub(crate) fn by_distance(left: &Candidate<'_>, right: &Candidate<'_>) -> Orderi
     }
 }
 
-/// Lower load per worker first; unknown loads last.
+/// Less busy first; unknown loads last.
 pub(crate) fn by_load(left: &Candidate<'_>, right: &Candidate<'_>) -> Ordering {
-    match (left.load, right.load) {
-        (Some(left), Some(right)) => left.per_worker().total_cmp(&right.per_worker()),
+    match (left.busy, right.busy) {
+        (Some(left), Some(right)) => left.total_cmp(&right),
         (Some(_), None) => Ordering::Less,
         (None, Some(_)) => Ordering::Greater,
         (None, None) => Ordering::Equal,
     }
 }
 
-/// From least to most expensive: nearest region first, then lower load per
-/// worker.
+/// From least to most expensive: nearest region first, then less busy.
 pub(crate) fn cost_order(candidates: &mut [Candidate<'_>]) {
     candidates.sort_by(|left, right| by_distance(left, right).then_with(|| by_load(left, right)));
 }
 
-/// For when every pool is overloaded: the lowest load per worker, nearest
-/// on ties.
+/// For when every pool is overloaded: the least busy, nearest on ties.
 pub(crate) fn least_loaded<'a, 'b>(candidates: &'b [Candidate<'a>]) -> Option<&'b Candidate<'a>> {
     candidates
         .iter()
@@ -159,6 +211,7 @@ pub(crate) mod tests {
 
     use crate::catalog::tests::regional_pool;
     use crate::load::InFlightTracker;
+    use crate::signals::{LoadReport, PoolLoad};
 
     use super::*;
 
@@ -188,13 +241,57 @@ pub(crate) mod tests {
     /// Sets each pool's requests in flight, with 8 workers each.
     pub(crate) fn set_loads(pools: &[Pool], signals: &PoolSignals, in_flight: [u64; 4]) {
         for (pool, in_flight) in pools.iter().zip(in_flight) {
-            let workers = 8;
-            signals.record_load(&pool.id, PoolLoad { in_flight, workers });
+            let load = PoolLoad {
+                in_flight,
+                workers: 8,
+            };
+            signals.record_load(
+                &pool.id,
+                LoadReport {
+                    load,
+                    awaiting: 0,
+                    started_total: 0,
+                    observed_ms: 0,
+                },
+            );
+        }
+    }
+
+    /// Gives every pool 40 requests in flight over 8 workers, and sets each
+    /// pool's expected wait from its waiting requests and the requests it
+    /// starts per second.
+    pub(crate) fn set_waits(pools: &[Pool], signals: &PoolSignals, waits: [(u64, u64); 4]) {
+        for (pool, (awaiting, per_second)) in pools.iter().zip(waits) {
+            signals.forget_load(&pool.id);
+            for (observed_ms, started_total) in [(0, 0), (1000, per_second)] {
+                let load = PoolLoad {
+                    in_flight: 40,
+                    workers: 8,
+                };
+                let report = LoadReport {
+                    load,
+                    awaiting,
+                    started_total,
+                    observed_ms,
+                };
+                signals.record_load(&pool.id, report);
+            }
+        }
+    }
+
+    pub(crate) fn by_wait() -> Spill {
+        Spill {
+            measure: LoadMeasure::Wait,
+            ..Spill::default()
         }
     }
 
     fn names(candidates: &[Candidate<'_>]) -> Vec<String> {
         candidates.iter().map(|c| c.pool.name.clone()).collect()
+    }
+
+    fn overloaded(candidates: &[Candidate<'_>]) -> Vec<bool> {
+        candidates.iter().map(|c| c.overloaded).collect()
     }
 
     #[test]
@@ -204,15 +301,49 @@ pub(crate) mod tests {
 
         // Fleet: 400 / 32 = 12.5 per worker. Ohio-a has 25 per worker.
         set_loads(&pools, &signals, [200, 100, 80, 20]);
-        let overloaded = place(&refs, OHIO, &signals, Overload::default())
-            .iter()
-            .map(|c| c.overloaded)
-            .collect::<Vec<_>>();
-        assert_eq!(overloaded, [true, false, false, false]);
+        let placed = place(&refs, OHIO, &signals, Spill::default());
+        assert_eq!(overloaded(&placed), [true, false, false, false]);
 
         // Nearly idle: 0.6 per worker against 0.3 is under the floor.
         set_loads(&pools, &signals, [5, 3, 2, 0]);
-        let placed = place(&refs, OHIO, &signals, Overload::default());
+        let placed = place(&refs, OHIO, &signals, Spill::default());
+        assert!(placed.iter().all(|c| !c.overloaded));
+    }
+
+    #[test]
+    fn wait_tells_apart_pools_that_are_equally_full_but_not_equally_fast() {
+        let (pools, signals) = fleet();
+        let refs = pools.iter().collect::<Vec<_>>();
+        // Every pool has 5 requests per worker. Ohio-a starts 4 requests a
+        // second with 20 waiting (5 s); the others start 8 with 4 waiting
+        // (0.5 s). The fleet waits 32 / 28 = 1.14 s.
+        set_waits(&pools, &signals, [(20, 4), (4, 8), (4, 8), (4, 8)]);
+
+        let mut placed = place(&refs, OHIO, &signals, Spill::default());
+        assert!(placed.iter().all(|c| !c.overloaded));
+        cost_order(&mut placed);
+        assert_eq!(
+            names(&placed)[..2],
+            ["us-east-2/dynamo/ohio-a", "us-east-2/dynamo/ohio-b"]
+        );
+
+        let mut placed = place(&refs, OHIO, &signals, by_wait());
+        assert_eq!(overloaded(&placed), [true, false, false, false]);
+        cost_order(&mut placed);
+        assert_eq!(
+            names(&placed)[..2],
+            ["us-east-2/dynamo/ohio-b", "us-east-2/dynamo/ohio-a"]
+        );
+    }
+
+    #[test]
+    fn wait_overload_has_a_floor() {
+        let (pools, signals) = fleet();
+        let refs = pools.iter().collect::<Vec<_>>();
+        // Ohio-a waits 0.2 s against a fleet of 0.05 s: four times longer,
+        // but under the 0.5 s floor.
+        set_waits(&pools, &signals, [(1, 5), (0, 5), (0, 5), (0, 5)]);
+        let placed = place(&refs, OHIO, &signals, by_wait());
         assert!(placed.iter().all(|c| !c.overloaded));
     }
 
@@ -222,7 +353,7 @@ pub(crate) mod tests {
         let refs = pools.iter().collect::<Vec<_>>();
         set_loads(&pools, &signals, [40, 20, 0, 0]);
 
-        let mut placed = place(&refs, TOKYO, &signals, Overload::default());
+        let mut placed = place(&refs, TOKYO, &signals, Spill::default());
         cost_order(&mut placed);
         // From Tokyo, Tokyo is home; Ohio's median measured round trip (1 ms)
         // is less than Oregon's (50 ms) here, and Ohio-b is less loaded.
@@ -245,18 +376,25 @@ pub(crate) mod tests {
     fn pools_without_fresh_load_are_tried_last() {
         let (pools, signals) = fleet();
         let refs = pools.iter().collect::<Vec<_>>();
-        let placed = place(&refs, OHIO, &signals, Overload::default());
-        assert!(placed.iter().all(|c| !c.overloaded && c.load.is_none()));
+        let placed = place(&refs, OHIO, &signals, Spill::default());
+        assert!(placed.iter().all(|c| !c.overloaded && c.busy.is_none()));
 
-        signals.record_load(
-            &pools[1].id,
-            PoolLoad {
-                in_flight: 8,
-                workers: 8,
-            },
-        );
-        let placed = place(&refs, OHIO, &signals, Overload::default());
-        let overloaded = placed.iter().map(|c| c.overloaded).collect::<Vec<_>>();
-        assert_eq!(overloaded, [true, false, true, true]);
+        let load = PoolLoad {
+            in_flight: 8,
+            workers: 8,
+        };
+        let report = LoadReport {
+            load,
+            awaiting: 0,
+            started_total: 0,
+            observed_ms: 0,
+        };
+        signals.record_load(&pools[1].id, report);
+        let placed = place(&refs, OHIO, &signals, Spill::default());
+        assert_eq!(overloaded(&placed), [true, false, true, true]);
+
+        // By wait, a pool needs two reports before it has a rate.
+        let placed = place(&refs, OHIO, &signals, by_wait());
+        assert!(placed.iter().all(|c| !c.overloaded && c.busy.is_none()));
     }
 }
