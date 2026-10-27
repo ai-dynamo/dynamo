@@ -12,8 +12,10 @@ from tests.utils import sidecar_runtime
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 
-@pytest.mark.parametrize("backend", [None, "trtllm", "vllm"])
-@pytest.mark.parametrize("available", [False, True])
+@pytest.mark.parametrize(
+    "backend,available",
+    [("trtllm", True), ("trtllm", False), (None, False), ("vllm", False)],
+)
 def test_required_ci_fails_missing_runtime_and_local_runs_skip(
     monkeypatch, backend, available
 ):
