@@ -4169,6 +4169,24 @@ _Appears in:_
 | `format` _string_ | Format is the log format (e.g., "json", "text") | json |  |
 
 
+#### MCSImplementation
+
+_Underlying type:_ _string_
+
+MCSImplementation identifies an implementation of the Multi-Cluster Services API.
+
+
+
+_Appears in:_
+- [MultiClusterConfiguration](#multiclusterconfiguration)
+
+| Field | Description |
+| --- | --- |
+| `` | MCSImplementationNone exports nothing.<br /> |
+| `mcs` | MCSImplementationStandard is an implementation of the SIG Multicluster API that<br />imports Services into ServiceImports and EndpointSlices with the standard labels.<br /> |
+| `karmada` | MCSImplementationKarmada is Karmada, which reads the same ServiceExport in<br />member clusters but names imported EndpointSlices after the source cluster.<br /> |
+
+
 #### MPIConfiguration
 
 
@@ -4202,6 +4220,26 @@ _Appears in:_
 | `bindAddress` _string_ | BindAddress is the address the server binds to |  |  |
 | `port` _integer_ | Port is the port the server listens on |  |  |
 | `secure` _boolean_ | Secure enables secure serving for the metrics endpoint.<br />nil = default to true (secure by default). |  |  |
+
+
+#### MultiClusterConfiguration
+
+
+
+MultiClusterConfiguration configures how the operator exports Global Router
+pools through the Kubernetes Multi-Cluster Services (MCS) API, for the Global
+Discovery Service's Kubernetes stores. The operator exports a pool only when
+MCSImplementation is set and its DGD has the nvidia.com/global-router-pool
+annotation.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `mcsImplementation` _[MCSImplementation](#mcsimplementation)_ | MCSImplementation is the MCS implementation that imports the exports. Empty,<br />the default, exports nothing: Global Router pools are then discovered without<br />Kubernetes. Clearing it leaves earlier exports in place until their DGDs are<br />deleted. |  |  |
 
 
 #### NamespaceConfiguration
@@ -4264,6 +4302,7 @@ OperatorConfiguration is the Schema for the operator configuration.
 | `mpi` _[MPIConfiguration](#mpiconfiguration)_ | MPI SSH secret configuration |  |  |
 | `checkpoint` _[CheckpointConfiguration](#checkpointconfiguration)_ | Checkpoint/restore configuration |  |  |
 | `discovery` _[DiscoveryConfiguration](#discoveryconfiguration)_ | Discovery backend configuration |  |  |
+| `multiCluster` _[MultiClusterConfiguration](#multiclusterconfiguration)_ | MultiCluster configures exporting Global Router pools to other clusters. |  |  |
 | `gpu` _[GPUConfiguration](#gpuconfiguration)_ | GPU discovery configuration |  |  |
 | `logging` _[LoggingConfiguration](#loggingconfiguration)_ | Logging configuration |  |  |
 | `security` _[SecurityConfiguration](#securityconfiguration)_ | HTTP/2 and TLS settings |  |  |

@@ -239,6 +239,16 @@ rules:
   - update
   - watch
 - apiGroups:
+  - multicluster.x-k8s.io
+  resources:
+  - serviceexports
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
   - networking.istio.io
   resources:
   - destinationrules

@@ -39,6 +39,7 @@ type disaggregatedSetProgram struct {
 	rollout         *dgdWorkerRolloutReconciler
 	workloads       *disaggregatedSetWorkloadsReconciler
 	scalingAdapters *dgdScalingAdaptersReconciler
+	serviceExports  *dgdServiceExportReconciler
 	gate            features.Gate
 }
 
@@ -57,6 +58,7 @@ func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetProgram() *disaggre
 		rollout:         rollout,
 		workloads:       r.newDisaggregatedSetWorkloadsReconciler(rollout),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
+		serviceExports:  newDGDServiceExportReconciler(newDGDResourceSyncer(r.Client, r.Recorder), r.Config, r.RuntimeConfig.Gate),
 		gate:            r.RuntimeConfig.Gate,
 	}
 }
@@ -137,6 +139,13 @@ func (p *disaggregatedSetProgram) Reconcile(
 			log.FromContext(ctx).Error(err, "Failed to reconcile scaling adapters")
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
+	}
+
+	// A Global Router pool's exports follow its workloads, so a failed export does
+	// not hold them back.
+	if err := p.serviceExports.Reconcile(ctx, req.DGD); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to reconcile Global Router pool ServiceExports")
+		return programResult, fmt.Errorf("failed to reconcile Global Router pool ServiceExports: %w", err)
 	}
 
 	programResult.applyReconcileResult(req.DGD.Generation, result)

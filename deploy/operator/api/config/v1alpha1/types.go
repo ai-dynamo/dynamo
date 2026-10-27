@@ -62,6 +62,9 @@ type OperatorConfiguration struct {
 	// Discovery backend configuration
 	Discovery DiscoveryConfiguration `json:"discovery"`
 
+	// MultiCluster configures exporting Global Router pools to other clusters.
+	MultiCluster MultiClusterConfiguration `json:"multiCluster,omitempty"`
+
 	// GPU discovery configuration
 	GPU GPUConfiguration `json:"gpu"`
 
@@ -396,6 +399,33 @@ type DiscoveryConfiguration struct {
 	// +kubebuilder:default="kubernetes"
 	Backend DiscoveryBackend `json:"backend"`
 }
+
+// MultiClusterConfiguration configures how the operator exports Global Router
+// pools through the Kubernetes Multi-Cluster Services (MCS) API, for the Global
+// Discovery Service's Kubernetes stores. The operator exports a pool only when
+// MCSImplementation is set and its DGD has the nvidia.com/global-router-pool
+// annotation.
+type MultiClusterConfiguration struct {
+	// MCSImplementation is the MCS implementation that imports the exports. Empty,
+	// the default, exports nothing: Global Router pools are then discovered without
+	// Kubernetes. Clearing it leaves earlier exports in place until their DGDs are
+	// deleted.
+	MCSImplementation MCSImplementation `json:"mcsImplementation,omitempty"`
+}
+
+// MCSImplementation identifies an implementation of the Multi-Cluster Services API.
+type MCSImplementation string
+
+const (
+	// MCSImplementationNone exports nothing.
+	MCSImplementationNone MCSImplementation = ""
+	// MCSImplementationStandard is an implementation of the SIG Multicluster API that
+	// imports Services into ServiceImports and EndpointSlices with the standard labels.
+	MCSImplementationStandard MCSImplementation = "mcs"
+	// MCSImplementationKarmada is Karmada, which reads the same ServiceExport in
+	// member clusters but names imported EndpointSlices after the source cluster.
+	MCSImplementationKarmada MCSImplementation = "karmada"
+)
 
 // DiscoveryBackend is the type for the discovery backend.
 type DiscoveryBackend string

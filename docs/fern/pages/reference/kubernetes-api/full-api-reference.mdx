@@ -10,13 +10,13 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 4 Kubernetes API packages with 208 typed CRD and config sections.
+Dynamo publishes 4 Kubernetes API packages with 210 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">71 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">76 types</Card>
 <Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">32 types</Card>
-<Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
+<Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">31 types</Card>
 </CardGroup>
 
 <div id="nvidia-com-v1alpha1" />
@@ -5746,6 +5746,21 @@ Format is the log format (e.g., "json", "text")
 </ParamField>
 </Accordion>
 
+<Accordion id="mcsimplementation" title="MCSImplementation">
+MCSImplementation identifies an implementation of the Multi-Cluster Services API.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Appears in:** [MultiClusterConfiguration](#multiclusterconfiguration)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>``</Badge> MCSImplementationNone exports nothing.
+- <Badge intent="note" minimal>mcs</Badge> MCSImplementationStandard is an implementation of the SIG Multicluster API that imports Services into ServiceImports and EndpointSlices with the standard labels.
+- <Badge intent="note" minimal>karmada</Badge> MCSImplementationKarmada is Karmada, which reads the same ServiceExport in member clusters but names imported EndpointSlices after the source cluster.
+</Accordion>
+
 <Accordion id="mpiconfiguration" title="MPIConfiguration">
 MPIConfiguration holds MPI SSH secret settings.
 
@@ -5779,6 +5794,23 @@ Port is the port the server listens on
 
 <ParamField path="secure" type="boolean">
 Secure enables secure serving for the metrics endpoint. nil = default to true (secure by default).
+</ParamField>
+</Accordion>
+
+<Accordion id="multiclusterconfiguration" title="MultiClusterConfiguration">
+MultiClusterConfiguration configures how the operator exports Global Router
+pools through the Kubernetes Multi-Cluster Services (MCS) API, for the Global
+Discovery Service's Kubernetes stores. The operator exports a pool only when
+MCSImplementation is set and its DGD has the nvidia.com/global-router-pool
+annotation.
+
+
+**Kind:** `type`
+**Appears in:** [OperatorConfiguration](#operatorconfiguration)
+
+<ParamField path="mcsImplementation" type="MCSImplementation">
+MCSImplementation is the MCS implementation that imports the exports. Empty, the default, exports nothing: Global Router pools are then discovered without Kubernetes. Clearing it leaves earlier exports in place until their DGDs are deleted.
+See [MCSImplementation](#mcsimplementation).
 </ParamField>
 </Accordion>
 
@@ -5889,6 +5921,11 @@ See [CheckpointConfiguration](#checkpointconfiguration).
 <ParamField path="discovery" type="DiscoveryConfiguration">
 Discovery backend configuration
 See [DiscoveryConfiguration](#discoveryconfiguration).
+</ParamField>
+
+<ParamField path="multiCluster" type="MultiClusterConfiguration">
+MultiCluster configures exporting Global Router pools to other clusters.
+See [MultiClusterConfiguration](#multiclusterconfiguration).
 </ParamField>
 
 <ParamField path="gpu" type="GPUConfiguration">

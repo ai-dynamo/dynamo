@@ -148,6 +148,7 @@ var allNames = [...]Name{
 	VolcanoScheduler,
 	DRA,
 	Istio,
+	MultiClusterExport,
 	GPUDiscovery,
 }
 
@@ -158,16 +159,17 @@ type Gate interface {
 
 // Gates is the complete set of operator feature gates.
 type Gates struct {
-	Checkpoint       bool `json:"checkpoint"`
-	Grove            bool `json:"grove"`
-	LPX              bool `json:"lpx"`
-	LWS              bool `json:"lws"`
-	DisaggregatedSet bool `json:"disaggregatedSet"`
-	KaiScheduler     bool `json:"kaiScheduler"`
-	VolcanoScheduler bool `json:"volcanoScheduler"`
-	DRA              bool `json:"dra"`
-	Istio            bool `json:"istio"`
-	GPUDiscovery     bool `json:"gpuDiscovery"`
+	Checkpoint         bool `json:"checkpoint"`
+	Grove              bool `json:"grove"`
+	LPX                bool `json:"lpx"`
+	LWS                bool `json:"lws"`
+	DisaggregatedSet   bool `json:"disaggregatedSet"`
+	KaiScheduler       bool `json:"kaiScheduler"`
+	VolcanoScheduler   bool `json:"volcanoScheduler"`
+	DRA                bool `json:"dra"`
+	Istio              bool `json:"istio"`
+	MultiClusterExport bool `json:"multiClusterExport"`
+	GPUDiscovery       bool `json:"gpuDiscovery"`
 }
 
 // Defaults returns the default feature gates.
@@ -280,6 +282,14 @@ func New(
 		}
 		if gates.Istio, err = resolve(config.ServiceMesh.Enabled, istioAvailable,
 			"service mesh is explicitly enabled in config but the networking.istio.io DestinationRule API was not detected in the cluster"); err != nil {
+			return Gates{}, err
+		}
+	}
+
+	// Export Global Router pools only through a configured MCS implementation whose
+	// ServiceExport API this cluster serves.
+	if config.MultiCluster.MCSImplementation != configv1alpha1.MCSImplementationNone {
+		if gates.MultiClusterExport, err = resolveMultiClusterExport(ctx, mgr.GetConfig()); err != nil {
 			return Gates{}, err
 		}
 	}
