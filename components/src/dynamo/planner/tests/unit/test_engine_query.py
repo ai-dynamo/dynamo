@@ -146,6 +146,178 @@ def test_queued_prefill_uses_full_chunks_plus_tail():
     ] == [100, 50]
 
 
+@pytest.mark.parametrize(
+    "worker_type,decode_requests,expected_chunks,expected_s",
+    [
+        ("aggregated", 6, (2, 1), 0.05),
+        ("aggregated", 0, (8, 1), 0.02),
+        ("prefill", 6, (8, 1), 0.02),
+    ],
+)
+def test_queue_drain_reserves_decode_tokens(
+    worker_type, decode_requests, expected_chunks, expected_s
+):
+    model, forward_pass_model = _model(
+        worker_type=worker_type,
+        estimate=lambda _metrics: 10.0,
+        max_num_batched_tokens=8,
+        max_num_seqs=8,
+    )
+    snapshot = ForwardPassMetrics(
+        scheduled_requests=ScheduledRequestMetrics(
+            num_decode_requests=decode_requests,
+            sum_decode_kv_tokens=decode_requests * 10,
+        ),
+        queued_requests=QueuedRequestMetrics(
+            num_prefill_requests=1, sum_prefill_tokens=9
+        ),
+    )
+
+    estimate_s = model.get_queued_prefill_time([snapshot])
+
+    assert estimate_s == pytest.approx(expected_s)
+    assert (
+        tuple(
+            call[0]["scheduled_requests"]["sum_prefill_tokens"]
+            for call in forward_pass_model.estimate_calls
+        )
+        == expected_chunks
+    )
+    for call in forward_pass_model.estimate_calls:
+        scheduled = call[0]["scheduled_requests"]
+        assert scheduled["sum_prefill_tokens"] + scheduled["num_decode_requests"] <= 8
+
+
+@pytest.mark.parametrize(
+    "queued_tokens,decode_requests,expected_s,expected_chunks",
+    [
+        ((9, 9), (6, 2), 0.05, ((2, 6), (2, 3), (2, 0), (1, 0))),
+        ((0, 9), (8, 2), 0.02, ((0, 6), (0, 3))),
+        ((1, 9), (8, 2), None, ()),
+        ((0, 9), (9, 2), None, ()),
+        ((0, 0), (8, 8), 0.0, ()),
+    ],
+)
+def test_aggregate_queue_drain_uses_each_ranks_remaining_budget(
+    queued_tokens, decode_requests, expected_s, expected_chunks
+):
+    model, forward_pass_model = _model(
+        worker_type="aggregated",
+        estimate=lambda _metrics: 10.0,
+        max_num_batched_tokens=8,
+        max_num_seqs=8,
+        attention_dp_size=2,
+    )
+    snapshots = [
+        ForwardPassMetrics(
+            dp_rank=rank,
+            scheduled_requests=ScheduledRequestMetrics(
+                num_decode_requests=decode_requests[rank],
+                sum_decode_kv_tokens=decode_requests[rank] * 10,
+            ),
+            queued_requests=QueuedRequestMetrics(
+                num_prefill_requests=int(tokens > 0), sum_prefill_tokens=tokens
+            ),
+        )
+        for rank, tokens in enumerate(queued_tokens)
+    ]
+
+    estimate_s = model.get_queued_prefill_time(snapshots)
+
+    if expected_s is None:
+        assert estimate_s is None
+    else:
+        assert estimate_s == pytest.approx(expected_s)
+    assert (
+        tuple(
+            tuple(rank["scheduled_requests"]["sum_prefill_tokens"] for rank in call)
+            for call in forward_pass_model.estimate_calls
+        )
+        == expected_chunks
+    )
+    for call in forward_pass_model.estimate_calls:
+        for rank in call:
+            scheduled = rank["scheduled_requests"]
+            assert (
+                scheduled["sum_prefill_tokens"] + scheduled["num_decode_requests"] <= 8
+            )
+
+
+@pytest.mark.parametrize(
+    "ranks,decode_requests,tokens,expected_s",
+    [
+        (1, 6, 9, 0.05),
+        (1, 8, 9, None),
+        (1, 8, 0, 0.0),
+        (2, 6, 9, 0.02),
+        (2, 13, 5, 0.03),
+        (2, 16, 1, None),
+        (2, 0, 9, 0.02),
+    ],
+)
+def test_aggregate_capacity_ttft_keeps_each_synthetic_rank_within_budget(
+    ranks, decode_requests, tokens, expected_s
+):
+    model, forward_pass_model = _model(
+        worker_type="aggregated",
+        estimate=lambda _metrics: 10.0,
+        max_num_batched_tokens=8,
+        max_num_seqs=8,
+        attention_dp_size=ranks,
+    )
+
+    estimate_s = model._aggregated_ttft(tokens, decode_requests, decode_requests * 10)
+
+    if expected_s is None:
+        assert estimate_s is None
+    else:
+        assert estimate_s == pytest.approx(expected_s)
+    for call in forward_pass_model.estimate_calls:
+        for rank in call:
+            scheduled = rank["scheduled_requests"]
+            assert (
+                scheduled["sum_prefill_tokens"] + scheduled["num_decode_requests"] <= 8
+            )
+
+
+def test_aggregate_queue_drain_groups_identical_rounds():
+    model, forward_pass_model = _model(
+        worker_type="aggregated",
+        estimate=lambda _metrics: 1.0,
+        max_num_batched_tokens=8,
+    )
+    snapshot = ForwardPassMetrics(
+        scheduled_requests=ScheduledRequestMetrics(
+            num_decode_requests=7, sum_decode_kv_tokens=70
+        ),
+        queued_requests=QueuedRequestMetrics(
+            num_prefill_requests=1, sum_prefill_tokens=1_000_000
+        ),
+    )
+
+    assert model.get_queued_prefill_time([snapshot]) == pytest.approx(1000.0)
+    assert len(forward_pass_model.estimate_calls) == 1
+
+
+def test_aggregate_capacity_applies_ttft_after_reserving_decode_tokens():
+    model, forward_pass_model = _model(
+        worker_type="aggregated",
+        estimate=lambda _metrics: 10.0,
+        max_num_batched_tokens=8,
+        max_num_seqs=8,
+    )
+
+    capacity = model.find_engine_capacity_rps(
+        EngineCapacityRequest(isl=6, osl=32, ttft_sla_s=0.015, itl_sla_s=0.1)
+    )
+
+    assert capacity is not None and capacity.eligible
+    assert capacity.rps == pytest.approx(3.125)
+    for call in forward_pass_model.estimate_calls:
+        scheduled = call[0]["scheduled_requests"]
+        assert scheduled["sum_prefill_tokens"] + scheduled["num_decode_requests"] <= 8
+
+
 def test_aggregated_decode_uses_learned_prefill_mix():
     model, forward_pass_model = _model(
         worker_type="aggregated",
