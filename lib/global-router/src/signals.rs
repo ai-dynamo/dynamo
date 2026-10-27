@@ -31,7 +31,7 @@ impl PoolLoad {
 }
 
 /// One report from a pool's Relay: the pool's load, and the counts its
-/// expected wait is worked out from.
+/// timing is worked out from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LoadReport {
     pub load: PoolLoad,
@@ -39,20 +39,31 @@ pub struct LoadReport {
     pub awaiting: u64,
     /// Requests the pool has started since its Relay started.
     pub started_total: u64,
+    /// Requests the pool has completed since its Relay started.
+    pub completed_total: u64,
+    /// Output tokens the pool has produced since its Relay started.
+    pub output_tokens_total: u64,
     /// When the Relay observed these counts, in milliseconds on its clock.
     pub observed_ms: u64,
 }
 
-/// A pool's expected wait for a first token, and what it is worked out
-/// from.
+/// How long requests take at a pool, and what that is worked out from.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PoolWait {
+pub struct PoolTiming {
+    /// Expected wait for a first token.
     pub wait: Duration,
+    /// Time per output token, as last measured while the pool was
+    /// generating. `None` until it has been.
+    pub token_time: Option<Duration>,
     /// Requests waiting for a first token, averaged over the window.
     pub awaiting: f64,
     /// Requests that stopped waiting (got a first token, or failed) per
     /// second over the window.
     pub served_per_s: f64,
+    /// Requests completed over the window.
+    pub completed: u64,
+    /// Output tokens produced over the window.
+    pub output_tokens: u64,
 }
 
 /// What the router knows about each pool besides the catalog: its load, as
@@ -79,13 +90,20 @@ struct Report {
     /// The Relay's recent counts, oldest first. The first is the last one
     /// at or before the start of the wait window.
     samples: VecDeque<Sample>,
+    /// Time per output token, as last measured while the pool generated.
+    /// An idle pool keeps it: how fast a pool decodes does not change while
+    /// it waits for work.
+    token_time: Option<Duration>,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Sample {
     observed_ms: u64,
     awaiting: u64,
+    generating: u64,
     started_total: u64,
+    completed_total: u64,
+    output_tokens_total: u64,
 }
 
 impl PoolSignals {
@@ -119,7 +137,10 @@ impl PoolSignals {
         let sample = Sample {
             observed_ms: report.observed_ms,
             awaiting: report.awaiting,
+            generating: report.load.in_flight.saturating_sub(report.awaiting),
             started_total: report.started_total,
+            completed_total: report.completed_total,
+            output_tokens_total: report.output_tokens_total,
         };
         let (received, started) = (Instant::now(), self.in_flight.started(pool));
         let mut current = self.loads.entry(pool.clone()).or_insert_with(|| Report {
@@ -127,6 +148,7 @@ impl PoolSignals {
             received,
             started,
             samples: VecDeque::new(),
+            token_time: None,
         });
         current.load = report.load;
         current.received = received;
@@ -134,7 +156,10 @@ impl PoolSignals {
         let samples = &mut current.samples;
         // A Relay that restarted counts from zero again.
         if samples.back().is_some_and(|last| {
-            sample.started_total < last.started_total || sample.observed_ms < last.observed_ms
+            sample.started_total < last.started_total
+                || sample.completed_total < last.completed_total
+                || sample.output_tokens_total < last.output_tokens_total
+                || sample.observed_ms < last.observed_ms
         }) {
             samples.clear();
         }
@@ -150,6 +175,9 @@ impl PoolSignals {
             .saturating_sub(self.wait_window.as_millis() as u64);
         while samples.get(1).is_some_and(|next| next.observed_ms <= start) {
             samples.pop_front();
+        }
+        if let Some(token_time) = token_time(samples) {
+            current.token_time = Some(token_time);
         }
     }
 
@@ -180,20 +208,25 @@ impl PoolSignals {
         load
     }
 
-    /// The pool's expected wait for a first token, by Little's law: the
-    /// requests waiting for one, averaged over the wait window, divided by
-    /// the rate requests stop waiting: those started over the window, less
-    /// the growth in those waiting. Like requests per worker, it rises as a
-    /// pool fills up, but it also compares pools whose workers differ in
-    /// speed or size. The rate is how fast the pool works through its
-    /// queue, not how fast requests arrive: a pool that routers stop
+    /// How long requests take at the pool.
+    ///
+    /// The expected wait for a first token is by Little's law: the requests
+    /// waiting for one, averaged over the wait window, divided by the rate
+    /// requests stop waiting: those started over the window, less the
+    /// growth in those waiting. The rate is how fast the pool works through
+    /// its queue, not how fast requests arrive: a pool that routers stop
     /// sending to keeps draining, and its wait shows that. Requests this
     /// process has sent since the last report count as waiting, as in
     /// [`Self::load`]. The rate counts at least one request, so a pool that
-    /// serves none still has a finite wait. `None` without a fresh report,
-    /// or until a second report gives a rate. Unlike [`Self::load`], this
-    /// is not counted as a read.
-    pub fn wait(&self, pool: &PoolId) -> Option<PoolWait> {
+    /// serves none still has a finite wait.
+    ///
+    /// The time per output token is by Little's law too: the requests
+    /// generating over the output tokens they produce per second. Both rise
+    /// as a pool fills up, and both compare pools whose workers differ in
+    /// speed or size. `None` without a fresh report, or until a second
+    /// report gives a rate. Unlike [`Self::load`], this is not counted as a
+    /// read.
+    pub fn timing(&self, pool: &PoolId) -> Option<PoolTiming> {
         let report = self
             .loads
             .get(pool)
@@ -213,10 +246,13 @@ impl PoolSignals {
             .saturating_sub(last.awaiting)
             .max(1);
         let served_per_s = served as f64 * 1000.0 / span_ms as f64;
-        Some(PoolWait {
+        Some(PoolTiming {
             wait: Duration::from_secs_f64(awaiting / served_per_s),
+            token_time: report.token_time,
             awaiting,
             served_per_s,
+            completed: last.completed_total - first.completed_total,
+            output_tokens: last.output_tokens_total - first.output_tokens_total,
         })
     }
 
@@ -238,13 +274,31 @@ impl PoolSignals {
     }
 }
 
+/// Time per output token over the samples' window: the requests generating,
+/// on average, over the output tokens produced per second. `None` unless the
+/// pool generated over the window.
+fn token_time(samples: &VecDeque<Sample>) -> Option<Duration> {
+    let (first, last) = (samples.front()?, samples.back()?);
+    let span_ms = last.observed_ms.saturating_sub(first.observed_ms);
+    let produced = last.output_tokens_total - first.output_tokens_total;
+    let generating = samples
+        .iter()
+        .skip(1)
+        .map(|sample| sample.generating as f64)
+        .sum::<f64>()
+        / samples.len().saturating_sub(1).max(1) as f64;
+    (span_ms > 0 && produced > 0 && generating > 0.0)
+        .then(|| Duration::from_secs_f64(generating * span_ms as f64 / 1000.0 / produced as f64))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::catalog::tests::pool;
 
     use super::*;
 
-    /// A report from a pool of 8 workers whose requests are all waiting.
+    /// A report from a pool of 8 workers whose requests are all waiting, and
+    /// that has produced no output.
     fn report(observed_ms: u64, awaiting: u64, started_total: u64) -> LoadReport {
         LoadReport {
             load: PoolLoad {
@@ -253,12 +307,36 @@ mod tests {
             },
             awaiting,
             started_total,
+            completed_total: 0,
+            output_tokens_total: 0,
+            observed_ms,
+        }
+    }
+
+    /// A report from a pool of 8 workers with `generating` requests and no
+    /// queue, which has completed `completed_total` requests and produced
+    /// `output_tokens_total` tokens.
+    fn generating(
+        observed_ms: u64,
+        generating: u64,
+        completed_total: u64,
+        output_tokens_total: u64,
+    ) -> LoadReport {
+        LoadReport {
+            load: PoolLoad {
+                in_flight: generating,
+                workers: 8,
+            },
+            awaiting: 0,
+            started_total: completed_total + generating,
+            completed_total,
+            output_tokens_total,
             observed_ms,
         }
     }
 
     fn wait_secs(signals: &PoolSignals, pool: &PoolId) -> Option<f64> {
-        signals.wait(pool).map(|wait| wait.wait.as_secs_f64())
+        signals.timing(pool).map(|timing| timing.wait.as_secs_f64())
     }
 
     #[test]
@@ -298,13 +376,13 @@ mod tests {
 
         // One report gives no rate yet.
         signals.record_load(&blue, report(0, 4, 0));
-        assert_eq!(signals.wait(&blue), None);
+        assert_eq!(signals.timing(&blue), None);
 
         // 20 started in 2 s while those waiting grew from 4 to 8, so 16
         // were served: 8 per second. 7 waiting on average: 0.875 s.
         signals.record_load(&blue, report(1000, 6, 10));
         signals.record_load(&blue, report(2000, 8, 20));
-        let wait = signals.wait(&blue).unwrap();
+        let wait = signals.timing(&blue).unwrap();
         assert_eq!((wait.awaiting, wait.served_per_s), (7.0, 8.0));
         assert!((wait.wait.as_secs_f64() - 0.875).abs() < 1e-9);
 
@@ -339,7 +417,7 @@ mod tests {
 
         // The Relay restarted: its counts begin again, so does the history.
         signals.record_load(&blue, report(6000, 2, 3));
-        assert_eq!(signals.wait(&blue), None);
+        assert_eq!(signals.timing(&blue), None);
         signals.record_load(&blue, report(7000, 2, 7));
         assert!((wait_secs(&signals, &blue).unwrap() - 0.5).abs() < 1e-9);
     }
@@ -354,9 +432,33 @@ mod tests {
         for (at, awaiting) in [(0, 10), (1000, 6), (2000, 2)] {
             signals.record_load(&blue, report(at, awaiting, 100));
         }
-        let wait = signals.wait(&blue).unwrap();
+        let wait = signals.timing(&blue).unwrap();
         assert_eq!((wait.awaiting, wait.served_per_s), (4.0, 4.0));
         assert!((wait.wait.as_secs_f64() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn time_per_token_is_requests_generating_over_tokens_per_second() {
+        let signals = PoolSignals::new(Arc::new(InFlightTracker::new()), Duration::from_secs(60));
+        let blue = pool("blue", "qwen", &["http://blue:8000"]).id;
+        // 40 requests generating produce 2,000 tokens a second: 20 ms per
+        // token.
+        signals.record_load(&blue, generating(0, 40, 0, 0));
+        assert_eq!(signals.timing(&blue), None);
+        signals.record_load(&blue, generating(1000, 40, 4, 2000));
+        signals.record_load(&blue, generating(2000, 40, 8, 4000));
+        let timing = signals.timing(&blue).unwrap();
+        assert_eq!(timing.token_time, Some(Duration::from_millis(20)));
+        assert_eq!((timing.completed, timing.output_tokens), (8, 4000));
+        assert_eq!(timing.wait, Duration::ZERO);
+
+        // Idle, the pool keeps the speed it was last measured at.
+        signals.record_load(&blue, generating(3000, 0, 48, 4000));
+        signals.record_load(&blue, generating(14000, 0, 48, 4000));
+        signals.record_load(&blue, generating(15000, 0, 48, 4000));
+        let timing = signals.timing(&blue).unwrap();
+        assert_eq!(timing.token_time, Some(Duration::from_millis(20)));
+        assert_eq!((timing.completed, timing.output_tokens), (0, 0));
     }
 
     #[test]
@@ -365,8 +467,8 @@ mod tests {
         let blue = pool("blue", "qwen", &["http://blue:8000"]).id;
         signals.record_load(&blue, report(0, 1, 0));
         signals.record_load(&blue, report(1000, 1, 5));
-        assert!(signals.wait(&blue).is_some());
+        assert!(signals.timing(&blue).is_some());
         std::thread::sleep(Duration::from_millis(60));
-        assert_eq!(signals.wait(&blue), None);
+        assert_eq!(signals.timing(&blue), None);
     }
 }

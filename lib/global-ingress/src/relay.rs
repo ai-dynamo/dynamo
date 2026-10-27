@@ -156,8 +156,9 @@ async fn stream_load(
 }
 
 /// The pool's requests in flight (waiting for a first token or generating)
-/// for `model`, its live workers, the requests waiting and started so far,
-/// and when the Relay observed them. `None` unless every part is reported:
+/// for `model`, its live workers, the requests waiting, the requests started
+/// and completed and the output tokens produced so far, and when the Relay
+/// observed them. `None` unless every part is reported:
 /// the Relay leaves a value unset when its view is incomplete, and unset
 /// does not mean zero. A Relay watching one pool reports one model; a model
 /// it names differently from the catalog still counts.
@@ -180,18 +181,24 @@ fn pool_report(update: &ServingLoadUpdate, model: &str) -> Option<LoadReport> {
     if models.is_empty() {
         return None;
     }
-    let (mut in_flight, mut awaiting, mut started_total) = (0, 0, 0);
+    let (mut in_flight, mut awaiting) = (0, 0);
+    let (mut started_total, mut completed_total, mut output_tokens_total) = (0, 0, 0);
     for entry in models {
-        let requests = entry.load.as_ref()?.requests.as_ref()?;
+        let load = entry.load.as_ref()?;
+        let requests = load.requests.as_ref()?;
         let waiting = requests.requests_awaiting_first_token?;
         in_flight += waiting + requests.requests_generating?;
         awaiting += waiting;
         started_total += requests.requests_started_total;
+        completed_total += requests.requests_completed_total;
+        output_tokens_total += load.tokens.as_ref()?.output_tokens_total?;
     }
     Some(LoadReport {
         load: PoolLoad { in_flight, workers },
         awaiting,
         started_total,
+        completed_total,
+        output_tokens_total,
         observed_ms: update.observed_ms,
     })
 }
@@ -200,12 +207,14 @@ fn pool_report(update: &ServingLoadUpdate, model: &str) -> Option<LoadReport> {
 mod tests {
     use dynamo_llm::pool_relay::wan::grpc::protocol::{
         LoadView, ModelServingLoad, PoolDeploymentStatus, PoolServingLoad, RequestLifecycleStats,
+        TokenLoadStats,
     };
 
     use super::*;
 
     /// An update observed at 5 s, with each model's requests waiting,
-    /// generating, and started so far.
+    /// generating, and started so far; half the started requests have
+    /// completed, with 10 output tokens each.
     fn update(
         workers: Option<u64>,
         models: &[(&str, Option<u64>, Option<u64>, u64)],
@@ -226,8 +235,13 @@ mod tests {
                     load: Some(LoadView {
                         requests: Some(RequestLifecycleStats {
                             requests_started_total: *started,
+                            requests_completed_total: started / 2,
                             requests_awaiting_first_token: *awaiting,
                             requests_generating: *generating,
+                            ..Default::default()
+                        }),
+                        tokens: Some(TokenLoadStats {
+                            output_tokens_total: Some(started / 2 * 10),
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -254,6 +268,8 @@ mod tests {
                 },
                 awaiting: 3,
                 started_total: 900,
+                completed_total: 450,
+                output_tokens_total: 4500,
                 observed_ms: 5000,
             })
         );
@@ -276,5 +292,8 @@ mod tests {
             None
         );
         assert_eq!(pool_report(&update(Some(8), &[]), "qwen"), None);
+        let mut without_tokens = update(Some(8), &[("qwen", Some(1), Some(1), 0)]);
+        without_tokens.models[0].load.as_mut().unwrap().tokens = None;
+        assert_eq!(pool_report(&without_tokens, "qwen"), None);
     }
 }

@@ -202,7 +202,7 @@ impl PoolSelector for AffinitySelector {
 
 #[cfg(test)]
 mod tests {
-    use crate::placement::tests::{OHIO, by_cost, by_wait, fleet, set_loads, set_waits};
+    use crate::placement::tests::{OHIO, by_cost, by_latency, fleet, set_loads, set_waits};
 
     use super::*;
 
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn affinity_by_wait_pins_new_sessions_to_the_pool_that_answers_sooner() {
+    fn affinity_by_latency_pins_new_sessions_to_the_pool_that_answers_sooner() {
         let (pools, signals) = fleet();
         // Both Ohio pools hold 5 requests per worker, but Ohio-a waits 2 s
         // and Ohio-b 0.25 s.
@@ -317,7 +317,7 @@ mod tests {
             AffinitySelector::new(signals.clone(), OHIO.into(), Spill::default(), idle);
         assert_eq!(pick(&per_worker, &pools, Some("s")), "ohio-a");
 
-        let wait = AffinitySelector::new(signals, OHIO.into(), by_wait(), idle);
+        let wait = AffinitySelector::new(signals, OHIO.into(), by_latency(), idle);
         assert_eq!(pick(&wait, &pools, Some("s")), "ohio-b");
     }
 

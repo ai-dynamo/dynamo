@@ -94,8 +94,8 @@ impl RoutingStats {
             .retain(|_, (_, at)| now.duration_since(*at) <= SESSION_MEMORY);
     }
 
-    /// The counts, with each known pool's current load, expected wait and
-    /// round trip.
+    /// The counts, with each known pool's current load, timing and round
+    /// trip.
     pub fn report(&self, pools: &PoolSnapshot, signals: &PoolSignals) -> Value {
         let count = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         let pools = pools
@@ -103,15 +103,18 @@ impl RoutingStats {
             .iter()
             .map(|pool| {
                 let load = signals.load(&pool.id);
-                let wait = signals.wait(&pool.id);
+                let timing = signals.timing(&pool.id);
                 json!({
                     "name": pool.name,
                     "region": pool.location.region,
                     "routed": self.routed.get(&pool.id).map_or(0, |routed| count(&routed)),
                     "in_flight": load.map(|load| load.in_flight),
                     "workers": load.map(|load| load.workers),
-                    "wait_ms": wait.map(|wait| wait.wait.as_secs_f64() * 1000.0),
-                    "served_per_s": wait.map(|wait| wait.served_per_s),
+                    "wait_ms": timing.map(|timing| timing.wait.as_secs_f64() * 1000.0),
+                    "token_ms": timing
+                        .and_then(|timing| timing.token_time)
+                        .map(|token_time| token_time.as_secs_f64() * 1000.0),
+                    "served_per_s": timing.map(|timing| timing.served_per_s),
                     "round_trip_ms": signals
                         .round_trip(&pool.id)
                         .map(|round_trip| round_trip.as_secs_f64() * 1000.0),

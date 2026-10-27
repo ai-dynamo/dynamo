@@ -88,9 +88,9 @@ struct Args {
     /// least this many requests per worker...
     #[arg(long, default_value_t = Overload::default().floor)]
     overload_floor: f64,
-    /// ...or, with `--load-measure wait`, by at least this much wait.
-    #[arg(long, default_value_t = Overload::default().wait_floor.as_millis() as u64)]
-    overload_wait_floor_ms: u64,
+    /// ...or, with `--load-measure latency`, by at least this much time.
+    #[arg(long, default_value_t = Overload::default().latency_floor.as_millis() as u64)]
+    overload_latency_floor_ms: u64,
     /// `rendezvous` and `affinity`: when a request leaves its session's pool.
     #[arg(long, value_enum, default_value_t = Rule::FleetRatio)]
     spill_rule: Rule,
@@ -123,9 +123,9 @@ enum RouterPolicy {
 enum Rule {
     /// While the pool is overloaded.
     FleetRatio,
-    /// For the cheapest other pool, by round trip plus expected wait, when
-    /// it is at least `--switch-margin-ms` cheaper. Needs
-    /// `--load-measure wait`.
+    /// For the cheapest other pool, by round trip plus expected time for a
+    /// request, when it is at least `--switch-margin-ms` cheaper. Needs
+    /// `--load-measure latency`.
     Cheapest,
 }
 
@@ -133,9 +133,9 @@ enum Rule {
 enum Measure {
     /// Requests in flight per worker.
     PerWorker,
-    /// Expected wait for a first token, from the pool's waiting requests
-    /// and the rate it starts requests.
-    Wait,
+    /// Expected time for a typical request: the wait for a first token plus
+    /// the fleet's mean output length times the pool's time per token.
+    Latency,
 }
 
 fn parse_pool(value: &str) -> Result<Pool, String> {
@@ -208,12 +208,12 @@ async fn main() -> Result<()> {
     let spill = Spill {
         measure: match args.load_measure {
             Measure::PerWorker => LoadMeasure::PerWorker,
-            Measure::Wait => LoadMeasure::Wait,
+            Measure::Latency => LoadMeasure::Latency,
         },
         overload: Overload {
             ratio: args.overload_ratio,
             floor: args.overload_floor,
-            wait_floor: Duration::from_millis(args.overload_wait_floor_ms),
+            latency_floor: Duration::from_millis(args.overload_latency_floor_ms),
         },
         rule: match args.spill_rule {
             Rule::FleetRatio => SpillRule::FleetRatio,
@@ -222,8 +222,8 @@ async fn main() -> Result<()> {
             },
         },
     };
-    if matches!(spill.rule, SpillRule::Cheapest { .. }) && spill.measure != LoadMeasure::Wait {
-        bail!("--spill-rule cheapest needs --load-measure wait");
+    if matches!(spill.rule, SpillRule::Cheapest { .. }) && spill.measure != LoadMeasure::Latency {
+        bail!("--spill-rule cheapest needs --load-measure latency");
     }
     let region = || {
         args.region

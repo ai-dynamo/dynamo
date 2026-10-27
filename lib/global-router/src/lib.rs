@@ -25,4 +25,4 @@ pub use selector::{
     LeastInFlightSelector, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
 };
 pub use session::{AffinitySelector, RendezvousSelector};
-pub use signals::{LoadReport, PoolLoad, PoolSignals, PoolWait};
+pub use signals::{LoadReport, PoolLoad, PoolSignals, PoolTiming};
