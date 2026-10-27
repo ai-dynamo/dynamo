@@ -192,9 +192,7 @@ pub mod generic {
     pub mod realtime {
         use super::*;
 
-        pub use dynamo_protocols::types::realtime::{
-            DynamoRealtimeClientEvent, RealtimeServerEvent,
-        };
+        pub use crate::protocols::realtime::{DynamoRealtimeClientEvent, RealtimeServerEvent};
 
         /// A [`BidirectionalStreamingEngine`] implementation for the OpenAI
         /// Realtime API.

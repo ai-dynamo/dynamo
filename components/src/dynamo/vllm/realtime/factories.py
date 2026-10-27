@@ -10,26 +10,29 @@ import logging
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
 from contextlib import aclosing
+from dataclasses import replace
 from importlib.util import find_spec
 from typing import Any
 
 import numpy as np
+
+from .request import TextGenerationRequest
 
 #: Adapt float32 audio chunks and generated-token feedback to vLLM StreamingInput.
 StreamingInputFactory = Callable[
     [AsyncGenerator[np.ndarray, None], "asyncio.Queue[list[int]]"],
     AsyncGenerator[Any, None],
 ]
-#: Await with chat messages and an optional output-token limit to obtain a stream
-#: of OpenAI chat-completion SSE frames. The caller owns closing that stream.
+#: Await with a validated request snapshot to obtain a stream of OpenAI
+#: chat-completion SSE frames. The caller owns closing that stream.
 ChatCompletionFactory = Callable[
-    [list[dict[str, str]], int | None],
+    [TextGenerationRequest],
     Awaitable[AsyncGenerator[str, None]],
 ]
 #: Consume cumulative user-text updates alongside committed chat history to warm
 #: the prefix cache. Cancellation must complete engine cleanup before returning.
 TextPrefillFactory = Callable[
-    [list[dict[str, str]], AsyncGenerator[str, None]],
+    [TextGenerationRequest, AsyncGenerator[str, None]],
     Coroutine[Any, Any, None],
 ]
 
@@ -74,6 +77,8 @@ def build_realtime_text_factories(
     model_name: str,
     model_path: str,
     chat_template_path: str | None,
+    tool_parser: str | None = None,
+    reasoning_parser: str | None = None,
 ) -> tuple[ChatCompletionFactory, TextPrefillFactory]:
     """Bind final-generation and prefix-warming callbacks to one vLLM engine.
 
@@ -81,9 +86,9 @@ def build_realtime_text_factories(
     ``chat_template_path`` optionally overrides the model's default chat template.
     Both callbacks use vLLM's chat renderer to apply that template and tokenize.
 
-    Awaiting the first callback with chat messages and an optional output-token
-    limit returns an SSE stream that the caller must close. The second consumes
-    cumulative pending-user text with committed chat history and warms stable,
+    Awaiting the first callback with a request snapshot returns an SSE stream
+    that the caller must close. The second consumes cumulative pending-user
+    text with the same chat options and committed history and warms stable,
     complete prefix-cache blocks through vLLM StreamingInput. Cancel and await
     this prefill callback before final generation, which renders the exact
     committed conversation independently. Without prefix caching, updates are
@@ -112,11 +117,14 @@ def build_realtime_text_factories(
             **kwargs: Any,
         ) -> AsyncGenerator[str, None]:
             # Closing the SSE generator alone does not close its engine iterator.
-            async with aclosing(result_generator), aclosing(
-                super().chat_completion_stream_generator(
-                    request, result_generator, *args, **kwargs
-                )
-            ) as stream:
+            async with (
+                aclosing(result_generator),
+                aclosing(
+                    super().chat_completion_stream_generator(
+                        request, result_generator, *args, **kwargs
+                    )
+                ) as stream,
+            ):
                 async for frame in stream:
                     yield frame
 
@@ -140,16 +148,20 @@ def build_realtime_text_factories(
         request_logger=None,
         chat_template=chat_template,
         chat_template_content_format="auto",
+        tool_parser=tool_parser,
+        enable_auto_tools=tool_parser is not None,
+        reasoning_parser=reasoning_parser or "",
+        enable_prompt_tokens_details=True,
     )
 
     async def create_chat_completion(
-        messages: list[dict[str, str]],
-        max_output_tokens: int | None,
+        snapshot: TextGenerationRequest,
     ) -> AsyncGenerator[str, None]:
         request = ChatCompletionRequest(
-            messages=messages,
+            **snapshot.options,
+            messages=snapshot.messages,
             model=model_name,
-            max_completion_tokens=max_output_tokens,
+            max_completion_tokens=snapshot.max_output_tokens,
             stream=True,
             stream_options={"include_usage": True},
         )
@@ -158,9 +170,10 @@ def build_realtime_text_factories(
             raise ValueError(response.error.message)
         return response
 
-    async def render_tokens(messages: list[dict[str, str]]) -> list[int]:
+    async def render_tokens(snapshot: TextGenerationRequest) -> list[int]:
         request = ChatCompletionRequest(
-            messages=messages,
+            **snapshot.options,
+            messages=snapshot.messages,
             model=model_name,
             add_generation_prompt=False,
             continue_final_message=True,
@@ -177,7 +190,7 @@ def build_realtime_text_factories(
         return list(token_ids)
 
     async def prefill_text(
-        messages: list[dict[str, str]],
+        snapshot: TextGenerationRequest,
         updates: AsyncGenerator[str, None],
     ) -> None:
         cache_config = engine_client.vllm_config.cache_config
@@ -199,7 +212,13 @@ def build_realtime_text_factories(
             nonlocal emitted
             async for text in updates:
                 token_ids = await render_tokens(
-                    [*messages, {"role": "user", "content": text}],
+                    replace(
+                        snapshot,
+                        messages=[
+                            *snapshot.messages,
+                            {"role": "user", "content": text},
+                        ],
+                    ),
                 )
                 if token_ids[: len(emitted)] != emitted:
                     # Appending text can change tokenizer boundaries. Stop this

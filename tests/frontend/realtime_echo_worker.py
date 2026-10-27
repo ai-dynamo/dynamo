@@ -13,6 +13,8 @@ backend, ``DYN_FILE_KV``) and installs a typed realtime PushRouter to it.
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
 import uuid
 
 import uvloop
@@ -145,7 +147,72 @@ async def main() -> None:
         model_name=MODEL_NAME,
         worker_type=WorkerType.Aggregated,
     )
-    await endpoint.serve_bidirectional_endpoint(_python_realtime_echo)
+    handler = _python_realtime_echo
+    if "--text-tools" in sys.argv:
+        from dynamo.vllm.realtime.handlers.text import RealtimeTextHandler
+
+        async def complete(request):
+            async def frames():
+                if any(message["role"] == "tool" for message in request.messages):
+                    delta = {"content": "Sunny."}
+                    finish = "stop"
+                else:
+                    if (
+                        request.options["temperature"] != 0
+                        or request.options["chat_template_kwargs"]["enable_thinking"]
+                        is not False
+                    ):
+                        raise ValueError("request options did not cross the frontend")
+                    delta = {
+                        "reasoning": "Check the weather.",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_weather",
+                                "type": "function",
+                                "function": {
+                                    "name": "weather",
+                                    "arguments": '{"city":"Warsaw"}',
+                                },
+                            }
+                        ],
+                    }
+                    finish = "tool_calls"
+                    if request.max_output_tokens == 1:
+                        delta["tool_calls"][0]["function"]["arguments"] = "{"
+                        finish = "length"
+                yield "data: " + json.dumps(
+                    {
+                        "choices": [
+                            {"index": 0, "delta": delta, "finish_reason": finish}
+                        ],
+                        "usage": {
+                            "prompt_tokens": 10,
+                            "completion_tokens": 3,
+                            "total_tokens": 13,
+                            "prompt_tokens_details": {
+                                "cached_tokens": 5,
+                                "created_cache_tokens": 2,
+                            },
+                            "completion_tokens_details": {"reasoning_tokens": 1},
+                        },
+                    }
+                ) + "\n\n"
+
+            return frames()
+
+        async def prefill(request, updates):
+            async for _ in updates:
+                pass
+
+        handler = RealtimeTextHandler(
+            model_name=MODEL_NAME,
+            chat_completion_factory=complete,
+            text_prefill_factory=prefill,
+            supports_tools=True,
+            supports_reasoning=True,
+        ).generate
+    await endpoint.serve_bidirectional_endpoint(handler)
 
 
 if __name__ == "__main__":

@@ -20,11 +20,14 @@ use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse, prompt_to_string},
 };
+use crate::protocols::realtime::{
+    DynamoRealtimeClientEvent, RealtimeServerEvent as DynamoRealtimeServerEvent, TextClientEvent,
+};
 use crate::types::openai::embeddings::NvCreateEmbeddingRequest;
 use crate::types::openai::embeddings::NvCreateEmbeddingResponse;
 use dynamo_protocols::types::realtime::{
-    DynamoRealtimeClientEvent, EventType, MaxOutputTokens, RealtimeAPIError, RealtimeClientEvent,
-    RealtimeResponse, RealtimeResponseStatus, RealtimeServerEvent, RealtimeServerEventError,
+    EventType, MaxOutputTokens, RealtimeAPIError, RealtimeClientEvent, RealtimeResponse,
+    RealtimeResponseStatus, RealtimeServerEvent, RealtimeServerEventError,
     RealtimeServerEventResponseAudioDelta, RealtimeServerEventResponseAudioDone,
     RealtimeServerEventResponseCreated, RealtimeServerEventResponseDone,
     RealtimeServerEventSessionUpdated,
@@ -143,13 +146,17 @@ const ECHO_AUDIO_DELTA_CHUNK_LEN: usize = 64;
 pub struct EchoBidirectionalEngine;
 
 #[async_trait]
-impl AsyncEngine<ManyIn<DynamoRealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEvent>>, Error>
-    for EchoBidirectionalEngine
+impl
+    AsyncEngine<
+        ManyIn<DynamoRealtimeClientEvent>,
+        ManyOut<Annotated<DynamoRealtimeServerEvent>>,
+        Error,
+    > for EchoBidirectionalEngine
 {
     async fn generate(
         &self,
         incoming: ManyIn<DynamoRealtimeClientEvent>,
-    ) -> Result<ManyOut<Annotated<RealtimeServerEvent>>, Error> {
+    ) -> Result<ManyOut<Annotated<DynamoRealtimeServerEvent>>, Error> {
         let ctx = incoming.context();
         let session_id = ctx.id().to_string();
         let ctx_for_stream = ctx.clone();
@@ -167,10 +174,20 @@ impl AsyncEngine<ManyIn<DynamoRealtimeClientEvent>, ManyOut<Annotated<RealtimeSe
                     break;
                 }
 
-                match client_event {
-                    DynamoRealtimeClientEvent::OpenAI(
-                        RealtimeClientEvent::SessionUpdate(req),
-                    ) => {
+                let event_type = client_event.event_type();
+                let event = match client_event {
+                    DynamoRealtimeClientEvent::Text(TextClientEvent::SessionUpdate(req)) =>
+                        Some(RealtimeClientEvent::SessionUpdate(
+                            dynamo_protocols::types::realtime::RealtimeClientEventSessionUpdate {
+                                event_id: req.event_id,
+                                session: req.session.inner,
+                            },
+                        )),
+                    DynamoRealtimeClientEvent::OpenAI(event) => Some(*event),
+                    _ => None,
+                };
+                match event {
+                    Some(RealtimeClientEvent::SessionUpdate(req)) => {
                         frame += 1;
                         yield annotated_event(
                             frame,
@@ -182,9 +199,7 @@ impl AsyncEngine<ManyIn<DynamoRealtimeClientEvent>, ManyOut<Annotated<RealtimeSe
                             ),
                         );
                     }
-                    DynamoRealtimeClientEvent::OpenAI(
-                        RealtimeClientEvent::InputAudioBufferAppend(req),
-                    ) => {
+                    Some(RealtimeClientEvent::InputAudioBufferAppend(req)) => {
                         let response_id = format!("resp_{session_id}_{frame}");
                         let item_id = format!("item_{session_id}_{frame}");
 
@@ -261,7 +276,7 @@ impl AsyncEngine<ManyIn<DynamoRealtimeClientEvent>, ManyOut<Annotated<RealtimeSe
                             ),
                         );
                     }
-                    other => {
+                    _ => {
                         frame += 1;
                         yield annotated_event(
                             frame,
@@ -272,7 +287,7 @@ impl AsyncEngine<ManyIn<DynamoRealtimeClientEvent>, ManyOut<Annotated<RealtimeSe
                                     code: Some("echo_engine_unsupported".to_string()),
                                     message: format!(
                                         "echo engine does not support client event {}",
-                                        other.event_type()
+                                        event_type
                                     ),
                                     param: None,
                                     event_id: None,
@@ -288,10 +303,10 @@ impl AsyncEngine<ManyIn<DynamoRealtimeClientEvent>, ManyOut<Annotated<RealtimeSe
     }
 }
 
-fn annotated_event(frame: u64, event: RealtimeServerEvent) -> Annotated<RealtimeServerEvent> {
+fn annotated_event(frame: u64, event: RealtimeServerEvent) -> Annotated<DynamoRealtimeServerEvent> {
     Annotated {
         id: Some(frame.to_string()),
-        ..Annotated::from_data(event)
+        ..Annotated::from_data(event.into())
     }
 }
 
@@ -616,13 +631,15 @@ mod tests {
         let chunk = response_stream.next().await.expect("one server event");
         assert!(response_stream.next().await.is_none(), "exactly one event");
 
-        match chunk.data.expect("annotated payload") {
-            RealtimeServerEvent::Error(err) => {
-                assert_eq!(err.error.code.as_deref(), Some("echo_engine_unsupported"));
-                assert!(err.error.message.contains("conversation.item.create"));
-            }
-            other => panic!("expected error, got {other:?}"),
-        }
+        let value = serde_json::to_value(chunk.data.expect("annotated payload")).unwrap();
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["error"]["code"], "echo_engine_unsupported");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("conversation.item.create")
+        );
     }
 
     #[tokio::test]

@@ -319,6 +319,18 @@ class TestEmbeddingFrontendTokenization:
 
 
 class TestRealtimeWorkerExclusivity:
+    @pytest.mark.parametrize(
+        "field", ["realtime_tool_parser", "realtime_reasoning_parser"]
+    )
+    def test_parser_requires_realtime(self, field):
+        config = create_config()
+        setattr(config, field, "test-parser")
+        with pytest.raises(ValueError, match="require --realtime"):
+            config._validate_realtime_worker_exclusivity()
+        config.realtime = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config._validate_realtime_worker_exclusivity()
+
     def test_baseline_aggregated_is_accepted(self):
         config = create_config()
         config.realtime = True

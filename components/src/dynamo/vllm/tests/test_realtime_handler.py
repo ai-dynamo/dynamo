@@ -16,7 +16,7 @@ from dynamo.vllm.realtime import (
     RealtimeTranscriptionHandler,
 )
 from dynamo.vllm.realtime.handlers.text import _TextPrefill, _TextTurn
-from dynamo.vllm.realtime.handlers.text_utils import _text_prompt
+from dynamo.vllm.realtime.request import TextGenerationRequest
 
 pytestmark = [
     pytest.mark.unit,
@@ -236,14 +236,14 @@ def test_text_turn_finalization_is_idempotent():
 
     assert first[-1]["response"]["status"] == "completed"
     assert second == []
-    assert len(items) == 1
-    assert _text_prompt(items, "") == [{"role": "assistant", "content": ""}]
+    assert items == []
 
 
 def test_text_session_streams_canonical_response_and_preserves_usage():
     calls = []
 
-    async def chat_completion(messages, max_output_tokens):
+    async def chat_completion(request):
+        messages, max_output_tokens = request.messages, request.max_output_tokens
         calls.append((messages, max_output_tokens))
 
         async def frames():
@@ -328,7 +328,8 @@ def test_text_commit_cancels_warming_before_final_generation(monkeypatch, overfl
     prefill_done = asyncio.Event()
     prefill_seen = asyncio.Event()
 
-    async def prefill(messages, updates):
+    async def prefill(request, updates):
+        messages = request.messages
         prefill_messages.extend(messages)
         try:
             async for update in updates:
@@ -339,7 +340,8 @@ def test_text_commit_cancels_warming_before_final_generation(monkeypatch, overfl
             prefill_done.set()
             raise
 
-    async def chat_completion(messages, max_output_tokens):
+    async def chat_completion(request):
+        messages, max_output_tokens = request.messages, request.max_output_tokens
         assert prefill_done.is_set()
         assert messages[-1] == {"role": "user", "content": "Hello world"}
         assert max_output_tokens == 32
@@ -394,7 +396,7 @@ def test_response_cancel_waits_for_committed_prefill_cleanup():
         release_cleanup = asyncio.Event()
         prefill_done = asyncio.Event()
 
-        async def prefill(messages, updates):
+        async def prefill(request, updates):
             try:
                 async for _ in updates:
                     prefill_seen.set()
@@ -403,7 +405,8 @@ def test_response_cancel_waits_for_committed_prefill_cleanup():
                 await release_cleanup.wait()
                 prefill_done.set()
 
-        async def chat_completion(messages, max_output_tokens):
+        async def chat_completion(request):
+            _messages, _max_output_tokens = request.messages, request.max_output_tokens
             raise AssertionError("cancelled response must not start generation")
 
         handler = RealtimeTextHandler(
@@ -444,14 +447,16 @@ def test_text_buffer_clear_discards_input_and_allows_replay():
     prefill_texts = []
     prefill_seen = asyncio.Event()
 
-    async def prefill(messages, updates):
+    async def prefill(request, updates):
+        messages = request.messages
         del messages
         async for text in updates:
             prefill_texts.append(text)
             if text == "correct":
                 prefill_seen.set()
 
-    async def chat_completion(messages, max_output_tokens):
+    async def chat_completion(request):
+        messages, max_output_tokens = request.messages, request.max_output_tokens
         del max_output_tokens
         assert messages[-1] == {"role": "user", "content": "correct"}
 
@@ -494,13 +499,15 @@ def test_text_buffer_clear_discards_input_and_allows_replay():
 def test_text_prefill_failure_does_not_fail_final_generation():
     prefill_failed = asyncio.Event()
 
-    async def failed_prefill(messages, updates):
+    async def failed_prefill(request, updates):
+        messages = request.messages
         del messages
         async for _ in updates:
             prefill_failed.set()
             raise RuntimeError("prefill failed")
 
-    async def chat_completion(messages, max_output_tokens):
+    async def chat_completion(request):
+        messages, max_output_tokens = request.messages, request.max_output_tokens
         del messages, max_output_tokens
 
         async def frames():
@@ -537,14 +544,14 @@ def test_text_buffer_coalesces_updates_and_limits_bytes(monkeypatch, prefill_fai
         seen = asyncio.Event()
         updates_seen = []
 
-        async def factory(messages, updates):
+        async def factory(request, updates):
             async for text in updates:
                 updates_seen.append(text)
                 seen.set()
                 if prefill_fails:
                     raise RuntimeError("prefill failed")
 
-        prefill = _TextPrefill(messages=[], factory=factory)
+        prefill = _TextPrefill(request=TextGenerationRequest([]), factory=factory)
         try:
             prefill.append("ab")
             prefill.append("\u20ac")
@@ -563,10 +570,12 @@ def test_text_buffer_coalesces_updates_and_limits_bytes(monkeypatch, prefill_fai
 
 
 def test_text_buffer_must_be_committed_before_response():
-    async def unused_chat_completion(messages, max_output_tokens):
+    async def unused_chat_completion(request):
+        messages, max_output_tokens = request.messages, request.max_output_tokens
         raise AssertionError((messages, max_output_tokens))
 
-    async def prefill(messages, updates):
+    async def prefill(request, updates):
+        messages = request.messages
         del messages
         async for _ in updates:
             pass
@@ -602,7 +611,8 @@ def test_text_buffer_must_be_committed_before_response():
 def test_invalid_text_buffer_events_are_recoverable(monkeypatch, event, message):
     monkeypatch.setattr("dynamo.vllm.realtime.handlers.text.MAX_TEXT_BUFFER_BYTES", 8)
 
-    async def chat_completion(messages, max_output_tokens):
+    async def chat_completion(request):
+        messages, _max_output_tokens = request.messages, request.max_output_tokens
         assert messages == [
             {"role": "system", "content": "Recovered"},
             {"role": "user", "content": "Hi"},
@@ -613,7 +623,8 @@ def test_invalid_text_buffer_events_are_recoverable(monkeypatch, event, message)
 
         return frames()
 
-    async def unused_prefill(messages, updates):
+    async def unused_prefill(request, updates):
+        messages = request.messages
         raise AssertionError((messages, updates))
 
     result = asyncio.run(
@@ -656,7 +667,8 @@ def test_invalid_text_buffer_events_are_recoverable(monkeypatch, event, message)
     ],
 )
 def test_response_rejects_unsupported_options(option):
-    async def unused_chat_completion(messages, max_output_tokens):
+    async def unused_chat_completion(request):
+        messages, max_output_tokens = request.messages, request.max_output_tokens
         raise AssertionError((messages, max_output_tokens))
 
     result = asyncio.run(
@@ -678,7 +690,9 @@ def test_response_rejects_unsupported_options(option):
 @pytest.mark.parametrize("metadata", [None, {}, {"topic": "classification"}])
 @pytest.mark.parametrize("finish_reason", ["stop", "length"])
 def test_out_of_band_response_preserves_metadata(metadata, finish_reason):
-    async def chat_completion(messages, max_output_tokens):
+    async def chat_completion(request):
+        _messages, _max_output_tokens = request.messages, request.max_output_tokens
+
         async def frames():
             yield f'data: {{"choices":[{{"delta":{{"content":"support"}},"finish_reason":"{finish_reason}"}}]}}\n\n'
             yield "data: [DONE]\n\n"
@@ -749,7 +763,8 @@ def test_out_of_band_response_preserves_metadata(metadata, finish_reason):
     ],
 )
 def test_text_session_rejects_unsupported_options(session_update, item, code):
-    async def unused_chat_completion(messages, max_output_tokens):
+    async def unused_chat_completion(request):
+        messages, max_output_tokens = request.messages, request.max_output_tokens
         raise AssertionError((messages, max_output_tokens))
 
     result = asyncio.run(
@@ -782,7 +797,8 @@ def test_response_cancel_aborts_generation(after_first_delta):
     async def scenario():
         started = asyncio.Event()
 
-        async def chat_completion(messages, max_output_tokens):
+        async def chat_completion(request):
+            messages, max_output_tokens = request.messages, request.max_output_tokens
             del messages, max_output_tokens
 
             async def frames():
@@ -821,20 +837,25 @@ def test_response_cancel_aborts_generation(after_first_delta):
     response_events = [
         event["type"] for event in result if event["type"].startswith("response.")
     ]
-    assert response_events == [
-        "response.created",
-        "response.output_item.added",
-        "response.content_part.added",
-        *(["response.output_text.delta"] if after_first_delta else []),
-        "response.output_text.done",
-        "response.content_part.done",
-        "response.output_item.done",
-        "response.done",
-    ]
-    assert done[0]["response"]["output"][0]["status"] == "incomplete"
-    assert done[0]["response"]["output"][0]["content"] == (
-        [{"type": "output_text", "text": "partial"}] if after_first_delta else []
-    )
+    expected = ["response.created"]
+    if after_first_delta:
+        expected.extend(
+            [
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_text.delta",
+                "response.output_text.done",
+                "response.content_part.done",
+                "response.output_item.done",
+            ]
+        )
+    assert response_events == [*expected, "response.done"]
+    if after_first_delta:
+        item = done[0]["response"]["output"][0]
+        assert item["status"] == "incomplete"
+        assert item["content"] == [{"type": "output_text", "text": "partial"}]
+    else:
+        assert done[0]["response"]["output"] == []
 
 
 @pytest.mark.parametrize("signal", ["stop_generating", "kill"])
@@ -855,7 +876,8 @@ def test_context_cancellation_closes_pending_text_generation(
             await asyncio.sleep(0)
             closed.set()
 
-        async def chat_completion(messages, max_output_tokens):
+        async def chat_completion(request):
+            messages, max_output_tokens = request.messages, request.max_output_tokens
             del messages, max_output_tokens
             if pending == "factory":
                 try:
@@ -907,7 +929,8 @@ def test_connection_cancellation_waits_for_response_cancel_cleanup():
         release_cleanup = asyncio.Event()
         closed = asyncio.Event()
 
-        async def chat_completion(messages, max_output_tokens):
+        async def chat_completion(request):
+            messages, max_output_tokens = request.messages, request.max_output_tokens
             del messages, max_output_tokens
 
             async def frames():
@@ -974,7 +997,8 @@ def test_cancellation_under_backpressure_closes_chat_stream(stop_context):
 
         stream = frames()
 
-        async def chat_completion(messages, max_tokens):
+        async def chat_completion(request):
+            _messages, _max_tokens = request.messages, request.max_output_tokens
             return stream
 
         handler = RealtimeTextHandler(
@@ -1044,7 +1068,9 @@ def test_text_serving_closes_nested_engine_stream(monkeypatch, close_early):
             model_path=TEXT_MODEL,
             chat_template_path=None,
         )
-        stream = await factory([{"role": "user", "content": "Hi"}], 32)
+        stream = await factory(
+            TextGenerationRequest([{"role": "user", "content": "Hi"}], 32)
+        )
         await anext(stream)
         if close_early:
             await stream.aclose()
@@ -1055,10 +1081,11 @@ def test_text_serving_closes_nested_engine_stream(monkeypatch, close_early):
     asyncio.run(asyncio.wait_for(scenario(), timeout=1))
 
 
-def test_generation_failure_closes_announced_response_item():
+def test_generation_failure_before_output_has_no_phantom_item():
     metadata = {"request_id": "failed-turn"}
 
-    async def failed_chat_completion(messages, max_output_tokens):
+    async def failed_chat_completion(request):
+        messages, max_output_tokens = request.messages, request.max_output_tokens
         del messages, max_output_tokens
         raise RuntimeError("engine unavailable")
 
@@ -1079,15 +1106,7 @@ def test_generation_failure_closes_announced_response_item():
     response_events = [
         event["type"] for event in result if event["type"].startswith("response.")
     ]
-    assert response_events == [
-        "response.created",
-        "response.output_item.added",
-        "response.content_part.added",
-        "response.output_text.done",
-        "response.content_part.done",
-        "response.output_item.done",
-        "response.done",
-    ]
+    assert response_events == ["response.created", "response.done"]
     assert result[-1]["response"]["status"] == "failed"
     assert result[-1]["response"]["metadata"] == metadata
 
@@ -1112,7 +1131,8 @@ def test_text_session_starts_next_turn_immediately_after_response_done(
         calls = []
         started = asyncio.Event()
 
-        async def chat_completion(messages, max_output_tokens):
+        async def chat_completion(request):
+            messages, max_output_tokens = request.messages, request.max_output_tokens
             del max_output_tokens
             calls.append(messages)
             started.set()
@@ -1183,7 +1203,7 @@ def test_text_session_starts_next_turn_immediately_after_response_done(
     )
     assistant_history = (
         []
-        if response_options.get("conversation") == "none"
+        if response_options.get("conversation") == "none" or cancelled_text == ""
         else [
             {
                 "role": "assistant",
@@ -1524,9 +1544,349 @@ def test_text_serving_preserves_error_message(monkeypatch, caplog, operation):
 
     if operation == "create_chat_completion":
         with pytest.raises(ValueError, match=message):
-            asyncio.run(create_chat_completion([{"role": "user", "content": "Hi"}], 32))
+            asyncio.run(
+                create_chat_completion(
+                    TextGenerationRequest([{"role": "user", "content": "Hi"}], 32)
+                )
+            )
     else:
-        asyncio.run(prefill_text([], updates()))
+        asyncio.run(prefill_text(TextGenerationRequest([]), updates()))
         assert caplog.messages == [
             f"realtime text prefill disabled for this turn: {message}"
         ]
+
+
+def _tool_session(**overrides):
+    return _text_session(
+        tools=[
+            {
+                "type": "function",
+                "name": "weather",
+                "description": "Weather",
+                "parameters": {"type": "object"},
+            },
+            {
+                "type": "function",
+                "name": "clock",
+                "description": "Time",
+                "parameters": {"type": "object"},
+            },
+        ],
+        tool_choice="auto",
+        nvext={
+            "required_capabilities": ["tools", "reasoning", "incremental_text"],
+            "sampling": {"temperature": 0, "seed": 0, "repetition_penalty": 1.05},
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+        **overrides,
+    )
+
+
+def _chat_frame(delta=None, finish_reason=None, usage=None):
+    import json
+
+    choices = [{"index": 0, "delta": delta or {}, "finish_reason": finish_reason}]
+    return "data: " + json.dumps({"choices": choices, "usage": usage}) + "\n\n"
+
+
+@pytest.mark.timeout(5)
+def test_streaming_prefill_tools_results_and_followup_share_options():
+    async def scenario():
+        warmed = asyncio.Event()
+        first_done = asyncio.Event()
+        prefill_requests = []
+        requests = []
+
+        async def prefill(request, updates):
+            prefill_requests.append(request)
+            async for text in updates:
+                assert text == "Weather and time?"
+                warmed.set()
+
+        async def complete(request):
+            requests.append(request)
+
+            async def frames():
+                if len(requests) == 1:
+                    yield _chat_frame(
+                        {
+                            "reasoning": "I need both tools.",
+                            "content": "Checking. ",
+                            "tool_calls": [
+                                {
+                                    "index": 2,
+                                    "id": "call_weather",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "weather",
+                                        "arguments": '{"city":',
+                                    },
+                                },
+                                {
+                                    "index": 0,
+                                    "id": "call_clock",
+                                    "type": "function",
+                                    "function": {"name": "clock", "arguments": "{"},
+                                },
+                            ],
+                        }
+                    )
+                    yield _chat_frame(
+                        {
+                            "tool_calls": [
+                                {"index": 0, "function": {"arguments": "}"}},
+                                {"index": 2, "function": {"arguments": '"Warsaw"}'}},
+                            ]
+                        },
+                        "tool_calls",
+                        {
+                            "prompt_tokens": 100,
+                            "completion_tokens": 20,
+                            "total_tokens": 120,
+                            "prompt_tokens_details": {
+                                "cached_tokens": 80,
+                                "created_cache_tokens": 10,
+                            },
+                            "completion_tokens_details": {"reasoning_tokens": 3},
+                        },
+                    )
+                else:
+                    yield _chat_frame({"content": "Sunny, noon."}, "stop")
+
+            return frames()
+
+        async def incoming():
+            yield {"type": "session.update", "session": _tool_session()}
+            yield {"type": "input_text.append", "text": "Weather and time?"}
+            await warmed.wait()
+            yield {"type": "input_text.commit"}
+            yield {"type": "response.create"}
+            await first_done.wait()
+            for call_id, output in [("call_clock", "noon"), ("call_weather", "sunny")]:
+                yield {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": output,
+                    },
+                }
+            yield {"type": "response.create", "response": {"tool_choice": "none"}}
+
+        handler = RealtimeTextHandler(
+            model_name=TEXT_MODEL,
+            chat_completion_factory=complete,
+            text_prefill_factory=prefill,
+            supports_tools=True,
+            supports_reasoning=True,
+        )
+        events = []
+        async for event in handler.generate(incoming(), _Context()):
+            events.append(event)
+            if event["type"] == "response.done":
+                first_done.set()
+        return prefill_requests, requests, events
+
+    prefill, requests, events = asyncio.run(scenario())
+    assert prefill[0].options == requests[0].options
+    assert requests[1].options == {**requests[0].options, "tool_choice": "none"}
+    assert requests[0].options["temperature"] == 0
+    assert requests[0].options["chat_template_kwargs"] == {"enable_thinking": False}
+    assert requests[1].messages[-3:] == [
+        {
+            "role": "assistant",
+            "content": "Checking. ",
+            "tool_calls": [
+                {
+                    "id": "call_weather",
+                    "type": "function",
+                    "function": {"name": "weather", "arguments": '{"city":"Warsaw"}'},
+                },
+                {
+                    "id": "call_clock",
+                    "type": "function",
+                    "function": {"name": "clock", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_clock", "content": "noon"},
+        {"role": "tool", "tool_call_id": "call_weather", "content": "sunny"},
+    ]
+    done = [event["response"] for event in events if event["type"] == "response.done"]
+    assert [response["status"] for response in done] == ["completed", "completed"]
+    assert done[0]["usage"]["input_token_details"]["cached_tokens"] == 80
+    assert done[0]["nvext"]["usage"] == {
+        "reasoning_tokens": 3,
+        "created_cache_tokens": 10,
+    }
+    assert [
+        event["delta"]
+        for event in events
+        if event["type"] == "response.nvext.reasoning.delta"
+    ] == ["I need both tools."]
+    calls = [
+        event
+        for event in events
+        if event["type"] == "response.function_call_arguments.done"
+    ]
+    assert [(event["call_id"], event["arguments"]) for event in calls] == [
+        ("call_weather", '{"city":"Warsaw"}'),
+        ("call_clock", "{}"),
+    ]
+    assert len({event["item_id"] for event in calls}) == 2
+    for call in calls:
+        fragments = [
+            event["delta"]
+            for event in events
+            if event["type"] == "response.function_call_arguments.delta"
+            and event["item_id"] == call["item_id"]
+        ]
+        assert "".join(fragments) == call["arguments"]
+
+
+@pytest.mark.parametrize(
+    "finish,arguments,status",
+    [
+        (None, "{}", "failed"),
+        ("tool_calls", "{", "failed"),
+        ("length", "{", "incomplete"),
+        ("content_filter", "{", "incomplete"),
+    ],
+)
+def test_tool_stream_failure_cannot_become_a_successful_call(finish, arguments, status):
+    async def complete(request):
+        async def frames():
+            yield _chat_frame(
+                {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "weather", "arguments": arguments},
+                        }
+                    ]
+                },
+                finish,
+            )
+
+        return frames()
+
+    session = _tool_session()
+    session["nvext"]["required_capabilities"] = ["tools"]
+    events = asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL,
+                chat_completion_factory=complete,
+                supports_tools=True,
+            ),
+            [
+                {"type": "session.update", "session": session},
+                _text_item("Weather?"),
+                {"type": "response.create"},
+            ],
+        )
+    )
+    done = events[-1]["response"]
+    assert done["status"] == status
+    assert done["output"][0]["status"] == "incomplete"
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"nvext": False},
+        {"nvext": {"sampling": []}},
+        {"nvext": {"sampling": {"temperature": -1}}},
+        {"nvext": {"required_capabilities": ["not-supported"]}},
+        {"nvext": {"response_format": {"type": "json_object"}}},
+        {"tool_choice": {"type": "function", "name": []}},
+    ],
+)
+def test_invalid_tool_options_are_recoverable_before_prefill(override):
+    async def unused(*args):
+        raise AssertionError("invalid request reached generation")
+
+    session = _tool_session()
+    session.update(override)
+    result = asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL,
+                chat_completion_factory=unused,
+                text_prefill_factory=unused,
+                supports_tools=True,
+            ),
+            [
+                {"type": "session.update", "event_id": "bad", "session": session},
+                {"type": "session.update", "session": _text_session()},
+            ],
+        )
+    )
+    assert result[0]["error"]["event_id"] == "bad"
+    assert result[-1]["type"] == "session.updated"
+
+
+def test_tool_identity_can_arrive_after_arguments():
+    async def complete(request):
+        async def frames():
+            yield _chat_frame(
+                {
+                    "tool_calls": [
+                        {"index": 0, "function": {"arguments": '{"city":"Warsaw"}'}}
+                    ]
+                }
+            )
+            yield _chat_frame(
+                {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "late-id",
+                            "type": "function",
+                            "function": {"name": "weather"},
+                        }
+                    ]
+                }
+            )
+            yield _chat_frame(
+                {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "type": None,
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    ]
+                },
+                "tool_calls",
+            )
+
+        return frames()
+
+    session = _tool_session()
+    session["nvext"]["required_capabilities"] = ["tools"]
+    events = asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL,
+                chat_completion_factory=complete,
+                supports_tools=True,
+            ),
+            [
+                {"type": "session.update", "session": session},
+                _text_item("Weather?"),
+                {"type": "response.create"},
+            ],
+        )
+    )
+    assert events[-1]["response"]["status"] == "completed"
+    deltas = [
+        event
+        for event in events
+        if event["type"] == "response.function_call_arguments.delta"
+    ]
+    assert len(deltas) == 1
+    assert deltas[0]["call_id"] == "late-id"
+    assert deltas[0]["delta"] == '{"city":"Warsaw"}'
