@@ -60,7 +60,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	runtimeserializer "k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 	"sigs.k8s.io/randfill"
 	"sigs.k8s.io/yaml"
@@ -579,7 +578,7 @@ func fuzzBeta2Workload(workload *v1beta2.WorkloadSpec, c randfill.Continue) {
 		static.Load = &v1beta2.StaticLoadSpec{Concurrency: oneOfPtr(c, int32(1), int32(32), int32(1024))}
 	case 3:
 		if c.Bool() {
-			static.Load = &v1beta2.StaticLoadSpec{KVCapacityFraction: &v1beta2.KVCapacityFractionSpec{Value: ptr.To(0.5)}}
+			static.Load = &v1beta2.StaticLoadSpec{KVCapacityFraction: &v1beta2.KVCapacityFractionSpec{Value: new(0.5)}}
 		} else {
 			static.Load = &v1beta2.StaticLoadSpec{KVCapacityFraction: &v1beta2.KVCapacityFractionSpec{
 				Range: &v1beta2.KVCapacityFractionRange{Min: 0.1, Max: 1.0},

@@ -27,7 +27,6 @@ import (
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	admissionv1 "k8s.io/api/admission/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/utils/ptr"
 )
 
 // defaultMetricV1beta2 is the scalar target an Optimize objective receives when it names none.
@@ -198,10 +197,10 @@ func defaultHardwareSpecV1beta2(hardware *nvidiacomv1beta2.HardwareSpec, default
 // SKU and let admission size the budget.
 func defaultGPUHardwareSpecV1beta2(gpu *nvidiacomv1beta2.GPUHardwareSpec, defaults hardwareDefaultsV1beta2) {
 	if gpu.SKU == nil && defaults.sku != "" {
-		gpu.SKU = ptr.To(defaults.sku)
+		gpu.SKU = new(defaults.sku)
 	}
 	if gpu.Budget == nil && defaults.budget > 0 {
-		gpu.Budget = ptr.To(defaults.budget)
+		gpu.Budget = new(defaults.budget)
 	}
 }
 
@@ -218,14 +217,14 @@ func defaultWorkloadSpecV1beta2(workload *nvidiacomv1beta2.WorkloadSpec) {
 // defaultStaticWorkloadSpecV1beta2 completes a static workload with every omitted default.
 func defaultStaticWorkloadSpecV1beta2(static *nvidiacomv1beta2.StaticWorkloadSpec) {
 	if static.InputTokens == nil {
-		static.InputTokens = ptr.To(defaultStaticInputTokensV1beta2)
+		static.InputTokens = new(defaultStaticInputTokensV1beta2)
 	}
 	if static.OutputTokens == nil {
-		static.OutputTokens = ptr.To(defaultStaticOutputTokensV1beta2)
+		static.OutputTokens = new(defaultStaticOutputTokensV1beta2)
 	}
 	if static.Load == nil {
 		static.Load = &nvidiacomv1beta2.StaticLoadSpec{
-			Concurrency: ptr.To(defaultStaticConcurrencyV1beta2),
+			Concurrency: new(defaultStaticConcurrencyV1beta2),
 		}
 	}
 }
@@ -239,7 +238,7 @@ func defaultObjectiveSpecV1beta2(objective *nvidiacomv1beta2.ObjectiveSpec) {
 		objective.Mode = nvidiacomv1beta2.ObjectiveModeOptimize
 	}
 	if objective.Mode == nvidiacomv1beta2.ObjectiveModeOptimize && objective.Metric == nil {
-		objective.Metric = ptr.To(defaultMetricV1beta2)
+		objective.Metric = new(defaultMetricV1beta2)
 	}
 	if objective.SLA == nil {
 		objective.SLA = &nvidiacomv1beta2.ObjectiveSLASpec{}
@@ -249,8 +248,8 @@ func defaultObjectiveSpecV1beta2(objective *nvidiacomv1beta2.ObjectiveSpec) {
 
 // defaultObjectiveSLASpecV1beta2 fills the whole-object SLA default admission creates.
 func defaultObjectiveSLASpecV1beta2(sla *nvidiacomv1beta2.ObjectiveSLASpec) {
-	sla.TTFTMs = ptr.To(defaultSLATTFTMsV1beta2)
-	sla.ITLMs = ptr.To(defaultSLAITLMsV1beta2)
+	sla.TTFTMs = new(defaultSLATTFTMsV1beta2)
+	sla.ITLMs = new(defaultSLAITLMsV1beta2)
 }
 
 func defaultRecommendationSpecV1beta2(recommendation *nvidiacomv1beta2.RecommendationSpec) {

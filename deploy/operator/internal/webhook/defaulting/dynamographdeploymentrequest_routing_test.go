@@ -33,10 +33,9 @@ import (
 // v1beta1. requestVersion is the version the client used; empty means no conversion.
 func ctxForRequest(op admissionv1.Operation, requestVersion string) context.Context {
 	gvk := nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK
-	req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+	req := admission.Request{
 		Operation: op,
-		Kind:      metav1.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind},
-	}}
+		Kind:      metav1.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind}}
 	if requestVersion != "" {
 		req.RequestKind = &metav1.GroupVersionKind{Group: gvk.Group, Version: requestVersion, Kind: gvk.Kind}
 	}
@@ -47,7 +46,7 @@ const modelOnlyCarrier = `{"model":{"name":"Qwen/Qwen3-32B"}}`
 
 func carrierRequest() *nvidiacomv1beta1.DynamoGraphDeploymentRequest {
 	return &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "default"},
+		Name: "r", Namespace: "default",
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 			V1Beta2: &apiextensionsv1.JSON{Raw: []byte(modelOnlyCarrier)},
 		},

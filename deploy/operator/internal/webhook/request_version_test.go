@@ -20,7 +20,6 @@ package webhook
 import (
 	"testing"
 
-	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -28,9 +27,8 @@ import (
 // requestWithKinds returns a request whose stored kind is v1beta1, the version every webhook
 // receives after conversion, and whose original request kind is requestKind (empty for none).
 func requestWithKinds(requestKind string) admission.Request {
-	req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
-		Kind: metav1.GroupVersionKind{Group: "nvidia.com", Version: "v1beta1", Kind: "DynamoGraphDeploymentRequest"},
-	}}
+	req := admission.Request{
+		Kind: metav1.GroupVersionKind{Group: "nvidia.com", Version: "v1beta1", Kind: "DynamoGraphDeploymentRequest"}}
 	if requestKind != "" {
 		req.RequestKind = &metav1.GroupVersionKind{Group: "nvidia.com", Version: requestKind, Kind: "DynamoGraphDeploymentRequest"}
 	}

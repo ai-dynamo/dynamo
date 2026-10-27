@@ -179,8 +179,7 @@ func rejectHardwareV1beta2(err *field.Error) error { return &hardwareRejectionV1
 // admissionVerdictV1beta2 turns a rejection into the invalid-object verdict validation uses, so a
 // client sees the field and its cause. Any other error is returned as it is.
 func admissionVerdictV1beta2(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, err error) error {
-	var rejection *hardwareRejectionV1beta2
-	if errors.As(err, &rejection) {
+	if rejection, ok := errors.AsType[*hardwareRejectionV1beta2](err); ok {
 		return apierrors.NewInvalid(nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.GroupKind(), dgdr.Name,
 			field.ErrorList{rejection.err})
 	}
