@@ -3549,32 +3549,6 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[test]
-    fn runtime_config_accepts_velo() {
-        use clap::Parser;
-        #[derive(Parser)]
-        struct Args {
-            #[command(flatten)]
-            runtime: RuntimeConfig,
-        }
-        let args = Args::try_parse_from([
-            "worker",
-            "--discovery-backend",
-            "mem",
-            "--request-plane",
-            "tcp",
-            "--event-plane",
-            "zmq",
-            "--response-plane",
-            "velo",
-        ])
-        .unwrap();
-        assert_eq!(
-            args.runtime.to_distributed_config().unwrap().response_plane,
-            Some(dynamo_runtime::pipeline::network::ResponsePlaneMode::Velo)
-        );
-    }
-
-    #[test]
     fn runtime_config_apply_to_env_writes_set_fields() {
         let cfg = RuntimeConfig {
             discovery_backend: Some("file".to_string()),

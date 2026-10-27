@@ -229,7 +229,6 @@ async fn worker_removal_cancels_pending_handshakes_but_drains_established_stream
         [
             ("DYN_RESPONSE_PLANE", Some("quic")),
             ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
-            ("DYN_VELO_RESPONSE_TRANSPORT", Some("tcp")),
         ],
         async {
             // Every scenario shares the process-wide request-plane listener and its runtime.

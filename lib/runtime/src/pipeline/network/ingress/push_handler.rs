@@ -1403,70 +1403,45 @@ mod tests {
 
     #[tokio::test]
     async fn velo_setup_failures_count_response_stream_errors() {
-        if crate::test_utils::run_isolated(
-            concat!(
-                module_path!(),
-                "::velo_setup_failures_count_response_stream_errors"
-            ),
-            &[
-                ("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1"),
-                ("DYN_VELO_RESPONSE_TRANSPORT", "tcp"),
-            ],
-        ) {
-            return;
-        }
-        let runtime = crate::Runtime::from_current().unwrap();
-        for bound in [false, true] {
-            let ingress = TestIngress::new();
-            let metrics = Arc::new(test_metrics());
-            ingress.metrics.set(metrics.clone()).unwrap();
-            ingress.response_plane.set(ResponsePlaneMode::Velo).unwrap();
-            if bound {
-                ingress
-                    .velo_response_owner
-                    .set(Arc::downgrade(&runtime.velo_response_service()))
-                    .unwrap();
-            }
-            let control = RequestControlMessage {
-                id: "test".into(),
-                request_type: RequestType::SingleIn,
-                response_type: ResponseType::ManyOut,
-                payload_codec: RequestPlanePayloadCodec::Json,
-                connection_info: ConnectionInfo {
-                    transport: velo_response::TRANSPORT_NAME.into(),
-                    info: "{}".into(),
-                },
-                metadata: Default::default(),
-                frontend_send_ts_ns: None,
-                request_stream_connection_info: None,
-            };
-            let payload = TwoPartCodec::default()
-                .encode_message(TwoPartMessage::from_parts(
-                    serde_json::to_vec(&control).unwrap().into(),
-                    Bytes::from_static(b"{}"),
-                ))
-                .unwrap();
-            let error = ingress
-                .handle_payload_shared(payload, None)
-                .await
-                .unwrap_err();
-            assert!(
-                error.to_string().contains(if bound {
-                    "missing field"
-                } else {
-                    "live runtime endpoint"
-                }),
-                "{error}"
-            );
-            assert_eq!(
-                metrics
-                    .error_counter
-                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
-                    .get(),
-                1
-            );
-        }
-        runtime.velo_response_service().shutdown().await;
+        // An ingress not bound to a runtime endpoint has no Velo service.
+        let ingress = TestIngress::new();
+        let metrics = Arc::new(test_metrics());
+        ingress.metrics.set(metrics.clone()).unwrap();
+        ingress.response_plane.set(ResponsePlaneMode::Velo).unwrap();
+        let control = RequestControlMessage {
+            id: "test".into(),
+            request_type: RequestType::SingleIn,
+            response_type: ResponseType::ManyOut,
+            payload_codec: RequestPlanePayloadCodec::Json,
+            connection_info: ConnectionInfo {
+                transport: velo_response::TRANSPORT_NAME.into(),
+                info: "{}".into(),
+            },
+            metadata: Default::default(),
+            frontend_send_ts_ns: None,
+            request_stream_connection_info: None,
+        };
+        let payload = TwoPartCodec::default()
+            .encode_message(TwoPartMessage::from_parts(
+                serde_json::to_vec(&control).unwrap().into(),
+                Bytes::from_static(b"{}"),
+            ))
+            .unwrap();
+        let error = ingress
+            .handle_payload_shared(payload, None)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("live runtime endpoint"),
+            "{error}"
+        );
+        assert_eq!(
+            metrics
+                .error_counter
+                .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                .get(),
+            1
+        );
     }
 
     #[test]

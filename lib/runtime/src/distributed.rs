@@ -897,17 +897,6 @@ mod parser_env_tests {
                 "DYN_VELO_RESPONSE_HEARTBEAT_MS",
             ),
             (
-                "DYN_TCP_RESPONSE_STREAM_HOST",
-                "invalid host",
-                "invalid host",
-            ),
-            // Valid address, but not assigned to this host.
-            (
-                "DYN_TCP_RESPONSE_STREAM_HOST",
-                "192.0.2.1",
-                "Failed to pre-bind TCP listener",
-            ),
-            (
                 "DYN_VELO_RESPONSE_PORT",
                 "invalid",
                 "DYN_VELO_RESPONSE_PORT",

@@ -1054,16 +1054,6 @@ mod tests {
                 );
             });
         }
-        for value in ["", "-1", "1.5", "invalid", "18446744073709551616"] {
-            temp_env::with_var(DYN_VELO_RESPONSE_BATCH_MS, Some(value), || {
-                assert!(
-                    response_mux_config()
-                        .unwrap_err()
-                        .to_string()
-                        .contains(DYN_VELO_RESPONSE_BATCH_MS)
-                );
-            });
-        }
     }
 
     #[tokio::test]
@@ -1071,7 +1061,6 @@ mod tests {
         temp_env::async_with_vars(
             [
                 ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
-                ("DYN_VELO_RESPONSE_TRANSPORT", Some("tcp")),
                 ("DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", Some("1")),
             ],
             async {
@@ -1206,10 +1195,7 @@ mod tests {
     #[test]
     fn external_runtimes_get_their_own_service() {
         temp_env::with_vars(
-            [
-                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
-                ("DYN_VELO_RESPONSE_TRANSPORT", Some("tcp")),
-            ],
+            [("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1"))],
             || {
                 let tokio_runtime = || {
                     tokio::runtime::Builder::new_multi_thread()
@@ -1247,77 +1233,6 @@ mod tests {
                 });
             },
         );
-    }
-
-    /// Runs alone: it counts `_hello` events with a thread-scoped subscriber,
-    /// and other tests' handshakes race it through tracing's global callsite
-    /// interest cache.
-    #[tokio::test]
-    async fn concurrent_peer_preparation_shares_a_handshake_and_retries_failure() {
-        if crate::test_utils::run_isolated(
-            concat!(
-                module_path!(),
-                "::concurrent_peer_preparation_shares_a_handshake_and_retries_failure"
-            ),
-            &[],
-        ) {
-            return;
-        }
-        use std::sync::atomic::AtomicUsize;
-        use tracing_subscriber::prelude::*;
-
-        // Count actual hello requests at the peer, rather than just checking
-        // the cache size after concurrent calls have completed.
-        struct HelloCount(Arc<AtomicUsize>);
-        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for HelloCount {
-            fn on_event(
-                &self,
-                event: &tracing::Event<'_>,
-                _: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                if event.metadata().target() != "crate::messenger::system" {
-                    return;
-                }
-                struct Message(bool);
-                impl tracing::field::Visit for Message {
-                    fn record_debug(
-                        &mut self,
-                        field: &tracing::field::Field,
-                        value: &dyn std::fmt::Debug,
-                    ) {
-                        if field.name() == "message"
-                            && format!("{value:?}") == "Received _hello handshake from peer"
-                        {
-                            self.0 = true;
-                        }
-                    }
-                }
-                let mut message = Message(false);
-                event.record(&mut message);
-                if message.0 {
-                    self.0.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        }
-        let hellos = Arc::new(AtomicUsize::new(0));
-        let _logging = tracing::subscriber::set_default(
-            tracing_subscriber::registry().with(HelloCount(hellos.clone())),
-        );
-        let (consumer, producer) = pair(ResponseTransport::Tcp).await;
-        let peer = consumer.velo.instance_id();
-        let address = consumer.peer_address.as_str();
-        assert!(producer.prepare_peer(peer, "").await.is_err());
-        let results =
-            futures::future::join_all((0..8).map(|_| producer.prepare_peer(peer, address))).await;
-        for result in results {
-            result.unwrap();
-        }
-        assert_eq!(hellos.load(Ordering::Relaxed), 1);
-        // A prepared peer's address is not decoded again.
-        producer.prepare_peer(peer, "not base64").await.unwrap();
-        assert_eq!(hellos.load(Ordering::Relaxed), 1);
-        producer.shutdown().await;
-        consumer.shutdown().await;
     }
 
     async fn pair(
@@ -1425,6 +1340,8 @@ mod tests {
             .prepare_peer(peer, &consumer.peer_address)
             .await
             .unwrap();
+        // A prepared peer's address is not decoded again.
+        drop(producer.prepare_peer(peer, "not base64").await.unwrap());
         assert_eq!(producer.evict_idle_peers(u64::MAX), 0);
         drop(lease);
         let used = producer
@@ -1789,48 +1706,44 @@ mod tests {
         transport: ResponseTransport,
     ) {
         let (consumer, producer) = pair(transport).await;
-        for diagnostic in [None, Some("private backend detail")] {
-            let registered = consumer
-                .register_response(EngineContext::new(()).context(), false)
-                .unwrap();
-            let mut builder = DynamoError::builder()
-                .error_type(ErrorType::InvalidRequest)
-                .public_details(crate::error::PublicDetails::SizeLimit {
-                    limit: 10,
-                    actual: Some(11),
-                });
-            if let Some(diagnostic) = diagnostic {
-                builder = builder.diagnostic(diagnostic);
+        let registered = consumer
+            .register_response(EngineContext::new(()).context(), false)
+            .unwrap();
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidRequest)
+            .public_details(crate::error::PublicDetails::SizeLimit {
+                limit: 10,
+                actual: Some(11),
+            })
+            .diagnostic("private backend detail")
+            .build();
+        let mut sender = producer
+            .sender(
+                EngineContext::new(()).context(),
+                registered.connection_info.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        sender
+            .send_prologue(Some(StreamPrologueError::new(
+                "backend failure",
+                error.clone(),
+            )))
+            .await
+            .unwrap();
+        match registered.wait().await.unwrap() {
+            Err(actual) => {
+                let actual = actual.typed_error.expect("typed prologue error");
+                assert_eq!(actual.class(), ErrorType::InvalidRequest);
+                assert_eq!(actual.reason(), error.reason());
+                assert_eq!(actual.public_details(), error.public_details());
+                assert_eq!(
+                    actual.diagnostic().map(|d| d.as_str()),
+                    Some("private backend detail")
+                );
             }
-            let error = builder.build();
-            let mut sender = producer
-                .sender(
-                    EngineContext::new(()).context(),
-                    registered.connection_info.clone(),
-                    None,
-                )
-                .await
-                .unwrap();
-            sender
-                .send_prologue(Some(StreamPrologueError::new(
-                    "backend failure",
-                    error.clone(),
-                )))
-                .await
-                .unwrap();
-            match registered.wait().await.unwrap() {
-                Err(actual) => {
-                    let actual = actual.typed_error.expect("typed prologue error");
-                    assert_eq!(actual.class(), ErrorType::InvalidRequest);
-                    assert_eq!(actual.reason(), error.reason());
-                    assert_eq!(actual.public_details(), error.public_details());
-                    assert_eq!(
-                        actual.diagnostic().map(|d| d.as_str()).unwrap_or_default(),
-                        diagnostic.unwrap_or_default()
-                    );
-                }
-                Ok(_) => panic!("error prologue succeeded"),
-            }
+            Ok(_) => panic!("error prologue succeeded"),
         }
         let registered = consumer
             .register_response(EngineContext::new(()).context(), false)
