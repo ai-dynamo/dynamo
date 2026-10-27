@@ -1,5 +1,5 @@
 {
-  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "$schema": "http://cyclonedx.org/schema/bom-1.7.schema.json",
   "bomFormat": "CycloneDX",
   "components": [
     {
@@ -38,12 +38,12 @@
       "type": "file"
     },
     {
-      "bom-ref": "38ef877057d3e901",
+      "bom-ref": "f84797a24f6be3fe",
       "name": "/usr/bin/shelless_ulimit",
       "type": "file"
     },
     {
-      "bom-ref": "e07c12ffdba9be47",
+      "bom-ref": "a78fa41ec7eedca8",
       "name": "/usr/bin/sleep",
       "type": "file"
     },
@@ -1478,13 +1478,13 @@
       "type": "file"
     },
     {
-      "bom-ref": "e29ef363b20fe2db",
-      "name": "/usr/lib/x86_64-linux-gnu/libexpat.so.1.12.3",
+      "bom-ref": "47b2af09c0445289",
+      "name": "/usr/lib/x86_64-linux-gnu/libexpat.so.1.13.0",
       "type": "file"
     },
     {
-      "bom-ref": "3444e935026a841e",
-      "name": "/usr/lib/x86_64-linux-gnu/libexpatw.so.1.12.3",
+      "bom-ref": "af449084a14b6834",
+      "name": "/usr/lib/x86_64-linux-gnu/libexpatw.so.1.13.0",
       "type": "file"
     },
     {
@@ -1538,7 +1538,7 @@
       "type": "file"
     },
     {
-      "bom-ref": "e3327663ba8b9a97",
+      "bom-ref": "067a01c48afd2ebf",
       "name": "/usr/lib/x86_64-linux-gnu/liblzma.so.5.8.1",
       "type": "file"
     },
@@ -1913,7 +1913,7 @@
       "type": "file"
     },
     {
-      "bom-ref": "22d890b79959cb1d",
+      "bom-ref": "4c8098a1b51e7676",
       "name": "/usr/share/doc/ca-certificates/copyright",
       "type": "file"
     },
@@ -2048,22 +2048,22 @@
       "type": "file"
     },
     {
-      "bom-ref": "9501f1d01b1fca0b",
+      "bom-ref": "d6a933457087aac0",
       "name": "/usr/share/doc/libexpat1/AUTHORS",
       "type": "file"
     },
     {
-      "bom-ref": "84a20d66415c9f1f",
+      "bom-ref": "24b724008dba0ce8",
       "name": "/usr/share/doc/libexpat1/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "eba02d6ef976b139",
+      "bom-ref": "cfcd228258097a82",
       "name": "/usr/share/doc/libexpat1/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "3eeefb39b0d22302",
+      "bom-ref": "ff0046dccc44b88d",
       "name": "/usr/share/doc/libexpat1/copyright",
       "type": "file"
     },
@@ -2138,32 +2138,32 @@
       "type": "file"
     },
     {
-      "bom-ref": "428b7c301dbdf1c3",
+      "bom-ref": "34fb55f7f5b74a67",
       "name": "/usr/share/doc/liblzma5/AUTHORS",
       "type": "file"
     },
     {
-      "bom-ref": "ba5ab937ff9d0728",
+      "bom-ref": "124cf6dfaf2fa974",
       "name": "/usr/share/doc/liblzma5/NEWS.gz",
       "type": "file"
     },
     {
-      "bom-ref": "3441a3e86ed39253",
+      "bom-ref": "3f1a328c99ec2aaf",
       "name": "/usr/share/doc/liblzma5/THANKS.gz",
       "type": "file"
     },
     {
-      "bom-ref": "e036bfdeeca728c5",
+      "bom-ref": "8e27c64e4d2ce649",
       "name": "/usr/share/doc/liblzma5/changelog.Debian.gz",
       "type": "file"
     },
     {
-      "bom-ref": "7e9a7b69ec550ced",
+      "bom-ref": "d008f6535b7a488d",
       "name": "/usr/share/doc/liblzma5/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "964baf393f3c93ec",
+      "bom-ref": "00478cc0c5e88cfc",
       "name": "/usr/share/doc/liblzma5/copyright",
       "type": "file"
     },
@@ -2358,17 +2358,17 @@
       "type": "file"
     },
     {
-      "bom-ref": "c49bac1fa4e91fe3",
+      "bom-ref": "d91dbbeb973a06ac",
       "name": "/usr/share/doc/nvidia-shell-utils/README.gz",
       "type": "file"
     },
     {
-      "bom-ref": "544d8f3b8918040c",
+      "bom-ref": "0d570d455c4f39cf",
       "name": "/usr/share/doc/nvidia-shell-utils/changelog.gz",
       "type": "file"
     },
     {
-      "bom-ref": "d8b400bb358b7753",
+      "bom-ref": "d545ad42f29f8c2c",
       "name": "/usr/share/doc/nvidia-shell-utils/copyright",
       "type": "file"
     },
@@ -6953,12 +6953,12 @@
       "type": "file"
     },
     {
-      "bom-ref": "5c18cd64f554a5dd",
+      "bom-ref": "fb98c479a2e516ba",
       "name": "/var/lib/dpkg/status.d/ca-certificates",
       "type": "file"
     },
     {
-      "bom-ref": "1ff8a51eff7bdf7e",
+      "bom-ref": "5a93d0f950469e59",
       "name": "/var/lib/dpkg/status.d/ca-certificates.md5sums",
       "type": "file"
     },
@@ -7033,12 +7033,12 @@
       "type": "file"
     },
     {
-      "bom-ref": "85cde5fa0583a620",
+      "bom-ref": "6226d175ab982a07",
       "name": "/var/lib/dpkg/status.d/libexpat1",
       "type": "file"
     },
     {
-      "bom-ref": "0aba4be2351da295",
+      "bom-ref": "3353fed52aab0142",
       "name": "/var/lib/dpkg/status.d/libexpat1.md5sums",
       "type": "file"
     },
@@ -7123,12 +7123,12 @@
       "type": "file"
     },
     {
-      "bom-ref": "1d18f4d71fe9bd3c",
+      "bom-ref": "249be2760a68b110",
       "name": "/var/lib/dpkg/status.d/liblzma5",
       "type": "file"
     },
     {
-      "bom-ref": "6ddf6ad773637bef",
+      "bom-ref": "f2a76cb8af344937",
       "name": "/var/lib/dpkg/status.d/liblzma5.md5sums",
       "type": "file"
     },
@@ -7253,12 +7253,12 @@
       "type": "file"
     },
     {
-      "bom-ref": "18e0a7fdfce4285e",
+      "bom-ref": "3a27e6bdbcc3d939",
       "name": "/var/lib/dpkg/status.d/nvidia-shell-utils",
       "type": "file"
     },
     {
-      "bom-ref": "02d8ab336d813392",
+      "bom-ref": "26230bc384fe4ce1",
       "name": "/var/lib/dpkg/status.d/nvidia-shell-utils.md5sums",
       "type": "file"
     },
@@ -7303,7 +7303,7 @@
       "type": "file"
     },
     {
-      "bom-ref": "pkg:deb/debian/base-files@13.8%2Bdeb13u7?arch=amd64&distro=debian-13&package-id=df2661979f9bc8c5",
+      "bom-ref": "pkg:deb/debian/base-files@13.8%2Bdeb13u7?arch=amd64&distro=debian-13.7&package-id=df2661979f9bc8c5",
       "cpe": "cpe:2.3:a:base-files:base-files:13.8\\+deb13u7:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7324,13 +7324,13 @@
       ],
       "name": "base-files",
       "publisher": "Santiago Vila <sanvila@debian.org>",
-      "purl": "pkg:deb/debian/base-files@13.8%2Bdeb13u7?arch=amd64&distro=debian-13",
+      "purl": "pkg:deb/debian/base-files@13.8%2Bdeb13u7?arch=amd64&distro=debian-13.7",
       "type": "library",
       "version": "13.8+deb13u7"
     },
     {
-      "bom-ref": "pkg:deb/debian/ca-certificates@20250419?arch=all&distro=debian-13&package-id=a2939cc8ca3591de",
-      "cpe": "cpe:2.3:a:ca-certificates:ca-certificates:20250419:*:*:*:*:*:*:*",
+      "bom-ref": "pkg:deb/debian/ca-certificates@20250419%2Bdeb13u1?arch=all&distro=debian-13.7&package-id=64fd49a5d444c8ed",
+      "cpe": "cpe:2.3:a:ca-certificates:ca-certificates:20250419\\+deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
@@ -7350,12 +7350,12 @@
       ],
       "name": "ca-certificates",
       "publisher": "Julien Cristau <jcristau@debian.org>",
-      "purl": "pkg:deb/debian/ca-certificates@20250419?arch=all&distro=debian-13",
+      "purl": "pkg:deb/debian/ca-certificates@20250419%2Bdeb13u1?arch=all&distro=debian-13.7",
       "type": "library",
-      "version": "20250419"
+      "version": "20250419+deb13u1"
     },
     {
-      "bom-ref": "os:debian@13",
+      "bom-ref": "os:debian@13.7",
       "description": "Distroless",
       "externalReferences": [
         {
@@ -7376,49 +7376,29 @@
       "swid": {
         "name": "debian",
         "tagId": "debian",
-        "version": "13"
+        "version": "13.7"
       },
       "type": "operating-system",
-      "version": "13"
+      "version": "13.7"
     },
     {
-      "bom-ref": "pkg:deb/debian/gcc-14-base@14.2.0-19?arch=amd64&distro=debian-13&package-id=cf018a81635f3130&upstream=gcc-14",
+      "bom-ref": "pkg:deb/debian/gcc-14-base@14.2.0-19?arch=amd64&distro=debian-13.7&package-id=7e17eca42542b0ea&upstream=gcc-14",
       "cpe": "cpe:2.3:a:gcc-14-base:gcc-14-base:14.2.0-19:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
-            "id": "GFDL-1.2-only"
-          }
-        },
-        {
-          "license": {
-            "id": "GPL-3.0-only"
-          }
-        },
-        {
-          "license": {
-            "name": "Artistic"
-          }
-        },
-        {
-          "license": {
-            "name": "GPL"
-          }
-        },
-        {
-          "license": {
-            "name": "LGPL"
+            "name": "sha256:20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
           }
         }
       ],
       "name": "gcc-14-base",
       "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
-      "purl": "pkg:deb/debian/gcc-14-base@14.2.0-19?arch=amd64&distro=debian-13&upstream=gcc-14",
+      "purl": "pkg:deb/debian/gcc-14-base@14.2.0-19?arch=amd64&distro=debian-13.7&upstream=gcc-14",
       "type": "library",
       "version": "14.2.0-19"
     },
     {
-      "bom-ref": "pkg:deb/debian/libbz2-1.0@1.0.8-6?arch=amd64&distro=debian-13&package-id=ed2ee9c4af382a99&upstream=bzip2",
+      "bom-ref": "pkg:deb/debian/libbz2-1.0@1.0.8-6?arch=amd64&distro=debian-13.7&package-id=ed2ee9c4af382a99&upstream=bzip2",
       "cpe": "cpe:2.3:a:libbz2-1.0:libbz2-1.0:1.0.8-6:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7434,12 +7414,12 @@
       ],
       "name": "libbz2-1.0",
       "publisher": "Anibal Monsalve Salazar <anibal@debian.org>",
-      "purl": "pkg:deb/debian/libbz2-1.0@1.0.8-6?arch=amd64&distro=debian-13&upstream=bzip2",
+      "purl": "pkg:deb/debian/libbz2-1.0@1.0.8-6?arch=amd64&distro=debian-13.7&upstream=bzip2",
       "type": "library",
       "version": "1.0.8-6"
     },
     {
-      "bom-ref": "pkg:deb/debian/libc-bin@2.41-12%2Bdeb13u4?arch=amd64&distro=debian-13&package-id=0316fb42fb78b1a5&upstream=glibc",
+      "bom-ref": "pkg:deb/debian/libc-bin@2.41-12%2Bdeb13u4?arch=amd64&distro=debian-13.7&package-id=0316fb42fb78b1a5&upstream=glibc",
       "cpe": "cpe:2.3:a:libc-bin:libc-bin:2.41-12\\+deb13u4:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7605,12 +7585,12 @@
       ],
       "name": "libc-bin",
       "publisher": "GNU Libc Maintainers <debian-glibc@lists.debian.org>",
-      "purl": "pkg:deb/debian/libc-bin@2.41-12%2Bdeb13u4?arch=amd64&distro=debian-13&upstream=glibc",
+      "purl": "pkg:deb/debian/libc-bin@2.41-12%2Bdeb13u4?arch=amd64&distro=debian-13.7&upstream=glibc",
       "type": "library",
       "version": "2.41-12+deb13u4"
     },
     {
-      "bom-ref": "pkg:deb/debian/libc6@2.41-12%2Bdeb13u4?arch=amd64&distro=debian-13&package-id=27e0524b85198251&upstream=glibc",
+      "bom-ref": "pkg:deb/debian/libc6@2.41-12%2Bdeb13u4?arch=amd64&distro=debian-13.7&package-id=27e0524b85198251&upstream=glibc",
       "cpe": "cpe:2.3:a:libc6:libc6:2.41-12\\+deb13u4:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7776,12 +7756,12 @@
       ],
       "name": "libc6",
       "publisher": "GNU Libc Maintainers <debian-glibc@lists.debian.org>",
-      "purl": "pkg:deb/debian/libc6@2.41-12%2Bdeb13u4?arch=amd64&distro=debian-13&upstream=glibc",
+      "purl": "pkg:deb/debian/libc6@2.41-12%2Bdeb13u4?arch=amd64&distro=debian-13.7&upstream=glibc",
       "type": "library",
       "version": "2.41-12+deb13u4"
     },
     {
-      "bom-ref": "pkg:deb/debian/libcom-err2@1.47.2-3%2Bb12?arch=amd64&distro=debian-13&package-id=1ed86423cac06926&upstream=e2fsprogs%401.47.2-3",
+      "bom-ref": "pkg:deb/debian/libcom-err2@1.47.2-3%2Bb12?arch=amd64&distro=debian-13.7&package-id=1ed86423cac06926&upstream=e2fsprogs%401.47.2-3",
       "cpe": "cpe:2.3:a:libcom-err2:libcom-err2:1.47.2-3\\+b12:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7852,12 +7832,12 @@
       ],
       "name": "libcom-err2",
       "publisher": "Theodore Y. Ts'o <tytso@mit.edu>",
-      "purl": "pkg:deb/debian/libcom-err2@1.47.2-3%2Bb12?arch=amd64&distro=debian-13&upstream=e2fsprogs%401.47.2-3",
+      "purl": "pkg:deb/debian/libcom-err2@1.47.2-3%2Bb12?arch=amd64&distro=debian-13.7&upstream=e2fsprogs%401.47.2-3",
       "type": "library",
       "version": "1.47.2-3+b12"
     },
     {
-      "bom-ref": "pkg:deb/debian/libcrypt1@1%3A4.4.38-1?arch=amd64&distro=debian-13&package-id=d52d4a379e38f1fe&upstream=libxcrypt",
+      "bom-ref": "pkg:deb/debian/libcrypt1@1%3A4.4.38-1?arch=amd64&distro=debian-13.7&package-id=d52d4a379e38f1fe&upstream=libxcrypt",
       "cpe": "cpe:2.3:a:libcrypt1:libcrypt1:1\\:4.4.38-1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7868,12 +7848,12 @@
       ],
       "name": "libcrypt1",
       "publisher": "Marco d'Itri <md@linux.it>",
-      "purl": "pkg:deb/debian/libcrypt1@1%3A4.4.38-1?arch=amd64&distro=debian-13&upstream=libxcrypt",
+      "purl": "pkg:deb/debian/libcrypt1@1%3A4.4.38-1?arch=amd64&distro=debian-13.7&upstream=libxcrypt",
       "type": "library",
       "version": "1:4.4.38-1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libdb5.3t64@5.3.28%2Bdfsg2-9?arch=amd64&distro=debian-13&package-id=b7c62dc74d5542dc&upstream=db5.3",
+      "bom-ref": "pkg:deb/debian/libdb5.3t64@5.3.28%2Bdfsg2-9?arch=amd64&distro=debian-13.7&package-id=b7c62dc74d5542dc&upstream=db5.3",
       "cpe": "cpe:2.3:a:libdb5.3t64:libdb5.3t64:5.3.28\\+dfsg2-9:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7934,13 +7914,13 @@
       ],
       "name": "libdb5.3t64",
       "publisher": "Debian QA Group <packages@qa.debian.org>",
-      "purl": "pkg:deb/debian/libdb5.3t64@5.3.28%2Bdfsg2-9?arch=amd64&distro=debian-13&upstream=db5.3",
+      "purl": "pkg:deb/debian/libdb5.3t64@5.3.28%2Bdfsg2-9?arch=amd64&distro=debian-13.7&upstream=db5.3",
       "type": "library",
       "version": "5.3.28+dfsg2-9"
     },
     {
-      "bom-ref": "pkg:deb/debian/libexpat1@2.8.3-1~deb13u1?arch=amd64&distro=debian-13&package-id=e9ca31b19634378b&upstream=expat",
-      "cpe": "cpe:2.3:a:libexpat1:libexpat1:2.8.3-1\\~deb13u1:*:*:*:*:*:*:*",
+      "bom-ref": "pkg:deb/debian/libexpat1@2.9.0-1~deb13u1?arch=amd64&distro=debian-13.7&package-id=6b5f431f450771ca&upstream=expat",
+      "cpe": "cpe:2.3:a:libexpat1:libexpat1:2.9.0-1\\~deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
@@ -7950,12 +7930,12 @@
       ],
       "name": "libexpat1",
       "publisher": "Laszlo Boszormenyi (GCS) <gcs@debian.org>",
-      "purl": "pkg:deb/debian/libexpat1@2.8.3-1~deb13u1?arch=amd64&distro=debian-13&upstream=expat",
+      "purl": "pkg:deb/debian/libexpat1@2.9.0-1~deb13u1?arch=amd64&distro=debian-13.7&upstream=expat",
       "type": "library",
-      "version": "2.8.3-1~deb13u1"
+      "version": "2.9.0-1~deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libffi8@3.4.8-2?arch=amd64&distro=debian-13&package-id=67bc00e8efae1f4d&upstream=libffi",
+      "bom-ref": "pkg:deb/debian/libffi8@3.4.8-2?arch=amd64&distro=debian-13.7&package-id=67bc00e8efae1f4d&upstream=libffi",
       "cpe": "cpe:2.3:a:libffi8:libffi8:3.4.8-2:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -7996,116 +7976,76 @@
       ],
       "name": "libffi8",
       "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
-      "purl": "pkg:deb/debian/libffi8@3.4.8-2?arch=amd64&distro=debian-13&upstream=libffi",
+      "purl": "pkg:deb/debian/libffi8@3.4.8-2?arch=amd64&distro=debian-13.7&upstream=libffi",
       "type": "library",
       "version": "3.4.8-2"
     },
     {
-      "bom-ref": "pkg:deb/debian/libgcc-s1@14.2.0-19?arch=amd64&distro=debian-13&package-id=1fdbab05f00996f4&upstream=gcc-14",
+      "bom-ref": "pkg:deb/debian/libgcc-s1@14.2.0-19?arch=amd64&distro=debian-13.7&package-id=aa49ac20455c7644&upstream=gcc-14",
       "cpe": "cpe:2.3:a:libgcc-s1:libgcc-s1:14.2.0-19:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
-            "id": "GFDL-1.2-only"
-          }
-        },
-        {
-          "license": {
-            "id": "GPL-3.0-only"
-          }
-        },
-        {
-          "license": {
-            "name": "Artistic"
-          }
-        },
-        {
-          "license": {
-            "name": "GPL"
-          }
-        },
-        {
-          "license": {
-            "name": "LGPL"
+            "name": "sha256:20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
           }
         }
       ],
       "name": "libgcc-s1",
       "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
-      "purl": "pkg:deb/debian/libgcc-s1@14.2.0-19?arch=amd64&distro=debian-13&upstream=gcc-14",
+      "purl": "pkg:deb/debian/libgcc-s1@14.2.0-19?arch=amd64&distro=debian-13.7&upstream=gcc-14",
       "type": "library",
       "version": "14.2.0-19"
     },
     {
-      "bom-ref": "pkg:deb/debian/libgomp1@14.2.0-19?arch=amd64&distro=debian-13&package-id=5c48bcfc4c39d1fd&upstream=gcc-14",
+      "bom-ref": "pkg:deb/debian/libgomp1@14.2.0-19?arch=amd64&distro=debian-13.7&package-id=fa06adc0996a76e7&upstream=gcc-14",
       "cpe": "cpe:2.3:a:libgomp1:libgomp1:14.2.0-19:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
-            "id": "GFDL-1.2-only"
-          }
-        },
-        {
-          "license": {
-            "id": "GPL-3.0-only"
-          }
-        },
-        {
-          "license": {
-            "name": "Artistic"
-          }
-        },
-        {
-          "license": {
-            "name": "GPL"
-          }
-        },
-        {
-          "license": {
-            "name": "LGPL"
+            "name": "sha256:20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
           }
         }
       ],
       "name": "libgomp1",
       "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
-      "purl": "pkg:deb/debian/libgomp1@14.2.0-19?arch=amd64&distro=debian-13&upstream=gcc-14",
+      "purl": "pkg:deb/debian/libgomp1@14.2.0-19?arch=amd64&distro=debian-13.7&upstream=gcc-14",
       "type": "library",
       "version": "14.2.0-19"
     },
     {
-      "bom-ref": "pkg:deb/debian/libgssapi-krb5-2@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&package-id=127d2c7541f1b166&upstream=krb5",
+      "bom-ref": "pkg:deb/debian/libgssapi-krb5-2@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13.7&package-id=d694425059086d80&upstream=krb5",
       "cpe": "cpe:2.3:a:libgssapi-krb5-2:libgssapi-krb5-2:1.21.3-5\\+deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
-            "id": "GPL-2.0-only"
+            "name": "sha256:936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816"
           }
         }
       ],
       "name": "libgssapi-krb5-2",
       "publisher": "Sam Hartman <hartmans@debian.org>",
-      "purl": "pkg:deb/debian/libgssapi-krb5-2@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&upstream=krb5",
+      "purl": "pkg:deb/debian/libgssapi-krb5-2@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13.7&upstream=krb5",
       "type": "library",
       "version": "1.21.3-5+deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libk5crypto3@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&package-id=d1a08b9311327a62&upstream=krb5",
+      "bom-ref": "pkg:deb/debian/libk5crypto3@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13.7&package-id=064813fc43a031e9&upstream=krb5",
       "cpe": "cpe:2.3:a:libk5crypto3:libk5crypto3:1.21.3-5\\+deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
-            "id": "GPL-2.0-only"
+            "name": "sha256:936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816"
           }
         }
       ],
       "name": "libk5crypto3",
       "publisher": "Sam Hartman <hartmans@debian.org>",
-      "purl": "pkg:deb/debian/libk5crypto3@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&upstream=krb5",
+      "purl": "pkg:deb/debian/libk5crypto3@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13.7&upstream=krb5",
       "type": "library",
       "version": "1.21.3-5+deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libkeyutils1@1.6.3-6?arch=amd64&distro=debian-13&package-id=1087556cc266430b&upstream=keyutils",
+      "bom-ref": "pkg:deb/debian/libkeyutils1@1.6.3-6?arch=amd64&distro=debian-13.7&package-id=1087556cc266430b&upstream=keyutils",
       "cpe": "cpe:2.3:a:libkeyutils1:libkeyutils1:1.6.3-6:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8131,45 +8071,45 @@
       ],
       "name": "libkeyutils1",
       "publisher": "Christian Kastner <ckk@debian.org>",
-      "purl": "pkg:deb/debian/libkeyutils1@1.6.3-6?arch=amd64&distro=debian-13&upstream=keyutils",
+      "purl": "pkg:deb/debian/libkeyutils1@1.6.3-6?arch=amd64&distro=debian-13.7&upstream=keyutils",
       "type": "library",
       "version": "1.6.3-6"
     },
     {
-      "bom-ref": "pkg:deb/debian/libkrb5-3@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&package-id=23063980570247bb&upstream=krb5",
+      "bom-ref": "pkg:deb/debian/libkrb5-3@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13.7&package-id=32d48fe73b2777f1&upstream=krb5",
       "cpe": "cpe:2.3:a:libkrb5-3:libkrb5-3:1.21.3-5\\+deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
-            "id": "GPL-2.0-only"
+            "name": "sha256:936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816"
           }
         }
       ],
       "name": "libkrb5-3",
       "publisher": "Sam Hartman <hartmans@debian.org>",
-      "purl": "pkg:deb/debian/libkrb5-3@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&upstream=krb5",
+      "purl": "pkg:deb/debian/libkrb5-3@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13.7&upstream=krb5",
       "type": "library",
       "version": "1.21.3-5+deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libkrb5support0@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&package-id=9f60fcbff9b88d56&upstream=krb5",
+      "bom-ref": "pkg:deb/debian/libkrb5support0@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13.7&package-id=e24e645eceb94d42&upstream=krb5",
       "cpe": "cpe:2.3:a:libkrb5support0:libkrb5support0:1.21.3-5\\+deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
-            "id": "GPL-2.0-only"
+            "name": "sha256:936728f4181718f42951b881c1e8f1386bf6b2723c4fbc533c374d6f42c71816"
           }
         }
       ],
       "name": "libkrb5support0",
       "publisher": "Sam Hartman <hartmans@debian.org>",
-      "purl": "pkg:deb/debian/libkrb5support0@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13&upstream=krb5",
+      "purl": "pkg:deb/debian/libkrb5support0@1.21.3-5%2Bdeb13u1?arch=amd64&distro=debian-13.7&upstream=krb5",
       "type": "library",
       "version": "1.21.3-5+deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/liblzma5@5.8.1-1%2Bdeb13u1?arch=amd64&distro=debian-13&package-id=ff8368a61ac37760&upstream=xz-utils",
-      "cpe": "cpe:2.3:a:liblzma5:liblzma5:5.8.1-1\\+deb13u1:*:*:*:*:*:*:*",
+      "bom-ref": "pkg:deb/debian/liblzma5@5.8.1-1%2Bdeb13u2?arch=amd64&distro=debian-13.7&package-id=614615a927aea6da&upstream=xz-utils",
+      "cpe": "cpe:2.3:a:liblzma5:liblzma5:5.8.1-1\\+deb13u2:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
@@ -8239,12 +8179,12 @@
       ],
       "name": "liblzma5",
       "publisher": "Sebastian Andrzej Siewior <sebastian@breakpoint.cc>",
-      "purl": "pkg:deb/debian/liblzma5@5.8.1-1%2Bdeb13u1?arch=amd64&distro=debian-13&upstream=xz-utils",
+      "purl": "pkg:deb/debian/liblzma5@5.8.1-1%2Bdeb13u2?arch=amd64&distro=debian-13.7&upstream=xz-utils",
       "type": "library",
-      "version": "5.8.1-1+deb13u1"
+      "version": "5.8.1-1+deb13u2"
     },
     {
-      "bom-ref": "pkg:deb/debian/libncursesw6@6.5%2B20250216-2?arch=amd64&distro=debian-13&package-id=b10ad0335ad13aec&upstream=ncurses",
+      "bom-ref": "pkg:deb/debian/libncursesw6@6.5%2B20250216-2?arch=amd64&distro=debian-13.7&package-id=b10ad0335ad13aec&upstream=ncurses",
       "cpe": "cpe:2.3:a:libncursesw6:libncursesw6:6.5\\+20250216-2:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8265,12 +8205,12 @@
       ],
       "name": "libncursesw6",
       "publisher": "Ncurses Maintainers <ncurses@packages.debian.org>",
-      "purl": "pkg:deb/debian/libncursesw6@6.5%2B20250216-2?arch=amd64&distro=debian-13&upstream=ncurses",
+      "purl": "pkg:deb/debian/libncursesw6@6.5%2B20250216-2?arch=amd64&distro=debian-13.7&upstream=ncurses",
       "type": "library",
       "version": "6.5+20250216-2"
     },
     {
-      "bom-ref": "pkg:deb/debian/libnsl2@1.3.0-3%2Bb3?arch=amd64&distro=debian-13&package-id=45bd52f52d5fc66a&upstream=libnsl%401.3.0-3",
+      "bom-ref": "pkg:deb/debian/libnsl2@1.3.0-3%2Bb3?arch=amd64&distro=debian-13.7&package-id=45bd52f52d5fc66a&upstream=libnsl%401.3.0-3",
       "cpe": "cpe:2.3:a:libnsl2:libnsl2:1.3.0-3\\+b3:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8346,12 +8286,12 @@
       ],
       "name": "libnsl2",
       "publisher": "GNU Libc Maintainers <debian-glibc@lists.debian.org>",
-      "purl": "pkg:deb/debian/libnsl2@1.3.0-3%2Bb3?arch=amd64&distro=debian-13&upstream=libnsl%401.3.0-3",
+      "purl": "pkg:deb/debian/libnsl2@1.3.0-3%2Bb3?arch=amd64&distro=debian-13.7&upstream=libnsl%401.3.0-3",
       "type": "library",
       "version": "1.3.0-3+b3"
     },
     {
-      "bom-ref": "pkg:deb/debian/libreadline8t64@8.2-6?arch=amd64&distro=debian-13&package-id=d37f9d5a479cce9b&upstream=readline",
+      "bom-ref": "pkg:deb/debian/libreadline8t64@8.2-6?arch=amd64&distro=debian-13.7&package-id=d37f9d5a479cce9b&upstream=readline",
       "cpe": "cpe:2.3:a:libreadline8t64:libreadline8t64:8.2-6:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8392,12 +8332,12 @@
       ],
       "name": "libreadline8t64",
       "publisher": "Matthias Klose <doko@debian.org>",
-      "purl": "pkg:deb/debian/libreadline8t64@8.2-6?arch=amd64&distro=debian-13&upstream=readline",
+      "purl": "pkg:deb/debian/libreadline8t64@8.2-6?arch=amd64&distro=debian-13.7&upstream=readline",
       "type": "library",
       "version": "8.2-6"
     },
     {
-      "bom-ref": "pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u2?arch=amd64&distro=debian-13&package-id=07aeb7ddf1f40112&upstream=sqlite3",
+      "bom-ref": "pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u2?arch=amd64&distro=debian-13.7&package-id=07aeb7ddf1f40112&upstream=sqlite3",
       "cpe": "cpe:2.3:a:libsqlite3-0:libsqlite3-0:3.46.1-7\\+deb13u2:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8418,12 +8358,12 @@
       ],
       "name": "libsqlite3-0",
       "publisher": "Laszlo Boszormenyi (GCS) <gcs@debian.org>",
-      "purl": "pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u2?arch=amd64&distro=debian-13&upstream=sqlite3",
+      "purl": "pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u2?arch=amd64&distro=debian-13.7&upstream=sqlite3",
       "type": "library",
       "version": "3.46.1-7+deb13u2"
     },
     {
-      "bom-ref": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3?arch=amd64&distro=debian-13&package-id=1aa0edd3366adca1&upstream=openssl",
+      "bom-ref": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3?arch=amd64&distro=debian-13.7&package-id=1aa0edd3366adca1&upstream=openssl",
       "cpe": "cpe:2.3:a:libssl3t64:libssl3t64:3.5.7-1\\~deb13u3:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8449,48 +8389,28 @@
       ],
       "name": "libssl3t64",
       "publisher": "Debian OpenSSL Team <pkg-openssl-devel@alioth-lists.debian.net>",
-      "purl": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3?arch=amd64&distro=debian-13&upstream=openssl",
+      "purl": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3?arch=amd64&distro=debian-13.7&upstream=openssl",
       "type": "library",
       "version": "3.5.7-1~deb13u3"
     },
     {
-      "bom-ref": "pkg:deb/debian/libstdc%2B%2B6@14.2.0-19?arch=amd64&distro=debian-13&package-id=563847bf1116e309&upstream=gcc-14",
+      "bom-ref": "pkg:deb/debian/libstdc%2B%2B6@14.2.0-19?arch=amd64&distro=debian-13.7&package-id=82b808487e206a4b&upstream=gcc-14",
       "cpe": "cpe:2.3:a:libstdc\\+\\+6:libstdc\\+\\+6:14.2.0-19:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
-            "id": "GFDL-1.2-only"
-          }
-        },
-        {
-          "license": {
-            "id": "GPL-3.0-only"
-          }
-        },
-        {
-          "license": {
-            "name": "Artistic"
-          }
-        },
-        {
-          "license": {
-            "name": "GPL"
-          }
-        },
-        {
-          "license": {
-            "name": "LGPL"
+            "name": "sha256:20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79"
           }
         }
       ],
       "name": "libstdc++6",
       "publisher": "Debian GCC Maintainers <debian-gcc@lists.debian.org>",
-      "purl": "pkg:deb/debian/libstdc%2B%2B6@14.2.0-19?arch=amd64&distro=debian-13&upstream=gcc-14",
+      "purl": "pkg:deb/debian/libstdc%2B%2B6@14.2.0-19?arch=amd64&distro=debian-13.7&upstream=gcc-14",
       "type": "library",
       "version": "14.2.0-19"
     },
     {
-      "bom-ref": "pkg:deb/debian/libtinfo6@6.5%2B20250216-2?arch=amd64&distro=debian-13&package-id=ace5468b0f8f32a9&upstream=ncurses",
+      "bom-ref": "pkg:deb/debian/libtinfo6@6.5%2B20250216-2?arch=amd64&distro=debian-13.7&package-id=ace5468b0f8f32a9&upstream=ncurses",
       "cpe": "cpe:2.3:a:libtinfo6:libtinfo6:6.5\\+20250216-2:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8511,12 +8431,12 @@
       ],
       "name": "libtinfo6",
       "publisher": "Ncurses Maintainers <ncurses@packages.debian.org>",
-      "purl": "pkg:deb/debian/libtinfo6@6.5%2B20250216-2?arch=amd64&distro=debian-13&upstream=ncurses",
+      "purl": "pkg:deb/debian/libtinfo6@6.5%2B20250216-2?arch=amd64&distro=debian-13.7&upstream=ncurses",
       "type": "library",
       "version": "6.5+20250216-2"
     },
     {
-      "bom-ref": "pkg:deb/debian/libtirpc3t64@1.3.6%2Bds-1?arch=amd64&distro=debian-13&package-id=8be6ea5517af1182&upstream=libtirpc",
+      "bom-ref": "pkg:deb/debian/libtirpc3t64@1.3.6%2Bds-1?arch=amd64&distro=debian-13.7&package-id=8be6ea5517af1182&upstream=libtirpc",
       "cpe": "cpe:2.3:a:libtirpc3t64:libtirpc3t64:1.3.6\\+ds-1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8537,12 +8457,12 @@
       ],
       "name": "libtirpc3t64",
       "publisher": "Josue Ortega <josue@debian.org>",
-      "purl": "pkg:deb/debian/libtirpc3t64@1.3.6%2Bds-1?arch=amd64&distro=debian-13&upstream=libtirpc",
+      "purl": "pkg:deb/debian/libtirpc3t64@1.3.6%2Bds-1?arch=amd64&distro=debian-13.7&upstream=libtirpc",
       "type": "library",
       "version": "1.3.6+ds-1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libuuid1@2.41.5-0%2Bdeb13u1?arch=amd64&distro=debian-13&package-id=48eced0d504c8aaf&upstream=util-linux",
+      "bom-ref": "pkg:deb/debian/libuuid1@2.41.5-0%2Bdeb13u1?arch=amd64&distro=debian-13.7&package-id=48eced0d504c8aaf&upstream=util-linux",
       "cpe": "cpe:2.3:a:libuuid1:libuuid1:2.41.5-0\\+deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8638,12 +8558,12 @@
       ],
       "name": "libuuid1",
       "publisher": "Chris Hofstaedtler <zeha@debian.org>",
-      "purl": "pkg:deb/debian/libuuid1@2.41.5-0%2Bdeb13u1?arch=amd64&distro=debian-13&upstream=util-linux",
+      "purl": "pkg:deb/debian/libuuid1@2.41.5-0%2Bdeb13u1?arch=amd64&distro=debian-13.7&upstream=util-linux",
       "type": "library",
       "version": "2.41.5-0+deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/libzstd1@1.5.7%2Bdfsg-1?arch=amd64&distro=debian-13&package-id=4227c89854f9eaa4&upstream=libzstd",
+      "bom-ref": "pkg:deb/debian/libzstd1@1.5.7%2Bdfsg-1?arch=amd64&distro=debian-13.7&package-id=4227c89854f9eaa4&upstream=libzstd",
       "cpe": "cpe:2.3:a:libzstd1:libzstd1:1.5.7\\+dfsg-1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8669,12 +8589,12 @@
       ],
       "name": "libzstd1",
       "publisher": "RPM packaging team <team+pkg-rpm@tracker.debian.org>",
-      "purl": "pkg:deb/debian/libzstd1@1.5.7%2Bdfsg-1?arch=amd64&distro=debian-13&upstream=libzstd",
+      "purl": "pkg:deb/debian/libzstd1@1.5.7%2Bdfsg-1?arch=amd64&distro=debian-13.7&upstream=libzstd",
       "type": "library",
       "version": "1.5.7+dfsg-1"
     },
     {
-      "bom-ref": "pkg:deb/debian/media-types@13.0.0?arch=all&distro=debian-13&package-id=3c9375f7f83b0d94",
+      "bom-ref": "pkg:deb/debian/media-types@13.0.0?arch=all&distro=debian-13.7&package-id=3c9375f7f83b0d94",
       "cpe": "cpe:2.3:a:media-types:media-types:13.0.0:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8685,12 +8605,12 @@
       ],
       "name": "media-types",
       "publisher": "Mime-Support Packagers <team+debian-mimesupport-packagers@tracker.debian.org>",
-      "purl": "pkg:deb/debian/media-types@13.0.0?arch=all&distro=debian-13",
+      "purl": "pkg:deb/debian/media-types@13.0.0?arch=all&distro=debian-13.7",
       "type": "library",
       "version": "13.0.0"
     },
     {
-      "bom-ref": "pkg:deb/debian/netbase@6.5?arch=all&distro=debian-13&package-id=789361e68c8ad425",
+      "bom-ref": "pkg:deb/debian/netbase@6.5?arch=all&distro=debian-13.7&package-id=789361e68c8ad425",
       "cpe": "cpe:2.3:a:netbase:netbase:6.5:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8701,13 +8621,13 @@
       ],
       "name": "netbase",
       "publisher": "Marco d'Itri <md@linux.it>",
-      "purl": "pkg:deb/debian/netbase@6.5?arch=all&distro=debian-13",
+      "purl": "pkg:deb/debian/netbase@6.5?arch=all&distro=debian-13.7",
       "type": "library",
       "version": "6.5"
     },
     {
-      "bom-ref": "pkg:deb/debian/nvidia-shell-utils@1.0.5?arch=amd64&distro=debian-13&package-id=0607cb5885a0d4bb",
-      "cpe": "cpe:2.3:a:nvidia-shell-utils:nvidia-shell-utils:1.0.5:*:*:*:*:*:*:*",
+      "bom-ref": "pkg:deb/debian/nvidia-shell-utils@1.0.7?arch=amd64&distro=debian-13.7&package-id=b23f18f36505d2d2",
+      "cpe": "cpe:2.3:a:nvidia-shell-utils:nvidia-shell-utils:1.0.7:*:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
@@ -8722,12 +8642,12 @@
       ],
       "name": "nvidia-shell-utils",
       "publisher": "NVIDIA GFN Security <nv-shell-utils-release-bot@nvidia.com>",
-      "purl": "pkg:deb/debian/nvidia-shell-utils@1.0.5?arch=amd64&distro=debian-13",
+      "purl": "pkg:deb/debian/nvidia-shell-utils@1.0.7?arch=amd64&distro=debian-13.7",
       "type": "library",
-      "version": "1.0.5"
+      "version": "1.0.7"
     },
     {
-      "bom-ref": "pkg:deb/debian/openssl-provider-fips@3.5.7-1~deb13u3?arch=amd64&distro=debian-13&package-id=9dcc955b30e86a73&upstream=openssl",
+      "bom-ref": "pkg:deb/debian/openssl-provider-fips@3.5.7-1~deb13u3?arch=amd64&distro=debian-13.7&package-id=9dcc955b30e86a73&upstream=openssl",
       "cpe": "cpe:2.3:a:openssl-provider-fips:openssl-provider-fips:3.5.7-1\\~deb13u3:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8753,7 +8673,7 @@
       ],
       "name": "openssl-provider-fips",
       "publisher": "Debian OpenSSL Team <pkg-openssl-devel@alioth-lists.debian.net>",
-      "purl": "pkg:deb/debian/openssl-provider-fips@3.5.7-1~deb13u3?arch=amd64&distro=debian-13&upstream=openssl",
+      "purl": "pkg:deb/debian/openssl-provider-fips@3.5.7-1~deb13u3?arch=amd64&distro=debian-13.7&upstream=openssl",
       "type": "library",
       "version": "3.5.7-1~deb13u3"
     },
@@ -8766,22 +8686,22 @@
       "version": "3.13.16"
     },
     {
-      "bom-ref": "pkg:golang/shelless_ulimit@v0.0.0-20260806200008-600d56a7c50b?package-id=db2f4e06457784c6",
+      "bom-ref": "pkg:golang/shelless_ulimit@v0.0.0-20260806200008-600d56a7c50b?package-id=f49988f319664263",
       "name": "shelless_ulimit",
       "purl": "pkg:golang/shelless_ulimit@v0.0.0-20260806200008-600d56a7c50b",
       "type": "library",
       "version": "v0.0.0-20260806200008-600d56a7c50b"
     },
     {
-      "bom-ref": "pkg:golang/sleep@v0.0.0-20260806200008-600d56a7c50b?package-id=d98e3d7663684c3f",
+      "bom-ref": "pkg:golang/sleep@v0.0.0-20260806200008-600d56a7c50b?package-id=454279632324a18d",
       "name": "sleep",
       "purl": "pkg:golang/sleep@v0.0.0-20260806200008-600d56a7c50b",
       "type": "library",
       "version": "v0.0.0-20260806200008-600d56a7c50b"
     },
     {
-      "bom-ref": "pkg:golang/stdlib@1.27.1?package-id=9c8ec4fbe9fcbf9b",
-      "cpe": "cpe:2.3:a:golang:go:1.27.1:-:*:*:*:*:*:*",
+      "bom-ref": "pkg:golang/stdlib@1.27.3?package-id=3aea47c2742fa60c",
+      "cpe": "cpe:2.3:a:golang:go:1.27.3:-:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
@@ -8790,13 +8710,13 @@
         }
       ],
       "name": "stdlib",
-      "purl": "pkg:golang/stdlib@1.27.1",
+      "purl": "pkg:golang/stdlib@1.27.3",
       "type": "library",
-      "version": "go1.27.1"
+      "version": "go1.27.3"
     },
     {
-      "bom-ref": "pkg:golang/stdlib@1.27.1?package-id=e4c89665019b505d",
-      "cpe": "cpe:2.3:a:golang:go:1.27.1:-:*:*:*:*:*:*",
+      "bom-ref": "pkg:golang/stdlib@1.27.3?package-id=fb0a811c0bac67ef",
+      "cpe": "cpe:2.3:a:golang:go:1.27.3:-:*:*:*:*:*:*",
       "licenses": [
         {
           "license": {
@@ -8805,12 +8725,12 @@
         }
       ],
       "name": "stdlib",
-      "purl": "pkg:golang/stdlib@1.27.1",
+      "purl": "pkg:golang/stdlib@1.27.3",
       "type": "library",
-      "version": "go1.27.1"
+      "version": "go1.27.3"
     },
     {
-      "bom-ref": "pkg:deb/debian/tzdata@2026c-0%2Bdeb13u1?arch=all&distro=debian-13&package-id=423c6c0d8690fa0f",
+      "bom-ref": "pkg:deb/debian/tzdata@2026c-0%2Bdeb13u1?arch=all&distro=debian-13.7&package-id=423c6c0d8690fa0f",
       "cpe": "cpe:2.3:a:tzdata:tzdata:2026c-0\\+deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8821,12 +8741,12 @@
       ],
       "name": "tzdata",
       "publisher": "GNU Libc Maintainers <debian-glibc@lists.debian.org>",
-      "purl": "pkg:deb/debian/tzdata@2026c-0%2Bdeb13u1?arch=all&distro=debian-13",
+      "purl": "pkg:deb/debian/tzdata@2026c-0%2Bdeb13u1?arch=all&distro=debian-13.7",
       "type": "library",
       "version": "2026c-0+deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/tzdata-legacy@2026c-0%2Bdeb13u1?arch=all&distro=debian-13&package-id=7cf9655a6e3f014d&upstream=tzdata",
+      "bom-ref": "pkg:deb/debian/tzdata-legacy@2026c-0%2Bdeb13u1?arch=all&distro=debian-13.7&package-id=7cf9655a6e3f014d&upstream=tzdata",
       "cpe": "cpe:2.3:a:tzdata-legacy:tzdata-legacy:2026c-0\\+deb13u1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8837,12 +8757,12 @@
       ],
       "name": "tzdata-legacy",
       "publisher": "GNU Libc Maintainers <debian-glibc@lists.debian.org>",
-      "purl": "pkg:deb/debian/tzdata-legacy@2026c-0%2Bdeb13u1?arch=all&distro=debian-13&upstream=tzdata",
+      "purl": "pkg:deb/debian/tzdata-legacy@2026c-0%2Bdeb13u1?arch=all&distro=debian-13.7&upstream=tzdata",
       "type": "library",
       "version": "2026c-0+deb13u1"
     },
     {
-      "bom-ref": "pkg:deb/debian/zlib1g@1%3A1.3.dfsg%2Breally1.3.1-1%2Bb1?arch=amd64&distro=debian-13&package-id=9624b8abfaf8a472&upstream=zlib%401%3A1.3.dfsg%2Breally1.3.1-1",
+      "bom-ref": "pkg:deb/debian/zlib1g@1%3A1.3.dfsg%2Breally1.3.1-1%2Bb1?arch=amd64&distro=debian-13.7&package-id=9624b8abfaf8a472&upstream=zlib%401%3A1.3.dfsg%2Breally1.3.1-1",
       "cpe": "cpe:2.3:a:zlib1g:zlib1g:1\\:1.3.dfsg\\+really1.3.1-1\\+b1:*:*:*:*:*:*:*",
       "licenses": [
         {
@@ -8853,22 +8773,22 @@
       ],
       "name": "zlib1g",
       "publisher": "Mark Brown <broonie@debian.org>",
-      "purl": "pkg:deb/debian/zlib1g@1%3A1.3.dfsg%2Breally1.3.1-1%2Bb1?arch=amd64&distro=debian-13&upstream=zlib%401%3A1.3.dfsg%2Breally1.3.1-1",
+      "purl": "pkg:deb/debian/zlib1g@1%3A1.3.dfsg%2Breally1.3.1-1%2Bb1?arch=amd64&distro=debian-13.7&upstream=zlib%401%3A1.3.dfsg%2Breally1.3.1-1",
       "type": "library",
       "version": "1:1.3.dfsg+really1.3.1-1+b1"
     }
   ],
   "metadata": {
     "component": {
-      "bom-ref": "1625aa550171ea21",
+      "bom-ref": "13e7a2aac21edee2",
       "name": "nvcr.io/nvidia/distroless/python",
       "type": "container",
-      "version": "3.13-v4.1.6"
+      "version": "3.13-v4.1.9"
     },
     "properties": [
       {
         "name": "syft:image:labels:org.opencontainers.image.created",
-        "value": "2026-10-06T18:50:08Z"
+        "value": "2026-10-21T17:07:08Z"
       },
       {
         "name": "syft:image:labels:org.opencontainers.image.documentation",
@@ -8876,7 +8796,7 @@
       },
       {
         "name": "syft:image:labels:org.opencontainers.image.revision",
-        "value": "d9ce6fe1842f74a848ada894119391f9a011012c"
+        "value": "b50dc472e96217625979485fc1ac2e4c5f9fa70e"
       },
       {
         "name": "syft:image:labels:org.opencontainers.image.title",
@@ -8888,7 +8808,7 @@
       },
       {
         "name": "syft:image:labels:org.opencontainers.image.version",
-        "value": "v4.1.6"
+        "value": "v4.1.9"
       }
     ],
     "tools": {
@@ -8897,12 +8817,12 @@
           "author": "anchore",
           "name": "syft",
           "type": "application",
-          "version": "1.42.4"
+          "version": "1.55.0"
         }
       ]
     }
   },
-  "serialNumber": "urn:uuid:9f9c1f09-820d-5e37-8bbf-c330ca831562",
-  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:e174fcc3-d3ea-5fdb-8c02-4eaf9578b568",
+  "specVersion": "1.7",
   "version": 1
 }
