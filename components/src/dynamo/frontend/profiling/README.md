@@ -44,11 +44,8 @@ supply commands, PIDs or output paths. Fields and defaults are in
 `/engine/control/profiling_info` for its startup epoch (boot ID, PID, start tick)
 and `worker_instance_id` (its runtime connection ID, which the router records as
 the worker ID and the bundle uses for request attribution); with `verify_runtime`,
-a failed probe or changed epoch prevents start. For Torch capture, launch vLLM
-with `--profiler-config '{"profiler":"torch","torch_profiler_dir":...}'`; SGLang
-uses its own start/stop controls and `start_options` (`output_dir` = the
-`artifact_location`). Both get the session prefix; vLLM rank IDs look like
-`dp0_pp0_tp0_dcp0_ep0_rank0`, SGLang's like `TP-0` or `TP-0-DP-1`.
+a failed probe or changed epoch prevents start. Which profiler a target uses is
+fixed by how its worker was launched; see [Enabling captures](#enabling-captures).
 
 ## Admin API
 
@@ -92,24 +89,86 @@ reports `artifact_status: present`. Parsing, hashes, SQLite integrity and
 required activity are checked offline by the bundle, which reports `verified`.
 Clock probes estimate worker offsets and uncertainty; they never change clocks.
 
-## Nsight launches
+## Enabling captures
 
-Install `ai-dynamo[profiling]` for frontend NVTX. Each process is launched under
-Nsight by the deployment (clients never run it) with repeat capture and SQLite export:
+A plan's `mode` picks the profiler: `"torch_profile"` (PyTorch profiler, Kineto
+traces) or `"nsys"` (Nsight Systems). Each worker is launched for one of them;
+`GET /targets` lists the collectors each target supports.
 
-```text
-frontend: --trace=nvtx,osrt --sample=process-tree --cpuctxsw=process-tree
-          --capture-range=nvtx --nvtx-capture=ROI@app
-          --capture-range-end=repeat:100:async --export=sqlite
-worker:   --trace=cuda,nvtx,osrt --capture-range=cudaProfilerApi
-          --capture-range-end=repeat:100:async --export=sqlite
+### Kineto (`"mode": "torch_profile"`)
+
+1. **Launch the worker with the Torch profiler** writing to a directory that the
+   coordinator can also read (`artifact_location`):
+   - vLLM:
+
+     ```bash
+     python -m dynamo.vllm ... --profiler-config '{"profiler": "torch",
+       "torch_profiler_dir": "/shared/native-profiles/decode-0",
+       "torch_profiler_with_stack": false, "torch_profiler_use_gzip": false}'
+     ```
+
+     vLLM exports the trace inside `stop_profile` on the engine loop, so the
+     stopped replica pauses for the export. Without Python stacks and gzip the
+     pause drops from about a minute to seconds; the bundle compresses offline.
+   - SGLang: no launch flag. The coordinator passes the worker's `start_options`
+     to SGLang's `start_profile`; set `"start_options": {"output_dir": "<artifact_location>"}`.
+2. **Configure the worker entry**: `artifact_location` as above, and
+   `expected_rank_ids` with one ID per engine rank as it appears in the trace
+   file names: vLLM `dp0_pp0_tp0_dcp0_ep0_rank0`, SGLang `TP-0` (with `-DP-<n>`,
+   `-PP-<n>` or `-EP-<n>` when that dimension is larger than one). The
+   coordinator gives each session a unique `profile_prefix`, so files from other
+   sessions never count.
+3. **Frontend**: a `torch_profile` session also records the frontend with Linux
+   perf unless `frontend_perf_enabled` is false. Set it to false where
+   `perf_event_paranoid` denies attaching perf.
+4. **No data parallelism.** Do not use Kineto with vLLM data parallelism
+   (DP > 1, including DP attention and wide EP): the export runs synchronously in
+   `stop_profile` and serializes across the DP group's ranks, stalling the whole
+   group. Profile those deployments with Nsight. SGLang with DP > 1 has not been
+   checked. The coordinator does not enforce this.
+
+### Nsight Systems (`"mode": "nsys"`)
+
+1. **Launch each process under Nsight** (the deployment does this; clients never
+   run Nsight) with repeat capture and automatic SQLite export, and a distinct,
+   fresh output prefix per launch on storage the coordinator mounts:
+
+   ```text
+   frontend: --trace=nvtx,osrt --sample=process-tree --cpuctxsw=process-tree
+             --capture-range=nvtx --nvtx-capture=ROI@app
+             --capture-range-end=repeat:100:async --export=sqlite
+   worker:   --trace=cuda,nvtx,osrt --capture-range=cudaProfilerApi
+             --capture-range-end=repeat:100:async --export=sqlite
+   ```
+
+   vLLM workers also need `--profiler-config '{"profiler": "cuda"}'` so that
+   `start_profile`/`stop_profile` open and close the CUDA profiler range; such a
+   launch cannot serve Torch capture. SGLang needs no flag: the coordinator sends
+   `activities: ["CUDA_PROFILER"]`.
+2. **Configure** `nsys_frontend_output_prefix` (absolute) in the config and
+   `nsys_output_prefix` (absolute) per worker, matching the launches.
+3. **Frontend**: install `ai-dynamo[profiling]` (NVTX) and use the embedded host.
+   In `nsys` mode the frontend is captured only when the plan selects `frontend`.
+
+### Starting a capture
+
+```bash
+S=/private/profiling/admin.sock
+curl -s --unix-socket $S http://localhost/admin/profiling/v1/targets  # epochs, collectors
+curl -s --unix-socket $S -X POST http://localhost/admin/profiling/v1/sessions \
+  -H 'Content-Type: application/json' -d '{
+    "client_request_id": "incident-42",
+    "mode": "torch_profile",
+    "targets": [{"target_id": "decode-0", "process_epoch": "<from /targets>"}],
+    "duration_ms": 5000,
+    "trace_ids": ["<triggering OTel trace ID>"]}'
+curl -s --unix-socket $S http://localhost/admin/profiling/v1/sessions/<session_id>
 ```
 
-Set a distinct, fresh output prefix per launch (mounted in the coordinator):
-`nsys_frontend_output_prefix` in the config and `nsys_output_prefix` per worker.
-vLLM selects its `cuda` profiler (a separate launch from Torch capture); SGLang
-receives `activities: ["CUDA_PROFILER"]`. In `mode: "nsys"`, select `frontend`
-explicitly; frontend perf is not implicit.
+The session stops at `duration_ms` (at most `max_duration_ms`) or on
+`POST /sessions/<session_id>/stop`, then reports `artifact_status` and the files per
+target. For Nsight, use `"mode": "nsys"` and add
+`{"target_id": "frontend", "process_epoch": ...}` to capture the frontend.
 
 ## Design
 
