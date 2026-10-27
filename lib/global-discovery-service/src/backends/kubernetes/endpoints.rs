@@ -86,13 +86,22 @@ impl ReplicaNaming {
             return None;
         }
         let cluster = mcs::source_cluster(self.mcs, slice)?;
-        let port = slice
+        let Some(port) = slice
             .ports
             .iter()
             .flatten()
             .find(|port| port.name.as_deref() == Some(self.port_name.as_str()))
             .and_then(|port| port.port)
-            .and_then(|port| u16::try_from(port).ok())?;
+            .and_then(|port| u16::try_from(port).ok())
+        else {
+            // The slice is the router Service's, so the name is misconfigured.
+            tracing::warn!(
+                slice = slice.metadata.name.as_deref().unwrap_or_default(),
+                port_name = %self.port_name,
+                "router EndpointSlice has no port of that name; its replicas are not listed"
+            );
+            return None;
+        };
         let replicas = slice
             .endpoints
             .iter()

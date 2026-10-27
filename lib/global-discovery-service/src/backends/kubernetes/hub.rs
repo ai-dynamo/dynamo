@@ -281,7 +281,7 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::runtime::watcher;
 
-    use super::super::cache::SliceCache;
+    use super::super::cache::{STALE_AFTER, SliceCache};
     use super::mcs::{KARMADA_SLICE_MANAGER, KUBERNETES_SERVICE_NAME_LABEL, MANAGED_BY_LABEL};
     use super::*;
 
@@ -343,6 +343,23 @@ mod tests {
             cache.apply(watcher::Event::InitApply(slice));
         }
         cache.apply(watcher::Event::InitDone);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_watch_keeps_its_last_list_but_marks_it_incomplete() {
+        let cache = cache();
+        let ready = || slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]);
+        sync(&cache, vec![ready()]);
+        cache.failing();
+        tokio::time::advance(STALE_AFTER).await;
+        assert_eq!(cache.failing(), STALE_AFTER);
+        let stale = cache.snapshot().unwrap();
+        assert_eq!(stale.items.len(), 1);
+        assert_eq!(stale.completeness, Completeness::Estimated);
+
+        // Any event means the watch works again.
+        cache.apply(watcher::Event::Apply(ready()));
+        assert_eq!(cache.snapshot().unwrap().completeness, Completeness::Exact);
     }
 
     fn record(cache: &SliceCache<PoolIndex>, key: &PoolKey) -> Option<PoolRecord> {

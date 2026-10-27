@@ -7,8 +7,11 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, PoisonError, RwLock, RwLockReadGuard};
+use std::time::Duration;
 
-use crate::pool_discovery::{Directory, PoolDiscoveryError, Snapshot, WatchEvent, WatchStream};
+use crate::pool_discovery::{
+    Completeness, Directory, PoolDiscoveryError, Snapshot, WatchEvent, WatchStream,
+};
 use async_trait::async_trait;
 use futures::StreamExt;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
@@ -16,9 +19,14 @@ use kube::Api;
 use kube::api::ListParams;
 use kube::runtime::{WatchStreamExt, watcher};
 use tokio::sync::broadcast;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::super::stream::{EVENT_BUFFER, watch_stream};
+
+/// How long the watch may fail before the cache reports its last view as
+/// `Estimated`. It keeps serving that view, and the service stays ready.
+pub(super) const STALE_AFTER: Duration = Duration::from_secs(60);
 
 /// Slices are keyed by (namespace, name).
 pub(super) type SliceKey = (String, String);
@@ -59,6 +67,8 @@ pub(super) trait SliceIndex: Default + Send + Sync + 'static {
 
 pub(super) struct CacheState<I: SliceIndex> {
     pub(super) synced: bool,
+    /// When the watch started failing. `None` while it works.
+    failing_since: Option<Instant>,
     /// Slices listed since the last `Init`; they replace the index at
     /// `InitDone`.
     relist: Option<HashMap<SliceKey, I::Entry>>,
@@ -69,9 +79,24 @@ impl<I: SliceIndex> Default for CacheState<I> {
     fn default() -> Self {
         Self {
             synced: false,
+            failing_since: None,
             relist: None,
             index: I::default(),
         }
+    }
+}
+
+impl<I: SliceIndex> CacheState<I> {
+    /// `None` until the first list completes.
+    fn snapshot(&self) -> Option<Snapshot<I::Item>> {
+        let mut snapshot = self.synced.then(|| self.index.snapshot())?;
+        if self
+            .failing_since
+            .is_some_and(|since| since.elapsed() >= STALE_AFTER)
+        {
+            snapshot.completeness = Completeness::Estimated;
+        }
+        Some(snapshot)
     }
 }
 
@@ -101,12 +126,13 @@ impl<I: SliceIndex> SliceCache<I> {
 
     /// `None` until the first list completes.
     pub(super) fn snapshot(&self) -> Option<Snapshot<I::Item>> {
-        let state = self.read();
-        state.synced.then(|| state.index.snapshot())
+        self.read().snapshot()
     }
 
     pub(super) fn apply(&self, event: watcher::Event<EndpointSlice>) {
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
+        // Any event means the watch works.
+        state.failing_since = None;
         let events = match event {
             watcher::Event::Init => {
                 state.relist = Some(HashMap::new());
@@ -143,6 +169,15 @@ impl<I: SliceIndex> SliceCache<I> {
         }
     }
 
+    /// The watch failed again. Returns how long it has been failing.
+    pub(super) fn failing(&self) -> Duration {
+        let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
+        state
+            .failing_since
+            .get_or_insert_with(Instant::now)
+            .elapsed()
+    }
+
     pub(super) fn subscribe(
         self: &Arc<Self>,
         cancel: CancellationToken,
@@ -153,7 +188,7 @@ impl<I: SliceIndex> SliceCache<I> {
             move || {
                 let state = cache.read();
                 let receiver = cache.events.subscribe();
-                (receiver, state.synced.then(|| state.index.snapshot()))
+                (receiver, state.snapshot())
             },
             cancel,
             stop,
@@ -177,11 +212,36 @@ async fn watch_slices<I: SliceIndex>(
             event = events.next() => event,
         };
         match event {
-            Some(Ok(event)) => cache.apply(event),
-            // The cache keeps the last good view, still `Exact`, and the
-            // watcher retries with backoff. Until it recovers, the service
-            // serves that view and stays ready.
-            Some(Err(error)) => tracing::warn!(%error, %selector, "EndpointSlice watch error"),
+            Some(Ok(event)) => {
+                let relisted = matches!(event, watcher::Event::InitDone);
+                cache.apply(event);
+                if relisted
+                    && cache
+                        .snapshot()
+                        .is_some_and(|listed| listed.items.is_empty())
+                {
+                    tracing::warn!(
+                        %selector,
+                        "the EndpointSlices list nothing: check that MCS imports the expected Services into this cluster, under the expected names"
+                    );
+                }
+            }
+            // The cache keeps the last good view, and the watcher retries with
+            // backoff. The service serves that view and stays ready; after
+            // `STALE_AFTER`, the view is `Estimated`.
+            Some(Err(error)) => {
+                let failing_for = cache.failing();
+                if failing_for < STALE_AFTER {
+                    tracing::warn!(%error, %selector, "EndpointSlice watch error");
+                } else {
+                    tracing::error!(
+                        %error,
+                        %selector,
+                        ?failing_for,
+                        "EndpointSlice watch still failing; listing its last view as incomplete"
+                    );
+                }
+            }
             None => return,
         }
     }
