@@ -89,7 +89,7 @@ func TestDynamoGraphDeploymentDefaultingAdmission(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			env := defaultingAdmissionEnv.ForTest(t)
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: env.Namespace(), Annotations: tt.annotations},
+				Name: "graph", Namespace: env.Namespace(), Annotations: tt.annotations,
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{tt.component},
 				},
@@ -162,13 +162,11 @@ func TestDynamoComponentDeploymentDefaultingAdmission(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			env := defaultingAdmissionEnv.ForTest(t)
 			dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: env.Namespace()},
+				Name: "worker", Namespace: env.Namespace(),
 				Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
-					DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-						ComponentName: tt.componentName,
-						Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4},
-						Roles:         tt.roles,
-					},
+					ComponentName: tt.componentName,
+					Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4},
+					Roles:         tt.roles,
 				},
 			}
 
@@ -191,13 +189,11 @@ func TestDynamoComponentDeploymentDefaultingAdmission(t *testing.T) {
 
 func TestDynamoGraphDeploymentRequestDefaultingAdmission(t *testing.T) {
 	wantDefaultSpec := nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-		DynamoGraphDeploymentRequestNativeSpec: nvidiacomv1beta1.DynamoGraphDeploymentRequestNativeSpec{
-			Model:          "Qwen/Qwen3-8B",
-			Backend:        nvidiacomv1beta1.BackendTypeAuto,
-			Image:          "nvcr.io/nvidia/ai-dynamo/dynamo-planner:" + defaultingAdmissionOperatorVersion,
-			SearchStrategy: nvidiacomv1beta1.SearchStrategyRapid,
-			AutoApply:      new(true),
-		},
+		Model:          "Qwen/Qwen3-8B",
+		Backend:        nvidiacomv1beta1.BackendTypeAuto,
+		Image:          "nvcr.io/nvidia/ai-dynamo/dynamo-planner:" + defaultingAdmissionOperatorVersion,
+		SearchStrategy: nvidiacomv1beta1.SearchStrategyRapid,
+		AutoApply:      new(true),
 	}
 	tests := []struct {
 		name               string
@@ -208,7 +204,7 @@ func TestDynamoGraphDeploymentRequestDefaultingAdmission(t *testing.T) {
 		{
 			name: "combines schema and webhook defaults",
 			spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-				DynamoGraphDeploymentRequestNativeSpec: nvidiacomv1beta1.DynamoGraphDeploymentRequestNativeSpec{Model: "Qwen/Qwen3-8B"},
+				Model: "Qwen/Qwen3-8B",
 			},
 			want:               wantDefaultSpec,
 			clearImageOnUpdate: true,
@@ -216,31 +212,25 @@ func TestDynamoGraphDeploymentRequestDefaultingAdmission(t *testing.T) {
 		{
 			name: "treats explicit schema defaults identically",
 			spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-				DynamoGraphDeploymentRequestNativeSpec: nvidiacomv1beta1.DynamoGraphDeploymentRequestNativeSpec{
-					Model:          "Qwen/Qwen3-8B",
-					Backend:        nvidiacomv1beta1.BackendTypeAuto,
-					SearchStrategy: nvidiacomv1beta1.SearchStrategyRapid,
-					AutoApply:      new(true),
-				},
+				Model:          "Qwen/Qwen3-8B",
+				Backend:        nvidiacomv1beta1.BackendTypeAuto,
+				SearchStrategy: nvidiacomv1beta1.SearchStrategyRapid,
+				AutoApply:      new(true),
 			},
 			want: wantDefaultSpec,
 		},
 		{
 			name: "preserves an explicit profiler image",
 			spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-				DynamoGraphDeploymentRequestNativeSpec: nvidiacomv1beta1.DynamoGraphDeploymentRequestNativeSpec{
-					Model: "Qwen/Qwen3-8B",
-					Image: "registry.example/planner:custom",
-				},
+				Model: "Qwen/Qwen3-8B",
+				Image: "registry.example/planner:custom",
 			},
 			want: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-				DynamoGraphDeploymentRequestNativeSpec: nvidiacomv1beta1.DynamoGraphDeploymentRequestNativeSpec{
-					Model:          "Qwen/Qwen3-8B",
-					Backend:        nvidiacomv1beta1.BackendTypeAuto,
-					Image:          "registry.example/planner:custom",
-					SearchStrategy: nvidiacomv1beta1.SearchStrategyRapid,
-					AutoApply:      new(true),
-				},
+				Model:          "Qwen/Qwen3-8B",
+				Backend:        nvidiacomv1beta1.BackendTypeAuto,
+				Image:          "registry.example/planner:custom",
+				SearchStrategy: nvidiacomv1beta1.SearchStrategyRapid,
+				AutoApply:      new(true),
 			},
 		},
 	}
@@ -249,8 +239,8 @@ func TestDynamoGraphDeploymentRequestDefaultingAdmission(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			env := defaultingAdmissionEnv.ForTest(t)
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				ObjectMeta: metav1.ObjectMeta{Name: "request", Namespace: env.Namespace()},
-				Spec:       tt.spec,
+				Name: "request", Namespace: env.Namespace(),
+				Spec: tt.spec,
 			}
 
 			t.Log("Create the DGDR through the API server and production mutating handler")
