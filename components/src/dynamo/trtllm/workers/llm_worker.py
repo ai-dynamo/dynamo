@@ -523,8 +523,9 @@ async def init_llm_worker(
             ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
         event_buffer_max_size = int(current_kv_config["event_buffer_max_size"])
 
-        # With KV cache manager v2, polled events give the router no Stored
-        # event for a block that fills during decode.
+        # Polled KV cache manager v2 events do not yet match the publisher:
+        # multimodal blocks differ in digest tokens, continuation blocks and
+        # UUID identity, and cache salts are missing.
         use_v2 = current_kv_config.setdefault("use_kv_cache_manager_v2", False)
         if use_v2 is not False:
             raise ValueError(

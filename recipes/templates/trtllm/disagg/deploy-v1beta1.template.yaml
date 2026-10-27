@@ -61,7 +61,7 @@ data:
     moe_config:
       backend: TRTLLM
     cache_transceiver_config:
-      # UCX is required because NIXL/MOONCAKE do not support Mamba SSM transfer.
+      # The C++ NIXL/MOONCAKE transceivers do not support Mamba SSM transfer.
       backend: UCX
       transceiver_runtime: CPP
     cuda_graph_config:
@@ -95,7 +95,7 @@ data:
     moe_config:
       backend: TRTLLM
     cache_transceiver_config:
-      # UCX is required because NIXL/MOONCAKE do not support Mamba SSM transfer.
+      # The C++ NIXL/MOONCAKE transceivers do not support Mamba SSM transfer.
       backend: UCX
       transceiver_runtime: CPP
     cuda_graph_config:

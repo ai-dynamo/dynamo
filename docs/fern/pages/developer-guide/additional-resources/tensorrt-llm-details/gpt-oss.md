@@ -98,6 +98,7 @@ The deployment uses configuration files and command-line arguments to control be
 - `enable_chunked_prefill: true` - Enables efficient chunked prefill processing
 - `moe_config.backend: CUTLASS` - Uses optimized CUTLASS kernels for MoE layers
 - `cache_transceiver_config.backend: ucx` - Uses UCX for efficient KV cache transfer
+- `cache_transceiver_config.transceiver_runtime: CPP` and `kv_cache_config.use_kv_cache_manager_v2: false` - Select the C++ transceiver that UCX requires (see [Transceiver Runtime](kv-cache-transfer.md#transceiver-runtime))
 - `cuda_graph_config.max_batch_size: 32` - Maximum batch size for CUDA graphs
 
 **Decode Configuration (`examples/backends/trtllm/engine_configs/gpt-oss-120b/decode.yaml`)**:
@@ -105,6 +106,7 @@ The deployment uses configuration files and command-line arguments to control be
 - `disable_overlap_scheduler: false` - Enables overlapping for decode efficiency
 - `moe_config.backend: CUTLASS` - Uses optimized CUTLASS kernels for MoE layers
 - `cache_transceiver_config.backend: ucx` - Uses UCX for efficient KV cache transfer
+- `cache_transceiver_config.transceiver_runtime: CPP` and `kv_cache_config.use_kv_cache_manager_v2: false` - Select the C++ transceiver that UCX requires (see [Transceiver Runtime](kv-cache-transfer.md#transceiver-runtime))
 - `cuda_graph_config.max_batch_size: 128` - Maximum batch size for CUDA graphs
 
 #### Command-Line Arguments

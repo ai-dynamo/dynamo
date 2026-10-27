@@ -7,8 +7,8 @@
 # Uses TP=2 per worker (prefill: 2 GPUs, decode: 2 GPUs) for a total of 4 GPUs.
 # KV cache (attention + Mamba SSM state) is transferred between workers via UCX.
 #
-# IMPORTANT: Must use UCX backend, not NIXL. NIXL and MOONCAKE backends do not
-# support hybrid models with Mamba SSM state:
+# IMPORTANT: With the C++ transceiver, use the UCX backend, not NIXL. The C++
+# NIXL and MOONCAKE backends do not support hybrid models with Mamba SSM state:
 #   ValueError: NIXL or MOONCAKE backend does not support hybrid models with
 #   RNN (Mamba) states. Please use UCX or MPI backend for cache transfer with
 #   hybrid models.
@@ -46,8 +46,7 @@ data:
     moe_config:
       backend: TRTLLM
     cache_transceiver_config:
-      # UCX is required for hybrid Mamba+Attention models.
-      # NIXL/MOONCAKE do not support Mamba SSM state transfer.
+      # The C++ NIXL/MOONCAKE transceivers do not support Mamba SSM transfer.
       backend: UCX
       transceiver_runtime: CPP
     cuda_graph_config:
@@ -81,8 +80,7 @@ data:
     moe_config:
       backend: TRTLLM
     cache_transceiver_config:
-      # UCX is required for hybrid Mamba+Attention models.
-      # NIXL/MOONCAKE do not support Mamba SSM state transfer.
+      # The C++ NIXL/MOONCAKE transceivers do not support Mamba SSM transfer.
       backend: UCX
       transceiver_runtime: CPP
     cuda_graph_config:
