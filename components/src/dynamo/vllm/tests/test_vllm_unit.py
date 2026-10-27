@@ -959,9 +959,8 @@ class TestBenchmarkConfig:
             "DYN_GMS_USE_V1",
         ):
             monkeypatch.delenv(name, raising=False)
-        # parse_args writes DYN_FPM_TRACE when --fpm-trace is set; setenv
-        # records the original value so teardown restores it instead of
-        # leaking "1" into later tests in the same session.
+        # parse_args writes DYN_FPM_TRACE; setenv records the original value so
+        # teardown restores it instead of leaking "1" into later tests.
         monkeypatch.setenv("DYN_FPM_TRACE", "0")
         monkeypatch.delenv("DYN_FPM_TRACE")
         monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
