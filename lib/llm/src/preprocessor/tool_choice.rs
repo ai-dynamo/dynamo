@@ -148,17 +148,15 @@ impl OpenAIPreprocessor {
             gd.json = None;
         }
 
-        if self.apply_tool_choice_structural_tag(
-            &parser_tool_choice,
-            &convert_tools(tools.as_ref()),
-            request.inner.parallel_tool_calls,
-            prompt_prefill.unified,
-            request.inner.response_format.as_ref(),
-            common_request,
-        )? {
-            return Ok(GuidedToolConstraint::StructuralTag);
-        }
-
+        // Beam's grammar is built here, BEFORE the generic structural-tag path, and the
+        // generic path is skipped on the Beam route: the registered builder behind it
+        // knows nothing about the channel the rendered prompt leaves open, so with
+        // structural tags on it would install a fresh-turn grammar (analysis, then the
+        // answer) for an assistant prefill that already opened the final channel
+        // (`continue_final_message`), and the parser, started in `Response`, would show
+        // the reasoning and its channel markup as content. `beam_turn_structural_tag`
+        // builds for `prompt_prefill.beam_channel` instead; and when the operator opted
+        // out of the turn grammar, nothing may reinstall one.
         if matches!(
             beam_constraint,
             GuidedToolConstraint::BeamTurnGrammar { .. }
@@ -180,6 +178,19 @@ impl OpenAIPreprocessor {
                 );
                 return Ok(GuidedToolConstraint::None);
             }
+        }
+
+        if !self.is_beam()
+            && self.apply_tool_choice_structural_tag(
+                &parser_tool_choice,
+                &convert_tools(tools.as_ref()),
+                request.inner.parallel_tool_calls,
+                prompt_prefill.unified,
+                request.inner.response_format.as_ref(),
+                common_request,
+            )?
+        {
+            return Ok(GuidedToolConstraint::StructuralTag);
         }
 
         // If the structural-tag layer did not compose this response format with
@@ -1823,6 +1834,81 @@ mod tests {
             Some(true)
         );
         assert!(ValidateRequest::validate(&hermes).is_err());
+    }
+
+    /// With structural tags on (the default-on deployment shape), the open final
+    /// channel still gets Beam's channel-aware grammar — only the answer — not the
+    /// generic builder's fresh-turn grammar, which would make the model emit an analysis
+    /// channel that a parser started in `Response` shows as content.
+    #[test]
+    fn beam_open_final_channel_keeps_only_the_answer_with_structural_tags_on() {
+        let preprocessor = preprocessor("beam", StructuralTagMode::On);
+        let open_answer = PromptReasoningPrefill {
+            legacy: false,
+            unified: false,
+            unified_starting_state: None,
+            prefix: None,
+            response: true,
+            beam_channel: Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
+        };
+        let auto = request(json!({"tools": tools()}));
+        let blueprint = beam_turn_structural_tag(
+            effective_tools(&auto.inner).unwrap().as_ref(),
+            &ToolChoice::Auto,
+            None,
+            Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
+            None,
+        )
+        .expect("the open answer derives a grammar");
+
+        let mut common_request = preprocessed_request();
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&auto, &mut common_request, open_answer.clone())
+            .unwrap();
+        assert_eq!(
+            applied,
+            GuidedToolConstraint::BeamTurnGrammar {
+                frames_answer: false
+            }
+        );
+        let tag = installed_structural_tag(&common_request).expect("answer rest");
+        assert_eq!(tag, &blueprint);
+        let text = tag.to_string();
+        assert!(
+            !text.contains("<|channel|>analysis<|message|>") && !text.contains("to=get_weather"),
+            "{text}"
+        );
+
+        // A fresh turn under the same configuration still gets the whole turn grammar.
+        let mut common_request = preprocessed_request();
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&auto, &mut common_request, false)
+            .unwrap();
+        assert_eq!(
+            applied,
+            GuidedToolConstraint::BeamTurnGrammar {
+                frames_answer: false
+            }
+        );
+        let text = installed_structural_tag(&common_request)
+            .expect("turn grammar")
+            .to_string();
+        assert!(
+            text.contains("<|channel|>analysis<|message|>") && text.contains("to=get_weather"),
+            "{text}"
+        );
+
+        // A forced choice cannot be enforced once the final channel is open: no grammar.
+        let mut common_request = preprocessed_request();
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(
+                &request(json!({"tools": tools(), "tool_choice": "required"})),
+                &mut common_request,
+                open_answer,
+            )
+            .unwrap();
+        assert_eq!(applied, GuidedToolConstraint::None);
+        assert!(installed_structural_tag(&common_request).is_none());
     }
 
     #[test]
