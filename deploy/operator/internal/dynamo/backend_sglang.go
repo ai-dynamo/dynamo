@@ -39,7 +39,6 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	if err := reserveNixlExporterPorts(container, containerGPUCount); err != nil {
 		return err
 	}
-
 	if component.CompilationCache != nil {
 		logger := log.Log.WithName("sglang-backend")
 		logger.Info("Compilation cache configured for SGLang but not yet fully supported",

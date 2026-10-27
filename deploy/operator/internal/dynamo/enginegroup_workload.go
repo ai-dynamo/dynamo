@@ -23,6 +23,12 @@ func RenderComponentEngineGroup(dgd *api.DynamoGraphDeployment, component *api.D
 		return nil, err
 	}
 	switch backend {
+	case BackendFrameworkSGLang:
+		profile, err := ResolveSGLangComponentEngineGroup(component, dgd.Spec.Env)
+		if err != nil {
+			return nil, err
+		}
+		return RenderSGLangEngineGroup(dgd, component, worldIndex, profile), nil
 	default:
 		return nil, fmt.Errorf("Engine Group declaration is not implemented for backend %q", backend)
 	}
