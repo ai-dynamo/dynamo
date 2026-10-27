@@ -12,12 +12,22 @@ The module map and the rules for changing this code are in [`AGENTS.md`](AGENTS.
 The frontend pipeline (`entrypoint/input/common.rs`, `PreprocessedRouting::build_pipeline`)
 runs these stages in order:
 
-```text
-preprocessor → migration → detokenizer → EncoderRouter → PrefillRouter → RoutingHost
-                                             │                 │                │
-                      round-robin PushRouter ┘   prefill RoutingHost ┐          │ decode or aggregated
-                                                                     ▼          ▼
+```mermaid
+flowchart LR
+    pre[preprocessor] --> mig[migration] --> detok[detokenizer]
+    detok --> enc["EncoderRouter<br/>(operator)"] --> pf["PrefillRouter<br/>(operator)"]
+    pf --> host["RoutingHost<br/>decode or aggregated set"]
+    enc -. encode hop .-> epush["round-robin PushRouter<br/>encode workers"]
+    pf -. prefill hop .-> phost["RoutingHost<br/>prefill set"]
+    pf -. conditional-disagg preview .-> host
 ```
+
+`RoutingHost` is the pipeline's terminal engine. `EncoderRouter` and `PrefillRouter` are
+operators in front of it, not `RoutingHost`s. `PrefillRouter` holds a separate `RoutingHost` for
+the prefill worker set (built in `prefill_router/activation.rs`) and sends the prefill hop
+through it. It also keeps a handle to the decode `RoutingHost`, which it uses only to preview
+decode for conditional disaggregation. `EncoderRouter` sends the encode hop through its own
+round-robin `PushRouter`.
 
 A `RoutingHost` serves one worker set. What it holds (composition, not call order):
 
@@ -55,6 +65,27 @@ What a KV request does in `RoutingHost::generate` (call order):
 A query-only request (`query_instance_id`) skips step 2, only looks up the session's target in
 step 3 without acquiring it, selects with `Query` admission in step 4 so nothing is booked, and
 returns the selection instead of steps 5–7.
+
+Selection and booking happen in `KvRouter`. The host owns dispatch and tracks the request until
+its booking is released:
+
+```mermaid
+sequenceDiagram
+    participant H as RoutingHost
+    participant K as KvRouter / SelectionCore
+    participant L as RequestLeaseManager
+    participant G as RequestGuard
+    participant W as PushRouter → worker
+    H->>K: select and book (Lease admission)
+    K-->>H: worker + BookingHandle
+    H->>L: commit the booking, register its lease (KvRequestCleanup)
+    H->>G: hand over the booking
+    H->>W: dispatch
+    W-->>G: response stream
+    G->>L: first tokens mark prefill complete; progress keeps the lease alive
+    G->>L: stream end, error, or drop releases the lease
+    L->>K: enqueue the scheduler release
+```
 
 Discovery builds the pipeline once per Decode or Aggregated worker set
 (`discovery/watcher.rs`). Only a Decode set gets a real `PrefillRouter`; every other set gets a
@@ -115,6 +146,7 @@ errors, which return to the client.
 | Scoring and accounting overrides | `PreprocessedRequest::router_config_override` |
 | Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
 | Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
+| Query-only selection (KV plane) | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
 
 ## Admission modes
 
@@ -128,8 +160,9 @@ errors, which return to the client.
   Used by `SelectionCore::select_and_reserve_with_policy_class` (the standalone selection
   service), not by this module.
 
-A request annotated `query_instance_id` returns its selection without dispatching or updating
-router state.
+On the KV plane, a request annotated `query_instance_id` returns its selection without
+dispatching or updating router state. Builtin modes have no query path: they still select a
+worker and dispatch the request.
 
 ## Booking lifecycle (KV)
 
@@ -141,8 +174,9 @@ router state.
    complete on the booking, and output progress keeps the lease alive.
 4. **Release.** Stream end, error, or drop releases the lease, which enqueues the scheduler
    release. `finish()` waits for the scheduler to acknowledge it.
-5. **Expire.** The reaper reclaims a lease that sees no progress for one active-request expiry
-   interval.
+5. **Expire.** The reaper scans once per active-request expiry interval with a second-chance
+   clock: one scan marks an idle lease quiet and the next reclaims it. A lease is reclaimed one
+   to two intervals after its last progress.
 
 `register_detached` is the other registration: the booking is tracked by request id and
 released by `KvRouter::free`, not by a handle. `KvRouter::add_request` uses it.

@@ -40,8 +40,9 @@ and the booking lifecycle these rules protect.
 
 ## Guardrails
 
-- `KvRouter` never dispatches. `RoutingHost` is the only component here that sends a request to
-  a worker.
+- `KvRouter` never dispatches. `RoutingHost` dispatches decode, aggregated, and prefill requests
+  (the prefill hop through the prefill set's own `RoutingHost`); `EncoderRouter` dispatches
+  encode requests through a round-robin `PushRouter`.
 - Each booking has exactly one owner at a time (`RoutePlan`, then `RequestGuard`, or a detached
   lease) and is released exactly once.
 - A preview never books capacity and never creates an affinity binding.
