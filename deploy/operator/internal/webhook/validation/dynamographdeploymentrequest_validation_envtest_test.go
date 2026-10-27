@@ -30,7 +30,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/ptr"
 )
 
 const alternateAdmissionModel = "Qwen/Qwen3-8B"
@@ -297,11 +296,11 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		{
 			name: "auto apply can be enabled after reviewing a ready request",
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(true)
+				request.Spec.AutoApply = new(true)
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			gpuDiscovery: true,
@@ -310,12 +309,12 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name:               "auto apply activation can add a missing runtime version override",
 			seedWithoutWebhook: true,
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Spec.RuntimeVersionOverride = ""
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(true)
+				request.Spec.AutoApply = new(true)
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			gpuDiscovery: true,
@@ -324,12 +323,12 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name:               "auto apply activation requires a missing runtime version override",
 			seedWithoutWebhook: true,
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Spec.RuntimeVersionOverride = ""
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(true)
+				request.Spec.AutoApply = new(true)
 				request.Spec.RuntimeVersionOverride = ""
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
@@ -342,12 +341,12 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name:               "runtime version override can be added while ready with auto apply disabled",
 			seedWithoutWebhook: true,
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Spec.RuntimeVersionOverride = ""
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			gpuDiscovery: true,
@@ -355,11 +354,11 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		{
 			name: "runtime version override can change while ready with auto apply disabled",
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Spec.RuntimeVersionOverride = "1.2.0"
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
@@ -368,11 +367,11 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		{
 			name: "runtime version override can change while profiling with auto apply disabled",
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Spec.RuntimeVersionOverride = "1.2.0"
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
 			}),
@@ -381,11 +380,11 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		{
 			name: "other spec updates remain forbidden while ready with auto apply disabled",
 			oldRequest: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.AutoApply = ptr.To(false)
+				request.Spec.AutoApply = new(false)
 				request.Spec.Model = alternateAdmissionModel
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseReady
 			}),
@@ -701,11 +700,9 @@ func betaDGDRForAdmission(
 	mutate func(*nvidiacomv1beta1.DynamoGraphDeploymentRequest),
 ) *nvidiacomv1beta1.DynamoGraphDeploymentRequest {
 	request := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: nvidiacomv1beta1.GroupVersion.String(),
-			Kind:       "DynamoGraphDeploymentRequest",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
+		APIVersion: nvidiacomv1beta1.GroupVersion.String(),
+		Kind:       "DynamoGraphDeploymentRequest",
+		Name:       "test-dgdr", Namespace: "default",
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 			Model:                  "Qwen/Qwen3-0.6B",
 			Backend:                nvidiacomv1beta1.BackendTypeVllm,
@@ -724,11 +721,9 @@ func alphaDGDRForAdmission(
 	mutate func(*nvidiacomv1alpha1.DynamoGraphDeploymentRequest),
 ) *nvidiacomv1alpha1.DynamoGraphDeploymentRequest {
 	request := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
-			Kind:       "DynamoGraphDeploymentRequest",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
+		APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
+		Kind:       "DynamoGraphDeploymentRequest",
+		Name:       "test-dgdr", Namespace: "default",
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
 			Model:                  "Qwen/Qwen3-0.6B",
 			Backend:                "vllm",
@@ -748,11 +743,9 @@ func beta2DGDRForAdmission(
 	mutate func(*nvidiacomv1beta2.DynamoGraphDeploymentRequest),
 ) *nvidiacomv1beta2.DynamoGraphDeploymentRequest {
 	request := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: nvidiacomv1beta2.GroupVersion.String(),
-			Kind:       "DynamoGraphDeploymentRequest",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
+		APIVersion: nvidiacomv1beta2.GroupVersion.String(),
+		Kind:       "DynamoGraphDeploymentRequest",
+		Name:       "test-dgdr", Namespace: "default",
 		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
 			NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
 				Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"},

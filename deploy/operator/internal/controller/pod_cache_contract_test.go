@@ -32,28 +32,26 @@ import (
 func TestProjectedPodSupportsControllerContract(t *testing.T) {
 	controllerOwner := true
 	pod := podcache.Project(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-0",
-			Namespace: "inference",
-			UID:       types.UID("pod-uid"),
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName:       "graph",
-				consts.KubeLabelDynamoComponent:                 "prefill",
-				consts.KubeLabelDynamoNamespace:                 "inference-graph",
-				consts.KubeLabelDynamoSelector:                  "graph-prefill-old",
-				consts.KubeLabelDynamoComponentType:             consts.ComponentTypeWorker,
-				consts.KubeLabelDynamoSubComponentType:          consts.ComponentTypePrefill,
-				consts.KubeLabelDynamoFailoverEngineGroupMember: consts.KubeLabelValueTrue,
-				batchv1.JobNameLabel:                            "profiling-job",
-				"job-name":                                      "profiling-job",
-			},
-			Annotations: map[string]string{
-				consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
-			},
-			OwnerReferences: []metav1.OwnerReference{{
-				Name: "graph-prefill-old", UID: types.UID("owner-uid"), Controller: &controllerOwner,
-			}},
+		Name:      "worker-0",
+		Namespace: "inference",
+		UID:       types.UID("pod-uid"),
+		Labels: map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName:       "graph",
+			consts.KubeLabelDynamoComponent:                 "prefill",
+			consts.KubeLabelDynamoNamespace:                 "inference-graph",
+			consts.KubeLabelDynamoSelector:                  "graph-prefill-old",
+			consts.KubeLabelDynamoComponentType:             consts.ComponentTypeWorker,
+			consts.KubeLabelDynamoSubComponentType:          consts.ComponentTypePrefill,
+			consts.KubeLabelDynamoFailoverEngineGroupMember: consts.KubeLabelValueTrue,
+			batchv1.JobNameLabel:                            "profiling-job",
+			"job-name":                                      "profiling-job",
 		},
+		Annotations: map[string]string{
+			consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
+		},
+		OwnerReferences: []metav1.OwnerReference{{
+			Name: "graph-prefill-old", UID: types.UID("owner-uid"), Controller: &controllerOwner,
+		}},
 		Spec: corev1.PodSpec{
 			NodeName: "node-a",
 			Containers: []corev1.Container{{
@@ -68,11 +66,11 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 			}},
 			Volumes: []corev1.Volume{{
 				Name: "topology",
-				VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{
+				DownwardAPI: &corev1.DownwardAPIVolumeSource{
 					Items: []corev1.DownwardAPIVolumeFile{{
 						FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.labels['nvidia.com/dynamo-topology.zone']"},
 					}},
-				}},
+				},
 			}},
 		},
 		Status: corev1.PodStatus{
@@ -132,8 +130,8 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 			Client:   client,
 			Recorder: events.NewFakeRecorder(1),
 		}
-		dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace}}
-		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "profiling-job", Namespace: pod.Namespace}}
+		dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{Namespace: pod.Namespace}
+		job := &batchv1.Job{Name: "profiling-job", Namespace: pod.Namespace}
 
 		detail := reconciler.getProfilingJobErrorDetails(context.Background(), dgdr, job)
 		assert.Contains(t, detail, "ExitCode: 23")
