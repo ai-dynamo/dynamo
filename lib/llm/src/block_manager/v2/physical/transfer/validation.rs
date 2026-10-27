@@ -86,9 +86,6 @@ pub fn validate_bounce_unique(bounce_block_ids: &[usize]) -> Result<(), BlockVal
 }
 
 /// Validate that two layouts have the same layer count and outer dimension.
-///
-/// Every transfer executor runs this before any backend work. The layer count
-/// is checked first, then the outer dimension.
 pub(crate) fn validate_layout_compatibility(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
