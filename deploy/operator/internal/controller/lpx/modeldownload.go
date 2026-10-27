@@ -109,6 +109,9 @@ func (r *graphReconciler) reconcileModelDownloads(
 	return ctrl.Result{}, nil
 }
 
+// ensureModelsDownloaded checks the graph's remote builds and reuses keys in
+// existingBuilds. It returns downloaded keys, whether all builds are ready, and
+// any errors. dgd is non-nil; registry is required when the graph has LPX components.
 func ensureModelsDownloaded(
 	ctx context.Context,
 	dgd *v1beta1.DynamoGraphDeployment,
