@@ -147,6 +147,7 @@ def test_explicit_fpm_port_preserves_precedence_over_invalid_trace(monkeypatch, 
 
 
 def test_fpm_trace_cli_enables_and_is_exported(monkeypatch):
+    """The CLI flag enables tracing and exports it for child processes."""
     # validate() writes DYN_FPM_TRACE; setenv records the original value so
     # teardown restores it instead of leaking "1" into later tests.
     monkeypatch.setenv("DYN_FPM_TRACE", "0")

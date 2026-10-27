@@ -54,6 +54,7 @@ class DynamoWorkerProcess(ManagedProcess):
         etcd_endpoints: list,
         mode: WorkerMode = WorkerMode.AGGREGATED,
     ):
+        """Configure an etcd test worker without inherited FPM settings."""
         # Allocate system port for this worker.
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
         # Register port cleanup early so partially constructed workers still release ports.

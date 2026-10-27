@@ -952,6 +952,7 @@ class TestBenchmarkConfig:
     def test_disabled_benchmark_preserves_serving_worker(
         self, monkeypatch, mock_vllm_cli, trace, worker_cls
     ):
+        """Serving keeps the configured worker when benchmark mode is disabled."""
         for name in (
             "DYN_BENCHMARK_MODE",
             "DYN_BENCHMARK_RANDOMIZE_KDA_STATE",
