@@ -67,7 +67,9 @@ Write an operator-local JSON file outside Git with:
   before profiling, which takes minutes and varies by region, so every region
   measures the same absolute window: `windowOffsetS` after the shared start,
   for `measureS`. `profilingS` must keep profiling running past that window
-  in every region.
+  in every region. The Job's `cpu` and `memory` must fit on one bench node
+  beside the pools' pods: a load generator left Pending loads nothing, and that
+  region only shows up as missing at `collect`.
 
 ### Run
 
