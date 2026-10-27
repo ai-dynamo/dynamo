@@ -157,6 +157,35 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  vllm-publish-nvstaging:
+    name: Publish vllm-runtime-enterprise-nightly
+    needs: [vllm-build]
+    if: github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+    runs-on: prod-builder-amd-v1
+    environment: automated-release
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Compute nightly tag
+        id: tag
+        run: echo "tag=$(date -u +%Y%m%d)-${GITHUB_SHA::7}" >> "${GITHUB_OUTPUT}"
+      - name: Copy image to NGC
+        uses: $/.github/actions/skopeo-copy
+        with:
+          source_registry: ${{ vars.ECR_REGISTRY }}
+          source_image: ${{ vars.ECR_REPOSITORY }}
+          source_tag: ${{ github.sha }}-${{ needs.vllm-build.outputs.target_tag_plain }}-enterprise
+          source_aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          source_ecr_registry: ${{ vars.ECR_REGISTRY }}
+          target_registry: nvcr.io
+          target_image: ${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo/vllm-runtime-enterprise-nightly
+          target_tag: ${{ steps.tag.outputs.tag }}
+          target_registry_user: ${{ secrets.NGC_PUBLISH_USERNAME }}
+          target_registry_password: ${{ secrets.NGC_PUBLISH_TOKEN }}
+
   # ============================================================================
   # DEPLOYMENT JOBS
   # ============================================================================
