@@ -250,7 +250,6 @@ def test_worker_counts_from_deployment_state_hides_inactive_role():
     assert counts.ready_num_decode == 4
     assert counts.expected_num_decode == 5
     assert counts.decode_scaling_in_progress is True
-    # Pending-startup counts are reported even for a role that is not required.
     assert counts.pending_num_prefill == 1
     assert counts.pending_num_decode == 2
 
