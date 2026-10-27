@@ -295,7 +295,7 @@ def golden_objects(objects, latest=False):
                 annotations = metadata.get("annotations", {})
                 if "nvidia.com/last-applied-hash" in annotations:
                     annotations["nvidia.com/last-applied-hash"] = "$ignore"
-            if obj["kind"] in ("Deployment", "LeaderWorkerSet"):
+            if obj["kind"] in ("Deployment", "LeaderWorkerSet") and "status" in obj:
                 # Workload-controller availability is outside the operator lowering boundary.
                 obj["status"] = {"$ignore": True}
             if obj["kind"] in ("DynamoComponentDeployment", "DynamoGraphDeployment"):
@@ -363,6 +363,8 @@ def bind_latest_variables(value):
         for key, child in value.items():
             if key == "nvidia.com/dynamo-operator-origin-version":
                 value[key] = "$var:operator-version"
+            elif key == "disaggregatedset.x-k8s.io/revision":
+                value[key] = "$var:ds-revision"
             elif key in (
                 "nvidia.com/current-worker-hash-v2",
                 "nvidia.com/dynamo-worker-hash",

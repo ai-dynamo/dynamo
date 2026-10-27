@@ -53,6 +53,29 @@ excluded. Expected outputs normalize server metadata, Service addresses and cond
 timestamps as documented by the matcher; historical origins, worker hashes and
 namespace suffixes remain concrete.
 
+## Multinode Component and DisaggregatedSet coverage
+
+The canonical suite includes aggregated and disaggregated multinode Component
+scenarios for vLLM, SGLang, and TensorRT-LLM, plus one disaggregated multinode
+DisaggregatedSet scenario per engine. Component scenarios stop at DCD-owned
+LeaderWorkerSets; DisaggregatedSet scenarios stop at the DisaggregatedSet itself
+and the frontend's auxiliary DCD/Deployment. The LWS/DS controllers and serving
+Pods do not run. Dependency CRDs and production admission handlers come from the
+pinned LWS module already used by the shared clustertest setup.
+
+Independent checks enforce the selected provider, component/role inventory and
+multinode shape. Historical safety also protects the complete DisaggregatedSet
+spec, identity and generation. Intentional worker edits must reach every edited
+component and both leader/worker templates, including embedded DS role templates.
+The populated graph replay controls cover Deployment, LWS and DS graphs without
+claiming that these freshly captured test graphs came from an older release.
+Formal released history still advances only through the pinned-release workflow.
+
+These cases complete 22 of the 27 canonical matrix entries. The five remaining
+single-node Component cases and the missing-origin historical case remain in
+[#16650](https://github.com/ai-dynamo/dynamo/issues/16650); the incomplete
+release-matrix gate stays enforced.
+
 ## Storage and production lifecycle
 
 Run against an exclusively owned cluster without installed controllers or
@@ -160,10 +183,11 @@ captured 1.6 baseline; a 1.7 capture still requires complete coverage, and a 1.8
 bump still requires a published 1.7 baseline. Keep #16650 open.
 
 To repeat the scoped capture, prepare a dedicated published-release checkout and
-carry only the reviewed test harness. Start with the frozen pre-capture inventory:
+carry only the reviewed test harness. Pin that harness as well as the inputs so
+later development-matrix additions do not change this scoped reproduction:
 
 ```bash
-harness=$(git rev-parse HEAD)
+harness=515e4515d141e1d12e31d7d33641022b39e81d09
 inventory=75d0686fb7def243ab5a07ec69159427b169675c
 release_tree=../dynamo-release-capture
 git fetch origin tag v1.6.0
@@ -242,3 +266,14 @@ one-time 1.7-on-1.5 history exception from #17153; subsequent minor transitions
 must use the immediately preceding published baseline. Do not hand-edit captured inputs
 or relax safety assertions; verify takeover with the development operator
 before accepting this capture.
+
+Latest origin annotations use `$var:operator-version`, bound exactly to the
+operator chart's `appVersion` by the golden matcher. Worker hashes, the PCS
+spec digest and the DS role revision also depend on origin: their exact bindings
+are computed from the reviewed golden DGD/PCS/DS specifications with that version, never from candidate
+output. The independent CREATE origin assertion remains active. All other
+lowering fields remain exact, and historical origins and hashes remain concrete. Accepting a golden never bypasses rollout
+safety assertions.
+
+CI detects operator-affecting changes before running the suite. It retains test
+output and .new differences, and deletes its dedicated cluster on completion.
