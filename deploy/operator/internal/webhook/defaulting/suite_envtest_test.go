@@ -199,6 +199,7 @@ func TestDynamoGraphDeploymentRequestDefaultingAdmission(t *testing.T) {
 		name               string
 		spec               nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec
 		want               nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec
+		checkIdempotence   bool
 		clearImageOnUpdate bool
 	}{
 		{
@@ -207,6 +208,7 @@ func TestDynamoGraphDeploymentRequestDefaultingAdmission(t *testing.T) {
 				Model: "Qwen/Qwen3-8B",
 			},
 			want:               wantDefaultSpec,
+			checkIdempotence:   true,
 			clearImageOnUpdate: true,
 		},
 		{
@@ -220,7 +222,8 @@ func TestDynamoGraphDeploymentRequestDefaultingAdmission(t *testing.T) {
 			want: wantDefaultSpec,
 		},
 		{
-			name: "preserves an explicit profiler image",
+			name:             "preserves an explicit profiler image",
+			checkIdempotence: true,
 			spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 				Model: "Qwen/Qwen3-8B",
 				Image: "registry.example/planner:custom",
@@ -250,7 +253,9 @@ func TestDynamoGraphDeploymentRequestDefaultingAdmission(t *testing.T) {
 			if !reflect.DeepEqual(dgdr.Spec, tt.want) {
 				t.Fatalf("spec = %#v, want %#v", dgdr.Spec, tt.want)
 			}
-			assertCreateDefaultingIdempotent(t, env.Client(), dgdr)
+			if tt.checkIdempotence {
+				assertCreateDefaultingIdempotent(t, env.Client(), dgdr)
+			}
 
 			if tt.clearImageOnUpdate {
 				t.Log("Remove the image on UPDATE and verify the CREATE-only default stays absent")

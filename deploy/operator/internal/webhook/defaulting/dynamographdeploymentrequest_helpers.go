@@ -16,8 +16,6 @@ import (
 // the dedicated dynamo-planner image.
 const defaultImage = "nvcr.io/nvidia/ai-dynamo/dynamo-planner"
 
-// defaultImageFor returns the configured image, a planner image with a canonical
-// operator-version tag, or an empty string when the version cannot be parsed.
 func (d *DGDRDefaulter) defaultImageFor() string {
 	if d.DefaultImage != "" {
 		return d.DefaultImage
