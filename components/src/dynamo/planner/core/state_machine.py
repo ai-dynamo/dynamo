@@ -57,8 +57,7 @@ def normalize_speculative_accept_length(
 
     The decode capability's ``speculative_nextn`` takes precedence over the
     config fallback. Returns ``1.0`` when speculation is off or the value is
-    missing or not finite. Shared by the scaling state and the builtin load
-    predictor, which each keep their own stored value.
+    missing or not finite.
     """
     d_caps = capabilities.decode
     if d_caps and d_caps.speculative_nextn and d_caps.speculative_nextn > 0:

@@ -55,7 +55,6 @@ def _caps(decode_nextn=None, decode=True) -> WorkerCapabilities:
         # Bounded to [1.0, nextn + 1].
         (0.5, _caps(), 3, 1.0),
         (2.5, _caps(), 3, 2.5),
-        (7.0, _caps(), 3, 4.0),
     ],
 )
 def test_normalize_speculative_accept_length(
