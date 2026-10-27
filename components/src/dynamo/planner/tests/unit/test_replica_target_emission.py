@@ -18,6 +18,8 @@ from dynamo.planner.core.adapters import (
 from dynamo.planner.core.types import PlannerEffects, ScalingDecision
 from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.monitoring.worker_info import WorkerInfo
+from tests.utils.constants import DynamoPortRange
+from tests.utils.port_utils import reserved_ports
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -49,7 +51,13 @@ SINGLE_ROLE_MODES = [
 ]
 
 
-def _make_planner(cls, mode, *, roles_with_info, advisory=False, port=9999):
+@pytest.fixture
+def prometheus_port():
+    with reserved_ports(1, DynamoPortRange.SERVE) as (port,):
+        yield port
+
+
+def _make_planner(cls, mode, *, roles_with_info, port, advisory=False):
     state = DeploymentState()
     if PREFILL in roles_with_info:
         state.prefill.info = WorkerInfo(k8s_name=WORKER_NAMES[PREFILL])
@@ -96,9 +104,13 @@ def _applied(environment):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("desired", [3, 0])
 @pytest.mark.parametrize("cls,mode,roles", MODES)
-async def test_own_roles_publish_gauge_and_submit_one_batch(cls, mode, roles, desired):
+async def test_own_roles_publish_gauge_and_submit_one_batch(
+    cls, mode, roles, desired, prometheus_port
+):
     # 0 is a real target: it must be published and submitted like any other.
-    planner, environment = _make_planner(cls, mode, roles_with_info=roles)
+    planner, environment = _make_planner(
+        cls, mode, roles_with_info=roles, port=prometheus_port
+    )
     decision = ScalingDecision(**{FIELDS[r]: desired for r in roles})
 
     await planner._apply_effects(PlannerEffects(scale_to=decision))
@@ -114,8 +126,12 @@ async def test_own_roles_publish_gauge_and_submit_one_batch(cls, mode, roles, de
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cls,mode,roles", MODES)
-async def test_absent_targets_publish_and_submit_nothing(cls, mode, roles):
-    planner, environment = _make_planner(cls, mode, roles_with_info=roles)
+async def test_absent_targets_publish_and_submit_nothing(
+    cls, mode, roles, prometheus_port
+):
+    planner, environment = _make_planner(
+        cls, mode, roles_with_info=roles, port=prometheus_port
+    )
 
     await planner._apply_effects(PlannerEffects(scale_to=ScalingDecision()))
     await planner._apply_effects(PlannerEffects(scale_to=None))
@@ -127,9 +143,13 @@ async def test_absent_targets_publish_and_submit_nothing(cls, mode, roles):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cls,mode,own,other", SINGLE_ROLE_MODES)
-async def test_single_role_modes_ignore_other_role(cls, mode, own, other):
+async def test_single_role_modes_ignore_other_role(
+    cls, mode, own, other, prometheus_port
+):
     # The other role has no worker info; resolving it would raise.
-    planner, environment = _make_planner(cls, mode, roles_with_info=(own,))
+    planner, environment = _make_planner(
+        cls, mode, roles_with_info=(own,), port=prometheus_port
+    )
 
     await planner._apply_effects(
         PlannerEffects(scale_to=ScalingDecision(**{FIELDS[other]: 5}))
@@ -147,9 +167,11 @@ async def test_single_role_modes_ignore_other_role(cls, mode, own, other):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cls,mode,roles", MODES)
-async def test_advisory_publishes_gauges_without_scaling(cls, mode, roles):
+async def test_advisory_publishes_gauges_without_scaling(
+    cls, mode, roles, prometheus_port
+):
     planner, environment = _make_planner(
-        cls, mode, roles_with_info=roles, advisory=True
+        cls, mode, roles_with_info=roles, port=prometheus_port, advisory=True
     )
     decision = ScalingDecision(**{FIELDS[r]: 4 for r in roles})
 
@@ -162,9 +184,9 @@ async def test_advisory_publishes_gauges_without_scaling(cls, mode, roles):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("role", [PREFILL, DECODE])
-async def test_disagg_with_one_role_set_submits_only_that_role(role):
+async def test_disagg_with_one_role_set_submits_only_that_role(role, prometheus_port):
     planner, environment = _make_planner(
-        DisaggPlanner, "disagg", roles_with_info=(role,)
+        DisaggPlanner, "disagg", roles_with_info=(role,), port=prometheus_port
     )
 
     await planner._apply_effects(
@@ -180,10 +202,10 @@ async def test_disagg_with_one_role_set_submits_only_that_role(role):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("roles_with_info", [(), (PREFILL,), (DECODE,)])
 async def test_disagg_publishes_both_gauges_before_resolving_workers(
-    roles_with_info,
+    roles_with_info, prometheus_port
 ):
     planner, environment = _make_planner(
-        DisaggPlanner, "disagg", roles_with_info=roles_with_info
+        DisaggPlanner, "disagg", roles_with_info=roles_with_info, port=prometheus_port
     )
 
     with pytest.raises(RuntimeError, match="Missing worker info"):
