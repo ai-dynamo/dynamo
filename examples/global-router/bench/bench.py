@@ -232,8 +232,10 @@ def check_relay_capacity(cfg, pool):
         )
 
 
-def backend_manifest(cfg, member):
-    """Both pools of a region in one list, with their shared Namespace once."""
+def backend_manifest(cfg, member, restart=None):
+    """Both pools of a region in one list, with their shared Namespace once.
+    A new ``restart`` token rolls every Deployment, so a run starts with
+    empty KV caches and fresh pool state."""
     relay = cfg.get("relay", "poc")
     items = {}
     for pool in cfg["pools"]:
@@ -257,6 +259,11 @@ def backend_manifest(cfg, member):
         )
         for item in rendered["items"]:
             items[(item["kind"], item["metadata"]["name"])] = item
+    if restart:
+        for item in items.values():
+            if item["kind"] == "Deployment":
+                template = item["spec"]["template"]["metadata"]
+                template.setdefault("annotations", {})["bench/restart"] = restart
     return tune_http_servers(
         {"apiVersion": "v1", "kind": "List", "items": list(items.values())},
         cfg,
@@ -926,6 +933,10 @@ def main():
         sub.add_argument("--region", required=True)
         if name == "nodegroup":
             sub.add_argument("action", choices=["render", "up", "down"])
+        if name == "backend":
+            sub.add_argument(
+                "--restart", help="Any new value rolls every pool Deployment"
+            )
         if name == "control":
             sub.add_argument(
                 "--policy",
@@ -1062,7 +1073,7 @@ def main():
         value = cluster.deploy(
             member,
             stack(member, "backend"),
-            backend_manifest(cfg, member),
+            backend_manifest(cfg, member, args.restart),
             args.evidence,
         )
         print(json.dumps(value))

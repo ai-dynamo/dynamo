@@ -87,6 +87,42 @@ $B loadgen down --region us-east-2 --label rr-768
 
 Switch policies by re-running `control` with the other `--policy`; only the
 ingress Deployment rolls. `ping` and `probe --out FILE` measure the round
-trip and the first-token cost of each cross-region path, with the bench idle. `collect` reads the Job's `BENCH_SUMMARY` line and a
-per-container CPU sample from the bench nodes over SSM. Delete the
-`global-router-bench-*` stacks and the hub objects when finished.
+trip and the first-token cost of each cross-region path, with the bench idle.
+`collect` reads the Job's `BENCH_SUMMARY` line and a per-container CPU sample
+from the bench nodes over SSM. Delete the `global-router-bench-*` stacks and
+the hub objects when finished.
+
+### Session-aware policies and a daytime load cycle
+
+`--policy rendezvous` and `--policy affinity` keep each session on one pool and
+prefer the region a request entered. They read each pool's load from its Pool
+Relay, so the pools must run it:
+
+- `relay: "pool"` runs `python -m dynamo.pool_relay` from the planner image,
+  one WAN port per pool, and makes the frontends publish serving load. `hub`
+  then exports only that port. The relay drops a pool's KV filter if it
+  overflows, so `backend` refuses mocker KV sizes that could: keep
+  `workerReplicas` × `--num-gpu-blocks-override` under 75% of 1,048,576.
+- `routerMode: "kv"` routes inside each pool by KV overlap, so a session that
+  stays on a pool reuses its cache.
+- Each region's `utcOffset` places it on the daily curve.
+
+With `load.schedule: "daytime"`, a load-generator Job replays one compressed
+day instead of a fixed concurrency:
+
+- `dayS` (one day), `peakQps`, `nightFraction`, `peakHour` (local time),
+  `startHourUtc`, `maxInFlight` (a safety cap), `graceS`, and `cacheBust` (an
+  aiperf cache-bust target, for example `system_suffix`). Every region's rate
+  follows its own local time, so regions take turns being busy.
+- Requests carry `X-Dynamo-Session-ID`. Before the shared start, a one-request
+  run builds aiperf's dataset cache, so every region's day starts within
+  seconds of the others; `start_skew_s` in the summary records the offset.
+- The whole day is measured. `collect` adds a `BENCH_HOURLY` breakdown per
+  simulated hour (requests sent and completed, TTFT, and the ingress's routing
+  counts), and `table` adds the share of requests kept in their region and the
+  share of a session's later turns that went to the same pool.
+
+`schedule: "ramp"` with `rampFrom` and `rampTo` raises every region's rate in
+a straight line instead, to find capacity. `backend --restart TOKEN` rolls
+every pool Deployment so a run starts with empty caches. `router-stats`
+prints each ingress's routing counts, pool loads, and round trips.
