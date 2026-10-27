@@ -89,6 +89,7 @@ func ComponentCrashLoops(
 	namespace, graph string,
 	components []string,
 ) (map[string]poddiagnostics.CrashLoop, error) {
+	// Look up each component's Pods through the index.
 	crashLoops := map[string]poddiagnostics.CrashLoop{}
 	for _, component := range components {
 		componentPods, err := ListComponentPods(ctx, reader, namespace, graph, component)
@@ -104,13 +105,14 @@ func ComponentCrashLoops(
 
 // FindDeploymentCrashLoop reports a crash-looping container among the Pods the
 // Deployment selects, including Pods of older revisions during a rollout. reader
-// must be the manager's cache with SelectorIndex registered, and the Deployment
-// must select on the Dynamo selector label.
+// must be the manager's cache with SelectorIndex registered. deployment and its
+// Spec.Selector must be non-nil, and the selector must match the Dynamo selector label.
 func FindDeploymentCrashLoop(
 	ctx context.Context,
 	reader client.Reader,
 	deployment *appsv1.Deployment,
 ) (poddiagnostics.CrashLoop, bool, error) {
+	// The Dynamo selector label is the index key; the full selector decides membership.
 	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
 	if err != nil {
 		return poddiagnostics.CrashLoop{}, false, fmt.Errorf("parse Deployment %s selector: %w", deployment.Name, err)
@@ -122,7 +124,7 @@ func FindDeploymentCrashLoop(
 		)
 	}
 
-	// The index narrows the candidates; the Deployment's own selector decides membership.
+	// Narrow the candidates through the index, then keep the Pods the Deployment selects.
 	podList := &corev1.PodList{}
 	if err := reader.List(
 		ctx,
