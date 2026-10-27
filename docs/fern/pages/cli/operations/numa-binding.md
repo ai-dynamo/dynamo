@@ -6,10 +6,33 @@ subtitle: Place frontend threads, GPU workers, host memory, and KV-transfer NICs
 ---
 
 Non-uniform memory access (NUMA) binding keeps NVIDIA Dynamo's CPU work and host memory close to
-the GPUs they serve. It's useful on multi-socket H100, H200, B200, and B300 servers, as well as
-Grace-based systems. The right NUMA node depends on the server's CPU and PCIe layout.
+the GPUs they serve. Pay particular attention to placement on **GB200 and GB300 systems**, where
+GPUs can access Grace CPU memory over NVLink-C2C. CPU and memory placement still affect access
+latency and bandwidth on these cache-coherent systems. Binding is also useful on multi-socket
+H100, H200, B200, and B300 servers. The right NUMA node depends on the server's CPU, memory,
+GPU, and NIC topology.
 
 Add these settings to a working deployment, keeping its model, discovery, and KV-transfer options.
+
+## Where NUMA Binding Can Help
+
+Keeping CPU threads, host buffers, and NICs close to their GPUs can improve several serving paths:
+
+- **Time to First Token (TTFT):** Local CPU work, cached KV reloads, and prefill-to-decode
+  handoffs can reduce the time spent waiting before the first token.
+- **Inter-Token Latency (ITL):** Better locality can reduce gaps between decode steps when
+  host-side work or KV movement delays token generation.
+- **KV-cache offloading and onboarding:** Placing host-cache buffers near the GPU can improve
+  bandwidth and latency when offloading KV blocks from GPU to host memory and onboarding them
+  back to the GPU for reuse. For storage-backed caches that use host staging buffers, their
+  placement matters too.
+- **KV transfer:** Pairing each GPU with a nearby NIC and local host buffers, when used, can
+  reduce cross-domain traffic during prefill/decode handoffs and remote-cache transfers.
+
+Measure these paths with your own workload; the benefit depends on whether CPU work,
+host-memory access, or transfers limit performance. See
+[NVIDIA's Grace NUMA guidance](https://docs.nvidia.com/dccpu/grace-perf-tuning-guide/os-settings.html#unified-memory-considerations-on-grace-hopper-blackwell-systems)
+and the [KV-cache offloading guide](../kv-cache-offloading/overview.mdx).
 
 ## Check the Tools in Your Image
 
@@ -544,5 +567,6 @@ high-address host buffers, and use `numastat -p` for totals by node. Check under
 initialization. For UCX, temporarily set `UCX_LOG_LEVEL=info` and check the HCA, TCP interface,
 and KV-payload transport.
 
-Compare latency, throughput, memory placement, and KV-transfer performance with the same workload
-before and after binding.
+Compare TTFT, ITL, throughput, memory placement, and KV-transfer performance with the same
+workload before and after binding. If the workload offloads KV cache, also measure offload and
+onboard latency and bandwidth so you can tell whether host-memory placement improved that path.
