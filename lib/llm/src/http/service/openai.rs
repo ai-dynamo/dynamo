@@ -7528,7 +7528,9 @@ mod tests {
     #[test]
     #[serial_test::serial(failure_metrics)]
     fn explicit_backend_status_survives_semantic_wire_and_legacy_rendering() {
-        use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, ErrorType};
+        use dynamo_runtime::error::{
+            BackendError, DynamoError, ErrorClass, ErrorReason, ErrorType,
+        };
 
         let message = "private backend detail token=secret";
         for (code, class) in [
@@ -7541,13 +7543,16 @@ mod tests {
             (500, ErrorClass::Internal),
         ] {
             let diagnostic = serde_json::json!({"message": message, "code": code}).to_string();
-            let error = DynamoError::builder()
-                .class(class)
-                .diagnostic(&diagnostic)
-                .build();
-            let mut wire = serde_json::to_value(error).unwrap();
+            let builder = DynamoError::builder().class(class).diagnostic(&diagnostic);
+            let builder = if code == 422 {
+                builder.reason(ErrorReason::unprocessable_entity())
+            } else {
+                builder
+            };
+            let wire = serde_json::to_value(builder.build()).unwrap();
             if code == 422 {
-                wire["reason"] = serde_json::json!("request.unprocessable_entity");
+                assert_eq!(wire["reason"], "request.invalid");
+                assert_eq!(wire["http_status"], 422);
             }
             let semantic: DynamoError = serde_json::from_value(wire).unwrap();
             let unary = ErrorMessage::from_anyhow(anyhow::Error::new(semantic.clone()), "failed");
@@ -7588,6 +7593,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[serial_test::serial(failure_metrics)]
+    fn direct_unprocessable_reason_is_read_without_a_compatibility_marker() {
+        let error: DynamoError = serde_json::from_value(serde_json::json!({
+            "class": "InvalidRequest",
+            "reason": "request.unprocessable_entity",
+            "diagnostic": "private token=secret",
+        }))
+        .unwrap();
+        assert_eq!(error.reason().as_str(), "request.unprocessable_entity");
+        let response = ErrorMessage::from_anyhow(error.into(), "failed");
+        assert_eq!(response.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.1.code, 422);
+        assert!(
+            !serde_json::to_string(&response.1.0)
+                .unwrap()
+                .contains("secret")
+        );
     }
 
     #[test]

@@ -40,6 +40,16 @@
 //!
 //! A worker overload limited to one data-parallel rank is [`ErrorClass::WorkerRankOverloaded`], which carries the rank. Like [`ErrorClass::WorkerOverloaded`], it normalizes to [`ErrorClass::CapacityExhausted`] with the default reason `capacity.worker_overloaded`, and [`match_error_chain`] matches it wherever a set names [`ErrorClass::WorkerOverloaded`]. On the wire, a [`DynamoError`] with it keeps the worker overload's class, legacy type, and reason, and adds the rank as an optional `dp_rank` field, which this reader honors only with that reason. Readers that predate the field decode a whole-worker overload, as this reader does when the field is absent or malformed.
 //!
+//! ## Validation refinement compatibility
+//!
+//! In memory, an unprocessable request has class [`ErrorClass::InvalidRequest`] and reason [`ErrorReason::UNPROCESSABLE_ENTITY`]. Its wire representation retains the established `request.invalid` reason and adds `http_status: 422`, so older semantic readers preserve a valid generic request error instead of rejecting an unknown reason. Current readers restore the refined reason only for that valid class/reason pair and exact integer marker; malformed or misplaced markers are ignored.
+//!
+//! The existing `http_status` field name is retained as a constrained producer-side compatibility encoding, not an arbitrary consumer HTTP-status override. It carries only this registered identity refinement; protocol consumers still own their response status, retry, stream and worker-health policies. Renaming the additive field would introduce a second wire representation without improving those ownership boundaries.
+//!
+//! Dynamo v1.7 supports v1.5 and v1.6 readers under N-2 compatibility. TODO(v1.9): Retire the legacy-reason and marker emission only after v1.6 is outside N-2 and every supported reader, including supported v1.7 builds, recognizes the refined reason. Retain marker decoding until all marker-emitting writers are also outside the supported window.
+//!
+//! JSON sinks that serialize [`DynamoError`] observe `request.invalid` plus `http_status`, not the refined in-memory reason. Dashboards consuming that serialized form must account for the marker; consumers of [`DynamoError::reason`] and in-memory metric classification retain the precise registered identity.
+//!
 //! # Data visibility
 //!
 //! [`Diagnostic`] contains bounded operator-facing context. It may be used in logs and traces, but it must never be copied into a client response or metric label. Do not place secrets, credentials, prompts, generated text, or raw upstream response bodies in a diagnostic.
