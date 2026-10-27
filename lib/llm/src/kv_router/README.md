@@ -71,21 +71,24 @@ its booking is released:
 
 ```mermaid
 sequenceDiagram
+    participant C as caller
     participant H as RoutingHost
     participant K as KvRouter / SelectionCore
-    participant L as RequestLeaseManager
+    participant L as RequestLeaseManager (owned by KvRouter)
     participant G as RequestGuard
-    participant W as PushRouter → worker
+    participant W as PushRouter to worker
     H->>K: select and book (Lease admission)
     K-->>H: worker + BookingHandle
-    H->>L: commit the booking, register its lease (KvRequestCleanup)
-    H->>G: hand over the booking
+    H->>L: KvRequestCleanup commits the booking and registers its lease
+    H->>G: move the cleanup into the guard
     H->>W: dispatch
-    W-->>G: response stream
-    G->>L: first tokens mark prefill complete
+    W-->>H: response stream
+    H-->>C: stream wrapped by the guard
+    G->>K: first tokens mark prefill complete
     G->>L: output progress keeps the lease alive
-    G->>L: stream end, error, or drop releases the lease
-    L->>K: enqueue the scheduler release
+    G->>L: stream end or error calls finish()
+    L->>K: release the scheduler booking
+    K-->>L: acknowledgement (finish waits, drop does not)
 ```
 
 Discovery builds the pipeline once per Decode or Aggregated worker set
