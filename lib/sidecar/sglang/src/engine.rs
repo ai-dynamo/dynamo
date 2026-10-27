@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dynamo backend for SGLang's native `sglang.runtime.v1` gRPC server.
+//! Dynamo backend for SGLang's native `sglang.api.v1` gRPC server.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -27,13 +27,11 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, Client, Discovery, KV_CONFIG_KEY, NodeMetadata, Pool, WORKER_GROUP_KEY};
+use crate::client::{self, AbortRpc, Client, GRPC_SERVICE, NodeMetadata, Pool, WORKER_GROUP_KEY};
+use crate::discovery::{self, EngineInfo, sglang_eagle_enabled};
 use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
-use crate::protocol::{
-    build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
-    meta_u32, output_ids_to_u32, terminal_from_meta,
-};
+use crate::protocol::{FrameOutput, ResponseConverter, build_generate_request, validate_dp_rank};
 
 const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -136,7 +134,7 @@ impl SglangSidecarEngine {
         args: Args,
         bootstrap: bool,
     ) -> Result<(Self, WorkerConfig), DynamoError> {
-        let discovery = bootstrap_discover(
+        let discovery = client::bootstrap_discover(
             &args.sidecar.grpc_endpoint,
             &args.sidecar.grpc.config(),
             bootstrap,
@@ -147,12 +145,12 @@ impl SglangSidecarEngine {
 
     pub(crate) fn from_discovered(
         args: Args,
-        discovery: Discovery,
+        discovery: EngineInfo,
     ) -> Result<(Self, WorkerConfig), DynamoError> {
         Self::validate_args(&args)?;
         let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
-        let disaggregation_mode = client::discovery_mode(&discovery.server_info)?;
+        let disaggregation_mode = discovery.disaggregation_mode;
         let bootstrap_host = if disaggregation_mode.is_prefill() {
             resolve_bootstrap_host(
                 args.bootstrap_host.as_deref(),
@@ -194,10 +192,10 @@ impl SglangSidecarEngine {
             model_input: ModelInput::Tokens,
             reasoning_parser: common
                 .dyn_reasoning_parser
-                .or_else(|| discovery_string(&discovery.server_info, "reasoning_parser")),
+                .or_else(|| discovery.reasoning_parser.clone()),
             tool_call_parser: common
                 .dyn_tool_call_parser
-                .or_else(|| discovery_string(&discovery.server_info, "tool_call_parser")),
+                .or_else(|| discovery.tool_call_parser.clone()),
             structural_tag,
             exclude_tools_when_tool_choice_none: common.exclude_tools_when_tool_choice_none,
             route_to_encoder: false,
@@ -276,8 +274,8 @@ impl LLMEngine for SglangSidecarEngine {
         let pool = Pool::connect(&self.endpoint, &self.transport, deadline).await?;
         let mut control = pool.control_client();
         self.await_ready(&mut control, deadline).await?;
-        let discovery = client::discover(&mut control, deadline).await?;
-        let observed_mode = client::discovery_mode(&discovery.server_info)?;
+        let discovery = discovery::engine_info(client::discover(&mut control, deadline).await?)?;
+        let observed_mode = discovery.disaggregation_mode;
         if observed_mode != self.disaggregation_mode {
             return Err(client::invalid_arg(format!(
                 "SGLang role changed since bootstrap: registered as {:?}, now reports {:?}",
@@ -291,9 +289,13 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.clone(),
             self.bootstrap_port,
         )?;
+        // Before native HTTP readiness, which may spend the rest of the
+        // startup deadline: the worker group's DNS lookup needs some of it.
+        let kv_event_sources = discover_kv_event_sources(&discovery, &mut config, deadline).await?;
         let native_http = match NativeHttp::discover(
             &self.endpoint,
             &discovery,
+            AbortRpc::new(control),
             self.transport.connect_attempt_timeout,
             self.native_http_max_event_bytes,
         )? {
@@ -319,11 +321,16 @@ impl LLMEngine for SglangSidecarEngine {
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
         }
-        let kv_event_sources =
-            discover_kv_event_sources(&discovery, &mut config, &self.endpoint, deadline).await?;
         let connection_count = pool.len();
         let kv_event_source_count = kv_event_sources.len();
         let combined_token_limit = combined_token_limit(&discovery);
+        if lacks_draft_reserve(&discovery) {
+            tracing::warn!(
+                "SGLang runs EAGLE speculative decoding but reports no draft-token reserve \
+                 (GetServerInfo.num_reserved_tokens); it predates the api.v1 discovery fields \
+                 listed in lib/sidecar/sglang/README.md, so no token budget is published"
+            );
+        }
         if combined_token_limit.is_none() {
             tracing::warn!("requests without max_tokens keep SGLang's 128-token default");
         }
@@ -354,6 +361,7 @@ impl LLMEngine for SglangSidecarEngine {
             .state
             .get()
             .ok_or_else(|| client::engine_shutdown("generate called before start"))?;
+        validate_dp_rank(&request, self.disaggregation_mode)?;
         if let Some(native_request) = native_http::request(
             &request,
             ctx.id(),
@@ -382,30 +390,29 @@ impl LLMEngine for SglangSidecarEngine {
             .output_options
             .return_tokens_as_token_ids
             .unwrap_or(false);
-        let grpc_request = build_generate_request(
+        let (grpc_request, rendezvous) = build_generate_request(
             &request,
             ctx.id(),
             self.disaggregation_mode,
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
-        let mut prefill_handoff = if self.disaggregation_mode.is_prefill() {
-            grpc_request
-                .disaggregated_params
-                .as_ref()
-                .map(disaggregated_params_to_json)
-        } else {
-            None
-        };
-        let cancel = self.cancel.child_token();
         let is_prefill = self.disaggregation_mode.is_prefill();
-        let stop_conditions = request.stop_conditions;
+        let mut prefill_handoff = if is_prefill { rendezvous } else { None };
+        let cancel = self.cancel.child_token();
+        let mut converter = ResponseConverter::new(
+            is_prefill,
+            return_tokens_as_ids,
+            request.stop_conditions,
+            prompt_tokens,
+        );
 
         Ok(Box::pin(async_stream::stream! {
             if ctx.is_stopped() || cancel.is_cancelled() {
                 yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
                 return;
             }
+            let shutdown = cancel.clone();
             let stopped_ctx = ctx.inner_arc();
             let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
             let mut shutdown_cancellation = Box::pin(async move { cancel.cancelled().await });
@@ -443,24 +450,20 @@ impl LLMEngine for SglangSidecarEngine {
                 });
             }
 
-            let mut generated = 0_u32;
-            let mut observed_prompt_tokens = prompt_tokens;
             loop {
                 tokio::select! {
                     biased;
                     _ = &mut request_cancellation => {
-                        yield Ok(LLMEngineOutput::cancelled()
-                            .with_usage(usage(observed_prompt_tokens, generated)));
+                        yield Ok(LLMEngineOutput::cancelled().with_usage(converter.usage()));
                         break;
                     }
                     _ = &mut shutdown_cancellation => {
-                        yield Ok(LLMEngineOutput::cancelled()
-                            .with_usage(usage(observed_prompt_tokens, generated)));
+                        yield Ok(LLMEngineOutput::cancelled().with_usage(converter.usage()));
                         break;
                     }
                     message = stream.message() => {
-                        let response = match message {
-                            Ok(Some(response)) => response,
+                        let item = match message {
+                            Ok(Some(item)) => item,
                             Ok(None) => {
                                 yield Err(client::engine_shutdown(
                                     "SGLang closed Generate before a finished response",
@@ -472,90 +475,33 @@ impl LLMEngine for SglangSidecarEngine {
                                 break;
                             }
                         };
-
-                        if let Some(value) = meta_u32(&response.meta_info, "prompt_tokens") {
-                            observed_prompt_tokens = value;
-                        }
-                        let token_ids = match output_ids_to_u32(&response.output_ids) {
-                            Ok(ids) => ids,
-                            Err(err) => {
-                                yield Err(err);
-                                break;
-                            }
-                        };
-                        let (log_probs, top_logprobs) =
-                            match extract_logprobs(&response.meta_info, return_tokens_as_ids) {
-                                Ok(values) => values,
-                                Err(err) => {
-                                    yield Err(err);
-                                    break;
-                                }
-                            };
-
-                        if is_prefill {
-                            if response.finished {
-                                let terminal = match terminal_from_meta(
-                                    &response.meta_info,
-                                    observed_prompt_tokens,
-                                    0,
-                                    &stop_conditions,
-                                ) {
-                                    Ok(terminal) => terminal,
+                        match item.item {
+                            Some(pb::generate_stream_item::Item::Frame(frame)) => {
+                                match converter.frame(frame) {
+                                    Ok(FrameOutput::Skip) => {}
+                                    Ok(FrameOutput::Delta(output)) => yield Ok(output),
+                                    Ok(FrameOutput::Terminal(output)) => {
+                                        yield Ok(output);
+                                        break;
+                                    }
                                     Err(error) => {
                                         yield Err(error);
                                         break;
                                     }
-                                };
-                                yield Ok(terminal);
+                                }
+                            }
+                            // SGLang ends a request's stream after its error item.
+                            Some(pb::generate_stream_item::Item::Error(error)) => {
+                                let is_cancelled = ctx.is_stopped() || shutdown.is_cancelled();
+                                yield converter.stream_error(&error, is_cancelled);
                                 break;
                             }
-                            continue;
-                        }
-
-                        generated = generated.saturating_add(token_ids.len() as u32);
-                        if response.finished {
-                            let mut terminal = match terminal_from_meta(
-                                &response.meta_info,
-                                observed_prompt_tokens,
-                                generated,
-                                &stop_conditions,
-                            ) {
-                                Ok(terminal) => terminal,
-                                Err(error) => {
-                                    yield Err(error);
-                                    break;
-                                }
-                            };
-                            let engine_data = match engine_data_from_meta(&response.meta_info, true) {
-                                Ok(engine_data) => engine_data,
-                                Err(error) => {
-                                    yield Err(error);
-                                    break;
-                                }
-                            };
-                            terminal.token_ids = token_ids;
-                            terminal.log_probs = log_probs;
-                            terminal.top_logprobs = top_logprobs;
-                            terminal.engine_data = engine_data;
-                            yield Ok(terminal);
-                            break;
-                        }
-
-                        if !token_ids.is_empty() {
-                            let engine_data = match engine_data_from_meta(&response.meta_info, false) {
-                                Ok(engine_data) => engine_data,
-                                Err(error) => {
-                                    yield Err(error);
-                                    break;
-                                }
-                            };
-                            yield Ok(LLMEngineOutput {
-                                token_ids,
-                                log_probs,
-                                top_logprobs,
-                                engine_data,
-                                ..Default::default()
-                            });
+                            None => {
+                                yield Err(client::protocol_error(
+                                    "SGLang Generate stream item has neither a frame nor an error",
+                                ));
+                                break;
+                            }
                         }
                     }
                 }
@@ -563,42 +509,14 @@ impl LLMEngine for SglangSidecarEngine {
         }))
     }
 
+    /// The Abort RPC also cancels requests opened through native HTTP.
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
         let Some(state) = self.state.get() else {
             return;
         };
-        // HTTP queues scheduler cancellation without first closing the gRPC stream.
-        if let Some(native_http) = &state.native_http {
-            match native_http
-                .abort(ctx.id(), self.transport.connect_attempt_timeout)
-                .await
-            {
-                Ok(()) => return,
-                Err(error) => tracing::debug!(
-                    request_id = ctx.id(),
-                    %error,
-                    "SGLang HTTP abort failed; falling back to gRPC"
-                ),
-            }
-        }
-        let mut grpc_client = state.pool.control_client();
-        let request = pb::AbortRequest {
-            rid: ctx.id().to_string(),
-            abort_all: false,
-        };
-        if let Err(error) = client::abort(
-            &mut grpc_client,
-            request,
-            self.transport.connect_attempt_timeout,
-        )
-        .await
-        {
-            tracing::debug!(
-                request_id = ctx.id(),
-                %error,
-                "SGLang Abort RPC failed"
-            );
-        }
+        AbortRpc::new(state.pool.control_client())
+            .abort(ctx.id(), self.transport.connect_attempt_timeout)
+            .await;
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
@@ -626,29 +544,9 @@ impl LLMEngine for SglangSidecarEngine {
     }
 }
 
-async fn bootstrap_discover(
-    endpoint: &GrpcEndpoint,
-    transport: &GrpcTransportConfig,
-    bootstrap: bool,
-) -> Result<Discovery, DynamoError> {
-    match client::bootstrap_discover(endpoint, transport, bootstrap).await? {
-        client::StartupDiscovery::Leader(discovery) => Ok(*discovery),
-        client::StartupDiscovery::Follower => {
-            Err(client::invalid_arg("inference engine requires node_rank=0"))
-        }
-    }
-}
-
-fn discovery_string(value: &Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|entry| !entry.is_empty())
-        .map(str::to_string)
-}
-
-fn discovery_bootstrap_port(discovery: &Discovery) -> Result<Option<u16>, DynamoError> {
-    client::json_u64(&discovery.server_info, "disaggregation_bootstrap_port")
+fn discovery_bootstrap_port(discovery: &EngineInfo) -> Result<Option<u16>, DynamoError> {
+    discovery
+        .disaggregation_bootstrap_port
         .map(|port| {
             u16::try_from(port).map_err(|_| {
                 client::protocol_error(format!(
@@ -672,7 +570,7 @@ fn discovery_bootstrap_port(discovery: &Discovery) -> Result<Option<u16>, Dynamo
 fn resolve_bootstrap_host(
     explicit: Option<&str>,
     endpoint: &str,
-    discovery: &Discovery,
+    discovery: &EngineInfo,
 ) -> Result<Option<String>, DynamoError> {
     let local_host = dynamo_runtime::utils::local_ip_for_advertise();
     resolve_bootstrap_host_with_local(explicit, endpoint, discovery, &local_host)
@@ -681,24 +579,22 @@ fn resolve_bootstrap_host(
 fn resolve_bootstrap_host_with_local(
     explicit: Option<&str>,
     endpoint: &str,
-    discovery: &Discovery,
+    discovery: &EngineInfo,
     local_host: &str,
 ) -> Result<Option<String>, DynamoError> {
     if let Some(host) = explicit.filter(|host| !host.trim().is_empty()) {
         return Ok(Some(host.trim().to_string()));
     }
     let from_server = discovery
-        .server_info
-        .get("host")
-        .and_then(Value::as_str)
+        .host
+        .as_deref()
         .filter(|host| is_routable_host(host));
     if let Some(host) = from_server {
         return Ok(Some(host.trim().to_string()));
     }
     let from_dist = discovery
-        .server_info
-        .get("dist_init_addr")
-        .and_then(Value::as_str)
+        .dist_init_addr
+        .as_deref()
         .and_then(host_from_address)
         .filter(|host| is_routable_host(host));
     if let Some(host) = from_dist {
@@ -742,17 +638,20 @@ fn is_routable_host(host: &str) -> bool {
         .unwrap_or(true)
 }
 
-async fn local_kv_event_sources(
-    metadata: &NodeMetadata,
+/// The engine's own KV-event publishers. Each must publish at the registered
+/// block size; the worker group is published for multi-node deployments.
+async fn discover_kv_event_sources(
+    discovery: &EngineInfo,
     config: &mut EngineConfig,
     deadline: Instant,
 ) -> Result<Vec<DiscoveredKvEventSource>, DynamoError> {
+    let metadata: &NodeMetadata = discovery.kv_events.as_ref().map_err(Clone::clone)?;
     let llm = config
         .llm
         .as_ref()
         .ok_or_else(|| client::invalid_arg("KV sources require LLM registration"))?;
     metadata
-        .validate_registration(llm.data_parallel_size.unwrap_or(1), llm.kv_cache_block_size)
+        .validate_registration(llm.kv_cache_block_size)
         .map_err(|error| client::invalid_arg(error.to_string()))?;
     if let Some(group_id) = metadata
         .worker_group_id(deadline)
@@ -763,11 +662,7 @@ async fn local_kv_event_sources(
             .runtime_data
             .insert(WORKER_GROUP_KEY.into(), group_id.into());
     }
-    config.runtime_data.insert(KV_CONFIG_KEY.into(), serde_json::json!({
-        "block_size": llm.kv_cache_block_size,
-        "local_dp_ranks": metadata.kv_event_sources.iter().map(|source| source.dp_rank).collect::<Vec<_>>(),
-    }));
-    Ok(metadata
+    let sources: Vec<_> = metadata
         .kv_event_sources
         .iter()
         .map(|source| DiscoveredKvEventSource {
@@ -775,226 +670,40 @@ async fn local_kv_event_sources(
             topic: source.topic.clone(),
             dp_rank: source.dp_rank,
         })
-        .collect())
-}
-
-async fn discover_kv_event_sources(
-    discovery: &Discovery,
-    engine_config: &mut EngineConfig,
-    grpc_endpoint: &GrpcEndpoint,
-    deadline: Instant,
-) -> Result<Vec<DiscoveredKvEventSource>, DynamoError> {
-    // An explicit list is authoritative, including an empty list. Only older
-    // engines without this field may use the legacy single-node descriptor.
-    if let Some(metadata) = NodeMetadata::from_server_info(&discovery.server_info)
-        .map_err(|error| client::protocol_error(error.to_string()))?
-    {
-        return local_kv_event_sources(&metadata, engine_config, deadline).await;
+        .collect();
+    if !sources.is_empty() {
+        tracing::info!(
+            sources = sources.len(),
+            "discovered SGLang ZMQ KV-event sources"
+        );
     }
-    let Some(descriptor) = discovery.server_info.get("kv_events") else {
-        return Ok(Vec::new());
-    };
-    if descriptor.is_null() {
-        return Ok(Vec::new());
-    }
-    let descriptor = descriptor.as_object().ok_or_else(|| {
-        client::protocol_error("SGLang GetServerInfo.kv_events must be an object or null")
-    })?;
-
-    let publisher = descriptor
-        .get("publisher")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            client::protocol_error("SGLang GetServerInfo.kv_events.publisher must be a string")
-        })?;
-    if publisher != "zmq" {
-        return Err(client::protocol_error(format!(
-            "unsupported SGLang KV-event publisher `{publisher}`; expected `zmq`"
-        )));
-    }
-    let endpoint_host = descriptor
-        .get("endpoint_host")
-        .and_then(Value::as_str)
-        .filter(|host| !host.trim().is_empty())
-        .ok_or_else(|| {
-            client::protocol_error(
-                "SGLang GetServerInfo.kv_events.endpoint_host must be a non-empty string",
-            )
-        })?;
-    let base_port = descriptor
-        .get("endpoint_port_base")
-        .and_then(Value::as_u64)
-        .and_then(|port| u16::try_from(port).ok())
-        .filter(|port| *port != 0)
-        .ok_or_else(|| {
-            client::protocol_error(
-                "SGLang GetServerInfo.kv_events.endpoint_port_base must be in 1..=65535",
-            )
-        })?;
-    let topic = descriptor
-        .get("topic")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            client::protocol_error("SGLang GetServerInfo.kv_events.topic must be a string")
-        })?;
-    let block_size = descriptor
-        .get("block_size")
-        .and_then(Value::as_u64)
-        .and_then(|size| u32::try_from(size).ok())
-        .filter(|size| *size != 0)
-        .ok_or_else(|| {
-            client::protocol_error(
-                "SGLang GetServerInfo.kv_events.block_size must be a positive uint32",
-            )
-        })?;
-    let reported_dp_size = descriptor
-        .get("dp_size")
-        .and_then(Value::as_u64)
-        .and_then(|size| u32::try_from(size).ok())
-        .filter(|size| *size != 0)
-        .ok_or_else(|| {
-            client::protocol_error(
-                "SGLang GetServerInfo.kv_events.dp_size must be a positive uint32",
-            )
-        })?;
-
-    let llm = engine_config.llm.as_ref().ok_or_else(|| {
-        client::protocol_error("SGLang KV events require an LLM engine registration")
-    })?;
-    if llm.kv_cache_block_size != Some(block_size) {
-        return Err(client::protocol_error(format!(
-            "SGLang KV-event block size {block_size} does not match the registered engine block size {:?}",
-            llm.kv_cache_block_size
-        )));
-    }
-    let dp_start = llm.data_parallel_start_rank.unwrap_or(0);
-    let dp_size = llm.data_parallel_size.unwrap_or(1);
-    if reported_dp_size != dp_size {
-        return Err(client::protocol_error(format!(
-            "SGLang KV-event discovery reports {reported_dp_size} DP ranks but this sidecar registered {dp_size}"
-        )));
-    }
-    let dp_end = dp_start.checked_add(dp_size).ok_or_else(|| {
-        client::protocol_error("SGLang data-parallel rank range overflows uint32")
-    })?;
-    if dp_end > reported_dp_size {
-        return Err(client::protocol_error(format!(
-            "SGLang KV-event discovery does not cover registered DP rank range {dp_start}..{dp_end}"
-        )));
-    }
-    let nnodes = client::json_u32(&discovery.server_info, "nnodes")
-        .unwrap_or(1)
-        .max(1);
-    if nnodes > 1 && dp_size > 1 {
-        return Err(client::protocol_error(format!(
-            "SGLang KV events for multi-node DP are unsupported because GetServerInfo does not map DP ranks to publisher hosts (nnodes={nnodes}, dp_size={dp_size})"
-        )));
-    }
-
-    let connect_host = kv_event_connect_host(endpoint_host, grpc_endpoint)?;
-    let mut sources = Vec::with_capacity(dp_size as usize);
-    for dp_rank in dp_start..dp_end {
-        let port = u32::from(base_port)
-            .checked_add(dp_rank)
-            .filter(|port| *port <= u32::from(u16::MAX))
-            .ok_or_else(|| {
-                client::protocol_error(format!(
-                    "SGLang KV-event port overflows 65535 for base port {base_port} and DP rank {dp_rank}"
-                ))
-            })?;
-        sources.push(DiscoveredKvEventSource {
-            endpoint: format!("tcp://{connect_host}:{port}"),
-            topic: topic.to_string(),
-            dp_rank,
-        });
-    }
-
-    tracing::info!(
-        sources = sources.len(),
-        block_size,
-        base_port,
-        topic,
-        "discovered SGLang ZMQ KV-event sources"
-    );
     Ok(sources)
 }
 
-fn kv_event_connect_host(
-    endpoint_host: &str,
-    grpc_endpoint: &GrpcEndpoint,
-) -> Result<String, DynamoError> {
-    let endpoint_host = endpoint_host.trim();
-    let bare_host = endpoint_host.trim_matches(&['[', ']'][..]);
-    if matches!(bare_host, "*" | "0.0.0.0" | "::") {
-        return Ok(grpc_endpoint.authority_host().to_string());
-    }
-    if let Ok(address) = bare_host.parse::<IpAddr>() {
-        return Ok(match address {
-            IpAddr::V4(address) => address.to_string(),
-            IpAddr::V6(address) => format!("[{address}]"),
-        });
-    }
-    if bare_host.contains([':', '/', '\\']) || bare_host.chars().any(char::is_whitespace) {
-        return Err(client::protocol_error(format!(
-            "invalid SGLang KV-event endpoint host `{endpoint_host}`"
-        )));
-    }
-    Ok(bare_host.to_string())
+/// Context length minus the speculative draft-token reserve, which SGLang
+/// counts against the context once `max_new_tokens` is set. `None` when the
+/// reserve is unknown.
+fn combined_token_limit(discovery: &EngineInfo) -> Option<u32> {
+    discovery
+        .context_length?
+        .checked_sub(discovery.num_reserved_tokens?)
 }
 
-/// Same predicate as SGLang's `SpeculativeAlgorithm.is_eagle()`, which is
-/// what switches its radix cache (and so its KV events) to bigram keys.
-/// `NEXTN` covers older builds that don't normalize it to `EAGLE`.
-fn sglang_eagle_enabled(server_info: &Value) -> bool {
-    server_info
-        .get("speculative_algorithm")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .is_some_and(|algorithm| {
-            matches!(
-                algorithm.to_ascii_uppercase().as_str(),
-                "EAGLE" | "EAGLE3" | "FROZEN_KV_MTP" | "NEXTN"
-            )
-        })
-}
-
-/// Context length minus the EAGLE draft-token reserve, which SGLang counts
-/// against the context once `max_new_tokens` is set. Adaptive speculation does
-/// not report its reserve.
-fn combined_token_limit(discovery: &Discovery) -> Option<u32> {
-    let server_info = &discovery.server_info;
-    let reserved = if !sglang_eagle_enabled(server_info) {
-        0
-    } else if server_info
-        .get("speculative_adaptive")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return None;
-    } else {
-        let field = |key| client::json_u32(server_info, key);
-        field("speculative_eagle_topk")?
-            .saturating_mul(field("speculative_num_steps")?)
-            .max(field("speculative_num_draft_tokens")?)
-    };
-    discovery.max_model_len?.checked_sub(reserved)
+/// EAGLE reserves at least one draft-token slot per request, so a server that
+/// reports none predates the field and the reserve is unknown.
+fn lacks_draft_reserve(discovery: &EngineInfo) -> bool {
+    sglang_eagle_enabled(discovery.speculative_algorithm.as_deref())
+        && discovery.num_reserved_tokens.is_none()
 }
 
 /// SGLang holds a request's grammar until its reasoning parser sees the end of thinking.
-fn sglang_gates_reasoning(server_info: &Value) -> bool {
-    discovery_string(server_info, "reasoning_parser").is_some()
-        && !server_info
-            .get("skip_tokenizer_init")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+fn sglang_gates_reasoning(discovery: &EngineInfo) -> bool {
+    discovery.reasoning_parser.is_some() && !discovery.skip_tokenizer_init
 }
 
 /// SGLang rejects token overflow unless `allow_auto_truncate` is set.
-fn sglang_token_budget(discovery: &Discovery) -> Option<TokenBudget> {
-    let truncates = discovery
-        .server_info
-        .get("allow_auto_truncate")?
-        .as_bool()?;
+fn sglang_token_budget(discovery: &EngineInfo) -> Option<TokenBudget> {
+    let truncates = discovery.allow_auto_truncate;
     Some(TokenBudget {
         combined_limit: combined_token_limit(discovery)?,
         reject_prompt_overflow: !truncates,
@@ -1015,144 +724,23 @@ fn omitted_max_tokens_default(
         .filter(|remaining| *remaining >= min_tokens.unwrap_or(0).max(1))
 }
 
-fn is_deepseek_v4_arch(model_info: &Value) -> bool {
-    model_info
-        .get("architectures")
-        .and_then(Value::as_array)
-        .is_some_and(|architectures| {
-            architectures.iter().any(|architecture| {
-                matches!(
-                    architecture.as_str(),
-                    Some(
-                        "DeepseekV4ForCausalLM"
-                            | "DeepseekV4ForCausalLMNextN"
-                            | "DeepseekV4ForCausalLMDSpark"
-                    )
-                )
-            })
-        })
-}
-
-fn hicache_native_offloading_capacity(server_info: &Value, model_info: &Value) -> Option<u64> {
-    let device_tokens = server_info
-        .get("max_total_num_tokens")?
-        .as_u64()
-        .filter(|tokens| *tokens > 0)?;
-    let policy = server_info.get("hicache_write_policy")?.as_str()?;
-    if !matches!(policy, "write_back" | "write_through") {
-        return None;
-    }
-
-    let host_tokens = match server_info.get("hicache_host_total_tokens") {
-        Some(value) => value.as_u64().filter(|tokens| *tokens > 0)?,
-        None => {
-            if server_info
-                .get("enable_hierarchical_cache")
-                .and_then(Value::as_bool)
-                != Some(true)
-                || server_info.get("hicache_size").and_then(Value::as_u64) != Some(0)
-                || client::json_u64(server_info, "dcp_size")
-                    .unwrap_or(1)
-                    .max(1)
-                    > 1
-            {
-                return None;
-            }
-
-            let page_size = client::json_u64(server_info, "page_size").filter(|size| *size > 0)?;
-            let ratio = server_info
-                .get("hicache_ratio")?
-                .as_f64()
-                .filter(|ratio| ratio.is_finite() && *ratio > 0.0)?;
-            if is_deepseek_v4_arch(model_info) {
-                // Compatibility with SGLang's current DSV4 host allocator. Prefer the
-                // authoritative field above once SGLang exposes realized capacity.
-                let device_pages = device_tokens
-                    .checked_add(page_size.checked_sub(1)?)?
-                    .checked_div(page_size)?;
-                let host_pages = device_pages as f64 * ratio;
-                if !host_pages.is_finite() || host_pages >= u64::MAX as f64 {
-                    return None;
-                }
-                (host_pages as u64).checked_mul(page_size)?
-            } else {
-                let unaligned_tokens = device_tokens as f64 * ratio;
-                if !unaligned_tokens.is_finite() || unaligned_tokens >= u64::MAX as f64 {
-                    return None;
-                }
-                (unaligned_tokens as u64)
-                    .checked_div(page_size)?
-                    .checked_add(1)?
-                    .checked_mul(page_size)?
-            }
-        }
-    };
-    if host_tokens == 0 {
-        return None;
-    }
-
-    match policy {
-        "write_back" => Some(host_tokens),
-        "write_through" => host_tokens
-            .checked_sub(device_tokens)
-            .filter(|tokens| *tokens > 0),
-        _ => None,
-    }
-}
-
 fn build_engine_config(
-    discovery: &Discovery,
+    discovery: &EngineInfo,
     mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
 ) -> Result<EngineConfig, DynamoError> {
-    let page_size = client::json_u32(&discovery.server_info, "page_size");
-    let dcp_size = client::json_u32(&discovery.server_info, "dcp_size")
-        .unwrap_or(1)
-        .max(1);
-    let kv_cache_block_size = page_size.map(|size| size.saturating_mul(dcp_size));
-    let max_total_tokens = client::json_u64(&discovery.server_info, "max_total_num_tokens");
+    let page_size = discovery.page_size;
+    let kv_cache_block_size = page_size.map(|size| size.saturating_mul(discovery.dcp_size));
+    let max_total_tokens = discovery.max_total_num_tokens;
     let total_kv_blocks = match (max_total_tokens, page_size) {
         (Some(tokens), Some(page_size)) if page_size > 0 => {
             Some(tokens.saturating_add(u64::from(page_size) - 1) / u64::from(page_size))
         }
         _ => None,
     };
-    let model_dp_size = client::json_u32(&discovery.server_info, "dp_size")
-        .unwrap_or(1)
-        .max(1);
-    let attn_dp_size = client::json_u32(&discovery.server_info, "attn_dp_size")
-        .unwrap_or(1)
-        .max(1);
-    // dp_size describes model DP while attn_dp_size describes the additional
-    // attention-DP rank space used by KV event publishers.
-    let deployment_dp_size = model_dp_size.checked_mul(attn_dp_size).ok_or_else(|| {
-        client::invalid_arg("SGLang deployment DP size exceeds the supported range")
-    })?;
-    let max_num_seqs =
-        client::json_u64(&discovery.server_info, "max_running_requests").map(|value| {
-            // Releases without attn_dp_size report attention DP as dp_size
-            // with enable_dp_attention, and max_running_requests covers all
-            // of those ranks.
-            let legacy_attention_dp = discovery
-                .server_info
-                .get("enable_dp_attention")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let ranks = match client::json_u32(&discovery.server_info, "attn_dp_size") {
-                Some(size) => size.max(1),
-                None if legacy_attention_dp => model_dp_size,
-                None => 1,
-            };
-            value / u64::from(ranks)
-        });
-    let max_num_batched_tokens =
-        client::json_u64(&discovery.server_info, "max_prefill_tokens").or(max_total_tokens);
-
-    // Native gRPC is exposed by the rank-zero frontend for the complete
-    // SGLang endpoint, so one sidecar registers every pure- or attention-DP rank.
-    let data_parallel_start_rank = Some(0);
-    let data_parallel_size = Some(deployment_dp_size);
+    let max_num_seqs = discovery.max_num_seqs;
+    let max_num_batched_tokens = discovery.max_prefill_tokens.or(max_total_tokens);
 
     if mode.is_prefill() && (bootstrap_host.is_none() || bootstrap_port.is_none()) {
         return Err(client::protocol_error(
@@ -1160,22 +748,20 @@ fn build_engine_config(
         ));
     }
 
-    let enable_eagle = sglang_eagle_enabled(&discovery.server_info);
+    let enable_eagle = sglang_eagle_enabled(discovery.speculative_algorithm.as_deref());
 
     let mut runtime_data = HashMap::new();
     runtime_data.insert(
         "grpc_service".to_string(),
-        Value::String("sglang.runtime.v1.SglangService".to_string()),
+        Value::String(GRPC_SERVICE.to_string()),
     );
-    if let Some(total_tokens) =
-        hicache_native_offloading_capacity(&discovery.server_info, &discovery.model_info)
-    {
+    if let Some(total_tokens) = discovery.native_offloading_capacity {
         runtime_data.insert(
             "native_offloading_capacity".to_string(),
             serde_json::json!({"total_tokens": total_tokens}),
         );
     }
-    if sglang_gates_reasoning(&discovery.server_info) {
+    if sglang_gates_reasoning(discovery) {
         runtime_data.insert(
             TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY.to_string(),
             Value::Bool(true),
@@ -1194,14 +780,15 @@ fn build_engine_config(
         model_aliases: Vec::new(),
         runtime_data,
         llm: Some(LlmRegistration {
-            context_length: discovery.max_model_len,
+            context_length: discovery.context_length,
             kv_cache_block_size,
             total_kv_blocks,
             max_num_seqs,
             max_num_batched_tokens,
             max_gpu_lora_count: None,
-            data_parallel_size,
-            data_parallel_start_rank,
+            // Discovery rejects deployments with more than one DP rank.
+            data_parallel_size: Some(1),
+            data_parallel_start_rank: Some(0),
             enable_eagle,
             bootstrap_host: mode.is_prefill().then_some(bootstrap_host).flatten(),
             bootstrap_port: mode.is_prefill().then_some(bootstrap_port).flatten(),
@@ -1215,26 +802,56 @@ mod tests {
     use tokio::time::Instant;
 
     use clap::Parser;
-    use dynamo_backend_common::{BackendError, ErrorType, ModelInput};
-    use dynamo_sidecar_common::GrpcEndpoint;
+    use dynamo_backend_common::{BackendError, DynamoError, ErrorType, ModelInput};
     use serde_json::json;
 
     use super::{
-        Args, DisaggregationMode, DiscoveredKvEventSource, Discovery, EngineConfig,
-        SglangSidecarEngine, build_engine_config, combined_token_limit, discover_kv_event_sources,
-        discovery_bootstrap_port, hicache_native_offloading_capacity, kv_event_connect_host,
+        Args, DisaggregationMode, DiscoveredKvEventSource, EngineConfig, EngineInfo,
+        SglangSidecarEngine, WORKER_GROUP_KEY, build_engine_config, combined_token_limit,
+        discover_kv_event_sources, discovery_bootstrap_port, lacks_draft_reserve,
         omitted_max_tokens_default, resolve_bootstrap_host_with_local, sglang_eagle_enabled,
     };
+    use crate::discovery;
+    use crate::proto as pb;
 
-    fn discovery(server_info: serde_json::Value) -> Discovery {
-        Discovery {
-            model_path: "model".to_string(),
-            tokenizer_path: "tokenizer".to_string(),
-            served_model_name: None,
-            max_model_len: None,
-            model_info: json!({}),
-            server_info,
-        }
+    /// The discovery RPC responses of one engine.
+    struct Reported {
+        model: pb::GetModelInfoResponse,
+        server: pb::GetServerInfoResponse,
+        deployment: pb::DeploymentInfo,
+    }
+
+    fn try_discovery(update: impl FnOnce(&mut Reported)) -> Result<EngineInfo, DynamoError> {
+        let mut reported = Reported {
+            model: pb::GetModelInfoResponse {
+                model_path: "model".into(),
+                tokenizer_path: "tokenizer".into(),
+                ..Default::default()
+            },
+            server: pb::GetServerInfoResponse {
+                incremental_streaming_output: true,
+                ..Default::default()
+            },
+            deployment: pb::DeploymentInfo {
+                nnodes: 1,
+                dp_size: 1,
+                dcp_size: 1,
+                ..Default::default()
+            },
+        };
+        update(&mut reported);
+        let Reported {
+            model,
+            mut server,
+            deployment,
+        } = reported;
+        server.deployment_info = Some(deployment);
+        discovery::engine_info(discovery::parse_discovery(model, server, Vec::new())?)
+    }
+
+    /// The engine's view of discovery responses that `update` rewrites.
+    fn discovery(update: impl FnOnce(&mut Reported)) -> EngineInfo {
+        try_discovery(update).unwrap()
     }
 
     fn args() -> Args {
@@ -1272,7 +889,9 @@ mod tests {
         for (mode, component) in [("aggregated", "custom-component"), ("decode", "backend")] {
             let mut args = args();
             args.sidecar.common.disaggregation_mode = DisaggregationMode::Prefill;
-            let mut discovery = discovery(json!({"disaggregation_mode": mode}));
+            let mut discovery = discovery(|reported| {
+                reported.server.disaggregation_mode = mode.into();
+            });
             discovery.served_model_name = Some("public-model".into());
             let (engine, config) = SglangSidecarEngine::from_discovered(args, discovery).unwrap();
 
@@ -1327,19 +946,22 @@ mod tests {
             args.sidecar.common.dyn_tool_call_parser = cli_tools.map(str::to_string);
             let (_, config) = SglangSidecarEngine::from_discovered(
                 args,
-                discovery(json!({
-                    "reasoning_parser": "native-reasoning",
-                    "tool_call_parser": "native-tools",
-                })),
+                discovery(|reported| {
+                    reported.model.reasoning_parser = Some("native-reasoning".into());
+                    reported.model.tool_call_parser = Some("native-tools".into());
+                }),
             )
             .unwrap();
             assert_eq!(config.reasoning_parser.as_deref(), Some(expected_reasoning));
             assert_eq!(config.tool_call_parser.as_deref(), Some(expected_tools));
         }
-        for native in [json!(""), json!(null)] {
+        for native in [Some(String::new()), None] {
             let (_, config) = SglangSidecarEngine::from_discovered(
                 args(),
-                discovery(json!({"reasoning_parser": native, "tool_call_parser": native})),
+                discovery(|reported| {
+                    reported.model.reasoning_parser = native.clone();
+                    reported.model.tool_call_parser = native;
+                }),
             )
             .unwrap();
             assert!(config.reasoning_parser.is_none());
@@ -1366,26 +988,40 @@ mod tests {
     }
 
     #[test]
+    fn discovery_defers_start_time_validation() {
+        // start() reports these where it resolves them, so bootstrap
+        // construction still succeeds.
+        let info = discovery(|reported| {
+            reported.server.port = 65_536;
+            reported.deployment.nnodes = 2;
+        });
+        SglangSidecarEngine::from_discovered(args(), info.clone()).unwrap();
+        build_engine_config(&info, DisaggregationMode::Aggregated, None, None).unwrap();
+        let port_error = info.http_port.as_ref().unwrap().as_ref().unwrap_err();
+        assert!(port_error.to_string().contains("GetServerInfo.port"));
+        let kv_error = info.kv_events.as_ref().unwrap_err();
+        assert!(
+            kv_error
+                .to_string()
+                .contains("multinode deployments require dist_init_addr")
+        );
+    }
+
+    #[test]
     fn bootstrap_port_requires_a_nonzero_u16() {
-        for (value, expected) in [(json!(1), 1), (json!("65535"), u16::MAX)] {
+        for (value, expected) in [(1, 1), (65535, u16::MAX)] {
             assert_eq!(
-                discovery_bootstrap_port(&discovery(
-                    json!({"disaggregation_bootstrap_port": value})
-                ))
+                discovery_bootstrap_port(&discovery(|reported| {
+                    reported.deployment.disaggregation_bootstrap_port = Some(value);
+                }))
                 .unwrap(),
                 Some(expected)
             );
         }
-        for value in [
-            json!(null),
-            json!(0),
-            json!(-1),
-            json!(65536),
-            json!("invalid"),
-        ] {
-            let error = discovery_bootstrap_port(&discovery(
-                json!({"disaggregation_bootstrap_port": value}),
-            ))
+        for value in [None, Some(0), Some(65536)] {
+            let error = discovery_bootstrap_port(&discovery(|reported| {
+                reported.deployment.disaggregation_bootstrap_port = value;
+            }))
             .unwrap_err();
             assert_eq!(
                 error.error_type(),
@@ -1395,45 +1031,50 @@ mod tests {
         }
     }
 
+    /// The bootstrap host candidates discovery reports.
+    fn hosts(host: &str, dist_init_addr: Option<&str>) -> EngineInfo {
+        discovery(|reported| {
+            reported.server.host = host.into();
+            reported.deployment.dist_init_addr = dist_init_addr.map(str::to_string);
+        })
+    }
+
     #[test]
     fn bootstrap_host_falls_back_to_remote_endpoint_and_preserves_ipv6() {
-        for (server_info, endpoint, expected) in [
+        for (info, endpoint, expected) in [
             (
-                json!({"host": "localhost", "dist_init_addr": "worker.localhost:20000"}),
+                hosts("localhost", Some("worker.localhost:20000")),
                 "http://remote.example:30001",
                 "remote.example",
             ),
             (
-                json!({"dist_init_addr": "tcp://[2001:db8::1]:20000"}),
+                hosts("", Some("tcp://[2001:db8::1]:20000")),
                 "http://127.0.0.1:30001",
                 "[2001:db8::1]",
             ),
         ] {
-            let host = resolve_bootstrap_host_with_local(
-                Some(" "),
-                endpoint,
-                &discovery(server_info),
-                "::1",
-            )
-            .unwrap();
+            let host =
+                resolve_bootstrap_host_with_local(Some(" "), endpoint, &info, "::1").unwrap();
             assert_eq!(host.as_deref(), Some(expected));
         }
     }
 
     #[test]
     fn registration_preserves_identity_and_optional_limits() {
-        let mut discovery = discovery(
-            json!({"max_total_num_tokens": "512", "max_prefill_tokens": "128", "max_running_requests": "32"}),
-        );
-        discovery.served_model_name = Some("public-model".into());
-        discovery.max_model_len = Some(4096);
+        let mut info = discovery(|reported| {
+            reported.server.max_context_length = 4096;
+            reported.server.max_total_num_tokens = Some(512);
+            reported.deployment.max_prefill_tokens = 128;
+            reported.deployment.max_running_requests = Some(32);
+        });
+        info.served_model_name = Some("public-model".into());
         let config =
-            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
+            build_engine_config(&info, DisaggregationMode::Aggregated, None, None).unwrap();
         assert_eq!(config.model, "model");
         assert_eq!(config.served_model_name.as_deref(), Some("public-model"));
         assert_eq!(
             config.runtime_data.get("grpc_service"),
-            Some(&json!("sglang.runtime.v1.SglangService"))
+            Some(&json!("sglang.api.v1.SglangService"))
         );
         let llm = config.llm.unwrap();
         assert_eq!(llm.context_length, Some(4096));
@@ -1442,25 +1083,27 @@ mod tests {
         assert_eq!(llm.kv_cache_block_size, None);
         assert_eq!(llm.total_kv_blocks, None);
 
-        discovery
-            .server_info
-            .as_object_mut()
-            .unwrap()
-            .remove("max_prefill_tokens");
+        // Zero is proto3's unset prefill limit.
+        let info = discovery(|reported| {
+            reported.server.max_total_num_tokens = Some(512);
+        });
         assert_eq!(
-            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None)
+            build_engine_config(&info, DisaggregationMode::Aggregated, None, None)
                 .unwrap()
                 .llm
                 .unwrap()
                 .max_num_batched_tokens,
             Some(512)
         );
-        discovery.server_info = json!({});
-        discovery.max_model_len = None;
-        let llm = build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None)
-            .unwrap()
-            .llm
-            .unwrap();
+        let llm = build_engine_config(
+            &discovery(|_| {}),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap()
+        .llm
+        .unwrap();
         assert_eq!(
             (
                 llm.context_length,
@@ -1483,7 +1126,7 @@ mod tests {
             (None, Some(8998)),
         ] {
             let error = build_engine_config(
-                &discovery(json!({})),
+                &discovery(|_| {}),
                 DisaggregationMode::Prefill,
                 host.map(str::to_string),
                 port,
@@ -1501,7 +1144,7 @@ mod tests {
             DisaggregationMode::Prefill,
         ] {
             let llm = build_engine_config(
-                &discovery(json!({})),
+                &discovery(|_| {}),
                 mode,
                 Some("prefill.example".into()),
                 Some(8998),
@@ -1517,189 +1160,80 @@ mod tests {
         }
     }
 
-    fn kv_discovery() -> (Discovery, EngineConfig, GrpcEndpoint) {
-        let discovery = discovery(json!({
-            "page_size": 128, "dp_size": 2,
-            "kv_events": {"publisher": "zmq", "endpoint_host": "*", "endpoint_port_base": 5557,
-                          "topic": "kv", "block_size": 128, "dp_size": 2}
-        }));
-        let config =
-            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
-        let endpoint = GrpcEndpoint::parse("worker.example:30001", "test").unwrap();
-        (discovery, config, endpoint)
-    }
-
     #[tokio::test]
-    async fn kv_event_descriptor_is_optional_but_validated_when_present() {
-        let (mut discovery, mut config, endpoint) = kv_discovery();
-        for value in [json!(null), json!([]), json!("zmq")] {
-            discovery.server_info["kv_events"] = value.clone();
-            let result = discover_kv_event_sources(
-                &discovery,
-                &mut config,
-                &endpoint,
-                Instant::now() + Duration::from_secs(1),
-            )
-            .await;
-            if value.is_null() {
-                assert!(result.unwrap().is_empty());
-            } else {
-                assert!(
-                    result
-                        .unwrap_err()
-                        .to_string()
-                        .contains("must be an object or null")
-                );
-            }
+    async fn kv_event_sources_match_registration_and_publish_the_worker_group() {
+        // Node 0 of a two-node tensor-parallel deployment with one DP rank.
+        let info = |block_size: u32, sources: bool| {
+            discovery(|reported| {
+                reported.deployment.nnodes = 2;
+                reported.deployment.page_size = Some(64);
+                reported.deployment.dcp_size = 2;
+                reported.deployment.dist_init_addr = Some("127.0.0.1:2345".into());
+                if sources {
+                    reported.deployment.kv_event_sources = vec![pb::KvEventSource {
+                        dp_rank: 0,
+                        endpoint: "tcp://127.0.0.1:5557".into(),
+                        topic: "kv".into(),
+                        block_size,
+                    }];
+                }
+            })
+        };
+        async fn resolve(
+            info: EngineInfo,
+        ) -> Result<(Vec<DiscoveredKvEventSource>, EngineConfig), DynamoError> {
+            let mut config =
+                build_engine_config(&info, DisaggregationMode::Aggregated, None, None).unwrap();
+            discover_kv_event_sources(&info, &mut config, Instant::now() + Duration::from_secs(1))
+                .await
+                .map(|sources| (sources, config))
         }
-        discovery.server_info = json!({});
-        assert!(
-            discover_kv_event_sources(
-                &discovery,
-                &mut config,
-                &endpoint,
-                Instant::now() + Duration::from_secs(1)
-            )
-            .await
-            .unwrap()
-            .is_empty()
+
+        let (sources, config) = resolve(info(128, true)).await.unwrap();
+        assert_eq!(
+            sources,
+            [DiscoveredKvEventSource {
+                endpoint: "tcp://127.0.0.1:5557".to_string(),
+                topic: "kv".to_string(),
+                dp_rank: 0,
+            }]
+        );
+        assert_eq!(
+            config.runtime_data[WORKER_GROUP_KEY],
+            "dist_init:tcp://127.0.0.1:2345"
         );
 
-        for (field, value) in [
-            ("publisher", json!(null)),
-            ("publisher", json!("redis")),
-            ("endpoint_host", json!(" ")),
-            ("endpoint_port_base", json!(0)),
-            ("endpoint_port_base", json!(65536)),
-            ("endpoint_port_base", json!("5557")),
-            ("topic", json!(null)),
-            ("block_size", json!(0)),
-            ("block_size", json!(u64::from(u32::MAX) + 1)),
-            ("dp_size", json!(0)),
-        ] {
-            let (mut discovery, mut config, endpoint) = kv_discovery();
-            discovery.server_info["kv_events"][field] = value;
-            let error = discover_kv_event_sources(
-                &discovery,
-                &mut config,
-                &endpoint,
-                Instant::now() + Duration::from_secs(1),
-            )
-            .await
-            .unwrap_err();
-            assert_eq!(
-                error.error_type(),
-                ErrorType::Backend(BackendError::Unknown)
-            );
-            assert!(error.to_string().contains(field), "{field}: {error}");
-        }
-    }
+        // An empty list is authoritative and still publishes the group.
+        let (sources, config) = resolve(info(128, false)).await.unwrap();
+        assert!(sources.is_empty());
+        assert!(config.runtime_data.contains_key(WORKER_GROUP_KEY));
 
-    #[tokio::test]
-    async fn kv_events_require_matching_registration_and_rank_coverage() {
-        for (block_size, dp_size, dp_start, message) in [
-            (64, 2, 0, "block size"),
-            (128, 1, 0, "reports 2 DP ranks"),
-            (128, 2, u32::MAX, "rank range overflows"),
-            (128, 2, 1, "does not cover registered DP rank range"),
-        ] {
-            let (discovery, mut config, endpoint) = kv_discovery();
-            let llm = config.llm.as_mut().unwrap();
-            llm.kv_cache_block_size = Some(block_size);
-            llm.data_parallel_size = Some(dp_size);
-            llm.data_parallel_start_rank = Some(dp_start);
-            let error = discover_kv_event_sources(
-                &discovery,
-                &mut config,
-                &endpoint,
-                Instant::now() + Duration::from_secs(1),
-            )
-            .await
-            .unwrap_err();
-            assert_eq!(
-                error.error_type(),
-                ErrorType::Backend(BackendError::Unknown)
-            );
-            assert!(error.to_string().contains(message), "{error}");
-        }
-        let (discovery, mut config, endpoint) = kv_discovery();
-        config.llm = None;
-        assert!(
-            discover_kv_event_sources(
-                &discovery,
-                &mut config,
-                &endpoint,
-                Instant::now() + Duration::from_secs(1)
-            )
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("require an LLM engine registration")
+        let error = resolve(info(64, true)).await.unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
         );
-    }
+        assert!(
+            error
+                .to_string()
+                .contains("block_size does not match the registration"),
+            "{error}"
+        );
 
-    #[tokio::test]
-    async fn kv_events_reject_unmapped_multi_node_dp_and_port_overflow() {
-        for (nnodes, base_port, message) in [
-            (2, 5557, "multi-node DP are unsupported"),
-            (1, 65535, "port overflows 65535"),
-        ] {
-            let (mut discovery, mut config, endpoint) = kv_discovery();
-            discovery.server_info["nnodes"] = json!(nnodes);
-            discovery.server_info["kv_events"]["endpoint_port_base"] = json!(base_port);
-            let error = discover_kv_event_sources(
-                &discovery,
-                &mut config,
-                &endpoint,
-                Instant::now() + Duration::from_secs(1),
-            )
-            .await
-            .unwrap_err();
-            assert_eq!(
-                error.error_type(),
-                ErrorType::Backend(BackendError::Unknown)
-            );
-            assert!(error.to_string().contains(message), "{error}");
-        }
-    }
-
-    #[test]
-    fn kv_event_hosts_normalize_ipv6_and_reject_embedded_addresses() {
-        let endpoint = GrpcEndpoint::parse("http://[2001:db8::1]:30001", "test").unwrap();
-        for (host, expected) in [
-            ("*", "[2001:db8::1]"),
-            ("0.0.0.0", "[2001:db8::1]"),
-            ("[::]", "[2001:db8::1]"),
-            ("2001:db8::2", "[2001:db8::2]"),
-            ("[2001:db8::2]", "[2001:db8::2]"),
-            (" 10.0.0.2 ", "10.0.0.2"),
-            ("worker.example", "worker.example"),
-        ] {
-            assert_eq!(kv_event_connect_host(host, &endpoint).unwrap(), expected);
-        }
-        for host in [
-            "tcp://worker",
-            "worker:5557",
-            "worker/path",
-            "worker\\path",
-            "two hosts",
-        ] {
-            let error = kv_event_connect_host(host, &endpoint).unwrap_err();
-            assert_eq!(
-                error.error_type(),
-                ErrorType::Backend(BackendError::Unknown)
-            );
-            assert!(
-                error
-                    .to_string()
-                    .contains("invalid SGLang KV-event endpoint host")
-            );
-        }
+        // A single-node engine has no worker group.
+        let (_, config) = resolve(discovery(|_| {})).await.unwrap();
+        assert!(!config.runtime_data.contains_key(WORKER_GROUP_KEY));
     }
 
     #[test]
     fn eagle_enabled_tracks_sglang_is_eagle_predicate() {
-        for algorithm in [
+        let algorithm = |value: Option<&str>| {
+            discovery(|reported| {
+                reported.deployment.speculative_algorithm = value.map(str::to_string);
+            })
+            .speculative_algorithm
+        };
+        for name in [
             "EAGLE",
             "eagle",
             "EAGLE3",
@@ -1708,56 +1242,75 @@ mod tests {
             " Eagle ",
         ] {
             assert!(
-                sglang_eagle_enabled(&json!({"speculative_algorithm": algorithm})),
-                "{algorithm:?} keys the radix cache by bigrams and must advertise enable_eagle"
+                sglang_eagle_enabled(algorithm(Some(name)).as_deref()),
+                "{name:?} keys the radix cache by bigrams and must advertise enable_eagle"
             );
         }
-        for server_info in [
-            json!({}),
-            json!({"speculative_algorithm": null}),
-            json!({"speculative_algorithm": "NONE"}),
-            json!({"speculative_algorithm": "NGRAM"}),
-            json!({"speculative_algorithm": "STANDALONE"}),
-            json!({"speculative_algorithm": 3}),
-        ] {
+        for name in [None, Some("NONE"), Some("NGRAM"), Some("STANDALONE")] {
             assert!(
-                !sglang_eagle_enabled(&server_info),
-                "{server_info} must not advertise enable_eagle"
+                !sglang_eagle_enabled(algorithm(name).as_deref()),
+                "{name:?} must not advertise enable_eagle"
             );
         }
     }
 
     #[test]
-    fn combined_token_limit_subtracts_sglang_eagle_reserve() {
-        let limit = |server_info| {
-            let mut discovery = discovery(server_info);
-            discovery.max_model_len = Some(4096);
-            combined_token_limit(&discovery)
+    fn combined_token_limit_subtracts_the_reported_draft_reserve() {
+        let limit = |context: u32, reserved: u64| {
+            combined_token_limit(&discovery(|reported| {
+                reported.server.max_context_length = context;
+                reported.server.num_reserved_tokens = reserved;
+            }))
         };
-        let eagle = json!({
-            "speculative_algorithm": "EAGLE",
-            "speculative_eagle_topk": 1,
-            "speculative_num_steps": 3,
-            "speculative_num_draft_tokens": 4,
-        });
-        assert_eq!(limit(json!({})), Some(4096));
-        assert_eq!(limit(eagle.clone()), Some(4092));
-        let mut adaptive = eagle.clone();
-        adaptive["speculative_adaptive"] = true.into();
-        assert_eq!(limit(adaptive), None);
-        let mut incomplete = eagle;
-        incomplete
-            .as_object_mut()
-            .unwrap()
-            .remove("speculative_num_steps");
-        assert_eq!(limit(incomplete), None);
+        assert_eq!(limit(4096, 0), Some(4096));
+        assert_eq!(limit(4096, 4), Some(4092));
+        assert_eq!(limit(4, 5), None);
+        // Zero is proto3's unset context length.
+        assert_eq!(limit(0, 0), None);
+    }
+
+    /// EAGLE reserves at least one draft-token slot, so an EAGLE server that
+    /// reports none predates the field. Its reserve is unknown: no budget is
+    /// published and omitted max_tokens keep SGLang's default, rather than a
+    /// budget the draft tokens would overrun.
+    #[test]
+    fn eagle_without_a_reported_draft_reserve_publishes_no_budget() {
+        let info = |algorithm: Option<&str>, reserved: u64| {
+            discovery(|reported| {
+                reported.server.max_context_length = 4096;
+                reported.server.num_reserved_tokens = reserved;
+                reported.deployment.speculative_algorithm = algorithm.map(str::to_string);
+            })
+        };
+        let budget = |info: &EngineInfo| {
+            build_engine_config(info, DisaggregationMode::Aggregated, None, None)
+                .unwrap()
+                .runtime_data
+                .remove("token_budget")
+        };
+        let old_eagle = info(Some("EAGLE"), 0);
+        assert!(lacks_draft_reserve(&old_eagle));
+        assert_eq!(combined_token_limit(&old_eagle), None);
+        assert_eq!(budget(&old_eagle), None);
+
+        assert!(!lacks_draft_reserve(&info(Some("EAGLE"), 4)));
+        // Other algorithms reserve nothing, so zero is their real reserve.
+        for algorithm in [None, Some("NGRAM")] {
+            let info = info(algorithm, 0);
+            assert!(!lacks_draft_reserve(&info), "{algorithm:?}");
+            assert_eq!(combined_token_limit(&info), Some(4096), "{algorithm:?}");
+            assert!(budget(&info).is_some(), "{algorithm:?}");
+        }
     }
 
     #[test]
     fn reasoning_gate_follows_the_engine_reasoning_parser() {
-        let gate = |server_info| {
+        let gate = |parser: Option<&str>, skip_tokenizer_init: bool| {
             build_engine_config(
-                &discovery(server_info),
+                &discovery(|reported| {
+                    reported.model.reasoning_parser = parser.map(str::to_string);
+                    reported.server.skip_tokenizer_init = skip_tokenizer_init;
+                }),
                 DisaggregationMode::Aggregated,
                 None,
                 None,
@@ -1766,32 +1319,37 @@ mod tests {
             .runtime_data
             .remove("tool_call_structural_tag_reasoning_gate")
         };
-        assert_eq!(
-            gate(json!({"reasoning_parser": "kimi_k2"})),
-            Some(json!(true))
-        );
-        for server_info in [
-            json!({}),
-            json!({"reasoning_parser": ""}),
-            json!({"reasoning_parser": null}),
-            json!({"reasoning_parser": "kimi_k2", "skip_tokenizer_init": true}),
-        ] {
-            assert_eq!(gate(server_info.clone()), None, "{server_info}");
+        assert_eq!(gate(Some("kimi_k2"), false), Some(json!(true)));
+        for (parser, skip_tokenizer_init) in
+            [(None, false), (Some(""), false), (Some("kimi_k2"), true)]
+        {
+            assert_eq!(
+                gate(parser, skip_tokenizer_init),
+                None,
+                "{parser:?} {skip_tokenizer_init}"
+            );
         }
     }
 
     #[test]
     fn token_budget_follows_sglang_auto_truncation() {
-        let budget = |server_info| {
-            let mut discovery = discovery(server_info);
-            discovery.max_model_len = Some(4096);
-            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None)
-                .unwrap()
-                .runtime_data
-                .remove("token_budget")
+        let budget = |context: u32, reserved: u64, truncates: bool| {
+            build_engine_config(
+                &discovery(|reported| {
+                    reported.server.max_context_length = context;
+                    reported.server.num_reserved_tokens = reserved;
+                    reported.server.allow_auto_truncate = truncates;
+                }),
+                DisaggregationMode::Aggregated,
+                None,
+                None,
+            )
+            .unwrap()
+            .runtime_data
+            .remove("token_budget")
         };
         assert_eq!(
-            budget(json!({"allow_auto_truncate": false})),
+            budget(4096, 0, false),
             Some(json!({
                 "combined_limit": 4096,
                 "reject_prompt_overflow": true,
@@ -1799,28 +1357,15 @@ mod tests {
             }))
         );
         assert_eq!(
-            budget(json!({
-                "allow_auto_truncate": true,
-                "speculative_algorithm": "EAGLE",
-                "speculative_eagle_topk": 1,
-                "speculative_num_steps": 3,
-                "speculative_num_draft_tokens": 4,
-            })),
+            budget(4096, 4, true),
             Some(json!({
                 "combined_limit": 4092,
                 "reject_prompt_overflow": false,
                 "reject_total_overflow": false,
             }))
         );
-        assert_eq!(budget(json!({})), None);
-        assert_eq!(
-            budget(json!({
-                "allow_auto_truncate": false,
-                "speculative_algorithm": "EAGLE",
-                "speculative_adaptive": true,
-            })),
-            None
-        );
+        assert_eq!(budget(0, 0, false), None);
+        assert_eq!(budget(4, 5, false), None);
     }
 
     #[test]
@@ -1834,23 +1379,23 @@ mod tests {
 
     #[test]
     fn registration_advertises_enable_eagle_for_eagle_servers() {
-        let eagle = build_engine_config(
-            &discovery(json!({"speculative_algorithm": "EAGLE", "page_size": 256})),
-            DisaggregationMode::Aggregated,
-            None,
-            None,
-        )
-        .unwrap();
-        assert!(eagle.llm.unwrap().enable_eagle);
-
-        let plain = build_engine_config(
-            &discovery(json!({"page_size": 256})),
-            DisaggregationMode::Aggregated,
-            None,
-            None,
-        )
-        .unwrap();
-        assert!(!plain.llm.unwrap().enable_eagle);
+        let enable_eagle = |algorithm: Option<&str>| {
+            build_engine_config(
+                &discovery(|reported| {
+                    reported.deployment.speculative_algorithm = algorithm.map(str::to_string);
+                    reported.deployment.page_size = Some(256);
+                }),
+                DisaggregationMode::Aggregated,
+                None,
+                None,
+            )
+            .unwrap()
+            .llm
+            .unwrap()
+            .enable_eagle
+        };
+        assert!(enable_eagle(Some("EAGLE")));
+        assert!(!enable_eagle(None));
     }
 
     #[test]
@@ -1858,7 +1403,7 @@ mod tests {
         let host = resolve_bootstrap_host_with_local(
             Some("prefill.example"),
             "http://127.0.0.1:30001",
-            &discovery(json!({"dist_init_addr": "10.0.0.1:20000"})),
+            &hosts("", Some("10.0.0.1:20000")),
             "10.0.0.2",
         )
         .unwrap();
@@ -1870,10 +1415,7 @@ mod tests {
         let host = resolve_bootstrap_host_with_local(
             None,
             "http://127.0.0.1:30001",
-            &discovery(json!({
-                "host": "10.0.0.1",
-                "dist_init_addr": "10.0.0.2:20000"
-            })),
+            &hosts("10.0.0.1", Some("10.0.0.2:20000")),
             "10.0.0.3",
         )
         .unwrap();
@@ -1885,10 +1427,7 @@ mod tests {
         let host = resolve_bootstrap_host_with_local(
             None,
             "http://127.0.0.1:30001",
-            &discovery(json!({
-                "host": "0.0.0.0",
-                "dist_init_addr": "10.0.0.1:20000"
-            })),
+            &hosts("0.0.0.0", Some("10.0.0.1:20000")),
             "10.0.0.2",
         )
         .unwrap();
@@ -1900,7 +1439,7 @@ mod tests {
         let host = resolve_bootstrap_host_with_local(
             None,
             "http://127.0.0.1:30001",
-            &discovery(json!({})),
+            &hosts("", None),
             "10.0.0.2",
         )
         .unwrap();
@@ -1912,7 +1451,7 @@ mod tests {
         let error = resolve_bootstrap_host_with_local(
             None,
             "http://localhost:30001",
-            &discovery(json!({"dist_init_addr": "0.0.0.0:20000"})),
+            &hosts("", Some("0.0.0.0:20000")),
             "127.0.0.1",
         )
         .unwrap_err();
@@ -1920,107 +1459,13 @@ mod tests {
     }
 
     #[test]
-    fn multi_node_grpc_endpoint_registers_all_dp_ranks() {
-        let config = build_engine_config(
-            &discovery(json!({
-                "dp_size": 16,
-                "enable_dp_attention": true,
-                "nnodes": 4,
-                "node_rank": 0,
-            })),
-            DisaggregationMode::Decode,
-            None,
-            None,
-        )
-        .unwrap();
-        let registration = config.llm.unwrap();
-
-        assert_eq!(registration.data_parallel_start_rank, Some(0));
-        assert_eq!(registration.data_parallel_size, Some(16));
-    }
-
-    #[test]
-    fn pure_dp_preserves_per_rank_max_num_seqs() {
-        let config = build_engine_config(
-            &discovery(json!({
-                "dp_size": 4,
-                "enable_dp_attention": false,
-                "max_running_requests": 256,
-            })),
-            DisaggregationMode::Decode,
-            None,
-            None,
-        )
-        .unwrap();
-
-        let registration = config.llm.unwrap();
-        assert_eq!(registration.max_num_seqs, Some(256));
-        assert_eq!(registration.data_parallel_start_rank, Some(0));
-        assert_eq!(registration.data_parallel_size, Some(4));
-    }
-
-    #[test]
-    fn attention_dp_normalizes_aggregate_max_num_seqs_per_rank() {
-        let config = build_engine_config(
-            &discovery(json!({
-                "attn_dp_size": 4,
-                "max_running_requests": 256,
-            })),
-            DisaggregationMode::Decode,
-            None,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(config.llm.unwrap().max_num_seqs, Some(64));
-    }
-
-    #[test]
-    fn legacy_attention_dp_normalizes_max_num_seqs_per_rank() {
-        let config = build_engine_config(
-            &discovery(json!({
-                "dp_size": 4,
-                "enable_dp_attention": true,
-                "max_running_requests": 256,
-            })),
-            DisaggregationMode::Decode,
-            None,
-            None,
-        )
-        .unwrap();
-
-        let registration = config.llm.unwrap();
-        assert_eq!(registration.data_parallel_size, Some(4));
-        assert_eq!(registration.max_num_seqs, Some(64));
-    }
-
-    #[test]
-    fn split_attention_dp_fields_register_the_deployment_rank_count() {
-        let config = build_engine_config(
-            &discovery(json!({
-                "dp_size": 2,
-                "attn_dp_size": 4,
-                "max_running_requests": 256,
-            })),
-            DisaggregationMode::Decode,
-            None,
-            None,
-        )
-        .unwrap();
-
-        let registration = config.llm.unwrap();
-        assert_eq!(registration.data_parallel_size, Some(8));
-        assert_eq!(registration.max_num_seqs, Some(64));
-    }
-
-    #[test]
     fn dcp_registers_logical_kv_block_size() {
         let config = build_engine_config(
-            &discovery(json!({
-                "page_size": 64,
-                "dcp_size": 8,
-                "max_total_num_tokens": 1024,
-            })),
+            &discovery(|reported| {
+                reported.deployment.page_size = Some(64);
+                reported.deployment.dcp_size = 8;
+                reported.server.max_total_num_tokens = Some(1024);
+            }),
             DisaggregationMode::Decode,
             None,
             None,
@@ -2035,14 +1480,14 @@ mod tests {
     #[test]
     fn publishes_hicache_capacity() {
         let config = build_engine_config(
-            &discovery(json!({
-                "enable_hierarchical_cache": true,
-                "hicache_size": 0,
-                "hicache_ratio": 3.0,
-                "hicache_write_policy": "write_through",
-                "page_size": 16,
-                "max_total_num_tokens": 100,
-            })),
+            &discovery(|reported| {
+                reported.deployment.enable_hierarchical_cache = true;
+                reported.deployment.hicache_size = 0;
+                reported.deployment.hicache_ratio = Some(3.0);
+                reported.deployment.hicache_write_policy = Some("write_through".into());
+                reported.deployment.page_size = Some(16);
+                reported.server.max_total_num_tokens = Some(100);
+            }),
             DisaggregationMode::Decode,
             None,
             None,
@@ -2057,163 +1502,40 @@ mod tests {
 
     #[test]
     fn supports_deepseek_v4_hicache_capacity() {
-        let mut server_info = json!({
-            "enable_hierarchical_cache": true,
-            "hicache_size": 0,
-            "hicache_ratio": 2.0,
-            "hicache_write_policy": "write_back",
-            "page_size": 256,
-            "max_total_num_tokens": 8192,
-        });
+        let capacity = |architecture: &str, host_total_tokens: Option<u64>| {
+            build_engine_config(
+                &discovery(|reported| {
+                    reported.model.architectures = vec![architecture.to_string()];
+                    reported.deployment.enable_hierarchical_cache = true;
+                    reported.deployment.hicache_size = 0;
+                    reported.deployment.hicache_ratio = Some(2.0);
+                    reported.deployment.hicache_write_policy = Some("write_back".into());
+                    reported.deployment.hicache_host_total_tokens = host_total_tokens;
+                    reported.deployment.page_size = Some(256);
+                    reported.server.max_total_num_tokens = Some(8192);
+                }),
+                DisaggregationMode::Decode,
+                None,
+                None,
+            )
+            .unwrap()
+            .runtime_data
+            .remove("native_offloading_capacity")
+        };
         for architecture in [
             "DeepseekV4ForCausalLM",
             "DeepseekV4ForCausalLMNextN",
             "DeepseekV4ForCausalLMDSpark",
         ] {
             assert_eq!(
-                hicache_native_offloading_capacity(
-                    &server_info,
-                    &json!({"architectures": [architecture]}),
-                ),
-                Some(16384)
+                capacity(architecture, None),
+                Some(json!({"total_tokens": 16384})),
+                "{architecture}"
             );
         }
-
-        server_info["hicache_host_total_tokens"] = json!(16640);
         assert_eq!(
-            hicache_native_offloading_capacity(
-                &server_info,
-                &json!({"architectures": ["DeepseekV4ForCausalLM"]}),
-            ),
-            Some(16640)
-        );
-    }
-
-    #[tokio::test]
-    async fn discovers_ranked_kv_event_sources_from_server_info() {
-        let discovery = discovery(json!({
-            "page_size": 64,
-            "dcp_size": 2,
-            "dp_size": 2,
-            "enable_dp_attention": true,
-            "kv_events": {
-                "publisher": "zmq",
-                "endpoint_host": "*",
-                "endpoint_port_base": 5557,
-                "topic": "kv",
-                "block_size": 128,
-                "dp_size": 2
-            }
-        }));
-        let mut config =
-            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
-        let endpoint = GrpcEndpoint::parse("http://worker.example:30001", "test").unwrap();
-
-        let sources = discover_kv_event_sources(
-            &discovery,
-            &mut config,
-            &endpoint,
-            Instant::now() + Duration::from_secs(1),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            sources,
-            [
-                DiscoveredKvEventSource {
-                    endpoint: "tcp://worker.example:5557".to_string(),
-                    topic: "kv".to_string(),
-                    dp_rank: 0,
-                },
-                DiscoveredKvEventSource {
-                    endpoint: "tcp://worker.example:5558".to_string(),
-                    topic: "kv".to_string(),
-                    dp_rank: 1,
-                },
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn local_metadata_overrides_global_sources_without_shrinking_registration() {
-        use crate::client::{KV_CONFIG_KEY, WORKER_GROUP_KEY};
-
-        let mut discovery = discovery(json!({
-            "page_size": 64, "dp_size": 8, "nnodes": 2, "node_rank": 0,
-            "dist_init_addr": "127.0.0.1:2345",
-            "kv_event_sources": [
-                {"dp_rank":0,"endpoint":"tcp://127.0.0.1:5557","topic":"kv","block_size":64},
-                {"dp_rank":1,"endpoint":"tcp://127.0.0.1:5558","topic":"kv","block_size":64},
-                {"dp_rank":2,"endpoint":"tcp://127.0.0.1:5559","topic":"kv","block_size":64},
-                {"dp_rank":3,"endpoint":"tcp://127.0.0.1:5560","topic":"kv","block_size":64}
-            ],
-            "kv_events": {
-                "publisher": "zmq", "endpoint_host": "*",
-                "endpoint_port_base": 5557, "topic": "kv", "block_size": 64,
-                "dp_size": 8
-            }
-        }));
-        let mut config =
-            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
-        let endpoint = GrpcEndpoint::parse("http://127.0.0.1:30001", "test").unwrap();
-        let sources = discover_kv_event_sources(
-            &discovery,
-            &mut config,
-            &endpoint,
-            Instant::now() + Duration::from_secs(1),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            sources
-                .iter()
-                .map(|source| source.dp_rank)
-                .collect::<Vec<_>>(),
-            vec![0, 1, 2, 3]
-        );
-        assert_eq!(sources[0].endpoint, "tcp://127.0.0.1:5557");
-        assert_eq!(config.llm.as_ref().unwrap().data_parallel_size, Some(8));
-        assert_eq!(
-            config.runtime_data[WORKER_GROUP_KEY],
-            "dist_init:tcp://127.0.0.1:2345"
-        );
-        assert_eq!(config.runtime_data[KV_CONFIG_KEY]["block_size"], 64);
-
-        // An explicit empty source list must not fall back to all global ranks.
-        discovery.server_info["kv_event_sources"] = json!([]);
-        assert!(
-            discover_kv_event_sources(
-                &discovery,
-                &mut config,
-                &endpoint,
-                Instant::now() + Duration::from_secs(1)
-            )
-            .await
-            .unwrap()
-            .is_empty()
-        );
-        assert_eq!(
-            config.runtime_data[KV_CONFIG_KEY]["local_dp_ranks"],
-            json!([])
-        );
-        assert_eq!(config.llm.as_ref().unwrap().data_parallel_size, Some(8));
-
-        // Engines without the new metadata field retain the old multinode guard.
-        discovery
-            .server_info
-            .as_object_mut()
-            .unwrap()
-            .remove("kv_event_sources");
-        assert!(
-            discover_kv_event_sources(
-                &discovery,
-                &mut config,
-                &endpoint,
-                Instant::now() + Duration::from_secs(1)
-            )
-            .await
-            .is_err()
+            capacity("DeepseekV4ForCausalLM", Some(16640)),
+            Some(json!({"total_tokens": 16640}))
         );
     }
 }
