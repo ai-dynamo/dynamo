@@ -734,7 +734,7 @@ instance. Callers reach the public surface via `fetch_bytes`
 and the unified exception classes above; the concrete backend type
 is invisible past instantiation.
 
-[`components/src/dynamo/common/http/base.py#L104`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L104)
+[`components/src/dynamo/common/http/base.py#L105`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L105)
 
 **Public methods**
 
@@ -746,7 +746,7 @@ __init__(config: Optional[HttpConfigBase] = None) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L113)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L114)
 
 <h4 id="api-dynamo-common-http-base-httpclient-fetch-bytes">fetch_bytes</h4>
 
@@ -776,7 +776,7 @@ hop against the policy via `url_validator.validate_url`.
 This is the SSRF-safe path; raises `UrlValidationError`
 if any hop fails or the chain exceeds ``_MAX_REDIRECTS``.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L117)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L118)
 
 <h4 id="api-dynamo-common-http-base-httpclient-close">close</h4>
 
@@ -786,7 +786,7 @@ close() -> None
 
 Close the backend session/client. Idempotent.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L235)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L236)
 </Accordion>
 
 <Accordion id="api-dynamo-common-http-base-httpconfigurationerror" title="HttpConfigurationError (class)">
@@ -801,7 +801,7 @@ the client as a 4xx. Loaders that convert unknown exceptions into
 ``ValueError`` have to let this one through: ``py_err_to_dynamo`` maps
 ``ValueError`` to ``InvalidArgument``, which is a client error.
 
-[`components/src/dynamo/common/http/base.py#L50`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L50)
+[`components/src/dynamo/common/http/base.py#L51`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L51)
 </Accordion>
 
 <Accordion id="api-dynamo-common-http-base-httpconnectionerror" title="HttpConnectionError (class)">
@@ -811,7 +811,7 @@ Network-layer failure: DNS, refused, reset, half-close.
 from dynamo.common.http import HttpConnectionError
 ```
 
-[`components/src/dynamo/common/http/base.py#L46`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L46)
+[`components/src/dynamo/common/http/base.py#L47`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L47)
 </Accordion>
 
 <Accordion id="api-dynamo-common-http-base-httperror" title="HttpError (class)">
@@ -821,7 +821,7 @@ Base class for all HTTP fetch failures.
 from dynamo.common.http import HttpError
 ```
 
-[`components/src/dynamo/common/http/base.py#L38`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L38)
+[`components/src/dynamo/common/http/base.py#L39`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L39)
 </Accordion>
 
 <Accordion id="api-dynamo-common-http-base-httpstatuserror" title="HttpStatusError (class)">
@@ -835,7 +835,7 @@ from dynamo.common.http import HttpStatusError
 HttpStatusError(status: int, message: str, url: str) -> None
 ```
 
-[`components/src/dynamo/common/http/base.py#L60`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L60)
+[`components/src/dynamo/common/http/base.py#L61`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L61)
 
 **Public methods**
 
@@ -847,7 +847,7 @@ __init__(status: int, message: str, url: str) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L63)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L64)
 </Accordion>
 
 <Accordion id="api-dynamo-common-http-base-httptimeouterror" title="HttpTimeoutError (class)">
@@ -857,7 +857,7 @@ Timeout during connect / read / pool-wait.
 from dynamo.common.http import HttpTimeoutError
 ```
 
-[`components/src/dynamo/common/http/base.py#L42`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L42)
+[`components/src/dynamo/common/http/base.py#L43`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L43)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-image-loader-imageloader" title="ImageLoader (class)">
@@ -868,17 +868,17 @@ from dynamo.common.multimodal import ImageLoader
 ```
 
 ```python
-ImageLoader(cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None, max_bytes: int | None = None, session_scoped_cache: bool | None = None)
+ImageLoader(cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None, max_bytes: int | None = None, session_scoped_cache: bool | None = None, max_pixels: int | None = None)
 ```
 
-[`components/src/dynamo/common/multimodal/image_loader.py#L137`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L137)
+[`components/src/dynamo/common/multimodal/image_loader.py#L138`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L138)
 
 **Public methods**
 
 <h4 id="api-dynamo-common-multimodal-image-loader-imageloader-init">__init__</h4>
 
 ```python
-__init__(cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None, max_bytes: int | None = None, session_scoped_cache: bool | None = None)
+__init__(cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None, max_bytes: int | None = None, session_scoped_cache: bool | None = None, max_pixels: int | None = None)
 ```
 
 Initialize the ImageLoader with caching, HTTP settings, and optional NIXL config for receiving frontend decoding.
@@ -911,18 +911,25 @@ in-flight, and shared-cache keys. ``None`` (default) reads
 DYN_MM_IMAGE_CACHE_SESSION_SCOPED (default off). When enabled,
 HTTP loads without a scope bypass all image caches.
 </ParamField>
+<ParamField path="max_pixels" type="int | None">
+Optional per-image pixel limit, checked before RGB decode.
+</ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L140)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L141)
 
 <h4 id="api-dynamo-common-multimodal-image-loader-imageloader-load-image">load_image</h4>
 
 ```python
-load_image(image_url: str, *, cache_scope: str | None = None) -> Image.Image
+load_image(image_url: str, *, cache_scope: str | None = None, max_pixels: int | None = None) -> Image.Image
 ```
 
-Load and decode one media URL through the validated image cache.
+Load one image, optionally with a request-specific remaining pixel budget.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L385)
+A request-specific budget uses a cancellable private fetch on cache miss;
+it cannot join an in-flight decode with a different budget. Completed
+cache entries remain shareable and are checked against the caller's limit.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L414)
 
 <h4 id="api-dynamo-common-multimodal-image-loader-imageloader-load-image-batch">load_image_batch</h4>
 
@@ -965,7 +972,7 @@ DYN_MM_IMAGE_CACHE_SESSION_SCOPED is enabled.
 - `ValueError` — If enable_frontend_decoding=True but nixl_connector is None
 - `ValueError` — If a UUID-only slot is received without opting in
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L485)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L544)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-llmengine" title="LLMEngine (class)">
