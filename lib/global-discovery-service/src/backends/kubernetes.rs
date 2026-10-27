@@ -56,6 +56,8 @@ mod cache;
 pub mod endpoints;
 pub mod hub;
 pub mod mcs;
+pub mod routing;
+pub use routing::{McsRoutingConfig, McsRoutingConfigError};
 
 pub use endpoints::{EndpointSliceReplicaDirectory, RouterService};
 pub use hub::{
