@@ -360,7 +360,6 @@ async fn recovery_session(
             },
             message = replay.next(), if is_replaying => {
                 let frames = multipart_message(message.ok_or_else(|| anyhow::anyhow!("KV replay socket ended"))??);
-                replay_deadline = Instant::now() + INACTIVITY_TIMEOUT;
                 match decode_replay(frames)? {
                     ReplayFrame::Batch(sequence, payload) => {
                         // A hole inside one reply is a transport drop; the next round re-requests it.
@@ -374,6 +373,8 @@ async fn recovery_session(
                             }
                             apply_in_order(cursor, sequence, payload, normalizer, tx, next_event_id, worker, expected_rank, true).await?;
                         }
+                        // Inactivity counts from here, so waiting for the index does not time out replay.
+                        replay_deadline = Instant::now() + INACTIVITY_TIMEOUT;
                     }
                     ReplayFrame::End => {
                         is_replaying = false;
@@ -416,7 +417,9 @@ async fn recovery_session(
                     revoke(&config.status, deadline);
                     next_replay = Some(Instant::now());
                 }
+                let applying = Instant::now();
                 apply_in_order(cursor, sequence, payload, normalizer, tx, next_event_id, worker, expected_rank, !is_success).await?;
+                replay_deadline += applying.elapsed();
             },
         }
     }
@@ -797,6 +800,22 @@ mod socket_tests {
                 assert!(matches!(status, KvStreamStatus::Failed { .. }));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn slow_index_acknowledgement_does_not_time_out_replay() {
+        let mut f = Fixture::new(Duration::from_secs(30));
+        let id = f.request(0).await;
+        f.send(&id, 0, payload(0)).await;
+        let PublisherInput::Recovery(_, done) = f.input().await else {
+            panic!("expected recovery application")
+        };
+        // Past the replay inactivity limit, within the index acknowledgement limit.
+        tokio::time::sleep(INACTIVITY_TIMEOUT + Duration::from_millis(500)).await;
+        done.send(Ok(())).unwrap();
+        f.send(&id, -1, vec![]).await;
+        f.ack().await;
+        f.status(KvStreamStatus::Success).await;
     }
 
     #[tokio::test]
