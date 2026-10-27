@@ -791,7 +791,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `clusterId` _string_ | ClusterID is the Relay's stable logical cluster ID across restarts. |  | MaxLength: 128 <br />MinLength: 1 <br />Pattern: `^[^[:space:]\p\{Z\}\x85\x1c-\x1f](.*[^[:space:]\p\{Z\}\x85\x1c-\x1f])?$` <br /> |
-| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate configures Relay Pods. Its main container needs an image with `dynamo.pool_relay` and `--sources-file` support from the operator's revision. The controller sets the main command, listener probes, source volume, service account, and Relay identity and discovery environment variables. Reserved env names: DYN_NAMESPACE, DYN_DISCOVERY_BACKEND, DYN_KUBE_DISCOVERY_MODE, DYN_SYSTEM_PORT, DYN_TCP_RESPONSE_STREAM_HOST, DYN_TCP_RESPONSE_STREAM_PORT, DYN_CLUSTER_ID, DYN_RELAY_BIND, DYN_RELAY_CONNECTION_REVISION, DYN_RELAY_NAMESPACES, DYN_RELAY_WATCH_ALL, DYN_RELAY_ENDPOINT_PREFIXES, POD_NAME, POD_NAMESPACE, and POD_UID. The main container cannot use envFrom because it could override those values. |  | Required: \{\} <br /> |
+| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate configures Relay Pods. Its main container needs an image with<br />dynamo.pool_relay and --sources-file support from the operator's revision.<br />The controller sets the main command, listener probes, source volume,<br />service account, and Relay identity and discovery environment variables.<br />Reserved env names: DYN_NAMESPACE, DYN_DISCOVERY_BACKEND,<br />DYN_KUBE_DISCOVERY_MODE, DYN_SYSTEM_PORT, DYN_TCP_RESPONSE_STREAM_HOST,<br />DYN_TCP_RESPONSE_STREAM_PORT, DYN_CLUSTER_ID, DYN_RELAY_BIND,<br />DYN_RELAY_CONNECTION_REVISION, DYN_RELAY_NAMESPACES, DYN_RELAY_WATCH_ALL,<br />DYN_RELAY_ENDPOINT_PREFIXES, POD_NAME, POD_NAMESPACE, and POD_UID.<br />The main container cannot use envFrom because it could override those values. |  | Required: \{\} <br /> |
 | `replicas` _integer_ | Replicas sets the number of active Relay Pods. Each watches the DGD. | 2 | Minimum: 1 <br />Optional: \{\} <br /> |
 
 
@@ -808,10 +808,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `observedGeneration` _integer_ | The Relay resource generation last reconciled by the operator. |  | Optional: \{\} <br /> |
-| `endpoint` _string_ | Cluster-local `<dgd>-pool-relay.<namespace>.svc:5561` address; empty after withdrawal or a failed reconciliation. |  | Optional: \{\} <br /> |
-| `availableReplicas` _integer_ | Number of Relay Pods the Deployment reports available. |  | Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Ready reports listener availability, not model or KV readiness. Reasons include ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration, ReconcileFailed, and ResourceOwnershipConflict. |  | Optional: \{\} <br /> |
+| `observedGeneration` _integer_ | ObservedGeneration is the Relay resource generation last reconciled by the operator. |  | Optional: \{\} <br /> |
+| `endpoint` _string_ | Endpoint is the cluster-local `<dgd>-pool-relay.<namespace>.svc:5561` address.<br />It is empty after withdrawal or a failed reconciliation. |  | Optional: \{\} <br /> |
+| `availableReplicas` _integer_ | AvailableReplicas is the number of Relay Pods the Deployment reports available. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions includes Ready for listener availability, not model or KV readiness.<br />Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound,<br />DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers,<br />InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict. |  | Optional: \{\} <br /> |
 
 
 #### EPPConfig
