@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
@@ -33,6 +34,18 @@ use url::Url;
 /// and the stores add the lease to the current time, which a lease near
 /// `u64::MAX` seconds would overflow.
 const MAX_LEASE_DURATION_SECS: u64 = 86_400;
+
+/// How long the Kubernetes client waits to connect to the API server, TLS
+/// included. kube's default is 30 s.
+const KUBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the Kubernetes client waits for the API server to answer. The
+/// Kubernetes stores need this and [`KUBE_CONNECT_TIMEOUT`] to add up to
+/// under 90 s, so a server that stops answering shows up as failures; their
+/// watches end after 50 s, so a working watch never reaches it. kube's
+/// default is 295 s.
+const KUBE_READ_TIMEOUT: Duration = Duration::from_secs(75);
+const _: () = assert!(KUBE_CONNECT_TIMEOUT.as_secs() + KUBE_READ_TIMEOUT.as_secs() < 90);
 
 #[derive(Parser)]
 #[command(about = "Serve Global Router pool discovery over HTTP")]
@@ -175,7 +188,7 @@ async fn kubernetes_store(args: &Args, mcs: McsImplementation) -> Result<Discove
             "the Kubernetes stores need --router-namespace, --router-service and --router-port-name"
         );
     };
-    let client = Client::try_default()
+    let client = kubernetes_client()
         .await
         .context("create the Kubernetes client")?;
     let router = ExportedService {
@@ -192,6 +205,16 @@ async fn kubernetes_store(args: &Args, mcs: McsImplementation) -> Result<Discove
         routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
         registrar: None,
     })
+}
+
+/// A client configured as `Client::try_default` does, from the pod's service
+/// account or the local kubeconfig, but with [`KUBE_CONNECT_TIMEOUT`] and
+/// [`KUBE_READ_TIMEOUT`].
+async fn kubernetes_client() -> Result<Client> {
+    let mut config = kube::Config::infer().await?;
+    config.connect_timeout = Some(KUBE_CONNECT_TIMEOUT);
+    config.read_timeout = Some(KUBE_READ_TIMEOUT);
+    Ok(Client::try_from(config)?)
 }
 
 /// Cancels `shutdown` on SIGTERM or Ctrl-C. Fails at startup if it cannot

@@ -16,6 +16,7 @@
 //! traits. It runs on `dynamo-http-server`, so it gets TLS and mTLS the way
 //! the Dynamo frontend does.
 
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -39,6 +40,14 @@ pub struct DiscoveryStore {
     pub routers: Arc<ReplicaDirectory>,
     /// `None` for a store that takes no registrations, such as MCS.
     pub registrar: Option<Arc<dyn PoolRegistrar>>,
+}
+
+impl fmt::Debug for DiscoveryStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DiscoveryStore")
+            .field("takes_registrations", &self.registrar.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// TLS for the listener. With `client_ca`, callers must also present a
