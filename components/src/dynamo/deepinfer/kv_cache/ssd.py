@@ -170,12 +170,12 @@ class SSDPool:
             os.posix_fallocate(self._fd, 0, size)
         except (AttributeError, OSError) as e:
             if getattr(e, "errno", None) in (errno.ENOSPC, errno.EDQUOT):
-                what = (
+                message = (
                     "could not preallocate the SSD file (%s): sparse, writes may fail"
                 )
             else:
-                what = "posix_fallocate unavailable (%s): sparse SSD file"
-            logger.warning(what, e)
+                message = "posix_fallocate unavailable (%s): sparse SSD file"
+            logger.warning(message, e)
             os.ftruncate(self._fd, size)
 
     @property

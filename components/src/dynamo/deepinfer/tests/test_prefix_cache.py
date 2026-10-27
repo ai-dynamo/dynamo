@@ -1418,7 +1418,7 @@ def test_ssd_backup_with_an_ssd_child_is_not_reclaimed(tmp_path, io):
     d.close()
 
 
-def test_read_that_does_not_fit_evicts_nothing(tmp_path, io):
+def test_read_that_gets_fewer_rows_is_cut_back_to_a_snapshot(tmp_path, io):
     d = Driver(ssd_runner(tmp_path, rows=3, ssd_blocks=64))
     a = prompt(1200, salt=1)
     d.run("a", a)
@@ -1433,12 +1433,85 @@ def test_read_that_does_not_fit_evicts_nothing(tmp_path, io):
     d.events.clear()
     d.add("a2", a, max_tokens=4)
     # 256 tokens hit from host (two rows free up); the gap block behind them
-    # stays, and of the five SSD blocks only the one up to the next snapshot
-    # fits in the rows left: no host block is evicted for a read not made.
+    # stays. Two rows are taken for the five SSD blocks, which covers the
+    # first and the gap behind it: the read is cut back to the first (the
+    # deepest snapshot the rows cover) and the second row goes back.
     assert d.admissions["a2"].hit_tokens == 256
     assert calls == [("load", [run[3].ssd_slot])]
+    # Nothing was evictable, so nothing was evicted for the rows.
     assert d.cache.host_evictions == before and not removed(d)
     assert [x.tier.name for x in run[:4]] == ["GPU", "GPU", "HOST", "HOST"]
+    host = d.cache._host
+    # Held rows: the gap block and the one being read; the third is free.
+    assert host.num_free == 1 and run[4].reading is False
+    d.apply(aborts=["a2"])
+    d.apply()
+    # Quiescent: no row leaked (check_ssd adds them up).
+    check_ssd(d)
+    d.close()
+
+
+def test_read_that_cannot_fit_evicts_nothing(tmp_path, io):
+    d = Driver(ssd_runner(tmp_path, rows=3, ssd_blocks=64, snapshot_interval=1024))
+    a = prompt(1200, salt=1)
+    d.run("a", a)
+    for _ in range(10):  # a's blocks go down to SSD, one leaf at a time
+        d.cache.ensure_free(d.bm.get_num_free_blocks() + 1)
+        d.apply()
+        d.apply()
+    run = [d.cache._blocks[h] for h in chain(a, 8)]
+    for i in range(3):  # fill the host with unrelated blocks
+        d.run(f"q{i}", one_block(10 + i))
+    evict_all(d)
+    d.apply()
+    d.apply()
+    d.apply()
+    assert [x.tier.name for x in run] == ["SSD"] * 8
+    assert [x.snapshot >= 0 for x in run] == [False] * 7 + [True]
+    host = d.cache._host
+    assert host.num_free == 0
+    calls = spy_io(d)
+    before, free = d.cache.host_evictions, host.num_free
+    held = {b.host_slot for b in d.cache._blocks.values() if b.host_slot >= 0}
+    d.events.clear()
+    d.add("a2", a, max_tokens=4)
+    # Eight rows are needed to reach the only snapshot; the host has three.
+    assert calls == [] and d.cache.host_evictions == before
+    assert host.num_free == free and not removed(d)
+    assert held == {b.host_slot for b in d.cache._blocks.values() if b.host_slot >= 0}
+    assert not any(x.reading for x in run)
+    d.apply(aborts=["a2"])
+    d.apply()
+    check_ssd(d)
+    d.close()
+
+
+def test_failed_load_submission_gives_the_rows_back(tmp_path, io):
+    from dynamo.deepinfer.kv_cache.prefix import _Evicted
+
+    d = Driver(ssd_runner(tmp_path, rows=8, ssd_blocks=64))
+    a = prompt(1200, salt=1)
+    d.run("a", a)
+    evict_all(d)
+    d.apply()
+    run = [d.cache._blocks[h] for h in chain(a, 8)]
+    for x in reversed(run):  # a leaves the host: only the SSD copies stay
+        if x.tier.name == "HOST":
+            d.cache._evict_host(x, _Evicted())
+    d.apply()
+    assert any(x.tier.name == "SSD" for x in run)
+
+    submitted = []
+
+    def boom(*args, **kwargs):
+        submitted.append(1)
+        raise OSError("injected")
+
+    d.cache._ssd.load = boom
+    free = d.cache._host.num_free
+    d.add("a2", a, max_tokens=4)
+    assert submitted and not any(x.reading for x in run)
+    assert d.cache._host.num_free == free
     d.apply(aborts=["a2"])
     d.apply()
     check_ssd(d)

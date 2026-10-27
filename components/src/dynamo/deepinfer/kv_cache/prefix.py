@@ -829,7 +829,8 @@ class PrefixCacheManager(NoopCacheManager):
     def _write_through(self, block: _Block, row: int, out: _Evicted) -> None:
         """Queue the SSD copy of a block just demoted to host ``row``, unless it
         has one. ``_drain_writes`` starts it at the end of the eviction pass, so
-        a burst writes its ancestors first. The row stays put until written."""
+        a burst writes its ancestors first. The row is not pinned: the entry is
+        checked (``_write_pending``) when it is popped."""
         if block.ssd_state is SsdState.NONE:
             self._queue_write(block, row)
 
@@ -927,41 +928,79 @@ class PrefixCacheManager(NoopCacheManager):
         for block in held:
             block.users += 1
         try:
-            self._start_read(self._readable(run))
+            self._start_read(run)
         finally:
             for block in held:
                 block.users -= 1
                 self._maybe_push(block)
 
     def _start_read(self, run: list[_Block]) -> None:
+        """Read the SSD blocks of ``run`` into host rows. Rows are taken until
+        the host has none to give; the read is then cut back to the deepest
+        snapshot they cover and the unused rows go back. A read that could not
+        reach its first snapshot even with every evictable host block taken is
+        skipped before anything is evicted for it."""
         assert self._ssd is not None and self._host is not None
         todo = [b for b in run if b.tier is Tier.SSD and not b.reading]
-        if not todo or sum(b.tier is Tier.SSD for b in run) < SSD_MIN_READ_BLOCKS:
+        if len(todo) < SSD_MIN_READ_BLOCKS:
+            return
+        # Rows needed to reach the first snapshot worth reading.
+        need = min_need = 0
+        held = 0
+        for block in run:
+            held += block.tier is Tier.HOST
+            need += block.tier is Tier.SSD and not block.reading
+            if not min_need and block.snapshot >= 0 and need >= SSD_MIN_READ_BLOCKS:
+                min_need = need
+        if not min_need or min_need > self._host.capacity:
+            return
+        # Loose bound: free rows plus every host block the run does not hold.
+        if min_need > self._host.num_free + self._num_host - held:
             return
         out = _Evicted()
         rows: list[int] = []
-        for _ in todo:
+        for _ in todo:  # the last snapshot of ``run`` needs all of them
             row = self._host_slot(out)
             if row is None:
                 break
             rows.append(row)
-        if len(rows) < len(todo):
-            for row in rows:
-                self._host.release(row)
-        else:
-            for block in todo:
-                # Held against eviction until the read is done.
-                block.reading = True
-            slots = [b.ssd_slot for b in todo]
-            self._ssd.load(
-                slots,
-                [self._host.row(r) for r in rows],
-                # Rows freed since (by a promotion or an eviction) may still be
-                # the target of a copy queued before this read.
-                after=self._host.fence(),
-                tag=_Read(todo, slots, rows),
-            )
-        self._flush(out, [])
+        # Defensive: evicting for the rows may have dropped blocks of the run.
+        run = self._live(run)
+        end = need = 0
+        for i, block in enumerate(run):
+            need += block.tier is Tier.SSD and not block.reading
+            if need > len(rows):
+                break
+            if block.snapshot >= 0:
+                end = i + 1
+        todo = [b for b in run[:end] if b.tier is Tier.SSD and not b.reading]
+        keep = len(todo) if len(todo) >= SSD_MIN_READ_BLOCKS else 0
+        for row in rows[keep:]:
+            self._host.release(row)
+        rows, todo = rows[:keep], todo[:keep]
+        try:
+            if todo:
+                for block in todo:
+                    # Held against eviction until the read is done.
+                    block.reading = True
+                slots = [b.ssd_slot for b in todo]
+                try:
+                    self._ssd.load(
+                        slots,
+                        [self._host.row(r) for r in rows],
+                        # Rows freed since (by a promotion or an eviction) may
+                        # still be the target of a copy queued before this read.
+                        after=self._host.fence(),
+                        tag=_Read(todo, slots, rows),
+                    )
+                except Exception:
+                    logger.exception("SSD load submission failed")
+                    for block in todo:
+                        block.reading = False
+                    for row in rows:
+                        self._host.release(row)
+        finally:
+            self._flush(out, [])
 
     def _live(self, run: list[_Block]) -> list[_Block]:
         """The part of ``run`` that is still cached and still ends at a snapshot:
@@ -977,62 +1016,6 @@ class PrefixCacheManager(NoopCacheManager):
                 end = i + 1
         return run[:end]
 
-    def _readable(self, run: list[_Block]) -> list[_Block]:
-        """The longest part of ``run`` that ends at a snapshot and whose reads
-        get host rows without evicting more than can be had: an abandoned read
-        must not have evicted anything."""
-        rows = self._host_rows(sum(b.tier is Tier.SSD and not b.reading for b in run))
-        need = end = 0
-        for i, block in enumerate(run):
-            need += block.tier is Tier.SSD and not block.reading
-            if need > rows:
-                break
-            if block.snapshot >= 0:
-                end = i + 1
-        return run[:end]
-
-    def _host_rows(self, limit: int) -> int:
-        """How many host rows (up to ``limit``) allocating can get: the free ones
-        plus those eviction frees, leaf by leaf and then the parents it exposes.
-        Walks the host heap in eviction order and puts the entries back."""
-        assert self._host is not None
-        rows, heap = self._host.num_free, self._host_heap
-        taken: list[tuple[int, int, _Block]] = []
-        seen: set[int] = set()
-        # Host children each parent still has, after the leaves counted so far.
-        left: dict[int, int] = {}
-        exposed: list[_Block] = []
-        while rows < limit and (exposed or heap):
-            if exposed:
-                block = exposed.pop()
-            else:
-                entry = heapq.heappop(heap)
-                block = entry[2]
-                if entry[0] != block.heap_key or block.tier is not Tier.HOST:
-                    continue
-                if block.users or not self._host_leaf(block):
-                    block.heap_key = None
-                    continue
-                if id(block) in seen:
-                    continue
-                seen.add(id(block))
-                taken.append(entry)
-            rows += 1
-            parent = block.parent
-            if parent is not None and parent.tier is Tier.HOST:
-                n = left.get(id(parent), parent.host_children) - 1
-                left[id(parent)] = n
-                if not (
-                    n
-                    or parent.users
-                    or parent.gpu_children
-                    or parent.ssd_state is SsdState.WRITING
-                ):
-                    exposed.append(parent)
-        for entry in taken:
-            heapq.heappush(heap, entry)
-        return rows
-
     def _read_done(self, ticket: Ticket, out: _Evicted) -> None:
         assert self._host is not None and self._ssd is not None
         read: _Read = ticket.tag
@@ -1040,25 +1023,21 @@ class PrefixCacheManager(NoopCacheManager):
         for block, slot, row in zip(read.blocks, read.slots, read.rows):
             block.reading = False
             if self._blocks.get(block.block_hash) is not block:
-                # Dropped meanwhile; its slot waited for the read.
                 if block.ssd_slot >= 0:
                     self._ssd.release(block.ssd_slot)
                     block.ssd_slot = -1
                 self._host.release(row)
             elif block.tier is not Tier.SSD or block.ssd_slot != slot:
-                # Re-homed meanwhile (recomputed into the GPU, ...): keep it.
                 self._host.release(row)
                 self._maybe_push(block)
             elif ticket.error is not None:
                 self._host.release(row)
                 failed.append(block)
             elif block.parent is not None and block.parent.tier is Tier.SSD:
-                # Its parent left host meanwhile.
                 self._host.release(row)
                 self._maybe_push(block)
             else:
                 block.host_slot, block.ssd_warm = row, True
-                # Fresh: it was just wanted, so it is not the first host victim.
                 block.last_used = next(self._clock)
                 self._move(block, Tier.HOST)
                 self._maybe_push(block)

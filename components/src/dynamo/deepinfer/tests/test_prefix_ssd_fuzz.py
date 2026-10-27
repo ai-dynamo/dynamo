@@ -77,12 +77,13 @@ def test_random_traffic_keeps_the_tiers_consistent(
     monkeypatch.setenv("DEEPINFER_FAKE_NUM_GPU_BLOCKS", str(gpu_blocks))
     monkeypatch.setattr(prefix, "SSD_MAX_INFLIGHT_WRITES", rnd.choice([1, 2, 64]))
     monkeypatch.setattr(prefix, "SSD_PENDING_WRITES_FACTOR", rnd.choice([0, 1, 4]))
-    monkeypatch.setattr(prefix, "SSD_MIN_READ_BLOCKS", rnd.choice([1, 1, 4]))
+    monkeypatch.setattr(prefix, "SSD_MIN_READ_BLOCKS", rnd.choice([1, 1, 4, 8]))
     d = Driver(
         ssd_runner(
             tmp_path,
             rows=rnd.choice([2, 4, 8, 12]),
             ssd_blocks=rnd.choice([4, 8, 16, 32]),
+            snapshot_interval=rnd.choice([256, 1024]),
         )
     )
     pool = d.cache._ssd
