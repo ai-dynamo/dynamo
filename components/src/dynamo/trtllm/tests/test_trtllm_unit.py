@@ -28,7 +28,6 @@ from dynamo.trtllm.workers.llm_worker import (
     _populate_kv_cache_capacity,
     _resolve_streaming_kv_events_config,
     _strip_postprocess_workers,
-    _validate_streaming_kv_events_backend,
     init_llm_worker,
 )
 
@@ -497,19 +496,6 @@ def test_resolve_streaming_kv_events_config_uses_nested_kv_cache_config():
         "endpoint": "tcp://*:6000",
         "topic": "kv-events",
     }
-
-
-def test_streaming_kv_events_require_python_v2_cache_manager(monkeypatch):
-    monkeypatch.delenv("TLLM_KV_CACHE_MANAGER_V2_BACKEND", raising=False)
-
-    with pytest.raises(ValueError, match="TLLM_KV_CACHE_MANAGER_V2_BACKEND=python"):
-        _validate_streaming_kv_events_backend()
-
-
-def test_streaming_kv_events_accept_python_v2_cache_manager(monkeypatch):
-    monkeypatch.setenv("TLLM_KV_CACHE_MANAGER_V2_BACKEND", "python")
-
-    _validate_streaming_kv_events_backend()
 
 
 @pytest.mark.parametrize(

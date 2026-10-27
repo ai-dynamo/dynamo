@@ -90,7 +90,6 @@ except ImportError:
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
-_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV = "TLLM_KV_CACHE_MANAGER_V2_BACKEND"
 
 # TRT-LLM 1.3.0rc21 keeps in-vocab image markers for these validated families.
 # Leave other families unresolved until their KV-event convention is verified.
@@ -139,20 +138,6 @@ def _resolve_streaming_kv_events_config(
     config["endpoint"] = endpoint
     config.setdefault("topic", "")
     return config
-
-
-def _validate_streaming_kv_events_backend() -> None:
-    """Require TensorRT-LLM's Python V2 cache manager for streaming events."""
-    backend = os.environ.get(_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV)
-    if backend == "python":
-        return
-    configured = backend if backend is not None else "unset (defaults to cpp)"
-    raise ValueError(
-        "TensorRT-LLM streaming KV events require "
-        f"{_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV}=python; current value is "
-        f"{configured!r}. The C++ V2 cache manager cannot host the streaming "
-        "event manager."
-    )
 
 
 def _resolve_model_dir(config: Config) -> str:
@@ -492,7 +477,6 @@ async def init_llm_worker(
     streaming_kv_events_config = _resolve_streaming_kv_events_config(arg_map)
     if config.publish_kv_events:
         if streaming_kv_events_config is not None:
-            _validate_streaming_kv_events_backend()
             kv_event_publication_mode = KvEventPublicationMode.STREAMING
         else:
             kv_event_publication_mode = KvEventPublicationMode.POLLING
@@ -546,8 +530,7 @@ async def init_llm_worker(
             raise ValueError(
                 f"kv_cache_config.use_kv_cache_manager_v2={use_v2!r} is not supported "
                 "with polled KV events; set it to false, or enable streaming KV "
-                "events via kv_cache_config.kv_events_config with "
-                f"{_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV}=python"
+                "events via kv_cache_config.kv_events_config"
             )
 
         # TRT-LLM enables block reuse by default; warn only when it is explicitly
