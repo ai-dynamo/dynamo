@@ -42,17 +42,23 @@ class QwenVideoHandoff:
         self._metadata: OrderedDict[tuple[str, str], bytes] = OrderedDict()
         self._cache_bytes = 0
 
+    @staticmethod
+    def _entry_size(key: tuple[str, str], encoded: bytes) -> int:
+        return sum(len(part.encode()) for part in key) + len(encoded)
+
     def _remember(self, key: tuple[str, str], metadata: dict[str, Any]) -> None:
         encoded = json.dumps(metadata, allow_nan=False).encode()
-        if len(encoded) > _MAX_METADATA_CACHE_BYTES:
+        entry_size = self._entry_size(key, encoded)
+        if entry_size > _MAX_METADATA_CACHE_BYTES:
             return
         previous = self._metadata.pop(key, None)
-        self._cache_bytes -= len(previous) if previous is not None else 0
+        if previous is not None:
+            self._cache_bytes -= self._entry_size(key, previous)
         self._metadata[key] = encoded
-        self._cache_bytes += len(encoded)
+        self._cache_bytes += entry_size
         while self._cache_bytes > _MAX_METADATA_CACHE_BYTES:
-            _, evicted = self._metadata.popitem(last=False)
-            self._cache_bytes -= len(evicted)
+            evicted_key, evicted = self._metadata.popitem(last=False)
+            self._cache_bytes -= self._entry_size(evicted_key, evicted)
 
     def capture(self, processed: dict[str, Any]) -> dict[str, Any] | None:
         """Capture native layout without transferring pixels or embeddings."""
@@ -164,7 +170,7 @@ class QwenVideoHandoff:
                     or type(length) is not int
                     or offset < 0
                     or length < 1
-                    or offset + length >= len(tokens)
+                    or offset + length > len(tokens)
                     or (
                         mask is not None
                         and (
@@ -232,6 +238,15 @@ class QwenVideoHandoff:
         ordered = sorted(intervals)
         if any(left[1] > right[0] for left, right in zip(ordered, ordered[1:])):
             raise ValueError("Overlapping Qwen video handoff placeholders")
+        # NIXL decode recomputes the last prompt token. Reload media if that
+        # token needs visual embeddings, which this handoff does not carry.
+        if any(
+            span.offset + span.length == len(tokens)
+            and (span.is_embed is None or bool(span.is_embed[-1]))
+            for spans in placeholders.values()
+            for span in spans
+        ):
+            return None
         return {
             "type": "multimodal",
             "prompt_token_ids": tokens,

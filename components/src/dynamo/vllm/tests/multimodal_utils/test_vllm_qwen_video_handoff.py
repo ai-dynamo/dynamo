@@ -96,8 +96,11 @@ def test_roundtrip_preserves_native_layout_without_pixels(processed):
     assert "pixel_values_videos" not in json.dumps(state)
 
 
-def test_metadata_only_input_has_identical_native_mrope(processed):
+@pytest.mark.parametrize("ends_at_boundary", [False, True])
+def test_metadata_only_input_has_identical_native_mrope(processed, ends_at_boundary):
     processed["prompt_token_ids"] = [5, 1001, 1004, 1002, 6, 1001, 1004, 1002, 7]
+    if ends_at_boundary:
+        processed["prompt_token_ids"].pop()
     processed["mm_placeholders"]["video"] = [
         PlaceholderRange(
             offset=1,
@@ -128,6 +131,28 @@ def test_metadata_only_input_has_identical_native_mrope(processed):
     restored_positions, restored_delta = positions(restored)
     assert torch.equal(original_positions, restored_positions)
     assert original_delta == restored_delta
+
+
+def test_placeholder_ending_at_prompt_boundary_roundtrips(processed):
+    span = processed["mm_placeholders"]["video"][0]
+    processed["mm_placeholders"]["video"][0] = replace(
+        span, offset=len(processed["prompt_token_ids"]) - span.length
+    )
+    restored = restore(mod.QwenVideoHandoff().capture(processed))
+    actual = restored["mm_placeholders"]["video"][0]
+    assert actual.offset + actual.length == len(restored["prompt_token_ids"])
+    start, end = actual.get_embeds_indices_in_range(actual.length - 1, actual.length)
+    assert start == end
+
+
+@pytest.mark.parametrize("mask", [None, [True] * 7])
+def test_visual_tail_uses_raw_media_fallback(processed, mask):
+    state = mod.QwenVideoHandoff().capture(processed)
+    state["mm_placeholders"]["video"][0].update(offset=5, is_embed=mask)
+    assert restore(state) is None
+    state["metadata"]["video"][0]["timestamps"] = []
+    with pytest.raises(ValueError):
+        restore(state)
 
 
 def test_multiple_videos_keep_separate_native_identities(processed):
@@ -205,6 +230,49 @@ def test_metadata_cache_is_byte_bounded(processed, monkeypatch):
     processed["mm_hashes"]["video"] = ["opaque-native-identity"]
     processed["mm_kwargs"]["video"] = [None]
     assert handoff.capture(processed) is None
+
+
+@pytest.mark.parametrize("identity", ["x" * 150, "界" * 50])
+def test_cache_counts_uuid_bytes_even_when_handoff_is_too_large(
+    processed, monkeypatch, identity
+):
+    monkeypatch.setattr(mod, "_MAX_METADATA_CACHE_BYTES", 256)
+    monkeypatch.setattr(mod, "_MAX_HANDOFF_BYTES", 1)
+    handoff = mod.QwenVideoHandoff()
+    for index in range(5):
+        processed["mm_hashes"]["video"] = [f"{identity}-{index}"]
+        assert handoff.capture(processed) is None
+        expected_bytes = sum(
+            len(modality.encode()) + len(uuid.encode()) + len(value)
+            for (modality, uuid), value in handoff._metadata.items()
+        )
+        assert handoff._cache_bytes == expected_bytes <= 256
+        assert len(handoff._metadata) == 1
+
+
+def test_oversized_uuid_is_not_cached(processed, monkeypatch):
+    monkeypatch.setattr(mod, "_MAX_METADATA_CACHE_BYTES", 256)
+    processed["mm_hashes"]["video"] = ["x" * 256]
+    handoff = mod.QwenVideoHandoff()
+    assert handoff.capture(processed) is not None
+    assert not handoff._metadata and handoff._cache_bytes == 0
+    processed["mm_kwargs"]["video"] = [None]
+    assert handoff.capture(processed) is None
+
+
+def test_cache_replacement_counts_key_only_once(processed):
+    handoff = mod.QwenVideoHandoff()
+    state = handoff.capture(processed)
+    fields = state["metadata"]["video"][0]
+    key = ("video", state["mm_hashes"]["video"][0])
+    fields["timestamps"] = [0.12345, 0.34567]
+    for _ in range(3):
+        handoff._remember(key, fields)
+        expected_bytes = sum(len(part.encode()) for part in key) + len(
+            json.dumps(fields, allow_nan=False).encode()
+        )
+        assert handoff._cache_bytes == expected_bytes
+        assert len(handoff._metadata) == 1
 
 
 @pytest.mark.parametrize("state", [None, {}, {"version": 2}, {"version": "1"}])
@@ -336,8 +404,16 @@ async def test_cosmos3_uses_the_qwen_video_handoff(processor, processed, model_t
     assert rendered is processed and state is not None
 
 
+@pytest.mark.parametrize("ends_at_boundary", [False, True])
 @pytest.mark.asyncio
-async def test_decode_skips_every_media_loader_with_valid_handoff(processor, processed):
+async def test_decode_skips_every_media_loader_with_valid_handoff(
+    processor, processed, ends_at_boundary
+):
+    if ends_at_boundary:
+        span = processed["mm_placeholders"]["video"][0]
+        processed["mm_placeholders"]["video"][0] = replace(
+            span, offset=len(processed["prompt_token_ids"]) - span.length
+        )
     state = mod.QwenVideoHandoff().capture(processed)
     request = {
         "token_ids": [1, 2],
@@ -360,14 +436,23 @@ async def test_decode_skips_every_media_loader_with_valid_handoff(processor, pro
     processor.audio_loader.load_audio_batch.assert_not_awaited()
 
 
+@pytest.mark.parametrize("reason", ["unknown_version", "visual_tail", "unmasked_tail"])
 @pytest.mark.asyncio
-async def test_unknown_version_falls_back_to_real_video(processor):
+async def test_unusable_handoff_falls_back_to_real_video(processor, processed, reason):
+    state = mod.QwenVideoHandoff().capture(processed)
+    if reason == "unknown_version":
+        state["version"] = 2
+    else:
+        state["mm_placeholders"]["video"][0].update(offset=5)
+        state["mm_placeholders"]["video"][0]["is_embed"] = (
+            [True] * 7 if reason == "visual_tail" else None
+        )
     request = {
         "token_ids": [1, 2],
         "multi_modal_data": {"video_url": [{"Url": "video"}]},
         "prefill_result": {
             "disaggregated_params": {
-                "embedding_params": {mod.QWEN_VIDEO_HANDOFF_KEY: {"version": 2}}
+                "embedding_params": {mod.QWEN_VIDEO_HANDOFF_KEY: state}
             }
         },
     }
