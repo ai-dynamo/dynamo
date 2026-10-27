@@ -170,6 +170,11 @@ worker and dispatch the request.
 
 ## Booking lifecycle (KV)
 
+A booking belongs to the selection core's scheduler. A `Lease` admission returns it in a
+`BookingHandle`, which still releases it if dropped. `KvRequestCleanup` commits the handle and
+registers the booking with `RequestLeaseManager`; from then on this module is responsible for
+releasing it.
+
 1. **Admit.** A `Lease` admission returns a `BookingHandle` for one scheduler attempt.
 2. **Own.** `KvRequestCleanup` commits the handle and registers a local `RequestAttemptLease`
    with the `RequestLeaseManager`, plus an approximate-LRU lease when the approximate indexer is
