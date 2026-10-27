@@ -10,8 +10,6 @@ the GPUs they serve. It's useful on multi-socket H100, H200, B200, and B300 serv
 Grace-based systems. The right NUMA node depends on the server's CPU and PCIe layout.
 
 Add these settings to a working deployment, keeping its model, discovery, and KV-transfer options.
-For manifests, use the
-[Kubernetes NUMA Binding guide](../../kubernetes/operations/numa-binding.md).
 
 ## Inspect the Topology
 

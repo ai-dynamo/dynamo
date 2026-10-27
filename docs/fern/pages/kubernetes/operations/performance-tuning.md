@@ -37,14 +37,6 @@ least:
 Run multiple passes before accepting a result. A change that improves peak throughput can still be a
 regression if it violates the latency objective or reduces stability under sustained load.
 
-## Align CPU, Memory, and NIC Placement
-
-On nodes with multiple NUMA domains, place frontend threads and backend workers near the host memory
-they use. For RDMA KV transfer, also expose and select NICs close to each worker's GPU and NUMA
-domain. Follow [NUMA Binding](numa-binding.md) for backend-specific settings, frontend launch
-configuration, memory-policy choices, and placement verification. Process binding and NIC selection
-complement the cluster's GPU allocation policy; they do not move a pod to a different GPU or PCIe root.
-
 ## Tune the KV block size
 
 KV block size affects both transfer efficiency and prefix-cache reuse:
