@@ -40,26 +40,6 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
 ARG NIXL_REF
-ARG TRTLLM_SOURCE_REPOSITORY
-ARG TRTLLM_SOURCE_COMMIT
-
-COPY tests/utils/trtllm_media_overlay.py /tmp/validate_media_overlay.py
-
-# Optional source overlay for cross-repository CI. Retain the release-coupled
-# server launcher and framework, installing the pinned media hooks and ownership
-# helpers alongside OpenEngine's worker pools.
-RUN if [ -n "${TRTLLM_SOURCE_COMMIT}" ]; then \
-        test -n "${TRTLLM_SOURCE_REPOSITORY}" && \
-        source_dir=$(mktemp -d) && \
-        wget --quiet --tries=3 \
-            "${TRTLLM_SOURCE_REPOSITORY}/archive/${TRTLLM_SOURCE_COMMIT}.tar.gz" \
-            -O "${source_dir}/source.tar.gz" && \
-        tar -xzf "${source_dir}/source.tar.gz" -C "${source_dir}" \
-            --strip-components=1 && \
-        /usr/bin/python3 /tmp/validate_media_overlay.py \
-            --install-source "${source_dir}" --check-signatures-only && \
-        rm -rf "${source_dir}"; \
-    fi
 
 # Remove the upstream runtime's Git LFS package without pruning shared dependencies.
 RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*

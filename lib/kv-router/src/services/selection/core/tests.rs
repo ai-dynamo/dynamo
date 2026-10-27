@@ -3,7 +3,7 @@
 
 use super::super::affinity::SessionAffinityMode;
 use super::super::input::PromptRequest;
-use super::hint::transfer_hint_for_selection;
+use super::hint::transfer_hint_payload;
 use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
@@ -467,17 +467,26 @@ async fn unreachable_remote_indexer_is_reported_not_ready() {
 async fn hint_fixture(
     configure: impl Fn(&mut WorkerRequest),
 ) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
+    hint_fixture_with(test_config(true), 8, configure).await
+}
+
+/// Like [`hint_fixture`], with a `prompt_tokens`-token prompt and `config`.
+async fn hint_fixture_with(
+    config: crate::config::KvRouterConfig,
+    prompt_tokens: u32,
+    configure: impl Fn(&mut WorkerRequest),
+) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
     use crate::indexer::KvIndexerInterface;
     use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 
-    let core = local_core(test_config(true));
+    let core = local_core(config);
     for worker_id in [1, 2] {
         let mut request = worker_with_kv_events(worker_id);
         configure(&mut request);
         core.upsert_worker(request).await.expect("worker upsert");
     }
     let entry = core.entry(&default_key()).expect("entry");
-    let tokens: Vec<u32> = (1..=8).collect();
+    let tokens: Vec<u32> = (1..=prompt_tokens).collect();
     let hashes: Vec<u64> = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())
         .into_iter()
         .map(|hash| hash.0)
@@ -544,6 +553,45 @@ async fn booked_selection_attaches_router_hint_from_a_better_source() {
     assert!(response.kv_hint.is_none());
 }
 
+/// Worker 1 holds the whole prompt but is busy; idle worker 2 can fetch it.
+/// Crediting fetchable blocks moves the booking to worker 2, and its hint
+/// fetches from worker 1, the source the credit assumed.
+#[tokio::test]
+async fn fetchable_prefix_credit_books_an_idle_worker_with_its_hint() {
+    for (multiplier, expected_worker) in [(0.0, 1), (0.5, 2)] {
+        let config = crate::config::KvRouterConfig {
+            shared_cache_multiplier: Some(multiplier),
+            overlap_score_credit_decay: 0.0,
+            ..test_config(true)
+        };
+        let (core, _entry, tokens) = hint_fixture_with(config, 32, hint_capable).await;
+        // Busy worker 1 (12 prefill tokens, 3 decode blocks) costs 3 + 11 = 14.
+        // Worker 2 costs 8 + 8 = 16, less 0.5 * 8 fetchable blocks = 12.
+        reserve_pinned(&core, "load", &(100..112).collect::<Vec<_>>(), 1).await;
+        let mut request = reserve_request("prompt");
+        request.prompt = PromptRequest {
+            token_ids: Some(tokens),
+            ..PromptRequest::default()
+        };
+        let response = core.select_and_reserve(request).await.expect("reserve");
+
+        assert_eq!(
+            response.worker_id, expected_worker,
+            "multiplier={multiplier}"
+        );
+        let source = response.kv_hint.map(|hint| {
+            let payload: KvSourceLocationsPayload =
+                serde_json::from_value(serde_json::to_value(&hint.actions[0].payload).unwrap())
+                    .unwrap();
+            (payload.source_control_endpoint, payload.block_hashes.len())
+        });
+        let expected_source =
+            (expected_worker == 2).then(|| ("tcp://worker-1:9000".to_string(), 8));
+        assert_eq!(source, expected_source, "multiplier={multiplier}");
+        core.shutdown();
+    }
+}
+
 #[tokio::test]
 async fn state_agent_workers_are_not_router_hint_sources() {
     let (core, _entry, tokens) = hint_fixture(|request| {
@@ -594,7 +642,7 @@ async fn hint_capability_tracks_catalog_membership() {
         hint_capable(&mut request);
         request
     };
-    let flag = || super::hint::hint_capable_partition(&entry.workers_tx.borrow());
+    let flag = || entry.hint_capable_workers.load(Ordering::Relaxed);
 
     assert!(!flag());
     let response = reserve_pinned(&core, "before", &tokens, 2).await;
@@ -3431,6 +3479,26 @@ async fn affinity_configuration_rejects_invalid_or_conflicting_config() {
     ));
 }
 
+/// The hint a booking on `target` gets: selection's source choice, then the
+/// post-pick payload.
+fn transfer_hint_for_selection(
+    configs: &HashMap<WorkerId, SelectionWorkerConfig>,
+    target: WorkerWithDpRank,
+    target_cached_prefix_blocks: u32,
+    candidates: Option<&KvTransferCandidates>,
+) -> Option<KvSourceLocationsPayload> {
+    let candidates = candidates?;
+    let local = target_cached_prefix_blocks as usize;
+    let target_keys = configs
+        .get(&target.worker_id)?
+        .kv_transfer_keys()
+        .target()?;
+    let scope = crate::kv_hints::KvTransferScope::of([(target_keys, local)]);
+    let source = crate::kv_hints::KvTransferSourceSummary::new(candidates, configs, scope)
+        .source_for(target, target_keys, local)?;
+    transfer_hint_payload(configs, source, candidates)
+}
+
 fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerConfig {
     SelectionWorkerConfig {
         endpoint: "http://worker:8000".to_string(),
@@ -3451,6 +3519,7 @@ fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerC
             .map(|(rank, endpoint)| (*rank, endpoint.to_string()))
             .collect(),
         kv_event_source_mode: None,
+        kv_transfer_keys: Default::default(),
     }
 }
 
@@ -3569,6 +3638,22 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
     assert_eq!(hint.source_control_endpoint, "tcp://persistent-owner:23280");
 }
 
+#[test]
+fn hint_is_dropped_when_the_selected_source_left() {
+    let source = crate::kv_hints::KvTransferSourceChoice {
+        source: WorkerWithDpRank::new(8, 0).into(),
+        prefix_blocks: 2,
+    };
+    let candidates = hint_candidates(&[101, 102, 103], vec![(source.source, 2)]);
+    let mut configs = HashMap::from([(7, hint_config("prefill", &[]))]);
+    assert_eq!(transfer_hint_payload(&configs, source, &candidates), None);
+
+    configs.insert(8, hint_config("prefill", &[(0, "tcp://source:23280")]));
+    let payload = transfer_hint_payload(&configs, source, &candidates).expect("hint");
+    assert_eq!(payload.source_control_endpoint, "tcp://source:23280");
+    assert_eq!(payload.block_hashes.len(), 2);
+}
+
 const ISLAND_DOMAIN: &str = "rdma-island";
 
 fn island_config(endpoint: &str, island: &str) -> SelectionWorkerConfig {
@@ -3611,8 +3696,11 @@ fn hint_source_must_share_the_target_island() {
     );
     // Without a same-island source there is no hint, and the target recomputes.
     assert_eq!(hint_endpoint(&configs, &cross_island), None);
-    // A target without a transfer domain is not filtered.
-    configs.get_mut(&7).unwrap().kv_transfer_domain = None;
+    // A target without a transfer domain is not filtered. Published configs
+    // are replaced, never edited, so their derived keys stay current.
+    let mut target = island_config("tcp://target:23280", "a");
+    target.kv_transfer_domain = None;
+    configs.insert(7, target);
     assert_eq!(
         hint_endpoint(&configs, &cross_island).as_deref(),
         Some("tcp://other-island:23280")

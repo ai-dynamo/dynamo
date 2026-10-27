@@ -25,7 +25,7 @@ use tonic::{Request, Response, Status};
 
 use super::{
     FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture, SidecarFixture, WireFixture,
-    fast_engine_args, sidecar_command, wait_scheduler_idle,
+    fast_engine_args, sidecar_command, wait_scheduler_active, wait_scheduler_idle,
 };
 
 pub struct Fixture {
@@ -366,18 +366,7 @@ impl WireFixture for Fixture {
     }
 
     async fn scheduler_active(&self) {
-        let mut metrics = self.service.metrics_receiver();
-        dynamo_sidecar_testkit::bounded("Mocker active scheduler work", async {
-            loop {
-                let snapshot = metrics.borrow_and_update().clone();
-                if snapshot.running_requests + snapshot.waiting_requests > 0 {
-                    assert!(self.service.active_request_count() > 0);
-                    return;
-                }
-                metrics.changed().await.unwrap();
-            }
-        })
-        .await;
+        wait_scheduler_active(self, self.service.metrics_receiver()).await;
     }
 }
 

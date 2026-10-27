@@ -746,7 +746,7 @@ func TestLPXHandoffWaitsForSharedResourceReconciliation(t *testing.T) {
 
 	t.Log("Preserve the child revision and component status while reporting the shared-resource error")
 	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
-	require.ErrorContains(t, err, "RBAC manager not initialized")
+	require.ErrorContains(t, err, "planner ClusterRole name is required")
 	require.Equal(t, v1beta1.DGDStateFailed, result.Status.State)
 	stored := &v1alpha1.LPXGraphDeployment{}
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), stored))
