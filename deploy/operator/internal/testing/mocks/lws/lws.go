@@ -71,9 +71,12 @@ func Configurations() webhookconfig.Configurations {
 				AdmissionReviewVersions: []string{"v1"},
 				FailurePolicy:           &fail,
 				SideEffects:             &none,
-				Rules: []admissionregistrationv1.RuleWithOperations{{Operations: operations, Rule: admissionregistrationv1.Rule{
-					APIGroups: []string{"disaggregatedset.x-k8s.io"}, APIVersions: []string{"v1"}, Resources: []string{"disaggregatedsets"},
-				}}},
+				Rules: []admissionregistrationv1.RuleWithOperations{{
+					Operations:  operations,
+					APIGroups:   []string{"disaggregatedset.x-k8s.io"},
+					APIVersions: []string{"v1"},
+					Resources:   []string{"disaggregatedsets"},
+				}},
 				ClientConfig: serviceClientConfig("/validate-disaggregatedset-x-k8s-io-v1-disaggregatedset"),
 			}},
 		}},
