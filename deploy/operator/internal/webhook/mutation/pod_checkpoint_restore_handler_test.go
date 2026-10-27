@@ -133,11 +133,10 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 		pod.Annotations[consts.RestoreStandbyCapableAnnotation] = consts.KubeLabelValueTrue
 		pod.Spec.Containers[1].Command = []string{"python3", "-m", "autovllm.dynamo_server"}
 		original := mustMarshalPod(t, pod)
-		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+		req := admission.Request{
 			Operation: admissionv1.Create,
 			Namespace: pod.Namespace,
-			Object:    runtime.RawExtension{Raw: original},
-		}}
+			Object:    runtime.RawExtension{Raw: original}}
 
 		t.Log("When the Dynamo admission webhook shapes the Pod")
 		resp := mutator.Handle(ctx, req)
