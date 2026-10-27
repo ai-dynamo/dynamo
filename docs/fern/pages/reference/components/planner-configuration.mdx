@@ -134,8 +134,8 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
     Each required role must appear in exactly one of `roles` and `dataset_profiles`.
   </ParamField>
   <ParamField path="dataset_profiles" type="object" default="{}">
-    Maps `prefill` or `decode` to an execution-profile manifest in a local AISimulate
-    dataset. Aggregated workers are unsupported. The manifest supplies the complete
+    Maps `prefill`, `decode`, or `aggregated` to an execution-profile manifest in a
+    local AISimulate dataset. The manifest supplies the complete
     canonical configuration; Planner does not override its model, runtime, or pin.
   </ParamField>
   <ParamField path="dataset_profiles.&lt;role&gt;.root" type="string">
@@ -199,13 +199,14 @@ ais_perf_model:
 ```
 
 Set the paths to the installed snapshot and its selected manifest. For disaggregated
-serving, supply separate `prefill` and `decode` sources. Canonical prepared configs
+serving, supply separate `prefill` and `decode` sources. For `mode: agg`, use an
+`aggregated` source whose profile contains both phase graphs. Canonical prepared configs
 containing `estimator_config.op_level.execution_profile` also work through `roles`.
 
 Planner applies its existing workload estimates, including queue scaling,
 prefix-cache discounts, and next-request estimates, before calling AISimulate's
-common forward-pass query API. AISimulate selects the profile query internally.
-If it cannot estimate the resulting shape, Planner skips scaling decisions that
+common forward-pass query API. The prediction path is the same for built-in and
+external inputs, including mixed steps. If it cannot estimate the resulting shape, Planner skips scaling decisions that
 depend on that estimate.
 
 <ParamField path="aic_interpolation" type="AICInterpolationSpec" default="null">

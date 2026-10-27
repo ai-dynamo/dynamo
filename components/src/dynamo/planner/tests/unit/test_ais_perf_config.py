@@ -232,15 +232,15 @@ def test_legacy_identity_shape_is_rejected():
         )
 
 
-def test_dataset_sources_roundtrip_without_accessing_runtime_files():
-    source = {"root": "/not-mounted-yet/dataset", "manifest": "prefill.json"}
+@pytest.mark.parametrize(
+    "role,mode", [("prefill", "prefill"), ("decode", "decode"), ("aggregated", "agg")]
+)
+def test_dataset_sources_roundtrip_without_accessing_runtime_files(role, mode):
+    source = {"root": "/not-mounted-yet/dataset", "manifest": "profile.json"}
     config = PlannerConfig(
         namespace="external-data",
-        mode="disagg",
-        ais_perf_model={
-            "roles": {"decode": _role_config()},
-            "dataset_profiles": {"prefill": source},
-        },
+        mode=mode,
+        ais_perf_model={"dataset_profiles": {role: source}},
     )
     assert PlannerConfig.model_validate_json(
         config.model_dump_json()
@@ -254,7 +254,7 @@ def test_dataset_sources_roundtrip_without_accessing_runtime_files():
     [
         {
             "dataset_profiles": {
-                "aggregated": {"root": "/data", "manifest": "profile.json"}
+                "unknown": {"root": "/data", "manifest": "profile.json"}
             }
         },
         {

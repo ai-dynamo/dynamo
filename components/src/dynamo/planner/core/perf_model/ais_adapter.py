@@ -248,8 +248,6 @@ class PlannerEnginePerfModel:
         spec = self._config.ais_perf_model
         if spec is None:
             raise ValueError("AIS role configuration is absent")
-        if self._worker_type == "aggregated":
-            return spec.roles[self._worker_type]
         source = spec.dataset_profiles.get(self._worker_type)
         if source is None:
             return spec.roles[self._worker_type]

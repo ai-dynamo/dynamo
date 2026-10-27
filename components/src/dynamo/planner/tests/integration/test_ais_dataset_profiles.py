@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Offline dataset-to-Planner checks with synthetic, hand-derived timings."""
+"""Offline dataset-to-Planner checks for measured timings and input equivalence."""
 
 import hashlib
 import json
@@ -108,7 +108,7 @@ def dataset_profile(request, tmp_path, monkeypatch):
                         for batch, length, latency in (
                             [(1, 4, 2.0), (1, 8, 4.0), (2, 4, 2.0)]
                             if phase == "prefill"
-                            else [(1, 5, 2.0), (2, 5, 2.0)]
+                            else [(1, 4, 2.0), (2, 4, 2.0)]
                         )
                     ],
                 )
@@ -302,3 +302,174 @@ def test_profile_estimates_next_request_with_existing_planner_logic(dataset_prof
             [observed], add_next_request=True
         )
     assert estimate == pytest.approx(0.006)
+
+
+@pytest.mark.parametrize("role", ["prefill", "decode", "aggregated"])
+def test_dataset_preserves_builtin_planner_estimates(tmp_path, monkeypatch, role):
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+    bundled = Path(engine.__file__).parents[1] / "systems"
+    root = tmp_path / "dataset"
+    systems = root / "systems"
+    artifacts = []
+
+    def retain(path, contents, kind, runtime_path=None):
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)
+        artifact = dict(
+            artifact_id=path,
+            path=path,
+            role=kind,
+            format=target.suffix.lstrip("."),
+            schema="test/v1",
+            sha256=hashlib.sha256(contents).hexdigest(),
+            bytes=len(contents),
+            rows=pq.ParquetFile(target).metadata.num_rows
+            if target.suffix == ".parquet"
+            else None,
+            runtime_path=runtime_path,
+        )
+        artifacts.append(artifact)
+        return artifact
+
+    # Retain the published tables unchanged and compile their actual op graphs.
+    files = [
+        bundled / "b200_sxm.yaml",
+        *sorted((bundled / "data/b200_sxm").glob("*/vllm/0.24.0/*")),
+    ]
+    for source in files:
+        relative = str(source.relative_to(bundled))
+        retain(
+            "systems/" + relative,
+            source.read_bytes(),
+            "hardware" if source.suffix == ".yaml" else "operation-measurements",
+            relative,
+        )
+    basis = json.loads(
+        _native.engine_spec_json_from_bincode(
+            engine.compile_engine(
+                "Qwen/Qwen3-0.6B",
+                "b200_sxm",
+                "vllm",
+                "0.24.0",
+                systems_path=str(systems),
+                database_mode="SILICON",
+                shared_layer=False,
+                forward_model="op_level",
+            )
+        )
+    )
+    profile = dict(
+        schema_version=1,
+        basis=basis,
+        worker_type=role,
+        ops=basis["generation_ops" if role == "decode" else "context_ops"],
+        retained_files=[
+            dict(path=a["runtime_path"], sha256=a["sha256"], size_bytes=a["bytes"])
+            for a in artifacts
+        ],
+    )
+    if role == "aggregated":
+        profile["generation_ops"] = basis["generation_ops"]
+    pin = retain("profile.json", json.dumps(profile).encode(), "execution-profile")[
+        "sha256"
+    ]
+    config = dict(
+        model="Qwen/Qwen3-0.6B",
+        system="b200_sxm",
+        backend="vllm",
+        backend_version="0.24.0",
+        worker_type=role,
+        estimation_mode="op_level",
+        fallback_policy="deny",
+        database_mode="SILICON",
+        enable_shared_layer=False,
+        estimator_config={"correction": {"enabled": False}},
+    )
+    external = config | {
+        "estimator_config": config["estimator_config"]
+        | {"op_level": {"execution_profile": {"path": "profile.json", "sha256": pin}}}
+    }
+    retain("config.json", json.dumps(external).encode(), "predictor-config")
+    identity = Identity(
+        hardware=config["system"],
+        framework=config["backend"],
+        framework_version=config["backend_version"],
+        operation_family=None,
+        model=config["model"],
+        effective_settings={"worker_type": role},
+        unresolved_identity=None,
+    )
+    manifest = dict(
+        schema_version="aisim-artifact-manifest/v1",
+        category="op-latency",
+        purpose="execution-profile",
+        configuration_id=configuration_id("op-latency", "execution-profile", identity),
+        identity=identity.model_dump(),
+        requested_settings=None,
+        artifacts=artifacts,
+        provenance={"source": "bundled operation tables"},
+        evidence_gaps=[],
+    )
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    models = [
+        PlannerEnginePerfModel(
+            worker_type=role,
+            config=PlannerConfig(
+                namespace="input-equivalence",
+                mode="agg" if role == "aggregated" else role,
+                backend="vllm",
+                pre_deployment_sweeping_mode="none",
+                ais_perf_model=spec,
+            ),
+            capabilities=EngineCapabilities(
+                max_num_batched_tokens=128, max_num_seqs=4, max_kv_tokens=4096
+            ),
+        )
+        for spec in [
+            {"roles": {role: config}},
+            {
+                "dataset_profiles": {
+                    role: {"root": str(root), "manifest": "manifest.json"}
+                }
+            },
+        ]
+    ]
+    assert all(model.has_sufficient_data() for model in models)
+    # Preparation owns its snapshot, including across an aggregated model rebuild.
+    shutil.rmtree(root)
+    for model in models:
+        model.update_capabilities(replace(model._capabilities, max_kv_tokens=8192))
+    metrics = [
+        ForwardPassMetrics(
+            queued_requests=QueuedRequestMetrics(
+                num_prefill_requests=2, sum_prefill_tokens=256
+            ),
+            scheduled_requests=ScheduledRequestMetrics(
+                num_prefill_requests=2 if role == "aggregated" else 0,
+                sum_prefill_tokens=128 if role == "aggregated" else 0,
+                num_decode_requests=2 if role != "prefill" else 0,
+                sum_decode_kv_tokens=256 if role != "prefill" else 0,
+            ),
+        )
+    ]
+    if role != "decode":
+        estimates = [
+            model.estimate_queued_prefill_time(
+                metrics, max_num_batched_tokens=128, add_next_request=False
+            )
+            for model in models
+        ]
+        assert estimates[0] is not None and estimates[0] > 0
+        assert estimates[0] == estimates[1]
+    if role != "prefill":
+        estimates = [
+            model.estimate_scheduled_decode_itl(metrics, add_next_request=False)
+            for model in models
+        ]
+        assert estimates[0] is not None and estimates[0] > 0
+        assert estimates[0] == estimates[1]
+    capacities = [model.find_engine_capacity_rps(isl=64, osl=2) for model in models]
+    assert capacities[0] is not None and capacities[0].rps > 0
+    assert capacities[0] == capacities[1]

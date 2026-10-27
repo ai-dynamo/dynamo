@@ -155,9 +155,9 @@ class AISPerfModelSpec(BaseModel):
     roles: dict[Literal["prefill", "decode", "aggregated"], dict[str, Any]] = Field(
         default_factory=dict
     )
-    dataset_profiles: dict[Literal["prefill", "decode"], AISDatasetProfileSpec] = Field(
-        default_factory=dict
-    )
+    dataset_profiles: dict[
+        Literal["prefill", "decode", "aggregated"], AISDatasetProfileSpec
+    ] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def distinct_sources(self):
