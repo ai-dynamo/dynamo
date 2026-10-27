@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: kimi-k2-5
+title: Kimi-K2.5 NVFP4
+provider: moonshot
+model:
+  name: Kimi-K2.5
+  hf_id: nvidia/Kimi-K2.5-NVFP4
+  precision: NVFP4
+status: validated
+targets:
+- id: disagg-eagle-kv-router
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 24
+  runtime:
+    framework: TensorRT-LLM
+  topology: disaggregated
+  techniques:
+  - kv-routing
+  - eagle3-spec-dec
+  - kv-cache-offload
+  - disaggregated-prefill-decode
+  workload:
+    type: agentic-coding
+    traffic: Mooncake-format agentic coding trace, ~200K ctx, 1-hour replay, c=32
+    sla: goodput TTFT 5000ms / ITL 10ms
+  deploy:
+    asset: recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml
+  expected_performance:
+    available: true
+    summary: ~130 tok/s/user avg, ~5,400 tok/s/GPU (Pareto winner of 4-arm comparison)
+related_benchmarks:
+- kimi-k2-5-feature-stack
+maintainer: null
+gaps:
+- deploy.yaml ships non-resolvable image tag <IMAGE_TAG>; README says v1.1.1~
+- expected performance numbers are README approximations; no raw artifacts checked in (Pareto plot is GitHub user-attachment,
+  not repo asset)
+- trace dataset not checked in; generated from AIPerf repo manifest (pinned commit)
+- maintainer unknown
+deferred_reason: 'R1 scope decision (2026-06-11): source packaging is benchmark-first (4-arm ablation, non-resolvable image
+  tag, trace-coupled validation). Re-add in R2 via the recipe-promotion process once recipes/kimi-k2.5 is refactored (see
+  ai-dynamo/dynamo#10626).'
