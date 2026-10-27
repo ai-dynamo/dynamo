@@ -299,6 +299,79 @@ async def test_worker_failure_withdraws_state_agent_before_engine_cleanup(role):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["decode", "prefill"])
+@pytest.mark.parametrize("configured_timeout", [0.01, 0])
+async def test_hung_async_drain_does_not_prevent_engine_shutdown(
+    role, configured_timeout, monkeypatch
+):
+    if configured_timeout == 0:
+        monkeypatch.setattr(
+            "dynamo.vllm.worker_factory.ASYNC_HANDLER_DRAIN_TIMEOUT_SECONDS", 0.01
+        )
+    factory = _make_factory(state_agent_lifecycle=SimpleNamespace(close=AsyncMock()))
+    released = asyncio.Event()
+    settled = asyncio.Event()
+    started = asyncio.Event()
+    calls = []
+    cancelled = False
+    shutdown_saw_pending_drain = False
+
+    async def close_after_engine_shutdown():
+        nonlocal cancelled
+        started.set()
+        calls.append("drain-started")
+        try:
+            await released.wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            calls.append("drain-settled")
+            settled.set()
+
+    def shutdown(**_kwargs):
+        nonlocal shutdown_saw_pending_drain
+        shutdown_saw_pending_drain = started.is_set() and not settled.is_set()
+        calls.append("engine-shutdown")
+        released.set()
+
+    handler = Mock()
+    handler.aclose = AsyncMock(side_effect=close_after_engine_shutdown)
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = shutdown
+
+    async def finish_serving(*_args, lifecycle, **_kwargs):
+        lifecycle.handler = handler
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=configured_timeout)
+
+    setattr(factory, f"_run_{role}_worker", finish_serving)
+    try:
+        with pytest.raises(TimeoutError, match="asynchronous handler drain"):
+            await asyncio.wait_for(
+                getattr(factory, f"_create_{role}_worker")(
+                    Mock(),
+                    SimpleNamespace(custom_encoder_class=None),
+                    asyncio.Event(),
+                    [],
+                ),
+                timeout=1,
+            )
+    finally:
+        released.set()
+        await asyncio.wait_for(settled.wait(), timeout=1)
+
+    engine_client.shutdown.assert_called_once_with(timeout=configured_timeout)
+    await asyncio.gather(*tuple(factory._pending_handler_drains))
+    await asyncio.sleep(0)
+    assert shutdown_saw_pending_drain
+    assert not cancelled
+    assert calls == ["drain-started", "engine-shutdown", "drain-settled"]
+    assert not factory._pending_handler_drains
+    assert handler.aclose.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_prefill_startup_failure_withdraws_state_agent_owner():
     lifecycle = SimpleNamespace(close=AsyncMock())
     factory = _make_factory(state_agent_lifecycle=lifecycle)
@@ -1221,6 +1294,7 @@ async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
 ) -> None:
     engine_client = Mock()
     vllm_config = Mock(
+        shutdown_timeout=5.0,
         additional_config={},
         cache_config=SimpleNamespace(num_gpu_blocks=96),
     )

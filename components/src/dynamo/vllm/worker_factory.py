@@ -104,6 +104,8 @@ BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 # serving nor error propagation may hang on it.
 WORKER_GC_STOP_TIMEOUT_SECONDS = 30.0
 
+ASYNC_HANDLER_DRAIN_TIMEOUT_SECONDS = 30.0
+
 # Bound for the post-benchmark RPC that turns vLLM's cudagraph_metrics back
 # off in the model workers. It shares the restore budget bounded by
 # WORKER_GC_STOP_TIMEOUT_SECONDS, so it stays well below it; setting one
@@ -1755,6 +1757,7 @@ class WorkerFactory:
         self.setup_fpm_relay = setup_fpm_relay_fn
         self.setup_metrics_collection = setup_metrics_collection_fn
         self.state_agent_lifecycle = state_agent_lifecycle or StateAgentLifecycle()
+        self._pending_handler_drains: set[asyncio.Task[None]] = set()
 
     async def _setup_kv_routing(
         self,
@@ -2308,7 +2311,7 @@ class WorkerFactory:
             errors.append(exc)
         if lifecycle.handler is not None:
             try:
-                await lifecycle.handler.aclose()
+                await self._drain_handler(lifecycle)
             except (Exception, asyncio.CancelledError) as exc:
                 errors.append(exc)
         if errors:
@@ -2318,6 +2321,34 @@ class WorkerFactory:
                     exc_info=(type(secondary), secondary, secondary.__traceback__),
                 )
             raise errors[0]
+
+    async def _drain_handler(self, lifecycle: _WorkerLifecycle) -> None:
+        if lifecycle.handler is None:
+            return
+        timeout = (
+            lifecycle.vllm_config.shutdown_timeout
+            if lifecycle.vllm_config is not None
+            else 0
+        )
+        if timeout <= 0:
+            timeout = ASYNC_HANDLER_DRAIN_TIMEOUT_SECONDS
+        task = asyncio.create_task(lifecycle.handler.aclose())
+        try:
+            done, _pending = await asyncio.wait({task}, timeout=timeout)
+        finally:
+            if not task.done():
+                self._pending_handler_drains.add(task)
+                task.add_done_callback(self._finish_handler_drain)
+        if not done:
+            raise TimeoutError(
+                "asynchronous handler drain timed out; shutting down the engine"
+            )
+        task.result()
+
+    def _finish_handler_drain(self, task: asyncio.Task[None]) -> None:
+        self._pending_handler_drains.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("Asynchronous handler drain failed after engine teardown")
 
     async def _run_decode_worker(
         self,
