@@ -33,8 +33,8 @@ class UpgradePathTest(unittest.TestCase):
 
     def test_rejects_skipped_minor_upgrade_and_downgrade(self):
         for installed, target, expected in (
-            ("1.2.3", "1.5.0", "unsupportedUpgradeOverride=1.2"),
-            ("1.5.0", "1.2.3", "unsupportedDowngradeOverride=1.5"),
+            ("1.2.3", "1.5.0", "unsupportedUpgradeOverride=1.5"),
+            ("1.5.0", "1.2.3", "unsupportedDowngradeOverride=1.2"),
         ):
             with (
                 self.subTest(installed=installed, target=target),
@@ -42,25 +42,34 @@ class UpgradePathTest(unittest.TestCase):
             ):
                 preflight.validate_upgrade_path(installed, target)
 
-    def test_matching_source_minor_override_allows_unsupported_transition(self):
-        preflight.validate_upgrade_path("1.2.3", "1.5.0", "1.2")
-        preflight.validate_upgrade_path("1.5.3", "1.2.0", "", "1.5")
+    def test_matching_target_minor_override_allows_unsupported_transition(self):
+        preflight.validate_upgrade_path("1.2.3", "1.5.0", "1.5")
+        preflight.validate_upgrade_path("1.5.3", "1.2.0", "", "1.2")
 
-    def test_stale_override_does_not_allow_another_unsupported_transition(self):
-        with self.assertRaisesRegex(ValueError, "unsupportedUpgradeOverride=1.5"):
-            preflight.validate_upgrade_path("1.5.0", "1.7.0", "1.2")
+    def test_installed_minor_override_does_not_allow_unsupported_transition(self):
+        for installed, target, upgrade_override, downgrade_override, expected in (
+            ("1.2.0", "1.5.0", "1.2", "", "unsupportedUpgradeOverride=1.5"),
+            ("1.5.0", "1.2.0", "", "1.5", "unsupportedDowngradeOverride=1.2"),
+        ):
+            with (
+                self.subTest(installed=installed, target=target),
+                self.assertRaisesRegex(ValueError, expected),
+            ):
+                preflight.validate_upgrade_path(
+                    installed, target, upgrade_override, downgrade_override
+                )
 
     def test_override_does_not_apply_in_the_other_direction(self):
-        with self.assertRaisesRegex(ValueError, "unsupportedDowngradeOverride=1.5"):
-            preflight.validate_upgrade_path("1.5.0", "1.2.0", "1.5", "")
+        with self.assertRaisesRegex(ValueError, "unsupportedDowngradeOverride=1.2"):
+            preflight.validate_upgrade_path("1.5.0", "1.2.0", "1.2", "")
 
     def test_override_requires_minor_version_form(self):
         with self.assertRaisesRegex(ValueError, "must be a minor version in N.M form"):
-            preflight.validate_upgrade_path("1.2.0", "1.5.0", "1.2.0")
+            preflight.validate_upgrade_path("1.2.0", "1.5.0", "1.5.0")
 
     def test_matching_override_allows_major_transition(self):
-        preflight.validate_upgrade_path("1.9.0", "2.0.0", "1.9")
-        preflight.validate_upgrade_path("2.0.0", "1.9.0", "", "2.0")
+        preflight.validate_upgrade_path("1.9.0", "2.0.0", "2.0")
+        preflight.validate_upgrade_path("2.0.0", "1.9.0", "", "1.9")
 
     def test_rejects_non_semantic_version(self):
         with self.assertRaisesRegex(ValueError, "not a supported semantic version"):

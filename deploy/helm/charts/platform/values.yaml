@@ -115,11 +115,11 @@ dynamo-operator:
         # -- Per-check overrides of upgradePreflight.job. Unspecified fields inherit the shared
         # defaults; affinity, podSecurityContext, and imagePullSecrets replace them as whole values.
         job: {}
-        # -- Installed minor (N.M) allowed to make one otherwise unsupported forward upgrade.
-        # The value is ignored after the installed minor changes and never bypasses other checks.
+        # -- Target minor (N.M) allowed for an otherwise unsupported forward upgrade.
+        # The value is ignored for other target minors and never bypasses other checks.
         unsupportedUpgradeOverride: ""
-        # -- Installed minor (N.M) allowed to make one otherwise unsupported downgrade.
-        # The value is ignored after the installed minor changes and never bypasses other checks.
+        # -- Target minor (N.M) allowed for an otherwise unsupported downgrade.
+        # The value is ignored for other target minors and never bypasses other checks.
         unsupportedDowngradeOverride: ""
 
   dgdrV1Beta2:

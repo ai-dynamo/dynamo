@@ -55,7 +55,7 @@ disabled hooks do not enforce the check. When the operator subchart is disabled,
 omitted because the separately managed operator release owns its upgrade policy.
 
 The Job reads the installed operator version and rejects larger minor jumps and major-version
-changes. After separately validating an unsupported transition, authorize only that source minor
+changes. After separately validating an unsupported transition, authorize only that target minor
 with the matching override:
 
 ```yaml
@@ -63,14 +63,14 @@ dynamo-operator:
   upgradePreflight:
     checks:
       upgradePath:
-        # For a forward upgrade starting from 1.2.x:
-        unsupportedUpgradeOverride: "1.2"
-        # For a downgrade starting from 1.5.x:
-        unsupportedDowngradeOverride: "1.5"
+        # For a forward upgrade targeting 1.5.x:
+        unsupportedUpgradeOverride: "1.5"
+        # For a downgrade targeting 1.2.x:
+        unsupportedDowngradeOverride: "1.2"
 ```
 
-The value must match the currently installed `N.M` version. It is ignored after the installed minor
-changes, so it cannot authorize a later unsupported transition. The override applies only to the
+The value must match the target operator's `N.M` version. It is ignored when a later operation
+targets another minor, so it cannot authorize that transition. The override applies only to the
 `upgradePath` check and cannot bypass sibling preflight checks. An override does not make the path
 supported.
 

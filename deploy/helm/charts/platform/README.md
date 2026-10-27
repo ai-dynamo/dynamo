@@ -55,7 +55,7 @@ disabled hooks do not enforce the check. When the operator subchart is disabled,
 omitted because the separately managed operator release owns its upgrade policy.
 
 The Job reads the installed operator version and rejects larger minor jumps and major-version
-changes. After separately validating an unsupported transition, authorize only that source minor
+changes. After separately validating an unsupported transition, authorize only that target minor
 with the matching override:
 
 ```yaml
@@ -63,14 +63,14 @@ dynamo-operator:
   upgradePreflight:
     checks:
       upgradePath:
-        # For a forward upgrade starting from 1.2.x:
-        unsupportedUpgradeOverride: "1.2"
-        # For a downgrade starting from 1.5.x:
-        unsupportedDowngradeOverride: "1.5"
+        # For a forward upgrade targeting 1.5.x:
+        unsupportedUpgradeOverride: "1.5"
+        # For a downgrade targeting 1.2.x:
+        unsupportedDowngradeOverride: "1.2"
 ```
 
-The value must match the currently installed `N.M` version. It is ignored after the installed minor
-changes, so it cannot authorize a later unsupported transition. The override applies only to the
+The value must match the target operator's `N.M` version. It is ignored when a later operation
+targets another minor, so it cannot authorize that transition. The override applies only to the
 `upgradePath` check and cannot bypass sibling preflight checks. An override does not make the path
 supported.
 
@@ -612,8 +612,8 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.upgradePreflight.job.affinity | object | `{}` | Independent preflight affinity. Does not inherit controllerManager.affinity. |
 | dynamo-operator.upgradePreflight.job.podSecurityContext | string | `nil` | Full replacement of the preflight pod security context. Null uses secure defaults. Omit runAsUser on OpenShift for admission to assign the namespace UID. |
 | dynamo-operator.upgradePreflight.checks.upgradePath.job | object | `{}` | Per-check overrides of upgradePreflight.job. Unspecified fields inherit the shared defaults; affinity, podSecurityContext, and imagePullSecrets replace them as whole values. |
-| dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride | string | `""` | Installed minor (N.M) allowed to make one otherwise unsupported forward upgrade. The value is ignored after the installed minor changes and never bypasses other checks. |
-| dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride | string | `""` | Installed minor (N.M) allowed to make one otherwise unsupported downgrade. The value is ignored after the installed minor changes and never bypasses other checks. |
+| dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported forward upgrade. The value is ignored for other target minors and never bypasses other checks. |
+| dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported downgrade. The value is ignored for other target minors and never bypasses other checks. |
 | dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2 Request API with conversion and install the Run and Candidate APIs. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. When true, the operator reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate planner Job with a publisher sidecar that persists deployment Candidates. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
