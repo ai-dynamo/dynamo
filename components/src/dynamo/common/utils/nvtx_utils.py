@@ -72,9 +72,6 @@ def _parse_enabled(name: str) -> bool:
     )
 
 
-# `nvtx` is not a dependency of ai-dynamo — it ships in the optional
-# `ai-dynamo[profiling]` extra and in the container images. It is imported only
-# when markers are enabled, so the call sites carry no dependency on it.
 ENABLED: bool = _parse_enabled(ENV_VAR)
 
 if ENABLED:

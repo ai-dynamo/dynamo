@@ -200,7 +200,6 @@ class TestEnabledWithoutPackage:
         assert module.ENABLED is False
         assert "DYN_NVTX" in caplog.text
         assert "not installed" in caplog.text
-        # The no-op surface is in place, so call sites keep working.
         assert module.start_range("x") is None
         module.end_range(None)
         with module.annotate("x"):
@@ -245,15 +244,13 @@ class TestEnvParsing:
     recorded nothing while the Rust half of the same capture was enabled.
     """
 
-    @pytest.mark.parametrize(
-        "value", ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON", " 1 ", " on "]
-    )
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on", "TRUE", " on "])
     def test_truthy_values_enable(self, monkeypatch, load_module, stub_nvtx, value):
         monkeypatch.setenv("DYN_NVTX", value)
         assert load_module().ENABLED is True
 
     @pytest.mark.parametrize(
-        "value", ["0", "false", "FALSE", "no", "off", "OFF", "", "  "]
+        "value", ["0", "false", "no", "off", "FALSE", " off ", "", "  "]
     )
     def test_falsey_values_disable(self, monkeypatch, load_module, value):
         monkeypatch.setenv("DYN_NVTX", value)

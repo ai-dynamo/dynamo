@@ -535,7 +535,7 @@ where
     let item = item.map_err(|e| ResponseProcessingError::Dynamo(map_python_exception(e)))?;
     let response = tokio::task::spawn_blocking(move || {
         // Per-response Python->Rust deserialization: pure Dynamo overhead paid
-        // once per token on the streaming path.
+        // once per streamed chunk.
         let _nvtx = dynamo_nvtx_range!("pybridge.decode_response");
         Python::with_gil(|py| depythonize_annotated::<Resp>(&item.into_bound(py)))
     })
