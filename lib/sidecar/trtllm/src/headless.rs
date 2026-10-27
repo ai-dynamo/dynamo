@@ -4,7 +4,6 @@
 //! Node-local telemetry without model registration or inference ingress.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use dynamo_backend_common::{DisaggregationMode, DynamoError, KvEventSource};
@@ -18,10 +17,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::TrtllmClient;
+use crate::engine::RoutingSupervision;
 use crate::node::{NODE_METADATA_KEY, NodeMetadata};
 use crate::proto as pb;
-
-const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub(crate) async fn relay(
     drt: DistributedRuntime,
@@ -34,6 +32,7 @@ pub(crate) async fn relay(
         "Telemetry-only sidecars cannot register encoder or RL routes"
     );
     let transport = args.sidecar.grpc.config();
+    let supervision = RoutingSupervision::default();
     let initialization = async {
         let client = TrtllmClient::connect(&args.sidecar.grpc_endpoint, transport).await?;
         let info = client
@@ -94,7 +93,7 @@ pub(crate) async fn relay(
     };
     let leader = tokio::select! {
         result = tokio::time::timeout(transport.startup_deadline, wait) => result.context("Timed out waiting for engine leader")??,
-        result = monitor_engine(&client, &node, &sources) => { result?; unreachable!() },
+        result = monitor_engine(&client, &node, &sources, supervision) => { result?; unreachable!() },
         _ = cancel.cancelled() => return Ok(()),
     };
     let (worker_id, leader_config) = leader;
@@ -164,7 +163,7 @@ pub(crate) async fn relay(
         _ = terminations.next(), if !terminations.is_empty() => {
             bail!("Local KV event publisher stopped; restarting the telemetry sidecar is required")
         }
-        result = monitor_engine(&client, &node, &sources) => result,
+        result = monitor_engine(&client, &node, &sources, supervision) => result,
         result = monitor_leader(&mut configs, &node, worker_id, &leader_config) => result,
         _ = cancel.cancelled() => Ok(()),
     }
@@ -225,11 +224,13 @@ pub(crate) async fn monitor_engine(
     client: &TrtllmClient,
     node: &NodeMetadata,
     sources: &[pb::KvEventSource],
+    supervision: RoutingSupervision,
 ) -> Result<()> {
-    const RECOVERY_LIMIT: Duration = Duration::from_secs(30);
-    let mut ticks = tokio::time::interval(POLL_INTERVAL);
+    let poll_interval = supervision.metadata_poll_interval;
+    let recovery_limit = supervision.metadata_recovery_limit;
+    let mut ticks = tokio::time::interval(poll_interval);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut deadline = tokio::time::Instant::now() + RECOVERY_LIMIT;
+    let mut deadline = tokio::time::Instant::now() + recovery_limit;
     let mut warned = false;
     loop {
         ticks.tick().await;
@@ -251,10 +252,10 @@ pub(crate) async fn monitor_engine(
             );
             Ok::<_, anyhow::Error>(())
         };
-        let attempt_deadline = deadline.min(tokio::time::Instant::now() + POLL_INTERVAL);
+        let attempt_deadline = deadline.min(tokio::time::Instant::now() + poll_interval);
         match tokio::time::timeout_at(attempt_deadline, check).await {
             Ok(Ok(())) => {
-                deadline = tokio::time::Instant::now() + RECOVERY_LIMIT;
+                deadline = tokio::time::Instant::now() + recovery_limit;
                 warned = false;
                 continue;
             }
@@ -283,7 +284,8 @@ pub(crate) async fn monitor_engine(
         }
         ensure!(
             tokio::time::Instant::now() < deadline,
-            "Native metadata remained unavailable for 30 seconds; withdrawing worker"
+            "Native metadata remained unavailable for {} seconds; withdrawing worker",
+            recovery_limit.as_secs_f64()
         );
     }
 }

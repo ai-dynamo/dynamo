@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::convert::build_generate_request;
+use crate::engine::RoutingSupervision;
 
 #[tokio::test]
 async fn sidecar_signs_parent_context_affinity_without_replacing_child() {
@@ -234,7 +235,10 @@ async fn stale_load_withdraws_worker_without_node_metadata() {
     let service = FakeTrtllm::default();
     service.kv_routing.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service.clone()).await;
-    let engine = engine_with_kv_routing(&server.endpoint);
+    let engine = engine_with_kv_routing(&server.endpoint).with_supervision(RoutingSupervision {
+        load_staleness_limit: Duration::from_millis(200),
+        ..Default::default()
+    });
     engine.start(0).await.expect("start with KV routing");
 
     let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
@@ -256,7 +260,7 @@ async fn stale_load_withdraws_worker_without_node_metadata() {
         .expect("metrics publisher callback")(publisher)
     .expect("start metrics publisher");
     // This legacy server has no node metadata: load health must still be supervised.
-    let error = tokio::time::timeout(Duration::from_secs(35), engine.monitor_routing())
+    let error = tokio::time::timeout(Duration::from_secs(5), engine.monitor_routing())
         .await
         .expect("bounded load staleness")
         .expect_err("stale routing load must withdraw the worker");
@@ -338,27 +342,27 @@ async fn leader_monitor_rejects_restarted_native_engine() {
         source_owners: [(0, "leader".into())].into(),
     });
     let server = FakeServer::start(service.clone()).await;
-    let engine = engine_with_kv_routing(&server.endpoint);
+    let supervision = RoutingSupervision {
+        metadata_poll_interval: Duration::from_millis(50),
+        ..Default::default()
+    };
+    let engine = engine_with_kv_routing(&server.endpoint).with_supervision(supervision);
     engine.start(0).await.expect("start original engine");
     // Either metadata RPC may transiently reject work without withdrawing the
     // unchanged engine. Recovery must not suppress actual identity changes.
+    // Each window spans at least one metadata poll.
+    let window = 2 * supervision.metadata_poll_interval;
     let monitor = engine.monitor_routing();
     tokio::pin!(monitor);
     for failure in [&service.server_info_error, &service.kv_sources_error] {
         for code in [tonic::Code::Unavailable, tonic::Code::ResourceExhausted] {
             *failure.lock().await = Some(code);
             assert!(
-                tokio::time::timeout(Duration::from_secs(6), &mut monitor)
-                    .await
-                    .is_err(),
+                tokio::time::timeout(window, &mut monitor).await.is_err(),
                 "transient {code:?} must not withdraw the worker"
             );
             *failure.lock().await = None;
-            assert!(
-                tokio::time::timeout(Duration::from_secs(6), &mut monitor)
-                    .await
-                    .is_err()
-            );
+            assert!(tokio::time::timeout(window, &mut monitor).await.is_err());
         }
     }
     service
@@ -368,7 +372,7 @@ async fn leader_monitor_rejects_restarted_native_engine() {
         .as_mut()
         .unwrap()
         .engine_id = "restarted".into();
-    let error = tokio::time::timeout(Duration::from_secs(6), &mut monitor)
+    let error = tokio::time::timeout(Duration::from_secs(5), &mut monitor)
         .await
         .expect("detect changed incarnation")
         .expect_err("must withdraw stale discovery");
@@ -439,10 +443,14 @@ async fn sustained_metadata_outage_withdraws_worker() {
         source_owners: [(0, "leader".into())].into(),
     });
     let server = FakeServer::start(service.clone()).await;
-    let engine = engine_with_kv_routing(&server.endpoint);
+    let engine = engine_with_kv_routing(&server.endpoint).with_supervision(RoutingSupervision {
+        metadata_poll_interval: Duration::from_millis(50),
+        metadata_recovery_limit: Duration::from_millis(300),
+        ..Default::default()
+    });
     engine.start(0).await.expect("start original engine");
     *service.kv_sources_error.lock().await = Some(tonic::Code::ResourceExhausted);
-    let error = tokio::time::timeout(Duration::from_secs(35), engine.monitor_routing())
+    let error = tokio::time::timeout(Duration::from_secs(5), engine.monitor_routing())
         .await
         .expect("bounded metadata recovery")
         .expect_err("sustained outage must withdraw worker");
