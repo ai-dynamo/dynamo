@@ -33,6 +33,10 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
+# Processes only detect a lost non-HA etcd when their lease expires (default
+# ETCD_LEASE_TTL is 30s), then need time to tear down; 30s alone races the TTL.
+NON_HA_SHUTDOWN_DEADLINE_SECS = 60
+
 pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.vllm,
@@ -121,6 +125,11 @@ class DynamoWorkerProcess(ManagedProcess):
             self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
             env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
 
+        # Each worker publishes forward-pass metrics on its own port; unset means
+        # the host-wide default 20380, which collides when prefill and decode share a host.
+        self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
+        env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
+
         # KV events config only for prefill worker
         if mode == WorkerMode.PREFILL:
             self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
@@ -172,6 +181,7 @@ class DynamoWorkerProcess(ManagedProcess):
             "system_port",
             "kv_event_port",
             "nixl_side_channel_port",
+            "fpm_port",
         ):
             port = getattr(self, port_attr, None)
             if port is None:
@@ -399,7 +409,8 @@ def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
 
                     # Step 7: Wait and verify frontend and worker detect the loss
                     wait_for_processes_to_terminate(
-                        {"Worker": worker, "Frontend": frontend}
+                        {"Worker": worker, "Frontend": frontend},
+                        timeout=NON_HA_SHUTDOWN_DEADLINE_SECS,
                     )
 
 
@@ -475,7 +486,8 @@ def test_etcd_non_ha_shutdown_vllm_disaggregated(
                                 "Decode Worker": decode_worker,
                                 "Prefill Worker": prefill_worker,
                                 "Frontend": frontend,
-                            }
+                            },
+                            timeout=NON_HA_SHUTDOWN_DEADLINE_SECS,
                         )
 
 
