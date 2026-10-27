@@ -125,7 +125,7 @@ func TestClusterFrontendDependencyStartup(t *testing.T) {
 			}
 			require.NoError(t, env.Client().Create(ctx, dependencyDeployment))
 
-			t.Log("Create a frontend and mock worker with runtime 1.6.0 defaults and the default dependency timeout")
+			t.Log("Create a frontend with explicit startup protection and a runtime 1.6.0 mock worker")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "late-" + dependency.name, Namespace: env.Namespace(),
@@ -154,6 +154,13 @@ func TestClusterFrontendDependencyStartup(t *testing.T) {
 							ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: modelConfig.Name}},
 						}}},
 					}},
+				}
+				// Explicit protection also supports graphs whose origin predates the generated default.
+				if componentType == nvidiacomv1beta1.ComponentTypeFrontend {
+					component.PodTemplate.Spec.Containers[0].StartupProbe = &corev1.Probe{
+						ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/live", Port: intstr.FromString("http")}},
+						PeriodSeconds: 10, TimeoutSeconds: 1, FailureThreshold: 30,
+					}
 				}
 				if componentType == nvidiacomv1beta1.ComponentTypeWorker {
 					component.PodTemplate.Spec.Containers[0].Command = []string{"python3"}
