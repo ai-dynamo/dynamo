@@ -89,6 +89,8 @@ class RuntimeLoRACoordinator:
         self,
         request: Mapping[str, Any],
         request_id: str,
+        *,
+        admission_id: str | None = None,
     ) -> LoRARequest | None:
         metadata = _parse_request(request)
         if metadata is None:
@@ -111,7 +113,8 @@ class RuntimeLoRACoordinator:
             raise _runtime_error(503, "lora_resolver_unavailable")
         self._validate_worker_capability(metadata)
 
-        resident = await self._lease_resident(metadata, request_id)
+        admission_id = request_id if admission_id is None else admission_id
+        resident = await self._lease_resident(metadata, admission_id)
         if resident is not None:
             return resident
         if self._closed:
@@ -124,7 +127,9 @@ class RuntimeLoRACoordinator:
             resident_record = state.runtime_loras.get(metadata.adapter_key)
             if resident_record is not None:
                 resident = self._validate_resident(metadata, resident_record)
-                self._record_pending_admission_locked(metadata.adapter_key, request_id)
+                self._record_pending_admission_locked(
+                    metadata.adapter_key, admission_id
+                )
                 return resident
             if (
                 sum(self._initial_waiters.values())
@@ -165,7 +170,7 @@ class RuntimeLoRACoordinator:
             self._initial_waiters[key] = self._initial_waiters.get(key, 0) + 1
         try:
             await asyncio.shield(task)
-            resident = await self._lease_resident(metadata, request_id)
+            resident = await self._lease_resident(metadata, admission_id)
             if resident is None:
                 raise _runtime_error(429, "lora_capacity_exceeded")
             return resident

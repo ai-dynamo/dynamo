@@ -48,3 +48,38 @@ async def test_initial_waiters_share_pending_admission_limit(monkeypatch, tmp_pa
     assert handler._lora_state.runtime_pending_leases == {result.lora_name: 1}
     assert not coordinator._initial_waiters
     await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_correlation_ids_have_independent_admissions(
+    monkeypatch, tmp_path
+):
+    snapshot = _snapshot(tmp_path)
+    contexts = []
+
+    async def resolve(**kwargs):
+        contexts.append(kwargs["context"])
+        return ResolvedLoRA(snapshot, "digest:immutable")
+
+    handler, coordinator = _coordinator(monkeypatch, tmp_path, resolve)
+    request = _request("wandb-artifact:///entity/project/adapter:v1")
+    first = await coordinator.ensure_from_request(
+        request, "shared-client-id", admission_id="internal-first"
+    )
+    second = await coordinator.ensure_from_request(
+        request, "shared-client-id", admission_id="internal-second"
+    )
+    assert set(handler._lora_state.runtime_pending_admissions) == {
+        "internal-first",
+        "internal-second",
+    }
+    assert handler._lora_state.runtime_pending_leases == {first.lora_name: 2}
+    assert contexts[0].request_id == "shared-client-id"
+
+    await coordinator.release_pending_admission("internal-first")
+    admitted = await coordinator.activate_pending_admission("internal-second", second)
+    assert admitted.lora_name == second.lora_name
+    assert handler._lora_state.runtime_active_leases == {second.lora_name: 1}
+    assert not handler._lora_state.runtime_pending_leases
+    await coordinator.release_active_admission(second.lora_name)
+    await coordinator.close()
