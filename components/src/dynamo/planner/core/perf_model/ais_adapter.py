@@ -487,7 +487,8 @@ class PlannerEnginePerfModel:
         """Estimate next-request TTFT in seconds from queued prefill work.
 
         FPM v1 queued prefill does not know KV reuse. The planner applies the
-        router-provided prefix-cache discount before calling the engine model.
+        router-provided prefix-cache discount to raw queued work before calling
+        the engine model. The observed next-request term is already fresh.
         AIS query failures are treated as unavailable estimates so load
         scaling can skip the current tick.
         """
@@ -645,12 +646,12 @@ class PlannerEnginePerfModel:
     ) -> ForwardPassMetrics:
         queued = fpm.queued_requests
         scheduled = fpm.scheduled_requests
-        queued_tokens = float(queued.sum_prefill_tokens) * queue_scale
+        queued_tokens = float(queued.sum_prefill_tokens) * queue_scale * prefill_scale
         queued_requests = float(queued.num_prefill_requests) * queue_scale
+        # avg_isl comes from freshly computed scheduled tokens, after KV reuse.
         if add_next_request and self.avg_isl > 0:
             queued_tokens += self.avg_isl
             queued_requests += 1.0
-        queued_tokens *= prefill_scale
 
         decode_kv = float(scheduled.sum_decode_kv_tokens)
         decode_requests = float(scheduled.num_decode_requests)
