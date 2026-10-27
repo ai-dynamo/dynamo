@@ -328,21 +328,8 @@ wait_for_ready() {
     return 1
 }
 
-# wait_ready <url> <name> [timeout_seconds] [report_url]
-#
-# Polls a worker health URL once per second until its JSON body reports
-# "status": "ready". Unlike wait_for_ready, an HTTP 200 alone does not count,
-# and curl has no --max-time.
-#
-# Args:
-#   url              Worker health URL (e.g. http://127.0.0.1:8081/health)
-#   name             Label used in the progress messages
-#   timeout_seconds  Max seconds to wait (default: 900)
-#   report_url       Any non-empty value (callers pass the word report_url)
-#                    adds the URL to the waiting message and prints a timeout
-#                    message to stderr. Without it, a timeout returns silently.
-#
-# Returns 0 when ready, 1 at the deadline.
+# wait_ready <url> <name> [timeout_seconds=900] [report_url]: poll until the /health body says "status": "ready".
+# A non-empty report_url adds the URL to messages and logs a timeout to stderr.
 wait_ready() {
     local url="$1" name="$2" timeout_s="${3:-900}" report_url="${4:-}"
     local deadline=$((SECONDS + timeout_s))
