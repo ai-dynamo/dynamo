@@ -240,6 +240,7 @@ pub(crate) fn resolve_indexer_domain(
 
 pub(crate) fn stable_cluster_id(value: &str) -> ClusterId {
     let mut hasher = blake3::Hasher::new();
+    // This domain is frozen: changing it would change every derived pool ID.
     hasher.update(b"dynamo/indexer-dc/v1");
     hasher.update(&(value.len() as u32).to_le_bytes());
     hasher.update(value.as_bytes());
