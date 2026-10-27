@@ -803,7 +803,7 @@ async def test_resolution_queue_exhaustion_does_not_invoke_plugin(
 
 
 @pytest.mark.asyncio
-async def test_false_add_is_accepted_only_when_engine_confirms_id(
+async def test_false_fresh_add_rejects_unverified_weights_even_when_id_exists(
     monkeypatch, tmp_path
 ):
     source_uri = "wandb-artifact:///entity/project/adapter:v1"
@@ -821,11 +821,16 @@ async def test_false_add_is_accepted_only_when_engine_confirms_id(
 
     handler.engine_client.list_loras = AsyncMock(side_effect=list_loras)
 
-    result = await coordinator.ensure_from_request(_request(source_uri), "request-id")
-
-    assert result is not None
-    assert result.lora_name in handler._lora_state.runtime_loras
-    handler.engine_client.remove_lora.assert_not_awaited()
+    with pytest.raises(HttpError, match="lora_load_failed") as error:
+        await coordinator.ensure_from_request(_request(source_uri), "request-id")
+    assert error.value.code == 500
+    request = handler.engine_client.add_lora.await_args.args[0]
+    handler.engine_client.remove_lora.assert_awaited_once_with(request.lora_int_id)
+    assert not handler._lora_state.runtime_loras
+    assert not handler._lora_state.loaded_loras
+    assert not handler._lora_state.runtime_reserved_ids
+    assert not handler._lora_state.runtime_pending_admissions
+    await coordinator.close()
 
 
 @pytest.mark.asyncio

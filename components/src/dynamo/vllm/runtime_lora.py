@@ -881,10 +881,7 @@ class RuntimeLoRACoordinator:
                     self._handler._pause_lock,
                     self._handler.engine_client.add_lora(request),
                 )
-                engine_added = add_error is None and (
-                    added is True
-                    or (added is False and await self._engine_contains_lora(lora_id))
-                )
+                engine_added = add_error is None and added is True
                 if add_cancelled or not engine_added:
                     capacity_reserved = False
                     rollback_cancelled = await self._finish_runtime_rollback(
