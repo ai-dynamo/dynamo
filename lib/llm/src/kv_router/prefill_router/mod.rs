@@ -381,12 +381,12 @@ impl
         req.annotations
             .retain(|annotation| annotation != BYPASS_REMOTE_PREFILL_ANNOTATION);
 
-        // Save original max_tokens for decode
-        let original_max_tokens = req.stop_conditions.max_tokens;
-
-        // Query-only requests are owned by the decode RoutingHost. In particular,
-        // do not turn an advisory worker lookup into conditional local execution.
-        let query_only = req.get_annotation_value("query_instance_id").is_some();
+        // Query-only requests are owned by the decode RoutingHost in every
+        // activation state. In particular, do not turn an advisory worker lookup
+        // into conditional local execution or a prefill hop.
+        if req.get_annotation_value("query_instance_id").is_some() {
+            return next.generate(context.map(|_| req)).await;
+        }
 
         // Hot path: an active router with a published binding never takes the
         // target lock. Anything else is resolved from one locked snapshot.
@@ -404,7 +404,7 @@ impl
                 // disaggregated decode`). Fail closed with a migratable error instead:
                 // the retry layer re-dispatches and the client sees a retryable 503
                 // rather than a backend failure.
-                ActivationSnapshot::Pending if !query_only => {
+                ActivationSnapshot::Pending => {
                     tracing::debug!(
                         request_id = %request_id,
                         model_name = %self.model_name,
@@ -417,17 +417,19 @@ impl
                         &self.namespace,
                     ));
                 }
-                // Query-only previews never reach the engine. Otherwise no prefill
-                // target was ever set (aggregated-capable deployment) or every prefill
-                // worker left (target cleared): route directly to the backend.
-                ActivationSnapshot::Pending | ActivationSnapshot::Untargeted => {
+                // No prefill target was ever set (aggregated-capable deployment) or
+                // every prefill worker left (target cleared): route directly to the
+                // backend.
+                ActivationSnapshot::Untargeted => {
                     return next.generate(context.map(|_| req)).await;
                 }
             }
         }
 
-        if query_only {
-            return next.generate(context.map(|_| req)).await;
+        // Ensure tracker exists for routing decisions in disaggregated mode.
+        // Create one if not provided by the upstream DeltaGenerator.
+        if req.tracker.is_none() {
+            req.tracker = Some(Arc::new(RequestTracker::new()));
         }
 
         let session_affinity = context
@@ -452,9 +454,6 @@ impl
                     );
 
                     let mut conditional_request = conditional_request;
-                    if conditional_request.tracker.is_none() {
-                        conditional_request.tracker = Some(Arc::new(RequestTracker::new()));
-                    }
                     if let Some(ref tracker) = conditional_request.tracker {
                         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
                     }
@@ -501,11 +500,6 @@ impl
             }
         }
 
-        // Ensure tracker exists for routing decisions in disaggregated mode.
-        // Create one if not provided by the upstream DeltaGenerator.
-        if req.tracker.is_none() {
-            req.tracker = Some(Arc::new(RequestTracker::new()));
-        }
         let tracker = req.tracker.as_ref().unwrap();
         let prefill_phase_barrier = tracker.set_phase(RequestPhase::Prefill).await;
 
@@ -676,31 +670,8 @@ impl
             let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
         }
 
-        let mut decode_req = into_decode_request(req, outcome);
-
-        if let Some(topology_constraints) = topology_constraints {
-            merge_decode_topology_constraints(&mut decode_req, topology_constraints);
-        }
-
-        decode_req.stop_conditions.max_tokens = original_max_tokens;
-
-        // Decode should not account prompt-side load. Normal disagg also
-        // forces zero overlap credit so decode routing stays load-only.
-        let existing_override = decode_req.router_config_override.take();
-        decode_req.router_config_override = Some(build_decode_router_override(
-            existing_override,
-            self.conditional_disagg_policy.is_enabled(),
-        ));
-
-        let annotated = |name| decode_req.annotations.iter().any(|a| a == name);
-        let output = match (
-            annotated(PREFILL_OUTPUT_ANNOTATION),
-            annotated(PREFILL_OUTPUT_FIRST_ANNOTATION),
-        ) {
-            (false, _) => PrefillNeed::None,
-            (true, false) => PrefillNeed::BeforeLast,
-            (true, true) => PrefillNeed::BeforeFirst,
-        };
+        let decode_req = self.build_decode_request(req, outcome, topology_constraints);
+        let output = prefill_need(&decode_req.annotations);
         let decode = next.generate(context.map(|_| decode_req));
         match prefill_completion {
             Some(completion) => {
@@ -728,6 +699,32 @@ fn independent_prefill_context(
 impl PrefillRouter {
     pub(crate) fn conditional_disagg_enabled(&self) -> bool {
         self.conditional_disagg_policy.is_enabled()
+    }
+
+    /// Shape the decode leg from the original request and the prefill outcome.
+    ///
+    /// The original request still carries the client's `max_tokens`: only the
+    /// prefill clone is capped at one token.
+    fn build_decode_request(
+        &self,
+        req: PreprocessedRequest,
+        outcome: PrefillOutcome,
+        topology_constraints: Option<RoutingConstraints>,
+    ) -> PreprocessedRequest {
+        let mut decode_req = into_decode_request(req, outcome);
+
+        if let Some(topology_constraints) = topology_constraints {
+            merge_decode_topology_constraints(&mut decode_req, topology_constraints);
+        }
+
+        // Decode should not account prompt-side load. Normal disagg also
+        // forces zero overlap credit so decode routing stays load-only.
+        let existing_override = decode_req.router_config_override.take();
+        decode_req.router_config_override = Some(build_decode_router_override(
+            existing_override,
+            self.conditional_disagg_policy.is_enabled(),
+        ));
+        decode_req
     }
 
     pub(crate) fn set_decode_routing_host(&self, routing_host: Arc<RoutingHost>) -> Result<()> {
@@ -835,6 +832,19 @@ fn build_decode_router_override(
     override_config.track_prefill_tokens = Some(false);
 
     override_config
+}
+
+/// When the client asked for prefill's output, and whether before any decode token.
+fn prefill_need(annotations: &[String]) -> PrefillNeed {
+    let annotated = |name| annotations.iter().any(|a| a == name);
+    match (
+        annotated(PREFILL_OUTPUT_ANNOTATION),
+        annotated(PREFILL_OUTPUT_FIRST_ANNOTATION),
+    ) {
+        (false, _) => PrefillNeed::None,
+        (true, false) => PrefillNeed::BeforeLast,
+        (true, true) => PrefillNeed::BeforeFirst,
+    }
 }
 
 fn merge_decode_topology_constraints(
@@ -1241,6 +1251,47 @@ mod tests {
                 Some(expected_worker),
                 "{label}: the decode leg must record which prefill worker holds the blocks"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn decode_request_keeps_client_limits_and_applies_prefill_topology() {
+        for (router, expected_overlap) in [
+            (fresh_decode_router(), Some(0.0)),
+            (active_conditional_router(), None),
+        ] {
+            let mut request = request_with_constraints(None);
+            request.stop_conditions.max_tokens = Some(64);
+            let outcome = PrefillOutcome::Completed {
+                result: PrefillResult {
+                    disaggregated_params: serde_json::json!({}),
+                    prompt_tokens_details: None,
+                },
+                worker_id: 12,
+                worker_link: None,
+            };
+            let topology = RoutingConstraints {
+                required_taints: HashSet::from(["dynamo.topology/zone=us-east-1a".to_string()]),
+                preferred_taints: HashMap::new(),
+            };
+
+            let decode = router.build_decode_request(request, outcome, Some(topology));
+
+            assert_eq!(decode.stop_conditions.max_tokens, Some(64));
+            assert!(decode.staged_kv_cleanup);
+            assert!(
+                decode
+                    .routing
+                    .as_ref()
+                    .and_then(|routing| routing.routing_constraints.as_ref())
+                    .is_some_and(|constraints| constraints
+                        .required_taints
+                        .contains("dynamo.topology/zone=us-east-1a"))
+            );
+            let override_config = decode.router_config_override.unwrap();
+            assert_eq!(override_config.overlap_score_credit, expected_overlap);
+            assert_eq!(override_config.assume_kv_reuse, Some(false));
+            assert_eq!(override_config.track_prefill_tokens, Some(false));
         }
     }
 
