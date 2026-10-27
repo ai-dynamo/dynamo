@@ -975,7 +975,9 @@ async def test_nsys_repeated_client_capture_without_subprocess(tmp_path, monkeyp
             report = tmp_path / f"frontend.{len(handles)}.nsys-rep"
             await asyncio.to_thread(nsys_report, report)
             if len(handles) == 1:
-                await asyncio.to_thread(nsys_report, tmp_path / "frontend-other.1.nsys-rep")
+                await asyncio.to_thread(
+                    nsys_report, tmp_path / "frontend-other.1.nsys-rep"
+                )
 
         # Range transitions run in a worker thread; schedule on the loop.
         loop.call_soon_threadsafe(lambda: pending.append(asyncio.create_task(export())))
@@ -1839,3 +1841,26 @@ def test_archive_skips_raw_files_gone_since_capture(tmp_path):
         names = tar.getnames()
     assert "bundle/profiles/frontend/frontend.perf.data" in names
     assert not any(name.endswith("/gone") for name in names)
+
+
+def test_aggregated_worker_operations_are_attributed():
+    # Aggregated workers emit `worker.operation` without a phase suffix.
+    spans = {}
+    for span in (
+        otel_span("t", "r", "", "kv_router.route_request", worker_id="7001"),
+        otel_span("t", "h", "r", "handle_payload", instance_id="7001"),
+        otel_span("t", "o", "h", "worker.operation", start=2_000_000, dur=4_000_000),
+    ):
+        spans[span["spanId"]] = span
+    manifest = {
+        "plan": {"trace_ids": []},
+        "clock": {"workers": {"agg-0": {"start": {"worker_instance_id": 7001}}}},
+    }
+    traces = {"t": spans}
+    workers = bundle.router_targets(manifest, traces)
+    assert workers == {"7001": "agg-0"}
+    window = {"agg-0": (BASE + 3_000_000, BASE + 5_000_000)}
+    (entry,) = bundle.index_requests(manifest, traces, workers, window)
+    (phase,) = entry["phases"]
+    assert (phase["phase"], phase["target_id"]) == ("aggregated", "agg-0")
+    assert phase["recording_overlap_ns"] == 2_000_000

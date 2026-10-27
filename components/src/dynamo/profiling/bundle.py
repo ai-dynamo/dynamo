@@ -19,7 +19,8 @@ neither tool is available. --per-request also writes one Perfetto timeline per
 request. Run on an extracted bundle (with --output) to regenerate any view from
 the archive alone.
 
-A request is selected when its `worker.operation.<phase>` span ran on a captured
+A request is selected when its `worker.operation[.<phase>]` span (no phase suffix
+in aggregated serving) ran on a captured
 target during that target's recording interval, or when the plan named its
 trace ID. Worker spans are assigned through router decisions
 (`kv_router.route_request` worker_id = `handle_payload` instance_id) and joined
@@ -222,14 +223,17 @@ def index_requests(manifest, traces, workers, intervals) -> list[dict]:
     for trace_id, spans in traces.items():
         phases = []
         for span in spans.values():
-            if span["name"].startswith("worker.operation."):
+            name = span["name"]
+            if name == "worker.operation" or name.startswith("worker.operation."):
                 worker_id = router_decision(span, spans)[0]
                 target = workers.get(worker_id)
                 start, end = start_end(span)
                 low, high = intervals.get(target, (0, 0))
                 phases.append(
                     {
-                        "phase": span["name"].rsplit(".", 1)[1],
+                        # Aggregated workers emit an unsuffixed operation span.
+                        "phase": name.removeprefix("worker.operation").lstrip(".")
+                        or "aggregated",
                         "router_worker_id": worker_id,
                         "target_id": target,
                         "operation_span_id": span["spanId"],
