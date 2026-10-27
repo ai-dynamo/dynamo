@@ -419,6 +419,14 @@ fn prepare_branches(
                         format!("question {question_id:?}: {oversized}"),
                     );
                 }
+                if let Some(incompatible) = cause
+                    .downcast_ref::<crate::preprocessor::SystemOneCandidateLabelsIncompatible>()
+                {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("question {question_id:?}: {incompatible}"),
+                    );
+                }
                 let reason = cause
                     .downcast_ref::<crate::preprocessor::SystemOneModelIncompatible>()
                     .map_or("chat template or tokenizer failed", |reason| reason.0);

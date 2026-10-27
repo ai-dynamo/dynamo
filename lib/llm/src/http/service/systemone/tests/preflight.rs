@@ -6,11 +6,18 @@ use std::io::{Read, Seek, SeekFrom};
 use super::*;
 use crate::tokenizers::{Encoding, traits};
 
-struct ByteTokenizer;
+#[derive(Default)]
+struct ByteTokenizer {
+    split_second_label: bool,
+}
 
 impl traits::Encoder for ByteTokenizer {
     fn encode(&self, input: &str) -> anyhow::Result<Encoding> {
-        Ok(Encoding::Sp(input.bytes().map(u32::from).collect()))
+        let mut ids: Vec<_> = input.bytes().map(u32::from).collect();
+        if self.split_second_label && input.ends_with('B') {
+            ids.push(300);
+        }
+        Ok(Encoding::Sp(ids))
     }
 
     fn encode_batch(&self, inputs: &[&str]) -> anyhow::Result<Vec<Encoding>> {
@@ -33,6 +40,13 @@ impl traits::Decoder for ByteTokenizer {
 impl traits::Tokenizer for ByteTokenizer {}
 
 fn preflight_selection(reasoning: Option<&str>) -> SystemOneExecutionSelection {
+    preflight_selection_with_tokenizer(reasoning, ByteTokenizer::default())
+}
+
+fn preflight_selection_with_tokenizer(
+    reasoning: Option<&str>,
+    tokenizer: ByteTokenizer,
+) -> SystemOneExecutionSelection {
     let selection = selection(TestEngine::new(EngineBehavior::Success));
     let mut card = selection.card.clone();
     card.runtime_config.context_length = Some(65_536);
@@ -40,7 +54,7 @@ fn preflight_selection(reasoning: Option<&str>) -> SystemOneExecutionSelection {
     let dynamo_renderer::PromptFormatter::OAI(formatter) =
         crate::preprocessor::prompt::prompt_formatter_from_mdc(&card).unwrap();
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, Arc::new(ByteTokenizer).into())
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, Arc::new(tokenizer).into())
             .unwrap();
     SystemOneExecutionSelection {
         card,
@@ -60,6 +74,23 @@ fn request_named(name: &str) -> dynamo_decisions::CanonicalRequest {
         dynamo_decisions::Route::SystemOne,
     )
     .unwrap()
+}
+
+#[test]
+fn incompatible_candidate_labels_return_safe_actionable_validation_error() {
+    let selection = preflight_selection_with_tokenizer(
+        None,
+        ByteTokenizer {
+            split_second_label: true,
+        },
+    );
+    let result = super::super::prepare_branches(&request_named("choice"), &selection, 65_536);
+    let (status, message) = result.err().expect("second candidate must fail validation");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(message.contains("first 1 of 2 candidate labels"));
+    assert!(message.contains("reduce candidates or select another model"));
+    assert!(!message.contains("Preserve this task evidence"));
+    assert!(!message.contains("Payments"));
 }
 
 #[test]
