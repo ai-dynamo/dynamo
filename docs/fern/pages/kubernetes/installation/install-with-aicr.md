@@ -7,10 +7,10 @@ subtitle: Install the Dynamo Platform on an existing Kubernetes cluster with NVI
 
 [NVIDIA AI Cluster Runtime (AICR)](https://github.com/NVIDIA/aicr) generates one version-locked **recipe** for the whole GPU and Dynamo stack, renders it into a deployable **bundle**, and validates the running cluster against the recipe. It is an alternative to the manual steps in [Install Dynamo](install-dynamo.md).
 
-This guide is written against AICR v1.0.0, whose Dynamo recipes install the `dynamo-platform` Helm chart 1.4.2 into the `dynamo-system` namespace. The commands target Amazon EKS with H100 GPUs and Ubuntu nodes; change the `--service`, `--accelerator`, and `--os` values to match your cluster.
+This guide is written against AICR v1.1.2, whose Dynamo recipes install the `dynamo-platform` Helm chart 1.4.2 into the `dynamo-system` namespace. The commands target Amazon EKS with H100 GPUs and Ubuntu nodes; change the `--service`, `--accelerator`, and `--os` values to match your cluster.
 
 > [!NOTE]
-> AICR is a separately maintained project. It configures an existing cluster and does not create one. For the full command reference, see the [AICR documentation](https://github.com/NVIDIA/aicr/tree/v1.0.0/docs/user).
+> AICR is a separately maintained project. It configures an existing cluster and does not create one. For the full command reference, see the [AICR documentation](https://github.com/NVIDIA/aicr/tree/v1.1.2/docs/user).
 
 ## Check for a Dynamo Recipe
 
@@ -34,7 +34,9 @@ If no row matches your cluster, use the manual steps in [Install Dynamo](install
 - Image pull access from the GPU nodes to the registries the bundle and your Dynamo runtime images use.
 - A cluster without existing installs of components the recipe manages. Run `helm list -A` and remove or plan around an existing GPU Operator, cert-manager, kube-prometheus-stack, or `dynamo-platform` release, because the bundle installs its own. On EKS, if the Amazon EBS CSI driver is installed as an EKS add-on, add `--set awsebscsidriver:enabled=false` to `aicr bundle`.
 
-## Install the CLI
+<Steps toc={true} tocDepth={2}>
+
+<Step title="Install the CLI">
 
 ```bash
 brew tap NVIDIA/aicr
@@ -53,9 +55,11 @@ Verify the installation:
 aicr --version
 ```
 
-The output should show v1.0.0. Homebrew and the install script install the latest release, and the recipes are built into the CLI, so a newer CLI can resolve different component versions. To match this guide exactly, download the archive for your platform from the [v1.0.0 release](https://github.com/NVIDIA/aicr/releases/tag/v1.0.0) and check it against `aicr_checksums.txt`.
+The output should show v1.1.2. Homebrew and the install script install the latest release, and the recipes are built into the CLI, so a newer CLI can resolve different component versions. To match this guide exactly, download the archive for your platform from the [v1.1.2 release](https://github.com/NVIDIA/aicr/releases/tag/v1.1.2) and check it against `aicr_checksums.txt`.
 
-## Generate the Recipe
+</Step>
+
+<Step title="Generate the Recipe">
 
 ```bash
 aicr recipe --service eks --accelerator h100 --os ubuntu \
@@ -64,13 +68,23 @@ aicr recipe --service eks --accelerator h100 --os ubuntu \
 
 Review the resolved components and their versions in `recipe.yaml` before you deploy.
 
-## Render and Deploy the Bundle
+</Step>
 
-Render the recipe into a Helm bundle:
+<Step title="Render and Deploy the Bundle">
+
+Render the recipe into a Helm bundle. Set `--accelerated-node-selector` to a label on your GPU node
+group; without it, the recipe's node tuning taints and reboots every node in the cluster, system nodes
+included, which can stall later Helm hooks in `deploy.sh`:
 
 ```bash
-aicr bundle --recipe recipe.yaml --deployer helm --output ./bundles
+aicr bundle --recipe recipe.yaml --deployer helm \
+  --accelerated-node-selector <label>=<value> \
+  --output ./bundles
 ```
+
+Use a label your provisioner sets, such as `node.kubernetes.io/instance-type=p5.48xlarge`. Do not use
+`nvidia.com/gpu.present=true` on a fresh cluster: GPU feature discovery, which sets that label, is
+installed by the same bundle. If the GPU nodes are tainted, also pass `--accelerated-node-toleration`.
 
 Verify the bundle, then run its `deploy.sh`, which installs each component in dependency order:
 
@@ -81,9 +95,11 @@ Verify the bundle, then run its `deploy.sh`, which installs each component in de
 > [!IMPORTANT]
 > Do not edit files in the generated bundle. `aicr verify` fails when a file no longer matches the bundle's checksums. To change a platform setting, pass `--set` to `aicr bundle` and regenerate the bundle.
 
-To deploy with Argo CD, Flux, or Helmfile, see [Generating Bundles](https://github.com/NVIDIA/aicr/blob/v1.0.0/docs/user/bundling.md) in the AICR documentation.
+To deploy with Argo CD, Flux, or Helmfile, see [Generating Bundles](https://github.com/NVIDIA/aicr/blob/v1.1.2/docs/user/bundling.md) in the AICR documentation.
 
-## Validate with AICR
+</Step>
+
+<Step title="Validate with AICR">
 
 Validate the cluster against the bundle's recipe, which records what was deployed:
 
@@ -93,15 +109,15 @@ aicr validate --recipe ./bundles/recipe.yaml --phase deployment --phase conforma
 
 `aicr validate` first runs a readiness pre-flight and exits with code 2 if the cluster does not meet the recipe's constraints. It then runs the requested phases:
 
-| Phase | What it checks |
-|-------|----------------|
-| `deployment` | The recipe's components are installed and healthy. |
-| `conformance` | The cluster supports the capabilities the recipe declares, such as DRA, gang scheduling, and metrics collection. |
-| `performance` | The cluster meets a throughput threshold with an inference benchmark. Run it with `--phase performance` before production use. |
+- `deployment`: the recipe's components are installed and healthy.
+- `conformance`: the cluster supports the capabilities the recipe declares, such as DRA, gang scheduling, and metrics collection.
+- `performance`: the cluster meets a throughput threshold with an inference benchmark. Run it with `--phase performance` before production use.
 
-For the phases a recipe declares, see [Validating a Cluster](https://github.com/NVIDIA/aicr/blob/v1.0.0/docs/user/validation.md).
+For the phases a recipe declares, see [Validating a Cluster](https://github.com/NVIDIA/aicr/blob/v1.1.2/docs/user/validation.md).
 
-## Check the Dynamo Components
+</Step>
+
+<Step title="Check the Dynamo Components">
 
 AICR validation does not replace a direct check of the Dynamo components. Confirm that the CRDs exist and the pods are running:
 
@@ -121,6 +137,10 @@ kubectl get nodes -o custom-columns='NAME:.metadata.name,GPUS:.status.allocatabl
 
 Each GPU node should report a nonzero GPU count.
 
+</Step>
+
+</Steps>
+
 ## Open Network Access on EKS
 
 The Dynamo recipes do not install NATS. The request plane uses TCP and KV events use ZMQ, so frontend and worker pods connect to each other directly. If you place frontend and worker components in different node groups, allow this traffic between their security groups:
@@ -130,17 +150,17 @@ The Dynamo recipes do not install NATS. The request plane uses TCP and KV events
 | Frontend | Worker | TCP 1024-65535 | Request plane and KV events |
 | Worker | Frontend | TCP 1024-65535 | Response streams |
 
-The `ai-service-metrics` conformance check also needs TCP 9090 access to Prometheus from every node group that can run validation jobs, even when frontend and worker share a node group. For the complete rules and an example, see [EKS Dynamo Networking Prerequisites](https://github.com/NVIDIA/aicr/blob/v1.0.0/docs/integrator/eks-dynamo-networking.md).
+The `ai-service-metrics` conformance check also needs TCP 9090 access to Prometheus from every node group that can run validation jobs, even when frontend and worker share a node group. For the complete rules and an example, see [EKS Dynamo Networking Prerequisites](https://github.com/NVIDIA/aicr/blob/v1.1.2/docs/integrator/eks-dynamo-networking.md).
 
 Disaggregated deployments also transfer KV cache between prefill and decode workers; see [EFA on AWS](rdma-setup/efa-on-aws.mdx).
 
 ## Next Steps
 
-Your cluster is ready. Follow the [Model Deployment guide](../model-deployment/introduction.mdx) to deploy a model with a DynamoGraphDeployment. Use runtime images (vLLM, SGLang, or TensorRT-LLM) that match the installed platform version, which is 1.4.2 for AICR v1.0.0. The bundle owns the platform: change platform settings by regenerating it with `aicr bundle --set`, and put model and serving settings in your DynamoGraphDeployment.
+Your cluster is ready. Follow the [Model Deployment guide](../model-deployment/introduction.mdx) to deploy a model with a DynamoGraphDeployment. Use runtime images (vLLM, SGLang, or TensorRT-LLM) that match the installed platform version, which is 1.4.2 for AICR v1.1.2. The bundle owns the platform: change platform settings by regenerating it with `aicr bundle --set`, and put model and serving settings in your DynamoGraphDeployment.
 
-To upgrade a deployed stack, run `aicr upgrade-check` and follow [Upgrading a Deployed Stack](https://github.com/NVIDIA/aicr/blob/v1.0.0/docs/user/upgrading.md). After an upgrade that changes the platform version, update each DynamoGraphDeployment's runtime image to match.
+To upgrade a deployed stack, run `aicr upgrade-check` and follow [Upgrading a Deployed Stack](https://github.com/NVIDIA/aicr/blob/v1.1.2/docs/user/upgrading.md). After an upgrade that changes the platform version, update each DynamoGraphDeployment's runtime image to match.
 
-To uninstall, run `helm uninstall` for each component in the reverse order listed under **Uninstall** in the bundle's `README.md`. See [Bundle Uninstall](https://github.com/NVIDIA/aicr/blob/v1.0.0/docs/user/cli-reference.md#bundle-uninstall). Helm does not delete CRDs. To remove the Dynamo CRDs, see **Clean uninstall?** in [Install Dynamo troubleshooting](install-dynamo.md#troubleshooting).
+To uninstall, run `helm uninstall` for each component in the reverse order listed under **Uninstall** in the bundle's `README.md`. See [Bundle Uninstall](https://github.com/NVIDIA/aicr/blob/v1.1.2/docs/user/cli-reference.md#bundle-uninstall). Helm does not delete CRDs. To remove the Dynamo CRDs, see **Clean uninstall?** in [Install Dynamo troubleshooting](install-dynamo.md#troubleshooting).
 
 ## Troubleshooting
 
