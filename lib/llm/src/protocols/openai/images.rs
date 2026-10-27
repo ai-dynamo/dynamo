@@ -347,6 +347,7 @@ mod tests {
     use serde::de::DeserializeOwned;
 
     use super::*;
+    use crate::protocols::openai::videos::NvCreateVideoRequest;
 
     /// Parses `json` as the OpenAI type `O` and as the Dynamo type `D`.
     /// Both must reject it, or both must serialize it to the same JSON.
@@ -419,6 +420,18 @@ mod tests {
         }
     }
 
+    /// The hand-written serde that the owned type replaced took the last
+    /// value of a repeated key. The derived one rejects the body, as the
+    /// video request already did.
+    #[test]
+    fn image_request_rejects_a_duplicate_key() {
+        let body = r#"{"prompt":"a cat","prompt":"a dog"}"#;
+        let image = serde_json::from_str::<NvCreateImageRequest>(body).unwrap_err();
+        assert!(image.to_string().contains("duplicate field"), "{image}");
+        let video = serde_json::from_str::<NvCreateVideoRequest>(body).unwrap_err();
+        assert!(video.to_string().contains("duplicate field"), "{video}");
+    }
+
     #[test]
     fn image_request_enum_values_match_the_openai_type() {
         let fields = [
@@ -472,6 +485,7 @@ mod tests {
             r#"{"created":1}"#,
             r#"{"created":1,"data":[{}]}"#,
             r#"{"created":1,"data":[{"revised_prompt":"a cat, photo"}]}"#,
+            r#"{"created":1,"data":[{"url":null,"b64_json":null}]}"#,
         ] {
             assert_same_wire_format::<ImagesResponse, NvImagesResponse>(json);
         }

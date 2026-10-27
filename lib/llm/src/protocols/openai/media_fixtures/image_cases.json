@@ -42,6 +42,7 @@
     {"name": "data-as-object", "type": "response", "valid": false, "body": {"created": 0, "data": {}}},
     {"name": "url-as-number", "type": "response", "valid": false, "body": {"created": 0, "data": [{"url": 1}]}},
     {"name": "data-without-url-or-b64-json", "type": "response", "valid": false, "frontend_only": true, "body": {"created": 0, "data": [{}]}},
+    {"name": "data-with-url-and-b64-json", "type": "response", "valid": true, "body": {"created": 0, "data": [{"url": "http://x/1.png", "b64_json": "aGk="}]}},
     {"name": "usage-negative-tokens", "type": "response", "valid": false, "body": {"created": 0, "data": [], "usage": {"input_tokens": -1, "total_tokens": 15, "output_tokens": 10, "input_tokens_details": {"text_tokens": 5, "image_tokens": 0}}}},
     {"name": "usage-tokens-as-string", "type": "response", "valid": false, "body": {"created": 0, "data": [], "usage": {"input_tokens": "5", "total_tokens": 15, "output_tokens": 10, "input_tokens_details": {"text_tokens": 5, "image_tokens": 0}}}},
     {"name": "usage-missing-total-tokens", "type": "response", "valid": false, "body": {"created": 0, "data": [], "usage": {"input_tokens": 5, "output_tokens": 10, "input_tokens_details": {"text_tokens": 5, "image_tokens": 0}}}},
