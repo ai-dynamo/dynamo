@@ -190,3 +190,42 @@ async def test_warm_admission_preserves_reserved_initial_waiter_budget(
     assert handler._lora_state.runtime_pending_leases == {result.lora_name: 1}
     assert not coordinator._initial_waiters
     await coordinator.close()
+
+
+@pytest.mark.parametrize("routing", [None, {}])
+@pytest.mark.asyncio
+async def test_model_runtime_key_requires_source_metadata(
+    monkeypatch, tmp_path, routing
+):
+    snapshot = _snapshot(tmp_path)
+    handler, coordinator = _coordinator(
+        monkeypatch, tmp_path, ResolvedLoRA(snapshot, "digest:immutable")
+    )
+    runtime = await coordinator.ensure_from_request(
+        _request("wandb-artifact:///entity/project/adapter:v1"), "first"
+    )
+    await coordinator.release_pending_admission("first")
+    request = {"model": runtime.lora_name}
+    if routing is not None:
+        request["routing"] = routing
+    with pytest.raises(HttpError, match="invalid_lora_model_id") as error:
+        await coordinator.ensure_from_request(request, "bypass")
+    assert error.value.code == 400
+    assert not handler._lora_state.runtime_pending_admissions
+    assert not handler._lora_state.runtime_active_leases
+    await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_registered_base_with_runtime_prefix_keeps_exact_name_precedence(
+    monkeypatch, tmp_path
+):
+    handler, coordinator = _coordinator(monkeypatch, tmp_path, None)
+    handler._served_model_name = "dyn-lora-canonical-base"
+    assert (
+        await coordinator.ensure_from_request(
+            {"model": handler._served_model_name}, "base"
+        )
+        is None
+    )
+    await coordinator.close()
