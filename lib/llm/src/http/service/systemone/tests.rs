@@ -355,10 +355,18 @@ enum EngineBehavior {
     PendingSiblings,
     RejectGenerate,
     RejectStream,
-    RejectPinned(dynamo_runtime::error::ErrorClass),
+    RejectStalePlacement,
+    RejectRequest {
+        class: dynamo_runtime::error::ErrorClass,
+        branch: usize,
+        in_stream: bool,
+    },
     TransportFailure,
     RemoveWorkerDuringFanout,
-    NativeAbort { status: Option<u16>, branch: usize },
+    NativeAbort {
+        status: Option<u16>,
+        branch: usize,
+    },
 }
 
 struct ObservedBranch {
@@ -421,14 +429,41 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .unwrap()
             .record_worker(worker_id, Some(3), "decode");
         self.started.notify_one();
-        if let EngineBehavior::RejectPinned(class) = self.behavior
+        if let EngineBehavior::RejectRequest {
+            class,
+            branch,
+            in_stream,
+        } = self.behavior
+            && index == branch
+        {
+            let error = dynamo_runtime::error::DynamoError::builder()
+                .class(class)
+                .message("private deterministic worker detail")
+                .build();
+            if !in_stream {
+                return Err(error.into());
+            }
+            return Ok(ResponseStream::new(
+                Box::pin(stream::iter([Annotated {
+                    data: None,
+                    id: None,
+                    event: Some("error".to_string()),
+                    comment: None,
+                    error: Some(error),
+                }])),
+                stream_context,
+            ));
+        }
+        if let EngineBehavior::RejectStalePlacement = self.behavior
             && index > 0
         {
-            return Err(dynamo_runtime::error::DynamoError::builder()
-                .class(class)
-                .message("private pinned worker detail")
-                .build()
-                .into());
+            return Err(crate::kv_router::UnknownWorkerTarget(
+                dynamo_runtime::error::DynamoError::builder()
+                    .class(dynamo_runtime::error::ErrorClass::InvalidRequest)
+                    .message("private pinned worker detail")
+                    .build(),
+            )
+            .into());
         }
         if matches!(self.behavior, EngineBehavior::TransportFailure) {
             let transport = std::io::Error::new(

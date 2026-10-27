@@ -53,7 +53,7 @@ async fn unknown_native_abort_is_unavailable_not_client_error_or_cancellation() 
         .await
         .expect("native abort must fail without waiting for stream closure");
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(response.headers()["retry-after"], "1");
+        assert!(!response.headers().contains_key("retry-after"));
         assert!(
             response
                 .extensions()

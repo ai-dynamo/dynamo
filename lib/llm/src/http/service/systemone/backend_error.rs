@@ -15,6 +15,14 @@ pub(super) fn classify(
     if metrics::request_was_cancelled(cause) {
         return DispatchError::cancelled();
     }
+    if is_pinned
+        && std::iter::successors(Some(cause), |error| error.source())
+            .any(|error| error.is::<crate::kv_router::UnknownWorkerTarget>())
+    {
+        return DispatchError::unavailable(
+            "server-selected scoring worker rejected pinned placement",
+        );
+    }
     if metrics::request_was_rejected(cause) {
         return DispatchError {
             status: error::overload_status_code(),
@@ -27,16 +35,6 @@ pub(super) fn classify(
     if let Some(error) = error::find_canonical_error_in_chain(cause) {
         if error.reason().as_str() == "runtime.unclassified" {
             return DispatchError::unavailable("native scoring transport failed");
-        }
-        if is_pinned
-            && matches!(
-                error.class(),
-                ErrorClass::InvalidRequest | ErrorClass::NotFound
-            )
-        {
-            return DispatchError::unavailable(
-                "server-selected scoring worker rejected pinned placement",
-            );
         }
         if let error::ClientErrorAction::Respond {
             status,
