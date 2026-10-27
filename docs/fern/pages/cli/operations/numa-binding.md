@@ -6,9 +6,11 @@ subtitle: Place frontend threads, GPU workers, host memory, and KV-transfer NICs
 ---
 
 Non-uniform memory access (NUMA) binding keeps NVIDIA Dynamo's CPU work and host memory close to
-the GPUs they serve. Pay particular attention to placement on **GB200 and GB300 systems**, where
-GPUs can access Grace CPU memory over NVLink-C2C. CPU and memory placement still affect access
-latency and bandwidth on these cache-coherent systems. Binding is also useful on multi-socket
+the GPUs they serve. Pay particular attention to placement on **GB200 and GB300 systems**. In
+NVL72 compute trays, each Grace CPU connects to two GPUs over cache-coherent NVLink-C2C.
+Threads and host buffers on the other Grace's NUMA node are remote to those GPUs. When GPU
+high-bandwidth memory (HBM) is exposed to the operating system, a process without explicit NUMA
+placement can also have host pages allocated in HBM. Binding is also useful on multi-socket
 H100, H200, B200, and B300 servers. The right NUMA node depends on the server's CPU, memory,
 GPU, and NIC topology.
 
