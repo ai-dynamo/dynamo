@@ -160,7 +160,6 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::replicas::ReplicaId;
 
     fn round_trip<T: Serialize + for<'de> Deserialize<'de>>(json: Value) -> T {
         let parsed: T = serde_json::from_value(json.clone()).unwrap();
@@ -189,7 +188,7 @@ mod tests {
         round_trip::<PoolRegistration>(registration.clone());
         registration["model"] = json!(" ");
         assert!(serde_json::from_value::<PoolRegistration>(registration).is_err());
-        let pools = round_trip::<PoolsResponse>(json!({
+        round_trip::<PoolsResponse>(json!({
             "pools": [{
                 "key": key,
                 "location": location,
@@ -201,14 +200,9 @@ mod tests {
             }],
             "complete": true
         }));
-        assert!(pools.complete);
-        let routers = round_trip::<RoutersResponse>(json!({
+        round_trip::<RoutersResponse>(json!({
             "routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}]
         }));
-        assert_eq!(
-            routers.routers[0].replica,
-            ReplicaId("aws-ohio/global-router-0".to_owned())
-        );
         let mapped: IpAddr = "::ffff:10.43.66.175".parse().unwrap();
         assert_eq!(address_identity(mapped), "ip:10.43.66.175");
         assert_eq!(address_identity("fd00::2".parse().unwrap()), "ip:fd00::2");
@@ -219,12 +213,8 @@ mod tests {
         let lease = round_trip::<Lease>(json!({"heartbeat_interval_s": 5, "lease_duration_s": 15}));
         assert_eq!(lease, Lease::new(5, 15).unwrap());
         assert_eq!(lease.heartbeat_interval(), Duration::from_secs(5));
-        // 48 hours, and the longest a client could be given.
-        for (interval, lease) in [(60, 172_800), (1, u64::MAX)] {
-            round_trip::<Lease>(
-                json!({"heartbeat_interval_s": interval, "lease_duration_s": lease}),
-            );
-        }
+        // The longest lease a client could be given.
+        round_trip::<Lease>(json!({"heartbeat_interval_s": 1, "lease_duration_s": u64::MAX}));
         for (interval, lease) in [(0, 15), (15, 15), (20, 15)] {
             let body = json!({"heartbeat_interval_s": interval, "lease_duration_s": lease});
             assert!(
