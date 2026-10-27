@@ -137,7 +137,6 @@ func computeParallelRestartStatus(
 }
 
 // computeSequentialRestartStatus handles sequential restart where components restart one at a time.
-// Each workload program supplies its own progress resolver, next-component policy, and logger.
 func computeSequentialRestartStatus(
 	ctx context.Context,
 	logger logr.Logger,
