@@ -623,8 +623,10 @@ async def test_close_cancels_resolution_and_rejects_new_runtime_requests(
 
     await coordinator.close()
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(HttpError, match="lora_resolver_unavailable") as error:
         await waiter
+    assert error.value.code == 503
+    assert not waiter.cancelled()
     assert cancelled.is_set()
     handler.engine_client.add_lora.assert_not_awaited()
     assert not handler._lora_state.runtime_load_tasks
@@ -688,8 +690,9 @@ async def test_close_waits_for_engine_mutation_and_rollback(monkeypatch, tmp_pat
 
     release_add.set()
     await close_task
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(HttpError, match="lora_resolver_unavailable") as error:
         await waiter
+    assert error.value.code == 503
 
     adapter_key = _identity("base", source_uri)
     handler.engine_client.remove_lora.assert_awaited_once()

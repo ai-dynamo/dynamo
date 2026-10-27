@@ -23,7 +23,7 @@ from dynamo.common.lora.runtime import (
     RuntimeLoRAResolverUnavailableError,
 )
 from dynamo.common.utils.env import env_bool
-from dynamo.llm import lora_name_to_id
+from dynamo.llm import HttpError, lora_name_to_id
 
 from .constants import DisaggregationMode
 from .lora_lifecycle import run_lora_engine_mutation, run_lora_mutation
@@ -63,6 +63,7 @@ class RuntimeLoRACoordinator:
         self._initial_waiters: dict[str, int] = {}
         self._snapshot_identities: dict[str, tuple[bytes, str, str]] = {}
         self._resolution_admitted: set[str] = set()
+        self._owned_admissions: set[str] = set()
         self._settings = (
             (
                 getattr(handler.config, "runtime_lora_settings", None)
@@ -180,6 +181,16 @@ class RuntimeLoRACoordinator:
                 if key not in self._resolution_admitted:
                     raise _runtime_error(429, "lora_capacity_exceeded") from None
                 raise _runtime_error(504, "runtime_lora_resolve_timeout") from None
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if (
+                    self._closed
+                    and task.cancelled()
+                    and current is not None
+                    and not current.cancelling()
+                ):
+                    raise _runtime_error(503, "lora_resolver_unavailable") from None
+                raise
             resident = await self._lease_resident(
                 metadata, admission_id, initial_waiter=True
             )
@@ -362,6 +373,8 @@ class RuntimeLoRACoordinator:
             self._active_settings.pending_admission_timeout_seconds,
             expire,
         )
+        if request_id in self._owned_admissions:
+            timer.cancel()
         state.runtime_pending_admissions[request_id] = (
             adapter_key,
             timer,
@@ -386,16 +399,21 @@ class RuntimeLoRACoordinator:
     @asynccontextmanager
     async def pending_admission_guard(self, request_id: str):
         """Release an unactivated pending admission on every request exit path."""
+        self._owned_admissions.add(request_id)
         try:
             yield
         finally:
-            cancelled, _released, error = await run_lora_mutation(
-                self.release_pending_admission(request_id)
-            )
-            if cancelled:
-                raise asyncio.CancelledError
-            if error is not None:
-                raise error
+            try:
+                if request_id in self._handler._lora_state.runtime_pending_admissions:
+                    cancelled, _released, error = await run_lora_mutation(
+                        self.release_pending_admission(request_id)
+                    )
+                    if cancelled:
+                        raise asyncio.CancelledError
+                    if error is not None:
+                        raise error
+            finally:
+                self._owned_admissions.discard(request_id)
 
     async def activate_pending_admission(
         self,
@@ -404,6 +422,8 @@ class RuntimeLoRACoordinator:
     ) -> LoRARequest:
         state = self._handler._lora_state
         async with self._handler._lora_capacity_guard:
+            if self._closed:
+                raise _runtime_error(503, "lora_resolver_unavailable")
             pending = state.runtime_pending_admissions.pop(request_id, None)
             if pending is None:
                 raise _runtime_error(429, "lora_capacity_exceeded")
@@ -434,6 +454,15 @@ class RuntimeLoRACoordinator:
             return _lora_request(resident)
 
     async def release_active_admission(self, adapter_key: str) -> None:
+        cancelled, _released, error = await run_lora_mutation(
+            self._release_active_admission(adapter_key)
+        )
+        if error is not None:
+            raise error
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _release_active_admission(self, adapter_key: str) -> None:
         state = self._handler._lora_state
         async with self._handler._lora_capacity_guard:
             lease_count = state.runtime_active_leases.get(adapter_key, 0)
@@ -504,19 +533,29 @@ class RuntimeLoRACoordinator:
                     )
                     raise _runtime_error(500, "lora_plugin_error") from None
 
-                local_path = await asyncio.to_thread(
-                    validate_snapshot,
-                    resolved.local_path,
-                    manager.cache_root,
-                    self._active_settings.max_download_bytes,
-                    getattr(self._handler.engine_args, "max_lora_rank", None),
-                    (
-                        metadata.base_model_name,
-                        getattr(self._handler, "_served_model_name", None),
-                        getattr(self._handler.engine_args, "model", None),
-                        *getattr(self._handler, "_served_model_aliases", ()),
-                    ),
-                )
+                try:
+                    local_path = await asyncio.to_thread(
+                        validate_snapshot,
+                        resolved.local_path,
+                        manager.cache_root,
+                        self._active_settings.max_download_bytes,
+                        getattr(self._handler.engine_args, "max_lora_rank", None),
+                        (
+                            metadata.base_model_name,
+                            getattr(self._handler, "_served_model_name", None),
+                            getattr(self._handler.engine_args, "model", None),
+                            *getattr(self._handler, "_served_model_aliases", ()),
+                        ),
+                    )
+                except HttpError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - artifact validation boundary
+                    logger.warning(
+                        "Runtime LoRA snapshot validation failed for adapter %s (type=%s)",
+                        metadata.adapter_key,
+                        type(exc).__name__,
+                    )
+                    raise _runtime_error(422, "invalid_lora_adapter") from None
                 await check_cache_limit(
                     state,
                     manager.cache_root,

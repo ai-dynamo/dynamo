@@ -1,12 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# ruff: noqa: E402 - optional vLLM dependency is checked before Dynamo imports
+
 import asyncio
 import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+pytest.importorskip("vllm.lora.request")
 
 from dynamo.llm import HttpError
 from dynamo.vllm.lora_state import LoRAState
