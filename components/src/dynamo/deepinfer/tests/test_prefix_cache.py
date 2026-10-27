@@ -8,8 +8,10 @@ import hashlib
 import os
 import pickle
 import time
+from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pytest
 
 from dynamo.deepinfer.kv_cache.base import Admission
@@ -774,6 +776,9 @@ def check_ssd(d: Driver) -> None:
     assert len(set(slots)) == len(slots)
     assert cache._ssd.num_free == cache._ssd.capacity - len(slots)
     assert cache._num_ssd == sum(b.tier.name == "SSD" for b in blocks)
+    assert cache._reading_rows == sum(b.reading for b in blocks) and (
+        cache._reads_inflight == 0
+    )
     assert cache._num_host == len(on_host)
     for b in blocks:
         assert b.users == 0 and not b.reading and b.write is None
@@ -1486,6 +1491,37 @@ def test_read_that_cannot_fit_evicts_nothing(tmp_path, io):
     d.close()
 
 
+def test_a_long_run_whose_read_cannot_start_is_admitted_at_once(
+    tmp_path, io, monkeypatch
+):
+    wait_for_ssd(monkeypatch)
+    d = Driver(ssd_runner(tmp_path, rows=3, ssd_blocks=64, snapshot_interval=1024))
+    a = prompt(1200, salt=1)
+    d.run("a", a)
+    for _ in range(10):
+        d.cache.ensure_free(d.bm.get_num_free_blocks() + 1)
+        d.apply()
+        d.apply()
+    run = [d.cache._blocks[h] for h in chain(a, 8)]
+    for i in range(3):  # fill the host with unrelated blocks
+        d.run(f"q{i}", one_block(10 + i))
+    evict_all(d)
+    d.apply()
+    d.apply()
+    d.apply()
+    assert [x.tier.name for x in run] == ["SSD"] * 8
+    assert d.cache._host.num_free == 0
+    d.add("a2", a, max_tokens=4)
+    # Eight rows are needed for the only snapshot and the host has three:
+    # there is nothing to wait for.
+    assert d.admissions["a2"].admitted and d.cache._retry is None
+    assert d.cache.ssd_waits == 0 and not any(x.reading for x in run)
+    d.apply(aborts=["a2"])
+    d.apply()
+    check_ssd(d)
+    d.close()
+
+
 def test_failed_load_submission_gives_the_rows_back(tmp_path, io):
     from dynamo.deepinfer.kv_cache.prefix import _Evicted
 
@@ -1580,6 +1616,277 @@ def test_a_block_read_back_from_ssd_is_not_the_first_host_victim(tmp_path, io):
     assert [x.tier.name for x in ba + bb] == ["HOST"] * 3 + ["HOST", "SSD", "SSD"]
     assert ba[2].ssd_warm and ba[2].last_used > bb[0].last_used
     assert d.cache._pop_evictable(gpu=False) is bb[0]
+    d.close()
+
+
+def park_on_ssd(d: Driver, prompts: list[list[int]], fillers: int) -> None:
+    """Cache ``prompts`` and push them down to the SSD tier with ``fillers``
+    other prompts that take over the host rows."""
+    for i, p in enumerate(prompts):
+        d.run(f"p{i}", p)
+        evict_all(d)
+        d.apply()
+    for i in range(fillers):
+        d.run(f"f{i}", prompt(600, salt=20 + i))
+        evict_all(d)
+        d.apply()
+
+
+def wait_for_ssd(monkeypatch, min_blocks: int = 1):
+    """Let short runs wait for their read, with a clock the test sets."""
+    from dynamo.deepinfer.kv_cache import prefix
+
+    monkeypatch.setattr(prefix, "SSD_WAIT_MIN_BLOCKS", min_blocks)
+    return [0.0]
+
+
+def test_a_long_ssd_run_waits_for_its_read_and_then_hits_from_host(
+    tmp_path, io, monkeypatch
+):
+    wait_for_ssd(monkeypatch)
+    d = Driver(ssd_runner(tmp_path, rows=3))
+    a = prompt(600, salt=1)
+    park_on_ssd(d, [a], fillers=1)
+    blocks = [d.cache._blocks[h] for h in chain(a)]
+    assert [x.tier.name for x in blocks] == ["SSD"] * 3
+    free = d.bm.get_num_free_blocks()
+    io.hold = True
+    d.add("x", a, max_tokens=4)
+    d.apply()
+    assert not d.admissions["x"].admitted and d.cache.ssd_waits == 1
+    assert all(x.reading for x in blocks) and d.cache.ssd_loads == 0
+    # Nothing is held while it waits: no pin, no GPU block, no state slot.
+    assert d.cache._retry.held == {} and d.cache._requests == {}
+    assert all(x.users == 0 for x in d.cache._blocks.values())
+    assert d.bm.get_num_free_blocks() == free
+    io.hold = False
+    io.release()
+    d.apply()
+    assert d.admissions["x"].admitted and d.admissions["x"].hit_tokens == 384
+    assert d.cache.ssd_hit_tokens == 384 and d.cache.host_hit_tokens == 384
+    assert d.cache.ssd_wait_timeouts == 0
+    d.apply(aborts=["x"])
+    d.apply()
+    check_ssd(d)
+    d.close()
+
+
+def test_the_wait_ends_at_its_deadline_and_the_request_recomputes(
+    tmp_path, io, monkeypatch
+):
+    now = wait_for_ssd(monkeypatch)
+    d = Driver(ssd_runner(tmp_path, rows=3))
+    d.cache._now = lambda: now[0]
+    a = prompt(600, salt=1)
+    park_on_ssd(d, [a], fillers=1)
+    run = [d.cache._blocks[h] for h in chain(a)]
+    io.hold = True
+    d.add("x", a, max_tokens=50)
+    req = d.cache._retry
+    now[0] += 0.001  # the deadline of three blocks is 2.3 ms
+    d.apply()
+    assert not d.admissions["x"].admitted and d.cache.ssd_wait_timeouts == 0
+    now[0] += 1.0
+    d.apply()
+    assert d.admissions["x"].admitted and d.admissions["x"].hit_tokens == 0
+    assert d.cache.ssd_waits == 1 and d.cache.ssd_wait_timeouts == 1
+    # A request never waits twice, even if admission is retried for another reason.
+    assert req.waited and not d.cache._wait_for_read(req, [], run)
+    assert d.cache.ssd_waits == 1 and d.cache.ssd_wait_timeouts == 1
+    d.apply(aborts=["x"])
+    io.hold = False
+    io.release()
+    d.apply()
+    d.apply()
+    check_ssd(d)
+    d.close()
+
+
+def test_a_read_that_fails_while_the_request_waits_ends_the_wait(
+    tmp_path, io, monkeypatch
+):
+    wait_for_ssd(monkeypatch)
+    d = Driver(ssd_runner(tmp_path, rows=3))
+    cold = Driver(make_runner("none"))
+    a = prompt(600, salt=1)
+    park_on_ssd(d, [a], fillers=1)
+    fail_io(d, "load")
+    io.hold = True
+    d.add("x", a, max_tokens=4)
+    assert not d.admissions["x"].admitted
+    io.hold = False
+    io.release()
+    d.apply()
+    # The blocks are gone, so the lookup misses: recomputed, not waited for.
+    assert d.admissions["x"].admitted and d.admissions["x"].hit_tokens == 0
+    assert d.cache.ssd_errors == 1 and d.cache.ssd_wait_timeouts == 0
+    out: list[int] = []
+    for _ in range(50):
+        for o in d.apply().outputs:
+            out += o.token_ids
+        if len(out) >= 4:
+            break
+    assert out == cold.run("c", a)
+    d.apply()
+    check_ssd(d)
+    d.close()
+    cold.close()
+
+
+@pytest.mark.parametrize(
+    "min_blocks, wait_ms", [(4, 50.0), (1, 0.0)], ids=["short run", "wait off"]
+)
+def test_short_runs_and_no_wait_are_admitted_at_once(
+    tmp_path, io, monkeypatch, min_blocks, wait_ms
+):
+    wait_for_ssd(monkeypatch, min_blocks)
+    d = Driver(ssd_runner(tmp_path, rows=3, ssd_wait_ms=wait_ms))
+    a = prompt(600, salt=1)
+    park_on_ssd(d, [a], fillers=1)
+    blocks = [d.cache._blocks[h] for h in chain(a)]
+    io.hold = True
+    d.add("x", a, max_tokens=50)
+    # Best effort as before: it goes on and the read still starts.
+    assert d.admissions["x"].admitted and d.admissions["x"].hit_tokens == 0
+    assert all(x.reading for x in blocks) and d.cache.ssd_waits == 0
+    d.apply(aborts=["x"])
+    io.hold = False
+    io.release()
+    d.apply()
+    d.close()
+
+
+def test_the_deadline_is_capped_by_the_ceiling_and_grows_with_the_blocks(
+    tmp_path, io, monkeypatch
+):
+    now = wait_for_ssd(monkeypatch)
+    d = Driver(ssd_runner(tmp_path, rows=8, ssd_blocks=64))
+    d.cache._now = lambda: now[0]
+    a = prompt(1200, salt=1)
+    park_on_ssd(d, [a], fillers=3)
+    tiers = [d.cache._blocks[h].tier.name for h in chain(a, 8)]
+    assert tiers == ["SSD"] * 8, tiers
+    io.hold = True
+    deadlines = []
+    for rid, tokens, ceiling in [("x", a[:600], 50.0), ("y", a, 50.0), ("z", a, 2.5)]:
+        d.cache.ssd_wait_ms = ceiling
+        d.add(rid, tokens, max_tokens=4)
+        assert not d.admissions[rid].admitted
+        deadlines.append(d.cache._retry.deadline)
+        d.apply(aborts=[rid])
+    from dynamo.deepinfer.kv_cache import prefix
+
+    base, per = prefix.SSD_WAIT_BASE_MS, prefix.SSD_WAIT_MS_PER_BLOCK
+    # Two SSD blocks lie behind the hit for the short prompt, eight for the long.
+    assert deadlines == pytest.approx(
+        [(base + 2 * per) / 1000, (base + 8 * per) / 1000, 2.5 / 1000]
+    )
+    io.hold = False
+    io.release()
+    d.apply()
+    d.close()
+
+
+def parked_pair(tmp_path, monkeypatch):
+    """Two prompts on SSD (3 blocks each) and a host tier of 6 rows, all of which
+    prefetch may use."""
+    from dynamo.deepinfer.kv_cache import prefix
+
+    monkeypatch.setattr(prefix, "SSD_PREFETCH_ROWS_FRACTION", 1.0)
+    d = Driver(ssd_runner(tmp_path, rows=6))
+    a, c = prompt(600, salt=1), prompt(600, salt=2)
+    park_on_ssd(d, [a, c], fillers=2)
+    for p in (a, c):
+        assert d.cache._blocks[chain(p, 1)[0]].tier.name == "SSD"
+    return d, [np.asarray(p, dtype=np.int32) for p in (a, c)]
+
+
+def enqueue(d: Driver, tokens: Any, seq_id: int = 90) -> None:
+    d.cache.on_enqueue(SimpleNamespace(seq_id=seq_id), tokens)
+
+
+def test_enqueue_starts_the_read_and_the_request_then_hits_from_host(
+    tmp_path, io, monkeypatch
+):
+    d, (a, _) = parked_pair(tmp_path, monkeypatch)
+    blocks = [d.cache._blocks[h] for h in chain(a.tolist())]
+    calls = spy_io(d)
+    free = d.bm.get_num_free_blocks()
+    io.hold = True
+    enqueue(d, a)
+    enqueue(d, a, seq_id=91)  # the blocks are being read: nothing more to start
+    assert calls == [("load", [x.ssd_slot for x in blocks])]
+    assert d.cache._reads_inflight == 1 and d.cache._reading_rows == 3
+    # Only host rows are used: no GPU block, pin or promotion.
+    assert d.bm.get_num_free_blocks() == free
+    assert all(x.tier.name == "SSD" and x.users == 0 for x in blocks)
+    io.hold = False
+    io.release()
+    d.apply()
+    assert [x.tier.name for x in blocks] == ["HOST"] * 3
+    assert d.cache._reads_inflight == 0 and d.cache._reading_rows == 0
+    d.add("x", a.tolist(), max_tokens=4)
+    assert d.admissions["x"].hit_tokens == 384 and d.cache.ssd_waits == 0
+    assert d.cache.ssd_hit_tokens == 384
+    d.apply(aborts=["x"])
+    d.apply()
+    check_ssd(d)
+    d.close()
+
+
+@pytest.mark.parametrize("cap", ["reads", "rows"])
+def test_enqueue_skips_a_prefetch_over_either_cap(tmp_path, io, monkeypatch, cap):
+    from dynamo.deepinfer.kv_cache import prefix
+
+    d, (a, c) = parked_pair(tmp_path, monkeypatch)
+    if cap == "reads":
+        monkeypatch.setattr(prefix, "SSD_MAX_PREFETCH_READS", 1)
+    else:  # room for one read of three blocks in six rows
+        monkeypatch.setattr(prefix, "SSD_PREFETCH_ROWS_FRACTION", 0.5)
+    calls = spy_io(d)
+    io.hold = True
+    enqueue(d, a)
+    enqueue(d, c, seq_id=91)
+    assert [kind for kind, _ in calls] == ["load"]
+    assert d.cache._blocks[chain(c.tolist(), 1)[0]].tier.name == "SSD"
+    # A read that landed frees its share of both caps.
+    io.hold = False
+    io.release()
+    d.apply()
+    enqueue(d, c, seq_id=92)
+    assert [kind for kind, _ in calls] == ["load", "load"]
+    io.release()
+    d.apply()
+    check_ssd(d)
+    d.close()
+
+
+def test_a_request_aborted_while_it_waits_is_not_presented_again(
+    tmp_path, io, monkeypatch
+):
+    wait_for_ssd(monkeypatch)
+    d = Driver(ssd_runner(tmp_path, rows=3))
+    a = prompt(600, salt=1)
+    park_on_ssd(d, [a], fillers=1)
+    seen: list[str] = []
+    admit = d.cache.admit
+
+    def spy_seen(seq: Any, tokens: Any) -> Admission:
+        seen.append(seq.request_id)
+        return admit(seq, tokens)
+
+    d.cache.admit = spy_seen
+    io.hold = True
+    d.add("x", a, max_tokens=4)
+    assert seen == ["x"]
+    d.apply(aborts=["x"])
+    io.hold = False
+    io.release()
+    for _ in range(3):
+        d.apply()
+    assert seen == ["x"] and "x" not in d.cache._requests
+    assert d.cache.ssd_loads == 3  # the read it started still landed
+    check_ssd(d)
     d.close()
 
 

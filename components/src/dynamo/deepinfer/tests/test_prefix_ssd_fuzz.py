@@ -3,11 +3,14 @@
 
 """Seeded random traffic over the prefix cache with the host and SSD tiers on:
 requests that share prefixes come and go, SSD I/O is held back and released, and
-reads and writes fail. At quiescent points every tier, pool, heap and event
+reads and writes fail, requests wait for their reads (on a fake clock in some
+seeds) and are prefetched before they are admitted. At quiescent points every tier, pool, heap and event
 must add up (``check_ssd``)."""
 
 import random
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from dynamo.deepinfer.tests.test_prefix_cache import (  # noqa: F401
@@ -78,14 +81,21 @@ def test_random_traffic_keeps_the_tiers_consistent(
     monkeypatch.setattr(prefix, "SSD_MAX_INFLIGHT_WRITES", rnd.choice([1, 2, 64]))
     monkeypatch.setattr(prefix, "SSD_PENDING_WRITES_FACTOR", rnd.choice([0, 1, 4]))
     monkeypatch.setattr(prefix, "SSD_MIN_READ_BLOCKS", rnd.choice([1, 1, 4, 8]))
+    monkeypatch.setattr(prefix, "SSD_WAIT_MIN_BLOCKS", rnd.choice([1, 1, 2, 64]))
+    monkeypatch.setattr(prefix, "SSD_MAX_PREFETCH_READS", rnd.choice([1, 2, 8]))
+    monkeypatch.setattr(prefix, "SSD_PREFETCH_ROWS_FRACTION", rnd.choice([0.25, 1.0]))
     d = Driver(
         ssd_runner(
             tmp_path,
             rows=rnd.choice([2, 4, 8, 12]),
             ssd_blocks=rnd.choice([4, 8, 16, 32]),
             snapshot_interval=rnd.choice([256, 1024]),
+            ssd_wait_ms=rnd.choice([0, 50, 50]),
         )
     )
+    clock = [0.0]
+    if rnd.random() < 0.5:
+        d.cache._now = lambda: clock[0]
     pool = d.cache._ssd
     transfer = pool._transfer
     fail = {"load": False, "store": False}
@@ -96,6 +106,30 @@ def test_random_traffic_keeps_the_tiers_consistent(
         transfer(slot, view, write=write)
 
     pool._transfer = maybe_fail
+    cache = d.cache
+    reads = []  # the tickets of the reads in flight
+    load, read_done, acquire = pool.load, cache._read_done, cache._acquire
+
+    def track_load(*args, **kwargs):
+        ticket = load(*args, **kwargs)  # a failed submission raises first
+        reads.append(kwargs["tag"])
+        return ticket
+
+    def track_done(ticket, out):
+        reads.remove(ticket.tag)
+        return read_done(ticket, out)
+
+    def checked_acquire(req, block):
+        # A hit is acquired only while it is cached, and not on SSD.
+        assert cache._blocks.get(block.block_hash) is block
+        assert block.tier.name != "SSD"
+        return acquire(req, block)
+
+    pool.load, cache._read_done, cache._acquire = (
+        track_load,
+        track_done,
+        checked_acquire,
+    )
     families = [prompt(1800, salt=s) for s in range(rnd.choice([2, 3]))]
     live: set[str] = set()
     steps = rnd.randint(150, 300)
@@ -108,6 +142,10 @@ def test_random_traffic_keeps_the_tiers_consistent(
                 half = length // 2
                 tokens = tokens[:half] + prompt(length - half, salt=rnd.randint(10, 13))
             rid = f"r{step}"
+            if rnd.random() < 0.3:  # a prefetch from a request queued earlier
+                d.cache.on_enqueue(
+                    SimpleNamespace(seq_id=10_000 + step), np.asarray(tokens, np.int32)
+                )
             d.add(rid, tokens, max_tokens=rnd.choice([2, 6, 20]))
             live.add(rid)
         elif r < 0.45 and live:
@@ -120,12 +158,17 @@ def test_random_traffic_keeps_the_tiers_consistent(
                 io.release()
         elif r < 0.6:
             fail[rnd.choice(["load", "store"])] = rnd.random() < 0.5
-        elif r < 0.65:
+        elif r < 0.75:
             d.cache.ensure_free(rnd.randint(1, gpu_blocks))
         else:
             for o in d.apply().outputs:
                 if o.finish_reason is not None:
                     live.discard(o.request_id)
+        clock[0] += rnd.choice([0, 0, 0.001, 0.02, 0.1])
+        # A block dropped while it is read keeps its rows counted until the read
+        # lands.
+        assert cache._reads_inflight == len(reads)
+        assert cache._reading_rows == sum(len(t.blocks) for t in reads)
         bound = prefix.SSD_PENDING_WRITES_FACTOR * pool.max_inflight_writes
         assert len(d.cache._pending_writes) <= bound
         if step == steps // 2:

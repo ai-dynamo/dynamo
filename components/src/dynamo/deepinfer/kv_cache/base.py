@@ -101,6 +101,11 @@ class KVCacheManager(ABC):
         prefix, restores state and sets ``num_cached_tokens``, and must leave
         :func:`admission_reserve` blocks free."""
 
+    def on_enqueue(self, seq: Any, token_ids: np.ndarray) -> None:
+        """A request was queued behind others: the cache may start background
+        work for it (a prefetch); it must not allocate GPU blocks or hold
+        anything."""
+
     def before_step(self) -> None:
         """Called once per iteration before ``step()``: make room for the
         prompt DeepInfer's scheduler allocates next."""

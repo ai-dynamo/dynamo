@@ -70,6 +70,7 @@ class DeepInferOptions:
     prefix_host_bytes: int = 0
     prefix_ssd_dir: Optional[str] = None
     prefix_ssd_bytes: int = 0
+    prefix_ssd_wait_ms: float = 50.0
     rank0_in_process: bool = True
     startup_timeout_s: float = 3600.0
     engine_overrides: dict[str, Any]
@@ -155,8 +156,8 @@ class DeepInferOptions:
                 "host_bytes": self.prefix_host_bytes,
                 "ssd_dir": self.prefix_ssd_dir,
                 "ssd_bytes": self.prefix_ssd_bytes,
-                # The ranks of a node split the SSD directory's free space.
                 "ssd_share": 1 / self.ranks_per_node,
+                "ssd_wait_ms": self.prefix_ssd_wait_ms,
             }
         events = self.kv_cache_manager != "none"
         per_node = self.ranks_per_node
@@ -263,6 +264,15 @@ def add_deepinfer_arguments(parser: argparse.ArgumentParser) -> None:
         "to this rank's share (1 / ranks per node) of the directory's free space.",
     )
     g.add_argument(
+        "--prefix-ssd-wait-ms",
+        type=float,
+        default=50.0,
+        help="Longest a request waits for the SSD read of its cached prefix (less "
+        "for shorter prefixes; the read also starts when the request is queued). "
+        "0 turns waiting and that prefetch off: the request recomputes the prefix. "
+        "Ignored without the SSD tier.",
+    )
+    g.add_argument(
         "--rank0-in-process",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -358,6 +368,8 @@ def validate_options(opts: Any) -> None:
         raise ValueError("--dp-size must be >= 1")
     if opts.prefix_host_bytes and opts.kv_cache_manager != "prefix":
         raise ValueError("--prefix-host-bytes needs --kv-cache-manager prefix")
+    if opts.prefix_ssd_wait_ms < 0:
+        raise ValueError("--prefix-ssd-wait-ms must be >= 0")
     if opts.prefix_ssd_dir and not opts.prefix_ssd_bytes:
         raise ValueError("--prefix-ssd-dir needs --prefix-ssd-bytes")
     if opts.prefix_ssd_bytes:

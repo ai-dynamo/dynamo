@@ -375,12 +375,19 @@ def test_parse_args_defaults(fake_env):
         assert spec.cache_options["ssd_rank"] == rank
         # The ranks of a node split the directory's free space.
         assert spec.cache_options["ssd_share"] == 1 / tier.ranks_per_node
+        assert spec.cache_options["ssd_wait_ms"] == 50.0
     assert (
         make_args("--kv-cache-manager", "prefix")
         .rank_specs("e")[0]
         .cache_options["ssd_bytes"]
         == 0
     )
+    wait = make_args(
+        "--kv-cache-manager", "prefix", "--prefix-ssd-wait-ms", "0", *ssd[:2]
+    )
+    assert wait.rank_specs("e")[0].cache_options["ssd_wait_ms"] == 0
+    with pytest.raises(ValueError, match="--prefix-ssd-wait-ms must be >= 0"):
+        make_args("--prefix-ssd-wait-ms", "-1")
     with pytest.raises(ValueError, match="ssd-bytes needs --kv-cache-manager prefix"):
         make_args("--prefix-ssd-bytes", "1G", "--prefix-ssd-dir", "/ssd")
     with pytest.raises(ValueError, match="needs --prefix-host-bytes"):

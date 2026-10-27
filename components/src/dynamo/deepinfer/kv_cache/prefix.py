@@ -39,8 +39,12 @@ first, and retried while the block is still on host), and a block with such a
 copy leaves host or GPU for the SSD tier without I/O and without an event: the
 copy is the block. The chain is GPU blocks, then host, then SSD. ``admit``
 serves only the GPU and host part of a hit (up to its last snapshot) and, when
-the SSD blocks behind it are worth it, starts a best-effort read of them into
-host rows: the request is not delayed, later ones hit from host. A host row
+the SSD blocks behind it are worth it, starts a read of them into host rows. A
+request whose run is long enough waits for that read, never past a short
+deadline and holding nothing meanwhile, then hits from host; when the deadline
+passes it is admitted and recomputes the run. A request queued behind others
+starts its read early (``on_enqueue``), within caps. A shorter run is read best
+effort: that request goes on without it, later ones hit from host. A host row
 stays reserved while a write reads it. Blocks and snapshots stay on the engine
 thread; the I/O threads (``ssd.py``) only move bytes, and their completions are
 applied on the engine thread (in ``before_step``, ``admit`` and ``_make_room``).
@@ -61,7 +65,7 @@ import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import numpy as np
 
@@ -91,6 +95,18 @@ STATS_LOG_INTERVAL_S = 60.0
 # read would cost more than recomputing it.
 SSD_MIN_READ_BLOCKS = 8
 SSD_MAX_INFLIGHT_WRITES = 64
+# A request waits for the SSD read of its prefix only when the run has at least
+# this many SSD-tier blocks; the deadline is SSD_WAIT_BASE_MS plus
+# SSD_WAIT_MS_PER_BLOCK per block, capped by --prefix-ssd-wait-ms. Phase 6 tunes
+# all three.
+SSD_WAIT_MIN_BLOCKS = 64
+SSD_WAIT_BASE_MS = 2.0
+SSD_WAIT_MS_PER_BLOCK = 0.1
+# Prefetch (a read started when the request is queued) stops at this many reads
+# in flight, or when the blocks being read would fill more than this fraction of
+# the host tier. The pool's I/O threads are shared with writes.
+SSD_MAX_PREFETCH_READS = 8
+SSD_PREFETCH_ROWS_FRACTION = 0.25
 # Blocks whose write was skipped wait for a turn, up to this many per write the
 # cap allows; the deepest are forgotten first.
 SSD_PENDING_WRITES_FACTOR = 4
@@ -197,6 +213,10 @@ class _Request:
     held: dict[BlockHash, _Block] = field(default_factory=dict)
     # Prompt positions still to snapshot, ascending.
     checkpoints: deque[int] = field(default_factory=deque)
+    # While admit waits for an SSD read: when it stops waiting (set once), and
+    # whether it did (a request never waits twice).
+    deadline: Optional[float] = None
+    waited: bool = False
 
 
 @dataclass
@@ -334,6 +354,7 @@ class PrefixCacheManager(NoopCacheManager):
         ssd_bytes: int = 0,
         ssd_rank: int = 0,
         ssd_share: float = 1.0,
+        ssd_wait_ms: float = 50.0,
     ) -> None:
         super().__init__(engine)
         if not engine.scheduler_config.chunked_prefill:
@@ -388,6 +409,9 @@ class PrefixCacheManager(NoopCacheManager):
             )
         elif ssd_bytes:
             logger.warning("The prefix cache's SSD tier needs the host tier and a dir")
+        self.ssd_wait_ms = max(0.0, float(ssd_wait_ms))
+        # Replaced by tests.
+        self._now = time.monotonic
         self._blocks: dict[BlockHash, _Block] = {}
         # Eviction candidates: (key, tiebreak, block); stale entries are skipped.
         self._heap: list[tuple[int, int, _Block]] = []
@@ -400,6 +424,9 @@ class PrefixCacheManager(NoopCacheManager):
         # (chain index, tiebreak, block, host row), ancestors first. Not pinned:
         # an entry is checked when it is popped.
         self._pending_writes: list[tuple[int, int, _Block, int]] = []
+        # SSD reads in flight and the blocks (host rows) they hold.
+        self._reads_inflight = 0
+        self._reading_rows = 0
         # Blocks in the host and SSD tiers.
         self._num_host = 0
         self._num_ssd = 0
@@ -425,12 +452,16 @@ class PrefixCacheManager(NoopCacheManager):
         self.host_evictions = 0
         # SSD tier counters: blocks written, read back into host, slots reclaimed
         # (backup copies cleared and SSD-tier blocks dropped), failed I/O
-        # operations, and hit tokens served from host rows an SSD read filled.
+        # operations, hit tokens served from host rows an SSD read filled, requests
+        # that waited for a read (turned away at least once) and those whose wait
+        # ran out.
         self.ssd_stores = 0
         self.ssd_loads = 0
         self.ssd_evictions = 0
         self.ssd_errors = 0
         self.ssd_hit_tokens = 0
+        self.ssd_waits = 0
+        self.ssd_wait_timeouts = 0
         self._last_log = time.monotonic()
         logger.info(
             "DeepInfer prefix cache: keep=%d interval=%d snapshots=%d x %d B on %s, "
@@ -484,6 +515,15 @@ class PrefixCacheManager(NoopCacheManager):
         chain, ssd_run = self._lookup(
             req, self._last_checkpoint(num_tokens) // self.block_size
         )
+        if ssd_run:
+            if self._wait_for_read(req, chain, ssd_run):
+                # Nothing is acquired or allocated while the request waits.
+                self._retry = req
+                return Admission(admitted=False)
+            # Starting the read may have evicted for its rows: look again.
+            chain, ssd_run = self._lookup(
+                req, self._last_checkpoint(num_tokens) // self.block_size
+            )
         scheduler = self.engine.scheduler
         hit = len(chain) * self.block_size
         if chain:
@@ -530,7 +570,8 @@ class PrefixCacheManager(NoopCacheManager):
                 (len(chain) - shared) * self.block_size,
             )
         if ssd_run:
-            # Best effort: this request goes on without them.
+            # Not waiting (short run, wait off, or the wait ran out): best effort,
+            # this request goes on without them.
             self._read_ssd(ssd_run)
         req.checkpoints = deque(self._checkpoints(hit, num_tokens))
         if req.checkpoints:
@@ -540,6 +581,21 @@ class PrefixCacheManager(NoopCacheManager):
         self._hit_tokens += hit
         scheduler.add_sequence(seq)
         return Admission(admitted=True, hit_tokens=hit)
+
+    def on_enqueue(self, seq: Any, token_ids: np.ndarray) -> None:
+        """Start the SSD read for a queued request, so the data is often in host
+        by the time it reaches the head. Only SSD data moves into host rows: no
+        GPU block, pin or promotion, and a capped prefetch is skipped."""
+        if self._ssd is None or self.ssd_wait_ms <= 0:
+            return
+        self._poll_ssd()
+        req = _Request(int(seq.seq_id), seq, token_ids)
+        chain, ssd_run = self._lookup(
+            req, self._last_checkpoint(len(token_ids)) // self.block_size
+        )
+        if not ssd_run or self._prefetch_capped(ssd_run):
+            return
+        self._read_ssd(ssd_run, chain)
 
     def before_step(self) -> None:
         self._poll_ssd()
@@ -916,15 +972,56 @@ class PrefixCacheManager(NoopCacheManager):
             # Evictable from host again, and a backup copy to reclaim.
             self._maybe_push(block)
 
-    def _read_ssd(self, run: list[_Block]) -> None:
-        """Start reading the SSD blocks of ``run`` into host rows (best effort:
-        the request that found them goes on without them)."""
+    def _wait_for_read(
+        self, req: _Request, chain: list[_Block], run: list[_Block]
+    ) -> bool:
+        """Whether ``admit`` turns the request away until the SSD read of ``run``
+        lands: the run is long enough, a read of it is in flight (started here if
+        need be) and the request's deadline, set when it first waits, has not
+        passed. Never blocks: the read is applied by a later poll. ``chain``, what
+        ``admit`` serves, stays held while the read takes rows."""
+        if self._ssd is None or self.ssd_wait_ms <= 0 or req.waited:
+            return False
+        n_ssd = sum(b.tier is Tier.SSD for b in run)
+        if n_ssd < SSD_WAIT_MIN_BLOCKS:
+            return False
+        now = self._now()
+        if req.deadline is not None and now >= req.deadline:
+            # Out of time: no new read, the request goes on without the run.
+            req.waited = True
+            self.ssd_wait_timeouts += 1
+            return False
+        self._read_ssd(run, chain)
+        if not any(b.reading for b in run):
+            # No rows, or too little to read: nothing to wait for.
+            return False
+        if req.deadline is None:
+            wait_ms = SSD_WAIT_BASE_MS + n_ssd * SSD_WAIT_MS_PER_BLOCK
+            req.deadline = now + min(self.ssd_wait_ms, wait_ms) / 1000
+            self.ssd_waits += 1
+        return True
+
+    def _prefetch_capped(self, run: list[_Block]) -> bool:
+        """Whether a prefetch of ``run`` would exceed the reads in flight or the
+        share of the host tier that reads may hold."""
+        assert self._host is not None
+        if self._reads_inflight >= SSD_MAX_PREFETCH_READS:
+            return True
+        rows = sum(b.tier is Tier.SSD and not b.reading for b in run)
+        limit = max(1, int(self._host.capacity * SSD_PREFETCH_ROWS_FRACTION))
+        return self._reading_rows + rows > limit
+
+    def _read_ssd(self, run: list[_Block], served: Sequence[_Block] = ()) -> None:
+        """Start reading the SSD blocks of ``run`` into host rows. Blocks already
+        being read are skipped, and a read that cannot start just does not.
+        ``served`` is the chain ahead of ``run`` that the caller is about to use
+        and has not acquired: its host blocks stay put too."""
         if self._ssd is None or self._host is None:
             return
         run = self._live(run)
         # Host blocks between the served part and the SSD blocks stay: a read
         # under a parent that left host would be of no use.
-        held = [b for b in run if b.tier is Tier.HOST]
+        held = [b for b in (*served, *run) if b.tier is Tier.HOST]
         for block in held:
             block.users += 1
         try:
@@ -993,6 +1090,8 @@ class PrefixCacheManager(NoopCacheManager):
                         after=self._host.fence(),
                         tag=_Read(todo, slots, rows),
                     )
+                    self._reads_inflight += 1
+                    self._reading_rows += len(todo)
                 except Exception:
                     logger.exception("SSD load submission failed")
                     for block in todo:
@@ -1020,6 +1119,8 @@ class PrefixCacheManager(NoopCacheManager):
         assert self._host is not None and self._ssd is not None
         read: _Read = ticket.tag
         failed: list[_Block] = []
+        self._reads_inflight -= 1
+        self._reading_rows -= len(read.blocks)
         for block, slot, row in zip(read.blocks, read.slots, read.rows):
             block.reading = False
             if self._blocks.get(block.block_hash) is not block:
@@ -1085,7 +1186,7 @@ class PrefixCacheManager(NoopCacheManager):
             logger.info(
                 "DeepInfer prefix cache SSD: %d blocks only on SSD, %d of %d slots "
                 "used, %d hit tokens warmed by SSD reads, stores %d, loads %d, "
-                "evictions %d, errors %d",
+                "evictions %d, errors %d, waits %d, wait timeouts %d",
                 self._num_ssd,
                 self._ssd.capacity - self._ssd.num_free,
                 self._ssd.capacity,
@@ -1094,6 +1195,8 @@ class PrefixCacheManager(NoopCacheManager):
                 self.ssd_loads,
                 self.ssd_evictions,
                 self.ssd_errors,
+                self.ssd_waits,
+                self.ssd_wait_timeouts,
             )
 
     # -- capture --------------------------------------------------------------
