@@ -103,7 +103,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Recorder: recorder,
 			Config: &configv1alpha1.OperatorConfiguration{
 				Namespace: configv1alpha1.NamespaceConfiguration{
-					Restricted: "",
+					Restricted: envtestNamespace,
 				},
 				RBAC: configv1alpha1.RBACConfiguration{
 					DGDRProfilingClusterRoleName: "test-cluster-role",
@@ -112,7 +112,6 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			RuntimeConfig:           &commonController.RuntimeConfig{},
 			OperatorImage:           "registry.example/operator:test",
 			OperatorImagePullPolicy: corev1.PullAlways,
-			RBACManager:             &MockRBACManager{},
 		}
 	})
 
@@ -2432,11 +2431,10 @@ var _ = Describe("DGDR Profiler Arguments", func() {
 			Recorder: events.NewFakeRecorder(100),
 			Config: &configv1alpha1.OperatorConfiguration{
 				Namespace: configv1alpha1.NamespaceConfiguration{
-					Restricted: "",
+					Restricted: envtestNamespace,
 				},
 			},
 			RuntimeConfig: &commonController.RuntimeConfig{},
-			RBACManager:   &MockRBACManager{},
 		}
 	})
 
@@ -2641,11 +2639,10 @@ var _ = Describe("DGDR Error Handling", func() {
 			Recorder:  recorder,
 			Config: &configv1alpha1.OperatorConfiguration{
 				Namespace: configv1alpha1.NamespaceConfiguration{
-					Restricted: "",
+					Restricted: envtestNamespace,
 				},
 			},
 			RuntimeConfig: &commonController.RuntimeConfig{},
-			RBACManager:   &MockRBACManager{},
 		}
 	})
 
@@ -4064,11 +4061,10 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 			Recorder:  recorder,
 			Config: &configv1alpha1.OperatorConfiguration{
 				Namespace: configv1alpha1.NamespaceConfiguration{
-					Restricted: "",
+					Restricted: envtestNamespace,
 				},
 			},
 			RuntimeConfig: &commonController.RuntimeConfig{},
-			RBACManager:   &MockRBACManager{},
 		}
 	})
 
@@ -4533,14 +4529,13 @@ var _ = Describe("DGDR Image Pull Error Detection", func() {
 			Recorder: recorder,
 			Config: &configv1alpha1.OperatorConfiguration{
 				Namespace: configv1alpha1.NamespaceConfiguration{
-					Restricted: "",
+					Restricted: envtestNamespace,
 				},
 				RBAC: configv1alpha1.RBACConfiguration{
 					DGDRProfilingClusterRoleName: "test-cluster-role",
 				},
 			},
 			RuntimeConfig: &commonController.RuntimeConfig{},
-			RBACManager:   &MockRBACManager{},
 		}
 	})
 
