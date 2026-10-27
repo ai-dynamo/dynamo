@@ -112,6 +112,9 @@ dynamo-operator:
     checks:
       # Reject Helm transitions that skip one or more Dynamo minor releases.
       upgradePath:
+        # -- Per-check overrides of upgradePreflight.job. Unspecified fields inherit the shared
+        # defaults; affinity, podSecurityContext, and imagePullSecrets replace them as whole values.
+        job: {}
         # -- Installed minor (N.M) allowed to make one otherwise unsupported forward upgrade.
         # The value is ignored after the installed minor changes and never bypasses other checks.
         unsupportedUpgradeOverride: ""

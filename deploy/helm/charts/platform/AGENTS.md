@@ -10,8 +10,12 @@ SPDX-License-Identifier: Apache-2.0
 Follow [DEP #17395](https://github.com/ai-dynamo/dynamo/issues/17395) when adding or changing an
 operator upgrade preflight check.
 
-- Keep shared Job execution settings under `dynamo-operator.upgradePreflight.job` and
+- Keep shared Job execution defaults under `dynamo-operator.upgradePreflight.job` and
   check-specific policy under `dynamo-operator.upgradePreflight.checks.<checkName>`.
+- A check may override shared Job defaults under `checks.<checkName>.job`. Treat this as a sparse,
+  field-level overlay: omitted fields inherit the shared value, while compound fields such as
+  `affinity`, `podSecurityContext`, and `imagePullSecrets` replace the shared field as a whole. Keep
+  the Job name, check identifier, script, command, and RBAC code-owned rather than configurable.
 - Give every check one stable identifier. Represent it as lower camel case in values, kebab case in
   Kubernetes names and paths, and snake case in Python symbols. For example, `upgradePath`,
   `upgrade-path`, and `upgrade_path` identify the same check.
@@ -22,8 +26,8 @@ operator upgrade preflight check.
   identifier. Keep reusable upgrade runtime code in `files/upgrade-preflight/common/` and generic
   preflight code shared with non-upgrade checks in `files/preflight/`.
 - Render common ServiceAccount, Job, Pod security, image, scheduling, deadline, cleanup, and log
-  policy through the shared upgrade-preflight Helm helper. Do not copy the full Job scaffold into
-  each check template.
+  policy through the shared upgrade-preflight Helm helper, including application of per-check Job
+  overrides. Do not copy the full Job scaffold or merge logic into each check template.
 - Give every check its own Job and least-privilege RBAC. Do not widen a narrow check's permissions
   or combine unrelated checks into a universal script or Job.
 - Mandatory compatibility checks must not have persistent disable switches. Put any exceptional

@@ -41,6 +41,6 @@ subjects:
     name: {{ $name }}
     namespace: {{ .Release.Namespace }}
 ---
-{{ include "dynamo-platform.upgradePreflight.job" (dict "root" . "operator" $operator "name" $name "checkID" "upgrade-path" "script" $script "args" $args) }}
+{{ include "dynamo-platform.upgradePreflight.job" (dict "root" . "operator" $operator "check" $config "name" $name "checkID" "upgrade-path" "script" $script "args" $args) }}
 {{- end }}
 

@@ -346,9 +346,12 @@ upgrade or downgrade path.
 
 The check uses Python's standard library with read-only access to the operator Deployment. Set
 `dynamo-operator.upgradePreflight.job.image` and `imagePullSecrets` if the cluster must pull the
-image from an internal registry. A failed Job is retained so you can inspect its logs. The
-supporting ServiceAccount, Role, and RoleBinding remain until the next attempt and require manual
-removal when retiring the release.
+image from an internal registry. These are shared Job defaults. Override an individual check under
+`dynamo-operator.upgradePreflight.checks.<checkName>.job` when it needs a different image or runtime
+setting. Unspecified fields inherit the shared value; compound fields replace that value rather
+than merging recursively. A failed Job is retained so you can inspect its logs. The supporting
+ServiceAccount, Role, and RoleBinding remain until the next attempt and require manual removal when
+retiring the release.
 
 ## Alternative: Install with AICR
 
