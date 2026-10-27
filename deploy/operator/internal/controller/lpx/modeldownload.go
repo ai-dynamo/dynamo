@@ -124,40 +124,62 @@ func ensureModelsDownloaded(
 		return nil, true, nil
 	}
 
+	downloaded, _, err := ensureDownloaded(ctx, builds, existingBuilds, "model",
+		func(build url.URL) string { return build.String() }, registry.EnsureDownloaded)
+	return downloaded, len(downloaded) == len(builds), err
+}
+
+// ensureDownloaded checks the items whose keys are not in existing, in order,
+// within one shared budget. It returns the downloaded and pending keys.
+func ensureDownloaded[T any](
+	ctx context.Context,
+	items []T,
+	existing []string,
+	kind string,
+	key func(T) string,
+	download func(context.Context, T) (bool, error),
+) ([]string, []string, error) {
+	if len(items) == 0 {
+		return nil, nil, nil
+	}
+
 	var (
-		downloaded     = make([]string, 0, len(builds))
+		downloaded     = make([]string, 0, len(items))
+		pending        []string
 		downloadErrors []error
 	)
 
 	ctx, cancel := context.WithTimeout(ctx, modelDownloadCheckTimeout)
 	defer cancel()
 
-	perBuildTimeout := modelDownloadCheckTimeout / time.Duration(len(builds))
+	// Cached items count toward the divisor, so each check gets the same share.
+	perItemTimeout := modelDownloadCheckTimeout / time.Duration(len(items))
 
-	for _, buildURL := range builds {
-		build := buildURL.String()
+	for _, item := range items {
+		itemKey := key(item)
 
-		if slices.Contains(existingBuilds, build) {
-			downloaded = append(downloaded, build)
+		if slices.Contains(existing, itemKey) {
+			downloaded = append(downloaded, itemKey)
 			continue
 		}
 
-		ctx, cancel := context.WithTimeout(ctx, perBuildTimeout)
-		buildDownloaded, err := registry.EnsureDownloaded(ctx, buildURL)
+		ctx, cancel := context.WithTimeout(ctx, perItemTimeout)
+		itemDownloaded, err := download(ctx, item)
 		cancel()
 
 		if err != nil {
-			downloadErrors = append(downloadErrors, fmt.Errorf("ensure model %q is downloaded: %w", build, err))
+			downloadErrors = append(downloadErrors, fmt.Errorf("ensure %s %q is downloaded: %w", kind, itemKey, err))
 			continue
 		}
-		if !buildDownloaded {
+		if !itemDownloaded {
+			pending = append(pending, itemKey)
 			continue
 		}
 
-		downloaded = append(downloaded, build)
+		downloaded = append(downloaded, itemKey)
 	}
 
-	return downloaded, len(downloaded) == len(builds), errors.Join(downloadErrors...)
+	return downloaded, pending, errors.Join(downloadErrors...)
 }
 
 func collectBuilds(dgd *v1beta1.DynamoGraphDeployment, registry lpx.ModelRegistry) ([]url.URL, error) {

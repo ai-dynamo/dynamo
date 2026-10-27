@@ -7,8 +7,6 @@ package lpx
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -104,46 +102,13 @@ func ensureCheckpointsDownloaded(
 	registry lpx.ModelRegistry,
 	existing []string,
 ) ([]string, []string, error) {
+	// registry may be nil when there is nothing to check, and taking its method
+	// value would panic.
 	if len(checkpoints) == 0 {
 		return nil, nil, nil
 	}
 
-	var (
-		downloaded     = make([]string, 0, len(checkpoints))
-		pending        []string
-		downloadErrors []error
-	)
-
-	ctx, cancel := context.WithTimeout(ctx, modelDownloadCheckTimeout)
-	defer cancel()
-
-	perCheckpointTimeout := modelDownloadCheckTimeout / time.Duration(len(checkpoints))
-
-	for _, checkpoint := range checkpoints {
-		key := lpx.CheckpointKey(checkpoint)
-
-		if slices.Contains(existing, key) {
-			downloaded = append(downloaded, key)
-			continue
-		}
-
-		ctx, cancel := context.WithTimeout(ctx, perCheckpointTimeout)
-		checkpointDownloaded, err := registry.EnsureCheckpointDownloaded(ctx, checkpoint)
-		cancel()
-
-		if err != nil {
-			downloadErrors = append(downloadErrors, fmt.Errorf("ensure checkpoint %q is downloaded: %w", key, err))
-			continue
-		}
-		if !checkpointDownloaded {
-			pending = append(pending, key)
-			continue
-		}
-
-		downloaded = append(downloaded, key)
-	}
-
-	return downloaded, pending, errors.Join(downloadErrors...)
+	return ensureDownloaded(ctx, checkpoints, existing, "checkpoint", lpx.CheckpointKey, registry.EnsureCheckpointDownloaded)
 }
 
 // workloadCheckpoints returns the distinct checkpoints of the resolved
