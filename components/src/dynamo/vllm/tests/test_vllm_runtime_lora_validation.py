@@ -454,6 +454,36 @@ def test_snapshot_rejects_nonstandard_json_constants(tmp_path, constant, artifac
     _assert_invalid(snapshot, tmp_path)
 
 
+@pytest.mark.parametrize("number", ["1e999", "-1e999"])
+@pytest.mark.parametrize(
+    "artifact", ["adapter_config.json", "adapter_model.safetensors"]
+)
+def test_snapshot_rejects_overflowing_json_float(tmp_path, number, artifact):
+    snapshot = _snapshot(tmp_path)
+    path = snapshot / artifact
+    if artifact.endswith("safetensors"):
+        header = (
+            json.dumps(
+                {
+                    "q_proj": {
+                        "dtype": "F32",
+                        "shape": [2],
+                        "data_offsets": [0, 8],
+                        "extra": 1.0,
+                    }
+                }
+            )
+            .replace("1.0", number)
+            .encode()
+        )
+        path.write_bytes(len(header).to_bytes(8, "little") + header + bytes(8))
+    else:
+        config = json.loads(path.read_text())
+        path.write_text(json.dumps({**config, "extra": 1.0}).replace("1.0", number))
+
+    _assert_invalid(snapshot, tmp_path)
+
+
 @pytest.mark.parametrize("shape", [[2**64, 0], [2**40, 2**40, 0]])
 def test_snapshot_rejects_shape_integer_overflow_before_zero(tmp_path, shape):
     snapshot = _snapshot(tmp_path)

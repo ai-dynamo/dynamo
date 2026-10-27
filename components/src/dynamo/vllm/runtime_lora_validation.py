@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import stat
 import sys
@@ -54,6 +55,13 @@ def _reject_json_constant(_value: str) -> NoReturn:
     raise _runtime_error(422, "invalid_lora_adapter")
 
 
+def _parse_json_float(value: str) -> float:
+    result = float(value)
+    if not math.isfinite(result):
+        raise _runtime_error(422, "invalid_lora_adapter")
+    return result
+
+
 def _parse_json(encoded: bytes) -> object:
     text = encoded.decode("utf-8")
     depth = 0
@@ -75,7 +83,9 @@ def _parse_json(encoded: bytes) -> object:
                 raise _runtime_error(422, "invalid_lora_adapter")
         elif char in "]}":
             depth -= 1
-    return json.loads(text, parse_constant=_reject_json_constant)
+    return json.loads(
+        text, parse_constant=_reject_json_constant, parse_float=_parse_json_float
+    )
 
 
 def _scan_error(error: OSError) -> None:
