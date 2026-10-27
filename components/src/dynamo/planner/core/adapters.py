@@ -9,6 +9,7 @@ Each subclass sets ``require_prefill`` / ``require_decode`` and overrides
 """
 
 import logging
+from typing import Optional
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.core.base import NativePlannerBase
@@ -28,6 +29,43 @@ def _log_missing_pre_deployment_data(component: str, error: Exception) -> None:
         component,
         error,
     )
+
+
+async def _emit_replica_targets(
+    planner: NativePlannerBase,
+    *,
+    num_prefill: Optional[int] = None,
+    num_decode: Optional[int] = None,
+) -> None:
+    """Publish predicted-replica gauges, then submit one scaling batch.
+
+    Callers pass only the roles their mode owns, so a single-role mode never
+    publishes, resolves, or scales the other role. ``None`` means "no target";
+    ``0`` is a real target. Gauges are set before any worker name is resolved,
+    so they are published even if ``_required_worker_info`` then raises, and
+    even in advisory mode (the advisory guard lives in
+    ``_apply_scaling_targets``). Prefill is ordered before decode.
+    """
+    if planner.prometheus_port != 0:
+        if num_prefill is not None:
+            planner.prometheus_metrics.predicted_num_prefill_replicas.set(num_prefill)
+        if num_decode is not None:
+            planner.prometheus_metrics.predicted_num_decode_replicas.set(num_decode)
+
+    targets: list[TargetReplica] = []
+    for component, desired in (
+        (SubComponentType.PREFILL, num_prefill),
+        (SubComponentType.DECODE, num_decode),
+    ):
+        if desired is not None:
+            targets.append(
+                TargetReplica(
+                    sub_component_type=component,
+                    component_name=planner._required_worker_info(component).k8s_name,
+                    desired_replicas=desired,
+                )
+            )
+    await planner._apply_scaling_targets(targets)
 
 
 class PrefillPlanner(NativePlannerBase):
@@ -59,20 +97,7 @@ class PrefillPlanner(NativePlannerBase):
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_prefill is None:
             return
-        desired = effects.scale_to.num_prefill
-        if self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_prefill_replicas.set(desired)
-        await self._apply_scaling_targets(
-            [
-                TargetReplica(
-                    sub_component_type=SubComponentType.PREFILL,
-                    component_name=self._required_worker_info(
-                        SubComponentType.PREFILL
-                    ).k8s_name,
-                    desired_replicas=desired,
-                )
-            ]
-        )
+        await _emit_replica_targets(self, num_prefill=effects.scale_to.num_prefill)
 
 
 class DecodePlanner(NativePlannerBase):
@@ -103,20 +128,7 @@ class DecodePlanner(NativePlannerBase):
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_decode is None:
             return
-        desired = effects.scale_to.num_decode
-        if self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_decode_replicas.set(desired)
-        await self._apply_scaling_targets(
-            [
-                TargetReplica(
-                    sub_component_type=SubComponentType.DECODE,
-                    component_name=self._required_worker_info(
-                        SubComponentType.DECODE
-                    ).k8s_name,
-                    desired_replicas=desired,
-                )
-            ]
-        )
+        await _emit_replica_targets(self, num_decode=effects.scale_to.num_decode)
 
 
 class AggPlanner(NativePlannerBase):
@@ -145,20 +157,7 @@ class AggPlanner(NativePlannerBase):
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_decode is None:
             return
-        desired = effects.scale_to.num_decode
-        if self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_decode_replicas.set(desired)
-        await self._apply_scaling_targets(
-            [
-                TargetReplica(
-                    sub_component_type=SubComponentType.DECODE,
-                    component_name=self._required_worker_info(
-                        SubComponentType.DECODE
-                    ).k8s_name,
-                    desired_replicas=desired,
-                )
-            ]
-        )
+        await _emit_replica_targets(self, num_decode=effects.scale_to.num_decode)
 
 
 class DisaggPlanner(NativePlannerBase):
@@ -200,36 +199,8 @@ class DisaggPlanner(NativePlannerBase):
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None:
             return
-        decision = effects.scale_to
-
-        if decision.num_prefill is not None and self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_prefill_replicas.set(
-                decision.num_prefill
-            )
-        if decision.num_decode is not None and self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_decode_replicas.set(
-                decision.num_decode
-            )
-
-        targets = []
-        if decision.num_prefill is not None:
-            targets.append(
-                TargetReplica(
-                    sub_component_type=SubComponentType.PREFILL,
-                    component_name=self._required_worker_info(
-                        SubComponentType.PREFILL
-                    ).k8s_name,
-                    desired_replicas=decision.num_prefill,
-                )
-            )
-        if decision.num_decode is not None:
-            targets.append(
-                TargetReplica(
-                    sub_component_type=SubComponentType.DECODE,
-                    component_name=self._required_worker_info(
-                        SubComponentType.DECODE
-                    ).k8s_name,
-                    desired_replicas=decision.num_decode,
-                )
-            )
-        await self._apply_scaling_targets(targets)
+        await _emit_replica_targets(
+            self,
+            num_prefill=effects.scale_to.num_prefill,
+            num_decode=effects.scale_to.num_decode,
+        )
