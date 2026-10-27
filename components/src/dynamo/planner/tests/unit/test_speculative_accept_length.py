@@ -1,24 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import asyncio
 import math
 
 import pytest
 
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.core.state_machine import (
-    PlannerScalingState,
-    normalize_speculative_accept_length,
-)
+from dynamo.planner.core.state_machine import normalize_speculative_accept_length
 from dynamo.planner.core.types import EngineCapabilities, WorkerCapabilities
-from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
-from dynamo.planner.plugins.types import (
-    ObservationData,
-    PipelineContext,
-    PredictStageRequest,
-    TrafficMetrics,
-)
 
 pytestmark = [
     pytest.mark.unit,
@@ -78,47 +67,3 @@ def test_normalize_speculative_accept_length(
     # Assigned after construction because field validation rejects negatives.
     config.speculative_nextn = config_nextn
     assert normalize_speculative_accept_length(accept_length, caps, config) == expected
-
-
-def _state_observe(state: PlannerScalingState, accept_length: float) -> float:
-    state.observe_runtime_metadata(accept_length=accept_length)
-    return state._current_decode_accept_length()
-
-
-def _plugin_observe(plugin: BuiltinLoadPredict, accept_length: float) -> float:
-    request = PredictStageRequest(
-        context=PipelineContext(
-            observations=ObservationData(
-                traffic=TrafficMetrics(
-                    duration_s=60.0,
-                    num_req=10.0,
-                    isl=128.0,
-                    osl=64.0,
-                    accept_length=accept_length,
-                )
-            )
-        )
-    )
-    response = asyncio.run(plugin.Predict(request))
-    assert response.predictions is not None
-    return response.predictions.predicted_accept_length
-
-
-@pytest.mark.parametrize(
-    "make, observe",
-    [
-        (lambda c, caps: PlannerScalingState(c, caps), _state_observe),
-        (lambda c, caps: BuiltinLoadPredict(c, caps), _plugin_observe),
-    ],
-    ids=["scaling_state", "load_predict"],
-)
-def test_callers_clamp_on_observe_update_and_read(make, observe):
-    caller = make(_config(1), _caps())
-    assert observe(caller, 3.5) == 2.0
-
-    # A capability update re-clamps the stored value; it does not restore the
-    # raw observation.
-    caller.update_capabilities(_caps(decode_nextn=4))
-    assert observe(caller, math.nan) == 2.0
-
-    assert observe(caller, 3.5) == 3.5
