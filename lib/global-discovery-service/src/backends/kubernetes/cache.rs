@@ -238,7 +238,7 @@ async fn watch_slices<I: SliceIndex>(
                         %error,
                         %selector,
                         ?failing_for,
-                        "EndpointSlice watch still failing; listing its last view as incomplete"
+                        "EndpointSlice watch still failing"
                     );
                 }
             }
@@ -311,6 +311,9 @@ impl<I: SliceIndex> Directory<I::Item, I::Key> for SliceDirectory<I> {
         Ok(index.snapshot())
     }
 
+    /// The stream starts at the first complete list. Until then it waits while
+    /// the watch retries and logs its failures, as `dynamo_runtime`'s
+    /// Kubernetes discovery waits to be ready; `cancel_token` ends the wait.
     async fn list_and_watch(
         &self,
         cancel_token: Option<CancellationToken>,

@@ -451,7 +451,6 @@ mod tests {
             panic!("expected Added");
         };
         assert!(second.revision > first.revision);
-        // The slice is deleted.
         cache.apply(watcher::Event::Delete(live));
         assert!(matches!(events.try_recv().unwrap(), WatchEvent::Removed(_)));
         assert!(cache.read().index.pools.is_empty());
