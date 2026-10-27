@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"strings"
 
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
+
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -64,8 +66,6 @@ const (
 	reasonComponentCrashLooping               Reason = "component_crash_looping"
 	reasonSelectedWorkloadProviderUnavailable Reason = "selected_workload_provider_unavailable"
 	reasonUnsupportedWorkloadProvider         Reason = "unsupported_workload_provider"
-
-	dgdComponentPodIndex = ".metadata.dgdComponent"
 )
 
 // rbacManager interface for managing RBAC resources
@@ -277,8 +277,8 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
 		&corev1.Pod{},
-		dgdComponentPodIndex,
-		dgdComponentPodIndexValues,
+		podcontroller.ComponentIndex,
+		podcontroller.ComponentIndexValues,
 	); err != nil {
 		return fmt.Errorf("register DGD component Pod index: %w", err)
 	}
@@ -423,26 +423,6 @@ func isDGDManagedWorkerPod(obj client.Object) bool {
 		labels[consts.KubeLabelDynamoComponent] != "" &&
 		(labels[consts.KubeLabelDynamoSelector] != "" || labels[consts.KubeLabelDynamoWorkerHash] != "") &&
 		dynamo.IsWorkerComponent(labels[consts.KubeLabelDynamoComponentType])
-}
-
-func dgdComponentPodIndexValues(obj client.Object) []string {
-	pod, ok := obj.(*corev1.Pod)
-	if !ok || pod == nil {
-		return nil
-	}
-	labels := pod.GetLabels()
-	dgdName := labels[consts.KubeLabelDynamoGraphDeploymentName]
-	componentName := labels[consts.KubeLabelDynamoComponent]
-	if dgdName == "" || componentName == "" {
-		return nil
-	}
-	return []string{dgdComponentPodIndexValue(dgdName, componentName)}
-}
-
-func dgdComponentPodIndexValue(dgdName, componentName string) string {
-	// Both inputs are label values, which cannot contain '/', so this encoding
-	// is collision-free.
-	return dgdName + "/" + componentName
 }
 
 // dgdWorkerPodEventPredicate admits only events that can change whether a

@@ -26,6 +26,8 @@ import (
 	"strings"
 	"testing"
 
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -2618,7 +2620,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			replicas:           1,
 			existingDeployment: crashLoopTestDeployment(),
 			existingObjects: []client.Object{
-				crashLoopTestPod(crashLoopTestNamespace, "test-component-a", crashLoopTestDCDName, false, 3),
+				crashLoopTestPod("test-component-a", crashLoopTestDCDName),
 			},
 			wantComponentReconcileResult: ComponentReconcileResult{
 				modified: true,
@@ -2640,7 +2642,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			replicas:           1,
 			existingDeployment: crashLoopTestDeployment(),
 			existingObjects: []client.Object{
-				crashLoopTestPod(crashLoopTestNamespace, "other-component-a", "other-component", false, 3),
+				crashLoopTestPod("other-component-a", "other-component"),
 			},
 			wantComponentReconcileResult: ComponentReconcileResult{
 				modified: true,
@@ -2731,6 +2733,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 
 			// Set up fake client with the DCD and existing Deployment
 			fakeKubeClient := fake.NewClientBuilder().
+				WithIndex(&corev1.Pod{}, podcontroller.SelectorIndex, podcontroller.SelectorIndexValues).
 				WithScheme(s).
 				WithObjects(objects...).
 				WithStatusSubresource(objects...).
@@ -2790,7 +2793,7 @@ func crashLoopTestDeployment() *appsv1.Deployment {
 // crashLoopTestTerminatingPod describes a crash-looping Pod of the crash-loop
 // cases' DCD that a rollout is deleting.
 func crashLoopTestTerminatingPod() *corev1.Pod {
-	pod := crashLoopTestPod(crashLoopTestNamespace, "test-component-previous-a", crashLoopTestDCDName, false, 3)
+	pod := crashLoopTestPod("test-component-previous-a", crashLoopTestDCDName)
 	pod.DeletionTimestamp = new(metav1.Now())
 	// The fake client refuses a deleted object that no finalizer holds.
 	pod.Finalizers = []string{"test.nvidia.com/hold"}
@@ -2855,6 +2858,7 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 	}
 
 	fakeKubeClient := fake.NewClientBuilder().
+		WithIndex(&corev1.Pod{}, podcontroller.SelectorIndex, podcontroller.SelectorIndexValues).
 		WithScheme(s).
 		WithObjects(dcd, deployment).
 		WithStatusSubresource(dcd, deployment).

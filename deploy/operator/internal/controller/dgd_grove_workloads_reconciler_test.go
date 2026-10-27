@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"testing"
 
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
+
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -138,7 +140,7 @@ func TestGroveProgram_CoherentScalingWaitsForCurrentGeneration(t *testing.T) {
 					return delegated.Update(ctx, object, opts...)
 				},
 			}, func() { writes++ })
-			providerClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, dgdComponentPodIndex, dgdComponentPodIndexValues).WithRESTMapper(groveScaleRESTMapper()).WithObjects(dgd, pcs, child).WithStatusSubresource(dgd, pcs).Build()
+			providerClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).WithRESTMapper(groveScaleRESTMapper()).WithObjects(dgd, pcs, child).WithStatusSubresource(dgd, pcs).Build()
 			kubeClient := interceptor.NewClient(providerClient, funcs)
 			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Config: config, RuntimeConfig: runtimeConfig, Recorder: events.NewFakeRecorder(10), DockerSecretRetriever: secrets}
 
@@ -1129,7 +1131,7 @@ func TestGroveProgram_ScalingDuringUpdatesPreservesStatus(t *testing.T) {
 				}
 				return scaleUpdate(ctx, kube, subresource, object, options...)
 			}
-			kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, dgdComponentPodIndex, dgdComponentPodIndexValues).WithRESTMapper(groveScaleRESTMapper()).WithObjects(dgd, pcs, pclq).WithStatusSubresource(dgd, &nvidiacomv1alpha1.LPXGraphDeployment{}).WithInterceptorFuncs(funcs).Build()
+			kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).WithRESTMapper(groveScaleRESTMapper()).WithObjects(dgd, pcs, pclq).WithStatusSubresource(dgd, &nvidiacomv1alpha1.LPXGraphDeployment{}).WithInterceptorFuncs(funcs).Build()
 
 			t.Log("Keep an already-settled LPX child independent of frontend scaling")
 			var lpxChild *nvidiacomv1alpha1.LPXGraphDeployment
@@ -1225,7 +1227,7 @@ func TestGroveProgram_CoherentAPIRejectionIsReported(t *testing.T) {
 				field.ErrorList{field.NotSupported(field.NewPath("spec", "updateStrategy", "type"), "Coherent", []string{"RollingRecreate", "OnDelete"})},
 			)
 			rejectStrategy := true
-			kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, dgdComponentPodIndex, dgdComponentPodIndexValues).WithObjects(dgd).WithInterceptorFuncs(interceptor.Funcs{
+			kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).WithObjects(dgd).WithInterceptorFuncs(interceptor.Funcs{
 				Create: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.CreateOption) error {
 					if isGrovePodCliqueSetObject(object) && rejectStrategy {
 						return rejected
@@ -1294,10 +1296,10 @@ func TestGroveProgram_CrashLoopFailsGraph(t *testing.T) {
 			require.NoError(t, err)
 			pcs.Annotations = map[string]string{commoncontroller.NvidiaAnnotationHashKey: hash, commoncontroller.NvidiaAnnotationGenerationKey: fmt.Sprint(pcs.Generation)}
 			pclq := &grovev1alpha1.PodClique{Name: "graph-0-frontend", Namespace: "default", Generation: 1, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}, Status: grovev1alpha1.PodCliqueStatus{Replicas: 1, UpdatedReplicas: 1, ScheduledReplicas: 1, ObservedGeneration: new(int64(1))}}
-			pod := crashLoopTestPod("default", "graph-0-frontend-a", "graph-frontend", false, 3)
+			pod := crashLoopTestPod("graph-0-frontend-a", "graph-frontend")
 			pod.Labels[consts.KubeLabelDynamoGraphDeploymentName] = "graph"
 			pod.Labels[consts.KubeLabelDynamoComponent] = "frontend"
-			kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, dgdComponentPodIndex, dgdComponentPodIndexValues).WithRESTMapper(groveScaleRESTMapper()).WithObjects(dgd, pcs, pclq, pod).WithStatusSubresource(dgd).WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, nil)).Build()
+			kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).WithRESTMapper(groveScaleRESTMapper()).WithObjects(dgd, pcs, pclq, pod).WithStatusSubresource(dgd).WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, nil)).Build()
 			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Config: config, RuntimeConfig: runtimeConfig, Recorder: events.NewFakeRecorder(10), DockerSecretRetriever: secrets}
 
 			t.Log("Run the complete Grove program")

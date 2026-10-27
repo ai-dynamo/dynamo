@@ -20,6 +20,8 @@ package controller
 import (
 	"context"
 
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
+
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -48,6 +50,7 @@ func newGroveWatchSetup(reader client.Reader) *groveWatchSetup {
 	return &groveWatchSetup{reader: reader}
 }
 
+// addTo registers the Grove workload and Pod watches on ctrlBuilder.
 func (s *groveWatchSetup) addTo(ctrlBuilder *builder.Builder) *builder.Builder {
 	return ctrlBuilder.
 		Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(predicate.Funcs{
@@ -71,8 +74,8 @@ func (s *groveWatchSetup) addTo(ctrlBuilder *builder.Builder) *builder.Builder {
 		// A container restart may change no Grove status, so crash loops need their own Pod watch.
 		Watches(
 			&corev1.Pod{},
-			handler.EnqueueRequestsFromMapFunc(mapPodToRequests(componentPodDGDName)),
-			builder.WithPredicates(podCrashLoopPredicate(componentPodDGDName)),
+			podcontroller.EnqueueOwners(podcontroller.DGDName),
+			builder.WithPredicates(podcontroller.CrashLoopPredicate(podcontroller.DGDName)),
 		)
 }
 

@@ -23,6 +23,8 @@ import (
 	"maps"
 	"time"
 
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
+
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -242,11 +244,20 @@ func (p *groveProgram) Reconcile(
 	}
 
 	// Grove readiness reports a crash-looping component only as not ready.
-	crashLoops, err := findComponentPodCrashLoops(ctx, p.reader, req.DGD, req.ManagedComponents())
+	managed := req.ManagedComponents()
+	componentNames := make([]string, 0, len(managed))
+	for i := range managed {
+		componentNames = append(componentNames, managed[i].ComponentName)
+	}
+	crashLoops, err := podcontroller.ComponentCrashLoops(ctx, p.reader, req.DGD.Namespace, req.DGD.Name, componentNames)
 	if err != nil {
 		return programResult, fmt.Errorf("find crash-looping Grove Pods: %w", err)
 	}
-	result = failCrashLoopingComponents(result, crashLoops)
+	diagnoses := make(map[string]string, len(crashLoops))
+	for component, crashLoop := range crashLoops {
+		diagnoses[component] = crashLoop.String()
+	}
+	result = failCrashLoopingComponents(result, diagnoses)
 
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 

@@ -159,3 +159,99 @@ func TestCrashLoopString(t *testing.T) {
 		})
 	}
 }
+
+func TestCrashLoopChanged(t *testing.T) {
+	recovered := crashLoopTestPod("worker-a", false, 2, 1)
+	recovered.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	terminal := crashLoopTestPod("worker-a", false, 2, 1)
+	terminal.Status.Phase = corev1.PodFailed
+	terminating := crashLoopTestPod("worker-a", false, 2, 1)
+	terminating.DeletionTimestamp = &metav1.Time{}
+
+	t.Log("Describe a Pod whose crash loop moves between two containers while one container stays waiting")
+	firstCrashing := crashLoopTestPod("worker-a", false, 2, 1)
+	firstCrashing.Status.ContainerStatuses = append(firstCrashing.Status.ContainerStatuses, corev1.ContainerStatus{
+		Name:  "sidecar",
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	})
+	secondCrashing := crashLoopTestPod("worker-a", false, 0, 0)
+	secondCrashing.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	secondCrashing.Status.ContainerStatuses = append(secondCrashing.Status.ContainerStatuses, corev1.ContainerStatus{
+		Name:                 "sidecar",
+		RestartCount:         2,
+		State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+	})
+
+	tests := []struct {
+		name   string
+		oldPod corev1.Pod
+		newPod corev1.Pod
+		want   bool
+	}{
+		{
+			name:   "crash loop starts",
+			oldPod: crashLoopTestPod("worker-a", false, 1, 1),
+			newPod: crashLoopTestPod("worker-a", false, 2, 1),
+			want:   true,
+		},
+		{
+			name:   "container recovers",
+			oldPod: crashLoopTestPod("worker-a", false, 2, 1),
+			newPod: recovered,
+			want:   true,
+		},
+		{
+			name:   "restart count changes",
+			oldPod: crashLoopTestPod("worker-a", false, 2, 1),
+			newPod: crashLoopTestPod("worker-a", false, 3, 1),
+			want:   true,
+		},
+		{
+			name:   "exit code changes",
+			oldPod: crashLoopTestPod("worker-a", false, 2, 1),
+			newPod: crashLoopTestPod("worker-a", false, 2, 137),
+			want:   true,
+		},
+		{
+			name:   "crash loop moves to another container",
+			oldPod: firstCrashing,
+			newPod: secondCrashing,
+			want:   true,
+		},
+		{
+			name:   "Pod becomes Ready",
+			oldPod: crashLoopTestPod("worker-a", false, 2, 1),
+			newPod: crashLoopTestPod("worker-a", true, 2, 1),
+			want:   true,
+		},
+		{
+			name:   "Pod becomes terminal",
+			oldPod: crashLoopTestPod("worker-a", false, 2, 1),
+			newPod: terminal,
+			want:   true,
+		},
+		{
+			name:   "Pod starts terminating",
+			oldPod: crashLoopTestPod("worker-a", false, 2, 1),
+			newPod: terminating,
+			want:   true,
+		},
+		{
+			name:   "unchanged crash loop",
+			oldPod: crashLoopTestPod("worker-a", false, 2, 1),
+			newPod: crashLoopTestPod("worker-a", false, 2, 1),
+		},
+		{
+			name:   "unchanged healthy Pod",
+			oldPod: crashLoopTestPod("worker-a", true, 0, 0),
+			newPod: crashLoopTestPod("worker-a", true, 0, 0),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, CrashLoopChanged(&tt.oldPod, &tt.newPod))
+		})
+	}
+}
