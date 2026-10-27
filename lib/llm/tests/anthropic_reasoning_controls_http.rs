@@ -205,3 +205,34 @@ async fn claude_code_default_effort_shape_is_accepted() {
     })
     .await;
 }
+
+#[tokio::test]
+#[serial]
+async fn between_tools_does_not_regain_up_front_thinking_from_effort() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(std::iter::repeat_n(script, 2)).await;
+        for stream in [false, true] {
+            let body = json!({"model": MODEL, "max_tokens": 4096, "stream": stream,
+                "messages": [{"role": "user", "content": "ping"}],
+                "thinking": {"type": "between_tools"}, "output_config": {"effort": "high"}});
+            let response = svc
+                .client
+                .post(format!("{}/v1/messages", svc.base_url))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let _ = response.text().await.unwrap();
+            let requests = svc.engine.take_requests().await;
+            assert_eq!(requests.len(), 1);
+            let args = requests[0].chat_template_args.as_ref().unwrap();
+            assert_eq!(args["enable_thinking"], false);
+            assert_eq!(args["thinking_mode"], "disabled");
+            assert_eq!(args["reasoning_effort"], "high");
+        }
+        svc.shutdown().await;
+    })
+    .await;
+}
