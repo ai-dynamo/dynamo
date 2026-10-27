@@ -18,36 +18,42 @@ type DynamoPoolRelaySpec struct {
 	// +kubebuilder:validation:Pattern=`^[^[:space:]\p{Z}\x85\x1c-\x1f](.*[^[:space:]\p{Z}\x85\x1c-\x1f])?$`
 	ClusterID string `json:"clusterId"`
 
-	// Image must contain dynamo.pool_relay with file-source support.
-	// +kubebuilder:validation:MinLength=1
-	Image string `json:"image"`
-
-	// ImagePullSecrets authenticate pulls of the Relay image from a private registry.
-	// +optional
-	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+	// PodTemplate configures Relay Pods. Its main container needs an image with
+	// dynamo.pool_relay and --sources-file support from the operator's revision.
+	// The controller sets the main command, listener probes, source volume,
+	// service account, and Relay identity and discovery environment variables.
+	// Reserved env names: DYN_NAMESPACE, DYN_DISCOVERY_BACKEND,
+	// DYN_KUBE_DISCOVERY_MODE, DYN_SYSTEM_PORT, DYN_TCP_RESPONSE_STREAM_HOST,
+	// DYN_TCP_RESPONSE_STREAM_PORT, DYN_CLUSTER_ID, DYN_RELAY_BIND,
+	// DYN_RELAY_CONNECTION_REVISION, DYN_RELAY_NAMESPACES, DYN_RELAY_WATCH_ALL,
+	// DYN_RELAY_ENDPOINT_PREFIXES, POD_NAME, POD_NAMESPACE, and POD_UID.
+	// The main container cannot use envFrom because it could override those values.
+	// +kubebuilder:validation:Required
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate"`
 
 	// Replicas sets the number of active Relay Pods. Each watches the DGD.
 	// +optional
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=1
 	Replicas *int32 `json:"replicas,omitempty"`
-
-	// Env sets transport and Relay tuning variables on each Pod.
-	// The operator reserves identity and source settings.
-	// +optional
-	// +listType=map
-	// +listMapKey=name
-	Env []corev1.EnvVar `json:"env,omitempty"`
 }
 
 // DynamoPoolRelayStatus reports listener availability. It does not report KV or model readiness.
 type DynamoPoolRelayStatus struct {
+	// ObservedGeneration is the Relay resource generation last reconciled by the operator.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// Endpoint is the cluster-local `<dgd>-pool-relay.<namespace>.svc:5561` address.
+	// It is empty after withdrawal or a failed reconciliation.
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
+	// AvailableReplicas is the number of Relay Pods the Deployment reports available.
 	// +optional
 	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
+	// Conditions includes Ready for listener availability, not model or KV readiness.
+	// Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound,
+	// DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers,
+	// InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -56,6 +62,10 @@ type DynamoPoolRelayStatus struct {
 
 // DynamoPoolRelay deploys active-active Relay Pods for one DGD.
 // The resource name matches its DGD; the Service name adds the -pool-relay suffix.
+// The DGD needs Kubernetes pod-mode discovery and at least one worker component.
+// Worker and frontend components cannot use globalDynamoNamespace. The DGD name
+// must produce a DNS-1035 Service name, so it starts with a lowercase letter,
+// uses only lowercase letters, digits, and hyphens, and is at most 52 characters.
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=dprelay

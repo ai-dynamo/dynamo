@@ -61,17 +61,17 @@ func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 	relayMeta := metav1.ObjectMeta{Name: "green", Namespace: "default", UID: "relay-uid"}
 	relay := &v1alpha1.DynamoPoolRelay{
 		ObjectMeta: relayMeta,
-		Spec:       v1alpha1.DynamoPoolRelaySpec{ClusterID: "east", Image: "relay:test"},
+		Spec:       relaySpec("east"),
 	}
 	r := &reconciler{Client: apiClient, scheme: scheme, defaultBackend: configv1alpha1.DiscoveryBackendKubernetes}
 	key := types.NamespacedName{Namespace: relay.Namespace, Name: serviceName(relay.Name)}
 	var firstResourceVersion string
 	for attempt := range 2 {
-		objects, err := render(relay, []string{"green-runtime"})
+		_, wanted, err := render(relay, []string{"green-runtime"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := r.apply(ctx, relay, objects[len(objects)-1]); err != nil {
+		if _, err := r.applyDeployment(ctx, relay, wanted); err != nil {
 			t.Fatal(err)
 		}
 		var deployment appsv1.Deployment
@@ -86,6 +86,64 @@ func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 		} else if deployment.ResourceVersion != firstResourceVersion {
 			t.Fatalf("unchanged Deployment was rewritten: %s -> %s", firstResourceVersion, deployment.ResourceVersion)
 		}
+	}
+	t.Log("Restore controller-owned Pod settings with Server-Side Apply")
+	var drifted appsv1.Deployment
+	if err := apiClient.Get(ctx, key, &drifted); err != nil {
+		t.Fatal(err)
+	}
+	drifted.Spec.Template.Spec.HostNetwork = true
+	drifted.Spec.Template.Spec.Volumes[0].ConfigMap.Items = []corev1.KeyToPath{{Key: "wrong", Path: "wrong.json"}}
+	if err := apiClient.Update(ctx, &drifted); err != nil {
+		t.Fatal(err)
+	}
+	_, wanted, err := render(relay, []string{"green-runtime"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.applyDeployment(ctx, relay, wanted); err != nil {
+		t.Fatal(err)
+	}
+	if err := apiClient.Get(ctx, key, &drifted); err != nil {
+		t.Fatal(err)
+	}
+	if drifted.Spec.Template.Spec.HostNetwork || len(drifted.Spec.Template.Spec.Volumes[0].ConfigMap.Items) != 1 ||
+		drifted.Spec.Template.Spec.Volumes[0].ConfigMap.Items[0].Key != "sources.json" {
+		t.Fatalf("Server-Side Apply did not restore Relay Pod settings: %+v", drifted.Spec.Template.Spec)
+	}
+	t.Log("Remove user PodTemplate fields when the resource no longer requests them")
+	relay.Spec.PodTemplate.Spec.Containers = append(relay.Spec.PodTemplate.Spec.Containers,
+		corev1.Container{Name: "metrics", Image: "metrics:test"})
+	relay.Spec.PodTemplate.Spec.Containers[0].Env = append(relay.Spec.PodTemplate.Spec.Containers[0].Env,
+		corev1.EnvVar{Name: "DYN_EVENT_PLANE", Value: "zmq"})
+	_, wanted, err = render(relay, []string{"green-runtime"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.applyDeployment(ctx, relay, wanted); err != nil {
+		t.Fatal(err)
+	}
+	if err := apiClient.Get(ctx, key, &drifted); err != nil {
+		t.Fatal(err)
+	}
+	if len(drifted.Spec.Template.Spec.Containers) != 2 {
+		t.Fatalf("user sidecar was not added: %+v", drifted.Spec.Template.Spec.Containers)
+	}
+	relay.Spec.PodTemplate.Spec.Containers = relay.Spec.PodTemplate.Spec.Containers[:1]
+	relay.Spec.PodTemplate.Spec.Containers[0].Env = nil
+	_, wanted, err = render(relay, []string{"green-runtime"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.applyDeployment(ctx, relay, wanted); err != nil {
+		t.Fatal(err)
+	}
+	if err := apiClient.Get(ctx, key, &drifted); err != nil {
+		t.Fatal(err)
+	}
+	if len(drifted.Spec.Template.Spec.Containers) != 1 ||
+		len(drifted.Spec.Template.Spec.Containers[0].Env) != len(wanted.Spec.Template.Spec.Containers[0].Env) {
+		t.Fatalf("removed PodTemplate fields remained in Deployment: %+v", drifted.Spec.Template.Spec.Containers)
 	}
 }
 
@@ -186,13 +244,22 @@ func TestControllerPublishesAndWithdrawsOneDGDService(t *testing.T) {
 		t.Fatalf("Relay Service was not published: %v", err)
 	}
 	var deployment appsv1.Deployment
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := apiClient.Get(ctx, serviceKey, &deployment); err == nil {
+			break
+		} else if !apierrors.IsNotFound(err) {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	if err := apiClient.Get(ctx, serviceKey, &deployment); err != nil {
 		t.Fatalf("Relay Deployment was not published: %v", err)
 	}
 	if relay.Spec.Replicas == nil || deployment.Spec.Replicas == nil ||
 		*deployment.Spec.Replicas != *relay.Spec.Replicas ||
 		len(deployment.Spec.Template.Spec.Containers) != 1 ||
-		deployment.Spec.Template.Spec.Containers[0].Image != relay.Spec.Image {
+		deployment.Spec.Template.Spec.Containers[0].Image != relay.Spec.PodTemplate.Spec.Containers[0].Image {
 		t.Fatalf("Relay Deployment does not match the sample: %+v", deployment.Spec)
 	}
 	if err := apiClient.Delete(ctx, dgd); err != nil {

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -43,10 +45,13 @@ import (
 
 const (
 	relayPort       = int32(5561)
+	recoveryPort    = int32(5562)
 	systemPort      = int32(8081)
 	sourcesFilePath = "/var/run/dynamo-relay/sources/sources.json"
 	mainContainer   = "main"
 )
+
+var errOwnershipConflict = errors.New("Relay resource ownership conflict")
 
 type reconciler struct {
 	client.Client
@@ -104,7 +109,11 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	if !dgd.DeletionTimestamp.IsZero() {
 		return r.withdraw(ctx, &relay, "DGDTerminating", "The named DGD is terminating")
 	}
-	if !supportsPodDiscovery(&dgd, r.defaultBackend) {
+	supported, err := supportsPodDiscovery(&dgd, r.defaultBackend)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("resolve DGD discovery settings: %w", err)
+	}
+	if !supported {
 		return r.withdraw(ctx, &relay, "UnsupportedDiscovery", "The named DGD must use Kubernetes pod-mode discovery")
 	}
 	for _, component := range dgd.Spec.Components {
@@ -126,27 +135,39 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return r.withdraw(ctx, &relay, "UnsupportedSourceScope", "The Relay source file cannot isolate a DGD in the shared global Dynamo namespace")
 	}
 
-	resources, err := render(&relay, namespaces)
+	resources, desiredDeployment, err := render(&relay, namespaces)
 	if err != nil {
 		return r.withdraw(ctx, &relay, "InvalidConfiguration", err.Error())
 	}
 	for _, resource := range resources {
 		if err := r.apply(ctx, &relay, resource); err != nil {
-			return ctrl.Result{}, err
+			if errors.Is(err, errOwnershipConflict) {
+				_, withdrawErr := r.withdraw(ctx, &relay, "ResourceOwnershipConflict", err.Error())
+				return ctrl.Result{}, errors.Join(err, withdrawErr)
+			}
+			return ctrl.Result{}, errors.Join(err, r.reportApplyFailure(ctx, &relay, err))
 		}
+	}
+	deployment, err := r.applyDeployment(ctx, &relay, desiredDeployment)
+	if err != nil {
+		if errors.Is(err, errOwnershipConflict) {
+			_, withdrawErr := r.withdraw(ctx, &relay, "ResourceOwnershipConflict", err.Error())
+			return ctrl.Result{}, errors.Join(err, withdrawErr)
+		}
+		return ctrl.Result{}, errors.Join(err, r.reportApplyFailure(ctx, &relay, err))
 	}
 
 	// Deployment status is listener availability, never model or KV readiness.
-	deployment := resources[len(resources)-1].(*appsv1.Deployment)
 	available := deployment.Status.AvailableReplicas
 	desired := ptr.Deref(relay.Spec.Replicas, 2)
 	ready := deployment.Status.ObservedGeneration >= deployment.Generation &&
-		deployment.Status.UpdatedReplicas == desired && available == desired
+		deployment.Status.UpdatedReplicas == desired &&
+		deployment.Status.Replicas == desired && available == desired
 	reason, message := "DeploymentProgressing", "Waiting for Relay listeners"
 	if ready {
 		reason, message = "ListenerAvailable", "All requested Relay listeners are available"
 	}
-	if err := r.setStatus(ctx, &relay, ready, reason, message, serviceName(relay.Name), available); err != nil {
+	if err := r.setStatus(ctx, &relay, ready, reason, message, serviceName(relay.Name), available, true); err != nil {
 		return ctrl.Result{}, err
 	}
 	if !ready {
@@ -155,66 +176,59 @@ func (r *reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	return ctrl.Result{}, nil
 }
 
-func supportsPodDiscovery(dgd *v1beta1.DynamoGraphDeployment, defaultBackend configv1alpha1.DiscoveryBackend) bool {
-	// Grove takes the DGD metadata backend while ordinary component workloads
-	// can use a more specific setting. Publish only if every authored setting
-	// agrees on Kubernetes pod discovery.
+func supportsPodDiscovery(dgd *v1beta1.DynamoGraphDeployment, defaultBackend configv1alpha1.DiscoveryBackend) (bool, error) {
+	// Grove uses the DGD's own backend. Component PodTemplates can override
+	// graph defaults, so inspect the templates after normal DGD propagation.
 	if commoncontroller.GetDiscoveryBackend(defaultBackend, dgd.Annotations) != configv1alpha1.DiscoveryBackendKubernetes {
-		return false
-	}
-	compatible := func(values map[string]string) bool {
-		return commoncontroller.GetDiscoveryBackend(configv1alpha1.DiscoveryBackendKubernetes, values) == configv1alpha1.DiscoveryBackendKubernetes &&
-			commoncontroller.GetKubeDiscoveryMode(values) == configv1alpha1.KubeDiscoveryModePod
-	}
-	compatibleEnv := func(env []corev1.EnvVar) bool {
-		for _, item := range env {
-			switch item.Name {
-			case commonconsts.DynamoDiscoveryBackendEnvVar:
-				if item.ValueFrom != nil || item.Value != string(configv1alpha1.DiscoveryBackendKubernetes) {
-					return false
-				}
-			case "DYN_KUBE_DISCOVERY_MODE":
-				if item.ValueFrom != nil || item.Value != string(configv1alpha1.KubeDiscoveryModePod) {
-					return false
-				}
-			}
-		}
-		return true
-	}
-	if !compatible(dgd.Annotations) || !compatible(dgd.Spec.Annotations) || !compatibleEnv(dgd.Spec.Env) {
-		return false
-	}
-	var alpha v1alpha1.DynamoGraphDeployment
-	if err := alpha.ConvertFrom(dgd); err != nil {
-		return false
+		return false, nil
 	}
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
 		if !dynamo.IsWorkerComponent(string(component.ComponentType)) && component.ComponentType != v1beta1.ComponentTypeFrontend {
 			continue
 		}
-		if alphaComponent := alpha.Spec.Services[component.ComponentName]; alphaComponent != nil {
-			if !compatible(alphaComponent.Annotations) || !compatibleEnv(alphaComponent.Envs) {
-				return false
-			}
+		templates, err := dynamo.EffectiveDGDComponentTemplates(dgd, component)
+		if err != nil {
+			return false, err
 		}
-		for _, template := range dynamo.ComponentPodTemplates(component) {
-			if !compatible(template.Annotations) {
-				return false
+		for _, template := range templates {
+			discovery := dynamo.NewDiscoveryContext(defaultBackend, template.Annotations)
+			if discovery.Backend != configv1alpha1.DiscoveryBackendKubernetes || discovery.Mode != configv1alpha1.KubeDiscoveryModePod {
+				return false, nil
 			}
-			for _, container := range template.Spec.Containers {
-				if !compatibleEnv(container.Env) {
-					return false
+			var runtime *corev1.Container
+			for i := range template.Spec.Containers {
+				if template.Spec.Containers[i].Name == commonconsts.MainContainerName {
+					runtime = &template.Spec.Containers[i]
 				}
 			}
-			for _, container := range template.Spec.InitContainers {
-				if !compatibleEnv(container.Env) {
-					return false
+			for i := range template.Spec.InitContainers {
+				if template.Spec.InitContainers[i].Name == commonconsts.RuntimeContainerName {
+					runtime = &template.Spec.InitContainers[i]
+				}
+			}
+			if runtime == nil {
+				continue
+			}
+			// envFrom can replace these keys at runtime, so it cannot prove pod mode.
+			if len(runtime.EnvFrom) != 0 {
+				return false, nil
+			}
+			for _, item := range runtime.Env {
+				switch item.Name {
+				case commonconsts.DynamoDiscoveryBackendEnvVar:
+					if item.ValueFrom != nil || item.Value != string(configv1alpha1.DiscoveryBackendKubernetes) {
+						return false, nil
+					}
+				case "DYN_KUBE_DISCOVERY_MODE":
+					if item.ValueFrom != nil || item.Value != string(configv1alpha1.KubeDiscoveryModePod) {
+						return false, nil
+					}
 				}
 			}
 		}
 	}
-	return true
+	return true, nil
 }
 
 // withdraw removes the publication endpoint before reporting an unresolved source.
@@ -237,11 +251,12 @@ func (r *reconciler) withdraw(ctx context.Context, relay *v1alpha1.DynamoPoolRel
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("%T %s is not owned by DynamoPoolRelay %s", object, name, relay.Name))
 			continue
 		}
-		if err := r.Delete(ctx, object); err != nil && !apierrors.IsNotFound(err) {
+		uid := object.GetUID()
+		if err := r.Delete(ctx, object, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
 			cleanupErrors = append(cleanupErrors, err)
 		}
 	}
-	if err := r.setStatus(ctx, relay, false, reason, message, "", 0); err != nil {
+	if err := r.setStatus(ctx, relay, false, reason, message, "", 0, len(cleanupErrors) == 0); err != nil {
 		cleanupErrors = append(cleanupErrors, err)
 	}
 	return ctrl.Result{}, errors.Join(cleanupErrors...)
@@ -261,7 +276,7 @@ func (r *reconciler) apply(ctx context.Context, relay *v1alpha1.DynamoPoolRelay,
 		return r.Create(ctx, desired)
 	}
 	if !metav1.IsControlledBy(current, relay) {
-		return fmt.Errorf("%T %s is not owned by DynamoPoolRelay %s", current, key, relay.Name)
+		return fmt.Errorf("%w: %T %s is not owned by DynamoPoolRelay %s", errOwnershipConflict, current, key, relay.Name)
 	}
 	if !current.GetDeletionTimestamp().IsZero() {
 		return fmt.Errorf("%T %s is being deleted", current, key)
@@ -283,79 +298,103 @@ func (r *reconciler) apply(ctx context.Context, relay *v1alpha1.DynamoPoolRelay,
 		object.Spec.PublishNotReadyAddresses = false
 	case *corev1.ConfigMap:
 		object.Data = desired.(*corev1.ConfigMap).Data
-	case *appsv1.Deployment:
-		mergeDeploymentSpec(object, desired.(*appsv1.Deployment))
 	default:
 		return fmt.Errorf("unsupported Relay resource %T", current)
 	}
 	current.SetLabels(desired.GetLabels())
 	if equality.Semantic.DeepEqual(before, current) {
-		if deployment, ok := desired.(*appsv1.Deployment); ok {
-			*deployment = *current.(*appsv1.Deployment)
-		}
 		return nil
 	}
 	if err := r.Update(ctx, current); err != nil {
 		return fmt.Errorf("update %T %s: %w", current, key, err)
 	}
-	if deployment, ok := desired.(*appsv1.Deployment); ok {
-		*deployment = *current.(*appsv1.Deployment)
-	}
 	return nil
 }
 
-// Keep fields defaulted by the API server when updating an existing Deployment.
-// Replacing the whole PodSpec would erase those defaults on each reconcile and
-// create an endless rollout loop.
-func mergeDeploymentSpec(current, desired *appsv1.Deployment) {
-	current.Spec.Replicas = desired.Spec.Replicas
-	current.Spec.Selector = desired.Spec.Selector
-	current.Spec.Strategy = desired.Spec.Strategy
-	current.Spec.Template.Labels = desired.Spec.Template.Labels
-	pod, wanted := &current.Spec.Template.Spec, &desired.Spec.Template.Spec
-	pod.ServiceAccountName = wanted.ServiceAccountName
-	pod.HostNetwork = wanted.HostNetwork
-	pod.ImagePullSecrets = wanted.ImagePullSecrets
-	pod.TerminationGracePeriodSeconds = wanted.TerminationGracePeriodSeconds
-	var sourceVolume corev1.Volume
-	if len(pod.Volumes) == 1 {
-		sourceVolume = *pod.Volumes[0].DeepCopy()
-		if sourceVolume.ConfigMap != nil {
-			if ptr.Deref(sourceVolume.ConfigMap.DefaultMode, int32(0644)) == 0644 {
-				sourceVolume.ConfigMap.DefaultMode = nil
-			}
-			if !ptr.Deref(sourceVolume.ConfigMap.Optional, false) {
-				sourceVolume.ConfigMap.Optional = nil
-			}
+// applyDeployment lets the API server merge PodTemplate fields and preserve defaults.
+// It returns the observed Deployment without changing the desired object.
+func (r *reconciler) applyDeployment(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, desired *appsv1.Deployment) (*appsv1.Deployment, error) {
+	const fieldManager = "dynamo-pool-relay"
+	key := client.ObjectKeyFromObject(desired)
+	var current appsv1.Deployment
+	createdNew := false
+	if err := r.Get(ctx, key, &current); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, err
 		}
+		created := desired.DeepCopy()
+		if err := controllerutil.SetControllerReference(relay, created, r.scheme); err != nil {
+			return nil, err
+		}
+		// Create first so a same-name foreign workload cannot be adopted in a race.
+		if err := r.Create(ctx, created, client.FieldOwner(fieldManager)); err != nil {
+			return nil, fmt.Errorf("create Relay Deployment %s: %w", key, err)
+		}
+		current = *created
+		createdNew = true
+	} else if !metav1.IsControlledBy(&current, relay) {
+		return nil, fmt.Errorf("%w: Deployment %s is not owned by DynamoPoolRelay %s", errOwnershipConflict, key, relay.Name)
 	}
-	if !equality.Semantic.DeepEqual(sourceVolume, wanted.Volumes[0]) {
-		pod.Volumes = wanted.Volumes
+	if !current.DeletionTimestamp.IsZero() {
+		return nil, fmt.Errorf("Deployment %s is being deleted", key)
 	}
-	if len(pod.Containers) != 1 || pod.Containers[0].Name != mainContainer {
-		pod.Containers = wanted.Containers
-		return
+
+	intent := desired.DeepCopy()
+	if err := controllerutil.SetControllerReference(relay, intent, r.scheme); err != nil {
+		return nil, err
 	}
-	container, target := &pod.Containers[0], &wanted.Containers[0]
-	container.Image = target.Image
-	container.Command = target.Command
-	container.Args = target.Args
-	container.Env = target.Env
-	container.Ports = target.Ports
-	container.VolumeMounts = target.VolumeMounts
-	container.StartupProbe = target.StartupProbe
-	container.ReadinessProbe = target.ReadinessProbe
-	container.Resources = target.Resources
+	if !createdNew && equality.Semantic.DeepEqual(current.Spec, intent.Spec) &&
+		equality.Semantic.DeepEqual(current.Labels, intent.Labels) &&
+		equality.Semantic.DeepEqual(current.OwnerReferences, intent.OwnerReferences) {
+		return &current, nil
+	}
+	intent.TypeMeta = metav1.TypeMeta{APIVersion: appsv1.SchemeGroupVersion.String(), Kind: "Deployment"}
+	intent.UID = current.UID
+	fields, err := runtime.DefaultUnstructuredConverter.ToUnstructured(intent)
+	if err != nil {
+		return nil, fmt.Errorf("build Relay Deployment apply configuration: %w", err)
+	}
+	// A false bool is omitted by typed JSON, but the controller owns this safety setting.
+	if err := unstructured.SetNestedField(fields, false, "spec", "template", "spec", "hostNetwork"); err != nil {
+		return nil, err
+	}
+	applyObject := &unstructured.Unstructured{Object: fields}
+	if err := r.Patch(ctx, applyObject, client.Apply, client.FieldOwner(fieldManager), client.ForceOwnership); err != nil {
+		return nil, fmt.Errorf("apply Relay Deployment %s: %w", key, err)
+	}
+	observed := &appsv1.Deployment{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(applyObject.Object, observed); err != nil {
+		return nil, fmt.Errorf("decode Relay Deployment %s after apply: %w", key, err)
+	}
+	return observed, nil
 }
 
-func (r *reconciler) setStatus(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, ready bool, reason, message, endpoint string, available int32) error {
+// An apply error makes the current Relay condition unready without claiming
+// that this generation's required resources were reconciled.
+func (r *reconciler) reportApplyFailure(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, operationErr error) error {
+	before := relay.DeepCopy()
+	relay.Status.Endpoint = ""
+	relay.Status.AvailableReplicas = 0
+	meta.SetStatusCondition(&relay.Status.Conditions, metav1.Condition{
+		Type: "Ready", Status: metav1.ConditionFalse, Reason: "ReconcileFailed",
+		Message: operationErr.Error(), ObservedGeneration: relay.Generation,
+	})
+	if equality.Semantic.DeepEqual(before.Status, relay.Status) {
+		return nil
+	}
+	return r.Status().Update(ctx, relay)
+}
+
+func (r *reconciler) setStatus(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, ready bool, reason, message, endpoint string, available int32, advanceGeneration bool) error {
 	before := relay.DeepCopy()
 	condition := metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: reason, Message: message, ObservedGeneration: relay.Generation}
 	if ready {
 		condition.Status = metav1.ConditionTrue
 	}
 	meta.SetStatusCondition(&relay.Status.Conditions, condition)
-	relay.Status.ObservedGeneration = relay.Generation
+	if advanceGeneration {
+		relay.Status.ObservedGeneration = relay.Generation
+	}
 	relay.Status.AvailableReplicas = available
 	relay.Status.Endpoint = ""
 	if endpoint != "" {
@@ -409,23 +448,36 @@ func sourceJSON(namespaces []string, connectionRevision string) string {
 
 func serviceName(dgdName string) string { return dgdName + "-pool-relay" }
 
-func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Object, error) {
+func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Object, *appsv1.Deployment, error) {
 	name := serviceName(relay.Name)
 	if problems := validation.IsDNS1035Label(name); len(problems) != 0 {
-		return nil, fmt.Errorf("DGD name %q cannot produce a valid <dgd>-pool-relay Service name %q: %s", relay.Name, name, strings.Join(problems, "; "))
+		return nil, nil, fmt.Errorf("DGD name %q cannot produce a valid <dgd>-pool-relay Service name %q: %s", relay.Name, name, strings.Join(problems, "; "))
 	}
 	clusterID := relay.Spec.ClusterID
 	if clusterID == "" || strings.TrimFunc(clusterID, func(r rune) bool {
 		return unicode.IsSpace(r) || r >= '\x1c' && r <= '\x1f'
 	}) != clusterID {
-		return nil, fmt.Errorf("clusterId must be non-empty and have no surrounding whitespace")
+		return nil, nil, fmt.Errorf("clusterId must be non-empty and have no surrounding whitespace")
 	}
-	if relay.Spec.Image == "" {
-		return nil, fmt.Errorf("image is required")
+	if relay.Spec.PodTemplate == nil {
+		return nil, nil, fmt.Errorf("podTemplate with a main container is required")
+	}
+	podTemplate := relay.Spec.PodTemplate.DeepCopy()
+	mainIndex := -1
+	for i := range podTemplate.Spec.Containers {
+		if podTemplate.Spec.Containers[i].Name == mainContainer {
+			if mainIndex != -1 {
+				return nil, nil, fmt.Errorf("podTemplate has more than one main container")
+			}
+			mainIndex = i
+		}
+	}
+	if mainIndex == -1 || strings.TrimSpace(podTemplate.Spec.Containers[mainIndex].Image) == "" {
+		return nil, nil, fmt.Errorf("podTemplate requires a main container with an image")
 	}
 	replicas := ptr.Deref(relay.Spec.Replicas, 2)
 	if replicas < 1 {
-		return nil, fmt.Errorf("replicas must be at least one")
+		return nil, nil, fmt.Errorf("replicas must be at least one")
 	}
 	labels := map[string]string{"app.kubernetes.io/name": "pool-relay", "nvidia.com/relay-uid": string(relay.UID)}
 	metadata := metav1.ObjectMeta{Name: name, Namespace: relay.Namespace, Labels: labels}
@@ -439,7 +491,7 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 		{Name: "DYN_DISCOVERY_BACKEND", Value: "kubernetes"},
 		{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "pod"},
 		{Name: "DYN_SYSTEM_PORT", Value: fmt.Sprint(systemPort)},
-		{Name: "DYN_TCP_RESPONSE_STREAM_PORT", Value: "5562"},
+		{Name: "DYN_TCP_RESPONSE_STREAM_PORT", Value: fmt.Sprint(recoveryPort)},
 		{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.name"}}},
 		{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.namespace"}}},
 		{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.uid"}}},
@@ -455,9 +507,27 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 	} {
 		reserved[name] = true
 	}
-	for _, item := range relay.Spec.Env {
+	main := &podTemplate.Spec.Containers[mainIndex]
+	if len(main.Command) != 0 || len(main.Args) != 0 || main.StartupProbe != nil || main.ReadinessProbe != nil {
+		return nil, nil, fmt.Errorf("podTemplate main command, args, startup probe, and readiness probe are managed by the Relay controller")
+	}
+	if len(main.EnvFrom) != 0 {
+		return nil, nil, fmt.Errorf("podTemplate main envFrom can override controller-managed Relay settings; use env entries instead")
+	}
+	for _, port := range main.Ports {
+		if port.Name == "grpc" || port.Name == "system" || port.Name == "recovery" ||
+			port.ContainerPort == relayPort || port.ContainerPort == systemPort || port.ContainerPort == recoveryPort {
+			return nil, nil, fmt.Errorf("podTemplate main port %q:%d conflicts with a Relay listener", port.Name, port.ContainerPort)
+		}
+	}
+	for _, mount := range main.VolumeMounts {
+		if mount.Name == "relay-sources" || mount.MountPath == "/var/run/dynamo-relay/sources" {
+			return nil, nil, fmt.Errorf("podTemplate main mount %q at %q conflicts with the Relay source file", mount.Name, mount.MountPath)
+		}
+	}
+	for _, item := range main.Env {
 		if reserved[item.Name] {
-			return nil, fmt.Errorf("env %s is reserved for the Relay controller", item.Name)
+			return nil, nil, fmt.Errorf("env %s is reserved for the Relay controller", item.Name)
 		}
 		copy := item.DeepCopy()
 		if copy.ValueFrom != nil && copy.ValueFrom.FieldRef != nil && copy.ValueFrom.FieldRef.APIVersion == "" {
@@ -469,9 +539,9 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 		ClusterID string
 		Image     string
 		Env       []corev1.EnvVar
-	}{relay.Spec.ClusterID, relay.Spec.Image, env})
+	}{relay.Spec.ClusterID, main.Image, env})
 	if err != nil {
-		return nil, fmt.Errorf("encode Relay connection settings: %w", err)
+		return nil, nil, fmt.Errorf("encode Relay connection settings: %w", err)
 	}
 	connectionRevision := fmt.Sprintf("%x", sha256.Sum256(connection))
 	env = append(env, corev1.EnvVar{Name: "DYN_RELAY_CONNECTION_REVISION", Value: connectionRevision})
@@ -487,39 +557,60 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 	service := &corev1.Service{ObjectMeta: *metadata.DeepCopy(), Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Selector: labels, Ports: []corev1.ServicePort{{Name: "grpc", Port: relayPort, TargetPort: intstr.FromString("grpc"), Protocol: corev1.ProtocolTCP}}}}
 	service.Labels["nvidia.com/dynamo-discovery-backend"] = "kubernetes"
 	service.Labels["nvidia.com/dynamo-discovery-enabled"] = "true"
-	podLabels := metadata.DeepCopy().Labels
+	podLabels := maps.Clone(podTemplate.Labels)
+	if podLabels == nil {
+		podLabels = map[string]string{}
+	}
+	for key, value := range labels {
+		if supplied, exists := podLabels[key]; exists && supplied != value {
+			return nil, nil, fmt.Errorf("podTemplate label %s is reserved for the Relay controller", key)
+		}
+		podLabels[key] = value
+	}
 	podLabels["nvidia.com/dynamo-discovery-backend"] = "kubernetes"
 	podLabels["nvidia.com/dynamo-discovery-enabled"] = "true"
 	probeHandler := corev1.ProbeHandler{GRPC: &corev1.GRPCAction{Port: relayPort, Service: new("dynamo.kvrelay.v1.KvEventRelay")}}
-	container := corev1.Container{
-		Name: mainContainer, Image: relay.Spec.Image,
-		Command:      []string{"python3", "-m", "dynamo.pool_relay"},
-		Args:         []string{"--cluster-id", relay.Spec.ClusterID, "--sources-file", sourcesFilePath, "--bind", "0.0.0.0:5561"},
-		Env:          env,
-		Ports:        []corev1.ContainerPort{{Name: "grpc", ContainerPort: relayPort, Protocol: corev1.ProtocolTCP}, {Name: "system", ContainerPort: systemPort, Protocol: corev1.ProtocolTCP}, {Name: "recovery", ContainerPort: 5562, Protocol: corev1.ProtocolTCP}},
-		VolumeMounts: []corev1.VolumeMount{{Name: "relay-sources", MountPath: "/var/run/dynamo-relay/sources", ReadOnly: true}},
-		Resources: corev1.ResourceRequirements{
+	container := *main.DeepCopy()
+	container.Command = []string{"python3", "-m", "dynamo.pool_relay"}
+	container.Args = []string{"--cluster-id", relay.Spec.ClusterID, "--sources-file", sourcesFilePath, "--bind", fmt.Sprintf("0.0.0.0:%d", relayPort)}
+	container.Env = env
+	container.Ports = append(container.Ports, corev1.ContainerPort{Name: "grpc", ContainerPort: relayPort, Protocol: corev1.ProtocolTCP}, corev1.ContainerPort{Name: "system", ContainerPort: systemPort, Protocol: corev1.ProtocolTCP}, corev1.ContainerPort{Name: "recovery", ContainerPort: recoveryPort, Protocol: corev1.ProtocolTCP})
+	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{Name: "relay-sources", MountPath: "/var/run/dynamo-relay/sources", ReadOnly: true})
+	if len(container.Resources.Requests) == 0 && len(container.Resources.Limits) == 0 {
+		container.Resources = corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("1Gi")},
 			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
-		},
-		StartupProbe:   &corev1.Probe{ProbeHandler: probeHandler, PeriodSeconds: 5, TimeoutSeconds: 1, SuccessThreshold: 1, FailureThreshold: 60},
-		ReadinessProbe: &corev1.Probe{ProbeHandler: probeHandler, PeriodSeconds: 10, TimeoutSeconds: 1, SuccessThreshold: 1, FailureThreshold: 3},
+		}
 	}
+	container.StartupProbe = &corev1.Probe{ProbeHandler: probeHandler, PeriodSeconds: 5, TimeoutSeconds: 1, SuccessThreshold: 1, FailureThreshold: 60}
+	container.ReadinessProbe = &corev1.Probe{ProbeHandler: probeHandler, PeriodSeconds: 10, TimeoutSeconds: 1, SuccessThreshold: 1, FailureThreshold: 3}
 	sourceReference := corev1.LocalObjectReference{Name: name}
-	sourceConfigMap := &corev1.ConfigMapVolumeSource{LocalObjectReference: sourceReference}
+	sourceConfigMap := &corev1.ConfigMapVolumeSource{
+		LocalObjectReference: sourceReference,
+		Items:                []corev1.KeyToPath{{Key: "sources.json", Path: "sources.json"}},
+	}
 	sourceVolume := corev1.VolumeSource{ConfigMap: sourceConfigMap}
 	sourcesVolume := corev1.Volume{Name: "relay-sources", VolumeSource: sourceVolume}
-	podMeta := metav1.ObjectMeta{Labels: podLabels}
+	if podTemplate.Spec.ServiceAccountName != "" || podTemplate.Spec.HostNetwork {
+		return nil, nil, fmt.Errorf("podTemplate cannot set the Relay service account or host networking")
+	}
+	for _, volume := range podTemplate.Spec.Volumes {
+		if volume.Name == sourcesVolume.Name {
+			return nil, nil, fmt.Errorf("podTemplate volume %s is reserved for the Relay controller", volume.Name)
+		}
+	}
+	podTemplate.Spec.Containers[mainIndex] = container
+	podTemplate.Spec.Volumes = append(podTemplate.Spec.Volumes, sourcesVolume)
+	podTemplate.Spec.ServiceAccountName = name
+	if podTemplate.Spec.TerminationGracePeriodSeconds == nil {
+		podTemplate.Spec.TerminationGracePeriodSeconds = new(int64(60))
+	}
+	podTemplate.Spec.HostNetwork = false
+	podTemplate.Labels = podLabels
 	deployment := &appsv1.Deployment{ObjectMeta: *metadata.DeepCopy(), Spec: appsv1.DeploymentSpec{
 		Replicas: new(replicas), Selector: &metav1.LabelSelector{MatchLabels: labels},
 		Strategy: appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType, RollingUpdate: &appsv1.RollingUpdateDeployment{MaxUnavailable: new(intstr.FromInt32(0)), MaxSurge: new(intstr.FromInt32(1))}},
-		Template: corev1.PodTemplateSpec{ObjectMeta: podMeta, Spec: corev1.PodSpec{
-			ServiceAccountName:            name,
-			ImagePullSecrets:              append([]corev1.LocalObjectReference(nil), relay.Spec.ImagePullSecrets...),
-			TerminationGracePeriodSeconds: new(int64(60)),
-			Containers:                    []corev1.Container{container},
-			Volumes:                       []corev1.Volume{sourcesVolume},
-		}},
+		Template: *podTemplate,
 	}}
-	return []client.Object{serviceAccount, role, binding, configMap, service, deployment}, nil
+	return []client.Object{serviceAccount, role, binding, configMap, service}, deployment, nil
 }
