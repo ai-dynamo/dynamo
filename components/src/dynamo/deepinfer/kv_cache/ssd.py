@@ -18,7 +18,6 @@ rows and events it is handed (numpy rows for tests).
 
 from __future__ import annotations
 
-import errno
 import glob
 import importlib
 import logging
@@ -94,9 +93,9 @@ class SSDPool:
         self.capacity = count
         self._free = list(range(count - 1, -1, -1))
         self._closed = count == 0
+        self._fd = -1
         if not count:
-            self._fd = -1
-            self._executor.shutdown()
+            self._turn_off()
             return
         self._fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
         try:
@@ -106,14 +105,18 @@ class SSDPool:
             os.unlink(path)
             raise
         if not reserved:
-            # A sparse file on a full disk would fail every write at runtime.
+            self._turn_off()
+
+    def _turn_off(self) -> None:
+        """No file and no slots: ``capacity`` is 0 and nothing can be stored."""
+        if self._fd >= 0:
             os.close(self._fd)
-            os.unlink(path)
-            self._fd = -1
-            self.capacity = 0
-            self._free = []
-            self._closed = True
-            self._executor.shutdown()
+            os.unlink(self.path)
+        self._fd = -1
+        self.capacity = 0
+        self._free = []
+        self._closed = True
+        self._executor.shutdown()
 
     def _size(
         self,
@@ -173,21 +176,15 @@ class SSDPool:
         return count
 
     def _preallocate(self, size: int) -> bool:
-        """Reserve the file's blocks; False when the disk has no room for them
-        (the tier is then off). A filesystem without ``posix_fallocate`` gets a
-        sparse file of the right length."""
+        """Reserve the file's blocks; False when that fails (the tier is then
+        off): a sparse file on a full disk would fail every write at runtime."""
         if size == 0:
             return True
         try:
             os.posix_fallocate(self._fd, 0, size)
         except (AttributeError, OSError) as e:
-            if getattr(e, "errno", None) in (errno.ENOSPC, errno.EDQUOT):
-                logger.warning(
-                    "No room to preallocate the SSD file (%s): SSD tier off", e
-                )
-                return False
-            logger.warning("posix_fallocate unavailable (%s): sparse SSD file", e)
-            os.ftruncate(self._fd, size)
+            logger.warning("Could not preallocate the SSD file (%s): SSD tier off", e)
+            return False
         return True
 
     @property

@@ -260,11 +260,12 @@ def test_close_waits_deletes_and_is_idempotent(tmp_path):
     assert isinstance(late.error, RuntimeError)
 
 
-def test_no_room_to_preallocate_turns_the_tier_off(tmp_path, monkeypatch):
-    def full(fd, offset, length):
-        raise OSError(errno.ENOSPC, "No space left on device")
+@pytest.mark.parametrize("code", [errno.ENOSPC, errno.EOPNOTSUPP])
+def test_failing_to_preallocate_turns_the_tier_off(tmp_path, monkeypatch, code):
+    def refuse(fd, offset, length):
+        raise OSError(code, os.strerror(code))
 
-    monkeypatch.setattr(os, "posix_fallocate", full)
+    monkeypatch.setattr(os, "posix_fallocate", refuse)
     path = tmp_path / "rank0.kv"
     pool = SSDPool(str(path), ROW_BYTES, 8 * STRIDE, reserve_fraction=0)
     assert pool.capacity == 0 and pool.alloc() is None
