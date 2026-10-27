@@ -21,30 +21,30 @@ runs:
         echo "::group::Stop vCluster port-forward watchdog"
         set -euo pipefail
 
-        for pid_file in \
-          "${{ github.workspace }}/.vcluster-port-forward-watchdog.pid" \
-          "${{ github.workspace }}/.vcluster-port-forward.pid"; do
-          if [ ! -f "${pid_file}" ]; then
-            continue
-          fi
+        WATCHDOG_SCRIPT="${{ github.workspace }}/.github/actions/connect-vcluster/watchdog.sh"
+        PF_PID_FILE="${{ github.workspace }}/.vcluster-port-forward.pid"
+        PF_LOG="${{ github.workspace }}/.vcluster-port-forward.log"
+        WATCHDOG_LOG="${{ github.workspace }}/.vcluster-port-forward-watchdog.log"
+        WATCHDOG_PID_FILE="${{ github.workspace }}/.vcluster-port-forward-watchdog.pid"
+        WATCHDOG_LOCK_FILE="${{ github.workspace }}/.vcluster-port-forward-watchdog.lock"
 
-          pid="$(cat "${pid_file}")"
-          if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
-            echo "Stopping process ${pid} from ${pid_file}"
-            kill "${pid}" 2>/dev/null || true
-            for _ in $(seq 1 10); do
-              if ! kill -0 "${pid}" 2>/dev/null; then
-                break
-              fi
-              sleep 1
-            done
-            if kill -0 "${pid}" 2>/dev/null; then
-              echo "Process ${pid} did not exit after SIGTERM; sending SIGKILL"
-              kill -9 "${pid}" 2>/dev/null || true
-            fi
-          fi
-          rm -f "${pid_file}"
-        done
+        env \
+          PF_PID_FILE="${PF_PID_FILE}" \
+          PF_LOG="${PF_LOG}" \
+          WATCHDOG_LOG="${WATCHDOG_LOG}" \
+          WATCHDOG_PID_FILE="${WATCHDOG_PID_FILE}" \
+          WATCHDOG_LOCK_FILE="${WATCHDOG_LOCK_FILE}" \
+          NAMESPACE="${{ inputs.vcluster_namespace }}" \
+          VCLUSTER_NAME="${{ inputs.vcluster_name }}" \
+          "${WATCHDOG_SCRIPT}" stop-watchdog
+
+        env \
+          PF_PID_FILE="${PF_PID_FILE}" \
+          PF_LOG="${PF_LOG}" \
+          WATCHDOG_LOG="${WATCHDOG_LOG}" \
+          NAMESPACE="${{ inputs.vcluster_namespace }}" \
+          VCLUSTER_NAME="${{ inputs.vcluster_name }}" \
+          "${WATCHDOG_SCRIPT}" stop-port-forward
 
         echo "::endgroup::"
 

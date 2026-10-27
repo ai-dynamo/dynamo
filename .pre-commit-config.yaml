@@ -245,6 +245,12 @@ repos:
       language: python
       pass_filenames: false
       files: ^(\.github/actions/compliance-extract/|\.pre-commit-config\.yaml$)
+    - id: vcluster-watchdog-selftest
+      name: Test vCluster port-forward watchdog
+      entry: python3 .github/actions/connect-vcluster/test_watchdog.py
+      language: system
+      pass_filenames: false
+      files: ^(\.github/actions/connect-vcluster/|\.github/actions/teardown-dynamo-operator/action\.yml$|\.pre-commit-config\.yaml$)
     - id: check-action-pins-selftest
       name: Self-test the action-pin matcher
       entry: python3 scripts/check_action_pins.py --test
