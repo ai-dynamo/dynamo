@@ -187,6 +187,33 @@ def test_runtime_cache_requires_absolute_path(
         get_lora_manager(configure_runtime=True)
 
 
+@pytest.mark.asyncio
+async def test_unconfigured_runtime_resolver_does_not_use_explicit_downloader(
+    monkeypatch, tmp_path
+):
+    def unexpected_download(*_args):
+        pytest.fail("runtime resolution must not fall back to explicit downloading")
+
+    monkeypatch.setattr(
+        manager_module,
+        "LoRADownloader",
+        lambda _path: types.SimpleNamespace(download_if_needed=unexpected_download),
+    )
+    manager = manager_module.LoRAManager(tmp_path)
+    with pytest.raises(RuntimeLoRAConfigurationError, match="not configured"):
+        await manager.resolve_runtime_lora(
+            source_uri="wandb-artifact:///test/adapter:v1",
+            context=ResolveContext(
+                adapter_key="dyn-lora-0123456789abcdef0123456789abcdef",
+                base_model_name="base",
+                cache_root=tmp_path,
+                deadline_monotonic=asyncio.get_running_loop().time() + 1,
+                max_download_bytes=1024,
+                request_id="request-id",
+            ),
+        )
+
+
 async def _resolve_snapshot(monkeypatch, cache_root, snapshot, context_root=None):
     class FixedResolver:
         protocol_version = 2
