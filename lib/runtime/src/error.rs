@@ -393,6 +393,7 @@ pub struct ErrorReason(String);
 
 impl ErrorReason {
     pub const MAX_BYTES: usize = 128;
+    pub const UNPROCESSABLE_ENTITY: &str = "request.unprocessable_entity";
 
     pub fn new(value: impl Into<String>) -> Result<Self, InvalidErrorReason> {
         let value = value.into();
@@ -418,7 +419,7 @@ impl ErrorReason {
     }
 
     pub fn unprocessable_entity() -> Self {
-        Self::from_static("request.unprocessable_entity")
+        Self::from_static(Self::UNPROCESSABLE_ENTITY)
     }
 
     fn catalog_class(value: &str) -> Option<ErrorClass> {
@@ -429,7 +430,7 @@ impl ErrorReason {
             "request.invalid_argument"
             | "backend.invalid_argument"
             | "request.invalid"
-            | "request.unprocessable_entity" => Some(ErrorClass::InvalidRequest),
+            | Self::UNPROCESSABLE_ENTITY => Some(ErrorClass::InvalidRequest),
             "transport.cannot_connect"
             | "transport.disconnected"
             | "backend.unavailable"
@@ -609,6 +610,15 @@ where
         .and_then(|rank| u32::try_from(rank).ok()))
 }
 
+fn deserialize_http_status<'de, D>(deserializer: D) -> Result<Option<u16>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<serde_json::Value>::deserialize(deserializer)?
+        .and_then(|status| status.as_u64())
+        .and_then(|status| u16::try_from(status).ok()))
+}
+
 fn bounded_message(mut message: String) -> String {
     if message.len() > Diagnostic::MAX_BYTES {
         let mut end = Diagnostic::MAX_BYTES - Diagnostic::TRUNCATION_SUFFIX.len();
@@ -724,6 +734,10 @@ impl Serialize for DynamoError {
             ErrorClass::WorkerRankOverloaded(rank) => Some(rank),
             _ => None,
         };
+        // N-2 readers need the established reason until their catalog includes this refinement.
+        let http_status = (self.class() == ErrorClass::InvalidRequest
+            && self.reason().as_str() == ErrorReason::UNPROCESSABLE_ENTITY)
+            .then_some(422_u16);
         let caused_by = self
             .diagnostic
             .as_ref()
@@ -734,11 +748,17 @@ impl Serialize for DynamoError {
             4 + usize::from(self.diagnostic.is_some())
                 + usize::from(public.is_some())
                 + usize::from(dp_rank.is_some())
+                + usize::from(http_status.is_some())
                 + usize::from(caused_by.is_some()),
         )?;
         state.serialize_field("error_type", &self.legacy_wire_error_type())?;
         state.serialize_field("class", &self.class())?;
-        state.serialize_field("reason", self.reason())?;
+        let reason = if http_status.is_some() {
+            "request.invalid"
+        } else {
+            self.reason().as_str()
+        };
+        state.serialize_field("reason", reason)?;
         state.serialize_field("message", &self.message())?;
         if let Some(diagnostic) = &self.diagnostic {
             state.serialize_field("diagnostic", diagnostic)?;
@@ -748,6 +768,9 @@ impl Serialize for DynamoError {
         }
         if let Some(dp_rank) = dp_rank {
             state.serialize_field("dp_rank", &dp_rank)?;
+        }
+        if let Some(http_status) = http_status {
+            state.serialize_field("http_status", &http_status)?;
         }
         if let Some(caused_by) = caused_by {
             state.serialize_field("caused_by", caused_by)?;
@@ -777,6 +800,8 @@ impl<'de> Deserialize<'de> for DynamoError {
             public: Option<PublicDetails>,
             #[serde(default, deserialize_with = "deserialize_dp_rank")]
             dp_rank: Option<u32>,
+            #[serde(default, deserialize_with = "deserialize_http_status")]
+            http_status: Option<u16>,
             #[serde(default)]
             caused_by: Option<Box<DynamoError>>,
         }
@@ -825,6 +850,14 @@ impl<'de> Deserialize<'de> for DynamoError {
                 ErrorReason::from_static("runtime.invalid_error"),
                 None,
             ),
+        };
+        let reason = if class.normalized() == ErrorClass::InvalidRequest
+            && reason.as_str() == "request.invalid"
+            && representation.http_status == Some(422)
+        {
+            ErrorReason::unprocessable_entity()
+        } else {
+            reason
         };
 
         let diagnostic = match (
@@ -1443,6 +1476,71 @@ mod tests {
             wire.as_object_mut().unwrap().remove("dp_rank");
             assert_eq!(wire, whole, "{rank}");
         }
+    }
+
+    #[test]
+    fn unprocessable_request_uses_a_legacy_reason_with_additive_status() {
+        let plain = serde_json::to_value(
+            DynamoError::builder()
+                .class(ErrorClass::InvalidRequest)
+                .build(),
+        )
+        .unwrap();
+        let mut wire = serde_json::to_value(
+            DynamoError::builder()
+                .class(ErrorClass::InvalidRequest)
+                .reason(ErrorReason::unprocessable_entity())
+                .build(),
+        )
+        .unwrap();
+        assert_eq!(wire["reason"], "request.invalid");
+        assert_eq!(wire["http_status"], 422);
+        let decoded: DynamoError = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded.class(), ErrorClass::InvalidRequest);
+        assert_eq!(decoded.reason(), &ErrorReason::unprocessable_entity());
+        wire.as_object_mut().unwrap().remove("http_status");
+        assert_eq!(wire, plain);
+    }
+
+    #[test]
+    fn malformed_or_misplaced_http_status_does_not_change_error_identity() {
+        let plain = serde_json::to_value(
+            DynamoError::builder()
+                .class(ErrorClass::InvalidRequest)
+                .build(),
+        )
+        .unwrap();
+        for marker in [
+            serde_json::json!(null),
+            serde_json::json!("422"),
+            serde_json::json!(422.0),
+            serde_json::json!(-1),
+            serde_json::json!(65536),
+            serde_json::json!({"code": 422}),
+            serde_json::json!(400),
+        ] {
+            let mut wire = plain.clone();
+            wire["http_status"] = marker;
+            let decoded: DynamoError = serde_json::from_value(wire).unwrap();
+            assert_eq!(decoded.reason().as_str(), "request.invalid");
+        }
+        for class in [
+            ErrorClass::NotFound,
+            ErrorClass::InvalidArgument,
+            ErrorClass::Internal,
+        ] {
+            let error = DynamoError::builder().class(class).build();
+            let mut wire = serde_json::to_value(&error).unwrap();
+            wire["http_status"] = serde_json::json!(422);
+            let decoded: DynamoError = serde_json::from_value(wire).unwrap();
+            assert_eq!(decoded.reason(), error.reason());
+        }
+        let invalid: DynamoError = serde_json::from_value(serde_json::json!({
+            "class": "Internal", "reason": "request.invalid", "http_status": 422,
+        }))
+        .unwrap();
+        assert_eq!(invalid.class(), ErrorClass::Internal);
+        assert_eq!(invalid.reason().as_str(), "runtime.invalid_error");
     }
 
     /// An older writer's overload has no rank, and a malformed rank, one on an

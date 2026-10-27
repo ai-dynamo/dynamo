@@ -48,7 +48,7 @@ pub(crate) enum ClientErrorAction {
     },
 }
 
-/// Total class-to-HTTP policy. Backends never select these status codes.
+/// Default frontend class-to-HTTP policy, refined by validated reasons in `http_action_for_error`.
 pub(crate) fn http_action_for_class(class: dynamo_runtime::error::ErrorClass) -> ClientErrorAction {
     use dynamo_runtime::error::ErrorClass;
 
@@ -96,7 +96,7 @@ pub(crate) fn http_action_for_class(class: dynamo_runtime::error::ErrorClass) ->
 
 pub(crate) fn http_action_for_error(error: &DynamoError) -> ClientErrorAction {
     if error.class() == dynamo_runtime::error::ErrorClass::InvalidRequest
-        && error.reason().as_str() == "request.unprocessable_entity"
+        && error.reason().as_str() == dynamo_runtime::error::ErrorReason::UNPROCESSABLE_ENTITY
     {
         return ClientErrorAction::Respond {
             status: StatusCode::UNPROCESSABLE_ENTITY,

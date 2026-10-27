@@ -465,6 +465,10 @@ mod tests {
             assert_eq!(error.public_message(), None);
 
             let wire = serde_json::to_value(&error).expect("serialize DynamoError");
+            if code == 422 {
+                assert_eq!(wire["reason"], "request.invalid");
+                assert_eq!(wire["http_status"], 422);
+            }
             let semantic: DynamoError =
                 serde_json::from_value(wire.clone()).expect("semantic reader");
             assert_eq!(semantic.class(), expected_class);
