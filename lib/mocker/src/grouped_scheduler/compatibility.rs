@@ -99,6 +99,10 @@ impl CompatibilityState {
     }
 
     pub(super) fn mark_destination(&self, handoff_id: DynamoHandoffId, request_id: Uuid) {
+        // Transferred prompt KV does not measure the prefill worker's cache hits.
+        if let Some(request) = self.request_accounting.lock().get_mut(&request_id) {
+            request.cache_usage_reported = true;
+        }
         self.handoffs
             .lock()
             .mark_destination(handoff_id, request_id);
@@ -325,6 +329,28 @@ mod tests {
 
     fn handoff(value: u128) -> DynamoHandoffId {
         DynamoHandoffId::from(Uuid::from_u128(value))
+    }
+
+    #[test]
+    fn destination_admission_does_not_invent_cache_usage() {
+        for explicit in [None, Some(0), Some(3)] {
+            let state = CompatibilityState::new(MockerConfig::default());
+            let request = state.native_request(DirectRequest::default());
+            state.mark_destination(handoff(9), request.request_id);
+            state.record_admissions(&[Admission {
+                request_id: request.request_id,
+                reused_input_tokens: 0,
+                cache_tier_attribution: None,
+            }]);
+            let output = state.output_signal(Output {
+                request_id: request.request_id,
+                token_id: Some(7),
+                completed: true,
+                rejected: false,
+                cached_tokens: explicit,
+            });
+            assert_eq!(output.cached_tokens, explicit);
+        }
     }
 
     #[test]

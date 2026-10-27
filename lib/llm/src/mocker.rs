@@ -1399,10 +1399,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let mut completion_tokens = 0_usize;
+        let mut cached_tokens = None;
         let stream = UnboundedReceiverStream::new(stream_rx).map(move |mut output| {
             if let Some(metadata) = native_sglang.as_ref() {
                 completion_tokens = completion_tokens.saturating_add(output.token_ids.len());
-                sglang::adapt(metadata, &mut output, completion_tokens);
+                sglang::adapt(metadata, &mut output, completion_tokens, &mut cached_tokens);
             }
             Annotated::from_data(output)
         });
@@ -1759,6 +1760,59 @@ mod tests {
             response["meta_info"]["finish_reason"],
             serde_json::json!({"type": "length"})
         );
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_sglang_stream_retains_cache_usage_on_intermediate_chunks() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "backend": "sglang", "block_size": 4, "num_gpu_blocks": 64,
+                "max_num_batched_tokens": 64, "speedup_ratio": 1000.0
+            }
+        }))
+        .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+        let mut request = decode_request(3, 3);
+        request.extra_args = Some(serde_json::json!({"sglang_tito": {"rid": "stream"}}));
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        let mut chunks = 0;
+        while let Some(output) = stream.next().await {
+            let output = output.data.unwrap();
+            let meta = &output.engine_data.as_ref().unwrap()["sglang_response"]["meta_info"];
+            assert_eq!(meta["cached_tokens"], 0, "chunk {chunks}");
+            chunks += 1;
+        }
+        assert_eq!(chunks, 3);
+    }
+
+    #[tokio::test]
+    async fn native_sglang_candidate_budget_uses_short_replay_over_raw_limit() {
+        let file = write_replay_trace(&[serde_json::json!({
+            "request_id": "short-plan", "output_length": 1, "output_token_ids": [42]
+        })]);
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "backend": "sglang", "block_size": 4, "num_gpu_blocks": 128,
+                "max_num_batched_tokens": 64, "speedup_ratio": 1000.0
+            },
+            "dynamo": {"response_replay_trace_path": file.path()}
+        }))
+        .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+        let mut request = decode_request(3, 300);
+        request.extra_args = Some(serde_json::json!({"sglang_tito": {
+            "rid": "short-plan", "return_logprob": true,
+            "token_ids_logprob": (0..255).collect::<Vec<u32>>()
+        }}));
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        let output = stream.next().await.unwrap().data.unwrap();
+        assert_eq!(output.token_ids, vec![42]);
+        assert_eq!(output.finish_reason, Some(FinishReason::Length));
         assert!(stream.next().await.is_none());
     }
 

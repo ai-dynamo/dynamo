@@ -162,12 +162,12 @@ impl ResponseMetadata {
                     "output_token_ids_logprobs".to_string(),
                     Value::Array(
                         (0..scored_positions)
-                            .map(|_| {
+                            .map(|position| {
+                                let sampled = output_ids.get(position).copied();
                                 Value::Array(
                                     candidate_token_ids
                                         .iter()
-                                        .copied()
-                                        .map(candidate_logprob_entry)
+                                        .map(|&token_id| candidate_logprob_entry(token_id, sampled))
                                         .collect(),
                                 )
                             })
@@ -222,10 +222,10 @@ fn logprob_entry(token_id: u32) -> Value {
     json!([selected_logprob(token_id), token_id, null])
 }
 
-fn candidate_logprob_entry(token_id: u32) -> Value {
-    // A fixed offset keeps up to 255 candidate scores below unit mass without
-    // changing their relative probabilities or depending on the requested set.
-    json!([selected_logprob(token_id) - 10.0, token_id, null])
+fn candidate_logprob_entry(token_id: u32, sampled: Option<u32>) -> Value {
+    // Leave room for up to 255 candidates while preserving the sampled token's logprob.
+    let offset = if sampled == Some(token_id) { 0.0 } else { 10.0 };
+    json!([selected_logprob(token_id) - offset, token_id, null])
 }
 
 fn top_logprob_entries(token_id: u32, count: usize) -> Value {
@@ -336,6 +336,28 @@ mod tests {
             response["meta_info"]["output_token_ids_logprobs"],
             json!([[[-10.8, 17, null], [-10.5, 4, null]]])
         );
+    }
+
+    #[test]
+    fn sampled_candidate_matches_output_logprob_at_each_position() {
+        let options = LogprobOptions::new(true, 0, -1).unwrap();
+        let metadata =
+            ResponseMetadata::new("sampled", &[], options).with_candidate_token_ids(vec![42, 17]);
+        let response = metadata.response(&[42, 17], 2, Some(json!({"type": "length"})));
+        let meta = &response["meta_info"];
+        for position in 0..2 {
+            assert_eq!(
+                meta["output_token_ids_logprobs"][position][position],
+                meta["output_token_logprobs"][position]
+            );
+            let mass: f64 = meta["output_token_ids_logprobs"][position]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry[0].as_f64().unwrap().exp())
+                .sum();
+            assert!(mass <= 1.0);
+        }
     }
 
     #[test]

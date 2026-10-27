@@ -41,7 +41,10 @@ pub(super) fn response_metadata(
     };
     let controls = NativeControls::deserialize(payload)
         .map_err(|error| invalid_argument(format!("invalid extra_args.{PAYLOAD_KEY}: {error}")))?;
-    let candidate_token_ids = controls.token_ids_logprob.filter(|ids| !ids.is_empty());
+    let return_logprob = controls.return_logprob.unwrap_or(false);
+    let candidate_token_ids = controls
+        .token_ids_logprob
+        .filter(|ids| return_logprob && !ids.is_empty());
     if let Some(ids) = candidate_token_ids.as_ref() {
         if ids.len() > MAX_CANDIDATE_TOKEN_IDS {
             return Err(invalid_argument(format!(
@@ -53,7 +56,7 @@ pub(super) fn response_metadata(
         })?;
     }
     let logprobs = LogprobOptions::new(
-        controls.return_logprob.unwrap_or(false),
+        return_logprob,
         controls.top_logprobs_num.unwrap_or(0),
         controls.logprob_start_len.unwrap_or(-1),
     )
@@ -66,11 +69,6 @@ pub(super) fn response_metadata(
         Some(token_ids) => metadata.with_candidate_token_ids(token_ids),
         None => metadata,
     };
-    if let Some(max_tokens) = request.stop_conditions.max_tokens {
-        metadata
-            .validate_candidate_output_budget(max_tokens as usize)
-            .map_err(invalid_argument)?;
-    }
     Ok(Some(metadata))
 }
 
@@ -79,19 +77,23 @@ pub(super) fn adapt(
     metadata: &ResponseMetadata,
     output: &mut LLMEngineOutput,
     completion_tokens: usize,
+    cached_tokens: &mut Option<u32>,
 ) {
     let mut response = metadata.response(
         &output.token_ids,
         completion_tokens,
         output.finish_reason.as_ref().map(native_finish_reason),
     );
-    if let Some(cached_tokens) = output
+    if let Some(count) = output
         .completion_usage
         .as_ref()
         .and_then(|usage| usage.prompt_tokens_details.as_ref())
         .and_then(|details| details.cached_tokens)
     {
-        response["meta_info"]["cached_tokens"] = json!(cached_tokens);
+        *cached_tokens = Some(count);
+    }
+    if let Some(count) = *cached_tokens {
+        response["meta_info"]["cached_tokens"] = json!(count);
     }
     output.engine_data = Some(json!({"sglang_response": response}));
 }
@@ -206,7 +208,7 @@ mod tests {
             ),
             (LLMEngineOutput::cancelled(), "request was cancelled"),
         ] {
-            adapt(&metadata, &mut output, 0);
+            adapt(&metadata, &mut output, 0, &mut None);
             let finish = &output.engine_data.as_ref().unwrap()["sglang_response"]["meta_info"]["finish_reason"];
             assert_eq!(finish["type"], "abort");
             assert_eq!(finish["message"], expected_message);
@@ -220,7 +222,7 @@ mod tests {
             let mut output = LLMEngineOutput::length();
             output.completion_usage =
                 count.map(|cached| super::super::usage_with_cached_tokens(3, 0, cached));
-            adapt(&metadata, &mut output, 0);
+            adapt(&metadata, &mut output, 0, &mut None);
             let meta = &output.engine_data.as_ref().unwrap()["sglang_response"]["meta_info"];
             match count {
                 Some(cached) => assert_eq!(meta["cached_tokens"], cached),
@@ -243,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn bounds_candidate_count_and_total_output_entries() {
+    fn bounds_candidate_count_without_rejecting_raw_output_limits() {
         let check = |count: usize, max_tokens| {
             let mut request = request(Some(json!({"sglang_tito": {
                 "return_logprob": true,
@@ -255,11 +257,36 @@ mod tests {
         assert!(check(255, Some(0)).is_ok());
         assert!(check(256, Some(0)).is_err());
         assert!(check(1, Some(65_535)).is_ok());
-        assert!(check(1, Some(65_536)).is_err());
+        assert!(check(1, Some(65_536)).is_ok());
         assert!(check(255, Some(256)).is_ok());
-        assert!(check(255, Some(257)).is_err());
-        assert!(check(255, Some(u32::MAX)).is_err());
+        assert!(check(255, Some(257)).is_ok());
+        assert!(check(255, Some(u32::MAX)).is_ok());
         assert!(check(1, None).is_err());
+    }
+
+    #[test]
+    fn candidate_ids_are_ignored_without_logprobs() {
+        for return_logprob in [None, Some(false)] {
+            for max_tokens in [None, Some(300)] {
+                let mut request = request(Some(json!({"sglang_tito": {
+                    "return_logprob": return_logprob,
+                    "token_ids_logprob": (0..256).collect::<Vec<u32>>()
+                }})));
+                request.stop_conditions.max_tokens = max_tokens;
+                let metadata = response_metadata(&request, "ignored").unwrap().unwrap();
+                assert!(
+                    metadata
+                        .validate_candidate_output_budget(usize::MAX)
+                        .is_ok()
+                );
+                let response = metadata.response(&[42], 1, Some(json!({"type": "length"})));
+                assert!(
+                    response["meta_info"]
+                        .get("output_token_ids_logprobs")
+                        .is_none()
+                );
+            }
+        }
     }
 
     #[test]
