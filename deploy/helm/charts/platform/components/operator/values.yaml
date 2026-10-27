@@ -115,6 +115,16 @@ controllerManager:
     # derives dynamo-planner:<chart appVersion>, which only exists for GA
     # releases.
     dgdrDefaultImage: ""
+    # AISimulate runner image put into v1beta2 DGDR spec.aisimulate.image when unset.
+    # Empty derives nvcr.io/nvidia/ai-dynamo/dynamo-planner:<operator-version>.
+    dgdrAISimulateDefaultImage: ""
+    # AISimulate version bundled in the default image (for example 0.13.0), put into v1beta2 DGDR
+    # spec.aisimulate.versionOverride together with that image. Empty uses the AISimulate version
+    # the operator maps to the image's Dynamo release. Required when the image is not a mapped
+    # Dynamo release (for example nightly); the operator refuses to start without it. It also
+    # applies to the derived planner image when dgdrAISimulateDefaultImage is empty. A Request
+    # that names its own image never receives it.
+    dgdrAISimulateDefaultVersionOverride: ""
     resources:
       limits:
         cpu: 1024m

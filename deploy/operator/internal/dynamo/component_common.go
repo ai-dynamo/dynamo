@@ -10,7 +10,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/versionoverride"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -69,7 +69,7 @@ type ComponentContext struct {
 	Infrastructure                 configv1alpha1.InfrastructureConfiguration
 	EPPConfig                      *v1beta1.EPPConfig
 	WorkerHashSuffix               string
-	RuntimeVersion                 *runtimeversion.Version
+	RuntimeVersion                 *versionoverride.Version
 }
 
 func (b *BaseComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
