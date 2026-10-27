@@ -150,7 +150,7 @@ func (w *clientWriter) UpdateRunStatus(ctx context.Context, resourceVersion stri
 }
 
 func (w *clientWriter) DeleteCandidate(ctx context.Context, name string, uid types.UID) error {
-	object := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{Namespace: w.Namespace, Name: name}}
+	object := &v1beta2.DynamoGraphDeploymentCandidate{Namespace: w.Namespace, Name: name}
 	var options []client.DeleteOption
 	if uid != "" {
 		options = append(options, client.Preconditions{UID: &uid})
@@ -171,12 +171,10 @@ func buildCandidateApply(scheme *runtime.Scheme, namespace, runUID string, run *
 		return nil, err
 	}
 	object := &v1beta2.DynamoGraphDeploymentCandidate{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      name,
-			Labels:    map[string]string{LabelRunUID: runUID, LabelCandidateID: candidate.ID},
-		},
-		Spec: v1beta2.DynamoGraphDeploymentCandidateSpec{DynamoGraphDeploymentSpec: *spec},
+		Namespace: namespace,
+		Name:      name,
+		Labels:    map[string]string{LabelRunUID: runUID, LabelCandidateID: candidate.ID},
+		Spec:      v1beta2.DynamoGraphDeploymentCandidateSpec{DynamoGraphDeploymentSpec: *spec},
 	}
 	if companions != "" {
 		object.Annotations = map[string]string{AnnotationAdditionalResources: companions}

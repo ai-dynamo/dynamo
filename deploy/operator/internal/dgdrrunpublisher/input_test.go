@@ -182,7 +182,7 @@ func TestNextIntervalBacksOffWhileUnchangedAndResetsOnChange(t *testing.T) {
 	minimum, maximum := time.Second, 5*time.Second
 	got := []time.Duration{}
 	interval := minimum
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		interval = NextInterval(interval, minimum, maximum, false)
 		got = append(got, interval)
 	}

@@ -171,8 +171,7 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 // retryOrFail hands a failure to the workqueue's backoff, except where retrying cannot
 // help (malformed projection) or the Sweeper is gone and the attempts are used up.
 func (r *Reconciler) retryOrFail(exited bool, err error) error {
-	var inputErr *dgdcreconcile.DiffInputError
-	if errors.As(err, &inputErr) {
+	if _, ok := errors.AsType[*dgdcreconcile.DiffInputError](err); ok {
 		r.Completion.Finish(err) // retrying cannot fix it
 		return nil
 	}

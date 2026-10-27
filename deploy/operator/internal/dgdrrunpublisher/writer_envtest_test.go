@@ -68,7 +68,7 @@ func newWriterFixture(t *testing.T) *writerFixture {
 	c := env.Client()
 
 	run := &v1beta2.DynamoGraphDeploymentRun{
-		ObjectMeta: metav1.ObjectMeta{Namespace: env.Namespace(), Name: "publisher-run"},
+		Namespace: env.Namespace(), Name: "publisher-run",
 		Spec: v1beta2.DynamoGraphDeploymentRunSpec{
 			NativeSearchInput: v1beta2.NativeSearchInput{Model: &v1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"}},
 		},
@@ -134,11 +134,9 @@ func foreignCandidate(t *testing.T, namespace, name string, candidate dgdcreconc
 		t.Fatal(err)
 	}
 	return &v1beta2.DynamoGraphDeploymentCandidate{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      name,
-			Labels:    map[string]string{"owner": "foreign"},
-		},
+		Namespace: namespace,
+		Name:      name,
+		Labels:    map[string]string{"owner": "foreign"},
 		Spec: v1beta2.DynamoGraphDeploymentCandidateSpec{
 			DynamoGraphDeploymentSpec: *spec,
 			Parameters:                runtime.RawExtension{Raw: parameters},
@@ -459,8 +457,8 @@ func TestEnvtestCandidateUpdateTriggersStatusRepair(t *testing.T) {
 
 	t.Log("Arrange a fully converged Run and Candidate before starting the manager")
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Namespace: f.run.Namespace, Name: podName},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "sweeper", Image: "example.invalid/sweeper"}}},
+		Namespace: f.run.Namespace, Name: podName,
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sweeper", Image: "example.invalid/sweeper"}}},
 	}
 	if err := f.client.Create(f.ctx, pod); err != nil {
 		t.Fatalf("create pod: %v", err)

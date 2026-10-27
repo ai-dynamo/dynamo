@@ -101,13 +101,13 @@ func (w *memWriter) CreateCandidate(ctx context.Context, run *v1beta2.DynamoGrap
 	if w.lag {
 		return stored, nil
 	}
-	object := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
+	object := &v1beta2.DynamoGraphDeploymentCandidate{
 		Namespace:       testNamespace,
 		Name:            name,
 		UID:             types.UID("uid-" + name),
 		Labels:          map[string]string{LabelRunUID: testRunUID, LabelCandidateID: candidate.ID},
 		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(run, v1beta2.DynamoGraphDeploymentRunGVK)},
-	}}
+	}
 	return stored, client.IgnoreAlreadyExists(w.c.Create(ctx, object))
 }
 
@@ -163,7 +163,10 @@ func (w *memWriter) DeleteCandidate(ctx context.Context, name string, _ types.UI
 	if w.lag {
 		return nil
 	}
-	return client.IgnoreNotFound(w.c.Delete(ctx, &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name}}))
+	return client.IgnoreNotFound(w.c.Delete(ctx, &v1beta2.DynamoGraphDeploymentCandidate{
+		Namespace: testNamespace,
+		Name:      name,
+	}))
 }
 
 type fixture struct {
@@ -179,8 +182,8 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := &v1beta2.DynamoGraphDeploymentRun{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testRunName, UID: testRunUID}}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testPodName}}
+	run := &v1beta2.DynamoGraphDeploymentRun{Namespace: testNamespace, Name: testRunName, UID: testRunUID}
+	pod := &corev1.Pod{Namespace: testNamespace, Name: testPodName}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run, pod).Build()
 	store := &InputStore{}
 	observer := &Observer{
@@ -213,7 +216,7 @@ func (f *fixture) publish(data []byte) {
 
 func (f *fixture) reconcile() error {
 	f.t.Helper()
-	_, err := f.r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testRunName}})
+	_, err := f.r.Reconcile(context.Background(), ctrl.Request{Namespace: testNamespace, Name: testRunName})
 	return err
 }
 
@@ -242,7 +245,7 @@ func (f *fixture) exitSweeper(code int32) {
 func (f *fixture) deleteCandidate(name string) {
 	f.t.Helper()
 	delete(f.w.server, name)
-	object := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name}}
+	object := &v1beta2.DynamoGraphDeploymentCandidate{Namespace: testNamespace, Name: name}
 	if err := f.c.Delete(context.Background(), object); err != nil {
 		f.t.Fatal(err)
 	}
@@ -272,12 +275,12 @@ func (f *fixture) currentRun() *v1beta2.DynamoGraphDeploymentRun {
 }
 
 func candidateForRun(name, id string, run *v1beta2.DynamoGraphDeploymentRun) *v1beta2.DynamoGraphDeploymentCandidate {
-	return &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
+	return &v1beta2.DynamoGraphDeploymentCandidate{
 		Namespace:       run.Namespace,
 		Name:            name,
 		Labels:          map[string]string{LabelRunUID: string(run.UID), LabelCandidateID: id},
 		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(run, v1beta2.DynamoGraphDeploymentRunGVK)},
-	}}
+	}
 }
 
 // withProgress rewrites a snapshot's progress counters.
@@ -626,11 +629,11 @@ func TestFinalReconcileFailureEndsTheProcessAfterBoundedRetries(t *testing.T) {
 
 func TestForeignLabeledCandidateDoesNotSatisfyOrGetDeleted(t *testing.T) {
 	f := newFixture(t)
-	foreignRun := &v1beta2.DynamoGraphDeploymentRun{ObjectMeta: metav1.ObjectMeta{
+	foreignRun := &v1beta2.DynamoGraphDeploymentRun{
 		Namespace: testNamespace,
 		Name:      "foreign-run",
 		UID:       "foreign-run-uid",
-	}}
+	}
 	foreign := candidateForRun("foreign-candidate", "a", foreignRun)
 	foreign.Labels[LabelRunUID] = testRunUID
 	if err := f.c.Create(context.Background(), foreign); err != nil {
@@ -731,7 +734,7 @@ func TestRunRecreatedUnderTheSameNameIsNotTouched(t *testing.T) {
 func TestReconcileIgnoresOtherKeysAndAFinishedRun(t *testing.T) {
 	f := newFixture(t)
 	f.publish(snapshotJSON(t, PhaseSucceeded, cand{id: "a"}))
-	if _, err := f.r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: "other"}}); err != nil || len(f.w.ops) != 0 {
+	if _, err := f.r.Reconcile(context.Background(), ctrl.Request{Namespace: testNamespace, Name: "other"}); err != nil || len(f.w.ops) != 0 {
 		t.Fatalf("another key must be ignored: err=%v ops=%v", err, f.w.ops)
 	}
 	f.mustReconcile()
@@ -828,7 +831,7 @@ func TestCandidateApplyPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := &v1beta2.DynamoGraphDeploymentRun{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testRunName, UID: testRunUID}}
+	run := &v1beta2.DynamoGraphDeploymentRun{Namespace: testNamespace, Name: testRunName, UID: testRunUID}
 	candidate := dgdcreconcile.DesiredCandidate{ID: "a", Spec: validManifest, Parameters: map[string]any{"tp": 2}}
 	apply, err := buildCandidateApply(scheme, testNamespace, testRunUID, run, cn("a"), candidate)
 	if err != nil {
@@ -977,7 +980,7 @@ func TestConflictIsRetriedWithoutUsingUpTheFinalAttempts(t *testing.T) {
 	f.w.sticky = true
 	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
 	f.exitSweeper(1)
-	for attempt := 0; attempt < 2*finalReconcileAttempts; attempt++ {
+	for attempt := range 2 * finalReconcileAttempts {
 		if err := f.reconcile(); !apierrors.IsConflict(err) || f.r.Completion.Finished() {
 			t.Fatalf("attempt %d: a conflict from a stale read must be retried, err=%v finished=%v", attempt, err, f.r.Completion.Finished())
 		}

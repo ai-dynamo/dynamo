@@ -92,8 +92,7 @@ func boundDiagnostic(text string) string {
 // TerminationOutcome is what the publisher reports for err: the run's own outcome for a
 // run failure, otherwise the bounded error text.
 func TerminationOutcome(err error) TerminalOutcome {
-	var failed *RunFailedError
-	if errors.As(err, &failed) {
+	if failed, ok := errors.AsType[*RunFailedError](err); ok {
 		return failed.Outcome
 	}
 	return TerminalOutcome{Error: boundDiagnostic(err.Error())}
