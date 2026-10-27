@@ -882,6 +882,21 @@ Before conversion, the frontend validates these
 For `system`, `metadata`, `tool_choice`, and `thinking`, `null` is treated as omission.
 These checks validate admission; thinking-budget enforcement by the backend is not implemented.
 
+#### Reasoning Controls
+
+The admission policy in this section requires a build containing the fix for
+[#17375](https://github.com/ai-dynamo/dynamo/issues/17375).
+
+`POST /v1/messages` returns HTTP 400 with an Anthropic `invalid_request_error` before
+generation when a request supplies `output_config.effort` or a non-null
+`thinking.budget_tokens`. These controls are not supported on this endpoint: accepting a
+value would not guarantee that the selected backend and model enforce it. Remove
+`output_config.effort`; for thinking, use `type: "adaptive"` or `type: "disabled"`
+without a budget. Omitting reasoning controls preserves the existing model behavior.
+
+This restriction applies to generation. Token counting does not enforce generation controls.
+Backend-specific budget support on other endpoints does not establish Messages support.
+
 ### Infrastructure
 
 | Method | Path | Description |

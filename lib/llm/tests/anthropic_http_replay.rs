@@ -781,7 +781,7 @@ async fn tool_result_round_trip_reaches_the_chat_engine() {
                 "model": MODEL,
                 "max_tokens": 2048,
                 "stream": false,
-                "thinking": {"type": "enabled", "budget_tokens": 1024},
+                "thinking": {"type": "adaptive"},
                 "tools": [tool("list_directory")],
                 "messages": [{"role": "user", "content": "List /tmp"}]
             }),
@@ -916,10 +916,7 @@ async fn explicit_thinking_controls_reach_the_chat_engine() {
         let mut expected = Vec::new();
         for (thinking, enabled) in [
             (None, None),
-            (
-                Some(json!({"type": "enabled", "budget_tokens": 1024})),
-                Some(true),
-            ),
+            (Some(json!({"type": "adaptive"})), None),
             (Some(json!({"type": "disabled"})), Some(false)),
         ] {
             let mut body = json!({
