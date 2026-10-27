@@ -903,7 +903,7 @@ impl ErrorMessage {
 
     /// Parse first, so a code outside the HTTP status space cannot reach the
     /// response, then let [`BackendStatusAction::triage`] decide. A 5xx keeps
-    /// its own status only when it is 503 or the configured overload code,
+    /// its own status only when it is 503, 504 or the configured overload code,
     /// which is what makes a deliberate load shed distinguishable from an
     /// internal error. The body text is sanitized either way.
     pub fn from_http_error(class: ErrorClass, err: HttpError) -> ErrorResponse {
@@ -7155,7 +7155,7 @@ mod tests {
         // The client sees a generic 500 while the asserted status survives in
         // `details`. 507 is a WebDAV code no Dynamo component emits; 501 is
         // what the previous blanket pass-through forwarded verbatim.
-        for code in [501u16, 502, 504, 507] {
+        for code in [501u16, 502, 507] {
             let response = ErrorMessage::from_http_error(
                 ErrorClass::InvalidRequest,
                 HttpError {
@@ -7449,6 +7449,45 @@ mod tests {
 
         assert_eq!(response.0.as_u16(), 499);
         assert_eq!(response.1.message, "Request cancelled");
+    }
+
+    #[test]
+    fn backend_resolver_timeout_keeps_sanitized_gateway_status() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let message = "private timeout at /srv/provider.py token=secret";
+        let unary = ErrorMessage::from_backend_http_error(HttpError {
+            code: 504,
+            message: message.to_string(),
+        });
+        let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::Unknown))
+                    .message(serde_json::json!({"message": message, "code": 504}).to_string())
+                    .build(),
+            ),
+        };
+        let streaming = backend_error_response(
+            extract_backend_error_if_present(&event).expect("backend timeout envelope"),
+            false,
+        );
+        for response in [unary, streaming] {
+            assert_eq!(response.0, StatusCode::GATEWAY_TIMEOUT);
+            assert_eq!(response.1.code, 504);
+            assert_eq!(response.1.error_type, "Gateway Timeout");
+            assert_eq!(response.1.message, "Internal server error");
+            assert!(response.1.details.is_none());
+            assert!(
+                !serde_json::to_string(&response.1.0)
+                    .unwrap()
+                    .contains("secret")
+            );
+        }
     }
 
     #[test]
@@ -9669,6 +9708,7 @@ mod tests {
             (501, 500),
             (507, 500),
             (503, 503),
+            (504, 504),
         ] {
             let error_json =
                 format!(r#"{{"message":"engine failed at /srv/engine.py:88","code":{code}}}"#);
