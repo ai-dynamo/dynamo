@@ -177,7 +177,11 @@ def configure_muse_structural_tag_reasoning(
     Dynamo ATEM grammar includes the reasoning channel, so it owns that boundary.
     Unguided requests are unaffected by this structured-output setting.
     """
-    if config.dyn_tool_call_parser in ("muse_spark_open", "muse_spark"):
+    spark = ("muse_spark_open", "muse_spark")
+    # Match the frontend's effective parser selection for reasoning-only Spark.
+    if config.dyn_tool_call_parser in spark or (
+        config.dyn_tool_call_parser is None and config.dyn_reasoning_parser in spark
+    ):
         vllm_config.structured_outputs_config.enable_in_reasoning = True
 
 

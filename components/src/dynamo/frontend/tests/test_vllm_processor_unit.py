@@ -5241,15 +5241,27 @@ class TestToolCallGrammarReasoningStart:
 
 
 @pytest.mark.core
-@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
-def test_prepare_request_preserves_responses_native_tools(native):
+@pytest.mark.parametrize(
+    "native,choice,exclude",
+    [
+        (False, "auto", True),
+        (True, "auto", True),
+        (True, "none", True),
+        (True, "none", False),
+    ],
+    ids=["legacy", "native", "excluded", "retained"],
+)
+def test_prepare_request_preserves_responses_native_tools(native, choice, exclude):
     template = (
         "{% set deferred_render_mode = deferred_render_mode | default('tool_name_only') %}"
         if native
         else ""
-    ) + "{{ tools | tojson }}"
+    ) + "TOOL_USE {{ tools | tojson }}"
+    default = "DEFAULT {{ tools | tojson }}"
     tokenizer = SimpleNamespace(
-        chat_template=template, get_chat_template=lambda *args, **kwargs: template
+        chat_template=template,
+        get_chat_template=lambda chat_template=None, tools=None: chat_template
+        or (template if tools else default),
     )
     function = {"name": "read", "parameters": {"type": "object"}}
     flat = [{"type": "function", "function": function}]
@@ -5265,20 +5277,34 @@ def test_prepare_request_preserves_responses_native_tools(native):
     request = {
         "model": MODEL,
         "messages": [{"role": "user", "content": "Read a file"}],
-        "tool_choice": "auto",
+        "tool_choice": choice,
         "tools": flat,
     }
     request["responses_native_tools"] = {
         "tools": [{"type": "function", "function": {**function, "name": "fs.read"}}],
         "template_tools": catalog,
         "messages": request["messages"],
-        "tool_choice": "auto",
+        "tool_choice": choice,
     }
     sampling, _, _, _, params = _prepare_request(
-        request, tokenizer=tokenizer, tool_parser_class=None
+        request,
+        tokenizer=tokenizer,
+        tool_parser_class=None,
+        exclude_tools_when_tool_choice_none=exclude,
     )
-    assert sampling.tools[0].function.name == ("fs.read" if native else "read")
-    assert params.chat_template_kwargs["tools"] == (
-        catalog if native else [tool.model_dump() for tool in sampling.tools]
+    excluded = choice == "none" and exclude
+    assert sampling.tools[0].function.name == (
+        "fs.read" if native and not excluded else "read"
     )
+    rendered_tools = params.chat_template_kwargs["tools"]
+    if excluded:
+        assert rendered_tools is None
+    else:
+        assert rendered_tools == (
+            catalog if native else [tool.model_dump() for tool in sampling.tools]
+        )
+    selected_template = params.chat_template or tokenizer.get_chat_template(
+        tools=rendered_tools
+    )
+    assert selected_template == (default if excluded else template)
     assert request["tools"][0]["function"]["name"] == "read"

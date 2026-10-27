@@ -567,16 +567,28 @@ def test_vllm_publishes_structural_tag_reasoning_policy(
 
 
 @pytest.mark.parametrize(
-    "parser", ["muse_spark_open", "muse_spark", "qwen3_coder", None]
+    "tool_parser,reasoning_parser,expected",
+    [
+        ("muse_spark_open", None, True),
+        ("muse_spark", None, True),
+        (None, "muse_spark_open", True),
+        (None, "muse_spark", True),
+        ("qwen3_coder", "muse_spark_open", False),
+        (None, None, False),
+    ],
 )
-def test_muse_grammar_owns_reasoning_before_engine_launch(parser):
+def test_muse_grammar_owns_reasoning_before_engine_launch(
+    tool_parser, reasoning_parser, expected
+):
     vllm_main = _load_vllm_main()
-    config = SimpleNamespace(dyn_tool_call_parser=parser)
+    config = SimpleNamespace(
+        dyn_tool_call_parser=tool_parser, dyn_reasoning_parser=reasoning_parser
+    )
     outputs = SimpleNamespace(enable_in_reasoning=False)
     vllm_main.configure_muse_structural_tag_reasoning(
         config, SimpleNamespace(structured_outputs_config=outputs)
     )
-    assert outputs.enable_in_reasoning is (parser in ("muse_spark_open", "muse_spark"))
+    assert outputs.enable_in_reasoning is expected
 
 
 @pytest.mark.parametrize(
@@ -732,6 +744,7 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         embedding_worker=False,
         embedding_worker_processes=1,
         dyn_tool_call_parser=None,
+        dyn_reasoning_parser=None,
         gms_shadow_mode=False,
         multimodal_embedding_cache_capacity_gb=0,
         route_to_encoder=False,

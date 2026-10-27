@@ -709,3 +709,43 @@ fn client_search_fallback_alias_does_not_shadow_a_namespaced_function() {
         OutputItem::FunctionCall(_)
     ));
 }
+
+#[tokio::test]
+async fn custom_call_length_stop_never_exposes_a_truncated_input_wrapper() {
+    let response = request(
+        json!([{"type":"custom","name":"run"}]),
+        json!("Run a tool."),
+    );
+    for (arguments, expected, finish) in [
+        (r#"{"input":"*** Begin"#, "", "length"),
+        (r#"{"input":"print(1)"}"#, "print(1)", "length"),
+        ("raw payload", "raw payload", "stop"),
+    ] {
+        let mut converter =
+            stream_converter::ResponseStreamConverter::new("/model".into(), params(&response));
+        let mut events = converter.emit_start_events();
+        events.extend(converter.process_chunk(&tool_chunk(
+            Some("run"),
+            Some("c1"),
+            arguments,
+            Some(finish),
+        )));
+        events.extend(converter.emit_end_events());
+        let events = stream_json(events).await;
+        let terminal = events.last().unwrap();
+        assert_eq!(
+            terminal["type"],
+            if finish == "length" {
+                "response.incomplete"
+            } else {
+                "response.completed"
+            }
+        );
+        assert_eq!(terminal["response"]["output"][0]["input"], expected);
+        let done = events
+            .iter()
+            .find(|event| event["type"] == "response.custom_tool_call_input.done")
+            .unwrap();
+        assert_eq!(done["input"], expected);
+    }
+}

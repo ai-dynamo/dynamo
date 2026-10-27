@@ -412,3 +412,38 @@ fn responses_tool_kinds_are_validated_before_function_conversion() {
         NvCreateChatCompletionRequest::try_from(req).unwrap();
     }
 }
+
+#[test]
+fn named_tool_rendering_policy_matches_the_production_preprocessor() {
+    use crate::{model_card::ModelDeploymentCard, preprocessor::OpenAIPreprocessor};
+    let mut tools = namespace(true);
+    tools
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type":"function","name":"other","parameters":{"type":"object"}}));
+    for parser in [None, Some("muse_spark_open")] {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(path, None).unwrap();
+        mdc.runtime_config.tool_call_parser = parser.map(str::to_owned);
+        let mut response = request(tools.clone(), json!("Read a file."));
+        response.inner.tool_choice =
+            Some(serde_json::from_value(json!({"type":"function","name":"fs.read"})).unwrap());
+        let mut chat: NvCreateChatCompletionRequest = response.try_into().unwrap();
+        chat.normalize_responses_tools(true).unwrap();
+        let python = chat
+            .python_chat_processor_request_json(&mdc.runtime_config)
+            .unwrap();
+        let spark = parser.is_some();
+        assert_eq!(
+            python["responses_native_tools"]["render_named_tool_eagerly"],
+            spark
+        );
+        let tokenizer = mdc.tokenizer().unwrap();
+        let preprocessor =
+            OpenAIPreprocessor::new_with_parts(mdc, formatter(TEMPLATE), tokenizer).unwrap();
+        let prompt = preprocessor.apply_template(&chat).unwrap().unwrap();
+        assert_eq!(prompt.as_str().contains("\"path\""), spark);
+        assert_eq!(prompt.as_str().contains("\"name\": \"other\""), !spark);
+    }
+}

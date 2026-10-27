@@ -150,7 +150,8 @@ def test_phase_metadata_is_request_local(tokenizer):
     )
 
 
-def test_selected_deferred_tool_is_eager_and_replay_names_match(tokenizer):
+@pytest.mark.parametrize("eager", [False, True], ids=["generic", "spark"])
+def test_selected_deferred_tool_is_eager_and_replay_names_match(tokenizer, eager):
     from dynamo.frontend.responses_history import responses_tools_request
 
     function = {
@@ -180,10 +181,21 @@ def test_selected_deferred_tool_is_eager_and_replay_names_match(tokenizer):
     request = {
         "responses_native_tools": {
             "tools": [function],
+            "render_named_tool_eagerly": eager,
             "messages": messages,
             "tool_choice": {"type": "function", "function": {"name": "fs.read"}},
             "template_tools": [
-                {"type": "namespace", "name": "fs", "defer_loading": True}
+                {
+                    "type": "namespace",
+                    "name": "fs",
+                    "defer_loading": True,
+                    "tools": [
+                        {
+                            "name": "read",
+                            "parameters": function["function"]["parameters"],
+                        }
+                    ],
+                }
             ],
         }
     }
@@ -196,9 +208,16 @@ def test_selected_deferred_tool_is_eager_and_replay_names_match(tokenizer):
         tokenize=False,
         current_date="2026-10-06",
     )
-    assert '"path"' in prompt
-    assert '"name": "fs.read"' in prompt
+    if eager:
+        assert selected["responses_template_tools"] == [function]
+        assert '"name": "fs.read"' in prompt
+        assert "[deferred:" not in prompt
+    else:
+        assert (
+            selected["responses_template_tools"]
+            == request["responses_native_tools"]["template_tools"]
+        )
+        assert '"has_deferred_functions": true' in prompt
     assert "assistant to=fs.read<|message|>" in prompt
     assert "tool fs.read<|message|>" in prompt
-    assert "[deferred:" not in prompt
     assert request == before

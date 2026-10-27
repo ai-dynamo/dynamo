@@ -605,7 +605,13 @@ def _prepare_request(
         chat_params: ChatParams for render_messages / render_messages_async.
     """
     resolved_responses_template = None
-    if isinstance(request, dict) and request.get("responses_native_tools"):
+    if (
+        isinstance(request, dict)
+        and request.get("responses_native_tools")
+        and not (
+            exclude_tools_when_tool_choice_none and request.get("tool_choice") == "none"
+        )
+    ):
         # Resolve using the legacy function view so variant/override precedence
         # is unchanged, then switch the whole in-process view together.
         resolved_responses_template = resolve_chat_template(

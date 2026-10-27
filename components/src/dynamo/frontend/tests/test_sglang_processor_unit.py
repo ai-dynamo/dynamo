@@ -6358,22 +6358,39 @@ class TestThinkingControlParity:  # FRONTEND.10
 
 
 @pytest.mark.core
-@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
-def test_preprocess_preserves_responses_native_tools(native):
+@pytest.mark.parametrize(
+    "native,choice,exclude",
+    [
+        (False, "auto", True),
+        (True, "auto", True),
+        (True, "none", True),
+        (True, "none", False),
+    ],
+    ids=["legacy", "native", "excluded", "retained"],
+)
+def test_preprocess_preserves_responses_native_tools(native, choice, exclude):
     seen = []
+    template = (
+        "{% set deferred_render_mode = deferred_render_mode | default('tool_name_only') %}"
+        if native
+        else ""
+    ) + "TOOL_USE {{ tools | tojson }}"
+    default = "DEFAULT {{ tools | tojson }}"
 
     class CapturingTokenizer:
-        chat_template = (
-            "{% set deferred_render_mode = deferred_render_mode | default('tool_name_only') %}"
-            if native
-            else ""
-        ) + "{{ tools | tojson }}"
+        chat_template = template
 
-        def get_chat_template(self, **kwargs):
-            return self.chat_template
+        def get_chat_template(self, chat_template=None, tools=None):
+            return chat_template or (template if tools else default)
 
         def apply_chat_template(self, messages, **kwargs):
-            seen.append(kwargs["tools"])
+            seen.append(
+                (
+                    kwargs.get("tools"),
+                    kwargs.get("chat_template")
+                    or self.get_chat_template(tools=kwargs.get("tools")),
+                )
+            )
             return [1]
 
     function = {"name": "read", "parameters": {"type": "object"}}
@@ -6389,27 +6406,33 @@ def test_preprocess_preserves_responses_native_tools(native):
     request = {
         "model": MODEL,
         "messages": [{"role": "user", "content": "Read a file"}],
-        "tool_choice": "auto",
+        "tool_choice": choice,
         "tools": [{"type": "function", "function": function}],
     }
     request["responses_native_tools"] = {
         "tools": [{"type": "function", "function": {**function, "name": "fs.read"}}],
         "template_tools": catalog,
         "messages": request["messages"],
-        "tool_choice": "auto",
+        "tool_choice": choice,
     }
     result = preprocess_chat_request(
         request,
         tokenizer=CapturingTokenizer(),
         tool_call_parser_name=None,
         reasoning_parser_name=None,
+        exclude_tools_when_tool_choice_none=exclude,
     )
+    excluded = choice == "none" and exclude
     assert result.request["tools"][0]["function"]["name"] == (
-        "fs.read" if native else "read"
+        "fs.read" if native and not excluded else "read"
     )
-    if native:
-        assert seen[0] == catalog
+    rendered_tools, selected_template = seen[0]
+    assert selected_template == (default if excluded else template)
+    if excluded:
+        assert rendered_tools is None
+    elif native:
+        assert rendered_tools == catalog
     else:
-        assert seen[0][0]["type"] == "function"
-        assert seen[0][0]["function"]["name"] == "read"
+        assert rendered_tools[0]["type"] == "function"
+        assert rendered_tools[0]["function"]["name"] == "read"
     assert request["tools"][0]["function"]["name"] == "read"

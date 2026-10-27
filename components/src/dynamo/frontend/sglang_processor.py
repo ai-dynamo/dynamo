@@ -604,7 +604,10 @@ class SglangProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Main entry point: preprocess, route, post-process a chat request."""
-        if request.get("responses_native_tools"):
+        if request.get("responses_native_tools") and not (
+            self.exclude_tools_when_tool_choice_none
+            and request.get("tool_choice") == "none"
+        ):
             # Inline and pool postprocessing must use the same tool identities
             # as the prompt, including when parsers are recreated in the parent.
             request = responses_tools_request(

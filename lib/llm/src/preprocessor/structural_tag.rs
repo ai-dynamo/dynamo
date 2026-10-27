@@ -568,7 +568,10 @@ pub(super) fn validate_runtime_config(
         .map_or(StructuralTagReasoningBoundary::default(), |config| {
             config.reasoning_boundary
         });
-    if is_muse_spark_parser(runtime_config.tool_call_parser.as_deref()) {
+    if is_muse_spark_parser(structural_tag_parser(
+        runtime_config.tool_call_parser.as_deref(),
+        runtime_config.reasoning_parser.as_deref(),
+    )) {
         anyhow::ensure!(
             !backend_excludes_reasoning
                 && configured_boundary != StructuralTagReasoningBoundary::Backend,
@@ -825,6 +828,20 @@ mod tests {
             let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
             mdc.runtime_config.tool_call_parser = None;
             mdc.runtime_config.reasoning_parser = Some(parser.into());
+            // Startup must protect the same family selected for forced-call guidance.
+            let mut late_config = mdc.runtime_config.clone();
+            late_config
+                .set_engine_specific(
+                    TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                    true,
+                )
+                .unwrap();
+            assert!(
+                validate_runtime_config(&late_config)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("grammar-owned reasoning")
+            );
             let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
             for choice in [
                 serde_json::json!("required"),

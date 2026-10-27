@@ -901,7 +901,9 @@ def preprocess_chat_request(
     Synchronous -- suitable for both main-process and worker-process execution.
     """
     resolved_responses_template = None
-    if request.get("responses_native_tools"):
+    if request.get("responses_native_tools") and not (
+        exclude_tools_when_tool_choice_none and request.get("tool_choice") == "none"
+    ):
         resolved_responses_template = tokenizer.get_chat_template(
             chat_template=request.get("chat_template"), tools=request.get("tools")
         )

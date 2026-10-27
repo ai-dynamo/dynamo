@@ -418,7 +418,15 @@ impl NvCreateChatCompletionRequest {
                     .normalize_responses_tools(true)
                     .map_err(serde::ser::Error::custom)?;
                 let native = serde_json::to_value(native)?;
+                // Match the production Rust preprocessor's Spark-only policy.
+                // Other families retain the full native catalog for named choices.
+                let render_named_tool_eagerly =
+                    super::super::chat_completions::unified_parser::configured_family(
+                        runtime_config.tool_call_parser.as_deref(),
+                        runtime_config.reasoning_parser.as_deref(),
+                    ) == Some("muse_spark");
                 value["responses_native_tools"] = serde_json::json!({
+                    "render_named_tool_eagerly": render_named_tool_eagerly,
                     "template_tools": template_tools,
                     "tools": native["tools"],
                     "tool_choice": native["tool_choice"],
@@ -617,18 +625,21 @@ impl ResponseParams {
         }
         let (name, namespace, custom) = self.tool_identity(emitted);
         if custom {
-            let input = if arguments.is_empty() && status == OutputStatus::InProgress {
+            let input = if (arguments.is_empty() && status == OutputStatus::InProgress)
+                || (status == OutputStatus::Incomplete
+                    && serde_json::from_str::<serde_json::Value>(arguments).is_err())
+            {
+                // Match Chat: a token limit must not expose a partial adapter wrapper.
                 String::new()
             } else {
-                // Keep malformed model output as caller input, matching Chat.
-                // Truncated calls retain their raw text and incomplete status.
+                // Completed malformed output keeps the existing raw-text fallback.
                 custom_input_or_raw(arguments)
             };
-            // The upstream custom output type is non_exhaustive, so construct
-            // it through its wire representation rather than a struct literal.
+            // The custom item has no status field; the response signals truncation.
+            // Construct this non_exhaustive type through its wire representation.
             Ok(serde_json::from_value(
                 serde_json::json!({"type":"custom_tool_call", "id":item_id,
-                "call_id":call_id,"name":name,"namespace":namespace,"input":input,"status":status}),
+                "call_id":call_id,"name":name,"namespace":namespace,"input":input}),
             )?)
         } else {
             Ok(OutputItem::FunctionCall(FunctionToolCall {

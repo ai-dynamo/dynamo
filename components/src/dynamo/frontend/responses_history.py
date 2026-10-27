@@ -61,7 +61,7 @@ def _supports_native_response_tools(source: str) -> bool:
     # templates with the transformers-specific generation extension.
     return any(
         kind == "name" and value == "deferred_render_mode"
-        for _, kind, value in Environment().lex(source)
+        for _, kind, value in Environment(autoescape=True).lex(source)
     )
 
 
@@ -82,9 +82,14 @@ def responses_tools_request(request: dict, template_source: str | None) -> dict:
     }
     selected["responses_template_tools"] = native["template_tools"]
     choice = selected.get("tool_choice")
-    if isinstance(choice, dict) and choice.get("type") == "function":
+    if (
+        native.get("render_named_tool_eagerly")
+        and isinstance(choice, dict)
+        and choice.get("type") == "function"
+    ):
         name = choice["function"]["name"]
-        # A selected tool must expose its schema even when advertised deferred.
+        # Rust selects this policy for Spark, whose forced calls need the schema.
+        # Other families retain their full native catalog, matching Rust rendering.
         selected["responses_template_tools"] = [
             tool for tool in native["tools"] if tool["function"]["name"] == name
         ]
