@@ -1,0 +1,37 @@
+{
+  "fixture": "f5-lp20-lpu-nochain",
+  "description": "LP20 LPU-only bundle without prop-sync (llama3.2-1b-ursa-topk-1-c2c-invoke-lp20). The preset places all 16 decoder layers in one 8-chip partition and the host serves token embeddings, so the only deployed LPU partition is 1: one unit, which an LPU-only workload accepts. This compile does not produce several units; f5c-lp20-lpu-nochain-2p covers the refusal of several LPU-only units.",
+  "architecture": "lp20",
+  "compilationMode": "lpuOnly",
+  "devicesPerNode": 8,
+  "localPartitions": null,
+  "units": [
+    {"reservations": [{"partitionIds": [1], "size": {"nodes": 1}}], "connectors": []}
+  ],
+  "localPartitionIds": [],
+  "lpr": {
+    "partitions": [
+      {"id": "partition-000", "ordinal": 0, "compilerPartitionId": 1, "xtShape": "c8"}
+    ],
+    "propSyncConnectors": []
+  },
+  "agentCount": 1,
+  "agentPods": [
+    {"podIndex": 0, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 0, "groupSize": 1, "leaderPodIndex": 0}
+  ],
+  "novaStages": [
+    {"partitionId": 1, "nodeCount": 1, "podIndices": [0]}
+  ],
+  "legacy": {
+    "lpr": {
+      "partitions": [
+        {"id": "partition-000", "ordinal": 0, "compilerPartitionId": 1, "xtShape": "c8"}
+      ],
+      "propSyncConnectors": [],
+      "allocationMetadata": {}
+    },
+    "agentCount": 1,
+    "configMap": {"nodes_per_partition": "1", "partition_ids": "1", "partition_node_offsets": "0", "partition_paths": "part-1"},
+    "lpuServers": null
+  }
+}
