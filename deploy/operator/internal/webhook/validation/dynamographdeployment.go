@@ -23,7 +23,6 @@ import (
 	"sort"
 	"strings"
 
-	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -256,15 +255,7 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	annotationsPath := fldPath.Child("annotations")
-	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
-		if _, err := semver.NewVersion(value); err != nil {
-			allErrs = append(allErrs, field.Invalid(
-				annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),
-				value,
-				"must be valid semver",
-			))
-		}
-	}
+	allErrs = append(allErrs, v.sharedValidation.validateObjectMeta(objectMeta, nil, fldPath)...)
 	if value, invalid := invalidVLLMDistributedExecutorBackendAnnotation(objectMeta.Annotations); invalid {
 		allErrs = append(allErrs, field.Invalid(
 			annotationsPath.Key(consts.KubeAnnotationVLLMDistributedExecutorBackend),
@@ -820,23 +811,10 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMetaUpdate(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	annotationsPath := fldPath.Child("annotations")
-	newOrigin, newOriginExists := newObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
-	oldOrigin, oldOriginExists := oldObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
 	newProvider, newProviderExists := newObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
 	oldProvider, oldProviderExists := oldObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
 
-	// Keep creation provenance immutable, including whether it exists at all.
-	if newOriginExists != oldOriginExists || newOrigin != oldOrigin {
-		var invalidValue any
-		if newOriginExists {
-			invalidValue = newOrigin
-		}
-		allErrs = append(allErrs, field.Invalid(
-			annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),
-			invalidValue,
-			apivalidation.FieldImmutableErrorMsg,
-		))
-	}
+	allErrs = append(allErrs, v.sharedValidation.validateObjectMetaUpdate(newObjectMeta, oldObjectMeta, fldPath)...)
 
 	// Reserve the initial legacy-provider materialization for the configured operator identity.
 	if !oldProviderExists && newProviderExists && v.operatorPrincipal != "" &&
