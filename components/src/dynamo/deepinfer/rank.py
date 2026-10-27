@@ -304,11 +304,9 @@ class RankRunner:
                 behind_others = bool(self._later)
                 self._later.append((seq, prompt))
                 if behind_others:
-                    # Only a request that waits its turn gains from a prefetch.
                     try:
                         self.cache.on_enqueue(seq, prompt)
                     except Exception:
-                        # A prefetch never fails the request.
                         logger.exception("Prefetch of request %s failed", rid)
         except (ValueError, TypeError) as e:
             if add.handoff is not None and self.decode is not None and not handed_off:

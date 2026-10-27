@@ -111,9 +111,9 @@ class SSDPool:
             self._turn_off()
 
     def _claim(self) -> int:
-        """Lock ``<path>.lock`` until the pool is closed. The file is named by
-        rank alone, so two engines on one directory would delete each other's
-        files and count them as free space."""
+        """Hold ``<path>.lock`` until the pool is closed, so the directory belongs
+        to one engine (files are named by rank alone). Raises if another engine
+        holds it."""
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         fd = os.open(self.path + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
         try:
