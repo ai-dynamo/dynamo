@@ -20,7 +20,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from pydantic import ValidationError
 
 from dynamo.common.protocols.image_protocol import (
     ImageData,
@@ -28,6 +27,7 @@ from dynamo.common.protocols.image_protocol import (
     NvCreateImageRequest,
     NvImagesResponse,
 )
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 
 pytestmark = [
@@ -770,7 +770,7 @@ class TestImageHandlerResponseFormats:
             "n": n,
         }
 
-        with pytest.raises(ValidationError, match="n"):
+        with pytest.raises(InvalidArgument, match="n: Input should be"):
             async for _ in handler.generate(request, MagicMock()):
                 pass
 

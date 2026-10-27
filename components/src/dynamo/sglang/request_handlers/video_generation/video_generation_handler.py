@@ -15,6 +15,7 @@ import torch
 from dynamo._core import Context
 from dynamo.common.http.media_reference import local_media_reference
 from dynamo.common.http.url_validator import UrlValidationPolicy
+from dynamo.common.protocols.request_parsing import parse_media_request
 from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
 from dynamo.common.storage import upload_to_fs
 from dynamo.sglang.args import Config
@@ -95,7 +96,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         try:
             # The SGLang model fills in the defaults for the fields the
             # request leaves unset. An explicit value is kept as sent.
-            req = SGLangCreateVideoRequest(**request)
+            req = parse_media_request(SGLangCreateVideoRequest, request)
             nvext = req.nvext
 
             logger.info(

@@ -172,3 +172,4 @@ async def test_generate_rejects_zero_inference_steps(handler) -> None:
     handler._generate_video.assert_not_called()
     assert responses[0]["status"] == "failed"
     assert "num_inference_steps" in responses[0]["error"]
+    assert "input_value" not in responses[0]["error"]

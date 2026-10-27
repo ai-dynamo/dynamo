@@ -1114,9 +1114,9 @@ class TestI2VEngineInputs:
     @pytest.mark.asyncio
     async def test_video_rejection_by_the_model_propagates(self):
         """The shared request model rejects a non-positive fps, as the frontend
-        does. The handler maps the rejection to InvalidArgument, naming the
-        field, rather than turning it into an error chunk; the binding returns
-        a 400."""
+        does. The client gets InvalidArgument (a 400) that names the field and
+        the rule, and not the rejected value, which str(ValidationError) would
+        carry as input_value."""
         handler = _make_handler()
         handler.config.output_modalities = ["video"]
         request = {
@@ -1125,9 +1125,13 @@ class TestI2VEngineInputs:
             "nvext": {"fps": 0},
         }
 
-        with pytest.raises(InvalidArgument, match="fps"):
+        with pytest.raises(InvalidArgument) as excinfo:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
                 pass
+        assert (
+            str(excinfo.value)
+            == "nvext.fps: Input should be greater than or equal to 1"
+        )
 
     async def test_media_passthrough_reaches_sampling_params(self):
         """A top-level SDK extra_body field, nested by the frontend under

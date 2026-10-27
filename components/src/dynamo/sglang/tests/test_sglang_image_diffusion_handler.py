@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from PIL import Image
-from pydantic import ValidationError
 
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler import (
@@ -304,7 +303,7 @@ class TestImageDiffusionWorkerHandler:
             "nvext": {"num_inference_steps": 0},
         }
 
-        with pytest.raises(ValidationError, match="num_inference_steps"):
+        with pytest.raises(InvalidArgument, match="num_inference_steps"):
             async for _ in handler.generate(request, mock_context):
                 pass
 
@@ -724,13 +723,17 @@ class TestNParameter:
     @pytest.mark.asyncio
     async def test_n_above_max_is_rejected(self, handler, mock_context):
         """n above 10 is rejected by the shared request model, as the frontend
-        rejects it (no silent clamping). A ValueError from the handler reaches
-        the client as a 400."""
+        rejects it (no silent clamping). The InvalidArgument reaches the client
+        as a 400 that names the field and the rule, not the rejected value."""
         self._mock_one_image(handler)
 
-        with pytest.raises(ValidationError, match="less than or equal to 10"):
+        with pytest.raises(
+            InvalidArgument, match="less than or equal to 10"
+        ) as excinfo:
             async for _ in handler.generate(self._request(n=99), mock_context):
                 pass
+        assert str(excinfo.value).startswith("n: ")
+        assert "99" not in str(excinfo.value)
         assert handler.generator.generate.call_count == 0
 
     @pytest.mark.asyncio
@@ -738,7 +741,7 @@ class TestNParameter:
         """n=0 must not silently produce one image."""
         self._mock_one_image(handler)
 
-        with pytest.raises(ValidationError, match="greater than or equal to 1"):
+        with pytest.raises(InvalidArgument, match="greater than or equal to 1"):
             async for _ in handler.generate(self._request(n=0), mock_context):
                 pass
         assert handler.generator.generate.call_count == 0

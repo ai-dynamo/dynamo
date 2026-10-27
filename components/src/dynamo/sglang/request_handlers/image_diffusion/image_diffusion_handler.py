@@ -19,6 +19,7 @@ from dynamo.common.http.base import HttpStatusError
 from dynamo.common.http.media_reference import local_media_reference
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
+from dynamo.common.protocols.request_parsing import parse_media_request
 from dynamo.common.storage import upload_to_fs
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.args import Config
@@ -108,7 +109,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # failures (InvalidArgument) become 400s without traceback noise.
         # The SGLang model fills in the defaults for the fields the request
         # leaves unset. An explicit value is kept as sent.
-        req = SGLangCreateImageRequest(**request)
+        req = parse_media_request(SGLangCreateImageRequest, request)
         nvext = req.nvext
 
         if nvext.num_inference_steps > MAX_NUM_INFERENCE_STEPS:
