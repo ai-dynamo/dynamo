@@ -753,6 +753,17 @@ impl RoutingHost {
         }
 
         let request_context = request.context();
+        let reacquire = || {
+            self.acquire_affinity_slot(
+                affinity,
+                &session_id,
+                None,
+                request_context.as_ref(),
+                phase,
+                staged_kv,
+                budget,
+            )
+        };
         let mut operation = self
             .acquire_affinity_slot(
                 affinity,
@@ -775,17 +786,7 @@ impl RoutingHost {
                 .is_some_and(|target| !self.inner.client.is_instance_discovered(target.worker_id))
         {
             operation.invalidate();
-            operation = self
-                .acquire_affinity_slot(
-                    affinity,
-                    &session_id,
-                    None,
-                    request_context.as_ref(),
-                    phase,
-                    staged_kv,
-                    budget,
-                )
-                .await?;
+            operation = reacquire().await?;
         }
         let target = operation.target().map(from_table);
         match select(target).await {
@@ -797,17 +798,7 @@ impl RoutingHost {
                     && target.is_some_and(|target| !self.affinity_target_is_valid(target)) =>
             {
                 operation.invalidate();
-                let retry = self
-                    .acquire_affinity_slot(
-                        affinity,
-                        &session_id,
-                        None,
-                        request_context.as_ref(),
-                        phase,
-                        staged_kv,
-                        budget,
-                    )
-                    .await?;
+                let retry = reacquire().await?;
                 let selection = select(retry.target().map(from_table)).await?;
                 Ok((selection, Some(retry)))
             }
