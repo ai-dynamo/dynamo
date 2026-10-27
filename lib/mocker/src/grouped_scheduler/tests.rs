@@ -160,7 +160,7 @@ fn cancellation_translation_preserves_explicit_discard() {
 fn cache_usage_retains_admission_measurement_without_inventing_missing_counts() {
     let compatibility = CompatibilityState::new(args(1));
     let request_id = Uuid::from_u128(29);
-    compatibility.native_request(request(29, 0));
+    compatibility.native_request(request(29, 0)).unwrap();
     let output = |completed| aisimulate_core::engine::Output {
         request_id,
         token_id: None,
@@ -191,7 +191,7 @@ fn cache_usage_retains_admission_measurement_without_inventing_missing_counts() 
         compatibility.output_signal(output(true)).cached_tokens,
         None
     );
-    compatibility.native_request(request(29, 0));
+    compatibility.native_request(request(29, 0)).unwrap();
     assert_eq!(
         compatibility.output_signal(output(false)).cached_tokens,
         None
@@ -228,7 +228,7 @@ fn terminal_cache_usage_preserves_explicit_counts_and_cleans_up() {
     for (explicit, expected) in [(None, Some(2)), (Some(0), Some(0)), (Some(3), Some(3))] {
         let compatibility = CompatibilityState::new(args(1));
         let request_id = Uuid::from_u128(30);
-        compatibility.native_request(request(30, 0));
+        compatibility.native_request(request(30, 0)).unwrap();
         compatibility.record_admissions(&[Admission {
             request_id,
             reused_input_tokens: 2,
@@ -242,7 +242,7 @@ fn terminal_cache_usage_preserves_explicit_counts_and_cleans_up() {
             cached_tokens: explicit,
         };
         assert_eq!(compatibility.output_signal(output).cached_tokens, expected);
-        compatibility.native_request(request(30, 0));
+        compatibility.native_request(request(30, 0)).unwrap();
         assert_eq!(
             compatibility
                 .output_signal(aisimulate_core::engine::Output {

@@ -335,7 +335,7 @@ mod tests {
     fn destination_admission_does_not_invent_cache_usage() {
         for explicit in [None, Some(0), Some(3)] {
             let state = CompatibilityState::new(MockerConfig::default());
-            let request = state.native_request(DirectRequest::default());
+            let request = state.native_request(DirectRequest::default()).unwrap();
             state.mark_destination(handoff(9), request.request_id);
             state.record_admissions(&[Admission {
                 request_id: request.request_id,
@@ -439,7 +439,7 @@ mod tests {
                 .to_string()
                 .contains("authored KV fetch hints")
         );
-        assert!(state.request_prompt_lengths.lock().is_empty());
+        assert!(state.request_accounting.lock().is_empty());
         request.kv_hints = None;
         request.images.push(aisimulate_core::engine::ImageSpec {
             identity: 1,
@@ -460,6 +460,6 @@ mod tests {
                 .to_string()
                 .contains("image requests")
         );
-        assert!(state.request_prompt_lengths.lock().is_empty());
+        assert!(state.request_accounting.lock().is_empty());
     }
 }
