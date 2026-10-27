@@ -1540,12 +1540,17 @@ async fn responses_rejects_custom_kind_mismatch_before_dispatch() {
         let svc=HarnessService::start([]).await;
         let function=json!({"type":"function","name":"run","parameters":{"type":"object"}});
         let custom=json!({"type":"custom","name":"run"});
+        let search=json!({"type":"tool_search","execution":"client","parameters":{"type":"object","properties":{"query":{"type":"string"}}}});
         for stream in [false,true] {
             for (tools,choice) in [
                 (json!([function.clone()]),json!({"type":"custom","name":"run"})),
                 (json!([custom.clone()]),json!({"type":"function","name":"run"})),
                 (json!([function.clone(),custom.clone()]),json!("auto")),
-                (json!([custom.clone(),function.clone()]),json!("auto"))
+                (json!([custom.clone(),function.clone()]),json!("auto")),
+                (json!([search.clone()]),json!({"type":"custom","name":"tool_search"})),
+                (json!([search.clone()]),json!({"type":"allowed_tools","mode":"required","tools":[{"type":"custom","name":"tool_search"}]})),
+                (json!([]),json!({"type":"custom","name":"missing"})),
+                (json!([function.clone()]),json!({"type":"custom","name":"missing"}))
             ] {
                 let response=post_json(&svc,"/v1/responses",json!({"model":MODEL,"input":"hi","tools":tools,"tool_choice":choice,"stream":stream})).await;
                 assert_eq!(response.status(),reqwest::StatusCode::BAD_REQUEST,"kind mismatch dispatched");

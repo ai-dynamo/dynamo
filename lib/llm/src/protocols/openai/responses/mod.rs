@@ -966,6 +966,12 @@ fn validate_response_tool_kinds(
         match tool {
             Tool::Function(function) => register(None, &function.name, false)?,
             Tool::Custom(custom) => register(None, &custom.name, true)?,
+            // Client search uses the function adapter, never the custom input bridge.
+            Tool::ToolSearch(search)
+                if search.execution == Some(ToolSearchExecutionType::Client) =>
+            {
+                register(None, "tool_search", false)?;
+            }
             Tool::Namespace(namespace) => {
                 for member in &namespace.tools {
                     match member {
@@ -984,11 +990,12 @@ fn validate_response_tool_kinds(
     let validate = |namespace: Option<&str>, name: &str, custom: bool| -> anyhow::Result<()> {
         let resolved = names.resolve_choice(namespace, name)?;
         let (namespace, leaf) = names.decode(&resolved);
-        // Unknown names retain the existing tool-choice validation path.
-        if kinds
+        let declared = kinds
             .get(&(namespace.map(str::to_owned), leaf.to_owned()))
-            .is_some_and(|declared| *declared != custom)
-        {
+            .copied();
+        // Custom choices require a custom declaration. Unknown function names
+        // retain the existing downstream tool-choice validation path.
+        if declared.is_some_and(|declared| declared != custom) || (custom && declared.is_none()) {
             return Err(ResponsesConversionError::InvalidArgument(format!(
                 "Responses tool_choice selects {} tool '{name}', but that kind is not present in tools",
                 if custom { "custom" } else { "function" }
