@@ -181,8 +181,8 @@ them to a deployment that uses Dynamo Frontend routing. For the Frontend's endpo
 ### Operations and Integrations
 
 - **[Request migration](../fault-tolerance/request-migration.md):** when a worker fails during a
-  request, the request does not move to another worker, because the Gateway, not Dynamo, owns the
-  response stream.
+  request, the request does not move to another worker. The EPP pins each request to the worker it
+  picks, and the Frontend sidecar does not migrate a request that is pinned to a worker.
 - **[LoRA adapters](../operations/lora-adapters.md):** not supported.
 - **[Auto deployment with DGDR](../auto-deployment/auto-deploy-with-dgdr.md):** a
   DynamoGraphDeploymentRequest (DGDR) cannot generate or add an EPP component.

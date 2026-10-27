@@ -129,7 +129,9 @@ Gateway topology.
 </ParamField>
 
 <ParamField path="DYN_ROUTER_TRACK_OUTPUT_BLOCKS" type="boolean" default="false">
-  Predicts output blocks during generation and decays them as requests make progress.
+  Has no effect in the Dynamo EPP, which does not report generated tokens to the router. With
+  Dynamo Frontend routing, it predicts output blocks during generation and decays them as requests
+  make progress.
 </ParamField>
 
 <ParamField path="DYN_ROUTER_TRACK_PREFILL_TOKENS" type="boolean" default="true">
