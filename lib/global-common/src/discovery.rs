@@ -133,16 +133,18 @@ pub struct PoolListing {
     pub frontends: Vec<Url>,
     #[serde(default)]
     pub capacity: Vec<Capacity>,
-    /// The only PoolRelay allowed to stream this pool's state, when the
-    /// service knows it. On a trusted network it is [`address_identity`].
+    /// The only PoolRelay allowed to stream this pool's state, by each
+    /// identity it can connect with. On a trusted network these are its pod's
+    /// addresses, as [`address_identity`] writes them: two on a dual-stack
+    /// cluster. Empty when the service does not know the PoolRelay.
     #[serde(default)]
-    pub relay_identity: Option<String>,
+    pub relay_identities: Vec<String>,
 }
 
-/// Names a PoolRelay by its address on a trusted network, as
+/// Names a PoolRelay by one of its addresses on a trusted network, as
 /// `ip:<address>`. An IPv4-mapped IPv6 address is written as IPv4, as
 /// EndpointSlices list it. A router matches a connecting PoolRelay against
-/// [`PoolListing::relay_identity`] with this.
+/// [`PoolListing::relay_identities`] with this.
 pub fn address_identity(address: IpAddr) -> String {
     format!("ip:{}", address.to_canonical())
 }
@@ -195,7 +197,7 @@ mod tests {
                 "capabilities": [],
                 "frontends": [],
                 "capacity": [],
-                "relay_identity": "ip:10.43.66.175"
+                "relay_identities": ["ip:10.43.66.175", "ip:fd00::5"]
             }],
             "complete": true
         }));

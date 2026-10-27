@@ -15,7 +15,7 @@
 //!   | `GET /routers` | | [`RoutersResponse`] |
 //!
 //!   A router matches a connecting PoolRelay against a listing's
-//!   `relay_identity` with [`address_identity`].
+//!   `relay_identities` with [`address_identity`].
 //! - Global Router replicas ([`ReplicaEndpoint`]), and list-and-watch events
 //!   and snapshots ([`WatchEvent`], [`Snapshot`]), which the service's watch
 //!   contract and its clients share.
