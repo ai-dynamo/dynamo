@@ -32,5 +32,5 @@ case "${1:-}" in
 esac
 
 # Reuse per-node engine/sidecar startup, validation, GPU budgeting and cleanup.
-# ROLE enables NIXL; node 0 serves requests and followers relay local KV events.
+# ROLE enables NIXL.
 exec bash "$SCRIPT_DIR/multinode_kv_router_sidecar.sh" "$@"

@@ -16,6 +16,9 @@ source "$DYNAMO_HOME/examples/common/gpu_utils.sh"
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
 source "$DYNAMO_HOME/examples/common/launch_utils.sh"
 
+# The sidecar needs SGLang's Rust server (sglang.api.v1).
+export SGLANG_RUST_SERVER=1
+
 if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
     echo "Usage: NODE_RANK=<rank> DIST_INIT_ADDR=<leader-ip:port> bash $0 [SGLang options...]"
     echo "Run once per node; use the same Dynamo namespace, discovery and event services."
@@ -24,9 +27,10 @@ if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
     echo "          DP_SIZE must be divisible by NNODES so every node owns publishers."
     echo "Model:    MODEL=Qwen/Qwen3-32B, MAX_MODEL_LEN=4096, MAX_CONCURRENT_SEQS=32"
     echo "Role:     ROLE=aggregated|prefill|decode (default: aggregated)"
-    echo "PD:       SGLANG_BOOTSTRAP_HOST=<reachable prefill leader IP> on prefill node 0"
+    echo "PD:       SGLANG_BOOTSTRAP_HOST=<reachable prefill leader IP> on prefill node 0;"
+    echo "          prefill serves its bootstrap registry on SGLANG_HTTP_PORT"
     echo "Ports:    SGLANG_HTTP_PORT=30000, SGLANG_GRPC_PORT=30001, SGLANG_KV_EVENT_PORT=5557"
-    echo "          SGLANG_DISAGGREGATION_BOOTSTRAP_PORT=8998, DYN_SYSTEM_PORT=8081"
+    echo "          SGLANG_DISAGGREGATION_BOOTSTRAP_PORT=8998 (decode default), DYN_SYSTEM_PORT=8081"
     echo "          DYN_HTTP_PORT=8000 is the separately launched frontend's port."
     echo "Other:    SGLANG_PYTHON=python3, SGLANG_HOST=0.0.0.0, SGLANG_PAGE_SIZE=64"
     echo "          CUDA_VISIBLE_DEVICES is inherited. Extra arguments go to SGLang only."
@@ -78,8 +82,12 @@ esac
 case "$ROLE" in
     aggregated) ;;
     prefill|decode)
-        ENGINE_ROLE_ARGS=(--disaggregation-mode "$ROLE" --disaggregation-transfer-backend nixl
-            --disaggregation-bootstrap-port "${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT:-8998}")
+        ENGINE_ROLE_ARGS=(--disaggregation-mode "$ROLE" --disaggregation-transfer-backend nixl)
+        # The Rust server serves prefill's bootstrap on its HTTP port.
+        if [[ "$ROLE" == decode ]]; then
+            ENGINE_ROLE_ARGS+=(--disaggregation-bootstrap-port
+                "${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT:-8998}")
+        fi
         if [[ "$ROLE" == prefill && "$NODE_RANK" == 0 ]]; then
             : "${SGLANG_BOOTSTRAP_HOST:?Set SGLANG_BOOTSTRAP_HOST to the reachable prefill leader address}"
             SIDECAR_ARGS+=(--bootstrap-host "$SGLANG_BOOTSTRAP_HOST")
@@ -96,7 +104,7 @@ print_launch_banner --no-curl "SGLang multinode KV sidecar ($ROLE, node $NODE_RA
 
 trap dynamo_exit_trap EXIT
 
-# Sidecars retry gRPC startup; no sleep or inference health check is needed on followers.
+# Sidecars retry gRPC startup; no sleep or inference health check is needed.
 # Bind KV events only on loopback; engine and sidecar share a network namespace.
 # shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 "$SGLANG_PYTHON" -m sglang.launch_server \
