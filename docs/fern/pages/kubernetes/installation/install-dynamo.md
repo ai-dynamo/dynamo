@@ -327,7 +327,7 @@ If you have separately validated an unsupported forward upgrade, set
 ```bash
 helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
   --namespace $NAMESPACE \
-  --set-string dynamo-operator.unsupportedUpgradeOverride=1.2
+  --set-string dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride=1.2
 ```
 
 For an unsupported downgrade, use the corresponding downgrade override:
@@ -335,19 +335,20 @@ For an unsupported downgrade, use the corresponding downgrade override:
 ```bash
 helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
   --namespace $NAMESPACE \
-  --set-string dynamo-operator.unsupportedDowngradeOverride=1.5
+  --set-string dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride=1.5
 ```
 
 The override must match the installed operator's `N.M` version. After the transition changes the
 installed minor, the old value no longer matches and cannot authorize another unsupported
-transition. An override permits the Helm operation; it does not make that transition a supported
+transition. The override applies only to the `upgradePath` check and cannot bypass sibling
+preflight checks. It permits the Helm operation; it does not make that transition a supported
 upgrade or downgrade path.
 
 The check uses Python's standard library with read-only access to the operator Deployment. Set
-`dynamo-operator.upgradePreflight.image` and `imagePullSecrets` if the cluster must pull the image
-from an internal registry. A failed Job is retained so you can inspect its logs. The supporting
-ServiceAccount, Role, and RoleBinding remain until the next attempt and require manual removal when
-retiring the release.
+`dynamo-operator.upgradePreflight.job.image` and `imagePullSecrets` if the cluster must pull the
+image from an internal registry. A failed Job is retained so you can inspect its logs. The
+supporting ServiceAccount, Role, and RoleBinding remain until the next attempt and require manual
+removal when retiring the release.
 
 ## Alternative: Install with AICR
 

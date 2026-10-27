@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-suite: Dynamo version preflight
+suite: Dynamo upgrade-path preflight
 templates:
-  - templates/upgrade-preflight.yaml
+  - templates/upgrade-preflight/upgrade-path.yaml
 tests:
   - it: preserves the first hook resource apiVersion
     documentSelector: {path: kind, value: ServiceAccount}
@@ -13,7 +13,7 @@ tests:
   - it: runs a bounded compatibility check before install and upgrade
     documentSelector: {path: kind, value: Job}
     asserts:
-      - equal: {path: metadata.name, value: RELEASE-NAME-dynamo-operator-check-dynamo-version}
+      - equal: {path: metadata.name, value: RELEASE-NAME-dynamo-operator-check-upgrade-path}
       - equal: {path: 'metadata.annotations["helm.sh/hook"]', value: 'pre-install,pre-upgrade'}
       - equal: {path: 'metadata.annotations["helm.sh/hook-weight"]', value: '-10'}
       - equal: {path: 'metadata.annotations["helm.sh/hook-output-log-policy"]', value: hook-failed}
@@ -21,7 +21,7 @@ tests:
       - equal: {path: spec.backoffLimit, value: 2}
       - equal: {path: 'spec.template.spec.containers[0].args[3]', value: "1.7.0"}
       - matchRegex: {path: 'spec.template.spec.containers[0].args[0]', pattern: 'def kubernetes_client\('}
-      - matchRegex: {path: 'spec.template.spec.containers[0].args[0]', pattern: 'def check\('}
+      - matchRegex: {path: 'spec.template.spec.containers[0].args[0]', pattern: 'def check_upgrade_path\('}
 
   - it: omits the check when this release does not manage the operator
     set:
@@ -40,8 +40,8 @@ tests:
 
   - it: passes source-bound upgrade and downgrade overrides to the check
     set:
-      dynamo-operator.unsupportedUpgradeOverride: "1.2"
-      dynamo-operator.unsupportedDowngradeOverride: "1.5"
+      dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride: "1.2"
+      dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride: "1.5"
     documentSelector: {path: kind, value: Job}
     asserts:
       - equal: {path: 'spec.template.spec.containers[0].args[4]', value: "1.2"}
@@ -59,7 +59,7 @@ tests:
 
   - it: lets OpenShift assign the UID while retaining other security defaults
     set:
-      dynamo-operator.upgradePreflight.podSecurityContext:
+      dynamo-operator.upgradePreflight.job.podSecurityContext:
         runAsNonRoot: true
         seccompProfile: {type: RuntimeDefault}
     documentSelector: {path: kind, value: Job}
@@ -82,7 +82,7 @@ tests:
 
   - it: uses independently configured preflight affinity
     set:
-      dynamo-operator.upgradePreflight.affinity:
+      dynamo-operator.upgradePreflight.job.affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
@@ -99,4 +99,4 @@ tests:
       dynamo-operator.fullnameOverride: a-very-long-operator-name-that-needs-truncation-for-the-hook
     documentSelector: {path: kind, value: Job}
     asserts:
-      - matchRegex: {path: metadata.name, pattern: '^.{1,42}-check-dynamo-version$'}
+      - matchRegex: {path: metadata.name, pattern: '^.{1,44}-check-upgrade-path$'}
