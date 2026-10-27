@@ -116,6 +116,9 @@ areas:
   path_globs:
   - components/src/dynamo/triton/**
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
+- label: sidecar
+  github_team: '@ai-dynamo/dynamo-sidecar-codeowners'
+  path_globs: []
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:
@@ -1099,10 +1102,12 @@ shared:
   owners:
   - performance
   - backend-sglang
+  - sidecar
 - glob: lib/mocker/servers/trtllm/
   owners:
   - performance
   - backend-trtllm
+  - sidecar
 - glob: lib/runtime/src/nvtx.rs
   owners:
   - runtime
@@ -1111,10 +1116,72 @@ shared:
   owners:
   - runtime
   - backend-vllm
+  - sidecar
 - glob: lib/sidecar/testkit/tests/support/sglang.rs
   owners:
   - runtime
   - backend-sglang
+  - sidecar
+- glob: components/src/dynamo/sglang/sidecar.py
+  owners:
+  - backend-sglang
+  - sidecar
+- glob: components/src/dynamo/trtllm/sidecar.py
+  owners:
+  - backend-trtllm
+  - sidecar
+- glob: components/src/dynamo/vllm/sidecar.py
+  owners:
+  - backend-vllm
+  - sidecar
+- glob: docs/fern/**/*sidecar*
+  owners:
+  - docs
+  - sidecar
+- glob: lib/bindings/python/tests/test_sidecar_startup.py
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/mocker/servers/
+  owners:
+  - performance
+  - sidecar
+- glob: lib/sidecar/Dockerfile
+  owners:
+  - ops
+  - sidecar
+- glob: lib/sidecar/README.md
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/common/
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/dynamo-sidecar
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/sglang/
+  owners:
+  - backend-sglang
+  - sidecar
+- glob: lib/sidecar/testkit/
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/trtllm/
+  owners:
+  - backend-trtllm
+  - sidecar
+- glob: lib/sidecar/vllm/
+  owners:
+  - backend-vllm
+  - sidecar
+- glob: tests/serve/test_sidecar.py
+  owners:
+  - runtime
+  - sidecar
 - glob: tests/deploy/
   owners:
   - ops
