@@ -28,6 +28,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.lora.runtime import RuntimeLoRAConfigurationError
 from dynamo.common.model_fetch import fetch_model, needs_local_model_path
 from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
@@ -930,6 +931,17 @@ async def register_vllm_model(
         needs: Peer worker types required to serve traffic, in DNF form
             (list of alternative AND-sets).
     """
+    if env_bool("DYN_LORA_RUNTIME_LOAD_ENABLED"):
+        # ModelType flags do not expose Python equality or bitwise membership.
+        generate_types = {
+            str(ModelType.Chat),
+            str(ModelType.Completions),
+            str(ModelType.Chat | ModelType.Completions),
+        }
+        if model_input != ModelInput.Tokens or str(model_type) not in generate_types:
+            raise RuntimeLoRAConfigurationError(
+                "runtime LoRA protocol version 2 requires tokenized chat/completions workers"
+            )
     runtime_config = ModelRuntimeConfig()
     publish_runtime_lora_capability(runtime_config, config, worker_type)
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
