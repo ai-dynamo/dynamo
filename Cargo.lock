@@ -847,6 +847,7 @@ dependencies = [
  "matchit 0.8.4",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "rustversion",
@@ -2476,6 +2477,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-global-common"
+version = "1.7.0"
+
+[[package]]
+name = "dynamo-global-discovery-client"
+version = "1.7.0"
+
+[[package]]
+name = "dynamo-global-discovery-service"
+version = "1.7.0"
+
+[[package]]
+name = "dynamo-global-frontend"
+version = "1.7.0"
+
+[[package]]
+name = "dynamo-global-router"
+version = "1.7.0"
+
+[[package]]
+name = "dynamo-global-view-broadcaster"
+version = "1.7.0"
+
+[[package]]
+name = "dynamo-global-view-receiver"
+version = "1.7.0"
+
+[[package]]
 name = "dynamo-kv-hashing"
 version = "1.7.0"
 dependencies = [
@@ -2604,6 +2633,7 @@ dependencies = [
  "llm-tokenizer",
  "lru",
  "memfile",
+ "mime",
  "minijinja",
  "mockito",
  "modelexpress-client",
@@ -5944,6 +5974,23 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http 1.4.1",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin 0.9.8",
+ "version_check",
 ]
 
 [[package]]

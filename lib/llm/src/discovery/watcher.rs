@@ -100,6 +100,18 @@ fn worker_set_key(
     .expect("serializing WorkerSet key strings cannot fail")
 }
 
+/// Refresh committed capability records without changing controller admission.
+fn update_image_edit_capabilities(worker_set: &WorkerSet, members: &[DesiredInstance]) {
+    if let Some(admission) = &worker_set.image_edit_admission {
+        admission.replace(members.iter().map(|member| {
+            (
+                member.mcid.instance_id,
+                super::image_edits::advertised_limit(&member.card),
+            )
+        }));
+    }
+}
+
 fn model_card_endpoint_id(mcid: &ModelCardInstanceId) -> EndpointId {
     EndpointId {
         namespace: mcid.namespace.clone(),
@@ -469,6 +481,11 @@ impl ModelWatcher {
             WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
         worker_set.set_lifecycle_cancellation(cancellation.clone());
+        if card.model_type.supports_images() {
+            worker_set.image_edit_admission = Some(Arc::new(
+                super::image_edits::ImageEditAdmission::new(admitted_ids.clone()),
+            ));
+        }
         worker_set.set_topology_target(super::CommittedWorkerSetTarget {
             endpoint: endpoint.clone(),
             group: spec.key.id(),
@@ -900,7 +917,14 @@ impl ModelWatcher {
                     Annotated<NvImagesResponse>,
                 >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
-                worker_set.images_engine = Some(Arc::new(images_router));
+                let admission = worker_set
+                    .image_edit_admission
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("image admission state was not initialized"))?;
+                worker_set.images_engine = Some(Arc::new(super::image_edits::ImageEditEngine {
+                    router: images_router,
+                    admission: admission.clone(),
+                }));
             }
 
             if card.model_type.supports_videos() {
@@ -1112,6 +1136,7 @@ impl ControllerHost for ModelWatcher {
             .worker_set
             .take()
             .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
+        update_image_edit_capabilities(&worker_set, members);
         let mut committed_members = members
             .iter()
             .map(|member| (member.key.clone(), member.card.clone()))
@@ -1195,6 +1220,13 @@ impl ControllerHost for ModelWatcher {
                 .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
                 .collect(),
         )?;
+        if let Some(worker_set) = self
+            .manager
+            .get_committed_model(&key.model_name)
+            .and_then(|model| model.get_worker_set(&key.worker_set_key))
+        {
+            update_image_edit_capabilities(&worker_set, members);
+        }
         for (name, card) in &desired {
             if !was_available.get(name).copied().unwrap_or(false)
                 && self.manager.get_committed_model(name).is_some()
@@ -1245,6 +1277,7 @@ impl ControllerHost for ModelWatcher {
             .worker_set
             .take()
             .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
+        update_image_edit_capabilities(&worker_set, members);
         let mut committed_members = members
             .iter()
             .map(|member| (member.key.clone(), member.card.clone()))
