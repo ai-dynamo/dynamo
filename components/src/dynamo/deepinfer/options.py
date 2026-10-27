@@ -252,7 +252,8 @@ def add_deepinfer_arguments(parser: argparse.ArgumentParser) -> None:
         "--prefix-ssd-dir",
         default=None,
         help="Directory of the SSD tier's files (one per rank, recreated at every "
-        "start); needs --prefix-ssd-bytes.",
+        "start); needs --prefix-ssd-bytes. One engine per directory: a second "
+        "engine on it fails at startup.",
     )
     g.add_argument(
         "--prefix-ssd-bytes",

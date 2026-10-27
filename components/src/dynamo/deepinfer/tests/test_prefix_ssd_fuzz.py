@@ -79,9 +79,7 @@ def test_random_traffic_keeps_the_tiers_consistent(
     gpu_blocks = rnd.choice([32, 40, 48, 64])
     monkeypatch.setenv("DEEPINFER_FAKE_NUM_GPU_BLOCKS", str(gpu_blocks))
     monkeypatch.setattr(prefix, "SSD_MAX_INFLIGHT_WRITES", rnd.choice([1, 2, 64]))
-    monkeypatch.setattr(prefix, "SSD_PENDING_WRITES_FACTOR", rnd.choice([0, 1, 4]))
     monkeypatch.setattr(prefix, "SSD_MIN_READ_BLOCKS", rnd.choice([1, 1, 4, 8]))
-    monkeypatch.setattr(prefix, "SSD_WAIT_MIN_BLOCKS", rnd.choice([1, 1, 2, 64]))
     monkeypatch.setattr(prefix, "SSD_MAX_PREFETCH_READS", rnd.choice([1, 2, 8]))
     monkeypatch.setattr(prefix, "SSD_PREFETCH_ROWS_FRACTION", rnd.choice([0.25, 1.0]))
     d = Driver(
@@ -169,8 +167,9 @@ def test_random_traffic_keeps_the_tiers_consistent(
         # lands.
         assert cache._reads_inflight == len(reads)
         assert cache._reading_rows == sum(len(t.blocks) for t in reads)
-        bound = prefix.SSD_PENDING_WRITES_FACTOR * pool.max_inflight_writes
-        assert len(d.cache._pending_writes) <= bound
+        # A live queued write has its block on a host row: the host bounds them.
+        waiting = {id(e[2]) for e in cache._pending_writes if cache._write_pending(e)}
+        assert len(waiting) <= cache._host.capacity
         if step == steps // 2:
             quiesce(d, io, live, fail)
     quiesce(d, io, live, fail)

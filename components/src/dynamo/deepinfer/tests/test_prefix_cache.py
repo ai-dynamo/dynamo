@@ -4,6 +4,7 @@
 """PrefixCacheManager over the CPU fake of DeepInfer: hits, checkpoints,
 eviction, refcounts and events."""
 
+import fcntl
 import hashlib
 import os
 import pickle
@@ -835,7 +836,7 @@ def test_host_eviction_of_a_written_block_moves_it_to_ssd_without_io(tmp_path, i
 
 
 def test_ssd_hit_warms_host_and_the_next_request_hits_from_host(tmp_path, io):
-    d = Driver(ssd_runner(tmp_path, rows=3))
+    d = Driver(ssd_runner(tmp_path, rows=3, ssd_wait_ms=0))
     cold = Driver(make_runner("none"))
     a, b = prompt(600, salt=1), prompt(600, salt=2)
     first = d.run("a", a)
@@ -1031,7 +1032,7 @@ def test_a_burst_over_the_cap_is_written_root_first_within_the_cap(
     d.close()
 
 
-def test_pending_writes_are_bounded_and_the_deepest_are_forgotten(
+def test_pending_writes_keep_every_live_entry_and_prune_only_stale_ones(
     tmp_path, io, monkeypatch
 ):
     from dynamo.deepinfer.kv_cache import prefix
@@ -1042,9 +1043,14 @@ def test_pending_writes_are_bounded_and_the_deepest_are_forgotten(
     d.run("a", p)
     io.hold = True
     evict_all(d)
-    # The root is written; of the seven waiting, four fit (4 x cap): the
-    # deepest three are forgotten.
-    assert sorted(e[0] for e in d.cache._pending_writes) == [1, 2, 3, 4]
+    # The root is written; all seven others wait, however many the cap allows.
+    assert sorted(e[0] for e in d.cache._pending_writes) == [1, 2, 3, 4, 5, 6, 7]
+    # Past the prune threshold the stale entries go and the live ones stay.
+    block = d.cache._pending_writes[0][2]
+    for _ in range(1100):
+        d.cache._queue_write(block, row=-1)
+    d.cache._drain_writes(prefix._Evicted())
+    assert sorted(e[0] for e in d.cache._pending_writes) == [1, 2, 3, 4, 5, 6, 7]
     io.hold = False
     io.release()
     for _ in range(12):
@@ -1210,7 +1216,7 @@ def test_write_error_leaves_the_block_unwritten_and_cached(tmp_path, io):
 
 
 def test_failed_read_keeps_blocks_recomputed_meanwhile(tmp_path, io):
-    d = Driver(ssd_runner(tmp_path, rows=3))
+    d = Driver(ssd_runner(tmp_path, rows=3, ssd_wait_ms=0))
     a, b = prompt(600, salt=1), prompt(600, salt=2)
     d.run("a", a)
     evict_all(d)
@@ -1243,7 +1249,7 @@ def test_failed_read_keeps_blocks_recomputed_meanwhile(tmp_path, io):
 
 
 def test_ssd_read_waits_for_copies_that_still_use_its_rows(tmp_path, io):
-    d = Driver(ssd_runner(tmp_path, rows=8, ssd_blocks=64))
+    d = Driver(ssd_runner(tmp_path, rows=8, ssd_blocks=64, ssd_wait_ms=0))
     a, b = prompt(1200, salt=1), prompt(600, salt=2)
     d.run("a", a)
     evict_all(d)
@@ -1320,7 +1326,7 @@ def test_read_skips_blocks_evicted_since_the_lookup(tmp_path, io):
 
 
 def test_blocks_being_read_keep_their_slots(tmp_path, io):
-    d = Driver(ssd_runner(tmp_path, rows=3))
+    d = Driver(ssd_runner(tmp_path, rows=3, ssd_wait_ms=0))
     a, b = prompt(600, salt=1), prompt(600, salt=2)
     d.run("a", a)
     evict_all(d)
@@ -1633,10 +1639,10 @@ def park_on_ssd(d: Driver, prompts: list[list[int]], fillers: int) -> None:
 
 
 def wait_for_ssd(monkeypatch, min_blocks: int = 1):
-    """Let short runs wait for their read, with a clock the test sets."""
+    """Let short runs be read, and so waited for, with a clock the test sets."""
     from dynamo.deepinfer.kv_cache import prefix
 
-    monkeypatch.setattr(prefix, "SSD_WAIT_MIN_BLOCKS", min_blocks)
+    monkeypatch.setattr(prefix, "SSD_MIN_READ_BLOCKS", min_blocks)
     return [0.0]
 
 
@@ -1734,10 +1740,12 @@ def test_a_read_that_fails_while_the_request_waits_ends_the_wait(
 
 
 @pytest.mark.parametrize(
-    "min_blocks, wait_ms", [(4, 50.0), (1, 0.0)], ids=["short run", "wait off"]
+    "min_blocks, wait_ms, reads",
+    [(4, 50.0, False), (1, 0.0, True)],
+    ids=["too short to read", "wait off"],
 )
 def test_short_runs_and_no_wait_are_admitted_at_once(
-    tmp_path, io, monkeypatch, min_blocks, wait_ms
+    tmp_path, io, monkeypatch, min_blocks, wait_ms, reads
 ):
     wait_for_ssd(monkeypatch, min_blocks)
     d = Driver(ssd_runner(tmp_path, rows=3, ssd_wait_ms=wait_ms))
@@ -1746,9 +1754,10 @@ def test_short_runs_and_no_wait_are_admitted_at_once(
     blocks = [d.cache._blocks[h] for h in chain(a)]
     io.hold = True
     d.add("x", a, max_tokens=50)
-    # Best effort as before: it goes on and the read still starts.
+    # A run below the read minimum is neither read nor waited for; with the wait
+    # off the read is best effort: the request goes on and it still starts.
     assert d.admissions["x"].admitted and d.admissions["x"].hit_tokens == 0
-    assert all(x.reading for x in blocks) and d.cache.ssd_waits == 0
+    assert all(x.reading for x in blocks) == reads and d.cache.ssd_waits == 0
     d.apply(aborts=["x"])
     io.hold = False
     io.release()
@@ -1803,6 +1812,35 @@ def parked_pair(tmp_path, monkeypatch):
 
 def enqueue(d: Driver, tokens: Any, seq_id: int = 90) -> None:
     d.cache.on_enqueue(SimpleNamespace(seq_id=seq_id), tokens)
+
+
+def test_only_a_request_behind_others_is_prefetched_and_admit_reuses_its_hashes(
+    tmp_path, io, monkeypatch
+):
+    d, (a, _) = parked_pair(tmp_path, monkeypatch)
+    cache = d.cache
+    queued, lookups = [], []
+    on_enqueue, lookup = cache.on_enqueue, cache._lookup
+    cache.on_enqueue = lambda seq, tokens: (
+        queued.append(seq.request_id),
+        on_enqueue(seq, tokens),
+    )
+    cache._lookup = lambda req, n: (lookups.append(req), lookup(req, n))[1]
+    d.apply(
+        adds=[
+            AddReq(rid, prompt_bytes(a.tolist()), sampling={"max_tokens": 4})
+            for rid in ("x1", "x2")
+        ]
+    )
+    # x1 is first in line and x2 is behind it.
+    assert queued == ["x2"]
+    [prefetched] = [r for r in lookups if r.seq.request_id == "x2"][:1]
+    assert [r for r in lookups if r.seq.request_id == "x2"][1] is prefetched
+    assert not cache._prefetched
+    io.hold = False
+    io.release()
+    d.apply(aborts=["x1", "x2"])
+    d.close()
 
 
 def test_enqueue_starts_the_read_and_the_request_then_hits_from_host(
@@ -1942,7 +1980,9 @@ def test_restart_starts_with_an_empty_ssd_tier(tmp_path, io):
     d.apply()
     path = d.cache._ssd.path
     assert any(file_row(d, x.ssd_slot) != bytes(512) for x in d.cache._blocks.values())
-    # A crash leaves the file (and its blocks) behind: the next start is empty.
+    # A crash leaves the file (and its blocks) behind, and its lock is gone: the
+    # next start is empty.
+    fcntl.flock(d.cache._ssd._lock_fd, fcntl.LOCK_UN)
     d2 = Driver(ssd_runner(tmp_path, rows=3))
     pool = d2.cache._ssd
     assert pool.path == path and pool.num_free == pool.capacity
@@ -2028,6 +2068,7 @@ def test_ssd_tier_is_clamped_to_snapshots_and_free_space(
         assert [h.cache._ssd.capacity for h in halves] == [19, 19]
         for h in halves:  # a crash leaves the files behind: close only the pools
             os.close(h.cache._ssd._fd)
+            os.close(h.cache._ssd._lock_fd)
             h.cache._ssd._closed = True
     for f in tmp_path.glob("*.kv"):
         f.unlink()

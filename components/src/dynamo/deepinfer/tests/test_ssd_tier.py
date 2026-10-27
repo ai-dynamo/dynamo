@@ -219,6 +219,7 @@ def test_file_is_recreated_empty(tmp_path):
     first = SSDPool(path, 4096, 4 * 4096)
     first.store([np.full(4096, 7, dtype=np.uint8)], [2])
     drain(first, 1)
+    os.close(first._lock_fd)  # the old process is gone, and its lock with it
     second = SSDPool(path, 4096, 4 * 4096)
     try:
         assert os.path.getsize(path) == 4 * 4096
@@ -270,3 +271,13 @@ def test_failing_to_preallocate_turns_the_tier_off(tmp_path, monkeypatch, code):
     pool = SSDPool(str(path), ROW_BYTES, 8 * STRIDE, reserve_fraction=0)
     assert pool.capacity == 0 and pool.alloc() is None
     assert not path.exists()
+
+
+def test_a_second_engine_on_the_directory_is_refused(tmp_path):
+    path = str(tmp_path / "rank0.kv")
+    first = SSDPool(path, 4096, 4 * 4096)
+    with pytest.raises(RuntimeError, match="in use by another engine"):
+        SSDPool(path, 4096, 4 * 4096)
+    assert os.path.getsize(path) == 4 * 4096  # the first one's file is intact
+    first.close()
+    SSDPool(path, 4096, 4 * 4096).close()

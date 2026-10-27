@@ -18,6 +18,7 @@ rows and events it is handed (numpy rows for tests).
 
 from __future__ import annotations
 
+import fcntl
 import glob
 import importlib
 import logging
@@ -80,6 +81,7 @@ class SSDPool:
         io_threads: int = DEFAULT_IO_THREADS,
     ) -> None:
         self.path = path
+        self._lock_fd = self._claim()
         self.row_bytes = row_bytes
         self.stride = _round_up(row_bytes, ALIGN)
         self.max_inflight_writes = max_inflight_writes
@@ -103,9 +105,29 @@ class SSDPool:
         except BaseException:
             os.close(self._fd)
             os.unlink(path)
+            os.close(self._lock_fd)
             raise
         if not reserved:
             self._turn_off()
+
+    def _claim(self) -> int:
+        """Lock ``<path>.lock`` until the pool is closed. The file is named by
+        rank alone, so two engines on one directory would delete each other's
+        files and count them as free space."""
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        fd = os.open(self.path + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            raise RuntimeError(
+                f"{self.path} is in use by another engine: give each engine on "
+                "this node its own --prefix-ssd-dir"
+            ) from None
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
 
     def _turn_off(self) -> None:
         """No file and no slots: ``capacity`` is 0 and nothing can be stored."""
@@ -113,6 +135,8 @@ class SSDPool:
             os.close(self._fd)
             os.unlink(self.path)
         self._fd = -1
+        os.close(self._lock_fd)
+        self._lock_fd = -1
         self.capacity = 0
         self._free = []
         self._closed = True
@@ -302,3 +326,4 @@ class SSDPool:
             os.unlink(self.path)
         except FileNotFoundError:
             pass
+        os.close(self._lock_fd)
