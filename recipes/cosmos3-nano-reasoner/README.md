@@ -13,8 +13,8 @@ Dynamo.
 
 | Configuration | GPUs | Precision | Routing |
 | --- | --- | --- | --- |
-| `vllm/agg-h200-round-robin` | 4x H200 | FP8 | Round robin, no affinity |
-| `vllm/agg-h200-session-affinity` | 4x H200 | FP8 | Round robin with 300-second session affinity |
+| `vllm/agg-h200-round-robin` | 8x H200 | FP8 | Round robin, no affinity |
+| `vllm/agg-h200-session-affinity` | 8x H200 | FP8 | Round robin with 300-second session affinity |
 
 The workers use the NIM entrypoint for profile selection and launch
 `dynamo.vllm` internally. This recipe has been adapted from a deployment
@@ -25,7 +25,7 @@ sweep against the aggregated frontend.
 
 - A Kubernetes cluster with the Dynamo platform and the
   `nvidia.com/v1beta1` `DynamoGraphDeployment` API.
-- Four available H200 GPUs.
+- Eight available H200 GPUs.
 - A ReadWriteMany storage class.
 - An NGC API key with access to the Cosmos3 NIM image and model artifacts.
 

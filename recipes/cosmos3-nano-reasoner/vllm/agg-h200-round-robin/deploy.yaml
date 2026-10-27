@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Experimental Cosmos3 Nano Reasoner deployment for four H200 GPUs.
+# Experimental Cosmos3 Nano Reasoner deployment for eight H200 GPUs.
 # Requests are distributed by pure round robin; session affinity is disabled.
 # Cluster-specific scheduling, credentials, and registry configuration are
 # intentionally omitted from this portable base.
@@ -57,7 +57,7 @@ spec:
     - name: Worker
       type: worker
       runtimeVersionOverride: "1.5.0"
-      replicas: 4
+      replicas: 8
       sharedMemorySize: 64Gi
       podTemplate:
         spec:
@@ -96,6 +96,10 @@ spec:
                   value: tcp
                 - name: DYN_SELF_HOST_METADATA
                   value: "true"
+                - name: VLLM_EARLY_UUID_LOOKUPS
+                  value: "1"
+                - name: VLLM_UUID_AUTO_DERIVE
+                  value: "1"
                 - name: TQDM_DISABLE
                   value: "1"
                 - name: NIM_ENABLE_WARMUP
@@ -112,11 +116,11 @@ spec:
                   value: "1"
               resources:
                 requests:
-                  cpu: "32"
+                  cpu: "16"
                   memory: 96Gi
                   nvidia.com/gpu: "1"
                 limits:
-                  cpu: "32"
+                  cpu: "16"
                   memory: 128Gi
                   nvidia.com/gpu: "1"
               volumeMounts:

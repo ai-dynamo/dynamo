@@ -29,7 +29,7 @@ metadata:
     app.kubernetes.io/component: benchmark
 spec:
   backoffLimit: 1
-  activeDeadlineSeconds: 7200
+  activeDeadlineSeconds: 14400
   template:
     metadata:
       labels:
@@ -138,6 +138,21 @@ spec:
                   "Explain how the scene changes from the beginning to the end.",
                   "Describe any interactions between people, animals, or objects.",
                   "Summarize the sequence of events in chronological order.",
+                  "Describe the setting and environment shown in this video.",
+                  "What is the most important event in this video, and why?",
+                  "Describe the camera viewpoint and any camera motion in this video.",
+                  "List the colors and materials of the most prominent objects in this video.",
+                  "Estimate how many distinct people or animals appear in this video.",
+                  "Describe the motion of the fastest-moving subject in this video.",
+                  "What happens in the first five seconds of this video?",
+                  "What happens in the last five seconds of this video?",
+                  "Describe the lighting conditions and time of day in this video.",
+                  "Identify any text, signs, or symbols visible in this video.",
+                  "Describe the spatial layout of the scene in this video.",
+                  "What might happen immediately after this video ends?",
+                  "Describe any safety hazards or unusual events in this video.",
+                  "Explain the likely purpose or intent of the main subject in this video.",
+                  "Write a one-sentence caption for this video.",
               ]
               if questions_per_video > len(questions):
                   raise SystemExit(
@@ -249,9 +264,9 @@ spec:
             - name: VIDEO_POOL_SIZE
               value: "200"
             - name: QUESTIONS_PER_VIDEO
-              value: "5"
+              value: "20"
             - name: TOTAL_REQUEST_COUNT
-              value: "1000"
+              value: "4000"
             - name: CONCURRENCY_LEVELS
               value: "1 2 4 8 16"
             - name: WARMUP_REQUEST_COUNT

@@ -6,8 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # Cosmos3 Nano Reasoner Video Benchmark
 
 This benchmark uses AIPerf 0.12.0 to measure streaming video inference against
-the Cosmos3 Nano Reasoner Dynamo frontend. It runs 1,000 single-turn requests
-at concurrency levels 1, 2, 4, 8, and 16: five questions for each of 200
+the Cosmos3 Nano Reasoner Dynamo frontend. It runs 4,000 single-turn requests
+at concurrency levels 1, 2, 4, 8, and 16: 20 questions for each of 200
 30-second videos. Every request uses a fixed 128-token output length.
 
 The manifest pins the private dataset
@@ -20,7 +20,7 @@ sorted path order.
 
 The target deployment must be ready, `shared-model-cache` must be mounted in
 the namespace, and `hf-token-secret` must contain a read-only `HF_TOKEN`.
-Choose the profile matching the deployed four-worker target.
+Choose the profile matching the deployed eight-worker target.
 
 From the repository root:
 
@@ -35,7 +35,7 @@ kubectl -n "$NAMESPACE" apply \
 kubectl -n "$NAMESPACE" logs -f job/cosmos3-nano-reasoner-perf
 kubectl -n "$NAMESPACE" wait \
   --for=condition=Complete job/cosmos3-nano-reasoner-perf \
-  --timeout=7200s
+  --timeout=14400s
 ```
 
 The log ends with the artifact directory. It has one subdirectory per
@@ -61,7 +61,7 @@ kubectl -n "$NAMESPACE" cp \
 ## Interpreting the sweep
 
 The five concurrency levels execute sequentially with stable video URLs. Each
-video has five self-contained questions sharing one session ID. This gives the
+video has 20 self-contained questions sharing one session ID. This gives the
 router repeated requests for the same video within every concurrency level,
 rather than relying only on cache state carried over from an earlier level.
 
@@ -76,7 +76,7 @@ For `round-robin`, AIPerf does not send that ID as a routing header. For
 `session-affinity`, it adds `--session-header X-Dynamo-Session-ID`, so every
 replay of a given video carries the same header and remains pinned to one
 worker while the 300-second affinity TTL is active. The two profiles otherwise
-use the same four-worker deployment shape and benchmark settings.
+use the same eight-worker deployment shape and benchmark settings.
 
 ## Run the smoke test
 
@@ -97,35 +97,37 @@ kubectl -n "$NAMESPACE" logs -f job/cosmos3-nano-reasoner-smoke
 
 ## Compare the routing profiles
 
-Deploy and benchmark one profile at a time so both runs use exactly four H200
-workers. Compare request throughput, output tokens/s, TTFT, TPOT, and
-prompt-cache reads at each concurrency level. In pure round robin, the five
-questions can land on different workers. With session affinity, all five are
+Deploy and benchmark one profile at a time so both runs use exactly eight H200
+workers. Compare request throughput, output tokens/s, TTFT, request latency,
+and ITL at each concurrency level. In pure round robin, the 20
+questions can land on different workers. With session affinity, all 20 are
 pinned to the worker selected for that video.
 
 ## Measured results
 
-The following single-run measurements were collected on four H200 workers.
-Every row contains 1,000 successful requests with no errors. Output length was
-fixed at 128 tokens, so request and output-token throughput scale together.
+The following single-run AIPerf measurements were collected on eight H200
+workers with the manifests in this directory. Every row contains 4,000
+successful requests with no errors. Output length was fixed at 128 tokens, so
+request and output-token throughput scale together.
 
-| Concurrency | Profile | Requests/s | Output tokens/s | TTFT p50 / p95 (ms) | Request latency p50 / p95 (ms) | ITL p50 / p95 (ms) | Prompt cache read |
-|---:|---|---:|---:|---:|---:|---:|---:|
-| 1 | Round robin | 1.51 | 193 | 456 / 496 | 722 / 801 | 2.18 / 2.56 | 0.2% |
-| 1 | Session affinity | 2.03 | 260 | 140 / 487 | 424 / 771 | 2.15 / 2.56 | 0.1% |
-| 2 | Round robin | 3.48 | 445 | 413 / 480 | 633 / 781 | 2.18 / 2.58 | 25.1% |
-| 2 | Session affinity | 4.21 | 538 | 142 / 498 | 424 / 780 | 2.16 / 2.56 | 0.5% |
-| 4 | Round robin | 6.56 | 839 | 432 / 559 | 680 / 865 | 2.23 / 2.73 | 45.7% |
-| 4 | Session affinity | 8.29 | 1,060 | 142 / 506 | 426 / 785 | 2.17 / 2.57 | 1.0% |
-| 8 | Round robin | 10.20 | 1,305 | 525 / 694 | 826 / 1,062 | 2.52 / 3.49 | 42.1% |
-| 8 | Session affinity | 14.62 | 1,871 | 210 / 322 | 529 / 665 | 2.50 / 3.22 | 96.0% |
-| 16 | Round robin | 12.69 | 1,625 | 794 / 1,409 | 1,183 / 1,846 | 2.98 / 4.85 | 43.4% |
-| 16 | Session affinity | 20.64 | 2,642 | 359 / 614 | 735 / 1,030 | 2.90 / 3.94 | 93.0% |
+| Concurrency | Profile | Requests/s | Output tokens/s | TTFT p50 / p95 (ms) | Request latency p50 / p95 (ms) | ITL p50 / p95 (ms) |
+|---:|---|---:|---:|---:|---:|---:|
+| 1 | Round robin | 1.95 | 250 | 61 / 523 | 378 / 812 | 2.21 / 2.65 |
+| 1 | Session affinity | 2.74 | 351 | 57 / 85 | 339 / 632 | 2.20 / 2.62 |
+| 2 | Round robin | 4.10 | 524 | 60 / 530 | 368 / 817 | 2.18 / 2.65 |
+| 2 | Session affinity | 5.69 | 728 | 58 / 137 | 339 / 634 | 2.20 / 2.65 |
+| 4 | Round robin | 7.98 | 1,021 | 61 / 541 | 372 / 833 | 2.19 / 2.66 |
+| 4 | Session affinity | 11.37 | 1,456 | 58 / 68 | 340 / 595 | 2.20 / 2.66 |
+| 8 | Round robin | 14.60 | 1,869 | 99 / 625 | 401 / 939 | 2.28 / 2.90 |
+| 8 | Session affinity | 22.49 | 2,879 | 58 / 448 | 340 / 630 | 2.21 / 2.65 |
+| 16 | Round robin | 21.43 | 2,743 | 333 / 803 | 686 / 1,233 | 2.61 / 4.16 |
+| 16 | Session affinity | 39.18 | 5,016 | 62 / 135 | 395 / 503 | 2.58 / 3.33 |
 
 Session affinity improved request throughput at every tested concurrency. At
-concurrency 16 it delivered 63% more requests and output tokens per second,
-while reducing TTFT p50 by 55% and request-latency p50 by 38%. The largest
-TTFT improvement appears in the median because four repeat questions can reuse
-per-video locality after the first request. The reported prompt-cache counter
-does not account for every form of multimodal reuse and should not be treated
-as a direct measurement of video-cache hits.
+concurrency 16 it delivered 83% more requests and output tokens per second,
+while reducing TTFT p50 by 81% and request-latency p50 by 42%. Each worker
+fetches and decodes a video the first time it sees it and reuses the processed
+video for later questions. Round robin spreads a video's 20 questions across
+up to eight workers, so the same video is processed on each of them; session
+affinity processes it once. The gap therefore shows mainly in TTFT p95 at low
+concurrency and in every metric once the workers are saturated.
