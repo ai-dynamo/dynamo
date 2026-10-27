@@ -94,13 +94,15 @@ export DYN_LORA_ENABLED=true
 export DYN_LORA_RUNTIME_LOAD_ENABLED=true
 export DYN_LORA_DOWNLOADER_PLUGIN=my_package.wandb_resolver:resolver
 export DYN_LORA_ALLOWED_SCHEMES=wandb-artifact
-export DYN_LORA_PATH="$HOME/.cache/dynamo_loras"
+export DYN_LORA_PATH="$HOME/.cache/dynamo_runtime_loras/worker-0"
 mkdir -p "$DYN_LORA_PATH"
 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enable-lora \
   --max-lora-rank 64 --max-loras 4 --max-cpu-loras 4
 ```
 
 Scope the switches to the frontend and eligible aggregated vLLM processes. Leave runtime loading disabled for other backends and disaggregated workers; their existing explicit-load behavior is unchanged with the flag disabled.
+
+Give each worker process its own `DYN_LORA_PATH`; do not share a cache directory between worker processes without external coordination. The example uses `worker-0`; assign a different directory to each additional worker.
 
 `DYN_LORA_DOWNLOADER_PLUGIN` accepts a resolver instance, a class with a zero-argument constructor, or a zero-argument factory in `module:object` or `module.object` form. The resulting object must expose `protocol_version = 2`, a non-empty lowercase `schemes` set, and an asynchronous `resolve(*, source_uri, context)` method. It returns a `ResolvedLoRA` whose `local_path` is an immutable snapshot directory under `DYN_LORA_PATH` and whose `source_revision` identifies an immutable provider revision. `DYN_LORA_ALLOWED_SCHEMES` must explicitly intersect the plugin's declared schemes; built-in explicit-load schemes are not enabled automatically.
 
