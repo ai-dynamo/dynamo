@@ -195,10 +195,19 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .filter(|thinking| {
                 matches!(
                     thinking.thinking_type.as_str(),
-                    "enabled" | "disabled" | "adaptive"
+                    "enabled" | "disabled" | "adaptive" | "between_tools"
                 )
             })
-            .map(|thinking| serde_json::json!({"type": thinking.thinking_type}));
+            .map(|thinking| {
+                // The existing worker contract can disable up-front thinking;
+                // model-specific progress updates are not implemented here.
+                let mode = if thinking.thinking_type == "between_tools" {
+                    "disabled"
+                } else {
+                    &thinking.thinking_type
+                };
+                serde_json::json!({"type": mode})
+            });
 
         Ok(NvCreateChatCompletionRequest {
             inner: dynamo_protocols::types::CreateChatCompletionRequest {
@@ -243,7 +252,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             chat_template_args: req.thinking.as_ref().and_then(|thinking| {
                 let enabled = match thinking.thinking_type.as_str() {
                     "enabled" => true,
-                    "disabled" => false,
+                    "disabled" | "between_tools" => false,
                     _ => return None,
                 };
                 let mut args = std::collections::HashMap::new();

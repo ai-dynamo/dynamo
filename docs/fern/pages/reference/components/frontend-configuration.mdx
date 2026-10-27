@@ -889,7 +889,9 @@ Builds containing [#17375](https://github.com/ai-dynamo/dynamo/issues/17375) for
 `reasoning_effort` field. Enabled-thinking `budget_tokens` becomes
 `thinking_token_budget`, which feeds the existing thinking stop condition. Explicit
 `adaptive` mode continues to let the model decide whether to think, including when an
-API client such as Claude Code also sends effort `high`.
+API client such as Claude Code also sends effort `high`. `between_tools` maps to
+no up-front template thinking, including when effort is supplied; it does not enable
+model-specific progress updates or hosted tool execution.
 
 Forwarding does not guarantee identical behavior across models. Effort needs a model
 and chat template that understand the selected grade. Budget enforcement needs backend
