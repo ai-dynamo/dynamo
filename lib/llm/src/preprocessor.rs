@@ -7811,11 +7811,6 @@ impl
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
         );
-        crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
-            &mut request,
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        );
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
