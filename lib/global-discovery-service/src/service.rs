@@ -20,15 +20,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::pool_discovery::{
-    Completeness, PoolDirectory, PoolDiscoveryError, PoolRecord, PoolRegistrar, ReplicaDirectory,
-    Revision,
+    Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration, ReplicaDirectory,
 };
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use dynamo_global_common::{PoolListing, PoolRegistration, PoolsResponse, RoutersResponse};
+use dynamo_global_common::{PoolsResponse, RoutersResponse};
 use dynamo_http_server::lifecycle::ServiceObserver;
 use dynamo_http_server::server::{HttpServer, HttpServerConfig};
 use tokio::net::TcpListener;
@@ -98,8 +97,8 @@ async fn register_pool(
         )
             .into_response();
     };
-    match registrar.register(record_from(registration)).await {
-        Ok(registration) => Json(registration.lease).into_response(),
+    match registrar.register(registration).await {
+        Ok(lease) => Json(lease).into_response(),
         Err(error) => error_response(error),
     }
 }
@@ -108,7 +107,7 @@ async fn list_pools(State(store): State<Arc<DiscoveryStore>>) -> Response {
     match store.pools.list().await {
         Ok(snapshot) => Json(PoolsResponse {
             complete: snapshot.completeness == Completeness::Exact,
-            pools: snapshot.items.into_iter().map(listing_from).collect(),
+            pools: snapshot.items,
         })
         .into_response(),
         Err(error) => error_response(error),
@@ -141,39 +140,12 @@ async fn healthz(State(store): State<Arc<DiscoveryStore>>) -> StatusCode {
 }
 
 /// Maps a store error to a status. The cause is logged, not returned.
-fn error_response(error: PoolDiscoveryError) -> Response {
+fn error_response(error: DiscoveryError) -> Response {
     let status = match &error {
-        PoolDiscoveryError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        DiscoveryError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
     };
     tracing::warn!(?error, %status, "discovery request failed");
     (status, error.to_string()).into_response()
-}
-
-fn record_from(registration: PoolRegistration) -> PoolRecord {
-    PoolRecord {
-        key: registration.key,
-        location: registration.location,
-        model: Some(registration.model),
-        capabilities: registration.capabilities,
-        frontends: registration.frontends,
-        capacity: registration.capacity,
-        relay_identity: None,
-        revision: Revision::default(),
-    }
-}
-
-/// One pool in `GET /pools`. It leaves out the record's revision, which
-/// orders updates only within one service process and restarts at 1.
-fn listing_from(record: PoolRecord) -> PoolListing {
-    PoolListing {
-        key: record.key,
-        location: record.location,
-        model: record.model,
-        capabilities: record.capabilities,
-        frontends: record.frontends,
-        capacity: record.capacity,
-        relay_identity: record.relay_identity,
-    }
 }
 
 #[cfg(test)]
@@ -276,7 +248,7 @@ mod tests {
                     "capabilities": ["aggregated"],
                     "frontends": ["http://10.43.1.2:8000/"],
                     "capacity": [{"sku": "H100", "count": 8}],
-                    "relay_identity": null
+                    "relay_identities": []
                 }],
                 "complete": false
             })
@@ -323,15 +295,15 @@ mod tests {
 
     #[async_trait]
     impl<T: Send + 'static, K: Send + Sync + 'static> Directory<T, K> for Down {
-        async fn list(&self) -> Result<Snapshot<T>, PoolDiscoveryError> {
-            Err(PoolDiscoveryError::Unavailable(anyhow::anyhow!("down")))
+        async fn list(&self) -> Result<Snapshot<T>, DiscoveryError> {
+            Err(DiscoveryError::Unavailable(anyhow::anyhow!("down")))
         }
 
         async fn list_and_watch(
             &self,
             _cancel_token: Option<CancellationToken>,
-        ) -> Result<WatchStream<T, K>, PoolDiscoveryError> {
-            Err(PoolDiscoveryError::Unavailable(anyhow::anyhow!("down")))
+        ) -> Result<WatchStream<T, K>, DiscoveryError> {
+            Err(DiscoveryError::Unavailable(anyhow::anyhow!("down")))
         }
     }
 

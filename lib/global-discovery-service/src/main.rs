@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_common::Lease;
 use dynamo_global_discovery_service::backends::kubernetes::{
-    EndpointSliceReplicaDirectory, ExportedService, McsImplementation, McsPoolDirectory,
+    ExportedService, McsImplementation, McsPoolDirectory, McsReplicaDirectory,
 };
 use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
 use dynamo_global_discovery_service::pool_discovery::{
@@ -189,9 +189,7 @@ async fn kubernetes_store(args: &Args, mcs: McsImplementation) -> Result<Discove
             mcs,
             args.pool_service_suffix.clone(),
         )),
-        routers: Arc::new(EndpointSliceReplicaDirectory::imported(
-            client, &router, mcs,
-        )),
+        routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
         registrar: None,
     })
 }
