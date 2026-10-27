@@ -60,7 +60,7 @@ python3 benchmarks/request_trace/convert_to_perfetto.py \
   --output /tmp/rl-run/request-trace.perfetto.json
 ```
 
-Open the result in the [Perfetto UI](https://ui.perfetto.dev/). The timeline shows request, prefill, and decode slices; agentic workloads can also include inferred or explicitly reported tool spans. Use the framework's rollout and attempt records alongside the timeline to distinguish serving time from environment, tool, reward, and trainer time. See [Agent Tracing](../agents/agent-tracing.md) for tool-event capture and detailed Perfetto guidance.
+Open the result in the [Perfetto UI](https://ui.perfetto.dev/). The timeline shows request, prefill, and decode slices; agentic workloads can also include inferred or explicitly reported tool spans. Use the framework's rollout and attempt records alongside the timeline to distinguish serving time from environment, tool, reward, and trainer time. See [Trace an Agent Run](../agents/agent-tracing.md) for tool-event capture and detailed Perfetto guidance.
 
 Use the overview to scan concurrent rollouts for long-tail environment or tool behavior.
 

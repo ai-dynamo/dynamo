@@ -36,10 +36,11 @@ Start with a specific bottleneck and a baseline metric. Measure cache reuse, wor
 
 ## Where Dynamo Fits
 
-![The reinforcement learning loop from prompts through rollout generation, rewards, and optimization. Dynamo owns rollout-serving orchestration, inference backends execute generation and apply weights, and the RL framework owns every training decision.](./_assets/rl-serving-ownership-v2.svg)
+![In the RL loop, prompts go to Dynamo rollout serving, where the router and fault tolerance keep workers busy and running. Rollout samples are evaluated by the harness, which sends rewards to the trainer. Updated policy weights return to the workers through ModelExpress and NIXL weight sync. Request traces and DynoSim profile and replay the serving workload.](../../../assets/img/rl-dynamo-components.svg)
 
-> [!IMPORTANT]
-> Dynamo does not decide whether a trajectory is on-policy, accepted, or fresh enough for training. The framework must gate requests around synchronous updates or enforce its own bounded-staleness policy.
+<Info>
+Dynamo does not decide whether a trajectory is on-policy, accepted, or fresh enough for training. The framework must gate requests around synchronous updates or enforce its own bounded-staleness policy.
+</Info>
 
 ## Framework Integrations
 
@@ -53,8 +54,9 @@ Start with a specific bottleneck and a baseline metric. Measure cache reuse, wor
 
 Experimental guides have runnable upstream artifacts but do not make a general compatibility promise. Integrations in progress remain in the compatibility table until a maintained path lands.
 
-> [!NOTE]
-> Kubernetes is optional for these RL integrations. Use it only when the selected framework or deployment environment requires it.
+<Note>
+Kubernetes is optional for these RL integrations. Use it only when the selected framework or deployment environment requires it.
+</Note>
 
 ## Next Steps
 
