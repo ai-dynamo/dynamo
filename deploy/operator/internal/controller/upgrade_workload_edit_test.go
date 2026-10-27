@@ -48,7 +48,17 @@ func upgradeWorkerEditError(objects []unstructured.Unstructured, workers []strin
 				if !ok {
 					return fmt.Errorf("DisaggregatedSet %s role %d has no string name", object.GetName(), i)
 				}
-				edited[name] = edited[name] || upgradeLWSHasEdit(role)
+
+				// DS generations live on both embedded Pod templates, not the DS itself.
+				currentGeneration := true
+				for _, template := range []string{"leaderTemplate", "workerTemplate"} {
+					hash, found, err := unstructured.NestedString(role, "spec", "leaderWorkerTemplate", template, "metadata", "labels", "nvidia.com/dynamo-worker-hash")
+					if err != nil {
+						return fmt.Errorf("DisaggregatedSet %s role %s %s worker hash: %w", object.GetName(), name, template, err)
+					}
+					currentGeneration = currentGeneration && found && hash == desiredHash
+				}
+				edited[name] = edited[name] || (currentGeneration && upgradeLWSHasEdit(role))
 			}
 		}
 	}
@@ -91,7 +101,11 @@ func upgradeTemplateHasEdit(object map[string]any, path ...string) bool {
 
 func TestUpgradeMultinodeWorkerEdit(t *testing.T) {
 	for _, kind := range []string{"LeaderWorkerSet", "DisaggregatedSet"} {
-		for _, missing := range []string{"none", "leader", "worker", "decode"} {
+		cases := []string{"none", "leader", "worker", "decode"}
+		if kind == "DisaggregatedSet" {
+			cases = append(cases, "old-leader-hash", "old-worker-hash", "missing-hash")
+		}
+		for _, missing := range cases {
 			t.Run(kind+"/"+missing, func(t *testing.T) {
 				t.Log("Require the edit in both templates of every worker component")
 				var objects []unstructured.Unstructured
@@ -99,7 +113,18 @@ func TestUpgradeMultinodeWorkerEdit(t *testing.T) {
 				for _, name := range []string{"prefill", "decode"} {
 					role := map[string]any{"name": name, "spec": map[string]any{}}
 					for _, template := range []string{"leader", "worker"} {
-						pod := map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "main"}}}}
+						pod := map[string]any{
+							"metadata": map[string]any{"labels": map[string]any{"nvidia.com/dynamo-worker-hash": "new"}},
+							"spec":     map[string]any{"containers": []any{map[string]any{"name": "main"}}},
+						}
+						if kind == "DisaggregatedSet" && name == "prefill" {
+							if missing == "old-"+template+"-hash" {
+								require.NoError(t, unstructured.SetNestedField(pod, "old", "metadata", "labels", "nvidia.com/dynamo-worker-hash"))
+							}
+							if missing == "missing-hash" && template == "worker" {
+								unstructured.RemoveNestedField(pod, "metadata", "labels", "nvidia.com/dynamo-worker-hash")
+							}
+						}
 						if missing != template && missing != name {
 							require.NoError(t, unstructured.SetNestedSlice(pod, []any{map[string]any{
 								"name": "main", "env": []any{map[string]any{"name": "WORKER_REVISION", "value": "2"}},
