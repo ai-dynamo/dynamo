@@ -8,6 +8,9 @@
 {% if framework != "dynamo" %}
     {% include "templates/dynamo_base.Dockerfile" %}
     {% include "templates/wheel_builder.Dockerfile" %}
+    {% if device in ("xpu", "cpu") %}
+        {% include "templates/nixl_source.Dockerfile" %}
+    {% endif %}
 {% elif framework == "dynamo" %}
     {% if target == "frontend" %}
         {% include "templates/dynamo_base.Dockerfile" %}
