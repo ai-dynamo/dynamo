@@ -23,6 +23,7 @@ const (
 	testServiceAccountName = "test-sa"
 	testNamespace          = "test-namespace"
 	testClusterRoleName    = "test-cluster-role"
+	testOtherNamespace     = "other-namespace"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -101,6 +102,7 @@ func TestEnsureServiceAccountWithRBAC(t *testing.T) {
 		serviceAccountName string
 		clusterRoleName    string
 		initialObjects     []client.Object
+		ensureAgain        bool
 		expectedError      string
 		wantServiceAccount *corev1.ServiceAccount
 		wantRoleBinding    *rbacv1.RoleBinding
@@ -115,6 +117,47 @@ func TestEnsureServiceAccountWithRBAC(t *testing.T) {
 			wantRoleBinding: testRoleBinding(
 				desiredSubjects(),
 				desiredRoleRef(testClusterRoleName), managedLabels()),
+		},
+		{
+			name:               "converges when ensured again",
+			targetNamespace:    testNamespace,
+			serviceAccountName: testServiceAccountName,
+			clusterRoleName:    testClusterRoleName,
+			initialObjects:     []client.Object{testClusterRole(testClusterRoleName)},
+			ensureAgain:        true,
+			wantServiceAccount: testServiceAccount(managedLabels()),
+			wantRoleBinding:    testRoleBinding(desiredSubjects(), desiredRoleRef(testClusterRoleName), managedLabels()),
+		},
+		{
+			name:               "creates a missing binding for an existing service account",
+			targetNamespace:    testNamespace,
+			serviceAccountName: testServiceAccountName,
+			clusterRoleName:    testClusterRoleName,
+			initialObjects: []client.Object{
+				testClusterRole(testClusterRoleName),
+				testServiceAccount(existingLabels),
+			},
+			wantServiceAccount: testServiceAccount(existingLabels),
+			wantRoleBinding:    testRoleBinding(desiredSubjects(), desiredRoleRef(testClusterRoleName), managedLabels()),
+		},
+		{
+			name:               "creates resources without touching another namespace",
+			targetNamespace:    testNamespace,
+			serviceAccountName: testServiceAccountName,
+			clusterRoleName:    testClusterRoleName,
+			initialObjects: []client.Object{
+				testClusterRole(testClusterRoleName),
+				&corev1.ServiceAccount{Name: testServiceAccountName, Namespace: testOtherNamespace, Labels: managedLabels()},
+				&rbacv1.RoleBinding{
+					Name:      testServiceAccountName + "-binding",
+					Namespace: testOtherNamespace,
+					Labels:    managedLabels(),
+					Subjects:  []rbacv1.Subject{{Kind: kindServiceAccount, Name: testServiceAccountName, Namespace: testOtherNamespace}},
+					RoleRef:   desiredRoleRef(testClusterRoleName),
+				},
+			},
+			wantServiceAccount: testServiceAccount(managedLabels()),
+			wantRoleBinding:    testRoleBinding(desiredSubjects(), desiredRoleRef(testClusterRoleName), managedLabels()),
 		},
 		{
 			name:               "preserves existing resources",
@@ -138,6 +181,32 @@ func TestEnsureServiceAccountWithRBAC(t *testing.T) {
 				testClusterRole(testClusterRoleName),
 				testServiceAccount(existingLabels),
 				testRoleBinding([]rbacv1.Subject{{Kind: kindServiceAccount, Name: "wrong-sa", Namespace: testNamespace}}, desiredRoleRef(testClusterRoleName), existingLabels),
+			},
+			wantServiceAccount: testServiceAccount(existingLabels),
+			wantRoleBinding:    testRoleBinding(desiredSubjects(), desiredRoleRef(testClusterRoleName), existingLabels),
+		},
+		{
+			name:               "updates an incorrect subject namespace",
+			targetNamespace:    testNamespace,
+			serviceAccountName: testServiceAccountName,
+			clusterRoleName:    testClusterRoleName,
+			initialObjects: []client.Object{
+				testClusterRole(testClusterRoleName),
+				testServiceAccount(existingLabels),
+				testRoleBinding([]rbacv1.Subject{{Kind: kindServiceAccount, Name: testServiceAccountName, Namespace: testOtherNamespace}}, desiredRoleRef(testClusterRoleName), existingLabels),
+			},
+			wantServiceAccount: testServiceAccount(existingLabels),
+			wantRoleBinding:    testRoleBinding(desiredSubjects(), desiredRoleRef(testClusterRoleName), existingLabels),
+		},
+		{
+			name:               "updates an incorrect subject kind",
+			targetNamespace:    testNamespace,
+			serviceAccountName: testServiceAccountName,
+			clusterRoleName:    testClusterRoleName,
+			initialObjects: []client.Object{
+				testClusterRole(testClusterRoleName),
+				testServiceAccount(existingLabels),
+				testRoleBinding([]rbacv1.Subject{{Kind: rbacv1.UserKind, Name: testServiceAccountName, Namespace: testNamespace}}, desiredRoleRef(testClusterRoleName), existingLabels),
 			},
 			wantServiceAccount: testServiceAccount(existingLabels),
 			wantRoleBinding:    testRoleBinding(desiredSubjects(), desiredRoleRef(testClusterRoleName), existingLabels),
@@ -184,6 +253,19 @@ func TestEnsureServiceAccountWithRBAC(t *testing.T) {
 			wantServiceAccount: testServiceAccount(existingLabels),
 			wantRoleBinding:    testRoleBinding(desiredSubjects(), desiredRoleRef("new-cluster-role"), managedLabels()),
 		},
+		{
+			name:               "replaces a binding that references a namespaced Role",
+			targetNamespace:    testNamespace,
+			serviceAccountName: testServiceAccountName,
+			clusterRoleName:    testClusterRoleName,
+			initialObjects: []client.Object{
+				testClusterRole(testClusterRoleName),
+				testServiceAccount(existingLabels),
+				testRoleBinding(desiredSubjects(), rbacv1.RoleRef{APIGroup: apiGroupRBAC, Kind: "Role", Name: testClusterRoleName}, existingLabels),
+			},
+			wantServiceAccount: testServiceAccount(existingLabels),
+			wantRoleBinding:    testRoleBinding(desiredSubjects(), desiredRoleRef(testClusterRoleName), managedLabels()),
+		},
 	}
 
 	for _, tc := range testCases {
@@ -223,24 +305,58 @@ func TestEnsureServiceAccountWithRBAC(t *testing.T) {
 				t.Fatalf("Ensure returned an unexpected error: %v", err)
 			}
 
-			t.Log("Compare the resulting ServiceAccount")
-			gotServiceAccount := &corev1.ServiceAccount{}
-			if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(tc.wantServiceAccount), gotServiceAccount); err != nil {
-				t.Fatalf("get ServiceAccount: %v", err)
-			}
-			gotServiceAccount.ResourceVersion = ""
-			if diff := cmp.Diff(tc.wantServiceAccount, gotServiceAccount); diff != "" {
-				t.Errorf("ServiceAccount mismatch (-want +got):\n%s", diff)
+			if tc.ensureAgain {
+				t.Log("Ensure again against the resources created by the first call")
+				if err := EnsureServiceAccountWithRBAC(
+					ctx,
+					fakeClient,
+					tc.targetNamespace,
+					tc.serviceAccountName,
+					tc.clusterRoleName,
+				); err != nil {
+					t.Fatalf("Ensure again returned an unexpected error: %v", err)
+				}
 			}
 
-			t.Log("Compare the resulting RoleBinding")
-			gotRoleBinding := &rbacv1.RoleBinding{}
-			if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(tc.wantRoleBinding), gotRoleBinding); err != nil {
-				t.Fatalf("get RoleBinding: %v", err)
+			t.Log("Compare the ServiceAccounts in the target namespace")
+			gotServiceAccounts := &corev1.ServiceAccountList{}
+			if err := fakeClient.List(ctx, gotServiceAccounts, client.InNamespace(tc.targetNamespace)); err != nil {
+				t.Fatalf("list ServiceAccounts: %v", err)
 			}
-			gotRoleBinding.ResourceVersion = ""
-			if diff := cmp.Diff(tc.wantRoleBinding, gotRoleBinding); diff != "" {
-				t.Errorf("RoleBinding mismatch (-want +got):\n%s", diff)
+			for i := range gotServiceAccounts.Items {
+				gotServiceAccounts.Items[i].ResourceVersion = ""
+			}
+			if diff := cmp.Diff([]corev1.ServiceAccount{*tc.wantServiceAccount}, gotServiceAccounts.Items); diff != "" {
+				t.Errorf("ServiceAccounts mismatch (-want +got):\n%s", diff)
+			}
+
+			t.Log("Compare the RoleBindings in the target namespace")
+			gotRoleBindings := &rbacv1.RoleBindingList{}
+			if err := fakeClient.List(ctx, gotRoleBindings, client.InNamespace(tc.targetNamespace)); err != nil {
+				t.Fatalf("list RoleBindings: %v", err)
+			}
+			for i := range gotRoleBindings.Items {
+				gotRoleBindings.Items[i].ResourceVersion = ""
+			}
+			if diff := cmp.Diff([]rbacv1.RoleBinding{*tc.wantRoleBinding}, gotRoleBindings.Items); diff != "" {
+				t.Errorf("RoleBindings mismatch (-want +got):\n%s", diff)
+			}
+
+			t.Log("Verify objects outside the target namespace are unchanged")
+			for _, initial := range tc.initialObjects {
+				if initial.GetNamespace() == tc.targetNamespace {
+					continue
+				}
+				want := initial.DeepCopyObject().(client.Object)
+				want.SetResourceVersion("")
+				got := initial.DeepCopyObject().(client.Object)
+				if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(initial), got); err != nil {
+					t.Fatalf("get %T %s: %v", initial, client.ObjectKeyFromObject(initial), err)
+				}
+				got.SetResourceVersion("")
+				if diff := cmp.Diff(want, got); diff != "" {
+					t.Errorf("%T %s changed (-want +got):\n%s", initial, client.ObjectKeyFromObject(initial), diff)
+				}
 			}
 		})
 	}
