@@ -772,7 +772,8 @@ pub struct StepResult {
     /// `SeqResult.tokens[i]` must equal the text of `token_ids[i]` so that consumers
     /// zipping `tokens` with per-token logprobs (e.g. `create_logprobs`) stay aligned --
     /// logprobs describe what the model generated and must not change because a hidden
-    /// stop sequence also happens to be in flight.
+    /// stop sequence also happens to be in flight. `None` when the caller did not ask for
+    /// per-token text (see `Decoder::step_with_token_text`).
     pub token: Option<String>,
     /// Text to append to the caller-visible `text`/content this step. May be `None` on a
     /// step whose text is being withheld as a possible hidden-stop-sequence prefix, and may
@@ -783,21 +784,17 @@ pub struct StepResult {
 }
 
 impl StepResult {
-    fn ok(token: Option<String>, released_text: Option<String>) -> Self {
+    fn ok(released_text: Option<String>) -> Self {
         Self {
-            token,
+            token: None,
             released_text,
             stop_trigger: None,
         }
     }
 
-    fn with_stop_trigger(
-        token: Option<String>,
-        released_text: Option<String>,
-        stop_trigger: StopTrigger,
-    ) -> Self {
+    fn with_stop_trigger(released_text: Option<String>, stop_trigger: StopTrigger) -> Self {
         Self {
-            token,
+            token: None,
             released_text,
             stop_trigger: Some(stop_trigger),
         }
@@ -1022,20 +1019,23 @@ impl Decoder {
         // Decode the selected token independently for per-token metadata. Incremental
         // decoding may release a backlog of earlier byte-fallback IDs on this step; using
         // that backlog as this ID's token string would attach it to the wrong logprob.
-        let selected_token = needs_token_text
-            .then(|| {
-                self.tokenizer
-                    .as_ref()
-                    .and_then(|tokenizer| {
-                        decode_token_text(tokenizer, token_id, self.skip_special_tokens)
-                    })
-                    .or_else(|| decoded_text.clone())
-            })
-            .flatten();
+        let selected_token = if needs_token_text {
+            self.tokenizer
+                .as_ref()
+                .and_then(|tokenizer| {
+                    decode_token_text(tokenizer, token_id, self.skip_special_tokens)
+                })
+                .or_else(|| decoded_text.clone())
+        } else {
+            None
+        };
 
         // stop conditions to not apply until the minimum number of tokens have been generated
         if below_min_tokens {
-            return Ok(StepResult::ok(selected_token, decoded_text));
+            return Ok(StepResult {
+                token: selected_token,
+                ..StepResult::ok(decoded_text)
+            });
         }
 
         if self.visible_stop_ids.contains(&token_id) || self.hidden_stop_ids.contains(&token_id) {
@@ -1105,7 +1105,6 @@ impl Decoder {
                         .filter(|s| !s.is_empty());
                     self.jailed_bytes = 0;
                     return Ok(StepResult::with_stop_trigger(
-                        None,
                         partial_token,
                         StopTrigger::HiddenStopSequenceDetected(seq.to_string()),
                     ));
@@ -1124,7 +1123,6 @@ impl Decoder {
                         .filter(|s| !s.is_empty());
                     self.jailed_bytes = 0;
                     return Ok(StepResult::with_stop_trigger(
-                        None,
                         token_with_stop,
                         StopTrigger::VisibleStopSequenceDetected(seq.to_string()),
                     ));
@@ -1141,10 +1139,10 @@ impl Decoder {
                 .then(|| self.jail[release_start..release_end].to_string());
 
             Self::maybe_drain_to_max_bytes(&mut self.jail, self.jail_max_bytes);
-            return Ok(StepResult::ok(None, released));
+            return Ok(StepResult::ok(released));
         }
 
-        Ok(StepResult::ok(None, decoded_text))
+        Ok(StepResult::ok(decoded_text))
     }
 
     /// Finalize tokenizer bytes through the same stop-string filter as ordinary tokens.
@@ -1152,7 +1150,7 @@ impl Decoder {
         let tail = self.decode_stream.finish()?;
         self.pending_token_ids.clear();
         let mut result = if self.generated_tokens <= self.min_tokens {
-            StepResult::ok(None, tail)
+            StepResult::ok(tail)
         } else {
             self.process_decoded_text(tail)?
         };
