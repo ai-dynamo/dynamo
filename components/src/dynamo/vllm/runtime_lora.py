@@ -169,7 +169,14 @@ class RuntimeLoRACoordinator:
             key = metadata.adapter_key
             self._initial_waiters[key] = self._initial_waiters.get(key, 0) + 1
         try:
-            await asyncio.shield(task)
+            timeout = asyncio.timeout(self._active_settings.resolve_timeout_seconds)
+            try:
+                async with timeout:
+                    await asyncio.shield(task)
+            except TimeoutError:
+                if not timeout.expired():
+                    raise
+                raise _runtime_error(504, "runtime_lora_resolve_timeout") from None
             resident = await self._lease_resident(metadata, admission_id)
             if resident is None:
                 raise _runtime_error(429, "lora_capacity_exceeded")
