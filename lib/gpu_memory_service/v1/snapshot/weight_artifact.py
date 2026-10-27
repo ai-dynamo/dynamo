@@ -271,29 +271,37 @@ def load_weights(
         granularity,
         roots,
     )
-    session = _GMSClientSession(socket_path, RequestedLockType.RW_OR_RO)
+    backend = create_transfer_backend(
+        transfer_backend,
+        GMSSnapshotConfig(
+            device=device,
+            max_workers=max_workers,
+            backend_config={
+                "sharded_ssd_roots": list(roots),
+                "sharded_ssd_queues_per_root": sharded_ssd_queues_per_root,
+                "posix_backend_params": posix_backend_params,
+            },
+        ),
+    )
+    try:
+        session = _GMSClientSession(socket_path, RequestedLockType.RW_OR_RO)
+    except BaseException:
+        try:
+            backend.close()
+        except BaseException:
+            logger.exception(
+                "GMS V1 backend cleanup failed while preserving a session error"
+            )
+        raise
+
     with _Cleanup() as resources:
         resources.callback(session.close)
+        backend_holder = [backend]
+        resources.callback(_close_backend, backend_holder)
         _verify_session_device(session, device)
         if session.lock_type is GrantedLockType.RO:
             logger.info("GMS V1 weights already committed on device=%d", device)
             return
-
-        # Some backends do expensive device setup; skip it for committed weights.
-        backend = create_transfer_backend(
-            transfer_backend,
-            GMSSnapshotConfig(
-                device=device,
-                max_workers=max_workers,
-                backend_config={
-                    "sharded_ssd_roots": list(roots),
-                    "sharded_ssd_queues_per_root": sharded_ssd_queues_per_root,
-                    "posix_backend_params": posix_backend_params,
-                },
-            ),
-        )
-        backend_holder = [backend]
-        resources.callback(_close_backend, backend_holder)
 
         mappings: list[tuple[LocalMapping, int]] = []
         targets: dict[str, GMSTransferTarget] = {}

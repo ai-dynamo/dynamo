@@ -132,8 +132,10 @@ class _Backend:
         self._vmm = vmm
         self._fail = fail
         self.closed = False
+        self.restores = 0
 
     def start_restore(self, sources, integrity_by_path=None):
+        self.restores += 1
         return _Transfer(self._vmm, sources, integrity_by_path or {}, fail=self._fail)
 
     def close(self):
@@ -330,14 +332,16 @@ def test_weight_artifact_round_trip_preserves_exact_ids_and_bytes(
         (artifact / "manifest.json").write_bytes(msgspec.json.encode(legacy_manifest))
 
     target_vmm = _ByteVMM()
-    backend = _Backend(target_vmm)
+    backends = []
     backend_calls = []
     _configure_device(monkeypatch, target_vmm)
-    monkeypatch.setattr(
-        weight_artifact,
-        "create_transfer_backend",
-        lambda name, config: backend_calls.append((name, config)) or backend,
-    )
+
+    def create_backend(name, config):
+        backend_calls.append((name, config))
+        backends.append(_Backend(target_vmm))
+        return backends[-1]
+
+    monkeypatch.setattr(weight_artifact, "create_transfer_backend", create_backend)
     with _server(socket_path, target_vmm):
         weight_artifact.load_weights(
             str(artifact), socket_path, 0, transfer_backend=transfer_backend.value
@@ -358,10 +362,11 @@ def test_weight_artifact_round_trip_preserves_exact_ids_and_bytes(
         for mapping in reversed(restored):
             weight_artifact._release_mapping(target_vmm, mapping)
         reader.close()
-    assert backend.closed
-    assert len(backend_calls) == 1
-    assert backend_calls[0][0] == transfer_backend.value
-    assert backend_calls[0][1].device == 0
+    # The second load finds the weights committed: its backend restores nothing.
+    assert [backend.restores for backend in backends] == [1, 0]
+    assert all(backend.closed for backend in backends)
+    assert {name for name, _config in backend_calls} == {transfer_backend.value}
+    assert {config.device for _name, config in backend_calls} == {0}
     assert any(
         "content-digest integrity verification is unavailable" in warning
         for warning in warnings
