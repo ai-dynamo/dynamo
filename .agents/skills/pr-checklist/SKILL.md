@@ -36,7 +36,7 @@ Use this skill when making a pull request to Dynamo or reviewing one. Run the re
 
 **Replication.** Search the codebase for existing functionality before adding new code, and reuse it instead of duplicating it. Check test code too, such as shared fixtures and helpers. Justify any duplication.
 
-**Existing work.** Check `main`, open pull requests, and open issues for concurrent or existing work on the same problem. Build on it or coordinate with its author instead of opening a duplicate.
+**Existing work.** Check `main`, open pull requests, and open issues for concurrent or existing work on the same problem. Build on it or coordinate with its author instead of opening a duplicate, and record what you find under **Issues and Ongoing Work** in the PR description.
 
 **Complexity.** As a rule of thumb, the complexity of a change can be estimated by the number of new lines of code added to the main codebase:
 
@@ -90,4 +90,6 @@ Fill in every section of `.github/pull_request_template.md`, and title the PR pe
 
 **Key Changes.** State the core-logic line count (see Complexity under Design Fit), then up to three changes that most need review, each with a shortened file link and one line on what changed.
 
-**Validation.** Back each claim with evidence, ideally a table with one row per behavior: the case, what happened before, and what happens now. For bug fixes, explain what caused the problem and why the fix addresses it. Include performance data when the change claims or risks a performance impact. Name each key test added and the regression it catches. Do not list routine test runs, clippy or linter checks, or unnecessary detail. Every PR must reference a GitHub or Linear issue, for example `Closes #8480` or `Closes DYN-1234`. As the final step, run `dynamo-issue-first` to validate the issue and its reference.
+**Validation.** Back each claim with evidence, ideally a table with one row per behavior: the case, what happened before, and what happens now. For bug fixes, explain what caused the problem and why the fix addresses it. Include performance data when the change claims or risks a performance impact. Name each key test added and the regression it catches. Do not list routine test runs, clippy or linter checks, or unnecessary detail.
+
+**Issues and Ongoing Work.** Reference the GitHub or Linear issue the PR implements, for example `Closes #8480` or `Closes DYN-1234`. List any similar PRs, issues, or code on `main` that the Existing work check found, each with one line on how this PR differs; if the search found nothing, say so. As the final step, run `dynamo-issue-first` to validate the issue and its reference.

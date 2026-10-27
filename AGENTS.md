@@ -239,8 +239,8 @@ cargo fmt --all && cargo clippy --workspace
   `feat`, `fix`, `docs`, `test`, `ci`, `refactor`, `perf`, `chore`, `revert`,
   `style`, and `build`.
 - PR descriptions follow [`.github/pull_request_template.md`](.github/pull_request_template.md):
-  Overview, Key Changes, Validation, and the checklist. Run the `pr-checklist` skill when making
-  or reviewing a PR.
+  Overview, Key Changes, Validation, Issues and Ongoing Work, and the checklist. Run the
+  `pr-checklist` skill when making or reviewing a PR.
 - Every PR references the tracked issue it implements, in the title, description, or
   branch name (`Closes #123`, `Closes DYN-1234`, `user/dyn-1234-description`). The
   `PR Issue Link` check verifies the reference; it is advisory until `release/1.7.0` is
