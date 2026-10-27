@@ -8,6 +8,7 @@
 
 use super::{PhysicalLayout, TransferContext, TransferStrategy};
 use crate::block_manager::v2::physical::transfer::context::TransferCompleteNotification;
+use crate::block_manager::v2::physical::transfer::validation::validate_layout_compatibility;
 use anyhow::{Result, anyhow};
 use nixl_sys::{XferDescList, XferOp};
 use std::marker::PhantomData;
@@ -205,24 +206,8 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
         let _write_notif = self.write_notif;
 
         // Validate layouts
+        validate_layout_compatibility(src, dst)?;
         let src_layout = src.layout();
-        let dst_layout = dst.layout();
-
-        if src_layout.num_layers() != dst_layout.num_layers() {
-            return Err(anyhow!(
-                "Layouts have incompatible layer counts: src={}, dst={}",
-                src_layout.num_layers(),
-                dst_layout.num_layers()
-            ));
-        }
-
-        if src_layout.outer_dim() != dst_layout.outer_dim() {
-            return Err(anyhow!(
-                "Layouts have incompatible outer dimensions: src={}, dst={}",
-                src_layout.outer_dim(),
-                dst_layout.outer_dim()
-            ));
-        }
 
         // Get NIXL agent
         let nixl_agent = ctx.nixl_agent();

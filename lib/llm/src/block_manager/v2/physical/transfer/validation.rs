@@ -85,6 +85,36 @@ pub fn validate_bounce_unique(bounce_block_ids: &[usize]) -> Result<(), BlockVal
     }
 }
 
+/// Validate that two layouts have the same layer count and outer dimension.
+///
+/// Every transfer executor runs this before any backend work. The layer count
+/// is checked first, then the outer dimension.
+pub(crate) fn validate_layout_compatibility(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+) -> anyhow::Result<()> {
+    let src_layout = src.layout();
+    let dst_layout = dst.layout();
+
+    if src_layout.num_layers() != dst_layout.num_layers() {
+        return Err(anyhow::anyhow!(
+            "Layouts have incompatible layer counts: src={}, dst={}",
+            src_layout.num_layers(),
+            dst_layout.num_layers()
+        ));
+    }
+
+    if src_layout.outer_dim() != dst_layout.outer_dim() {
+        return Err(anyhow::anyhow!(
+            "Layouts have incompatible outer dimensions: src={}, dst={}",
+            src_layout.outer_dim(),
+            dst_layout.outer_dim()
+        ));
+    }
+
+    Ok(())
+}
+
 /// Check if two layouts are the same by comparing their Arc pointers.
 ///
 /// This is a conservative check - if pointers differ, layouts might still be the same
@@ -383,6 +413,66 @@ mod tests {
             }
             _ => panic!("Wrong error type"),
         }
+    }
+
+    fn layout_with_shape(num_layers: usize, outer_dim: usize) -> PhysicalLayout {
+        use crate::block_manager::v2::physical::layout::LayoutConfig;
+
+        let config = LayoutConfig::builder()
+            .num_blocks(2)
+            .num_layers(num_layers)
+            .outer_dim(outer_dim)
+            .page_size(16)
+            .inner_dim(128)
+            .dtype_width_bytes(2)
+            .build()
+            .unwrap();
+        PhysicalLayout::builder(create_test_agent("test_agent"))
+            .with_config(config)
+            .fully_contiguous()
+            .allocate_system()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_layout_compatibility_ok() {
+        let src = layout_with_shape(2, 2);
+        let dst = layout_with_shape(2, 2);
+        assert!(validate_layout_compatibility(&src, &dst).is_ok());
+    }
+
+    #[test]
+    fn test_layout_compatibility_layer_count_mismatch() {
+        let src = layout_with_shape(2, 2);
+        let dst = layout_with_shape(3, 2);
+        let err = validate_layout_compatibility(&src, &dst).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Layouts have incompatible layer counts: src=2, dst=3"
+        );
+    }
+
+    #[test]
+    fn test_layout_compatibility_outer_dim_mismatch() {
+        let src = layout_with_shape(2, 2);
+        let dst = layout_with_shape(2, 1);
+        let err = validate_layout_compatibility(&src, &dst).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Layouts have incompatible outer dimensions: src=2, dst=1"
+        );
+    }
+
+    #[test]
+    fn test_layout_compatibility_checks_layers_first() {
+        let src = layout_with_shape(2, 2);
+        let dst = layout_with_shape(3, 1);
+        let err = validate_layout_compatibility(&src, &dst).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Layouts have incompatible layer counts: src=2, dst=3"
+        );
     }
 
     // #[test]
