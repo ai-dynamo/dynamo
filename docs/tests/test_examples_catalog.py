@@ -219,7 +219,13 @@ def test_card_chips_cover_every_declared_backend_and_platform() -> None:
         assert re.search(rf"^\s*{platform}: \(", chips, re.MULTILINE), platform
     assert 'className="dynamo-example-sr"' in chips
     assert 'aria-hidden="true"' in chips
+    # Each card tags its platforms, then every backend chip carries the glyphs
+    # of its platforms. One flat row lets each chip wrap only when it must.
+    assert "data-platform={platform}" in chips
+    assert "partial" not in chips
+    assert "dynamo-example-chip-group" not in chips
     styles = (FERN / "components/ExamplesCatalog.tsx").read_text()
+    assert ".dynamo-example-chip[data-platform]" in styles
     # Inference engines get the diffusion catalog's tints; test backends stay neutral.
     for backend in backends - {"mocker", "sample", "custom"}:
         assert f'.dynamo-example-chip[data-backend="{backend}"]' in styles, backend
@@ -243,6 +249,51 @@ def test_examples_catalog_is_styled_accessible_and_responsive() -> None:
     assert "<PlatformGlyph" in component
     assert "dynamo-example-eyebrow" not in component
     assert "dynamo-example-badges" not in component
+
+
+def test_examples_catalog_filters_are_multi_select_chip_rows() -> None:
+    component = (FERN / "components/ExamplesCatalog.tsx").read_text()
+    # Toggle chips like the quickstart selectors replace single-choice dropdowns.
+    assert "<select" not in component
+    assert 'className="dynamo-example-option"' in component
+    assert "aria-pressed={selected[key].includes(value)}" in component
+    assert "aria-pressed={selected[key].length === 0}" in component
+    assert 'role="group"' in component
+    # Options within a row widen the match; a single-option row cannot narrow it.
+    assert "platform.includes(targetPlatform)" in component
+    assert "backend.includes(targetBackend)" in component
+    assert "options[key].length > 1" in component
+    # The count, removable active-filter chips, and reset live inside the panel,
+    # which drops the separate results row and its platform-glyph legend.
+    controls = component[component.index('className="dynamo-example-controls"') :]
+    controls = controls[: controls.index('className="dynamo-example-grid"')]
+    for part in (
+        'className="dynamo-example-summary"',
+        'className="dynamo-example-active-chip"',
+        "aria-label={`Remove ${FILTER_LABELS[key]} filter: ${label}`}",
+        'className="dynamo-example-reset"',
+    ):
+        assert part in controls, part
+    for retired in ("dynamo-example-results", "dynamo-example-legend"):
+        assert retired not in component, retired
+    # Options render on the server from the MDX card props, through Fern's wrappers.
+    assert "metadataFromChildren(props.children" in component
+
+
+def test_topic_filter_chips_use_short_labels_within_the_full_name() -> None:
+    options = (FERN / "components/example-options.ts").read_text()
+    (block,) = re.findall(
+        r"export const EXAMPLE_TOPIC_SHORT_LABELS: Record<string, string> = \{(.*?)\};",
+        options,
+        re.DOTALL,
+    )
+    short = dict(re.findall(r'^\s*"?([\w-]+)"?: "([^"]+)",', block, re.MULTILINE))
+    topics = {card["data-topic"]: card["data-topic-label"] for card in cards().values()}
+    assert set(short) == set(topics)
+    for topic, label in topics.items():
+        # The visible text stays part of the full accessible name.
+        assert short[topic] in label, topic
+        assert len(short[topic]) <= len(label), topic
 
 
 def variants(page: Path) -> list[dict[str, str]]:

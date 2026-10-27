@@ -193,11 +193,18 @@ refreshed by their own workflows, and need no local step.
 The main Examples overview owns the catalog metadata and its version-aware card links.
 Subsection overview pages mirror only their topic's cards, without the topic label, and pass
 `topicFilter={false}` to drop the single-option Topic filter; tests enforce parity. The component
-adds search and topic/platform/backend filters to either page shape. Its styles match
-`DiffusionCatalog`: each topic tints the card's icon tile, topic label, arrow, and glow, backend
-chips reuse the diffusion catalog's tints, and hover and focus states use green. `ExampleTargets`
-renders one chip per backend from the card's `platform:backend` pairs, with a Kubernetes or
-Local / CLI glyph for each platform; the results row shows a key for the glyphs.
+adds search and topic/platform/backend filters to either page shape. Each filter is a row of
+toggle chips, like the quickstart selectors: chips in one row combine with OR, rows combine with
+AND, and **All** clears its row. A row with only one option on the page stays hidden. The panel
+ends with the result count, a removable chip for each active selection, and **Reset filters**.
+Options come from the cards' MDX props on the server, so the rows render before hydration. Its
+styles match `DiffusionCatalog`: each topic tints the card's icon tile, topic label, arrow, and
+glow, backend chips reuse the diffusion catalog's tints, and hover and focus states use green.
+Topic chips show the compact labels in `EXAMPLE_TOPIC_SHORT_LABELS`, each a part of the full topic
+label, which stays the accessible name and tooltip. `ExampleTargets` renders an outlined
+Kubernetes or Local / CLI tag for each platform, then one chip per backend with a glyph for each
+platform it runs on, from the card's `platform:backend` pairs. The chips share one flat row, so
+each wraps only when it no longer fits.
 
 ```mdx
 import { ExamplesCatalog } from "@/components/ExamplesCatalog";

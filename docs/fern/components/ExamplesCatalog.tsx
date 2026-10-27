@@ -4,13 +4,18 @@
  *
  * The cards live in MDX so Fern resolves their links for each version and locale.
  * Filtering uses actual platform:backend pairs, not independent support lists.
+ * Filter chips toggle independently: OR within a row, AND across rows.
  * All cards remain readable without JavaScript.
  */
 "use client";
 
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { Children, isValidElement, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { EXAMPLE_BACKENDS as BACKENDS, EXAMPLE_PLATFORMS as PLATFORMS } from "./example-options";
+import {
+  EXAMPLE_BACKENDS as BACKENDS,
+  EXAMPLE_PLATFORMS as PLATFORMS,
+  EXAMPLE_TOPIC_SHORT_LABELS as TOPIC_SHORT_LABELS,
+} from "./example-options";
 import { EXAMPLES_LAYOUT_CSS } from "./examples-layout";
 import { PlatformGlyph } from "./ExampleTargets";
 
@@ -61,6 +66,7 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
   --example-gray-fg: #5f5e5a;
   --example-gray-bg: rgba(120, 120, 120, 0.1);
   --example-gray-border: rgba(120, 120, 120, 0.28);
+  --example-selected-bg: #eef7dd;
   margin-block: 24px 20px;
 }
 .dark .dynamo-examples, [data-theme="dark"] .dynamo-examples {
@@ -102,45 +108,78 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
   --example-gray-fg: #a8a8a8;
   --example-gray-bg: #242424;
   --example-gray-border: #383838;
+  --example-selected-bg: #1d2a10;
 }
 .dynamo-examples *, .dynamo-examples *::before, .dynamo-examples *::after { box-sizing: border-box; }
 .dynamo-example-controls {
   padding: 20px 22px; border: 1px solid var(--example-border); border-radius: 12px;
   color: var(--example-text); background: var(--example-panel);
 }
-.dynamo-example-controls label {
-  display: flex; flex-direction: column; gap: 7px; min-width: 0;
+.dynamo-example-controls label, .dynamo-example-filter-label {
   color: var(--example-muted); font-size: 11px; font-weight: 700; line-height: 1.3;
   letter-spacing: .08em; text-transform: uppercase;
 }
-.dynamo-example-controls input, .dynamo-example-controls select {
+.dynamo-example-controls label { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.dynamo-example-controls input {
   width: 100%; min-width: 0; min-height: 38px; padding: 7px 12px;
   border: 1px solid var(--example-field-border); border-radius: 8px;
   color: var(--example-text); background: var(--example-field);
   font: inherit; font-size: 13.5px; font-weight: 400; letter-spacing: normal; text-transform: none;
   transition: border-color .15s ease;
 }
-.dynamo-example-controls select { padding-right: 34px; cursor: pointer; }
-.dynamo-example-controls input:hover, .dynamo-example-controls select:hover { border-color: var(--example-field-hover); }
+.dynamo-example-controls input:hover { border-color: var(--example-field-hover); }
 .dynamo-example-controls input::placeholder { color: var(--example-muted); opacity: 1; }
-.dynamo-example-controls input:focus-visible, .dynamo-example-controls select:focus-visible,
-.dynamo-example-reset:focus-visible { outline: 2px solid var(--example-green); outline-offset: 2px; }
+.dynamo-example-controls input:focus-visible, .dynamo-example-option:focus-visible,
+.dynamo-example-active-chip:focus-visible, .dynamo-example-reset:focus-visible { outline: 2px solid var(--example-green); outline-offset: 2px; }
 .dynamo-example-search { position: relative; display: flex; align-items: center; }
 .dynamo-example-search svg { position: absolute; left: 12px; color: var(--example-muted); pointer-events: none; }
 .dynamo-example-search input { padding-left: 38px; }
-.dynamo-example-filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
-.dynamo-example-filters[data-columns="2"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.dynamo-example-results {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 16px 0 14px;
+/* Filter rows follow the quickstart and detail-page selectors: a label column,
+   then toggle chips. Chips within a row combine with OR, rows with AND. */
+.dynamo-example-filters { display: grid; gap: 10px; margin-top: 16px; }
+.dynamo-example-filter { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 10px; align-items: start; }
+.dynamo-example-filter-label { padding-top: 8px; }
+.dynamo-example-options { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.dynamo-example-option {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 4px 10px;
+  border: 1px solid var(--example-field-border); border-radius: 8px;
+  color: var(--example-text); background: var(--example-field);
+  font: inherit; font-size: 12.5px; font-weight: 400; line-height: 1.2; cursor: pointer;
+  transition: border-color .15s ease, background-color .15s ease;
+}
+.dynamo-example-option:hover { border-color: var(--example-field-hover); }
+.dynamo-example-option[aria-pressed="true"] {
+  border-color: var(--example-green); box-shadow: 0 0 0 1px var(--example-green);
+  background: var(--example-selected-bg); font-weight: 700;
+}
+/* Reserve the bold width so toggling a chip does not reflow its row. */
+.dynamo-example-option-text { display: inline-flex; flex-direction: column; }
+.dynamo-example-option-text::after {
+  content: attr(data-text); content: attr(data-text) / "";
+  height: 0; overflow: hidden; visibility: hidden; font-weight: 700; pointer-events: none;
+}
+.dynamo-example-option .dynamo-example-platform { width: 14px; height: 14px; flex-basis: 14px; }
+/* Count, removable chips for the active selections, and reset close the panel. */
+.dynamo-example-summary {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+  margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--example-border);
   color: var(--example-muted); font-size: 12.5px; font-variant-numeric: tabular-nums;
 }
-.dynamo-example-legend { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-left: auto; }
-.dynamo-example-legend > span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-.dynamo-example-legend .dynamo-example-platform { width: 14px; height: 14px; flex-basis: 14px; color: var(--example-text); }
+.dynamo-example-active { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.dynamo-example-active-chip {
+  display: inline-flex; align-items: center; gap: 5px; min-height: 26px; padding: 3px 10px 3px 7px;
+  border: 1px solid var(--example-green-border); border-radius: 999px;
+  color: var(--example-text); background: var(--example-selected-bg);
+  font: inherit; font-size: 12px; font-weight: 600; line-height: 1.2; white-space: nowrap; cursor: pointer;
+  transition: border-color .15s ease;
+}
+.dynamo-example-active-chip svg { flex: 0 0 auto; width: 12px; height: 12px; color: var(--example-muted); }
+.dynamo-example-active-chip:hover { border-color: var(--example-green); }
+.dynamo-example-active-chip:hover svg { color: var(--example-text); }
 .dynamo-example-reset {
-  display: inline-flex; align-items: center; min-height: 28px; padding: 5px 12px;
+  display: inline-flex; align-items: center; min-height: 28px; margin-left: auto; padding: 5px 12px;
   border: 1px solid var(--example-border); border-radius: 999px;
-  color: var(--example-muted); background: var(--example-panel);
+  color: var(--example-muted); background: var(--example-field);
   font: inherit; font-size: 12px; font-weight: 700; line-height: 1; cursor: pointer;
   transition: border-color .15s ease, color .15s ease;
 }
@@ -151,7 +190,7 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
   text-align: center; color: var(--example-text);
 }
 .dynamo-examples .dynamo-example-empty p { margin: 8px 0 0 !important; font-size: 13px; color: var(--example-muted); }
-.dynamo-example-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.dynamo-example-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
 /* The card is a grid so the MDX stays flat: icon, optional topic, title, and
    arrow on top, then the description, then the chips pinned to the bottom. */
 .dynamo-example-card {
@@ -251,11 +290,15 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
   --example-chip-fg: var(--example-gray-fg);
   --example-chip-bg: var(--example-gray-bg);
   --example-chip-border: var(--example-gray-border);
-  display: inline-flex; align-items: center; gap: 6px; min-height: 24px; padding: 2px 8px 2px 10px;
+  display: inline-flex; align-items: center; gap: 6px; min-height: 24px; padding: 2px 10px;
   border: 1px solid var(--example-chip-border); border-radius: 999px;
   color: var(--example-chip-fg); background: var(--example-chip-bg);
   font-size: 11.5px; font-weight: 600; line-height: 1.2; white-space: nowrap;
 }
+/* Platform tags lead the row as outlined chips, so they read as a separate
+   dimension from the tinted backend chips, as weight sizes do in DiffusionCatalog. */
+.dynamo-example-chip[data-platform] { padding-left: 8px; color: var(--example-text); background: transparent; }
+.dynamo-example-chip[data-backend] { padding-right: 8px; }
 /* TensorRT-LLM uses NVIDIA green. Mocker, sample, and custom backends stay neutral. */
 .dynamo-example-chip[data-backend="sglang"] {
   --example-chip-fg: var(--example-sky-fg); --example-chip-bg: var(--example-sky-bg); --example-chip-border: var(--example-sky-border);
@@ -282,63 +325,142 @@ const CSS = EXAMPLES_LAYOUT_CSS + `
   overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
 }
 @media (max-width: 720px) {
-  .dynamo-example-filters, .dynamo-example-filters[data-columns="2"], .dynamo-example-grid { grid-template-columns: minmax(0, 1fr); }
+  .dynamo-example-grid { grid-template-columns: minmax(0, 1fr); }
+  .dynamo-example-filter { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .dynamo-example-filter-label { padding-top: 0; }
   .dynamo-example-controls { padding: 16px; }
   .dynamo-example-grid { gap: 14px; }
   .dynamo-example-card { padding: 18px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .dynamo-example-card, .dynamo-example-reset,
-  .dynamo-example-controls input, .dynamo-example-controls select { transition: none; }
+  .dynamo-example-card, .dynamo-example-reset, .dynamo-example-option,
+  .dynamo-example-active-chip, .dynamo-example-controls input { transition: none; }
 }
 `;
+
+type FilterKey = "topic" | "platform" | "backend";
+// `short` is the visible chip text; `label` stays the full accessible name.
+type Option = { value: string; label: string; short?: string };
+type CardMeta = { topic: string; topicLabel: string; targets: string[] };
+type Selection = Record<FilterKey, string[]>;
+
+const FILTER_LABELS: Record<FilterKey, string> = { topic: "Topic", platform: "Platform", backend: "Backend" };
+const NO_SELECTION: Selection = { topic: [], platform: [], backend: [] };
+const NO_CARDS: CardMeta[] = [];
+
+function metadata(topic = "", topicLabel = "", targets = ""): CardMeta {
+  return { topic, topicLabel, targets: targets.split(/\s+/).filter(Boolean) };
+}
+
+// The server reads the cards' MDX props, so every option renders before
+// hydration without a layout shift. Fern wraps each MDX block in an error
+// boundary, so look through wrappers; the DOM read covers anything else.
+function metadataFromChildren(children: ReactNode, depth = 0): CardMeta[] {
+  return Children.toArray(children).flatMap((child) => {
+    if (!isValidElement<Record<string, unknown>>(child)) return [];
+    const { props } = child;
+    if (typeof props["data-example"] !== "string") {
+      return depth < 3 ? metadataFromChildren(props.children as ReactNode, depth + 1) : [];
+    }
+    const text = (key: string) => (typeof props[key] === "string" ? (props[key] as string) : "");
+    return [metadata(text("data-topic"), text("data-topic-label"), text("data-targets"))];
+  });
+}
+
+function metadataFromDom(root: HTMLElement | null): CardMeta[] {
+  return Array.from(root?.querySelectorAll<HTMLElement>("[data-example]") ?? [], ({ dataset }) =>
+    metadata(dataset.topic, dataset.topicLabel, dataset.targets)
+  );
+}
+
+function filterOptions(cards: CardMeta[]): Record<FilterKey, Option[]> {
+  const topics = new Map<string, string>();
+  const pairs = cards.flatMap((card) => {
+    topics.set(card.topic, card.topicLabel || card.topic);
+    return card.targets.map((target) => target.split(":"));
+  });
+  const present = (labels: Record<string, string>, index: number): Option[] =>
+    Object.entries(labels)
+      .filter(([value]) => pairs.some((pair) => pair[index] === value))
+      .map(([value, label]) => ({ value, label }));
+  return {
+    topic: Array.from(topics, ([value, label]) => ({ value, label, short: TOPIC_SHORT_LABELS[value] })),
+    platform: present(PLATFORMS, 0),
+    backend: present(BACKENDS, 1),
+  };
+}
+
+function RemoveIcon() {
+  return (
+    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true" focusable="false">
+      <path d="M3 3l6 6M9 3l-6 6" />
+    </svg>
+  );
+}
 
 export function ExamplesCatalog({ children, topicFilter = true }: { children: ReactNode; topicFilter?: boolean }) {
   const id = useId();
   const root = useRef<HTMLElement>(null);
   const [query, setQuery] = useState("");
-  const [topic, setTopic] = useState("");
-  const [platform, setPlatform] = useState("");
-  const [backend, setBackend] = useState("");
-  const [topics, setTopics] = useState<[string, string][]>([]);
+  const [selected, setSelected] = useState<Selection>(NO_SELECTION);
+  const [domCards, setDomCards] = useState<CardMeta[] | null>(null);
   const [count, setCount] = useState<number | null>(null);
-  const [total, setTotal] = useState(0);
-  const changed = Boolean(query || topic || platform || backend);
+  const childCards = useMemo(() => metadataFromChildren(children), [children]);
+  const cards = childCards.length ? childCards : domCards ?? NO_CARDS;
+  const options = useMemo(() => filterOptions(cards), [cards]);
+  // A row with one option cannot narrow the results, so it stays hidden.
+  const rows = (Object.keys(FILTER_LABELS) as FilterKey[])
+    .filter((key) => (key !== "topic" || topicFilter) && options[key].length > 1);
+  const active = rows.flatMap((key) =>
+    options[key].filter(({ value }) => selected[key].includes(value)).map((option) => ({ key, ...option }))
+  );
+  const changed = Boolean(query || active.length);
 
   useEffect(() => {
-    const cards = Array.from(root.current?.querySelectorAll<HTMLElement>("[data-example]") ?? []);
-    const labels = new Map<string, string>();
-    cards.forEach((card) => {
-      labels.set(card.dataset.topic ?? "", card.dataset.topicLabel ?? "");
-    });
-    setTopics(Array.from(labels.entries()));
-    setTotal(cards.length);
-  }, [children]);
+    if (!childCards.length) setDomCards(metadataFromDom(root.current));
+  }, [children, childCards]);
 
   useEffect(() => {
-    const cards = Array.from(root.current?.querySelectorAll<HTMLElement>("[data-example]") ?? []);
+    const nodes = Array.from(root.current?.querySelectorAll<HTMLElement>("[data-example]") ?? []);
     const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    const { topic, platform, backend } = selected;
     let visible = 0;
-    cards.forEach((card) => {
+    nodes.forEach((card) => {
       // Subsection pages show no topic label, so search reads it from the metadata.
       const text = `${card.textContent ?? ""} ${card.dataset.topicLabel ?? ""} ${card.dataset.keywords ?? ""}`.toLowerCase();
+      // Match one declared platform:backend pair, not independent platform and backend lists.
       const matchesTarget = (card.dataset.targets ?? "").split(/\s+/).some((target) => {
         const [targetPlatform, targetBackend] = target.split(":");
-        return (!platform || platform === targetPlatform) && (!backend || backend === targetBackend);
+        return (!platform.length || platform.includes(targetPlatform))
+          && (!backend.length || backend.includes(targetBackend));
       });
-      const matches = (!topic || topic === card.dataset.topic) && matchesTarget && words.every((word) => text.includes(word));
+      const matches = (!topic.length || topic.includes(card.dataset.topic ?? ""))
+        && matchesTarget && words.every((word) => text.includes(word));
       card.hidden = !matches;
       if (matches) visible += 1;
     });
     setCount(visible);
-  }, [children, query, topic, platform, backend]);
+  }, [children, query, selected]);
+
+  function toggle(key: FilterKey, value: string) {
+    setSelected((current) => ({
+      ...current,
+      [key]: current[key].includes(value) ? current[key].filter((item) => item !== value) : [...current[key], value],
+    }));
+  }
+
+  function clear(key: FilterKey) {
+    setSelected((current) => ({ ...current, [key]: [] }));
+  }
 
   function reset() {
     setQuery("");
-    setTopic("");
-    setPlatform("");
-    setBackend("");
+    setSelected(NO_SELECTION);
   }
+
+  const total = cards.length;
+  // Before hydration every card is visible, so the server count is exact.
+  const status = total ? `${count ?? total} of ${total} example${total === 1 ? "" : "s"}` : "Examples";
 
   return (
     <section className="dynamo-examples" ref={root} aria-label="Examples catalog">
@@ -353,47 +475,45 @@ export function ExamplesCatalog({ children, topicFilter = true }: { children: Re
             <input id={`${id}-search`} type="search" placeholder={topicFilter ? "Topic, feature, backend, or filename…" : "Feature, backend, or filename…"} value={query} onChange={(event) => setQuery(event.target.value)} />
           </span>
         </label>
-        <div className="dynamo-example-filters" data-columns={topicFilter ? 3 : 2}>
-          {topicFilter && (
-            <label htmlFor={`${id}-topic`}>
-              Topic
-              <select id={`${id}-topic`} value={topic} onChange={(event) => setTopic(event.target.value)}>
-                <option value="">All topics</option>
-                {topics.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-              </select>
-            </label>
+        {rows.length > 0 && (
+          <div className="dynamo-example-filters">
+            {rows.map((key) => (
+              <div key={key} className="dynamo-example-filter">
+                <span className="dynamo-example-filter-label" id={`${id}-${key}`}>{FILTER_LABELS[key]}</span>
+                <div className="dynamo-example-options" role="group" aria-labelledby={`${id}-${key}`}>
+                  <button type="button" className="dynamo-example-option" aria-pressed={selected[key].length === 0} onClick={() => clear(key)}>
+                    <span className="dynamo-example-option-text" data-text="All">All</span>
+                  </button>
+                  {options[key].map(({ value, label, short = label }) => (
+                    <button key={value} type="button" className="dynamo-example-option" aria-pressed={selected[key].includes(value)} aria-label={short === label ? undefined : label} title={short === label ? undefined : label} onClick={() => toggle(key, value)}>
+                      {key === "platform" && <PlatformGlyph platform={value} />}
+                      <span className="dynamo-example-option-text" data-text={short}>{short}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="dynamo-example-summary">
+          <span role="status" aria-live="polite" aria-atomic="true">{status}</span>
+          {active.length > 0 && (
+            <div className="dynamo-example-active" role="group" aria-label="Active filters">
+              {active.map(({ key, value, label, short = label }) => (
+                <button key={`${key}:${value}`} type="button" className="dynamo-example-active-chip" aria-label={`Remove ${FILTER_LABELS[key]} filter: ${label}`} onClick={() => toggle(key, value)}>
+                  <RemoveIcon />{short}
+                </button>
+              ))}
+            </div>
           )}
-          <label htmlFor={`${id}-platform`}>
-            Platform
-            <select id={`${id}-platform`} value={platform} onChange={(event) => setPlatform(event.target.value)}>
-              <option value="">All platforms</option>
-              {Object.entries(PLATFORMS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-            </select>
-          </label>
-          <label htmlFor={`${id}-backend`}>
-            Backend
-            <select id={`${id}-backend`} value={backend} onChange={(event) => setBackend(event.target.value)}>
-              <option value="">All backends</option>
-              {Object.entries(BACKENDS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-            </select>
-          </label>
+          <button className="dynamo-example-reset" type="button" disabled={!changed} onClick={reset}>Reset filters</button>
         </div>
-      </div>
-      <div className="dynamo-example-results">
-        <span role="status" aria-live="polite" aria-atomic="true">{count === null ? "Examples" : `${count} of ${total} examples`}</span>
-        {/* Visual key for the platform glyphs; each chip carries its own screen-reader text. */}
-        <span className="dynamo-example-legend" aria-hidden="true">
-          {Object.entries(PLATFORMS).map(([key, label]) => (
-            <span key={key}><PlatformGlyph platform={key} />{label}</span>
-          ))}
-        </span>
-        <button className="dynamo-example-reset" type="button" disabled={!changed} onClick={reset}>Reset filters</button>
       </div>
       <div className="dynamo-example-grid">{children}</div>
       {count === 0 && (
         <div className="dynamo-example-empty">
           <strong>No matching examples</strong>
-          <p>Try another platform or backend, or reset the filters.</p>
+          <p>Try another search, remove a filter, or reset the filters.</p>
         </div>
       )}
     </section>
