@@ -2650,6 +2650,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self,
         request: Mapping[str, Any],
         request_id: str,
+        context: Context | None = None,
     ) -> tuple[_LoRAAdmissionStack, LoRARequest | None, bool]:
         """Resolve a LoRA while already owning pending-admission cleanup."""
         admission_stack = _LoRAAdmissionStack()
@@ -2664,13 +2665,62 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             coordinator.pending_admission_guard(admission_stack.admission_id)
         )
         try:
-            lora_request, runtime_lora = await self._resolve_or_ensure_lora_request(
-                request, request_id, admission_id=admission_stack.admission_id
-            )
+            if context is None:
+                lora_request, runtime_lora = await self._resolve_or_ensure_lora_request(
+                    request, request_id, admission_id=admission_stack.admission_id
+                )
+            else:
+                lora_request, runtime_lora = await self._resolve_lora_until_stopped(
+                    request, request_id, admission_stack.admission_id, context
+                )
         except BaseException:
             await admission_stack.aclose()
             raise
         return admission_stack, lora_request, runtime_lora
+
+    async def _resolve_lora_until_stopped(
+        self,
+        request: Mapping[str, Any],
+        request_id: str,
+        admission_id: str,
+        context: Context,
+    ) -> tuple[LoRARequest | None, bool]:
+        resolution = asyncio.create_task(
+            self._resolve_or_ensure_lora_request(
+                request, request_id, admission_id=admission_id
+            )
+        )
+        killed = asyncio.ensure_future(context.async_killed_or_stopped())
+        shutdown = (
+            asyncio.create_task(self.shutdown_event.wait())
+            if self.shutdown_event is not None
+            else None
+        )
+        tasks: set[asyncio.Future[Any]] = {resolution, killed}
+        if shutdown is not None:
+            tasks.add(shutdown)
+        try:
+            done, _pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            if shutdown is not None and shutdown in done:
+                raise EngineShutdown("Engine was shut down during LoRA resolution.")
+            if killed in done:
+                raise asyncio.CancelledError
+            return await resolution
+        finally:
+
+            async def finish_waiters():
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            cancelled, _result, error = await run_lora_mutation(finish_waiters())
+            if error is not None:
+                raise error
+            if cancelled:
+                raise asyncio.CancelledError
 
     def _track_lora_request_activation(self, lora_request: LoRARequest | None) -> None:
         """Record adapters handed to vLLM for request-time lazy activation."""
@@ -2999,11 +3049,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     if close is not None:
                         await close()
                 finally:
-                    self._lora_state.end_request(admitted_lora_request.lora_name)
-                    if runtime_lora:
-                        await self._runtime_lora_coordinator.release_active_admission(
-                            admitted_lora_request.lora_name
-                        )
+                    try:
+                        self._lora_state.end_request(admitted_lora_request.lora_name)
+                    finally:
+                        if runtime_lora:
+                            await self._runtime_lora_coordinator.release_active_admission(
+                                admitted_lora_request.lora_name
+                            )
 
             release_cancelled, _released, release_error = await run_lora_mutation(
                 finish_admission()
@@ -3566,7 +3618,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         request_id,
         data_parallel_rank=None,
         lora_request=None,
-        runtime_lora=False,
         trace_headers=None,
         priority=0,
         reasoning_ended=None,
@@ -3577,6 +3628,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         kv_hints=None,
         artifact_session=None,
         emit_routed_experts=True,
+        *,
+        runtime_lora=False,
         admission_id=None,
     ):
         try:
@@ -4206,6 +4259,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         client_logprob_width = sampling_params.logprobs
         artifact_forced_logprobs = False
         artifact_session = None
+        artifact_session_factory: Callable[[], Any] | None = None
         artifact_settings = _backend_metadata_upload_settings(request)
         if artifact_settings is not None and "kind" in artifact_settings:
             from dynamo.artifacts.vllm.capture import (
@@ -4258,49 +4312,69 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     raise InvalidArgument(
                         "artifact delivery authority is not configured"
                     )
-            try:
-                artifact_session = VllmArtifactSession.from_request(
-                    request,
-                    prompt_token_count=len(prompt_ids),
-                    max_tokens=sampling_params.max_tokens,
-                    choice_count=sampling_params.n,
-                    route_capture_enabled=bool(
-                        getattr(self.engine_args, "enable_return_routed_experts", False)
-                    ),
-                    router_profile=self.artifact_router_profile,
-                    token_start=(
-                        getattr(sampling_params, "routed_experts_prompt_start", 0)
-                        if "moe_routes" in requested_contents
-                        and getattr(
-                            sampling_params, "routed_experts_prompt_start", None
-                        )
-                        is not None
-                        else 0
-                    ),
-                    logprob_width=(
-                        max(1, sampling_params.logprobs or 0) if needs_logprobs else 1
-                    ),
-                    runtime=artifact_runtime,
-                )
-            except CaptureCapacityError as exc:
-                raise WorkerOverloaded(str(exc)) from None
-            except ValueError as exc:
-                if artifact_runtime is not None and isinstance(
-                    exc, ArtifactAuthorityClosed
-                ):
+
+            def create_artifact_session():
+                try:
+                    return VllmArtifactSession.from_request(
+                        request,
+                        prompt_token_count=len(prompt_ids),
+                        max_tokens=sampling_params.max_tokens,
+                        choice_count=sampling_params.n,
+                        route_capture_enabled=bool(
+                            getattr(
+                                self.engine_args, "enable_return_routed_experts", False
+                            )
+                        ),
+                        router_profile=self.artifact_router_profile,
+                        token_start=(
+                            getattr(sampling_params, "routed_experts_prompt_start", 0)
+                            if "moe_routes" in requested_contents
+                            and getattr(
+                                sampling_params, "routed_experts_prompt_start", None
+                            )
+                            is not None
+                            else 0
+                        ),
+                        logprob_width=(
+                            max(1, sampling_params.logprobs or 0)
+                            if needs_logprobs
+                            else 1
+                        ),
+                        runtime=artifact_runtime,
+                    )
+                except CaptureCapacityError as exc:
                     raise WorkerOverloaded(str(exc)) from None
-                raise InvalidArgument(str(exc)) from None
-            except RuntimeError as exc:
-                # Storage policy rejects the requested destination before
-                # inference with a credential-safe message. A provider without
-                # conditional creation is a server fault and stays one.
-                if (
-                    artifact_runtime is not None
-                    and isinstance(exc, ArtifactStorageError)
-                    and exc.code in ("invalid_target", "destination_denied", "expired")
-                ):
+                except ValueError as exc:
+                    if artifact_runtime is not None and isinstance(
+                        exc, ArtifactAuthorityClosed
+                    ):
+                        raise WorkerOverloaded(str(exc)) from None
                     raise InvalidArgument(str(exc)) from None
-                raise
+                except RuntimeError as exc:
+                    # Storage policy rejects the requested destination before
+                    # inference with a credential-safe message.
+                    if (
+                        artifact_runtime is not None
+                        and isinstance(exc, ArtifactStorageError)
+                        and exc.code
+                        in ("invalid_target", "destination_denied", "expired")
+                    ):
+                        raise InvalidArgument(str(exc)) from None
+                    raise
+
+            artifact_session_factory = create_artifact_session
+
+        (
+            admission_stack,
+            lora_request,
+            runtime_lora,
+        ) = await self._prepare_lora_admission(request, request_id, context)
+        try:
+            if artifact_session_factory is not None:
+                artifact_session = artifact_session_factory()
+        except BaseException:
+            await admission_stack.aclose()
+            raise
 
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
@@ -4311,11 +4385,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         with (
             closing(artifact_session) if artifact_session is not None else nullcontext()
         ):
-            (
-                admission_stack,
-                lora_request,
-                runtime_lora,
-            ) = await self._prepare_lora_admission(request, request_id)
             async with (
                 admission_stack,
                 _deferred_abort_guard(
@@ -4700,7 +4769,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             admission_stack,
             lora_request,
             runtime_lora,
-        ) = await self._prepare_lora_admission(request, request_id)
+        ) = await self._prepare_lora_admission(request, request_id, context)
 
         async with (
             admission_stack,

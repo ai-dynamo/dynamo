@@ -539,6 +539,7 @@ class OmniHandler(BaseOmniHandler):
         create_generator: Callable[[LoRARequest | None], AsyncIterator[Any]],
         *,
         request_id: str | None = None,
+        admission_id: str | None = None,
         runtime_lora: bool = False,
         sampling_params_list: list | None = None,
     ) -> AsyncIterator[Any]:
