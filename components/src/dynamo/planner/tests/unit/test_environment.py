@@ -230,6 +230,7 @@ def test_replica_gpu_cost_change_refreshes_engine_capabilities():
 
 
 def test_worker_counts_from_deployment_state_hides_inactive_role():
+    """Hide inactive prefill counts while keeping both pending-startup counts."""
     state = DeploymentState(
         prefill=ComponentState(
             replicas=ReplicaState(active=2, expected=3, scaling=True, pending_startup=1)

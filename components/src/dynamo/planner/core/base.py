@@ -605,6 +605,7 @@ class NativePlannerBase:
                 )
 
     async def _collect_worker_counts(self) -> WorkerCounts:
+        """Collect deployment counts using this planner's required roles."""
         return util.worker_counts_from_deployment_state(
             self.environment.deployment_state(),
             require_prefill=self.require_prefill,
