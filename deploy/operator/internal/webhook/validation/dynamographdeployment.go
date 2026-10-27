@@ -34,6 +34,7 @@ import (
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -457,6 +458,13 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		allErrs = append(allErrs, lpxComponentGateErrors(
 			v.ctx, component, opts.oldComponents[component.ComponentName], componentPath, v.runtimeVersionSource,
 		)...)
+		// Engine Group admission proves the supported layout before any Grove resources exist.
+		if component.EngineGroup != nil {
+			allErrs = append(allErrs, v.validateComponentEngineGroupSpec(component.EngineGroup, componentPath.Child("engineGroup"), componentEngineGroupSpecValidationOptions{
+				component: component, backendFramework: spec.BackendFramework, parentEnv: spec.Env,
+				hasRootOverride: spec.ProviderOverride != nil,
+			})...)
+		}
 
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 			component,
@@ -469,6 +477,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				oldComponent:                      opts.oldComponents[component.ComponentName],
 				groveUpdateStrategy:               opts.groveUpdateStrategy,
 				groveStrategyChanged:              opts.oldGroveUpdateStrategy != opts.groveUpdateStrategy,
+				engineGroupsSupported:             opts.grovePathway,
 			},
 		)...)
 	}
@@ -651,6 +660,12 @@ func (v *dynamoGraphDeploymentValidation) validateRestart(
 	fldPath *field.Path,
 	components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) field.ErrorList {
+	// A legacy restart cannot roll a world whose collective membership is managed independently.
+	for _, component := range components {
+		if component.EngineGroup != nil {
+			return field.ErrorList{field.Forbidden(fldPath, "coordinated Engine Group restart is not implemented")}
+		}
+	}
 	if restart.Strategy == nil {
 		return nil
 	}
@@ -927,6 +942,16 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 		)...)
 		if !exists {
 			continue
+		}
+		// Until coordinated world rollout exists, preserve the declarative creation template.
+		if oldComponent.EngineGroup != nil || newComponent.EngineGroup != nil {
+			if !apiequality.Semantic.DeepEqual(newComponent, oldComponent) {
+				allErrs = append(allErrs, field.Forbidden(componentsPath.Index(i), "Engine Group component configuration is immutable; scale the child Engine Group instead"))
+			}
+			if newSpec.Restart != nil || !apiequality.Semantic.DeepEqual(newSpec.Env, oldSpec.Env) ||
+				newSpec.BackendFramework != oldSpec.BackendFramework || !apiequality.Semantic.DeepEqual(newSpec.ProviderOverride, oldSpec.ProviderOverride) {
+				allErrs = append(allErrs, field.Forbidden(fldPath, "Engine Group backend, launch environment, provider overrides and restart are immutable until coordinated world rollout is implemented"))
+			}
 		}
 
 		// Ratchet the shared multinode type contract because DGD updates skip the stateless traversal.
