@@ -22,7 +22,10 @@ mod support;
 
 use support::sglang::{self as sglang_fixture, http};
 use support::vllm as vllm_fixture;
-use support::{FixtureConfig, GenerateOpening, ProcessFixture, SidecarFixture, WireFixture};
+use support::{
+    DiscoveryFixture, FixtureConfig, GenerateOpening, ProcessFixture, Rejection, SidecarFixture,
+    WireFixture,
+};
 
 fn after_token_responses(count: usize, action: StreamAction) -> RequestPlan {
     RequestPlan {
@@ -146,21 +149,24 @@ async fn failures<F: SidecarFixture>() {
     let mut fixture = F::start(control.clone(), FixtureConfig::default()).await;
     let engine = fixture.engine().await;
     engine.start(0).await.unwrap();
-    for (plan, kind) in [
+    for (plan, kind, is_injected) in [
         (
             RequestPlan {
                 open: OpenAction::Fail,
                 ..Default::default()
             },
             BackendError::CannotConnect,
+            true,
         ),
         (
             after_token_responses(1, StreamAction::Close),
             F::eof_error(),
+            false,
         ),
         (
             after_token_responses(1, StreamAction::Fail),
-            BackendError::CannotConnect,
+            F::read_error(),
+            true,
         ),
     ] {
         let ctx = mock_context();
@@ -169,7 +175,20 @@ async fn failures<F: SidecarFixture>() {
         let req = request("mocker-model", vec![11, 22, 33], 6);
         let ctx = GenerateContext::new(ctx, None);
         let outputs = if is_open_failure {
-            collect(&engine, req, ctx).await
+            // The injected open failure is UNAVAILABLE.
+            let opening = bounded("failed native opening", engine.generate(req, ctx)).await;
+            match F::GENERATE_OPENING {
+                GenerateOpening::WaitsForHeaders => vec![Err(opening
+                    .err()
+                    .expect("native UNAVAILABLE must fail before a response stream opens"))],
+                GenerateOpening::OnStreamPoll => {
+                    bounded(
+                        "failed native opening",
+                        opening.unwrap().collect::<Outputs>(),
+                    )
+                    .await
+                }
+            }
         } else {
             let mut stream = engine.generate(req, ctx).await.unwrap();
             let mut outputs = checkpoint_outputs(&mut stream, &handle).await;
@@ -180,7 +199,7 @@ async fn failures<F: SidecarFixture>() {
         let tokens = handle.tokens();
         assert_eq!(tokens.is_empty(), is_open_failure);
         let error = failure(outputs, &tokens, kind);
-        if kind == BackendError::CannotConnect {
+        if is_injected {
             assert!(error.to_string().contains("injected"));
             assert!(error.to_string().contains("Generate"));
         }
@@ -552,6 +571,8 @@ macro_rules! enroll_baseline {
 
 enroll_baseline!(vllm, support::vllm::Fixture);
 enroll_baseline!(sglang, support::sglang::Fixture);
+enroll_baseline!(trtllm, support::trtllm::Fixture);
+enroll_baseline!(lpx, support::lpx::Fixture);
 
 #[tokio::test]
 async fn vllm_teardown_terminates_handlers_with_clients_alive() {
@@ -599,11 +620,12 @@ async fn native_rejection<F: WireFixture>(max_tokens: u32) -> DynamoError {
             GenerateContext::new(ctx, None),
         )
         .await;
-    let outputs = match F::GENERATE_OPENING {
-        GenerateOpening::WaitsForHeaders => vec![Err(opening
+    let outputs = match (F::GENERATE_OPENING, F::REJECTION) {
+        (GenerateOpening::WaitsForHeaders, Rejection::Returned) => vec![Err(opening
             .err()
             .expect("native rejection must fail before a response stream opens"))],
-        GenerateOpening::OnStreamPoll => {
+        (GenerateOpening::OnStreamPoll, _)
+        | (GenerateOpening::WaitsForHeaders, Rejection::FirstStreamItem) => {
             bounded("native rejection", opening.unwrap().collect::<Outputs>()).await
         }
     };
@@ -645,11 +667,39 @@ async fn sglang_native_rejection_recovers_on_same_engine() {
     );
 }
 
+/// Another worker would refuse the request the same way, so the sidecar
+/// delivers the refusal in the stream rather than as a migratable error.
+#[tokio::test]
+async fn lpx_native_rejection_is_the_first_stream_item() {
+    let error = bounded(
+        "native rejection and recovery",
+        native_rejection::<support::lpx::Fixture>(1_000_001),
+    )
+    .await;
+    assert!(error.to_string().contains("Generate"));
+    assert!(
+        error
+            .to_string()
+            .contains("max_tokens 1000001 exceeds the Mocker limit of 1000000")
+    );
+}
+
 #[tokio::test]
 async fn sglang_teardown_terminates_handlers_with_clients_alive() {
     let (outputs, tokens) = bounded(
         "server teardown with live clients",
         teardown_with_live_clients::<support::sglang::Fixture>(),
+    )
+    .await;
+    let error = failure(outputs, &tokens, BackendError::Unknown);
+    assert!(error.to_string().contains("Generate"));
+}
+
+#[tokio::test]
+async fn lpx_teardown_terminates_handlers_with_clients_alive() {
+    let (outputs, tokens) = bounded(
+        "server teardown with live clients",
+        teardown_with_live_clients::<support::lpx::Fixture>(),
     )
     .await;
     let error = failure(outputs, &tokens, BackendError::Unknown);
@@ -745,6 +795,87 @@ async fn sglang_malformed_terminal_fails_then_recovers() {
             BackendError::Unknown,
         );
         assert!(error.to_string().contains("missing finish_reason"));
+        bounded("malformed RPC released", handle.wait(Event::Dropped)).await;
+        healthy(&fixture, &engine, &control).await;
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn trtllm_teardown_terminates_handlers_with_clients_alive() {
+    let (outputs, tokens) = bounded(
+        "server teardown with live clients",
+        teardown_with_live_clients::<support::trtllm::Fixture>(),
+    )
+    .await;
+    let error = failure(outputs, &tokens, BackendError::Unknown);
+    assert!(error.to_string().contains("Generate"));
+}
+
+#[tokio::test]
+async fn trtllm_native_rejection_recovers_on_same_engine() {
+    let error = bounded(
+        "native rejection and recovery",
+        native_rejection::<support::trtllm::Fixture>(1_000_001),
+    )
+    .await;
+    assert!(
+        error
+            .to_string()
+            .contains("exceeds the Mocker limit of 1000000"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn trtllm_malformed_terminal_fails_then_recovers() {
+    bounded("malformed terminal and recovery", async {
+        use dynamo_trtllm_sidecar::proto as pb;
+        let control = Controller::<support::trtllm::Adapter>::default();
+        let mut fixture =
+            support::trtllm::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let ctx = mock_context();
+        let handle = control.request(ctx.id(), RequestPlan::default());
+        fixture.respond(
+            ctx.id(),
+            vec![
+                pb::GenerateResponse {
+                    event: Some(pb::generate_response::Event::Token(pb::TokenOutput {
+                        output_index: Some(0),
+                        tokens: vec![pb::TokenInfo {
+                            token_id: 101,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                },
+                pb::GenerateResponse {
+                    event: Some(pb::generate_response::Event::Finished(
+                        pb::GenerationFinished {
+                            output_index: Some(0),
+                            reason: pb::FinishReason::Unspecified as i32,
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                },
+            ],
+        );
+        let error = failure(
+            collect(
+                &engine,
+                request("mocker-model", vec![1, 2, 3], 3),
+                GenerateContext::new(ctx, None),
+            )
+            .await,
+            &[101],
+            BackendError::Unknown,
+        );
+        assert!(error.to_string().contains("unspecified finish reason"));
         bounded("malformed RPC released", handle.wait(Event::Dropped)).await;
         healthy(&fixture, &engine, &control).await;
         finish(&mut fixture, &engine).await;
@@ -1136,6 +1267,49 @@ async fn vllm_visible_stop_tokens_preserve_tool_delimiters() {
         let response = wire.response.unwrap();
         assert_eq!(response.output_text, Some(false));
         assert!(response.output_token_ids);
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}
+
+// SGLang text trims the matched stop token, so the delimiter must arrive as an ID.
+#[tokio::test]
+async fn sglang_visible_stop_tokens_preserve_tool_delimiters() {
+    bounded("visible tool delimiter", async {
+        use dynamo_sglang_sidecar::proto as pb;
+        let control = Controller::<sglang_fixture::Adapter>::default();
+        let mut fixture =
+            sglang_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        let ctx = mock_context();
+        let handle = control.request(ctx.id(), RequestPlan::default());
+        fixture.respond(
+            ctx.id(),
+            vec![pb::GenerateResponse {
+                output_ids: vec![42],
+                meta_info: [(
+                    "finish_reason".to_string(),
+                    json!({"type": "stop", "matched": 42}).to_string(),
+                )]
+                .into(),
+                finished: true,
+                ..Default::default()
+            }],
+        );
+        let mut req = request("mocker-model", vec![11, 22, 33], 1);
+        req.stop_conditions.stop_token_ids_visible = Some(vec![42]);
+        req.stop_conditions.stop_token_ids_hidden = Some(vec![2]);
+        let outputs = collect(&engine, req, GenerateContext::new(ctx, None)).await;
+        assert!(
+            outputs
+                .iter()
+                .all(|output| output.as_ref().unwrap().text.is_none())
+        );
+        terminal(outputs, &[42], 3, FinishReason::Stop);
+        let wire = handle.native_request().unwrap();
+        assert_eq!(wire.sampling_params.unwrap().stop_token_ids, [2, 42]);
+        assert_eq!(wire.return_text, None);
         finish(&mut fixture, &engine).await;
     })
     .await;

@@ -153,12 +153,10 @@ func createLegacyGroveWorkerHashSuffixTestDGD(
 	require.NoError(t, legacyClient.Create(ctx, dgd))
 
 	legacyPCS := &grovev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      dynamo.PCSNameForDGD(dgd, nil),
-			Namespace: dgd.Namespace,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
-			},
+		Name:      dynamo.PCSNameForDGD(dgd, nil),
+		Namespace: dgd.Namespace,
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
 		},
 		Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 			Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
@@ -179,10 +177,8 @@ func startGroveWorkerHashSuffixTestController(t *testing.T, env *operatorenv.Tes
 	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}
 	env.StartManager(func(mgr ctrl.Manager) error {
 		return SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{
-			SetupOptions: SetupOptions{
-				Config:        config,
-				RuntimeConfig: runtimeConfig,
-			},
+			Config:        config,
+			RuntimeConfig: runtimeConfig,
 		})
 	})
 }
@@ -194,7 +190,7 @@ func newGroveWorkerHashSuffixTestDGD(namespace, name string) *nvidiacomv1beta1.D
 	frontend := groveWorkerHashSuffixTestComponent("frontend", nvidiacomv1beta1.ComponentTypeFrontend, "registry.example/dynamo-frontend:1.4.0")
 
 	return &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Name: name, Namespace: namespace,
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Components:       []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{prefill, decode, frontend},

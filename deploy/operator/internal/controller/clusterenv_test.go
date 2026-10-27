@@ -34,32 +34,47 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 var clusterTestEnv *clusterenv.Env
 
-func TestMain(m *testing.M) {
-	logf.SetLogger(logr.Discard())
+func runClusterTests(m *testing.M, prepare func(context.Context, client.Client) (func(context.Context) error, error)) int {
+	if prepare != nil {
+		logf.SetLogger(zap.New(zap.UseDevMode(true)))
+	} else {
+		logf.SetLogger(logr.Discard())
+	}
 	operatorVersion, err := clusterTestOperatorVersion()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "derive cluster-test operator version: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	operatorConfig := &configv1alpha1.OperatorConfiguration{}
 	configv1alpha1.SetDefaultsOperatorConfiguration(operatorConfig)
 	operatorConfig.GPU.DiscoveryEnabled = ptr.To(false)
-	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}
+	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true, DisaggregatedSet: true}}
 	additionalAdmission := lwsmock.Configurations()
 	groveAdmission := grovemock.Configurations()
 	additionalAdmission.Mutating = append(additionalAdmission.Mutating, groveAdmission.Mutating...)
 	additionalAdmission.Validating = append(additionalAdmission.Validating, groveAdmission.Validating...)
 
+	var managerIdentity *rest.ImpersonationConfig
+	if prepare != nil {
+		managerIdentity = &rest.ImpersonationConfig{
+			UserName: "system:serviceaccount:dynamo-system:dynamo-operator",
+			Groups:   []string{"system:masters"},
+		}
+	}
 	clusterTestEnv = clusterenv.New(clusterenv.Options{
 		Scheme:                 newClusterTestScheme(),
+		BeforeWebhooks:         prepare,
+		ManagerImpersonation:   managerIdentity,
 		AdditionalAdmission:    additionalAdmission,
 		WebhookProxyImage:      os.Getenv("DYNAMO_CLUSTERTEST_WEBHOOK_PROXY_IMAGE"),
 		EventuallyTimeout:      2 * time.Minute,
@@ -79,7 +94,7 @@ func TestMain(m *testing.M) {
 			return grovemock.Setup(mgr)
 		},
 	})
-	os.Exit(clusterTestEnv.RunM(m))
+	return clusterTestEnv.RunM(m)
 }
 
 func TestClusterDynamoComponentDeploymentManifests(t *testing.T) {

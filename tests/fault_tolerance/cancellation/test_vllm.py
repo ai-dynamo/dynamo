@@ -136,13 +136,19 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls = [
                 (f"http://localhost:{self.system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
-                (f"http://localhost:{frontend_port}/health", check_health_generate),
+                (
+                    f"http://localhost:{frontend_port}/health?instances=true",
+                    check_health_generate,
+                ),
             ]
         else:
             health_check_urls = [
                 (f"http://localhost:{self.system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
-                (f"http://localhost:{frontend_port}/health", check_health_generate),
+                (
+                    f"http://localhost:{frontend_port}/health?instances=true",
+                    check_health_generate,
+                ),
             ]
 
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")

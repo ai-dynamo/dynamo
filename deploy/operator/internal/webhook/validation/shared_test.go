@@ -39,7 +39,6 @@ import (
 	apitest "k8s.io/apiextensions-apiserver/pkg/test"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -270,9 +269,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 		ComponentType:          nvidiacomv1beta1.ComponentTypeEPP,
 		RuntimeVersionOverride: "1.1.0",
 		PodTemplate: &corev1.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{
-				Annotations: map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid"},
-			},
+			Annotations: map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid"},
 			Spec: corev1.PodSpec{
 				Containers:     []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}, {Name: "sidecar"}},
 				InitContainers: []corev1.Container{{Name: "init"}},

@@ -65,14 +65,19 @@ func (r *graphReconciler) resolveWorkloads(
 		groups    = lpx.ComponentGroups(dgd)
 	)
 
+	registry := r.modelRegistry
+	if !adoptBuildCheckpoints(r.config.Infrastructure.ModelExpressURL, deployment) {
+		registry = lpx.WithoutBuildCheckpoints(registry)
+	}
+
 	for _, groupName := range slices.Sorted(maps.Keys(groups)) {
-		workload, err := lpx.ResolveWorkload(ctx, r.Client, dgd, groups[groupName], r.modelRegistry)
+		workload, err := lpx.ResolveWorkload(ctx, r.Client, dgd, groups[groupName], registry)
 		if err != nil {
 			return nil, nil, err
 		}
 		workloads[groupName] = workload
 
-		plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment))
+		plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment), dgd.GetComponentByName(workload.ServingComponentName()))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -128,10 +133,13 @@ func (r *graphReconciler) renderPodCliqueSet(
 			return nil, nil, err
 		}
 
-		// Discovery selects only this workload's conductor; all auxiliary roles stay private.
+		// Discovery selects only this workload's serving role; all auxiliary roles stay private.
 		serving := plan.ConductorTemplate
 		if serving == "" {
 			serving = plan.CyborgTemplate
+		}
+		if serving == "" {
+			serving = plan.Agents[len(plan.Agents)-1].TemplateName
 		}
 		for _, clique := range rendered.Cliques {
 			if token := deployment.Annotations[dynamo.LPXRestartAnnotation]; token != "" {
@@ -318,20 +326,19 @@ func (r *graphReconciler) stampClientIdentity(ctx context.Context, dgd *v1beta1.
 		if slices.ContainsFunc(spec.Volumes, func(v corev1.Volume) bool { return v.Name == identityVolume }) {
 			return fmt.Errorf("LPX agent template %s already defines volume %q, which the operator adds", clique.Name, identityVolume)
 		}
-		spec.Volumes = append(spec.Volumes, corev1.Volume{Name: identityVolume, VolumeSource: corev1.VolumeSource{
-			Projected: &corev1.ProjectedVolumeSource{DefaultMode: ptr.To(int32(0o440)), Sources: []corev1.VolumeProjection{
+		spec.Volumes = append(spec.Volumes, corev1.Volume{Name: identityVolume,
+			Projected: &corev1.ProjectedVolumeSource{DefaultMode: new(int32(0o440)), Sources: []corev1.VolumeProjection{
 				{Secret: &corev1.SecretProjection{
-					LocalObjectReference: corev1.LocalObjectReference{Name: name},
-					Items:                []corev1.KeyToPath{{Key: "client.pem", Path: "client.pem"}, {Key: "client.key", Path: "client.key"}},
+					Name:  name,
+					Items: []corev1.KeyToPath{{Key: "client.pem", Path: "client.pem"}, {Key: "client.key", Path: "client.key"}},
 				}},
 				// Optional, so Pods start where the platform has not published it.
 				{Secret: &corev1.SecretProjection{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "lpx-server-ca"},
-					Items:                []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.pem"}},
-					Optional:             ptr.To(true),
+					Name:     "lpx-server-ca",
+					Items:    []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.pem"}},
+					Optional: new(true),
 				}},
-			}},
-		}})
+			}}})
 		// Only the agent's main runtime authenticates to LPUD; a missing main must fail, never mount nowhere.
 		container := common.FindContainerByName(spec.Containers, consts.MainContainerName)
 		if container == nil {
@@ -380,10 +387,10 @@ func newClientIdentitySecret(namespace, name string) (*corev1.Secret, error) {
 		return nil, err
 	}
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Type:       corev1.SecretTypeOpaque,
+		Name: name, Namespace: namespace,
+		Type: corev1.SecretTypeOpaque,
 		// The key is never rewritten, so nobody may swap it in place either.
-		Immutable: ptr.To(true),
+		Immutable: new(true),
 		Data: map[string][]byte{
 			"client.pem": pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}),
 			"client.key": pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
@@ -392,4 +399,32 @@ func newClientIdentitySecret(namespace, name string) (*corev1.Secret, error) {
 			"private.key.pub": sshPub,
 		},
 	}, nil
+}
+
+// markBuildCheckpointAdoption records that new input adopts hybrid builds' own
+// checkpoints. The record is the checkpointDownload status, which persists the
+// decision while build downloads hold rendering across reconciles that each
+// advance observedGeneration. Input counts as new until a reconcile
+// acknowledges its generation, including input that an earlier operator never
+// acknowledged: rendering that input changes the workload anyway, so adopting
+// its checkpoint adds no extra roll. A deployment whose generation is
+// acknowledged and that has no record keeps its workload across an
+// operator-only upgrade. deployment is non-nil.
+func markBuildCheckpointAdoption(modelExpressURL string, deployment *v1alpha1.LPXGraphDeployment) {
+	if modelExpressURL == "" || deployment.Status.CheckpointDownload != nil ||
+		deployment.Generation == deployment.Status.ObservedGeneration {
+		return
+	}
+	deployment.Status.CheckpointDownload = &v1alpha1.CheckpointDownloadStatus{}
+}
+
+// adoptBuildCheckpoints reports whether hybrid builds' own checkpoints reach the
+// Cyborg conductor: Model Express is configured and the deployment records
+// adoption. Without Model Express the operator cannot confirm that a checkpoint
+// is in model storage, so it projects none: removing the Model Express URL
+// renders the authored conductor environment again, and restoring the URL
+// resumes projection from the retained record after another download check.
+// deployment is non-nil.
+func adoptBuildCheckpoints(modelExpressURL string, deployment *v1alpha1.LPXGraphDeployment) bool {
+	return modelExpressURL != "" && deployment.Status.CheckpointDownload != nil
 }

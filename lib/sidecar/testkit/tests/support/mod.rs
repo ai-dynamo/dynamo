@@ -12,7 +12,9 @@ use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
 
+pub mod lpx;
 pub mod sglang;
+pub mod trtllm;
 pub mod vllm;
 
 pub struct FixtureConfig {
@@ -38,14 +40,28 @@ pub enum GenerateOpening {
     OnStreamPoll,
 }
 
+/// How a request refused before any response reaches `generate()`'s caller.
+pub enum Rejection {
+    /// `generate()` returns the error.
+    Returned,
+    /// `generate()` returns a stream whose only item is the error.
+    FirstStreamItem,
+}
+
 pub trait SidecarFixture {
     type Engine: LLMEngine;
     type Protocol: Protocol;
     const GENERATE_OPENING: GenerateOpening;
+    /// How the sidecar delivers a refusal it decides deterministically.
+    const REJECTION: Rejection = Rejection::Returned;
 
     async fn start(control: Controller<Self::Protocol>, config: FixtureConfig) -> Self;
     async fn engine(&self) -> Self::Engine;
     fn eof_error() -> BackendError;
+    /// A native stream that fails with UNAVAILABLE after its first tokens.
+    fn read_error() -> BackendError {
+        BackendError::CannotConnect
+    }
     fn native_model(request: &<Self::Protocol as Protocol>::Request) -> Option<&str>;
     fn active_request_count(&self) -> usize;
     async fn scheduler_idle(&self);
@@ -77,21 +93,30 @@ fn fast_engine_args(engine_type: EngineType) -> MockerConfig {
 }
 
 pub trait ProcessFixture: WireFixture {
+    /// An UNAVAILABLE stream error removes the worker from routing until the router reconciles.
+    const QUARANTINES_ON_READ_ERROR: bool = false;
+
     fn endpoint(&self) -> String;
-    fn command() -> Command;
+    fn command(model: &str) -> Command;
     fn configure_request(request: &mut PreprocessedRequest);
     fn assert_registration(card: &ModelDeploymentCard);
+}
+
+/// Backends that discover served aliases and gate publication on native health.
+pub trait DiscoveryFixture: ProcessFixture {
     fn set_served_model_name(&self, name: &str);
     fn set_health(&self, is_healthy: Option<bool>);
     async fn health_check_received(&self);
     fn assert_unhealthy_startup(logs: &str);
 }
 
-pub trait HandoffFixture: ProcessFixture {
+/// A prefill fixture paired with the decode fixture `D`.
+pub trait HandoffFixture<D: ProcessFixture = Self>: ProcessFixture {
     const HAS_BOOTSTRAP: bool;
+    const KV_BLOCK_SIZE: u32;
     fn assert_handoff(
         prefill: &RequestHandle<Self::Protocol>,
-        decode: &RequestHandle<Self::Protocol>,
+        decode: &RequestHandle<D::Protocol>,
         id: &str,
     );
 }
@@ -114,6 +139,23 @@ pub fn sidecar_command(binary_name: &str, override_env: &str) -> Command {
         binary.display()
     );
     Command::new(binary)
+}
+
+async fn wait_scheduler_active(
+    fixture: &impl SidecarFixture,
+    mut metrics: tokio::sync::watch::Receiver<MockerMetrics>,
+) {
+    dynamo_sidecar_testkit::bounded("Mocker active scheduler work", async {
+        loop {
+            let snapshot = metrics.borrow_and_update().clone();
+            if snapshot.running_requests + snapshot.waiting_requests > 0 {
+                assert!(fixture.active_request_count() > 0);
+                return;
+            }
+            metrics.changed().await.unwrap();
+        }
+    })
+    .await;
 }
 
 async fn wait_scheduler_idle(
