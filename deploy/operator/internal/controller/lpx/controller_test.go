@@ -3064,9 +3064,15 @@ func TestLPXPodCliqueSetListOrder(t *testing.T) {
 	pcs, err = getPodCliqueSet(t.Context(), r.Client, child)
 	require.NoError(t, err)
 	require.Equal(t, originalUID, pcs.UID)
+
+	t.Log("Preserve the complete authored init containers with the model path prepended")
+	expectedInit := agent.PodTemplate.Spec.DeepCopy().InitContainers
+	for i := range expectedInit {
+		expectedInit[i].Env = append([]corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "/models/build-v2"}}, expectedInit[i].Env...)
+	}
 	for _, clique := range pcs.Spec.Template.Cliques {
 		if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleAgent {
-			require.Equal(t, agent.PodTemplate.Spec.InitContainers, clique.Spec.PodSpec.InitContainers)
+			require.Equal(t, expectedInit, clique.Spec.PodSpec.InitContainers)
 		}
 	}
 
@@ -3164,7 +3170,7 @@ func resolveLPXTestWorkload(t *testing.T, registry lpx.ModelRegistry, ctx contex
 	t.Helper()
 	workload, err := lpx.ResolveWorkload(ctx, fake.NewClientBuilder().Build(), dgd, singleGroupComponents(t, dgd), registry)
 	require.NoError(t, err)
-	plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment))
+	plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment), dgd.GetComponentByName(workload.ServingComponentName()))
 	require.NoError(t, err)
 	_, missing := resolvePipelineRequests(deployment, nil, workload, plan)
 	fixture := &lpxTestWorkload{workload: workload, plan: plan.ForReplica(0)}
