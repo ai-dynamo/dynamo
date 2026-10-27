@@ -107,7 +107,7 @@ impl SidecarFixture for Fixture {
             "--grpc-connections".into(),
             self.config.connections.to_string(),
             "--grpc-startup-deadline-secs".into(),
-            "5".into(),
+            "30".into(),
             "--grpc-connect-attempt-timeout-secs".into(),
             "1".into(),
         ])

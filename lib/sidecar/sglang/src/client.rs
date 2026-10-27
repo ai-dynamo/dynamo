@@ -434,11 +434,16 @@ async fn rpc_with_deadline<T, F>(rpc: &str, deadline: Instant, future: F) -> Res
 where
     F: Future<Output = Result<T, tonic::Status>>,
 {
+    // Startup callers share one deadline across connect and several RPCs, so
+    // report how much budget this RPC actually had to tell those phases apart.
+    let started = Instant::now();
+    let remaining = deadline.saturating_duration_since(started);
     match timeout_at(deadline, future).await {
         Ok(Ok(response)) => Ok(response),
         Ok(Err(status)) => Err(status_to_dynamo(rpc, status)),
         Err(_) => Err(connection_timeout(format!(
-            "{rpc} exceeded the configured deadline"
+            "{rpc} exceeded the configured deadline (waited {:?}; {remaining:?} of the deadline remained when the RPC started)",
+            started.elapsed()
         ))),
     }
 }

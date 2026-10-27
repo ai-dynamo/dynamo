@@ -4,6 +4,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
 use dynamo_llm::local_model::runtime_config::{
@@ -39,6 +40,7 @@ pub struct Fixture {
     scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
     model_info: Arc<Mutex<Value>>,
     server_info: Arc<Mutex<VecDeque<Value>>>,
+    server_info_entered: Arc<Mutex<Option<Instant>>>,
     health: watch::Sender<Option<bool>>,
     health_calls: watch::Receiver<usize>,
     http: Option<http::Peer>,
@@ -101,6 +103,7 @@ impl SidecarFixture for Fixture {
         let scripted = Arc::new(Mutex::new(HashMap::new()));
         let model_info = Arc::new(Mutex::new(Value::Null));
         let server_info = Arc::new(Mutex::new(VecDeque::new()));
+        let server_info_entered = Arc::new(Mutex::new(None));
         let (health, health_rx) = watch::channel(Some(true));
         let (health_tx, health_calls) = watch::channel(0);
         let controlled = ControlledService {
@@ -109,6 +112,7 @@ impl SidecarFixture for Fixture {
             scripted: scripted.clone(),
             model_info: model_info.clone(),
             server_info: server_info.clone(),
+            server_info_entered: server_info_entered.clone(),
             health: health_rx,
             health_calls: health_tx,
         };
@@ -130,6 +134,7 @@ impl SidecarFixture for Fixture {
             scripted,
             model_info,
             server_info,
+            server_info_entered,
             health,
             health_calls,
             http: None,
@@ -149,12 +154,31 @@ impl SidecarFixture for Fixture {
             "1".into(),
             "--grpc-retry-interval-secs".into(),
             "1".into(),
+            // Bounded but generous: parallel tests under coverage on a busy CI
+            // runner have stalled for over 5 s before discovery finished.
             "--grpc-startup-deadline-secs".into(),
-            "5".into(),
+            "30".into(),
         ];
-        tokio::task::spawn_blocking(move || SglangSidecarEngine::from_args(Some(argv)).unwrap().0)
-            .await
-            .unwrap()
+        *self.server_info_entered.lock().unwrap() = None;
+        let server_info_entered = self.server_info_entered.clone();
+        let started = Instant::now();
+        tokio::task::spawn_blocking(move || {
+            SglangSidecarEngine::from_args(Some(argv))
+                .unwrap_or_else(|error| {
+                    // Separates a late server handler from a slow connect or response.
+                    let entered = server_info_entered
+                        .lock()
+                        .unwrap()
+                        .map(|at| at.duration_since(started));
+                    panic!(
+                        "SGLang fixture startup failed after {:?}; server entered GetServerInfo after {entered:?}: {error}",
+                        started.elapsed()
+                    )
+                })
+                .0
+        })
+        .await
+        .unwrap()
     }
 
     fn eof_error() -> BackendError {
@@ -362,6 +386,7 @@ struct ControlledService {
     scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
     model_info: Arc<Mutex<Value>>,
     server_info: Arc<Mutex<VecDeque<Value>>>,
+    server_info_entered: Arc<Mutex<Option<Instant>>>,
     health: watch::Receiver<Option<bool>>,
     health_calls: watch::Sender<usize>,
 }
@@ -434,6 +459,7 @@ macro_rules! delegate_service {
                 &self,
                 request: Request<pb::GetServerInfoRequest>,
             ) -> Result<Response<pb::GetServerInfoResponse>, Status> {
+                *self.server_info_entered.lock().unwrap() = Some(Instant::now());
                 let mut response = self.inner.get_server_info(request).await?.into_inner();
                 let mut scripts = self.server_info.lock().unwrap();
                 if let Some(patch) = scripts.front() {

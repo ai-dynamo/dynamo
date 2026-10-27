@@ -117,7 +117,7 @@ impl SidecarFixture for Fixture {
             "--grpc-retry-interval-secs".into(),
             "1".into(),
             "--grpc-startup-deadline-secs".into(),
-            "5".into(),
+            "30".into(),
         ];
         let (_, bootstrap) = LpxSidecarEngine::try_from_args_async(argv).unwrap();
         bootstrap.await.unwrap().0
