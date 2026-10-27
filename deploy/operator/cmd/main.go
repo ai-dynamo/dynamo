@@ -55,7 +55,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
-	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 
 	semver "github.com/Masterminds/semver/v3"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -121,8 +120,6 @@ func initCRDSchemes() {
 	utilruntime.Must(nvidiacomv1beta2.AddToScheme(crdScheme))
 
 	utilruntime.Must(lwsscheme.AddToScheme(crdScheme))
-
-	utilruntime.Must(volcanoscheme.AddToScheme(crdScheme))
 
 	utilruntime.Must(grovev1alpha1.AddToScheme(crdScheme))
 
@@ -420,7 +417,7 @@ func main() {
 	}
 	setupLog.Info("Secret informer cache synced and ready")
 	_, err = secretInformer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
+		AddFunc: func(obj any) {
 			secret := obj.(*corev1.Secret)
 			if secret.Type == corev1.SecretTypeDockerConfigJson {
 				setupLog.Info("refreshing docker secrets index after secret creation...")
@@ -432,7 +429,7 @@ func main() {
 				}
 			}
 		},
-		UpdateFunc: func(old, new interface{}) {
+		UpdateFunc: func(old, new any) {
 			newSecret := new.(*corev1.Secret)
 			if newSecret.Type == corev1.SecretTypeDockerConfigJson {
 				setupLog.Info("refreshing docker secrets index after secret update...")
@@ -444,7 +441,7 @@ func main() {
 				}
 			}
 		},
-		DeleteFunc: func(obj interface{}) {
+		DeleteFunc: func(obj any) {
 			secret := obj.(*corev1.Secret)
 			if secret.Type == corev1.SecretTypeDockerConfigJson {
 				setupLog.Info("refreshing docker secrets index after secret deletion...")

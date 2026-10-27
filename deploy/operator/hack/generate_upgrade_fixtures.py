@@ -127,7 +127,7 @@ def validate_versions(current, baseline_version, previous=None):
     old_major, old_number = minor(baseline_version)
     if major != old_major or number - old_number not in (0, 1):
         raise ValueError(
-            "Revert the premature appVersion bump, run clustertest-upgrade-fixtures-regen UPGRADE_RELEASE_TAG=vN.x.y in the selected released operator tree, commit the history, then reapply the bump"
+            f"Operator {current} cannot replay newest baseline {baseline_version}; history must be the same minor or the minor immediately before it. Revert the premature appVersion bump, run clustertest-upgrade-fixtures-regen UPGRADE_RELEASE_TAG=vN.x.y in the selected released operator tree, commit the history, then reapply the bump"
         )
     if (
         previous
@@ -401,9 +401,22 @@ def bind_latest_variables(value):
 def write_golden(path, objects, latest=False):
     import yaml
 
+    # Go's YAML parser also recognizes exponent-only numbers such as worker hashes.
+    # Quote those strings so generated goldens retain their Kubernetes string type.
+    class GoldenDumper(yaml.SafeDumper):
+        pass
+
+    GoldenDumper.add_implicit_resolver(
+        "tag:yaml.org,2002:float",
+        re.compile(r"^[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)[eE][-+]?[0-9]+$"),
+        list("-+0123456789."),
+    )
     header = "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n"
     path.write_text(
-        header + yaml.safe_dump_all(golden_objects(objects, latest), sort_keys=True)
+        header
+        + yaml.dump_all(
+            golden_objects(objects, latest), Dumper=GoldenDumper, sort_keys=True
+        )
     )
 
 

@@ -142,9 +142,9 @@ likewise publish only scenarios in the release matrix catalog.
 
 This does not certify missing cases. Later releases and provisional captures
 still require the complete matrix from `required-matrix.json`: 24 component/Grove
-cases plus three multi-node DisaggregatedSet cases. A subsequent 1.7 bump can
-consume the captured 1.6 baseline; a 1.7 capture still requires complete coverage,
-and a 1.8 bump still requires a published 1.7 baseline. Keep #16650 open.
+cases plus three multi-node DisaggregatedSet cases. Main at 1.7 consumes the
+captured 1.6 baseline; a 1.7 capture still requires complete coverage, and a 1.8
+bump still requires a published 1.7 baseline. Keep #16650 open.
 
 To repeat the scoped capture, prepare a dedicated published-release checkout and
 carry only the reviewed test harness. Start with the frozen pre-capture inventory:
@@ -215,16 +215,16 @@ KUBEBUILDER_ASSETS=/path/to/envtest/binaries \
 This independently writes staging evidence and never replaces committed history.
 Normal CI does not fetch or compile old operators.
 
-## Known development takeover failure
+## Development takeover compatibility
 
-At development revision `75d0686fb7def243ab5a07ec69159427b169675c`, #15581 adds
-a frontend startup probe for runtime 1.6.0 and later, absent from the published
-1.6 operator's captured state. The 12 new canonical Grove histories trigger the
-independent template-safety assertion when main adds this probe. The new native
-Component history also fails to converge after a frontend Deployment update.
-These findings do not establish that inference worker Pods were replaced: Grove
-actuation and serving Pods are absent from this suite.
+The released 1.6 operator did not generate a frontend startup probe. Current
+main preserves those existing templates through the runtime-and-origin gate in
+#17182: only newly created workloads with operator origin 1.7 or later and a
+supported frontend runtime receive the generated default. Historical origins
+remain concrete and unchanged during replay.
 
-Keep the captured inputs and safety assertions intact. Accepting new goldens
-cannot authorize this template mutation. Resolve the production compatibility
-policy separately before merging this capture and the subsequent version bump.
+Main already reports operator 1.7.0. The appended 1.6 baseline replaces the
+one-time 1.7-on-1.5 history exception from #17153; subsequent minor transitions
+must use the immediately preceding published baseline. Keep the captured inputs
+and safety assertions intact, and verify takeover with the development operator
+before accepting this capture.

@@ -127,7 +127,7 @@ spec:
         nvidia.com/dynamo-graph-deployment-name: workers
         nvidia.com/dynamo-namespace: upgrade-history-1-6-0-trtllm-disaggregated-multi-grove-workers
         nvidia.com/dynamo-sub-component-type: prefill
-        nvidia.com/dynamo-worker-hash: 92221e36
+        nvidia.com/dynamo-worker-hash: '92221e36'
         nvidia.com/metrics-enabled: 'true'
         nvidia.com/selector: workers-prefill
       name: prefill-ldr
@@ -176,7 +176,7 @@ spec:
             - name: DYN_NAMESPACE
               value: upgrade-history-1-6-0-trtllm-disaggregated-multi-grove-workers
             - name: DYN_NAMESPACE_WORKER_SUFFIX
-              value: 92221e36
+              value: '92221e36'
             - name: DYN_PARENT_DGD_K8S_NAME
               value: workers
             - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -275,7 +275,7 @@ spec:
         nvidia.com/dynamo-graph-deployment-name: workers
         nvidia.com/dynamo-namespace: upgrade-history-1-6-0-trtllm-disaggregated-multi-grove-workers
         nvidia.com/dynamo-sub-component-type: prefill
-        nvidia.com/dynamo-worker-hash: 92221e36
+        nvidia.com/dynamo-worker-hash: '92221e36'
         nvidia.com/metrics-enabled: 'true'
         nvidia.com/selector: workers-prefill
       name: prefill-wkr
@@ -316,7 +316,7 @@ spec:
             - name: DYN_NAMESPACE
               value: upgrade-history-1-6-0-trtllm-disaggregated-multi-grove-workers
             - name: DYN_NAMESPACE_WORKER_SUFFIX
-              value: 92221e36
+              value: '92221e36'
             - name: DYN_PARENT_DGD_K8S_NAME
               value: workers
             - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -399,7 +399,7 @@ spec:
         nvidia.com/dynamo-graph-deployment-name: workers
         nvidia.com/dynamo-namespace: upgrade-history-1-6-0-trtllm-disaggregated-multi-grove-workers
         nvidia.com/dynamo-sub-component-type: decode
-        nvidia.com/dynamo-worker-hash: 92221e36
+        nvidia.com/dynamo-worker-hash: '92221e36'
         nvidia.com/metrics-enabled: 'true'
         nvidia.com/selector: workers-decode
       name: decode-ldr
@@ -448,7 +448,7 @@ spec:
             - name: DYN_NAMESPACE
               value: upgrade-history-1-6-0-trtllm-disaggregated-multi-grove-workers
             - name: DYN_NAMESPACE_WORKER_SUFFIX
-              value: 92221e36
+              value: '92221e36'
             - name: DYN_PARENT_DGD_K8S_NAME
               value: workers
             - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -547,7 +547,7 @@ spec:
         nvidia.com/dynamo-graph-deployment-name: workers
         nvidia.com/dynamo-namespace: upgrade-history-1-6-0-trtllm-disaggregated-multi-grove-workers
         nvidia.com/dynamo-sub-component-type: decode
-        nvidia.com/dynamo-worker-hash: 92221e36
+        nvidia.com/dynamo-worker-hash: '92221e36'
         nvidia.com/metrics-enabled: 'true'
         nvidia.com/selector: workers-decode
       name: decode-wkr
@@ -588,7 +588,7 @@ spec:
             - name: DYN_NAMESPACE
               value: upgrade-history-1-6-0-trtllm-disaggregated-multi-grove-workers
             - name: DYN_NAMESPACE_WORKER_SUFFIX
-              value: 92221e36
+              value: '92221e36'
             - name: DYN_PARENT_DGD_K8S_NAME
               value: workers
             - name: DYN_PARENT_DGD_K8S_NAMESPACE
@@ -681,7 +681,7 @@ apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   annotations:
-    nvidia.com/current-worker-hash-v2: 92221e36
+    nvidia.com/current-worker-hash-v2: '92221e36'
     nvidia.com/dynamo-operator-origin-version: 1.6.0
     nvidia.com/enable-grove: 'true'
     nvidia.com/workload-provider: grove
@@ -945,7 +945,7 @@ metadata:
   labels:
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
-    nvidia.com/dynamo-worker-hash: 92221e36
+    nvidia.com/dynamo-worker-hash: '92221e36'
   name: workers-decode
   namespace: upgrade-history-1-6-0-trtllm-disaggregated-multi-grove
   ownerReferences:
@@ -1032,7 +1032,7 @@ metadata:
   labels:
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-discovery-enabled: 'true'
-    nvidia.com/dynamo-worker-hash: 92221e36
+    nvidia.com/dynamo-worker-hash: '92221e36'
   name: workers-prefill
   namespace: upgrade-history-1-6-0-trtllm-disaggregated-multi-grove
   ownerReferences:

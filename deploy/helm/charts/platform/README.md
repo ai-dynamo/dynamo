@@ -19,7 +19,7 @@ limitations under the License.
 
 A Helm chart for NVIDIA Dynamo Platform.
 
-![Version: 1.6.0](https://img.shields.io/badge/Version-1.6.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
+![Version: 1.7.0](https://img.shields.io/badge/Version-1.7.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 
 ## 🚀 Overview
 
@@ -48,7 +48,43 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### v1.7.0
 
+#### Runtime Compatibility
+
+##### Frontend Startup Probe Defaults
+
+**Change:** Generated frontend startup probes require both a workload origin of operator
+1.7.0 or later and a frontend runtime of 1.6.0 or later. Standalone DCDs record their
+immutable origin only on CREATE; UPDATE never backfills existing resources. DGD-managed
+DCDs inherit the parent graph origin, even when the child is created by a newer operator.
+Frontend sidecars use the same origin and resolve their own image version.
+
+**Existing deployments:** Workloads created by operator 1.6.x or earlier, and resources
+without a resolvable origin, retain their previous frontend defaults during operator-only
+upgrades. Explicitly authored complete probes remain effective.
+
+**Action:** To enable startup protection on an existing workload, configure a complete
+`startupProbe` on its frontend container. This is an intentional Pod-template update;
+plan for frontend replacement, including a possible single-replica Grove Service outage.
+
 #### Operator behavior breaking changes
+
+##### Legacy LWS migration cleanup removed
+
+**Change:** The operator no longer cleans up the per-replica LWS objects
+and Volcano PodGroups created by Dynamo v1.1.x and earlier.
+
+**Affected:** LWS deployments that still use the legacy per-replica layout.
+
+**Action:**
+
+> [!WARNING]
+> Complete the native-scaling migration before upgrading to v1.7.0.
+> Use an intermediate operator version that includes migration cleanup,
+> such as v1.2.x. Verify that reconciliation has removed excess indexed
+> LWS objects and legacy Volcano PodGroups before proceeding.
+
+**Existing deployments:** Unmigrated legacy resources remain after
+upgrading, and excess LWS objects can continue consuming cluster resources.
 
 ##### Native sidecar backend inference
 
@@ -79,6 +115,26 @@ in addition to worker metadata access. If an older Planner service account recei
 HTTP 403 when listing Pods, Planner warns and uses existing status/default fallbacks.
 Grant Pod-list access to enable registered native names, models, and capabilities;
 other API errors still propagate.
+
+#### New behavior
+
+##### LWS no longer requires Volcano
+
+**Change:** LWS auto-detection and explicit enablement require only the
+LWS API.
+
+**Affected:** Clusters with LWS installed but without the Volcano API.
+
+**Action:** Configure gang scheduling separately through LWS. For the
+documented Volcano setup, install Volcano and set the LWS Helm value
+`gangSchedulingManagement.schedulerProvider=volcano`. Native Kubernetes
+gang scheduling is not supported for Dynamo-managed LWS workloads.
+
+**Existing deployments:** After the operator upgrade, clusters with LWS
+installed but no Volcano API automatically enable LWS orchestration.
+Without separately configured gang scheduling or group admission
+(e.g., through Kueue), multinode DGD/DCD workloads using LWS may remain
+partially scheduled.
 
 ### v1.6.0
 
@@ -425,7 +481,7 @@ Kubernetes: `>=1.30.0-0`
 
 | Repository | Name | Version |
 |------------|------|---------|
-| file://components/operator | dynamo-operator | 1.6.0 |
+| file://components/operator | dynamo-operator | 1.7.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.15 |

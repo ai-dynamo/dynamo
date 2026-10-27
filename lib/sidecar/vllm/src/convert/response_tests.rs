@@ -77,6 +77,7 @@ fn early_prompt_frames_retain_exact_native_metadata() {
                 pb::CandidateTokenInfo::default(),
             ],
         };
+        let expected = has_prompt_logprobs.then(|| json!({"prompt_logprobs": [null, {"22": {"logprob": -0.25, "rank": 1}, "23": {"logprob": -0.75, "rank": 2}}, {"33": {"logprob": -0.5, "rank": 2}}]}));
         let first = state
             .convert(pb::GenerateResponse {
                 prompt_info: Some(prompt),
@@ -84,9 +85,11 @@ fn early_prompt_frames_retain_exact_native_metadata() {
             })
             .unwrap();
         if has_output {
+            // The first output carries them, so a frontend stop string that
+            // ends the stream before vLLM's terminal cannot drop them.
             let first = first.unwrap();
             assert!(first.finish_reason.is_none());
-            assert!(first.engine_data.is_none());
+            assert_eq!(first.engine_data, expected);
         } else {
             assert!(first.is_none());
         }
@@ -101,7 +104,7 @@ fn early_prompt_frames_retain_exact_native_metadata() {
             .num_output_tokens = 1 + u32::from(has_output);
         let result = state.convert(response).unwrap().unwrap();
         assert!(result.finish_reason.is_some());
-        assert_eq!(result.engine_data, has_prompt_logprobs.then(|| json!({"prompt_logprobs": [null, {"22": {"logprob": -0.25, "rank": 1}, "23": {"logprob": -0.75, "rank": 2}}, {"33": {"logprob": -0.5, "rank": 2}}]})));
+        assert_eq!(result.engine_data, if has_output { None } else { expected });
     }
 }
 
@@ -147,7 +150,7 @@ fn negative_infinity_logprobs_are_normalized() {
 }
 
 #[test]
-fn missing_outputs_and_buffered_text_preserve_native_semantics() {
+fn only_token_ids_are_forwarded() {
     let mut request = request();
     request.output_options = Default::default();
     let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
@@ -157,19 +160,21 @@ fn missing_outputs_and_buffered_text_preserve_native_semantics() {
             .unwrap()
             .is_none()
     );
+    // The fixture output carries vLLM text (" token"); only its IDs are kept.
     let first = state
         .convert(sequence_response(false, false, None))
         .unwrap()
         .unwrap();
-    assert_eq!(first.text.as_deref(), Some(" token"));
+    assert_eq!(first.token_ids, [42]);
+    assert!(first.text.is_none());
     let mut response = sequence_response(true, false, None);
     let output = response.outputs.as_mut().unwrap();
     output.token_ids = vec![43, 44];
     output.num_tokens = 2;
-    output.text = String::new();
     output.finish_info.as_mut().unwrap().num_output_tokens = 3;
     let terminal = state.convert(response).unwrap().unwrap();
-    assert_eq!(terminal.text.as_deref(), Some(""));
+    assert_eq!(terminal.token_ids, [43, 44]);
+    assert!(terminal.text.is_none());
 }
 
 #[test]

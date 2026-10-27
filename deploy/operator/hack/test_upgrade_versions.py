@@ -35,6 +35,10 @@ class UpgradeVersionTest(unittest.TestCase):
         for current, reconciled, previous in [
             ("1.7.0", "1.5.0", "1.6.0"),
             ("1.7.0", "1.5.0", None),
+            ("1.7.0", "1.4.0", None),
+            ("1.8.0", "1.6.0", None),
+            ("1.8.0", "1.5.0", "1.7.0"),
+            ("1.6.0", "1.7.0", None),
             ("1.8.0", "1.7.0", "1.6.0"),
             ("2.0.0", "1.9.0", "1.9.0"),
         ]:
@@ -164,6 +168,27 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
         (self.tree / "history.lock.json").write_text(json.dumps(lock))
         with self.assertRaisesRegex(ValueError, "frozen scope"):
             fixtures.check()
+
+    def test_golden_quotes_scientific_looking_worker_hash(self):
+        path = self.tree / "hash-output.yaml"
+        fixtures.write_golden(
+            path,
+            [
+                {
+                    "kind": "ConfigMap",
+                    "metadata": {"name": "hash"},
+                    "data": {"workerHash": "92221e36"},
+                }
+            ],
+        )
+        self.assertRegex(path.read_text(), r"workerHash: ['\"]92221e36['\"]")
+
+    def test_regeneration_cannot_skip_a_minor(self):
+        (self.root / fixtures.CHART).write_text("appVersion: 1.7.0\n")
+        with patch.object(fixtures.subprocess, "run") as capture:
+            with self.assertRaisesRegex(ValueError, "cannot replay newest baseline"):
+                fixtures.regenerate(release_tag="v1.7.0")
+            capture.assert_not_called()
 
     def capture_api_outputs(self, command, *, env, **kwargs):
         # Model the capture boundary only; production admission/reconciliation is tested by clustertest.

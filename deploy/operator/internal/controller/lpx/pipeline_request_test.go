@@ -23,7 +23,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
@@ -90,7 +89,7 @@ func TestRemoveReleasedAgentPods(t *testing.T) {
 			case "bound":
 				request.Status.Phase = lpxv1alpha1.RequestPhaseBound
 			case "deleting":
-				request.DeletionTimestamp = ptr.To(metav1.Now())
+				request.DeletionTimestamp = new(metav1.Now())
 			case "namespace":
 				execution.NodeLocal.PartitionSelections[0].SelectedRows[0].Current.PodRef.Namespace = "other"
 			case "uid":
@@ -108,13 +107,13 @@ func TestRemoveReleasedAgentPods(t *testing.T) {
 			case "clique-owner":
 				pclq.OwnerReferences = nil
 			case "controller":
-				pod.OwnerReferences[0].Controller = ptr.To(false)
+				pod.OwnerReferences[0].Controller = new(false)
 			case "kind":
 				pod.OwnerReferences[0].Kind = "PodCliqueSet"
 			case "api":
 				pclq.OwnerReferences[0].APIVersion = "other.example.com/v1alpha1"
 			case "terminating":
-				pclq.DeletionTimestamp, pclq.Finalizers = ptr.To(metav1.Now()), []string{"example.com/cleanup"}
+				pclq.DeletionTimestamp, pclq.Finalizers = new(metav1.Now()), []string{"example.com/cleanup"}
 			}
 			objects := []client.Object{pod}
 			if !tc.missingClique {
@@ -196,15 +195,13 @@ func TestRemoveReleasedAgentPodsConcurrentOwnershipChange(t *testing.T) {
 }
 
 func newLPXTestAgentHierarchy() (map[string]*grovev1alpha1.PodCliqueScalingGroup, *grovev1alpha1.PodClique, *corev1.Pod) {
-	pcsg := &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "engines", UID: "engines-uid"}}
-	pclq := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{
+	pcsg := &grovev1alpha1.PodCliqueScalingGroup{Namespace: "test", Name: "engines", UID: "engines-uid"}
+	pclq := &grovev1alpha1.PodClique{
 		Namespace: pcsg.Namespace, Name: "old-agent-clique", UID: "old-agent-clique-uid",
-		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcsg, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueScalingGroup"))},
-	}}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcsg, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueScalingGroup"))}}
+	pod := &corev1.Pod{
 		Namespace: pcsg.Namespace, Name: "agent", UID: "agent-uid",
-		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pclq, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))},
-	}}
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pclq, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))}}
 	return map[string]*grovev1alpha1.PodCliqueScalingGroup{pcsg.Name: pcsg}, pclq, pod
 }
 
@@ -212,8 +209,8 @@ func newLPXTestReleaseRequest(pod *corev1.Pod) *lpxv1alpha1.LPUPipelineRequest {
 	committed := committedLPXTestPod(pod)
 	committed.Execution.Release = &lpxv1alpha1.ReleaseJournal{Reason: lpxv1alpha1.ReleaseReasonDependencyChanged, RequestedAtGeneration: 1}
 	return &lpxv1alpha1.LPUPipelineRequest{
-		ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace, Name: "request", Generation: 1},
-		Status:     &lpxv1alpha1.LPUPipelineRequestStatus{Phase: lpxv1alpha1.RequestPhaseReleasing, Committed: committed},
+		Namespace: pod.Namespace, Name: "request", Generation: 1,
+		Status: &lpxv1alpha1.LPUPipelineRequestStatus{Phase: lpxv1alpha1.RequestPhaseReleasing, Committed: committed},
 	}
 }
 
@@ -241,16 +238,15 @@ func TestGetPipelineRequests(t *testing.T) {
 				{"other-owner", "default", "other-uid"},
 				{"other-namespace", "other", "pcs-uid"},
 			} {
-				objects = append(objects, &lpxv1alpha1.LPUPipelineRequest{ObjectMeta: metav1.ObjectMeta{
+				objects = append(objects, &lpxv1alpha1.LPUPipelineRequest{
 					Name: request.name, Namespace: request.namespace,
 					OwnerReferences: []metav1.OwnerReference{{
 						APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Kind: "PodCliqueSet",
-						Name: "pcs", UID: request.uid, Controller: ptr.To(true),
-					}},
-				}})
+						Name: "pcs", UID: request.uid, Controller: new(true),
+					}}})
 			}
 			r := &graphReconciler{Client: newLPXTestClient(t, objects...)}
-			pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: "pcs", Namespace: tc.namespace, UID: tc.uid}}
+			pcs := &grovev1alpha1.PodCliqueSet{Name: "pcs", Namespace: tc.namespace, UID: tc.uid}
 
 			t.Log("Return only this PCS's requests")
 			requests, err := r.getPipelineRequests(t.Context(), pcs)
@@ -411,7 +407,7 @@ func TestNodeLocalSpecDecodePublishesOneRequestAndAgentCliquePerModelProjection(
 		projection := &desired.requests[index]
 		clique := getResource[*grovev1alpha1.PodClique](t, objects, expected.CliqueName)
 		require.Equal(t, int32(expected.Replicas), clique.Spec.Replicas)
-		require.Equal(t, ptr.To(int32(expected.Replicas)), clique.Spec.MinAvailable)
+		require.Equal(t, new(int32(expected.Replicas)), clique.Spec.MinAvailable)
 		require.Equal(t, projection.Annotations[lpx.WorkloadDigestAnnotation], clique.Annotations[lpx.WorkloadDigestAnnotation])
 		require.Equal(t, projection.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation], clique.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
 		require.Equal(t, projection.Annotations[pipelineRequestModelAnnotation], clique.Annotations[lpxv1alpha1.PodModelAnnotation])
@@ -500,7 +496,7 @@ func TestPipelineRequestsPendingDeletion(t *testing.T) {
 					desired[request.Name] = request
 				}
 				if slices.Contains(tc.terminating, request.Name) {
-					request.DeletionTimestamp = ptr.To(metav1.Now())
+					request.DeletionTimestamp = new(metav1.Now())
 				}
 			}
 
