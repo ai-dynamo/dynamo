@@ -3408,6 +3408,17 @@ impl OpenAIPreprocessor {
                 .unwrap_or_else(|| request.model()),
         );
         self.validate_model_request(request)?;
+        if runtime_lora.is_some()
+            && request
+                .nvext()
+                .and_then(|ext| ext.agent_hints.as_ref())
+                .and_then(|hints| hints.speculative_prefill)
+                == Some(true)
+        {
+            return Err(invalid_argument_error(
+                "runtime_lora_speculative_prefill_unsupported",
+            ));
+        }
 
         let mut stop_conditions = request.extract_stop_conditions()?;
         let eos_token_ids = self.model_info.eos_token_ids();
@@ -13589,6 +13600,88 @@ mod tests {
             LLMMetricAnnotation::from_annotation(&other)
                 .expect("other event is not an error")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn runtime_lora_preprocessor_preserves_wire_identity_and_constraints() {
+        let card = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(card).unwrap())
+            .unwrap_or_else(|_| panic!("unshared test preprocessor"));
+        preprocessor.lora_name = Some("preloaded".to_string());
+        let source = "provider-value?token=private";
+        let selection = crate::lora::runtime::resolve_runtime_lora_model(
+            &format!("base|{source}"),
+            &crate::lora::runtime::RuntimeLoraConfig { enabled: true },
+            |_| false,
+            |_| Some("base".to_string()),
+            || unreachable!(),
+        )
+        .unwrap()
+        .unwrap();
+        for with_nvext in [false, true] {
+            let mut value = serde_json::json!({"model": selection.requested_model, "messages": [{"role": "user", "content": "hello"}]});
+            if with_nvext {
+                value["nvext"] = serde_json::json!({"routing_constraints": {"required_taints": ["caller"], "preferred_taints": {"zone-a": 0.5}}});
+            }
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(value).unwrap();
+            let output = preprocessor
+                .builder_with_lora(&request, Some("override".to_string()), Some(&selection))
+                .unwrap()
+                .token_ids(vec![1])
+                .build()
+                .unwrap();
+            assert_eq!(output.model, "base");
+            let routing = output.routing.as_ref().unwrap();
+            assert_eq!(
+                routing.lora_name.as_deref(),
+                Some(selection.adapter_key.as_str())
+            );
+            assert_eq!(routing.base_model_name.as_deref(), Some("base"));
+            assert_eq!(routing.lora_source_uri.as_ref().unwrap().as_str(), source);
+            assert_eq!(
+                routing.lora_resolution_version,
+                Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION)
+            );
+            let constraints = routing.routing_constraints.as_ref().unwrap();
+            assert!(
+                constraints
+                    .required_taints
+                    .contains("dynamo.runtime-lora/v2")
+            );
+            assert_eq!(constraints.required_taints.contains("caller"), with_nvext);
+            assert_eq!(
+                constraints.preferred_taints.get("zone-a"),
+                with_nvext.then_some(&0.5)
+            );
+            assert!(!format!("{routing:?}").contains(source));
+            let wire = serde_json::to_value(&output).unwrap();
+            assert_eq!(wire["routing"]["lora_source_uri"], source);
+            let roundtrip: PreprocessedRequest = serde_json::from_value(wire).unwrap();
+            assert_eq!(
+                roundtrip
+                    .routing
+                    .unwrap()
+                    .lora_source_uri
+                    .as_ref()
+                    .unwrap()
+                    .as_str(),
+                source
+            );
+        }
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({"model": "base", "messages": [{"role": "user", "content": "hello"}], "nvext": {"agent_hints": {"speculative_prefill": true}}})).unwrap();
+        let error = match preprocessor.builder_with_lora(&request, None, Some(&selection)) {
+            Err(error) => error,
+            Ok(_) => panic!("runtime LoRA warmups must retain adapter identity"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("runtime_lora_speculative_prefill_unsupported")
         );
     }
 
