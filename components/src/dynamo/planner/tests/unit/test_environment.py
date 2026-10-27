@@ -9,6 +9,11 @@ from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core import util
 from dynamo.planner.core.base import build_worker_capabilities
 from dynamo.planner.environment.base import PlannerEnvironmentImpl
+from dynamo.planner.environment.state import (
+    ComponentState,
+    DeploymentState,
+    ReplicaState,
+)
 from dynamo.planner.errors import DeploymentValidationError, GPUShapeUnavailableError
 from dynamo.planner.monitoring.dgd_services import ComponentGPUShape
 from dynamo.planner.monitoring.worker_info import (
@@ -222,6 +227,31 @@ def test_replica_gpu_cost_change_refreshes_engine_capabilities():
         check_prefill=False,
         check_decode=True,
     )
+
+
+def test_worker_counts_from_deployment_state_hides_inactive_role():
+    state = DeploymentState(
+        prefill=ComponentState(
+            replicas=ReplicaState(active=2, expected=3, scaling=True, pending_startup=1)
+        ),
+        decode=ComponentState(
+            replicas=ReplicaState(active=4, expected=5, scaling=True, pending_startup=2)
+        ),
+    )
+
+    counts = util.worker_counts_from_deployment_state(
+        state, require_prefill=False, require_decode=True
+    )
+
+    assert counts.ready_num_prefill is None
+    assert counts.expected_num_prefill is None
+    assert counts.prefill_scaling_in_progress is False
+    assert counts.ready_num_decode == 4
+    assert counts.expected_num_decode == 5
+    assert counts.decode_scaling_in_progress is True
+    # Pending-startup counts are reported even for a role that is not required.
+    assert counts.pending_num_prefill == 1
+    assert counts.pending_num_decode == 2
 
 
 def test_gpu_discovery_failure_retains_last_observed_state():
