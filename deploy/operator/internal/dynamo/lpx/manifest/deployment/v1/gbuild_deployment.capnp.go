@@ -732,12 +732,12 @@ type DeploymentInfo capnp.Struct
 const DeploymentInfo_TypeID = 0xfd3ce92fb33e4ab2
 
 func NewDeploymentInfo(s *capnp.Segment) (DeploymentInfo, error) {
-	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 16, PointerCount: 3})
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 16, PointerCount: 4})
 	return DeploymentInfo(st), err
 }
 
 func NewRootDeploymentInfo(s *capnp.Segment) (DeploymentInfo, error) {
-	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 16, PointerCount: 3})
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 16, PointerCount: 4})
 	return DeploymentInfo(st), err
 }
 
@@ -863,12 +863,36 @@ func (s DeploymentInfo) NewRuntimeIo() (RuntimeIoConfig, error) {
 	return ss, err
 }
 
+func (s DeploymentInfo) LpuUnits() (LpuUnit_List, error) {
+	p, err := capnp.Struct(s).Ptr(3)
+	return LpuUnit_List(p.List()), err
+}
+
+func (s DeploymentInfo) HasLpuUnits() bool {
+	return capnp.Struct(s).HasPtr(3)
+}
+
+func (s DeploymentInfo) SetLpuUnits(v LpuUnit_List) error {
+	return capnp.Struct(s).SetPtr(3, v.ToPtr())
+}
+
+// NewLpuUnits sets the lpuUnits field to a newly
+// allocated LpuUnit_List, preferring placement in s's segment.
+func (s DeploymentInfo) NewLpuUnits(n int32) (LpuUnit_List, error) {
+	l, err := NewLpuUnit_List(capnp.Struct(s).Segment(), n)
+	if err != nil {
+		return LpuUnit_List{}, err
+	}
+	err = capnp.Struct(s).SetPtr(3, l.ToPtr())
+	return l, err
+}
+
 // DeploymentInfo_List is a list of DeploymentInfo.
 type DeploymentInfo_List = capnp.StructList[DeploymentInfo]
 
 // NewDeploymentInfo creates a new list of DeploymentInfo.
 func NewDeploymentInfo_List(s *capnp.Segment, sz int32) (DeploymentInfo_List, error) {
-	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 16, PointerCount: 3}, sz)
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 16, PointerCount: 4}, sz)
 	return capnp.StructList[DeploymentInfo](l), err
 }
 
@@ -1130,6 +1154,776 @@ type PropSyncChain_Future struct{ *capnp.Future }
 func (f PropSyncChain_Future) Struct() (PropSyncChain, error) {
 	p, err := f.Future.Ptr()
 	return PropSyncChain(p.Struct()), err
+}
+
+type LpuUnit capnp.Struct
+
+// LpuUnit_TypeID is the unique identifier for the type LpuUnit.
+const LpuUnit_TypeID = 0xb08ce1baf5c07985
+
+func NewLpuUnit(s *capnp.Segment) (LpuUnit, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 2})
+	return LpuUnit(st), err
+}
+
+func NewRootLpuUnit(s *capnp.Segment) (LpuUnit, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 0, PointerCount: 2})
+	return LpuUnit(st), err
+}
+
+func ReadRootLpuUnit(msg *capnp.Message) (LpuUnit, error) {
+	root, err := msg.Root()
+	return LpuUnit(root.Struct()), err
+}
+
+func (s LpuUnit) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (LpuUnit) DecodeFromPtr(p capnp.Ptr) LpuUnit {
+	return LpuUnit(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s LpuUnit) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s LpuUnit) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s LpuUnit) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s LpuUnit) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s LpuUnit) Reservations() (LpuReservation_List, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return LpuReservation_List(p.List()), err
+}
+
+func (s LpuUnit) HasReservations() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s LpuUnit) SetReservations(v LpuReservation_List) error {
+	return capnp.Struct(s).SetPtr(0, v.ToPtr())
+}
+
+// NewReservations sets the reservations field to a newly
+// allocated LpuReservation_List, preferring placement in s's segment.
+func (s LpuUnit) NewReservations(n int32) (LpuReservation_List, error) {
+	l, err := NewLpuReservation_List(capnp.Struct(s).Segment(), n)
+	if err != nil {
+		return LpuReservation_List{}, err
+	}
+	err = capnp.Struct(s).SetPtr(0, l.ToPtr())
+	return l, err
+}
+func (s LpuUnit) Connectors() (LpuConnector_List, error) {
+	p, err := capnp.Struct(s).Ptr(1)
+	return LpuConnector_List(p.List()), err
+}
+
+func (s LpuUnit) HasConnectors() bool {
+	return capnp.Struct(s).HasPtr(1)
+}
+
+func (s LpuUnit) SetConnectors(v LpuConnector_List) error {
+	return capnp.Struct(s).SetPtr(1, v.ToPtr())
+}
+
+// NewConnectors sets the connectors field to a newly
+// allocated LpuConnector_List, preferring placement in s's segment.
+func (s LpuUnit) NewConnectors(n int32) (LpuConnector_List, error) {
+	l, err := NewLpuConnector_List(capnp.Struct(s).Segment(), n)
+	if err != nil {
+		return LpuConnector_List{}, err
+	}
+	err = capnp.Struct(s).SetPtr(1, l.ToPtr())
+	return l, err
+}
+
+// LpuUnit_List is a list of LpuUnit.
+type LpuUnit_List = capnp.StructList[LpuUnit]
+
+// NewLpuUnit creates a new list of LpuUnit.
+func NewLpuUnit_List(s *capnp.Segment, sz int32) (LpuUnit_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 0, PointerCount: 2}, sz)
+	return capnp.StructList[LpuUnit](l), err
+}
+
+// LpuUnit_Future is a wrapper for a LpuUnit promised by a client call.
+type LpuUnit_Future struct{ *capnp.Future }
+
+func (f LpuUnit_Future) Struct() (LpuUnit, error) {
+	p, err := f.Future.Ptr()
+	return LpuUnit(p.Struct()), err
+}
+
+type LpuReservation capnp.Struct
+type LpuReservation_size LpuReservation
+type LpuReservation_size_Which uint16
+
+const (
+	LpuReservation_size_Which_nodes LpuReservation_size_Which = 0
+	LpuReservation_size_Which_hx    LpuReservation_size_Which = 1
+)
+
+func (w LpuReservation_size_Which) String() string {
+	const s = "nodeshx"
+	switch w {
+	case LpuReservation_size_Which_nodes:
+		return s[0:5]
+	case LpuReservation_size_Which_hx:
+		return s[5:7]
+
+	}
+	return "LpuReservation_size_Which(" + strconv.FormatUint(uint64(w), 10) + ")"
+}
+
+// LpuReservation_TypeID is the unique identifier for the type LpuReservation.
+const LpuReservation_TypeID = 0xc0c322eb45a6028e
+
+func NewLpuReservation(s *capnp.Segment) (LpuReservation, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2})
+	return LpuReservation(st), err
+}
+
+func NewRootLpuReservation(s *capnp.Segment) (LpuReservation, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2})
+	return LpuReservation(st), err
+}
+
+func ReadRootLpuReservation(msg *capnp.Message) (LpuReservation, error) {
+	root, err := msg.Root()
+	return LpuReservation(root.Struct()), err
+}
+
+func (s LpuReservation) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (LpuReservation) DecodeFromPtr(p capnp.Ptr) LpuReservation {
+	return LpuReservation(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s LpuReservation) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s LpuReservation) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s LpuReservation) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s LpuReservation) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s LpuReservation) PartitionIds() (capnp.UInt32List, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return capnp.UInt32List(p.List()), err
+}
+
+func (s LpuReservation) HasPartitionIds() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s LpuReservation) SetPartitionIds(v capnp.UInt32List) error {
+	return capnp.Struct(s).SetPtr(0, v.ToPtr())
+}
+
+// NewPartitionIds sets the partitionIds field to a newly
+// allocated capnp.UInt32List, preferring placement in s's segment.
+func (s LpuReservation) NewPartitionIds(n int32) (capnp.UInt32List, error) {
+	l, err := capnp.NewUInt32List(capnp.Struct(s).Segment(), n)
+	if err != nil {
+		return capnp.UInt32List{}, err
+	}
+	err = capnp.Struct(s).SetPtr(0, l.ToPtr())
+	return l, err
+}
+func (s LpuReservation) Size() LpuReservation_size { return LpuReservation_size(s) }
+
+func (s LpuReservation_size) Which() LpuReservation_size_Which {
+	return LpuReservation_size_Which(capnp.Struct(s).Uint16(4))
+}
+func (s LpuReservation_size) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s LpuReservation_size) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s LpuReservation_size) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s LpuReservation_size) Nodes() uint32 {
+	if capnp.Struct(s).Uint16(4) != 0 {
+		panic("Which() != nodes")
+	}
+	return capnp.Struct(s).Uint32(0)
+}
+
+func (s LpuReservation_size) SetNodes(v uint32) {
+	capnp.Struct(s).SetUint16(4, 0)
+	capnp.Struct(s).SetUint32(0, v)
+}
+
+func (s LpuReservation_size) Hx() (HxExtent, error) {
+	if capnp.Struct(s).Uint16(4) != 1 {
+		panic("Which() != hx")
+	}
+	p, err := capnp.Struct(s).Ptr(1)
+	return HxExtent(p.Struct()), err
+}
+
+func (s LpuReservation_size) HasHx() bool {
+	if capnp.Struct(s).Uint16(4) != 1 {
+		return false
+	}
+	return capnp.Struct(s).HasPtr(1)
+}
+
+func (s LpuReservation_size) SetHx(v HxExtent) error {
+	capnp.Struct(s).SetUint16(4, 1)
+	return capnp.Struct(s).SetPtr(1, capnp.Struct(v).ToPtr())
+}
+
+// NewHx sets the hx field to a newly
+// allocated HxExtent struct, preferring placement in s's segment.
+func (s LpuReservation_size) NewHx() (HxExtent, error) {
+	capnp.Struct(s).SetUint16(4, 1)
+	ss, err := NewHxExtent(capnp.Struct(s).Segment())
+	if err != nil {
+		return HxExtent{}, err
+	}
+	err = capnp.Struct(s).SetPtr(1, capnp.Struct(ss).ToPtr())
+	return ss, err
+}
+
+// LpuReservation_List is a list of LpuReservation.
+type LpuReservation_List = capnp.StructList[LpuReservation]
+
+// NewLpuReservation creates a new list of LpuReservation.
+func NewLpuReservation_List(s *capnp.Segment, sz int32) (LpuReservation_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2}, sz)
+	return capnp.StructList[LpuReservation](l), err
+}
+
+// LpuReservation_Future is a wrapper for a LpuReservation promised by a client call.
+type LpuReservation_Future struct{ *capnp.Future }
+
+func (f LpuReservation_Future) Struct() (LpuReservation, error) {
+	p, err := f.Future.Ptr()
+	return LpuReservation(p.Struct()), err
+}
+func (p LpuReservation_Future) Size() LpuReservation_size_Future {
+	return LpuReservation_size_Future{p.Future}
+}
+
+// LpuReservation_size_Future is a wrapper for a LpuReservation_size promised by a client call.
+type LpuReservation_size_Future struct{ *capnp.Future }
+
+func (f LpuReservation_size_Future) Struct() (LpuReservation_size, error) {
+	p, err := f.Future.Ptr()
+	return LpuReservation_size(p.Struct()), err
+}
+func (p LpuReservation_size_Future) Hx() HxExtent_Future {
+	return HxExtent_Future{Future: p.Future.Field(1, nil)}
+}
+
+type HxExtent capnp.Struct
+
+// HxExtent_TypeID is the unique identifier for the type HxExtent.
+const HxExtent_TypeID = 0xb043d658d0e76931
+
+func NewHxExtent(s *capnp.Segment) (HxExtent, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 0})
+	return HxExtent(st), err
+}
+
+func NewRootHxExtent(s *capnp.Segment) (HxExtent, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 0})
+	return HxExtent(st), err
+}
+
+func ReadRootHxExtent(msg *capnp.Message) (HxExtent, error) {
+	root, err := msg.Root()
+	return HxExtent(root.Struct()), err
+}
+
+func (s HxExtent) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (HxExtent) DecodeFromPtr(p capnp.Ptr) HxExtent {
+	return HxExtent(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s HxExtent) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s HxExtent) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s HxExtent) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s HxExtent) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s HxExtent) TraysPerHemisphere() uint8 {
+	return capnp.Struct(s).Uint8(0)
+}
+
+func (s HxExtent) SetTraysPerHemisphere(v uint8) {
+	capnp.Struct(s).SetUint8(0, v)
+}
+
+func (s HxExtent) Hemispheres() uint8 {
+	return capnp.Struct(s).Uint8(1)
+}
+
+func (s HxExtent) SetHemispheres(v uint8) {
+	capnp.Struct(s).SetUint8(1, v)
+}
+
+func (s HxExtent) Racks() uint8 {
+	return capnp.Struct(s).Uint8(2)
+}
+
+func (s HxExtent) SetRacks(v uint8) {
+	capnp.Struct(s).SetUint8(2, v)
+}
+
+// HxExtent_List is a list of HxExtent.
+type HxExtent_List = capnp.StructList[HxExtent]
+
+// NewHxExtent creates a new list of HxExtent.
+func NewHxExtent_List(s *capnp.Segment, sz int32) (HxExtent_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 8, PointerCount: 0}, sz)
+	return capnp.StructList[HxExtent](l), err
+}
+
+// HxExtent_Future is a wrapper for a HxExtent promised by a client call.
+type HxExtent_Future struct{ *capnp.Future }
+
+func (f HxExtent_Future) Struct() (HxExtent, error) {
+	p, err := f.Future.Ptr()
+	return HxExtent(p.Struct()), err
+}
+
+type LpuConnector capnp.Struct
+type LpuConnector_Which uint16
+
+const (
+	LpuConnector_Which_xt8888Gap    LpuConnector_Which = 0
+	LpuConnector_Which_hxPropSyncV1 LpuConnector_Which = 1
+)
+
+func (w LpuConnector_Which) String() string {
+	const s = "xt8888GaphxPropSyncV1"
+	switch w {
+	case LpuConnector_Which_xt8888Gap:
+		return s[0:9]
+	case LpuConnector_Which_hxPropSyncV1:
+		return s[9:21]
+
+	}
+	return "LpuConnector_Which(" + strconv.FormatUint(uint64(w), 10) + ")"
+}
+
+// LpuConnector_TypeID is the unique identifier for the type LpuConnector.
+const LpuConnector_TypeID = 0x9d05801710d3f8f9
+
+func NewLpuConnector(s *capnp.Segment) (LpuConnector, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 1})
+	return LpuConnector(st), err
+}
+
+func NewRootLpuConnector(s *capnp.Segment) (LpuConnector, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 1})
+	return LpuConnector(st), err
+}
+
+func ReadRootLpuConnector(msg *capnp.Message) (LpuConnector, error) {
+	root, err := msg.Root()
+	return LpuConnector(root.Struct()), err
+}
+
+func (s LpuConnector) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (LpuConnector) DecodeFromPtr(p capnp.Ptr) LpuConnector {
+	return LpuConnector(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s LpuConnector) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+
+func (s LpuConnector) Which() LpuConnector_Which {
+	return LpuConnector_Which(capnp.Struct(s).Uint16(0))
+}
+func (s LpuConnector) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s LpuConnector) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s LpuConnector) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s LpuConnector) Xt8888Gap() (XtGapConnector, error) {
+	if capnp.Struct(s).Uint16(0) != 0 {
+		panic("Which() != xt8888Gap")
+	}
+	p, err := capnp.Struct(s).Ptr(0)
+	return XtGapConnector(p.Struct()), err
+}
+
+func (s LpuConnector) HasXt8888Gap() bool {
+	if capnp.Struct(s).Uint16(0) != 0 {
+		return false
+	}
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s LpuConnector) SetXt8888Gap(v XtGapConnector) error {
+	capnp.Struct(s).SetUint16(0, 0)
+	return capnp.Struct(s).SetPtr(0, capnp.Struct(v).ToPtr())
+}
+
+// NewXt8888Gap sets the xt8888Gap field to a newly
+// allocated XtGapConnector struct, preferring placement in s's segment.
+func (s LpuConnector) NewXt8888Gap() (XtGapConnector, error) {
+	capnp.Struct(s).SetUint16(0, 0)
+	ss, err := NewXtGapConnector(capnp.Struct(s).Segment())
+	if err != nil {
+		return XtGapConnector{}, err
+	}
+	err = capnp.Struct(s).SetPtr(0, capnp.Struct(ss).ToPtr())
+	return ss, err
+}
+
+func (s LpuConnector) HxPropSyncV1() (HxPropSyncConnector, error) {
+	if capnp.Struct(s).Uint16(0) != 1 {
+		panic("Which() != hxPropSyncV1")
+	}
+	p, err := capnp.Struct(s).Ptr(0)
+	return HxPropSyncConnector(p.Struct()), err
+}
+
+func (s LpuConnector) HasHxPropSyncV1() bool {
+	if capnp.Struct(s).Uint16(0) != 1 {
+		return false
+	}
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s LpuConnector) SetHxPropSyncV1(v HxPropSyncConnector) error {
+	capnp.Struct(s).SetUint16(0, 1)
+	return capnp.Struct(s).SetPtr(0, capnp.Struct(v).ToPtr())
+}
+
+// NewHxPropSyncV1 sets the hxPropSyncV1 field to a newly
+// allocated HxPropSyncConnector struct, preferring placement in s's segment.
+func (s LpuConnector) NewHxPropSyncV1() (HxPropSyncConnector, error) {
+	capnp.Struct(s).SetUint16(0, 1)
+	ss, err := NewHxPropSyncConnector(capnp.Struct(s).Segment())
+	if err != nil {
+		return HxPropSyncConnector{}, err
+	}
+	err = capnp.Struct(s).SetPtr(0, capnp.Struct(ss).ToPtr())
+	return ss, err
+}
+
+// LpuConnector_List is a list of LpuConnector.
+type LpuConnector_List = capnp.StructList[LpuConnector]
+
+// NewLpuConnector creates a new list of LpuConnector.
+func NewLpuConnector_List(s *capnp.Segment, sz int32) (LpuConnector_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 8, PointerCount: 1}, sz)
+	return capnp.StructList[LpuConnector](l), err
+}
+
+// LpuConnector_Future is a wrapper for a LpuConnector promised by a client call.
+type LpuConnector_Future struct{ *capnp.Future }
+
+func (f LpuConnector_Future) Struct() (LpuConnector, error) {
+	p, err := f.Future.Ptr()
+	return LpuConnector(p.Struct()), err
+}
+func (p LpuConnector_Future) Xt8888Gap() XtGapConnector_Future {
+	return XtGapConnector_Future{Future: p.Future.Field(0, nil)}
+}
+func (p LpuConnector_Future) HxPropSyncV1() HxPropSyncConnector_Future {
+	return HxPropSyncConnector_Future{Future: p.Future.Field(0, nil)}
+}
+
+type XtGapConnector capnp.Struct
+
+// XtGapConnector_TypeID is the unique identifier for the type XtGapConnector.
+const XtGapConnector_TypeID = 0xebf19352700eb407
+
+func NewXtGapConnector(s *capnp.Segment) (XtGapConnector, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 0})
+	return XtGapConnector(st), err
+}
+
+func NewRootXtGapConnector(s *capnp.Segment) (XtGapConnector, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 0})
+	return XtGapConnector(st), err
+}
+
+func ReadRootXtGapConnector(msg *capnp.Message) (XtGapConnector, error) {
+	root, err := msg.Root()
+	return XtGapConnector(root.Struct()), err
+}
+
+func (s XtGapConnector) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (XtGapConnector) DecodeFromPtr(p capnp.Ptr) XtGapConnector {
+	return XtGapConnector(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s XtGapConnector) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s XtGapConnector) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s XtGapConnector) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s XtGapConnector) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s XtGapConnector) MaxInterPartitionOffset() uint8 {
+	return capnp.Struct(s).Uint8(0)
+}
+
+func (s XtGapConnector) SetMaxInterPartitionOffset(v uint8) {
+	capnp.Struct(s).SetUint8(0, v)
+}
+
+// XtGapConnector_List is a list of XtGapConnector.
+type XtGapConnector_List = capnp.StructList[XtGapConnector]
+
+// NewXtGapConnector creates a new list of XtGapConnector.
+func NewXtGapConnector_List(s *capnp.Segment, sz int32) (XtGapConnector_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 8, PointerCount: 0}, sz)
+	return capnp.StructList[XtGapConnector](l), err
+}
+
+// XtGapConnector_Future is a wrapper for a XtGapConnector promised by a client call.
+type XtGapConnector_Future struct{ *capnp.Future }
+
+func (f XtGapConnector_Future) Struct() (XtGapConnector, error) {
+	p, err := f.Future.Ptr()
+	return XtGapConnector(p.Struct()), err
+}
+
+type HxPropSyncConnector capnp.Struct
+
+// HxPropSyncConnector_TypeID is the unique identifier for the type HxPropSyncConnector.
+const HxPropSyncConnector_TypeID = 0xeb99c30b266b7331
+
+func NewHxPropSyncConnector(s *capnp.Segment) (HxPropSyncConnector, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2})
+	return HxPropSyncConnector(st), err
+}
+
+func NewRootHxPropSyncConnector(s *capnp.Segment) (HxPropSyncConnector, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2})
+	return HxPropSyncConnector(st), err
+}
+
+func ReadRootHxPropSyncConnector(msg *capnp.Message) (HxPropSyncConnector, error) {
+	root, err := msg.Root()
+	return HxPropSyncConnector(root.Struct()), err
+}
+
+func (s HxPropSyncConnector) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (HxPropSyncConnector) DecodeFromPtr(p capnp.Ptr) HxPropSyncConnector {
+	return HxPropSyncConnector(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s HxPropSyncConnector) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s HxPropSyncConnector) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s HxPropSyncConnector) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s HxPropSyncConnector) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s HxPropSyncConnector) Connections() (LogicalDevicePair_List, error) {
+	p, err := capnp.Struct(s).Ptr(0)
+	return LogicalDevicePair_List(p.List()), err
+}
+
+func (s HxPropSyncConnector) HasConnections() bool {
+	return capnp.Struct(s).HasPtr(0)
+}
+
+func (s HxPropSyncConnector) SetConnections(v LogicalDevicePair_List) error {
+	return capnp.Struct(s).SetPtr(0, v.ToPtr())
+}
+
+// NewConnections sets the connections field to a newly
+// allocated LogicalDevicePair_List, preferring placement in s's segment.
+func (s HxPropSyncConnector) NewConnections(n int32) (LogicalDevicePair_List, error) {
+	l, err := NewLogicalDevicePair_List(capnp.Struct(s).Segment(), n)
+	if err != nil {
+		return LogicalDevicePair_List{}, err
+	}
+	err = capnp.Struct(s).SetPtr(0, l.ToPtr())
+	return l, err
+}
+func (s HxPropSyncConnector) AcceptableLaneMultiplicities() (capnp.UInt8List, error) {
+	p, err := capnp.Struct(s).Ptr(1)
+	return capnp.UInt8List(p.List()), err
+}
+
+func (s HxPropSyncConnector) HasAcceptableLaneMultiplicities() bool {
+	return capnp.Struct(s).HasPtr(1)
+}
+
+func (s HxPropSyncConnector) SetAcceptableLaneMultiplicities(v capnp.UInt8List) error {
+	return capnp.Struct(s).SetPtr(1, v.ToPtr())
+}
+
+// NewAcceptableLaneMultiplicities sets the acceptableLaneMultiplicities field to a newly
+// allocated capnp.UInt8List, preferring placement in s's segment.
+func (s HxPropSyncConnector) NewAcceptableLaneMultiplicities(n int32) (capnp.UInt8List, error) {
+	l, err := capnp.NewUInt8List(capnp.Struct(s).Segment(), n)
+	if err != nil {
+		return capnp.UInt8List{}, err
+	}
+	err = capnp.Struct(s).SetPtr(1, l.ToPtr())
+	return l, err
+}
+func (s HxPropSyncConnector) TopologyDimension() uint8 {
+	return capnp.Struct(s).Uint8(0)
+}
+
+func (s HxPropSyncConnector) SetTopologyDimension(v uint8) {
+	capnp.Struct(s).SetUint8(0, v)
+}
+
+// HxPropSyncConnector_List is a list of HxPropSyncConnector.
+type HxPropSyncConnector_List = capnp.StructList[HxPropSyncConnector]
+
+// NewHxPropSyncConnector creates a new list of HxPropSyncConnector.
+func NewHxPropSyncConnector_List(s *capnp.Segment, sz int32) (HxPropSyncConnector_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 8, PointerCount: 2}, sz)
+	return capnp.StructList[HxPropSyncConnector](l), err
+}
+
+// HxPropSyncConnector_Future is a wrapper for a HxPropSyncConnector promised by a client call.
+type HxPropSyncConnector_Future struct{ *capnp.Future }
+
+func (f HxPropSyncConnector_Future) Struct() (HxPropSyncConnector, error) {
+	p, err := f.Future.Ptr()
+	return HxPropSyncConnector(p.Struct()), err
+}
+
+type LogicalDevicePair capnp.Struct
+
+// LogicalDevicePair_TypeID is the unique identifier for the type LogicalDevicePair.
+const LogicalDevicePair_TypeID = 0xd98e649d42c903dc
+
+func NewLogicalDevicePair(s *capnp.Segment) (LogicalDevicePair, error) {
+	st, err := capnp.NewStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 0})
+	return LogicalDevicePair(st), err
+}
+
+func NewRootLogicalDevicePair(s *capnp.Segment) (LogicalDevicePair, error) {
+	st, err := capnp.NewRootStruct(s, capnp.ObjectSize{DataSize: 8, PointerCount: 0})
+	return LogicalDevicePair(st), err
+}
+
+func ReadRootLogicalDevicePair(msg *capnp.Message) (LogicalDevicePair, error) {
+	root, err := msg.Root()
+	return LogicalDevicePair(root.Struct()), err
+}
+
+func (s LogicalDevicePair) EncodeAsPtr(seg *capnp.Segment) capnp.Ptr {
+	return capnp.Struct(s).EncodeAsPtr(seg)
+}
+
+func (LogicalDevicePair) DecodeFromPtr(p capnp.Ptr) LogicalDevicePair {
+	return LogicalDevicePair(capnp.Struct{}.DecodeFromPtr(p))
+}
+
+func (s LogicalDevicePair) ToPtr() capnp.Ptr {
+	return capnp.Struct(s).ToPtr()
+}
+func (s LogicalDevicePair) IsValid() bool {
+	return capnp.Struct(s).IsValid()
+}
+
+func (s LogicalDevicePair) Message() *capnp.Message {
+	return capnp.Struct(s).Message()
+}
+
+func (s LogicalDevicePair) Segment() *capnp.Segment {
+	return capnp.Struct(s).Segment()
+}
+func (s LogicalDevicePair) FromDevice() uint32 {
+	return capnp.Struct(s).Uint32(0)
+}
+
+func (s LogicalDevicePair) SetFromDevice(v uint32) {
+	capnp.Struct(s).SetUint32(0, v)
+}
+
+func (s LogicalDevicePair) ToDevice() uint32 {
+	return capnp.Struct(s).Uint32(4)
+}
+
+func (s LogicalDevicePair) SetToDevice(v uint32) {
+	capnp.Struct(s).SetUint32(4, v)
+}
+
+// LogicalDevicePair_List is a list of LogicalDevicePair.
+type LogicalDevicePair_List = capnp.StructList[LogicalDevicePair]
+
+// NewLogicalDevicePair creates a new list of LogicalDevicePair.
+func NewLogicalDevicePair_List(s *capnp.Segment, sz int32) (LogicalDevicePair_List, error) {
+	l, err := capnp.NewCompositeList(s, capnp.ObjectSize{DataSize: 8, PointerCount: 0}, sz)
+	return capnp.StructList[LogicalDevicePair](l), err
+}
+
+// LogicalDevicePair_Future is a wrapper for a LogicalDevicePair promised by a client call.
+type LogicalDevicePair_Future struct{ *capnp.Future }
+
+func (f LogicalDevicePair_Future) Struct() (LogicalDevicePair, error) {
+	p, err := f.Future.Ptr()
+	return LogicalDevicePair(p.Struct()), err
 }
 
 type RuntimeIoConfig capnp.Struct
