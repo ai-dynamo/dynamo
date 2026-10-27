@@ -359,12 +359,12 @@ func (r *reconciler) applyDeployment(ctx context.Context, relay *v1alpha1.Dynamo
 		return nil, err
 	}
 	applyObject := &unstructured.Unstructured{Object: fields}
-	if err := r.Patch(ctx, applyObject, client.Apply, client.FieldOwner(fieldManager), client.ForceOwnership); err != nil {
+	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(applyObject), client.FieldOwner(fieldManager), client.ForceOwnership); err != nil {
 		return nil, fmt.Errorf("apply Relay Deployment %s: %w", key, err)
 	}
 	observed := &appsv1.Deployment{}
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(applyObject.Object, observed); err != nil {
-		return nil, fmt.Errorf("decode Relay Deployment %s after apply: %w", key, err)
+	if err := r.Get(ctx, key, observed); err != nil {
+		return nil, fmt.Errorf("read Relay Deployment %s after apply: %w", key, err)
 	}
 	return observed, nil
 }
@@ -463,18 +463,6 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 		return nil, nil, fmt.Errorf("podTemplate with a main container is required")
 	}
 	podTemplate := relay.Spec.PodTemplate.DeepCopy()
-	mainIndex := -1
-	for i := range podTemplate.Spec.Containers {
-		if podTemplate.Spec.Containers[i].Name == mainContainer {
-			if mainIndex != -1 {
-				return nil, nil, fmt.Errorf("podTemplate has more than one main container")
-			}
-			mainIndex = i
-		}
-	}
-	if mainIndex == -1 || strings.TrimSpace(podTemplate.Spec.Containers[mainIndex].Image) == "" {
-		return nil, nil, fmt.Errorf("podTemplate requires a main container with an image")
-	}
 	replicas := ptr.Deref(relay.Spec.Replicas, 2)
 	if replicas < 1 {
 		return nil, nil, fmt.Errorf("replicas must be at least one")
@@ -507,34 +495,12 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 	} {
 		reserved[name] = true
 	}
+	mainIndex, userEnv, err := validateRelayPodTemplate(podTemplate, reserved)
+	if err != nil {
+		return nil, nil, err
+	}
+	env = append(env, userEnv...)
 	main := &podTemplate.Spec.Containers[mainIndex]
-	if len(main.Command) != 0 || len(main.Args) != 0 || main.StartupProbe != nil || main.ReadinessProbe != nil {
-		return nil, nil, fmt.Errorf("podTemplate main command, args, startup probe, and readiness probe are managed by the Relay controller")
-	}
-	if len(main.EnvFrom) != 0 {
-		return nil, nil, fmt.Errorf("podTemplate main envFrom can override controller-managed Relay settings; use env entries instead")
-	}
-	for _, port := range main.Ports {
-		if port.Name == "grpc" || port.Name == "system" || port.Name == "recovery" ||
-			port.ContainerPort == relayPort || port.ContainerPort == systemPort || port.ContainerPort == recoveryPort {
-			return nil, nil, fmt.Errorf("podTemplate main port %q:%d conflicts with a Relay listener", port.Name, port.ContainerPort)
-		}
-	}
-	for _, mount := range main.VolumeMounts {
-		if mount.Name == "relay-sources" || mount.MountPath == "/var/run/dynamo-relay/sources" {
-			return nil, nil, fmt.Errorf("podTemplate main mount %q at %q conflicts with the Relay source file", mount.Name, mount.MountPath)
-		}
-	}
-	for _, item := range main.Env {
-		if reserved[item.Name] {
-			return nil, nil, fmt.Errorf("env %s is reserved for the Relay controller", item.Name)
-		}
-		copy := item.DeepCopy()
-		if copy.ValueFrom != nil && copy.ValueFrom.FieldRef != nil && copy.ValueFrom.FieldRef.APIVersion == "" {
-			copy.ValueFrom.FieldRef.APIVersion = "v1"
-		}
-		env = append(env, *copy)
-	}
 	connection, err := json.Marshal(struct {
 		ClusterID string
 		Image     string
@@ -591,14 +557,6 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 	}
 	sourceVolume := corev1.VolumeSource{ConfigMap: sourceConfigMap}
 	sourcesVolume := corev1.Volume{Name: "relay-sources", VolumeSource: sourceVolume}
-	if podTemplate.Spec.ServiceAccountName != "" || podTemplate.Spec.HostNetwork {
-		return nil, nil, fmt.Errorf("podTemplate cannot set the Relay service account or host networking")
-	}
-	for _, volume := range podTemplate.Spec.Volumes {
-		if volume.Name == sourcesVolume.Name {
-			return nil, nil, fmt.Errorf("podTemplate volume %s is reserved for the Relay controller", volume.Name)
-		}
-	}
 	podTemplate.Spec.Containers[mainIndex] = container
 	podTemplate.Spec.Volumes = append(podTemplate.Spec.Volumes, sourcesVolume)
 	podTemplate.Spec.ServiceAccountName = name
@@ -613,4 +571,57 @@ func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Obje
 		Template: *podTemplate,
 	}}
 	return []client.Object{serviceAccount, role, binding, configMap, service}, deployment, nil
+}
+
+func validateRelayPodTemplate(podTemplate *corev1.PodTemplateSpec, reserved map[string]bool) (int, []corev1.EnvVar, error) {
+	mainIndex := -1
+	for i := range podTemplate.Spec.Containers {
+		if podTemplate.Spec.Containers[i].Name == mainContainer {
+			if mainIndex != -1 {
+				return 0, nil, fmt.Errorf("podTemplate has more than one main container")
+			}
+			mainIndex = i
+		}
+	}
+	if mainIndex == -1 || strings.TrimSpace(podTemplate.Spec.Containers[mainIndex].Image) == "" {
+		return 0, nil, fmt.Errorf("podTemplate requires a main container with an image")
+	}
+	main := &podTemplate.Spec.Containers[mainIndex]
+	if len(main.Command) != 0 || len(main.Args) != 0 || main.StartupProbe != nil || main.ReadinessProbe != nil {
+		return 0, nil, fmt.Errorf("podTemplate main command, args, startup probe, and readiness probe are managed by the Relay controller")
+	}
+	if len(main.EnvFrom) != 0 {
+		return 0, nil, fmt.Errorf("podTemplate main envFrom can override controller-managed Relay settings; use env entries instead")
+	}
+	for _, port := range main.Ports {
+		if port.Name == "grpc" || port.Name == "system" || port.Name == "recovery" ||
+			port.ContainerPort == relayPort || port.ContainerPort == systemPort || port.ContainerPort == recoveryPort {
+			return 0, nil, fmt.Errorf("podTemplate main port %q:%d conflicts with a Relay listener", port.Name, port.ContainerPort)
+		}
+	}
+	for _, mount := range main.VolumeMounts {
+		if mount.Name == "relay-sources" || mount.MountPath == "/var/run/dynamo-relay/sources" {
+			return 0, nil, fmt.Errorf("podTemplate main mount %q at %q conflicts with the Relay source file", mount.Name, mount.MountPath)
+		}
+	}
+	var userEnv []corev1.EnvVar
+	for _, item := range main.Env {
+		if reserved[item.Name] {
+			return 0, nil, fmt.Errorf("env %s is reserved for the Relay controller", item.Name)
+		}
+		copy := item.DeepCopy()
+		if copy.ValueFrom != nil && copy.ValueFrom.FieldRef != nil && copy.ValueFrom.FieldRef.APIVersion == "" {
+			copy.ValueFrom.FieldRef.APIVersion = "v1"
+		}
+		userEnv = append(userEnv, *copy)
+	}
+	if podTemplate.Spec.ServiceAccountName != "" || podTemplate.Spec.HostNetwork {
+		return 0, nil, fmt.Errorf("podTemplate cannot set the Relay service account or host networking")
+	}
+	for _, volume := range podTemplate.Spec.Volumes {
+		if volume.Name == "relay-sources" {
+			return 0, nil, fmt.Errorf("podTemplate volume %s is reserved for the Relay controller", volume.Name)
+		}
+	}
+	return mainIndex, userEnv, nil
 }

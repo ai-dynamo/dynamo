@@ -512,9 +512,9 @@ func TestDiscoveryUsesPreservedServiceAnnotationsAndHubEnvironment(t *testing.T)
 	if len(hub.Spec.Components) != 1 {
 		t.Fatalf("expected one hub component, got %d", len(hub.Spec.Components))
 	}
-	hub.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+	hub.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{Annotations: map[string]string{
 		commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "pod",
-	}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{
+	}, Spec: corev1.PodSpec{Containers: []corev1.Container{{
 		Name: commonconsts.MainContainerName,
 		Env:  []corev1.EnvVar{{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "pod"}},
 	}}}}
@@ -534,16 +534,16 @@ func TestDiscoveryConversionErrorDoesNotWithdrawPublishedRelay(t *testing.T) {
 		}
 	}
 	key := types.NamespacedName{Name: "green", Namespace: "inference"}
-	relay := &v1alpha1.DynamoPoolRelay{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, UID: "relay-uid"}, Spec: relaySpec("east")}
+	relay := &v1alpha1.DynamoPoolRelay{Name: key.Name, Namespace: key.Namespace, UID: "relay-uid", Spec: relaySpec("east")}
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Annotations: map[string]string{"nvidia.com/dgd-status": "{"}},
+		Name: key.Name, Namespace: key.Namespace, Annotations: map[string]string{"nvidia.com/dgd-status": "{"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
 	}
 	childKey := types.NamespacedName{Name: serviceName(key.Name), Namespace: key.Namespace}
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: childKey.Name, Namespace: childKey.Namespace}}
-	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: childKey.Name, Namespace: childKey.Namespace}}
+	service := &corev1.Service{Name: childKey.Name, Namespace: childKey.Namespace}
+	deployment := &appsv1.Deployment{Name: childKey.Name, Namespace: childKey.Namespace}
 	for _, obj := range []client.Object{service, deployment} {
 		if err := controllerutil.SetControllerReference(relay, obj, scheme); err != nil {
 			t.Fatal(err)
@@ -616,11 +616,11 @@ func TestApplyFailureWithdrawsStaleReadiness(t *testing.T) {
 	}
 	key := types.NamespacedName{Namespace: "inference", Name: "green"}
 	relay := &v1alpha1.DynamoPoolRelay{
-		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, UID: "relay-uid", Generation: 2},
-		Spec:       relaySpec("east"),
+		Name: key.Name, Namespace: key.Namespace, UID: "relay-uid", Generation: 2,
+		Spec: relaySpec("east"),
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+		Name: key.Name, Namespace: key.Namespace,
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
@@ -692,12 +692,12 @@ func TestWithdrawUsesVerifiedUIDAndPreservesGenerationOnFailure(t *testing.T) {
 		}
 	}
 	relay := &v1alpha1.DynamoPoolRelay{
-		ObjectMeta: metav1.ObjectMeta{Name: "green", Namespace: "inference", UID: "relay-uid", Generation: 3},
-		Spec:       relaySpec("east"),
-		Status:     v1alpha1.DynamoPoolRelayStatus{ObservedGeneration: 2},
+		Name: "green", Namespace: "inference", UID: "relay-uid", Generation: 3,
+		Spec:   relaySpec("east"),
+		Status: v1alpha1.DynamoPoolRelayStatus{ObservedGeneration: 2},
 	}
 	childKey := types.NamespacedName{Name: serviceName(relay.Name), Namespace: relay.Namespace}
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: childKey.Name, Namespace: childKey.Namespace, UID: "old-service"}}
+	service := &corev1.Service{Name: childKey.Name, Namespace: childKey.Namespace, UID: "old-service"}
 	if err := controllerutil.SetControllerReference(relay, service, scheme); err != nil {
 		t.Fatal(err)
 	}
@@ -738,11 +738,11 @@ func TestPrerequisiteOwnershipConflictWithdrawsRelay(t *testing.T) {
 	key := types.NamespacedName{Namespace: "inference", Name: "green"}
 	childKey := types.NamespacedName{Namespace: key.Namespace, Name: serviceName(key.Name)}
 	relay := &v1alpha1.DynamoPoolRelay{
-		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, UID: "relay-uid"},
-		Spec:       relaySpec("east"),
+		Name: key.Name, Namespace: key.Namespace, UID: "relay-uid",
+		Spec: relaySpec("east"),
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+		Name: key.Name, Namespace: key.Namespace,
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
@@ -805,7 +805,7 @@ func TestPrerequisiteOwnershipConflictWithdrawsRelay(t *testing.T) {
 	if err := apiClient.Delete(ctx, &serviceAccount); err != nil {
 		t.Fatal(err)
 	}
-	foreign := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: childKey.Name, Namespace: childKey.Namespace}}
+	foreign := &corev1.ServiceAccount{Name: childKey.Name, Namespace: childKey.Namespace}
 	if err := apiClient.Create(ctx, foreign); err != nil {
 		t.Fatal(err)
 	}

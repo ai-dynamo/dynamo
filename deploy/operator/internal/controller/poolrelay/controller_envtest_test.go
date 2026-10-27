@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
+//nolint:gocyclo // This test checks the same Deployment through defaulting, drift, and field removal.
 func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("KUBEBUILDER_ASSETS is needed for the API defaulting test")
@@ -147,6 +148,7 @@ func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // This test follows one Relay through publication and withdrawal against the API server.
 func TestControllerPublishesAndWithdrawsOneDGDService(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("KUBEBUILDER_ASSETS is needed for the controller API test")
