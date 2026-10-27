@@ -77,6 +77,7 @@ areas:
   - docs/fern/pages/reference/components/kv-dc-relay-configuration.md
   - lib/bindings/python/rust/llm/kv_dc_relay.rs
   - lib/global-common/
+  - lib/global-discovery-service/
   - lib/llm/src/kv_dc_relay.rs
   - lib/llm/src/kv_dc_relay/
   - lib/llm/tests/fixtures/relay-sources-canonical.json

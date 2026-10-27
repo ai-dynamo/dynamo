@@ -1,0 +1,388 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! In-memory store: one process keeps every registration. It needs no
+//! Kubernetes, so it suits tests and a first deployment. A restarted process
+//! starts empty and fills as PoolRelays register again, so its lists are
+//! `Estimated`. Router replicas come from configuration until routers
+//! register too. Run one replica: each keeps only the registrations it
+//! receives.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::Duration;
+
+use crate::pool_discovery::{
+    Completeness, Directory, PoolDiscoveryError, PoolEvent, PoolRecord, PoolRegistrar,
+    Registration, ReplicaEndpoint, ReplicaEvent, ReplicaId, Revision, Snapshot, WatchEvent,
+    WatchStream,
+};
+use async_trait::async_trait;
+use dynamo_global_common::{Lease, PoolKey};
+use tokio::sync::broadcast;
+use tokio::time::{Instant, MissedTickBehavior};
+use tokio_util::sync::CancellationToken;
+
+use super::stream::{EVENT_BUFFER, watch_stream};
+
+/// Pool registrations in memory. A record expires the lease duration after
+/// its last registration. Reads skip an expired record at once; a sweep
+/// removes it, with a `Removed` event, within one heartbeat interval.
+///
+/// Any caller may register any pool: V1 assumes a trusted network, and
+/// several PoolRelay replicas may register the same pool.
+pub struct MemoryPoolStore {
+    lease: Lease,
+    pools: Arc<Mutex<Pools>>,
+    /// Sent while holding the `pools` lock, so a subscriber that snapshots
+    /// and subscribes under it misses no event and sees none twice.
+    events: broadcast::Sender<PoolEvent>,
+    sweeping: OnceLock<()>,
+    stop: CancellationToken,
+}
+
+#[derive(Default)]
+struct Pools {
+    records: HashMap<PoolKey, Registered>,
+    last_revision: u64,
+}
+
+struct Registered {
+    record: PoolRecord,
+    expires_at: Instant,
+}
+
+impl Pools {
+    fn snapshot(&self, now: Instant) -> Snapshot<PoolRecord> {
+        Snapshot {
+            items: self
+                .records
+                .values()
+                .filter(|registered| registered.expires_at > now)
+                .map(|registered| registered.record.clone())
+                .collect(),
+            completeness: Completeness::Estimated,
+        }
+    }
+}
+
+impl MemoryPoolStore {
+    pub fn new(lease: Lease) -> Self {
+        Self {
+            lease,
+            pools: Arc::default(),
+            events: broadcast::channel(EVENT_BUFFER).0,
+            sweeping: OnceLock::new(),
+            stop: CancellationToken::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Pools> {
+        self.pools.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Every trait method runs in a Tokio runtime, so the spawn is safe.
+    fn ensure_sweeping(&self) {
+        self.sweeping.get_or_init(|| {
+            tokio::spawn(sweep(
+                Arc::clone(&self.pools),
+                self.events.clone(),
+                self.lease.heartbeat_interval(),
+                self.stop.clone(),
+            ));
+        });
+    }
+}
+
+impl Drop for MemoryPoolStore {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+/// Removes expired records and publishes `Removed` for each.
+async fn sweep(
+    pools: Arc<Mutex<Pools>>,
+    events: broadcast::Sender<PoolEvent>,
+    every: Duration,
+    stop: CancellationToken,
+) {
+    let mut ticks = tokio::time::interval(every);
+    ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            biased;
+            () = stop.cancelled() => return,
+            _ = ticks.tick() => {}
+        }
+        let now = Instant::now();
+        let mut pools = pools.lock().unwrap_or_else(PoisonError::into_inner);
+        pools.records.retain(|key, registered| {
+            let live = registered.expires_at > now;
+            if !live {
+                // No subscribers is not an error.
+                let _ = events.send(WatchEvent::Removed(key.clone()));
+            }
+            live
+        });
+    }
+}
+
+/// Stored lists are sorted and without repeats, so the same lists in another
+/// order are not a change.
+fn sort_lists(record: &mut PoolRecord) {
+    record.capabilities.sort_unstable();
+    record.capabilities.dedup();
+    record.frontends.sort_unstable();
+    record.frontends.dedup();
+    record.capacity.sort_unstable();
+    record.capacity.dedup();
+}
+
+#[async_trait]
+impl PoolRegistrar for MemoryPoolStore {
+    /// An unchanged record only renews its lease. A new or changed one gets
+    /// the next revision and an `Added` event. Lists in another order, for
+    /// example from another PoolRelay replica, are not a change.
+    async fn register(&self, mut record: PoolRecord) -> Result<Registration, PoolDiscoveryError> {
+        sort_lists(&mut record);
+        self.ensure_sweeping();
+        let now = Instant::now();
+        let expires_at = now + self.lease.lease_duration();
+        let mut pools = self.lock();
+        if let Some(registered) = pools.records.get_mut(&record.key)
+            && registered.expires_at > now
+        {
+            record.revision = registered.record.revision;
+            if registered.record == record {
+                registered.expires_at = expires_at;
+                return Ok(Registration { lease: self.lease });
+            }
+        }
+        pools.last_revision += 1;
+        record.revision = Revision(pools.last_revision);
+        pools.records.insert(
+            record.key.clone(),
+            Registered {
+                record: record.clone(),
+                expires_at,
+            },
+        );
+        // No subscribers is not an error.
+        let _ = self.events.send(WatchEvent::Added(record));
+        Ok(Registration { lease: self.lease })
+    }
+}
+
+#[async_trait]
+impl Directory<PoolRecord, PoolKey> for MemoryPoolStore {
+    async fn list(&self) -> Result<Snapshot<PoolRecord>, PoolDiscoveryError> {
+        Ok(self.lock().snapshot(Instant::now()))
+    }
+
+    async fn list_and_watch(
+        &self,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<WatchStream<PoolRecord, PoolKey>, PoolDiscoveryError> {
+        self.ensure_sweeping();
+        let pools = Arc::clone(&self.pools);
+        let events = self.events.clone();
+        Ok(watch_stream(
+            move || {
+                let pools = pools.lock().unwrap_or_else(PoisonError::into_inner);
+                (events.subscribe(), Some(pools.snapshot(Instant::now())))
+            },
+            cancel_token.unwrap_or_default(),
+            self.stop.clone(),
+        ))
+    }
+}
+
+/// Router replicas from configuration. The set never changes, and lists are
+/// `Exact`.
+pub struct StaticReplicaDirectory {
+    replicas: Vec<ReplicaEndpoint>,
+    /// Never sent on. Keeps watch streams open until the directory is
+    /// dropped.
+    events: broadcast::Sender<ReplicaEvent>,
+    stop: CancellationToken,
+}
+
+impl StaticReplicaDirectory {
+    pub fn new(replicas: Vec<ReplicaEndpoint>) -> Self {
+        Self {
+            replicas,
+            events: broadcast::channel(1).0,
+            stop: CancellationToken::new(),
+        }
+    }
+
+    fn snapshot(&self) -> Snapshot<ReplicaEndpoint> {
+        Snapshot {
+            items: self.replicas.clone(),
+            completeness: Completeness::Exact,
+        }
+    }
+}
+
+impl Drop for StaticReplicaDirectory {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+#[async_trait]
+impl Directory<ReplicaEndpoint, ReplicaId> for StaticReplicaDirectory {
+    async fn list(&self) -> Result<Snapshot<ReplicaEndpoint>, PoolDiscoveryError> {
+        Ok(self.snapshot())
+    }
+
+    async fn list_and_watch(
+        &self,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<WatchStream<ReplicaEndpoint, ReplicaId>, PoolDiscoveryError> {
+        let events = self.events.clone();
+        let snapshot = self.snapshot();
+        Ok(watch_stream(
+            move || (events.subscribe(), Some(snapshot.clone())),
+            cancel_token.unwrap_or_default(),
+            self.stop.clone(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::pool_discovery::Capacity;
+    use dynamo_global_common::PoolLocation;
+    use futures::StreamExt;
+    use url::Url;
+
+    use super::*;
+
+    fn lease() -> Lease {
+        Lease::new(5, 15).unwrap()
+    }
+
+    fn key(dgd: &str) -> PoolKey {
+        PoolKey::new("west", "dynamo", dgd).unwrap()
+    }
+
+    fn capacity(sku: &str, count: u32) -> Capacity {
+        Capacity {
+            sku: sku.to_owned(),
+            count,
+        }
+    }
+
+    fn record(dgd: &str, model: &str) -> PoolRecord {
+        PoolRecord {
+            key: key(dgd),
+            location: PoolLocation {
+                region: "us-west-2".to_owned(),
+                availability_zone: None,
+                cluster: Some("west".to_owned()),
+                datacenter: None,
+            },
+            model: Some(model.to_owned()),
+            capabilities: vec!["prefill".to_owned(), "decode".to_owned()],
+            frontends: vec![
+                Url::parse("http://10.43.1.3:8000/").unwrap(),
+                Url::parse("http://10.43.1.2:8000/").unwrap(),
+            ],
+            capacity: vec![capacity("H100", 8), capacity("B200", 4)],
+            relay_identity: None,
+            revision: Revision::default(),
+        }
+    }
+
+    async fn find(store: &MemoryPoolStore, dgd: &str) -> Option<PoolRecord> {
+        let snapshot = store.list().await.unwrap();
+        assert_eq!(snapshot.completeness, Completeness::Estimated);
+        snapshot
+            .items
+            .into_iter()
+            .find(|record| record.key == key(dgd))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn registering_again_renews_without_a_new_revision() {
+        let store = MemoryPoolStore::new(lease());
+        let registration = store.register(record("mocker", "m1")).await.unwrap();
+        assert_eq!(registration.lease, lease());
+        let first = find(&store, "mocker").await.unwrap();
+        assert_eq!(first.revision, Revision(1));
+        assert_eq!(first.capabilities, ["decode", "prefill"]);
+
+        // Heartbeats every 10 s keep the 15 s lease alive past 15 s. Lists in
+        // another order, or with an item twice, are no change.
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            let mut heartbeat = record("mocker", "m1");
+            heartbeat.capabilities.reverse();
+            heartbeat.frontends.reverse();
+            heartbeat.capacity.push(capacity("H100", 8));
+            store.register(heartbeat).await.unwrap();
+        }
+        let renewed = find(&store, "mocker").await.unwrap();
+        assert_eq!(renewed, first);
+
+        // A changed record is a new revision.
+        store.register(record("mocker", "m2")).await.unwrap();
+        let changed = find(&store, "mocker").await.unwrap();
+        assert_eq!(changed.revision, Revision(2));
+        assert_eq!(changed.model.as_deref(), Some("m2"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_missed_lease_hides_then_removes_the_pool() {
+        let store = MemoryPoolStore::new(lease());
+        store.register(record("mocker", "m1")).await.unwrap();
+        let mut watch = store.list_and_watch(None).await.unwrap();
+        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(_)))));
+        assert!(matches!(
+            watch.next().await,
+            Some(Ok(WatchEvent::Resync(_)))
+        ));
+
+        tokio::time::advance(Duration::from_secs(16)).await;
+        // Reads skip it before the sweep runs.
+        assert!(find(&store, "mocker").await.is_none());
+        // The sweep removes it and tells watchers.
+        assert!(
+            matches!(watch.next().await, Some(Ok(WatchEvent::Removed(k))) if k == key("mocker"))
+        );
+        assert!(store.lock().records.is_empty());
+
+        // Registering again brings it back as a new revision.
+        store.register(record("mocker", "m1")).await.unwrap();
+        assert!(
+            matches!(watch.next().await, Some(Ok(WatchEvent::Added(r))) if r.revision == Revision(2))
+        );
+    }
+
+    #[tokio::test]
+    async fn static_replicas_list_and_watch() {
+        let replica = ReplicaEndpoint {
+            replica: ReplicaId("ohio/global-router-0".to_owned()),
+            url: Url::parse("http://10.42.0.5:50051").unwrap(),
+        };
+        let directory = StaticReplicaDirectory::new(vec![replica.clone()]);
+        let snapshot = directory.list().await.unwrap();
+        assert_eq!(snapshot.items, std::slice::from_ref(&replica));
+        assert_eq!(snapshot.completeness, Completeness::Exact);
+
+        let cancel = CancellationToken::new();
+        let mut watch = directory
+            .list_and_watch(Some(cancel.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(r))) if r == replica));
+        assert!(matches!(
+            watch.next().await,
+            Some(Ok(WatchEvent::Resync(_)))
+        ));
+        cancel.cancel();
+        assert!(watch.next().await.is_none());
+    }
+}
