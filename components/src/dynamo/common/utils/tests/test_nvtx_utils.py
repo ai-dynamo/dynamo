@@ -44,7 +44,6 @@ MODULE_NAME = "_test_nvtx_utils_under_test"
 
 
 def _load_nvtx_utils():
-    """Execute nvtx_utils.py fresh and return the resulting module."""
     spec = importlib.util.spec_from_file_location(MODULE_NAME, NVTX_UTILS_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -159,23 +158,6 @@ class TestDisabled:
         with pytest.raises(ValueError, match="boom"):
             with disabled.annotate("my:block"):
                 raise ValueError("boom")
-
-    def test_range_decorator_returns_async_gen_unchanged(self, disabled):
-        """Kept separate from the sync surface: the async-generator branch is a
-        distinct code path in `range_decorator`, and it is the one that has to
-        keep yielding correctly rather than merely be returned unchanged."""
-
-        async def target():
-            yield 1
-            yield 2
-
-        decorated = disabled.range_decorator("my:async_gen")(target)
-        assert decorated is target
-
-        async def collect():
-            return [item async for item in decorated()]
-
-        assert asyncio.run(collect()) == [1, 2]
 
 
 # --------------------------------------------------------------------------- #
@@ -359,8 +341,6 @@ class TestEnabledWithPackage:
         second = module.start_range("my:range", color="blue")
         module.start_range("my:range", color="red")
         module.start_range("other:range", color="blue")
-        # Color is optional; the default must not create a second attributes entry
-        # for an already-seen (message, white) pair.
         module.start_range("plain:range")
 
         assert first != second

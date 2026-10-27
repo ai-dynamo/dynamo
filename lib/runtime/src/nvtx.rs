@@ -625,9 +625,7 @@ mod tests {
     // ── Macro arm coverage ───────────────────────────────────────────────────
 
     /// One representative shape per macro arm: a bare literal, a literal with
-    /// format args, and a non-literal `Display` expression. The exhaustive
-    /// enumeration this replaced re-tested `macro_rules!` itself; what actually
-    /// protects call sites is that both arms still match at all.
+    /// format args, and a non-literal `Display` expression.
     fn exercise_every_macro_arm() {
         let owned = String::from("test.arg.string");
         let number: u32 = 7;
@@ -652,9 +650,6 @@ mod tests {
         let _r3 = dynamo_nvtx_range!(&owned);
     }
 
-    /// Run [`exercise_every_macro_arm`] with annotations off — the state every
-    /// non-profiled process is in — and, when the feature is compiled in, again
-    /// with them on.
     #[test]
     fn every_macro_arm_compiles_and_runs() {
         #[cfg(feature = "nvtx")]
@@ -672,8 +667,6 @@ mod tests {
 
     // ── Enabled/disabled transitions ─────────────────────────────────────────
 
-    /// Without the Cargo feature the runtime switch cannot turn anything on:
-    /// `enabled()` is a compile-time `false`.
     #[cfg(not(feature = "nvtx"))]
     #[test]
     fn enabled_is_always_false_without_the_feature() {
@@ -687,8 +680,6 @@ mod tests {
         assert!(!super::enabled());
     }
 
-    /// `enabled()` is exactly a read of the `NVTX_ENABLED` atomic, and flipping it
-    /// back and forth is observable at every step.
     #[cfg(feature = "nvtx")]
     #[test]
     fn enabled_tracks_the_atomic_in_both_directions() {
