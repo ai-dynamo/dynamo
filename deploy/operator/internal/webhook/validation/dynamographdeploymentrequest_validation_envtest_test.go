@@ -1407,11 +1407,9 @@ func beta2DGDRForAdmission(
 
 func v1beta2RunForAdmission(model string, labels map[string]string) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
 	return &nvidiacomv1beta2.DynamoGraphDeploymentRun{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: nvidiacomv1beta2.GroupVersion.String(),
-			Kind:       "DynamoGraphDeploymentRun",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: "test-v1beta2-dgdr-run", Namespace: "default", Labels: labels},
+		APIVersion: nvidiacomv1beta2.GroupVersion.String(),
+		Kind:       "DynamoGraphDeploymentRun",
+		Name:       "test-v1beta2-dgdr-run", Namespace: "default", Labels: labels,
 		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRunSpec{NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
 			Model: &nvidiacomv1beta2.ModelSpec{Name: model},
 		}},
@@ -1500,13 +1498,6 @@ func v1beta2String(t *testing.T, obj *unstructured.Unstructured, path ...string)
 		t.Fatalf("%v = %#v, want a string", path, value)
 	}
 	return text
-}
-
-func v1beta2Absent(t *testing.T, obj *unstructured.Unstructured, path ...string) {
-	t.Helper()
-	if value, found := v1beta2Field(t, obj, path...); found {
-		t.Fatalf("%v = %#v, want it absent", path, value)
-	}
 }
 
 func v1beta2Empty(t *testing.T, obj *unstructured.Unstructured, path ...string) {

@@ -27,8 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-func ptrTo[T any](v T) *T { return &v }
-
 // defaultedSpec is a model-only Request after structural and admission defaults:
 // fixed-concurrency traffic, the scalar objective with latency bounds, and discovered hardware.
 func defaultedSpec() *v1beta2.DynamoGraphDeploymentRequestSpec {
@@ -36,16 +34,16 @@ func defaultedSpec() *v1beta2.DynamoGraphDeploymentRequestSpec {
 	return &v1beta2.DynamoGraphDeploymentRequestSpec{
 		Model:    &v1beta2.ModelSpec{Name: "meta-llama/Llama-3.1-8B-Instruct"},
 		Backends: []v1beta2.Backend{v1beta2.BackendVLLM, v1beta2.BackendSGLang, v1beta2.BackendTRTLLM},
-		Hardware: &v1beta2.HardwareSpec{GPU: &v1beta2.GPUHardwareSpec{SKU: ptrTo("h200_sxm"), Budget: ptrTo(int32(8))}},
+		Hardware: &v1beta2.HardwareSpec{GPU: &v1beta2.GPUHardwareSpec{SKU: new("h200_sxm"), Budget: new(int32(8))}},
 		Workload: &v1beta2.WorkloadSpec{Static: &v1beta2.StaticWorkloadSpec{
-			InputTokens:  ptrTo(int32(1024)),
-			OutputTokens: ptrTo(int32(128)),
-			Load:         &v1beta2.StaticLoadSpec{Concurrency: ptrTo(int32(10))},
+			InputTokens:  new(int32(1024)),
+			OutputTokens: new(int32(128)),
+			Load:         &v1beta2.StaticLoadSpec{Concurrency: new(int32(10))},
 		}},
 		Objective: &v1beta2.ObjectiveSpec{
 			Mode:   v1beta2.ObjectiveModeOptimize,
 			Metric: &metric,
-			SLA:    &v1beta2.ObjectiveSLASpec{TTFTMs: ptrTo(2000.0), ITLMs: ptrTo(30.0)},
+			SLA:    &v1beta2.ObjectiveSLASpec{TTFTMs: new(2000.0), ITLMs: new(30.0)},
 		},
 		Recommendation: &v1beta2.RecommendationSpec{MaxCandidates: 1},
 	}
@@ -53,7 +51,7 @@ func defaultedSpec() *v1beta2.DynamoGraphDeploymentRequestSpec {
 
 // withSLA restores the model-only latency defaults after a test changes them.
 func withSLA(spec *v1beta2.DynamoGraphDeploymentRequestSpec) *v1beta2.DynamoGraphDeploymentRequestSpec {
-	spec.Objective.SLA = &v1beta2.ObjectiveSLASpec{TTFTMs: ptrTo(2000.0), ITLMs: ptrTo(30.0)}
+	spec.Objective.SLA = &v1beta2.ObjectiveSLASpec{TTFTMs: new(2000.0), ITLMs: new(30.0)}
 	return spec
 }
 
@@ -66,8 +64,8 @@ func withoutSLA(spec *v1beta2.DynamoGraphDeploymentRequestSpec) *v1beta2.DynamoG
 // withKVRange replaces the fixed concurrency with a KV-load range search.
 func withKVRange(spec *v1beta2.DynamoGraphDeploymentRequestSpec) *v1beta2.DynamoGraphDeploymentRequestSpec {
 	spec.Workload.Static = &v1beta2.StaticWorkloadSpec{
-		InputTokens:  ptrTo(int32(4000)),
-		OutputTokens: ptrTo(int32(1000)),
+		InputTokens:  new(int32(4000)),
+		OutputTokens: new(int32(1000)),
 		Load: &v1beta2.StaticLoadSpec{KVCapacityFraction: &v1beta2.KVCapacityFractionSpec{
 			Range: &v1beta2.KVCapacityFractionRange{Min: 0.1, Max: 1},
 		}},
@@ -143,9 +141,9 @@ func TestLowerExplicitRequest(t *testing.T) {
 	spec := withSLA(defaultedSpec())
 	spec.Backends = []v1beta2.Backend{v1beta2.BackendVLLM, v1beta2.BackendSGLang}
 	spec.Workload.Static = &v1beta2.StaticWorkloadSpec{
-		InputTokens:  ptrTo(int32(4000)),
-		OutputTokens: ptrTo(int32(1000)),
-		Load:         &v1beta2.StaticLoadSpec{RequestsPerSecond: ptrTo(10.0)},
+		InputTokens:  new(int32(4000)),
+		OutputTokens: new(int32(1000)),
+		Load:         &v1beta2.StaticLoadSpec{RequestsPerSecond: new(10.0)},
 	}
 	spec.Objective.Metric = &metric
 	spec = withInputOverrides(spec, `{"traffic":{"stop":{"requests":1000}},"optimizer":{"max_trials":100}}`)
@@ -260,7 +258,7 @@ func TestMaxTrialsDefault(t *testing.T) {
 	})
 	t.Run("not added for a pinned load", func(t *testing.T) {
 		spec := withKVRange(defaultedSpec())
-		spec.Workload.Static.Load.KVCapacityFraction = &v1beta2.KVCapacityFractionSpec{Value: ptrTo(0.5)}
+		spec.Workload.Static.Load.KVCapacityFraction = &v1beta2.KVCapacityFractionSpec{Value: new(0.5)}
 		input := lower(t, spec)
 		if nested(t, input, "optimizer") != nil {
 			t.Fatalf("unexpected optimizer: %s", encode(t, input))
@@ -366,7 +364,7 @@ func TestUnderlayOmitsUnsetTypedFields(t *testing.T) {
 	if got := encode(t, underlay(t, spec)); got != `{"engine":{"model":"m"}}` {
 		t.Fatalf("got %s", got)
 	}
-	spec.Hardware = &v1beta2.HardwareSpec{GPU: &v1beta2.GPUHardwareSpec{SKU: ptrTo("")}}
+	spec.Hardware = &v1beta2.HardwareSpec{GPU: &v1beta2.GPUHardwareSpec{SKU: new("")}}
 	if got := encode(t, underlay(t, spec)); got != `{"engine":{"model":"m"}}` {
 		t.Fatalf("an empty SKU must not lower: %s", got)
 	}
@@ -375,7 +373,7 @@ func TestUnderlayOmitsUnsetTypedFields(t *testing.T) {
 func TestUnderlayKVCapacityFractionShapes(t *testing.T) {
 	spec := defaultedSpec()
 	spec.Workload.Static.Load = &v1beta2.StaticLoadSpec{
-		KVCapacityFraction: &v1beta2.KVCapacityFractionSpec{Value: ptrTo(0.25)},
+		KVCapacityFraction: &v1beta2.KVCapacityFractionSpec{Value: new(0.25)},
 	}
 	if nested(t, underlay(t, spec), "traffic", "load", "fraction") != 0.25 {
 		t.Fatal("a fixed fraction must lower to a scalar")

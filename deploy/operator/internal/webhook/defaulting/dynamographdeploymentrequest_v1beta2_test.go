@@ -30,8 +30,6 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
-func v1beta2Ptr[T any](v T) *T { return &v }
-
 type fakeDiscoverer struct {
 	found   gpu.GPUInfo
 	err     error
@@ -66,7 +64,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 	})
 	t.Run("complete hardware verifies its SKU against the cluster", func(t *testing.T) {
 		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "b200_sxm", GPUsPerNode: 4, NodesWithGPUs: 1, TotalGPUs: 4}}
-		got, err := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(v1beta2Ptr("b200_sxm"), v1beta2Ptr(int32(2))))
+		got, err := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(new("b200_sxm"), new(int32(2))))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -89,7 +87,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 	})
 	t.Run("a pinned SKU filters discovery and keeps its value", func(t *testing.T) {
 		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "b200_sxm", GPUsPerNode: 4, NodesWithGPUs: 1, TotalGPUs: 4}}
-		got, err := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(v1beta2Ptr("b200_sxm"), nil))
+		got, err := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(new("b200_sxm"), nil))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,7 +97,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 	})
 	t.Run("a pinned budget keeps its value", func(t *testing.T) {
 		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 64, NodesWithGPUs: 1}}
-		got, err := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, v1beta2Ptr(int32(3))))
+		got, err := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(nil, new(int32(3))))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -198,7 +196,7 @@ func TestHardwareIsNeverDiscoveredOnOtherOperations(t *testing.T) {
 	for _, op := range []admissionv1.Operation{admissionv1.Delete, admissionv1.Connect, ""} {
 		t.Run("operation "+string(op), func(t *testing.T) {
 			d := &fakeDiscoverer{found: gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1}}
-			old := hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), v1beta2Ptr(int32(4)))
+			old := hardwareSpecV1beta2(new("h100_sxm"), new(int32(4)))
 			got, err := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), op, old, hardwareSpecV1beta2(nil, nil))
 			if err != nil {
 				t.Fatal(err)
@@ -212,7 +210,7 @@ func TestHardwareIsNeverDiscoveredOnOtherOperations(t *testing.T) {
 
 func TestResolveHardwareByOperationV1beta2(t *testing.T) {
 	full := func() *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec {
-		return hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), v1beta2Ptr(int32(4)))
+		return hardwareSpecV1beta2(new("h100_sxm"), new(int32(4)))
 	}
 	tests := []struct {
 		name       string
@@ -227,21 +225,21 @@ func TestResolveHardwareByOperationV1beta2(t *testing.T) {
 		{"metadata-only update without hardware does not discover", admissionv1.Update,
 			hardwareSpecV1beta2(nil, nil), hardwareSpecV1beta2(nil, nil), hardwareDefaultsV1beta2{}, 0, ""},
 		{"update with unchanged incomplete hardware does not discover", admissionv1.Update,
-			hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), nil), hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), nil),
+			hardwareSpecV1beta2(new("h100_sxm"), nil), hardwareSpecV1beta2(new("h100_sxm"), nil),
 			hardwareDefaultsV1beta2{}, 0, ""},
 		{"update without a stored spec does not discover", admissionv1.Update,
 			nil, hardwareSpecV1beta2(nil, nil), hardwareDefaultsV1beta2{}, 0, ""},
 		{"removing only the budget discovers only the budget", admissionv1.Update,
-			full(), hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), nil),
+			full(), hardwareSpecV1beta2(new("h100_sxm"), nil),
 			hardwareDefaultsV1beta2{budget: 8}, 1, "h100_sxm"},
 		{"removing only the SKU discovers only the SKU", admissionv1.Update,
-			full(), hardwareSpecV1beta2(nil, v1beta2Ptr(int32(4))),
+			full(), hardwareSpecV1beta2(nil, new(int32(4))),
 			hardwareDefaultsV1beta2{sku: "h200_sxm"}, 1, ""},
 		{"removing all typed hardware discovers both", admissionv1.Update,
 			full(), hardwareSpecV1beta2(nil, nil),
 			hardwareDefaultsV1beta2{sku: "h200_sxm", budget: 8}, 1, ""},
 		{"changing to complete hardware verifies the new SKU", admissionv1.Update,
-			full(), hardwareSpecV1beta2(v1beta2Ptr("b200_sxm"), v1beta2Ptr(int32(2))),
+			full(), hardwareSpecV1beta2(new("b200_sxm"), new(int32(2))),
 			hardwareDefaultsV1beta2{}, 1, "b200_sxm"},
 	}
 	for _, tt := range tests {
@@ -260,7 +258,7 @@ func TestResolveHardwareByOperationV1beta2(t *testing.T) {
 }
 
 func TestDecodeOldSpecV1beta2(t *testing.T) {
-	old, err := json.Marshal(v1beta2Envelope(t, hardwareSpecV1beta2(v1beta2Ptr("h100_sxm"), nil)))
+	old, err := json.Marshal(v1beta2Envelope(t, hardwareSpecV1beta2(new("h100_sxm"), nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -34,7 +34,7 @@ func collectOtherModels(
 		return nil
 	}
 	seen := map[string]struct{}{}
-	for i := 0; i < nodes; i++ {
+	for i := range nodes {
 		if sku, model := at(i); sku != selected {
 			seen[model] = struct{}{}
 		}
