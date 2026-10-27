@@ -24,20 +24,12 @@ func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionIn
 	build := intent.Build
 	hybrid := intent.Pipeline == PipelineHybrid
 
-	// An LPU-only conductor launches one unit for each model. As in the legacy
-	// projection of a build without a selected chain, LP20 may instead run
-	// several units that each hold one partition.
+	// An LPU-only conductor launches exactly one unit for each model. The legacy
+	// projection accepts several LP20 partitions without a chain, but LPX then
+	// rejects the incomplete LPU-only chain, so units refuse them here.
 	if !hybrid && len(build.lpuUnits) != 1 {
-		if build.family != BuildFamilyXT {
-			return nil, fmt.Errorf("%w: LP30 LPU-only workloads require exactly one lpuUnits entry per model, got %d",
-				ErrUnsupportedRuntime, len(build.lpuUnits))
-		}
-		for _, unit := range build.lpuUnits {
-			if ids := unit.partitionIDs(); len(ids) > 1 {
-				return nil, fmt.Errorf("%w: LP20 LPU-only workloads run several lpuUnits entries only when each holds one partition; partitions %s form one of %d units",
-					ErrUnsupportedRuntime, formatPropSyncChain(ids), len(build.lpuUnits))
-			}
-		}
+		return nil, fmt.Errorf("%w: LPU-only workloads require exactly one lpuUnits entry per model; this bundle has %d",
+			ErrUnsupportedRuntime, len(build.lpuUnits))
 	}
 	units, localPartitionIDs, err := selectRemoteUnits(intent.LocalPartitions, intent.Pipeline, build.lpuUnits)
 	if err != nil {

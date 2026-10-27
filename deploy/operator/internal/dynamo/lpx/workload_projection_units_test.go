@@ -247,29 +247,12 @@ func TestUnitProjection(t *testing.T) {
 			wantServers:  servers + "0\n" + servers + "2",
 		},
 		{
-			name: "LP20 LPU-only partitions without a chain run as independent units",
+			name: "LP20 LPU-only partitions without a chain",
 			bundle: testUnitBundle{
 				architecture: lp20, devicesPerNode: 8, partitions: testUnitPartitions(8, nil, 1, 2),
 				units: testSingleUnits(testNodesReservation(1, 1), testNodesReservation(1, 2)),
 			},
-			wantPartitions: []lpxv1alpha1.PartitionRequest{
-				{ID: "partition-000", Ordinal: 0, CompilerPartitionID: 1, XtShape: new(lpxv1alpha1.Xt8888PartitionShapeC8)},
-				{ID: "partition-001", Ordinal: 1, CompilerPartitionID: 2, XtShape: new(lpxv1alpha1.Xt8888PartitionShapeC8)},
-			},
-			wantAgents: 2,
-			wantRows:   map[string]string{"nodes_per_partition": "1\n1", "partition_ids": "1\n2", "partition_node_offsets": "0\n1", "partition_paths": "part-1\npart-2"},
-		},
-		{
-			name: "LP20 LPU-only chain beside another unit",
-			bundle: testUnitBundle{
-				architecture: lp20, devicesPerNode: 8, chains: [][]uint32{{1, 2}}, partitions: testUnitPartitions(8, nil, 1, 2, 3),
-				units: []testLPUUnit{
-					{reservations: []testLPUReservation{testNodesReservation(1, 1), testNodesReservation(1, 2)}, connectors: []testLPUConnector{{}}},
-					{reservations: []testLPUReservation{testNodesReservation(1, 3)}},
-				},
-			},
-			wantErr: "unsupported LPX runtime: LP20 LPU-only workloads run several lpuUnits entries only when each holds one partition; " +
-				"partitions [1,2] form one of 2 units",
+			wantErr: "unsupported LPX runtime: LPU-only workloads require exactly one lpuUnits entry per model; this bundle has 2",
 		},
 		{
 			name: "LP30 LPU-only partitions without a chain",
@@ -277,7 +260,7 @@ func TestUnitProjection(t *testing.T) {
 				architecture: lp30, devicesPerNode: 16, partitions: testUnitPartitions(16, []uint32{16, 1, 1, 1}, 1, 2),
 				units: testSingleUnits(testHXReservation(1, 1, 1, 1), testHXReservation(1, 1, 1, 2)),
 			},
-			wantErr: "unsupported LPX runtime: LP30 LPU-only workloads require exactly one lpuUnits entry per model, got 2",
+			wantErr: "unsupported LPX runtime: LPU-only workloads require exactly one lpuUnits entry per model; this bundle has 2",
 		},
 		{
 			name: "LPU-only local partitions",
@@ -509,17 +492,10 @@ func TestUnitProjectionMatchesLegacy(t *testing.T) {
 			},
 		},
 		{
-			name: "LP20 LPU-only partitions without a chain",
+			name: "LP20 LPU-only partition smaller than a node",
 			bundle: testUnitBundle{
-				architecture: lp20, devicesPerNode: 8, partitions: []testUnitPartition{{id: 1, numChips: 16}, {id: 2, numChips: 8}, {id: 3, numChips: 4}},
-				units: testSingleUnits(testNodesReservation(2, 1), testNodesReservation(1, 2), testNodesReservation(1, 3)),
-			},
-		},
-		{
-			name: "LP20 LPU-only partitions without a chain after a CPU embedding partition",
-			bundle: testUnitBundle{
-				architecture: lp20, devicesPerNode: 8, cpuEmbeddings: true, partitions: testUnitPartitions(8, nil, 0, 1, 2),
-				units: testSingleUnits(testNodesReservation(1, 1), testNodesReservation(1, 2)),
+				architecture: lp20, devicesPerNode: 8, partitions: testUnitPartitions(4, nil, 1),
+				units: testSingleUnits(testNodesReservation(1, 1)),
 			},
 		},
 		{
