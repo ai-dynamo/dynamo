@@ -2333,12 +2333,9 @@ class WorkerFactory:
         if timeout <= 0:
             timeout = ASYNC_HANDLER_DRAIN_TIMEOUT_SECONDS
         task = asyncio.create_task(lifecycle.handler.aclose())
-        try:
-            done, _pending = await asyncio.wait({task}, timeout=timeout)
-        finally:
-            if not task.done():
-                self._pending_handler_drains.add(task)
-                task.add_done_callback(self._finish_handler_drain)
+        self._pending_handler_drains.add(task)
+        task.add_done_callback(self._finish_handler_drain)
+        done, _pending = await asyncio.wait({task}, timeout=timeout)
         if not done:
             raise TimeoutError(
                 "asynchronous handler drain timed out; shutting down the engine"
@@ -2348,7 +2345,7 @@ class WorkerFactory:
     def _finish_handler_drain(self, task: asyncio.Task[None]) -> None:
         self._pending_handler_drains.discard(task)
         if not task.cancelled() and task.exception() is not None:
-            logger.error("Asynchronous handler drain failed after engine teardown")
+            logger.error("Asynchronous handler drain failed")
 
     async def _run_decode_worker(
         self,

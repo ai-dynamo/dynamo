@@ -5,8 +5,10 @@
 
 import asyncio
 import copy
+import gc
 import json
 import logging
+import weakref
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -369,6 +371,50 @@ async def test_hung_async_drain_does_not_prevent_engine_shutdown(
     assert calls == ["drain-started", "engine-shutdown", "drain-settled"]
     assert not factory._pending_handler_drains
     assert handler.aclose.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_cancelled_drain_observes_already_failed_close_task(monkeypatch):
+    factory = _make_factory()
+    wait_returned = asyncio.Event()
+    original_wait = asyncio.wait
+    close_tasks = []
+
+    async def fail_close():
+        raise RuntimeError("asynchronous close failed")
+
+    async def wait_before_caller_observes_result(tasks, *, timeout):
+        close_tasks.append(weakref.ref(next(iter(tasks))))
+        result = await original_wait(tasks, timeout=timeout)
+        wait_returned.set()
+        await asyncio.Event().wait()
+        return result
+
+    monkeypatch.setattr(asyncio, "wait", wait_before_caller_observes_result)
+    lifecycle = _WorkerLifecycle(
+        handler=SimpleNamespace(aclose=fail_close),
+        vllm_config=SimpleNamespace(shutdown_timeout=1),
+    )
+    loop = asyncio.get_running_loop()
+    original_handler = loop.get_exception_handler()
+    unobserved = []
+    loop.set_exception_handler(lambda _loop, context: unobserved.append(context))
+    try:
+        drain = asyncio.create_task(factory._drain_handler(lifecycle))
+        await asyncio.wait_for(wait_returned.wait(), timeout=1)
+        drain.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await drain
+        del drain
+        gc.collect()
+        await asyncio.sleep(0)
+
+        assert not unobserved
+        assert all(reference() is None for reference in close_tasks)
+        assert not factory._pending_handler_drains
+    finally:
+        loop.set_exception_handler(original_handler)
 
 
 @pytest.mark.asyncio
