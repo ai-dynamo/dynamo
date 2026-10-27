@@ -381,12 +381,20 @@ func dgdrV1beta2SplitRuns(
 	return active, terminal
 }
 
-// requireDGDRV1beta2API fails when the cluster does not serve the v1beta2 Request and Run APIs.
+// requireDGDRV1beta2API fails when the cluster does not serve the complete v1beta2 execution API.
 // Without them the controller's caches never sync and the manager would hang at startup.
 func requireDGDRV1beta2API(mgr ctrl.Manager) error {
+	return requireDGDRV1beta2RESTMappings(mgr.GetRESTMapper())
+}
+
+func requireDGDRV1beta2RESTMappings(mapper meta.RESTMapper) error {
 	group, version := nvidiacomv1beta2.GroupVersion.Group, nvidiacomv1beta2.GroupVersion.Version
-	for _, kind := range []string{"DynamoGraphDeploymentRequest", "DynamoGraphDeploymentRun"} {
-		_, err := mgr.GetRESTMapper().RESTMapping(schema.GroupKind{Group: group, Kind: kind}, version)
+	for _, kind := range []string{
+		"DynamoGraphDeploymentRequest",
+		"DynamoGraphDeploymentRun",
+		"DynamoGraphDeploymentCandidate",
+	} {
+		_, err := mapper.RESTMapping(schema.GroupKind{Group: group, Kind: kind}, version)
 		if meta.IsNoMatchError(err) {
 			return fmt.Errorf("--dgdr-v1beta2-enabled is set but the cluster does not serve %s/%s %s; "+
 				"install the v1beta2 CRDs (dgdrV1Beta2.enabled)", group, version, kind)

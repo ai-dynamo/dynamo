@@ -97,9 +97,9 @@ dynamo-operator:
     # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2
     # Request API with conversion and install the Run and Candidate APIs. Run and
     # Candidate objects are persisted in etcd; incompatible schema changes may make
-    # them unreadable or block future CRD upgrades. When true, the operator also
-    # reconciles v1beta2 Requests into Runs; the controller that executes a Run is
-    # not part of the operator yet.
+    # them unreadable or block future CRD upgrades. When true, the operator
+    # reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate
+    # planner Job with a publisher sidecar that persists deployment Candidates.
     enabled: false
 
   # Environment variables to pass to operator Deployment.
