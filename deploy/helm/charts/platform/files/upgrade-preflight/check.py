@@ -7,7 +7,14 @@ import re
 import sys
 from urllib.parse import quote
 
-VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$")
+CORE_NUMBER = r"(0|[1-9]\d*)"
+PRERELEASE_IDENTIFIER = r"(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+BUILD_IDENTIFIER = r"[0-9A-Za-z-]+"
+VERSION_PATTERN = re.compile(
+    rf"^v?{CORE_NUMBER}\.{CORE_NUMBER}\.{CORE_NUMBER}"
+    rf"(?:-{PRERELEASE_IDENTIFIER}(?:\.{PRERELEASE_IDENTIFIER})*)?"
+    rf"(?:\+{BUILD_IDENTIFIER}(?:\.{BUILD_IDENTIFIER})*)?$"
+)
 MINOR_VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)$")
 
 

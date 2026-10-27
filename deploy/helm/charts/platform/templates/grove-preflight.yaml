@@ -83,6 +83,7 @@ spec:
           command: [python3, -c]
           args:
             - |
+              {{- .Files.Get "files/preflight/kubernetes.py" | nindent 14 }}
               {{- .Files.Get "files/grove-preflight/check.py" | nindent 14 }}
             - {{ $minimum | quote }}
             - {{ $config.namespace | quote }}

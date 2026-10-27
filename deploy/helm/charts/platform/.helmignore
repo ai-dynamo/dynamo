@@ -23,6 +23,8 @@
 .vscode/
 # test files
 tests/
+__pycache__/
+*.pyc
 test-values.yaml
 minikube-demo-values.yaml
 # subchart sources

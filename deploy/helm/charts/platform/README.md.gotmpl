@@ -45,10 +45,12 @@ Dynamo supports Helm transitions within the installed minor release and between 
 releases: `N.M` to `N.(M+1)` for upgrades and `N.(M+1)` to `N.M` for downgrades. Move through every
 intermediate minor release; skipping a minor release is unsupported.
 
-The chart runs a read-only `pre-install,pre-upgrade` Job before changing the operator Deployment. A
-first installation passes because no existing Deployment is present. Helm and Flux execute the
-hook directly; Argo CD maps it to PreSync. Raw `kubectl apply`, Argo CD selective sync, or disabled
-hooks do not enforce the check.
+When `dynamo-operator.enabled=true`, the chart runs a read-only `pre-install,pre-upgrade` Job before
+changing the operator Deployment. A first installation passes because no existing Deployment is
+present. Helm and Flux execute the hook directly; Argo CD maps it to PreSync. Raw `kubectl apply`,
+Argo CD selective sync, or disabled hooks do not enforce the check. When the operator subchart is
+disabled, the hook is omitted because the separately managed operator release owns its upgrade
+policy.
 
 The Job reads the installed operator version and rejects larger minor jumps and major-version
 changes. After separately validating an unsupported transition, authorize only that source minor

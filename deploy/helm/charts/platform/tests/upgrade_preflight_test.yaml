@@ -3,7 +3,7 @@
 
 suite: Dynamo version preflight
 templates:
-  - charts/dynamo-operator/templates/upgrade-preflight.yaml
+  - templates/upgrade-preflight.yaml
 tests:
   - it: preserves the first hook resource apiVersion
     documentSelector: {path: kind, value: ServiceAccount}
@@ -19,9 +19,15 @@ tests:
       - equal: {path: 'metadata.annotations["helm.sh/hook-output-log-policy"]', value: hook-failed}
       - equal: {path: spec.activeDeadlineSeconds, value: 120}
       - equal: {path: spec.backoffLimit, value: 2}
-      - equal: {path: 'spec.template.spec.containers[0].args[3]', value: "1.6.0"}
+      - equal: {path: 'spec.template.spec.containers[0].args[3]', value: "1.7.0"}
       - matchRegex: {path: 'spec.template.spec.containers[0].args[0]', pattern: 'def kubernetes_client\('}
       - matchRegex: {path: 'spec.template.spec.containers[0].args[0]', pattern: 'def check\('}
+
+  - it: omits the check when this release does not manage the operator
+    set:
+      dynamo-operator.enabled: false
+    asserts:
+      - hasDocuments: {count: 0}
 
   - it: gives the check read access only to the operator Deployment
     documentSelector: {path: kind, value: Role}
