@@ -478,12 +478,10 @@ container/run.sh --image dynamo:latest-sglang-xpu-local-dev --device=xpu \
 
 # From this point forward, commands run inside the container started in step 2.
 
-# 3. Editable install of dynamo into the SGLang conda env
+# 3. Editable install of dynamo into the upstream SGLang venv at /opt/venv
 # (local-dev images intentionally skip the dynamo wheel install; see
 #  container/templates/dev.Dockerfile -> "The editable install must be done at runtime")
-# The conda env at /opt/miniforge3/envs/sglang is root-owned, so chown it once
-# to the dynamo user (the image grants NOPASSWD sudo) before installing.
-sudo chown -R dynamo:0 /opt/miniforge3/envs/sglang
+# The dev stage already chowns /opt/venv to the dynamo user, so no sudo is needed.
 cargo build --locked --features dynamo-llm/block-manager --workspace
 # 3a. ai_dynamo_runtime (Rust bindings: dynamo._core)
 # Add `--features request-trace-s3` to enable the S3 request-trace sink

@@ -154,20 +154,17 @@ sglang:
     # same codec-limited build for frontend video decoding.
     baseline_sbom: cuda@0230b7f2
   xpu:
-    # oneAPI 2026.0 is required by the SGLang XPU pins below: torch 2.13.0+xpu
-    # links intel-sycl-rt 2026.0.0 (libsycl.so.9), and sgl-kernel-xpu's SYCL
-    # kernels must be compiled by the matching icpx. The 2025.3 base ships
-    # libsycl.so.8, so its icpx produces a kernel .so that torch cannot load.
-    base_image: intel/deep-learning-essentials
-    base_image_tag: 2026.0.0-devel-ubuntu24.04
-    runtime_image: intel/deep-learning-essentials
-    runtime_image_tag: 2026.0.0-devel-ubuntu24.04
-    sglang_ref: v0.5.19
-    sglang_git_url: https://github.com/sgl-project/sglang.git
-    sglang_kernel_ref: v0.2.0
-    sglang_kernel_git_url: https://github.com/sgl-project/sgl-kernel-xpu.git
-    # XPU SGLang requires a newer NIXL than the framework default; scoped here
-    # to avoid affecting sglang-cuda or other frameworks.
+    base_image: lmsysorg/sglang
+    base_image_tag: v0.5.22-xpu
+    runtime_image: lmsysorg/sglang
+    runtime_image_tag: v0.5.22-xpu
+    # Self-baseline of the published XPU image, same convention as vllm.xpu's
+    # vllm-openai-xpu@..., so NOTICES attribute only what Dynamo adds on top.
+    baseline_sbom: sglang@a66de2a4
+    # XPU SGLang requires a different NIXL than the framework default, and the
+    # NIXL versions in the XPU and CUDA base images are sometimes out of sync, so
+    # Dynamo keeps its own. Scoped here to avoid affecting sglang-cuda or other
+    # frameworks (e.g. dynamo KVBM link).
     nixl_ref: v1.1.0
   # Builds the NIXL C++ SDK in wheel_builder so the dev stage can link nixl-sys
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang

@@ -7,11 +7,7 @@
 ########## Runtime Image #########
 ##################################
 
-{% if device == "xpu" %}
-FROM framework AS runtime
-{% else %}
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
-{% endif %}
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
@@ -402,16 +398,17 @@ ENV SGLANG_FORCE_SHUTDOWN=1
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
 
+{# No conda activation and no `source setvars.sh` for XPU any more: the upstream
+   image puts /opt/venv on PATH and exports the whole oneAPI environment
+   (SETVARS_COMPLETED=1) through Docker ENV, which every process inherits --
+   unlike a bashrc, which only interactive shells read. /sgl-workspace is the
+   upstream WORKDIR on both devices, so the symlink needs no mkdir. #}
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
-{%- if device == "xpu" %}
-    echo '. /opt/miniforge3/bin/activate sglang' >> /etc/bash.bashrc && \
-    echo 'source /opt/intel/oneapi/setvars.sh --force' >> /etc/bash.bashrc && \
-    mkdir -p /sgl-workspace && \
     ln -sf /workspace /sgl-workspace/dynamo
-{%- else %}
-    ln -s /workspace /sgl-workspace/dynamo && \
-    NSYS_BIN=$(find /opt/nvidia/nsight-compute -maxdepth 6 -type f -name nsys -executable 2>/dev/null | head -n1) && \
+
+{% if device != "xpu" %}
+RUN NSYS_BIN=$(find /opt/nvidia/nsight-compute -maxdepth 6 -type f -name nsys -executable 2>/dev/null | head -n1) && \
     if [ -n "$NSYS_BIN" ]; then ln -sf "$NSYS_BIN" /usr/local/bin/nsys; \
     else echo "WARNING: no bundled nsys found under /opt/nvidia/nsight-compute"; fi
 {% endif %}
@@ -463,14 +460,14 @@ ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
 {% if device == "xpu" %}
-CMD ["bash", "-c", "source /etc/bash.bashrc && exec bash"]
+{# The XPU base ships no nvidia_entrypoint.sh, so match its own bare CMD. #}
+CMD ["bash"]
 {% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 {% endif %}
 
 
-{% if device != "xpu" %}
 {# Compliance is skipped for dev/local-dev: those images are not shipped (release
    ships runtime/frontend/operator/planner/snapshot-agent), compliance-extract
    already skips them, and their pre_runtime carries no dynamo venv to scan. #}
@@ -484,13 +481,16 @@ CMD []
 #######################################
 
 FROM pre_runtime AS runtime
+{% if device == "cuda" %}
 # NVDEC (PyNvVideoCodec, added in requirements.sglang.txt) needs the driver
 # "video" capability at runtime so libnvcuvid is exposed; without it
 # PyNvVideoCodec cannot import. Ensure the K8s pod/runtimeClass does not drop it.
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+{% endif %}
 {% if target not in ("dev", "local-dev") %}
 COPY --from=licenses /legal /legal
 {% endif %}
+{% if device != "xpu" %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 {% endif %}
