@@ -52,6 +52,7 @@ SINGLE_ROLE_MODES = [
 
 @pytest.fixture
 def prometheus_port():
+    """Choose a nonzero port for metrics while the HTTP server is mocked."""
     # start_http_server is patched, so the port is never bound; it only has to
     # be nonzero to enable gauge publication.
     with socket.socket() as sock:
@@ -60,6 +61,7 @@ def prometheus_port():
 
 
 def _make_planner(cls, mode, *, roles_with_info, port, advisory=False):
+    """Create a planner with mocked metrics and the specified worker information."""
     state = DeploymentState()
     if PREFILL in roles_with_info:
         state.prefill.info = WorkerInfo(k8s_name=WORKER_NAMES[PREFILL])
@@ -89,6 +91,7 @@ def _make_planner(cls, mode, *, roles_with_info, port, advisory=False):
 
 
 def _gauge(planner, role):
+    """Return the mock that records updates to the selected role's gauge."""
     return getattr(planner.prometheus_metrics, GAUGES[role]).set
 
 
@@ -109,6 +112,7 @@ def _applied(environment):
 async def test_own_roles_publish_gauge_and_submit_one_batch(
     cls, mode, roles, desired, prometheus_port
 ):
+    """Check that each owned role publishes its target in one ordered batch."""
     # 0 is a real target: it must be published and submitted like any other.
     planner, environment = _make_planner(
         cls, mode, roles_with_info=roles, port=prometheus_port
@@ -131,6 +135,7 @@ async def test_own_roles_publish_gauge_and_submit_one_batch(
 async def test_absent_targets_publish_and_submit_nothing(
     cls, mode, roles, prometheus_port
 ):
+    """Check that missing targets leave gauges and scaling unchanged."""
     planner, environment = _make_planner(
         cls, mode, roles_with_info=roles, port=prometheus_port
     )
@@ -148,6 +153,7 @@ async def test_absent_targets_publish_and_submit_nothing(
 async def test_single_role_modes_ignore_other_role(
     cls, mode, own, other, prometheus_port
 ):
+    """Check that a mode never publishes or resolves the role it does not own."""
     # The other role has no worker info; resolving it would raise.
     planner, environment = _make_planner(
         cls, mode, roles_with_info=(own,), port=prometheus_port
@@ -172,6 +178,7 @@ async def test_single_role_modes_ignore_other_role(
 async def test_advisory_publishes_gauges_without_scaling(
     cls, mode, roles, prometheus_port
 ):
+    """Check that advisory mode publishes targets without applying scaling."""
     planner, environment = _make_planner(
         cls, mode, roles_with_info=roles, port=prometheus_port, advisory=True
     )
@@ -187,6 +194,7 @@ async def test_advisory_publishes_gauges_without_scaling(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("role", [PREFILL, DECODE])
 async def test_disagg_with_one_role_set_submits_only_that_role(role, prometheus_port):
+    """Check that a disaggregated target needs only its own worker information."""
     planner, environment = _make_planner(
         DisaggPlanner, "disagg", roles_with_info=(role,), port=prometheus_port
     )
@@ -206,6 +214,7 @@ async def test_disagg_with_one_role_set_submits_only_that_role(role, prometheus_
 async def test_disagg_publishes_both_gauges_before_resolving_workers(
     roles_with_info, prometheus_port
 ):
+    """Check that both gauges update even when required worker information is missing."""
     planner, environment = _make_planner(
         DisaggPlanner, "disagg", roles_with_info=roles_with_info, port=prometheus_port
     )
@@ -223,6 +232,7 @@ async def test_disagg_publishes_both_gauges_before_resolving_workers(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cls,mode,roles", MODES)
 async def test_prometheus_port_zero_skips_gauges_but_still_scales(cls, mode, roles):
+    """Check that disabling metrics leaves scaling targets unchanged."""
     planner, environment = _make_planner(cls, mode, roles_with_info=roles, port=0)
     decision = ScalingDecision(**{FIELDS[r]: 2 for r in roles})
 

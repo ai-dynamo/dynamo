@@ -95,6 +95,7 @@ class PrefillPlanner(NativePlannerBase):
         await self._install_benchmark_fpms(prefill_fpms=fpms)
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
+        """Publish and submit the prefill target when one is present."""
         if effects.scale_to is None or effects.scale_to.num_prefill is None:
             return
         await _emit_replica_targets(self, num_prefill=effects.scale_to.num_prefill)
@@ -126,6 +127,7 @@ class DecodePlanner(NativePlannerBase):
         await self._install_benchmark_fpms(decode_fpms=fpms)
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
+        """Publish and submit the decode target when one is present."""
         if effects.scale_to is None or effects.scale_to.num_decode is None:
             return
         await _emit_replica_targets(self, num_decode=effects.scale_to.num_decode)
@@ -155,6 +157,7 @@ class AggPlanner(NativePlannerBase):
         await self._install_benchmark_fpms(agg_fpms=fpms)
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
+        """Publish and submit the aggregated worker target when one is present."""
         if effects.scale_to is None or effects.scale_to.num_decode is None:
             return
         await _emit_replica_targets(self, num_decode=effects.scale_to.num_decode)
@@ -197,6 +200,7 @@ class DisaggPlanner(NativePlannerBase):
         )
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
+        """Publish and submit the specified prefill and decode targets together."""
         if effects.scale_to is None:
             return
         await _emit_replica_targets(
