@@ -26,7 +26,7 @@ use crate::kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
 };
 use crate::plugins::worker_selection::{
-    CacheSnapshot, CandidateData, WorkerCacheData, WorkerTransferInput,
+    CacheSnapshot, CandidateData, WorkerCacheData, WorkerTransferInput, WorkerTransferInputs,
 };
 use crate::plugins::worker_selection::{
     RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
@@ -582,6 +582,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 candidates,
                 cache_inputs,
                 load_inputs,
+                unscored_candidates,
                 ..
             } = &mut *state;
             if candidates.is_empty() {
@@ -598,6 +599,10 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     !picker_inputs.contains(WorkerInputs::LOAD)
                         || load_inputs.len() == candidates.len()
                 );
+                debug_assert!(
+                    !picker_inputs.contains(WorkerInputs::KV_TRANSFER)
+                        || unscored_candidates.len() == candidates.len()
+                );
                 let picker_input = WorkerInputView {
                     candidates,
                     cache: picker_inputs.contains(WorkerInputs::CACHE).then_some(
@@ -609,6 +614,14 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     load: picker_inputs
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
+                    // The host fills every row's fetch input or none.
+                    transfer: (picker_inputs.contains(WorkerInputs::KV_TRANSFER)
+                        && unscored_candidates
+                            .first()
+                            .is_some_and(|row| row.transfer.is_some()))
+                    .then_some(WorkerTransferInputs {
+                        rows: unscored_candidates,
+                    }),
                 };
                 let row = picker.pick(&input.context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {

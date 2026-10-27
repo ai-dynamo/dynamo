@@ -60,9 +60,10 @@ impl<'a> WorkerCandidate<'a> {
     }
 
     /// The KV prefix this worker could fetch, only for a scorer that declared
-    /// KV_TRANSFER; filters and pickers do not receive it. None also means the
-    /// host has no transfer data for this request: no worker in the partition
-    /// consumes router hints, or the indexer cannot retain the matched block chain.
+    /// KV_TRANSFER; filters do not receive it, and pickers read it through
+    /// [`WorkerInputView::kv_transfer`]. None also means the host has no transfer
+    /// data for this request: no worker in the partition consumes router hints,
+    /// or the indexer cannot retain the matched block chain.
     pub fn kv_transfer(self) -> Option<WorkerTransferInput> {
         if self.inputs.contains(WorkerInputs::KV_TRANSFER) {
             self.data.transfer
@@ -252,12 +253,48 @@ pub struct WorkerTransferInput {
     pub(crate) source_prefix_blocks: Option<u32>,
 }
 
+/// Borrowed fetch rows in the same order as a picker's candidates.
+#[derive(Clone, Copy)]
+pub struct WorkerTransferInputs<'a> {
+    // The host fills every row's transfer input or none, and builds this view only once filled.
+    pub(crate) rows: &'a [CandidateData],
+}
+
+impl<'a> WorkerTransferInputs<'a> {
+    /// Number of fetch rows, equal to the picker candidate count.
+    pub fn len(self) -> usize {
+        self.rows.len()
+    }
+
+    /// Whether there are no fetch rows.
+    pub fn is_empty(self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// Return one worker's fetch input, or None for an out-of-range index.
+    pub fn get(self, row: usize) -> Option<WorkerTransferInput> {
+        self.rows
+            .get(row)
+            .map(|data| data.transfer.unwrap_or_default())
+    }
+
+    /// Iterate over fetch inputs without copying the rows.
+    pub fn iter(
+        self,
+    ) -> impl ExactSizeIterator<Item = WorkerTransferInput> + DoubleEndedIterator + Clone {
+        self.rows
+            .iter()
+            .map(|data| data.transfer.unwrap_or_default())
+    }
+}
+
 /// Borrowed, index-aligned view of one custom picker's requested worker inputs.
 #[derive(Clone, Copy)]
 pub struct WorkerInputView<'a> {
     pub(crate) candidates: &'a [ScoredWorkerCandidate],
     pub(crate) cache: Option<WorkerCacheInputs<'a>>,
     pub(crate) load: Option<&'a [WorkerLoadInput]>,
+    pub(crate) transfer: Option<WorkerTransferInputs<'a>>,
 }
 
 impl CandidateData {
@@ -407,5 +444,12 @@ impl<'a> WorkerInputView<'a> {
     /// Return index-aligned active-load inputs when the picker requested them.
     pub fn load(self) -> Option<&'a [WorkerLoadInput]> {
         self.load
+    }
+
+    /// Return index-aligned fetch inputs when the picker requested KV_TRANSFER.
+    /// None also means the host has no transfer data for this request, as for
+    /// [`WorkerCandidate::kv_transfer`].
+    pub fn kv_transfer(self) -> Option<WorkerTransferInputs<'a>> {
+        self.transfer
     }
 }

@@ -127,7 +127,7 @@ struct SelectionEntry {
     workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
     /// Whether a worker in `workers_tx` consumes router hints, set on publish.
     hint_capable_workers: AtomicBool,
-    /// Whether the selection policy scores fetchable prefixes (`KV_TRANSFER`).
+    /// Whether the selection policy's scorers or picker read fetchable prefixes (`KV_TRANSFER`).
     scores_kv_transfer: bool,
     scheduler: SelectionScheduler,
     replica_inbox: Option<ReplicaInbox>,
