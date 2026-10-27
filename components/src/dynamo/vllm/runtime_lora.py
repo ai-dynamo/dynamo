@@ -61,6 +61,7 @@ class RuntimeLoRACoordinator:
         self._close_task: asyncio.Task[None] | None = None
         self._reconciliation_lock = asyncio.Lock()
         self._initial_waiters: dict[str, int] = {}
+        self._snapshot_identities: dict[str, tuple[bytes, str, str]] = {}
         self._settings = (
             (
                 getattr(handler.config, "runtime_lora_settings", None)
@@ -729,6 +730,16 @@ class RuntimeLoRACoordinator:
         state = self._handler._lora_state
         lock = state.get_lock(metadata.adapter_key)
         async with lock:
+            snapshot_identity = (
+                metadata.identity_digest,
+                source_revision,
+                local_path,
+            )
+            previous = self._snapshot_identities.setdefault(
+                metadata.adapter_key, snapshot_identity
+            )
+            if previous != snapshot_identity:
+                raise _runtime_error(500, "runtime_lora_source_changed")
             await self._reconcile_uncertain_engine_loras()
             resident = state.runtime_loras.get(metadata.adapter_key)
             if resident is not None:
