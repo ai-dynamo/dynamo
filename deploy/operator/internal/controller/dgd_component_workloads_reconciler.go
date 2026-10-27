@@ -52,6 +52,8 @@ func newComponentWorkloadsReconciler(
 	}
 }
 
+// Reconcile syncs one DCD per component of dgd and returns their readiness. The
+// graph fails while any DCD reports a crash-looping container.
 func (r *componentWorkloadsReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,

@@ -26,6 +26,7 @@ type CrashLoop struct {
 	Reason       string
 }
 
+// String describes the crash loop for a status message.
 func (c CrashLoop) String() string {
 	message := fmt.Sprintf(
 		"pod %s container %s restarted %d times, last exit code %d",
@@ -87,6 +88,14 @@ func CrashLoopOf(pod *corev1.Pod) (CrashLoop, bool) {
 	return CrashLoop{}, false
 }
 
+// CrashLoopChanged reports whether newPod's crash-loop diagnosis differs from
+// oldPod's, including one starting or ending.
+func CrashLoopChanged(oldPod, newPod *corev1.Pod) bool {
+	oldCrashLoop, oldFound := CrashLoopOf(oldPod)
+	newCrashLoop, newFound := CrashLoopOf(newPod)
+	return oldFound != newFound || oldCrashLoop != newCrashLoop
+}
+
 // crashing reports whether a container is down after a failed run: waiting to
 // restart, or terminated non-zero. A completed init container is not.
 func crashing(status corev1.ContainerStatus) bool {
@@ -96,6 +105,7 @@ func crashing(status corev1.ContainerStatus) bool {
 	return status.State.Waiting != nil
 }
 
+// ready reports whether the Pod's Ready condition is true.
 func ready(pod *corev1.Pod) bool {
 	for _, condition := range pod.Status.Conditions {
 		if condition.Type == corev1.PodReady {

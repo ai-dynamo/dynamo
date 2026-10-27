@@ -158,6 +158,7 @@ func projectTopologyVolumes(in []corev1.Volume) []corev1.Volume {
 	return out
 }
 
+// projectStatus keeps the Pod status fields that controllers read.
 func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 	return corev1.PodStatus{
 		// Failover, DGDR diagnostics, and Recreate drain barriers require the
@@ -192,6 +193,8 @@ func projectConditions(in []corev1.PodCondition) []corev1.PodCondition {
 	return out
 }
 
+// projectContainerStatuses keeps each container's state, restart count and
+// last termination.
 func projectContainerStatuses(in []corev1.ContainerStatus) []corev1.ContainerStatus {
 	if len(in) == 0 {
 		return nil
@@ -208,6 +211,7 @@ func projectContainerStatuses(in []corev1.ContainerStatus) []corev1.ContainerSta
 	return out
 }
 
+// projectLastTerminationState keeps the exit code and reason of the last termination.
 func projectLastTerminationState(in corev1.ContainerState) corev1.ContainerState {
 	if in.Terminated == nil {
 		return corev1.ContainerState{}

@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
+
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -110,7 +112,7 @@ func createTestDGDReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployme
 	builder := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithRuntimeObjects(dgd).
-		WithIndex(&corev1.Pod{}, dgdComponentPodIndex, dgdComponentPodIndexValues).
+		WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).
 		WithStatusSubresource(&nvidiacomv1beta1.DynamoGraphDeployment{})
 	for _, opt := range opts {
 		opt(builder)
@@ -4132,86 +4134,6 @@ func TestOldWorkerPodsTerminated(t *testing.T) {
 			assert.Equal(t, tt.want, oldWorkerPodsTerminated(oldDCDs, tt.pods))
 		})
 	}
-}
-
-func TestDGDComponentPodIndexValues(t *testing.T) {
-	tests := []struct {
-		name string
-		obj  client.Object
-		want []string
-	}{
-		{
-			name: "DGD component pod",
-			obj: &corev1.Pod{Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "graph",
-				consts.KubeLabelDynamoComponent:           "decode",
-			}},
-			want: []string{"graph/decode"},
-		},
-		{
-			name: "missing DGD label",
-			obj: &corev1.Pod{Labels: map[string]string{
-				consts.KubeLabelDynamoComponent: "decode",
-			}},
-		},
-		{
-			name: "missing component label",
-			obj: &corev1.Pod{Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "graph",
-			}},
-		},
-		{
-			name: "non-Pod object",
-			obj:  &corev1.ConfigMap{},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, dgdComponentPodIndexValues(tt.obj))
-		})
-	}
-}
-
-func TestListDGDComponentPodsUsesCompositeIndex(t *testing.T) {
-	const (
-		namespace = "inference"
-		dgdName   = "graph"
-		component = "decode"
-	)
-	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		Name: dgdName, Namespace: namespace,
-	}
-	newPod := func(namespace, name, graph, component string) *corev1.Pod {
-		return &corev1.Pod{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: graph,
-				consts.KubeLabelDynamoComponent:           component,
-			}}
-	}
-
-	reconciler := createTestReconcilerWithStatus(
-		dgd,
-		withObjects(
-			newPod(namespace, "matching-a", dgdName, component),
-			newPod(namespace, "matching-b", dgdName, component),
-			newPod(namespace, "other-component", dgdName, "prefill"),
-			newPod(namespace, "other-dgd", "other-graph", component),
-			newPod("other-namespace", "other-namespace", dgdName, component),
-		),
-	)
-
-	pods, err := listDGDComponentPods(context.Background(), reconciler, dgd, component)
-	require.NoError(t, err)
-
-	names := make([]string, 0, len(pods))
-	for i := range pods {
-		names = append(names, pods[i].Name)
-	}
-	sort.Strings(names)
-	assert.Equal(t, []string{"matching-a", "matching-b"}, names)
 }
 
 func TestDGDWorkerPodEventPredicate(t *testing.T) {

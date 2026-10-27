@@ -21,6 +21,8 @@ import (
 	"context"
 	"testing"
 
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -460,7 +462,7 @@ func TestWorkerRecreateIgnoresCheckpointCapturePods(t *testing.T) {
 			}
 			r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD, newDCD, worker, capture))
 			ctx := context.Background()
-			pods, err := listDGDComponentPods(ctx, r, dgd, "worker")
+			pods, err := podcontroller.ListComponentPods(ctx, r, dgd.Namespace, dgd.Name, "worker")
 			require.NoError(t, err)
 			require.Len(t, pods, 2, "capture pods share the DGD/component index")
 
