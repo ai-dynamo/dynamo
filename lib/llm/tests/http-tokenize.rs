@@ -36,6 +36,7 @@ struct Service {
     /// render time, so dropping the temp file early makes /tokenize 501.
     _chat_template: Option<tempfile::TempPath>,
     port: u16,
+    service: HttpService,
     cancel: CancellationToken,
     join: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
@@ -90,6 +91,7 @@ impl Service {
         Self {
             _chat_template: chat_template,
             port,
+            service,
             cancel,
             join,
         }
@@ -606,4 +608,196 @@ async fn tokenize_requires_the_models_pipeline_preprocessor() {
 
     cancel.cancel();
     let _ = join.await;
+}
+
+/// An id outside the vocabulary must be rejected as bad input, not surface the abort of
+/// the blocking decode task. Tiktoken panics here where HuggingFace returns an empty string.
+#[tokio::test]
+async fn detokenize_rejects_an_out_of_range_token_id() {
+    let svc = Service::start(FIXTURE_TIKTOKEN, MODEL_TIKTOKEN).await;
+
+    let in_range = svc
+        .post_ok(
+            "/detokenize",
+            json!({"model": MODEL_TIKTOKEN, "tokens": [100]}),
+        )
+        .await;
+    assert!(in_range.get("prompt").is_some(), "control must decode");
+
+    for bad in [999_999u64, 4_294_967_295] {
+        let resp = svc
+            .post(
+                "/detokenize",
+                json!({"model": MODEL_TIKTOKEN, "tokens": [bad]}),
+            )
+            .await;
+        assert_eq!(resp.status(), 400, "id {bad} must be a client error");
+        let body = resp.text().await.expect("body");
+        assert!(
+            !body.contains("panicked"),
+            "the abort text must not reach the caller: {body}"
+        );
+    }
+
+    // The service still serves after the rejected ids.
+    let after = svc
+        .post_ok(
+            "/detokenize",
+            json!({"model": MODEL_TIKTOKEN, "tokens": [100]}),
+        )
+        .await;
+    assert!(after.get("prompt").is_some());
+
+    svc.shutdown().await;
+}
+
+/// The rejected part type is caller input and reaches the error log as well as the body,
+/// so it must be length-bounded and free of characters that forge a second log record.
+#[tokio::test]
+async fn tokenize_bounds_the_echoed_part_type() {
+    let svc = Service::start(FIXTURE_CHAT, MODEL_CHAT).await;
+
+    let huge = format!("img\nERROR forged{}", "Z".repeat(20_000));
+    let resp = svc
+        .post(
+            "/tokenize",
+            json!({"model": MODEL_CHAT, "messages": [
+                {"role": "user", "content": [{"type": huge, "text": "hi"}]}]}),
+        )
+        .await;
+    assert_eq!(resp.status(), 501);
+    let body = resp.text().await.expect("body");
+    assert!(
+        body.len() < 1_000,
+        "one request must not echo an unbounded string: {} bytes",
+        body.len()
+    );
+    assert!(!body.contains('\n'), "a newline would forge a log record");
+    let longest_z = body.split(|c| c != 'Z').map(str::len).max().unwrap_or(0);
+    assert!(
+        longest_z <= 32,
+        "the value must be truncated: {longest_z} Zs"
+    );
+
+    svc.shutdown().await;
+}
+
+/// Replicas of one model are several cards under distinct instance keys, and must not
+/// make the omitted-`model` default ambiguous.
+#[tokio::test]
+async fn tokenize_defaults_across_replicas_of_one_model() {
+    let svc = Service::start(FIXTURE_COMPLETION, MODEL_COMPLETION).await;
+
+    let mut replica = ModelDeploymentCard::load_from_disk(FIXTURE_COMPLETION, None).expect("card");
+    replica.display_name = MODEL_COMPLETION.to_string();
+    svc.service
+        .model_manager()
+        .save_model_card("second-instance-key", replica)
+        .expect("save replica");
+
+    for path in ["/tokenize", "/detokenize"] {
+        let body = match path {
+            "/tokenize" => json!({"prompt": "Hello, world!"}),
+            _ => json!({"tokens": [1]}),
+        };
+        let resp = svc.post(path, body).await;
+        assert_eq!(
+            resp.status(),
+            200,
+            "{path} must still resolve the single model across replicas"
+        );
+    }
+
+    svc.shutdown().await;
+}
+
+/// Discovery registers aliases in the alias catalog rather than as extra cards, so the
+/// requested name has to be resolved before it is matched against a card.
+#[tokio::test]
+async fn tokenize_resolves_a_registered_alias() {
+    let svc = Service::start(FIXTURE_COMPLETION, MODEL_COMPLETION).await;
+    assert!(
+        svc.service
+            .model_manager()
+            .register_alias("tinyllama-alias", MODEL_COMPLETION),
+        "alias registration"
+    );
+
+    let tok = svc
+        .post_ok(
+            "/tokenize",
+            json!({"model": "tinyllama-alias", "prompt": "Hello, world!"}),
+        )
+        .await;
+    let primary = svc
+        .post_ok(
+            "/tokenize",
+            json!({"model": MODEL_COMPLETION, "prompt": "Hello, world!"}),
+        )
+        .await;
+    assert_eq!(tok["count"], primary["count"], "alias must reach the model");
+
+    let detok = svc
+        .post(
+            "/detokenize",
+            json!({"model": "tinyllama-alias", "tokens": [1]}),
+        )
+        .await;
+    assert_eq!(detok.status(), 200, "/detokenize must accept the alias too");
+
+    svc.shutdown().await;
+}
+
+/// A bad value inside the chosen form must name that field rather than report the body
+/// as matching neither form.
+#[tokio::test]
+async fn tokenize_reports_the_failing_field() {
+    let svc = Service::start(FIXTURE_CHAT, MODEL_CHAT).await;
+
+    let resp = svc
+        .post(
+            "/tokenize",
+            json!({"model": MODEL_CHAT,
+                   "messages": [{"role": "user", "content": "hi"}],
+                   "add_generation_prompt": "yes"}),
+        )
+        .await;
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.expect("body");
+    assert!(
+        body.contains("add_generation_prompt"),
+        "the message must name the field at fault: {body}"
+    );
+
+    // A body carrying neither form still says so.
+    let neither = svc.post("/tokenize", json!({"model": MODEL_CHAT})).await;
+    assert_eq!(neither.status(), 400);
+    let body = neither.text().await.expect("body");
+    assert!(body.contains("prompt") && body.contains("messages"));
+
+    svc.shutdown().await;
+}
+
+/// The routes must carry the configured body limit rather than fall back to the axum
+/// default, which is far smaller than what a long prompt needs.
+#[tokio::test]
+async fn tokenize_accepts_bodies_over_the_axum_default() {
+    let svc = Service::start(FIXTURE_COMPLETION, MODEL_COMPLETION).await;
+
+    // The padding is an ignored field, so this measures the body limit and not the cost
+    // of tokenizing: 2.5 MB is above axum's 2 MiB default and under the configured 45 MB.
+    let padding = "a".repeat(2_500_000);
+    let resp = svc
+        .post(
+            "/tokenize",
+            json!({"model": MODEL_COMPLETION, "prompt": "hi", "_padding": padding}),
+        )
+        .await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "the configured limit must reach this route"
+    );
+
+    svc.shutdown().await;
 }

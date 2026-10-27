@@ -18,7 +18,7 @@ use dynamo_runtime::error::ErrorClass;
 use serde::{Deserialize, Serialize};
 
 use super::RouteDoc;
-use super::openai::{ErrorMessage, ErrorResponse, check_ready};
+use super::openai::{ErrorMessage, ErrorResponse, check_ready, get_body_limit};
 use super::service_v2;
 use crate::model_card::ModelDeploymentCard;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
@@ -61,8 +61,7 @@ pub struct TokenizeChatRequest {
     pub mm_processor_kwargs: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 pub enum TokenizeRequest {
     /// Boxed: the chat form is ~5x the size of the completion form, and clippy's
     /// `large_enum_variant` would otherwise make every request pay for the bigger one.
@@ -110,20 +109,30 @@ fn bad_request(message: String) -> ErrorResponse {
 }
 
 /// Resolve the model a request targets. A body without `model` is honored only when one
-/// model is registered.
+/// model is registered; replicas of the same model do not make it ambiguous.
 fn resolve_model(
     state: &Arc<service_v2::State>,
     requested: Option<&str>,
 ) -> Result<Arc<ModelDeploymentCard>, ErrorResponse> {
-    let mut cards = state.manager().model_cards();
-    match requested {
-        Some(name) => cards
-            .into_iter()
-            .find(|card| card.display_name == name)
-            .ok_or_else(ErrorMessage::model_not_found),
-        None if cards.len() == 1 => Ok(cards.remove(0)),
-        None => Err(ErrorMessage::model_not_found()),
-    }
+    let manager = state.manager();
+    let cards = manager.model_cards();
+    let wanted = match requested {
+        Some(name) => manager.resolve_canonical_name(name),
+        None => {
+            // One card per worker instance, so collapse replicas before calling it ambiguous.
+            let mut names: Vec<&str> = cards.iter().map(|c| c.display_name.as_str()).collect();
+            names.sort_unstable();
+            names.dedup();
+            match names.as_slice() {
+                [only] => only.to_string(),
+                _ => return Err(ErrorMessage::model_not_found()),
+            }
+        }
+    };
+    cards
+        .into_iter()
+        .find(|card| card.display_name == wanted)
+        .ok_or_else(ErrorMessage::model_not_found)
 }
 
 fn no_preprocessor(model: &str) -> ErrorResponse {
@@ -134,6 +143,22 @@ fn no_preprocessor(model: &str) -> ErrorResponse {
 
 fn tokenizer_failed(what: &str, error: impl std::fmt::Display) -> ErrorResponse {
     ErrorMessage::internal_server_error(&format!("Tokenizer {what} failed: {error}"))
+}
+
+/// Caller-controlled text reaches both the error body and the error log, so bound the
+/// length and drop control characters that would otherwise forge a second log record.
+fn for_message(value: &str) -> String {
+    const MAX: usize = 32;
+    let kept: String = value
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX)
+        .collect();
+    if value.chars().count() > MAX {
+        format!("{kept}...")
+    } else {
+        kept
+    }
 }
 
 /// Multimodal parts expand to many more tokens at inference than the single placeholder
@@ -168,15 +193,40 @@ fn chat_request(
 
 async fn tokenize(
     State(state): State<Arc<service_v2::State>>,
-    request: Result<Json<TokenizeRequest>, JsonRejection>,
+    request: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<Json<TokenizeResponse>, ErrorResponse> {
     check_ready(&state)?;
-    let Json(request) = request.map_err(|rejection| {
+    let Json(raw) = request.map_err(|rejection| {
         invalid_request(
             rejection,
             "either `prompt` (completion form) or `messages` (chat form)",
         )
     })?;
+    // Dispatch on the discriminating field so a bad value inside the chosen form names
+    // that field, instead of collapsing into one "matched no variant" for the whole body.
+    let request = if raw.get("messages").is_some() {
+        TokenizeRequest::Chat(Box::new(serde_path_to_error::deserialize(raw).map_err(
+            |e| {
+                bad_request(format!(
+                    "Invalid chat request at `{}`: {}",
+                    e.path(),
+                    e.inner()
+                ))
+            },
+        )?))
+    } else if raw.get("prompt").is_some() {
+        TokenizeRequest::Completion(serde_path_to_error::deserialize(raw).map_err(|e| {
+            bad_request(format!(
+                "Invalid completion request at `{}`: {}",
+                e.path(),
+                e.inner()
+            ))
+        })?)
+    } else {
+        return Err(bad_request(
+            "Expected either `prompt` (completion form) or `messages` (chat form).".to_string(),
+        ));
+    };
 
     let (card, preprocessor, encoding, return_token_strs) = match request {
         TokenizeRequest::Completion(req) => {
@@ -213,7 +263,8 @@ async fn tokenize(
             }
             if let Some(kind) = first_non_text_part(&req.messages) {
                 return Err(ErrorMessage::not_implemented_error(format!(
-                    "Multimodal content is not yet supported by /tokenize (message part type '{kind}')"
+                    "Multimodal content is not yet supported by /tokenize (message part type '{}')",
+                    for_message(kind)
                 )));
             }
             if req.add_special_tokens {
@@ -277,7 +328,7 @@ async fn detokenize(
         .ok_or_else(|| no_preprocessor(&card.display_name))?
         .detokenize(&request.tokens, false)
         .await
-        .map_err(|e| tokenizer_failed("decode", e))?;
+        .map_err(|e| bad_request(format!("Failed to detokenize: {e}")))?;
     Ok(Json(DetokenizeResponse { prompt }))
 }
 
@@ -287,7 +338,10 @@ pub fn tokenize_router(
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or_else(|| "/tokenize".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
-    let router = Router::new().route(&path, post(tokenize)).with_state(state);
+    let router = Router::new()
+        .route(&path, post(tokenize))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
     (vec![doc], router)
 }
 
@@ -299,6 +353,7 @@ pub fn detokenize_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(detokenize))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc], router)
 }

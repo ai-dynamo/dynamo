@@ -1596,7 +1596,9 @@ impl ModelManager {
     }
 
     /// Attach preprocessors for an in-process model. Discovery-backed models get theirs
-    /// from the watcher as it builds their pipelines.
+    /// from the watcher as it builds their pipelines, so this exists for tests and
+    /// embedded harnesses that register a model without a discovery round trip.
+    #[doc(hidden)]
     pub fn add_model_preprocessors(
         &self,
         model: &str,

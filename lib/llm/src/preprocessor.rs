@@ -2763,6 +2763,9 @@ impl OpenAIPreprocessor {
     }
 
     /// Decode token ids through this model's tokenizer, on the blocking pool.
+    ///
+    /// Some backends panic on an id outside the vocabulary rather than returning an error,
+    /// and the ids are caller input, so an abort is reported as a rejected id.
     pub async fn detokenize(
         &self,
         token_ids: &[TokenIdType],
@@ -2770,8 +2773,14 @@ impl OpenAIPreprocessor {
     ) -> anyhow::Result<String> {
         let tokenizer = self.tokenizer.clone();
         let ids = token_ids.to_vec();
-        tokio::task::spawn_blocking(move || Ok(tokenizer.decode(&ids, skip_special_tokens)?.into()))
-            .await?
+        match tokio::task::spawn_blocking(move || tokenizer.decode(&ids, skip_special_tokens)).await
+        {
+            Ok(decoded) => Ok(decoded?.into()),
+            Err(join) if join.is_panic() => {
+                anyhow::bail!("token id outside the model's vocabulary")
+            }
+            Err(join) => Err(join.into()),
+        }
     }
 
     /// The text each token contributes, decoded per id.
