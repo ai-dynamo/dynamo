@@ -191,10 +191,7 @@ func resolveVLLMProcesses(ctx context.Context, capacity *VLLMGroveCapacity, http
 		if !pod.DeletionTimestamp.IsZero() {
 			continue
 		}
-		// The launch contract supplies process identity; a Grove slot is not a native rank.
-		if len(allocation.Incarnation.Members) != 1 {
-			return nil, fmt.Errorf("packed vLLM launch requires a distinct control endpoint for every native process")
-		}
+		// One native client owns the allocation's entire range through a single control endpoint.
 		member := allocation.Incarnation.Members[0]
 		rank, err := strconv.ParseInt(strings.TrimPrefix(string(member.ID), "dp-"), 10, 32)
 		if err != nil {
@@ -211,7 +208,7 @@ func resolveVLLMProcesses(ctx context.Context, capacity *VLLMGroveCapacity, http
 		}
 		processes = append(processes, vllmruntime.Process{
 			Rank: int32(rank), PodUID: domain.PodUID(pod.UID), Membership: domain.ReplicaMembership{
-				ReplicaID: allocation.Incarnation.ReplicaID, Members: []domain.NativeMemberIncarnation{member},
+				ReplicaID: allocation.Incarnation.ReplicaID, Members: allocation.Incarnation.Members,
 			}, Client: native,
 		})
 	}

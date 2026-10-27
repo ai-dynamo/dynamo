@@ -152,3 +152,104 @@ func TestPackedNativeResizeAndDrainArePerMemberButReleaseIsPerAllocation(t *test
 	require.NotNil(t, preflight.Rejection)
 	require.Equal(t, "UnsupportedOperation", preflight.Rejection.Reason)
 }
+
+func TestPackedClientOwnsResizeAndProofForItsWholeLocalRange(t *testing.T) {
+	t.Log("one worker per Pod owns two local engines and one native control endpoint")
+	fixture := newMembershipFixture(t, 2, 4)
+	fixture.adapter.Layout = ReplicaLayout{NativeMembersPerReplica: 2}
+	fixture.adapter.MinDataParallelSize = 2
+	fixture.adapter.ManagedDrainValidator = ValidateWorkerManagedDrain
+	workers := &workerControlFixture{engine: fixture.engine, registered: map[int32]bool{0: true}, localWidth: 2,
+		podUIDs: map[int32]domain.PodUID{0: "pod-0", 2: "pod-1"}}
+	var owners []Process
+	for index := range 2 {
+		owner := fixture.adapter.Processes[index*2]
+		fixture.engine.states[owner.Rank+1].InstanceID = fixture.engine.states[owner.Rank].InstanceID
+		fixture.engine.states[owner.Rank+1].TopologyToken = fixture.engine.states[owner.Rank].TopologyToken
+		owner.PodUID = workers.podUIDs[owner.Rank]
+		owner.Membership.ReplicaID = domain.ReplicaID(fmt.Sprintf("replica-%d", index))
+		owner.Membership.Members = append(owner.Membership.Members, fixture.adapter.Processes[index*2+1].Membership.Members...)
+		control, err := NewWorkerClient(fmt.Sprintf("http://rank-%d.test", owner.Rank), &http.Client{Transport: workers})
+		require.NoError(t, err)
+		owner.Client = control
+		owners = append(owners, owner)
+	}
+	fixture.adapter.Processes = owners
+	groupID := domain.GroupID("group-uid")
+	base, err := fixture.adapter.Observe(t.Context(), groupID, "")
+	require.NoError(t, err)
+	capacity := &workerTestCapacity{processes: owners, count: 1}
+	allocated, err := capacity.Observe(t.Context(), groupID)
+	require.NoError(t, err)
+	traffic := &WorkerTraffic{Membership: fixture.adapter, Journal: kubejournal.NewStore(fixture.adapter.Journal.Client, "test", "group", "group-uid", "traffic")}
+	admitted, err := traffic.Observe(t.Context(), groupID)
+	require.NoError(t, err)
+	status, err := domain.NewGroupStatus(base.CommittedTopology, allocated, admitted)
+	require.NoError(t, err)
+	verifier := &WorkerVerifier{Membership: fixture.adapter}
+	grow := fixture.target(t, base.CommittedTopology, "packed-grow", 10, 4, domain.PlanKindGrow).Plan
+
+	t.Log("growth submits once to the existing owner, never separately to its child engine")
+	for range 30 {
+		result, err := domain.NewCoordinator(capacity, fixture.adapter, traffic, verifier).Reconcile(t.Context(), groupID, &grow, status)
+		require.NoError(t, err)
+		status = result.Status
+		if len(fixture.engine.requests[0]) != 0 {
+			break
+		}
+	}
+	require.NotEmpty(t, fixture.engine.requests[0])
+	require.Empty(t, fixture.engine.requests[1])
+	require.Empty(t, fixture.engine.requests[2], "the new owner's native bootstrap is not a second resize submission")
+	fixture.engine.complete(4)
+	workers.registered[2] = true
+	for range 30 {
+		result, err := domain.NewCoordinator(capacity, fixture.adapter, traffic, verifier).Reconcile(t.Context(), groupID, &grow, status)
+		require.NoError(t, err)
+		status = result.Status
+		if status.Transition.Outcome == domain.TransitionOutcomeCompleted {
+			break
+		}
+	}
+	require.Equal(t, domain.TransitionOutcomeCompleted, status.Transition.Outcome)
+	require.Equal(t, int32(2), capacity.count)
+
+	t.Log("shrink contacts both old owners, including the departing local range")
+	current, found := status.Topologies.Current()
+	require.True(t, found)
+	retire := fixture.target(t, current, "packed-retire", 100, 2, domain.PlanKindRetire).Plan
+	retire.TrafficRequirement = domain.TrafficRequirementEngineManagedDrain
+	for range 30 {
+		result, err := domain.NewCoordinator(capacity, fixture.adapter, traffic, verifier).Reconcile(t.Context(), groupID, &retire, status)
+		require.NoError(t, err)
+		status = result.Status
+		if len(fixture.engine.requests[2]) != 0 {
+			break
+		}
+	}
+	require.NotEmpty(t, fixture.engine.requests[2])
+	require.Empty(t, fixture.engine.requests[3])
+	fixture.engine.complete(2)
+	workers.registered[2] = false
+	workers.omitLastMember = true
+
+	t.Log("a response omitting either local member cannot authorize release of their shared Pod")
+	_, err = traffic.Observe(t.Context(), groupID)
+	require.ErrorContains(t, err, "another incarnation")
+	require.Equal(t, int32(2), capacity.count)
+	require.Empty(t, capacity.releases)
+	workers.omitLastMember = false
+	traffic = &WorkerTraffic{Membership: fixture.adapter, Journal: traffic.Journal}
+	for range 30 {
+		result, err := domain.NewCoordinator(capacity, fixture.adapter, traffic, verifier).Reconcile(t.Context(), groupID, &retire, status)
+		require.NoError(t, err)
+		status = result.Status
+		if status.Transition.Outcome == domain.TransitionOutcomeCompleted {
+			break
+		}
+	}
+	require.Equal(t, domain.TransitionOutcomeCompleted, status.Transition.Outcome)
+	require.Equal(t, int32(1), capacity.count)
+	require.Len(t, capacity.releases, 1)
+	require.Equal(t, []domain.CapacityRef{{Name: "pod-1", UID: "pod-1"}}, capacity.releases[0].CapacityRefs)
+}

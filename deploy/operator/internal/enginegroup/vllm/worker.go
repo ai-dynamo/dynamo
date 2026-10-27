@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
@@ -24,16 +25,16 @@ type NativeBinding struct {
 }
 
 type workerStatus struct {
-	PodUID             enginegroup.PodUID         `json:"pod_uid"`
-	MemberID           enginegroup.NativeMemberID `json:"member_id"`
-	Binding            *NativeBinding             `json:"binding"`
-	Verified           bool                       `json:"verified"`
-	Admitted           bool                       `json:"admitted"`
-	ListenerReady      bool                       `json:"listener_ready"`
-	InstanceID         string                     `json:"instance_id"`
-	Retired            bool                       `json:"retired"`
-	Withdrawn          bool                       `json:"withdrawn"`
-	NativeDrainEnabled bool                       `json:"native_drain_enabled"`
+	PodUID             enginegroup.PodUID           `json:"pod_uid"`
+	MemberIDs          []enginegroup.NativeMemberID `json:"member_ids"`
+	Binding            *NativeBinding               `json:"binding"`
+	Verified           bool                         `json:"verified"`
+	Admitted           bool                         `json:"admitted"`
+	ListenerReady      bool                         `json:"listener_ready"`
+	InstanceID         string                       `json:"instance_id"`
+	Retired            bool                         `json:"retired"`
+	Withdrawn          bool                         `json:"withdrawn"`
+	NativeDrainEnabled bool                         `json:"native_drain_enabled"`
 }
 
 func (c *Client) workerRequest(ctx context.Context, path string, result any) error {
@@ -111,6 +112,9 @@ func (v *WorkerVerifier) Verify(ctx context.Context, groupID enginegroup.GroupID
 		if err != nil {
 			return enginegroup.VerificationResult{}, err
 		}
+		if process.Rank != int32(rank) {
+			continue
+		}
 		status, err := observeWorker(ctx, process)
 		if err != nil {
 			return enginegroup.VerificationResult{}, err
@@ -140,8 +144,11 @@ func observeWorker(ctx context.Context, process Process) (workerStatus, error) {
 		return status, err
 	}
 	// The resolver proves group ownership; the endpoint proves its exact Pod and native process identity.
-	if status.PodUID != process.PodUID ||
-		status.MemberID != process.Membership.Members[0].ID || process.PodUID == "" {
+	ids := make([]enginegroup.NativeMemberID, len(process.Membership.Members))
+	for i, member := range process.Membership.Members {
+		ids[i] = member.ID
+	}
+	if status.PodUID != process.PodUID || !slices.Equal(status.MemberIDs, ids) || process.PodUID == "" {
 		return status, fmt.Errorf("worker serving observation belongs to another incarnation")
 	}
 	return status, nil
