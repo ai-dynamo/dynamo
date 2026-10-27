@@ -301,7 +301,13 @@ class RankRunner:
                     if self.prefill is None:
                         raise ValueError("hold_kv on a non-prefill rank")
                     self.prefill.expect(rid)
+                behind_others = bool(self._later)
                 self._later.append((seq, prompt))
+                if behind_others:
+                    try:
+                        self.cache.on_enqueue(seq, prompt)
+                    except Exception:
+                        logger.exception("Prefetch of request %s failed", rid)
         except (ValueError, TypeError) as e:
             if add.handoff is not None and self.decode is not None and not handed_off:
                 self.decode.release(add.handoff)
@@ -386,11 +392,26 @@ class RankRunner:
         if self._closed:
             return
         self._closed = True
-        try:
-            self.engine.close()
-        finally:
-            if self.prefill is not None:
-                self.prefill.close()
-            if self.engine.dynamo_transfer is not None:
-                self.engine.dynamo_transfer.shutdown()
-            self.sink.close()
+        # The engine first, then the prefill flow (its holds may evict, so
+        # before the cache), the cache, the transfer and the sink. A failing
+        # step does not stop the rest: the first error is raised at the end,
+        # later ones are logged.
+        steps = [self.engine.close]
+        if self.prefill is not None:
+            steps.append(self.prefill.close)
+        steps += [self.cache.close, self._shutdown_transfer, self.sink.close]
+        first: Optional[Exception] = None
+        for step in steps:
+            try:
+                step()
+            except Exception as e:
+                if first is None:
+                    first = e
+                else:
+                    logger.exception("Error while closing the rank (after %r)", first)
+        if first is not None:
+            raise first
+
+    def _shutdown_transfer(self) -> None:
+        if self.engine.dynamo_transfer is not None:
+            self.engine.dynamo_transfer.shutdown()

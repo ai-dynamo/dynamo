@@ -68,6 +68,9 @@ class DeepInferOptions:
     prefix_snapshot_device: Optional[str] = None
     prefix_free_watermark: float = 0.05
     prefix_host_bytes: int = 0
+    prefix_ssd_dir: Optional[str] = None
+    prefix_ssd_bytes: int = 0
+    prefix_ssd_wait_ms: float = 50.0
     rank0_in_process: bool = True
     startup_timeout_s: float = 3600.0
     engine_overrides: dict[str, Any]
@@ -151,6 +154,10 @@ class DeepInferOptions:
                 "snapshot_device": self.prefix_snapshot_device,
                 "free_watermark": self.prefix_free_watermark,
                 "host_bytes": self.prefix_host_bytes,
+                "ssd_dir": self.prefix_ssd_dir,
+                "ssd_bytes": self.prefix_ssd_bytes,
+                "ssd_share": 1 / self.ranks_per_node,
+                "ssd_wait_ms": self.prefix_ssd_wait_ms,
             }
         events = self.kv_cache_manager != "none"
         per_node = self.ranks_per_node
@@ -163,7 +170,9 @@ class DeepInferOptions:
                 backend=self.deepinfer_backend,
                 engine_id=engine_id,
                 cache_manager=self.kv_cache_manager,
-                cache_options=cache_options,
+                cache_options=(
+                    {**cache_options, "ssd_rank": rank} if cache_options else {}
+                ),
                 kv_transfer=self.kv_transfer,
                 kv_events_endpoint=(
                     f"tcp://*:{self.kv_events_port_base + rank % per_node}"
@@ -238,6 +247,31 @@ def add_deepinfer_arguments(parser: argparse.ArgumentParser) -> None:
         help="Per rank: pinned host memory for prefix blocks evicted from the GPU "
         "(and the snapshots on host), e.g. 80GiB; 0 turns the host tier off. "
         "Clamped at startup to keep 10%% of the host's memory available.",
+    )
+    g.add_argument(
+        "--prefix-ssd-dir",
+        default=None,
+        help="Directory of the SSD tier's files (one per rank, recreated at every "
+        "start); needs --prefix-ssd-bytes. One engine per directory: a second "
+        "engine on it fails at startup.",
+    )
+    g.add_argument(
+        "--prefix-ssd-bytes",
+        type=parse_size,
+        default=0,
+        help="Per rank: file space for prefix blocks evicted from host memory, "
+        "e.g. 1TiB; 0 turns the SSD tier off. Needs --prefix-host-bytes and "
+        "--prefix-ssd-dir. Clamped at startup to what the snapshots can serve and "
+        "to this rank's share (1 / ranks per node) of the directory's free space.",
+    )
+    g.add_argument(
+        "--prefix-ssd-wait-ms",
+        type=float,
+        default=50.0,
+        help="Longest a request waits for the SSD read of its cached prefix (less "
+        "for shorter prefixes; the read also starts when the request is queued). "
+        "0 turns waiting and that prefetch off: the request recomputes the prefix. "
+        "Ignored without the SSD tier.",
     )
     g.add_argument(
         "--rank0-in-process",
@@ -335,6 +369,17 @@ def validate_options(opts: Any) -> None:
         raise ValueError("--dp-size must be >= 1")
     if opts.prefix_host_bytes and opts.kv_cache_manager != "prefix":
         raise ValueError("--prefix-host-bytes needs --kv-cache-manager prefix")
+    if opts.prefix_ssd_wait_ms < 0:
+        raise ValueError("--prefix-ssd-wait-ms must be >= 0")
+    if opts.prefix_ssd_dir and not opts.prefix_ssd_bytes:
+        raise ValueError("--prefix-ssd-dir needs --prefix-ssd-bytes")
+    if opts.prefix_ssd_bytes:
+        if opts.kv_cache_manager != "prefix":
+            raise ValueError("--prefix-ssd-bytes needs --kv-cache-manager prefix")
+        if opts.prefix_host_bytes <= 0:
+            raise ValueError("--prefix-ssd-bytes needs --prefix-host-bytes")
+        if not opts.prefix_ssd_dir:
+            raise ValueError("--prefix-ssd-bytes needs --prefix-ssd-dir")
     if opts.nnodes < 1 or not 0 <= opts.node_rank < opts.nnodes:
         raise ValueError(
             f"--node-rank {opts.node_rank} is outside 0..{opts.nnodes - 1} (--nnodes)"
