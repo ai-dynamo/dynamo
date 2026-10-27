@@ -954,25 +954,6 @@ def test_a_candidate_error_message_is_bounded(
     assert 0 < len(candidate["error"]) <= 500
 
 
-def test_subscribe_does_not_publish_live_without_lifecycle_callbacks(
-    tmp_path: Path, renders: list[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    @dataclass
-    class LegacyCallbacks:
-        on_candidate: Any = None
-        on_round: Any = None
-
-    monkeypatch.setattr(
-        adapter_module, "RecommendationOutputCallbacks", LegacyCallbacks
-    )
-    callbacks = create_adapter().subscribe(
-        {**PLUGIN_CONFIG, "snapshot_dir": str(tmp_path)},
-        context=SimpleNamespace(workload="workload"),
-    )
-    assert callbacks is None
-    assert not (tmp_path / SNAPSHOT_FILE_NAME).exists()
-
-
 def test_a_persistent_write_failure_does_not_spin_the_writer(
     tmp_path: Path, renders: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

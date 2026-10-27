@@ -49,7 +49,7 @@ import math
 import threading
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NoReturn, Protocol
 
@@ -663,16 +663,6 @@ class DGDRRunOutputPlugin:
         resolved.generation_options()
         workload = getattr(context, "workload", None)
         if workload is None or resolved.snapshot_dir is None:
-            return None
-        # Live publishing needs both lifecycle hooks: without on_complete nothing stops
-        # the live writer before write() publishes the terminal snapshot, which a pending
-        # live write could then overwrite. Older AISimulate releases lack them; the
-        # terminal snapshot then comes from write() alone.
-        supported = {field.name for field in fields(RecommendationOutputCallbacks)}
-        if not {"on_complete", "on_failure"} <= supported:
-            logger.info(
-                "dgdr_run: AISimulate has no lifecycle callbacks; not publishing live"
-            )
             return None
         adapter = DGDRRunOutputAdapter(resolved, workload)
         adapter.start()
