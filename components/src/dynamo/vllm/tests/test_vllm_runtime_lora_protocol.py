@@ -474,8 +474,9 @@ def test_invalid_settings_fail_before_plugin_initialization(monkeypatch):
         )
 
 
-@pytest.mark.parametrize("base", ["\ud800", "base\x00name", "base\x7fname"])
-def test_base_envelope_errors_are_sanitized(base):
+@pytest.mark.parametrize("escaped_base", [r"\ud800", r"base\x00name", r"base\x7fname"])
+def test_base_envelope_errors_are_sanitized(escaped_base):
+    base = escaped_base.encode("ascii").decode("unicode_escape")
     request = _request("custom:adapter")
     request = {
         **request,
