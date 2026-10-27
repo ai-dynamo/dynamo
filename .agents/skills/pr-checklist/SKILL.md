@@ -36,6 +36,8 @@ Use this skill when making a pull request to Dynamo or reviewing one. Run the re
 
 **Replication.** Search the codebase for existing functionality before adding new code, and reuse it instead of duplicating it. Check test code too, such as shared fixtures and helpers. Justify any duplication.
 
+**Existing work.** Check `main`, open pull requests, and open issues for concurrent or existing work on the same problem. Build on it or coordinate with its author instead of opening a duplicate.
+
 **Complexity.** As a rule of thumb, the complexity of a change can be estimated by the number of new lines of code added to the main codebase:
 
 - Low complexity: < 50 lines. Generally easy to review and unlikely to introduce significant complexity.
