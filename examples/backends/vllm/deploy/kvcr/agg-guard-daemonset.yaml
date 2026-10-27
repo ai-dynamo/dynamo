@@ -1,0 +1,207 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Worker for the Guard (guard-daemonset.yaml) and state agent (agg-state-agent.yaml)
+# that live outside the DGD. The socket and pool are hostPath dirs at the same
+# absolute paths as in the Guard; hostNetwork and uid 2000 match the Guard.
+#
+# One worker per model per node: the cache owner slot hashes the node name and
+# Guard index only, so a second worker of the model on a node would collide on one
+# owner and the state-agent host would fail it for both. Keep the model label, the
+# anti-affinity and the kv-state-endpoint namespace equal in every DGD of the model.
+# --kv-state-endpoint needs all three parts: EndpointId::from reinterprets shorter ones.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  annotations:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-kube-discovery-mode: container
+  name: vllm-agg-kvcr-guard-daemonset
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: main
+    replicas: 1
+    type: frontend
+  - name: worker
+    podTemplate:
+      metadata:
+        labels:
+          kvcr.nvidia.com/model: kvcr-qwen3-0-6b
+      spec:
+        dnsPolicy: ClusterFirstWithHostNet
+        hostNetwork: true
+        securityContext:
+          runAsGroup: 0
+          runAsUser: 2000
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: kvcr.nvidia.com/model
+                  operator: In
+                  values:
+                  - kvcr-qwen3-0-6b
+              topologyKey: kubernetes.io/hostname
+        containers:
+        - args:
+          - |
+            set -euo pipefail
+
+            kv_transfer_config=$(
+              python3 - <<'PY'
+            import hashlib
+            import json
+            import os
+
+            def cache_owner_id():
+                # Node-stable, not pod-index based, so a replacement pod reclaims the slot.
+                node_name = os.environ["KVCR_NODE_NAME"]
+                guard_index = int(os.environ["KVCR_GUARD_INDEX"])
+                guard_count = int(os.environ["KVCR_GUARD_COUNT"])
+                if not node_name:
+                    raise SystemExit("KVCR node name must not be empty")
+                if not 0 <= guard_index < guard_count:
+                    raise SystemExit(
+                        f"KVCR guard index {guard_index} is outside [0, {guard_count})"
+                    )
+                digest = hashlib.sha256(
+                    "\0".join(
+                        ["kvcr-guard-slot/v1", node_name, str(guard_index)]
+                    ).encode()
+                ).digest()
+                return (
+                    "01010101010101010101010101010101:"
+                    "02020202020202020202020202020202/"
+                    f"0303030303030303/{digest[:16].hex()}"
+                )
+
+            print(json.dumps({
+                "kv_connector": "OffloadingConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "cpu_bytes_to_use": 2147483648,
+                    "spec_name": "TieringOffloadingSpec",
+                    "self_describing_kv_events": True,
+                    "dynamo_state_agent": {
+                        "raw_advertise_host": os.environ["POD_IP"],
+                        "cache_owner_ids": {"0": cache_owner_id()},
+                    },
+                    "secondary_tiers": [{
+                        "type": "kvcr",
+                        "kvcr_service_socket_path": "/run/kvcr/qwen3-0.6b/memory.sock",
+                        "compatibility_digest": "${DYNAMO_KVCR_COMPATIBILITY_DIGEST}",
+                        "router_capabilities": ["router_hint"],
+                        "control_host": "0.0.0.0",
+                        "control_ports": [23280],
+                        "control_advertise_host": os.environ["POD_IP"],
+                        "enable_telemetry": True,
+                    }],
+                },
+            }))
+            PY
+            )
+            exec python3 -m dynamo.vllm \
+              --model Qwen/Qwen3-0.6B \
+              --kv-state-endpoint kvcr-qwen3-0-6b/backend/generate \
+              --kv-transfer-config "$kv_transfer_config" \
+              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}'
+          command:
+          - /bin/bash
+          - -c
+          env:
+          - name: CONTAINER_NAME
+            value: main
+          - name: DYN_KUBE_DISCOVERY_MODE
+            value: container
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          - name: KVCR_NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+          - name: KVCR_GUARD_INDEX
+            value: "0"
+          - name: KVCR_GUARD_COUNT
+            value: "1"
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: PYTHONHASHSEED
+            value: "0"
+          - name: UCX_TLS
+            value: rc_x,cuda
+          - name: UCX_NET_DEVICES
+            value: ${DYNAMO_UCX_NET_DEVICES}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: main
+          resources:
+            limits:
+              ${DYNAMO_RDMA_RESOURCE}: "1"
+              nvidia.com/gpu: "1"
+            requests:
+              ${DYNAMO_RDMA_RESOURCE}: "1"
+              ephemeral-storage: 2Gi
+              nvidia.com/gpu: "1"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          volumeMounts:
+          - mountPath: /run/kvcr/qwen3-0.6b
+            name: kvcr-socket
+          - mountPath: /dev/shm/kvcr/qwen3-0.6b
+            name: kvcr-memory
+          workingDir: /workspace/examples/backends/vllm
+        initContainers:
+        - args:
+          - |
+            import socket, sys, time
+            path = "/run/kvcr/qwen3-0.6b/memory.sock"
+            while True:
+                s = socket.socket(socket.AF_UNIX)
+                s.settimeout(1)
+                try:
+                    s.connect(path)
+                    break
+                except OSError as error:
+                    print(f"waiting for the KVCR Guard socket {path}: {error}", file=sys.stderr, flush=True)
+                    time.sleep(2)
+                finally:
+                    s.close()
+          command:
+          - python3
+          - -c
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: wait-for-guard
+          volumeMounts:
+          - mountPath: /run/kvcr/qwen3-0.6b
+            name: kvcr-socket
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        volumes:
+        - hostPath:
+            path: /run/kvcr/qwen3-0.6b
+            type: Directory
+          name: kvcr-socket
+        - hostPath:
+            path: /dev/shm/kvcr/qwen3-0.6b
+            type: Directory
+          name: kvcr-memory
+    replicas: 2
+    type: worker

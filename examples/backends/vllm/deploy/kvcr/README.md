@@ -111,6 +111,25 @@ agent's routing state was also lost.
 The state agent carries routing and residency information; it does not move
 KV payloads. KVCR uses NIXL and UCX for the remote payload transfer.
 
+## Run a Guard outside the DGD
+
+`KVCR_MEMORY_SERVICE_ENABLED=external` applies a per-node Guard DaemonSet
+(`guard-daemonset.yaml`), a per-model state agent (`agg-state-agent.yaml`), and
+then the worker DGD (`agg-guard-daemonset.yaml`), so the pool survives DGD
+deletion. Not yet validated on a cluster.
+
+```bash
+export KVCR_STATE_AGENT_MAX_SLOTS=4   # GPU nodes ever used x Guards per node
+KVCR_MEMORY_SERVICE_ENABLED=external ./deploy.sh
+```
+
+The Guard needs a KVCR build with `--adopt-pools` and starts with it from its
+first launch (the adoption stamp is written only then). The state agent needs a
+persistent ServiceAccount and Role for Dynamo's Kubernetes discovery:
+`create,get,list,watch,update,patch,delete` on `dynamoworkermetadatas.nvidia.com`
+and `get,list,watch` on pods, endpoints and endpointslices. Do not use the
+operator-created per-DGD ServiceAccount, which is deleted with the DGD.
+
 ## Verify Guard recovery
 
 Use the memory-service variant and the opt-in live-cluster test. The test adds
