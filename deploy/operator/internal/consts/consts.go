@@ -125,6 +125,11 @@ const (
 	// CheckpointStartupPolicyAnnotation stores the DGD checkpoint startup policy
 	// on generated pod templates for debugging and admission.
 	CheckpointStartupPolicyAnnotation = "nvidia.com/dynamo-checkpoint-startup-policy"
+	// RestoreStandbyCapableAnnotation is the workload author's assertion that
+	// a custom python -m restore entrypoint calls
+	// maybe_run_restore_standby_mode() before importing runtime or backend
+	// code. Admission cannot inspect the module, so it trusts this opt-in.
+	RestoreStandbyCapableAnnotation = "nvidia.com/dynamo-restore-standby-capable"
 	// Snapshot compatibility metadata is written by Dynamo capture producers
 	// and validated before a PodSnapshot may restore a Dynamo worker.
 	SnapshotCompatibilityVersionAnnotation = "nvidia.com/dynamo-snapshot-compatibility-version"

@@ -126,6 +126,30 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 		assert.Equal(t, pod.Spec.Containers[0].LivenessProbe, shaped.Spec.Containers[0].LivenessProbe)
 	})
 
+	t.Run("admits an opted-in custom python module with standby injected", func(t *testing.T) {
+		t.Log("Given a native restore candidate whose engine runs a custom module that opts in to the standby contract")
+		t.Log("And autovllm.dynamo_server stands in for a wrapper that calls maybe_run_restore_standby_mode() before importing runtime or backend code")
+		pod := nativeRestoreCandidatePod(snapshot)
+		pod.Annotations[consts.RestoreStandbyCapableAnnotation] = consts.KubeLabelValueTrue
+		pod.Spec.Containers[1].Command = []string{"python3", "-m", "autovllm.dynamo_server"}
+		original := mustMarshalPod(t, pod)
+		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
+			Namespace: pod.Namespace,
+			Object:    runtime.RawExtension{Raw: original},
+		}}
+
+		t.Log("When the Dynamo admission webhook shapes the Pod")
+		resp := mutator.Handle(ctx, req)
+
+		t.Log("Then the Pod is admitted and every destination still receives standby mode")
+		require.True(t, resp.Allowed)
+		shaped := applyAdmissionPatches(t, original, resp)
+		for _, container := range shaped.Spec.Containers {
+			assert.Contains(t, container.Env, corev1.EnvVar{Name: podcontract.RestoreStandbyModeEnv, Value: "1"})
+		}
+	})
+
 	t.Run("denies stale or unsafe native candidates", func(t *testing.T) {
 		tests := []struct {
 			name    string
@@ -167,6 +191,13 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 					pod.Spec.Containers[1].Command = []string{"serve-model"}
 				},
 				wantErr: "must directly invoke python -m",
+			},
+			{
+				name: "custom python module without standby opt-in",
+				mutate: func(pod *corev1.Pod) {
+					pod.Spec.Containers[1].Command = []string{"python3", "-m", "autovllm.dynamo_server"}
+				},
+				wantErr: consts.RestoreStandbyCapableAnnotation,
 			},
 			{
 				name: "missing restore target metadata",
@@ -360,6 +391,7 @@ func TestUsesSupportedDynamoRestoreEntrypoint(t *testing.T) {
 		name      string
 		command   []string
 		args      []string
+		optIn     bool
 		supported bool
 	}{
 		{
@@ -394,17 +426,34 @@ func TestUsesSupportedDynamoRestoreEntrypoint(t *testing.T) {
 			args:    []string{"-m", "dynamo.vllm"},
 		},
 		{
-			name:      "other Python module",
-			command:   []string{"python3", "-m", "dynamo.frontend"},
+			name:    "custom Python module without opt-in",
+			command: []string{"python3", "-m", "autovllm.dynamo_server"},
+		},
+		{
+			name:    "dynamo.frontend does not implement the standby hook",
+			command: []string{"python3", "-m", "dynamo.frontend"},
+		},
+		{
+			name:      "custom Python module with opt-in",
+			command:   []string{"python3", "-m", "autovllm.dynamo_server"},
+			optIn:     true,
 			supported: true,
+		},
+		{
+			name:    "shell wrapper is rejected even with opt-in",
+			command: []string{"/bin/sh", "-c"},
+			args:    []string{"python3 -m autovllm.dynamo_server"},
+			optIn:   true,
 		},
 		{
 			name:    "empty module name",
 			command: []string{"python3", "-m", ""},
+			optIn:   true,
 		},
 		{
 			name:    "option-like module name",
 			command: []string{"python3", "-m", "-c"},
+			optIn:   true,
 		},
 	}
 
@@ -413,8 +462,8 @@ func TestUsesSupportedDynamoRestoreEntrypoint(t *testing.T) {
 			t.Log("Given a restore destination with an explicit container entrypoint")
 			container := &corev1.Container{Command: test.command, Args: test.args}
 
-			t.Log("Then only a direct python -m <module> invocation is accepted")
-			assert.Equal(t, test.supported, usesSupportedDynamoRestoreEntrypoint(container))
+			t.Log("Then Dynamo modules and explicitly opted-in direct python -m modules are accepted")
+			assert.Equal(t, test.supported, usesSupportedDynamoRestoreEntrypoint(container, test.optIn))
 		})
 	}
 }

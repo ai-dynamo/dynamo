@@ -339,7 +339,18 @@ func validateNativeSnapshotCandidate(annotations map[string]string, resolved *ch
 	return nil
 }
 
+// builtinRestoreModules are the Dynamo entrypoints known to call
+// maybe_run_restore_standby_mode(), so they are accepted without an opt-in.
+var builtinRestoreModules = map[string]struct{}{
+	"dynamo.vllm":   {},
+	"dynamo.sglang": {},
+	"dynamo.trtllm": {},
+}
+
 func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerMapping) error {
+	// Custom python -m modules are admitted only when the workload author opts in.
+	customEntrypointOptIn := pod.Annotations[consts.RestoreStandbyCapableAnnotation] == consts.KubeLabelValueTrue
+
 	containers := make(map[string]*corev1.Container, len(pod.Spec.Containers))
 	for i := range pod.Spec.Containers {
 		container := &pod.Spec.Containers[i]
@@ -353,10 +364,13 @@ func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerM
 		if container == nil {
 			return fmt.Errorf("restore destination container %q not found", mapping.Destination)
 		}
-		if !usesSupportedDynamoRestoreEntrypoint(container) {
+		if !usesSupportedDynamoRestoreEntrypoint(container, customEntrypointOptIn) {
 			return fmt.Errorf(
-				"restore destination container %q must directly invoke python -m <module>; command=%q args=%q",
+				"restore destination container %q must directly invoke python -m dynamo.vllm|dynamo.sglang|dynamo.trtllm, "+
+					"or python -m <module> with annotation %s=%q for a custom entrypoint that calls maybe_run_restore_standby_mode(); command=%q args=%q",
 				mapping.Destination,
+				consts.RestoreStandbyCapableAnnotation,
+				consts.KubeLabelValueTrue,
 				container.Command,
 				container.Args,
 			)
@@ -391,10 +405,12 @@ func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerM
 }
 
 // usesSupportedDynamoRestoreEntrypoint reports whether the container directly
-// runs `python -m <module>`. The module is not inspected. Shell and other
-// non-python launchers are rejected because admission cannot prove they honor
-// SNAPSHOT_RESTORE_STANDBY.
-func usesSupportedDynamoRestoreEntrypoint(container *corev1.Container) bool {
+// runs `python -m <module>` with a module that honors the restore standby
+// contract. Dynamo's own modules are accepted by default; any other module
+// needs customEntrypointOptIn because admission cannot inspect it. Shell and
+// other non-python launchers are rejected because admission cannot prove they
+// honor SNAPSHOT_RESTORE_STANDBY. The container must be non-nil.
+func usesSupportedDynamoRestoreEntrypoint(container *corev1.Container, customEntrypointOptIn bool) bool {
 	if len(container.Command) == 0 {
 		return false
 	}
@@ -418,7 +434,15 @@ func usesSupportedDynamoRestoreEntrypoint(container *corev1.Container) bool {
 
 	// An empty or option-like token is not a module name and fails at startup.
 	module := arguments[moduleFlagIndex+1]
-	return module != "" && !strings.HasPrefix(module, "-")
+	if module == "" || strings.HasPrefix(module, "-") {
+		return false
+	}
+
+	// Dynamo's own modules honor the standby contract; any other module needs the opt-in.
+	if _, ok := builtinRestoreModules[module]; ok {
+		return true
+	}
+	return customEntrypointOptIn
 }
 
 // isOperandFreePythonInterpreterFlag recognizes options that cannot consume
