@@ -704,6 +704,7 @@ func TestDGDScalingAdaptersReconciler_ReconcileUnlessWaitingForCheckpoint(t *tes
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a DGD with one scaling-adapter component and a fake client")
 			dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				Name:      "test-dgd",
 				Namespace: "default",
@@ -724,15 +725,18 @@ func TestDGDScalingAdaptersReconciler_ReconcileUnlessWaitingForCheckpoint(t *tes
 			fakeClient := clientBuilder.Build()
 			ctx := context.Background()
 
+			t.Log("Reconcile scaling adapters unless the result waits for a checkpoint")
 			err := newDGDScalingAdaptersReconciler(fakeClient, events.NewFakeRecorder(10)).
 				ReconcileUnlessWaitingForCheckpoint(ctx, dgd, tt.result)
 			if tt.failCreate {
+				t.Log("Verify the create failure is wrapped")
 				require.ErrorIs(t, err, createErr)
 				require.True(t, strings.HasPrefix(err.Error(), "failed to reconcile scaling adapters: "), err.Error())
 				return
 			}
 			require.NoError(t, err)
 
+			t.Log("Verify whether the adapter was created")
 			adapterList := &v1alpha1.DynamoGraphDeploymentScalingAdapterList{}
 			require.NoError(t, fakeClient.List(ctx, adapterList, client.InNamespace("default")))
 			if tt.expectAdapter {
