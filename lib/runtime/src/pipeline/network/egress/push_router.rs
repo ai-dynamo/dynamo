@@ -73,8 +73,7 @@ fn is_worker_overloaded(err: &(dyn std::error::Error + 'static)) -> bool {
 
 /// Check if an error chain indicates the worker should be reported as down.
 ///
-/// Never for a chain that carries a worker's overload, whatever wraps it: see
-/// [`is_worker_overloaded`].
+/// Request deadlines and worker overloads do not establish a worker fault.
 fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
     const INHIBITED: &[ErrorType] = &[
         ErrorType::CannotConnect,
@@ -90,6 +89,17 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         // stale or the worker is shutting down. Same reasoning as above.
         ErrorType::WorkerUnavailable,
     ];
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(error) = error.downcast_ref::<DynamoError>()
+            && error.class() == ErrorType::DeadlineExceeded
+            && error.reason().as_str() == "request.deadline_exceeded"
+        {
+            // The legacy wire type is ResponseTimeout for both request and backend deadlines.
+            return false;
+        }
+        current = error.source();
+    }
     // Pre-stream request rejections can carry an outer CannotConnect wrapper.
     !is_worker_overloaded(err)
         && match_error_chain(
@@ -2593,6 +2603,44 @@ mod tests {
         assert!(is_inhibited(&err));
     }
 
+    #[test]
+    fn request_deadlines_do_not_quarantine_healthy_workers_after_wire_round_trip() {
+        for (error_type, is_worker_fault) in [
+            (ErrorType::DeadlineExceeded, false),
+            (ErrorType::ResponseTimeout, true),
+            (ErrorType::ConnectionTimeout, true),
+        ] {
+            let error = DynamoError::builder().error_type(error_type).build();
+            assert_eq!(
+                is_inhibited(&error),
+                is_worker_fault,
+                "local {error_type:?}"
+            );
+            let delivered: DynamoError =
+                serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+            assert_eq!(delivered.class(), ErrorType::DeadlineExceeded);
+            assert_eq!(delivered.reason(), error.reason());
+            assert_eq!(
+                is_inhibited(&delivered),
+                is_worker_fault,
+                "wire {error_type:?}"
+            );
+            let wrapped = DynamoError::builder()
+                .error_type(ErrorType::CannotConnect)
+                .cause(delivered)
+                .build();
+            assert_eq!(
+                is_inhibited(&wrapped),
+                is_worker_fault,
+                "wrapped {error_type:?}"
+            );
+        }
+
+        let legacy: DynamoError =
+            serde_json::from_value(serde_json::json!({"error_type": "ResponseTimeout"})).unwrap();
+        assert!(is_inhibited(&legacy));
+    }
+
     /// A worker's admission refusal as the gate raises it, in process: for
     /// the whole worker, or for DP rank `dp_rank` alone.
     fn refusal(dp_rank: Option<u32>) -> DynamoError {
@@ -2682,7 +2730,7 @@ mod tests {
     /// lease can lapse between a refusal and the check after it. Neither
     /// reports the worker down; a real connection failure still does.
     #[tokio::test]
-    async fn fault_detection_marks_only_a_whole_worker_refusal_overloaded_and_never_down() {
+    async fn fault_detection_preserves_request_deadlines_and_scopes_overload() {
         const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
 
         let rt = Runtime::from_current().unwrap();
@@ -2705,6 +2753,29 @@ mod tests {
             PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
                 .await
                 .unwrap();
+
+        let deadline: DynamoError = serde_json::from_value(serde_json::json!({
+            "class": "DeadlineExceeded",
+            "error_type": "ResponseTimeout",
+            "reason": "request.deadline_exceeded",
+        }))
+        .unwrap();
+        let stream = ResponseStream::new(
+            Box::pin(tokio_stream::iter(vec![TestResponse {
+                error: Some(deadline),
+            }])),
+            Arc::new(Controller::default()),
+        );
+        let mut stream = router
+            .wrap_with_fault_detection(Ok(stream), instance_id, tracing::Span::none())
+            .unwrap();
+        assert!(stream.next().await.unwrap().err().is_some());
+        assert!(
+            router
+                .check_workers_available(instance_id, "after_deadline")
+                .is_ok(),
+            "a delivered request deadline must leave the worker available"
+        );
 
         let refuse = |dp_rank| {
             let error = router
