@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Expose the Frontend
-subtitle: Route external traffic to a DynamoGraphDeployment's Frontend with a Kubernetes Ingress, a LoadBalancer Service, a Gateway API HTTPRoute, or the Inference Gateway.
+subtitle: Route external traffic to a DynamoGraphDeployment's Frontend with a Kubernetes Ingress, a LoadBalancer Service, a Gateway API HTTPRoute to the Frontend Service, or the Inference Gateway (GAIE).
 ---
 
 The [DGD Guide](deploy-with-dgd.md) reaches the Frontend with `kubectl port-forward`, which is fine for a smoke test but not for production traffic. This page shows how to give the Frontend a stable external address. Whatever the API version, the operator creates a `ClusterIP` Service named `<name>-frontend` (where `<name>` is `metadata.name`) on port 8000 for the Frontend component — the options below route external traffic to that Service. Choose one of four paths depending on what your cluster runs.
@@ -11,8 +11,8 @@ The [DGD Guide](deploy-with-dgd.md) reaches the Frontend with `kubectl port-forw
 |---|---|
 | Kubernetes Ingress | You have an ingress controller (NGINX, etc.) and want a host-routed HTTP(S) entry point |
 | LoadBalancer Service | You want a cloud load balancer and manage routing yourself |
-| Gateway API HTTPRoute | Your cluster runs a Kubernetes Gateway, with or without the Gateway API Inference Extension |
-| Inference Gateway (GAIE) with the Dynamo EPP | The Gateway must pick the worker for each request. The EPP deployment style does not have full feature parity with Dynamo Frontend routing |
+| Gateway API HTTPRoute to the Frontend Service | Your cluster runs a Kubernetes Gateway, with or without the Gateway API Inference Extension |
+| Inference Gateway (GAIE) | The Gateway must pick the worker for each request. GAIE routing does not have full feature parity with Dynamo Frontend routing |
 
 ## Option 1: A Kubernetes Ingress
 
@@ -65,7 +65,7 @@ kubectl get svc <name>-frontend -n <namespace> -w   # wait for EXTERNAL-IP
 
 Send requests to the external IP on port 8000.
 
-## Option 3: A Gateway API HTTPRoute
+## Option 3: A Gateway API HTTPRoute to the Frontend Service
 
 To put the Frontend behind a Kubernetes [Gateway](https://gateway-api.sigs.k8s.io/), attach an `HTTPRoute` to the Gateway and point it at the operator-created `<name>-frontend` Service. The Frontend still selects the worker for each request, so the deployment keeps every Dynamo routing and request-handling feature. The route needs no Gateway API Inference Extension (GAIE) resources, so it works whether or not GAIE is installed.
 
@@ -89,9 +89,9 @@ Create the route in the DGD namespace, next to the Frontend Service. If the Gate
 
 To serve several deployments behind one Gateway, create an `HTTPRoute` for each Frontend Service and give each route a distinct hostname or header match.
 
-## Option 4: The Inference Gateway (GAIE) with the Dynamo EPP
+## Option 4: The Inference Gateway (GAIE)
 
-[Using GAIE with Dynamo](../kv-aware-routing/gateway-api.mdx) is a different mechanism: instead of exposing the Frontend, the Gateway asks the Dynamo Endpoint Picker Plugin (EPP) to pick a worker for each request and forwards the request to that worker. A Frontend sidecar in each worker pod runs with `--router-mode direct` and respects the EPP's choice.
+[Using GAIE with Dynamo](../kv-aware-routing/gateway-api.mdx) is a different mechanism: the `HTTPRoute` points at an `InferencePool` instead of the Frontend Service, and the Gateway asks the Dynamo Endpoint Picker Plugin (EPP) to pick a worker for each request and forwards the request to that worker. A Frontend sidecar in each worker pod runs with `--router-mode direct` and respects the EPP's choice.
 
 The Dynamo EPP does not support every Dynamo feature; see [Features Not Supported by the Dynamo EPP](../kv-aware-routing/overview.md#features-not-supported-by-the-dynamo-epp). Prefer Option 3 unless your platform requires the Gateway itself to pick the worker.
 
@@ -100,6 +100,6 @@ The Dynamo EPP does not support every Dynamo feature; see [Features Not Supporte
 
 ## Related pages
 
-- [KV-Aware Routing on Kubernetes](../kv-aware-routing/overview.md) — choose between Frontend routing and the Dynamo EPP.
+- [KV-Aware Routing on Kubernetes](../kv-aware-routing/overview.md) — choose between Dynamo Frontend routing and GAIE routing.
 - [Using GAIE with Dynamo](../kv-aware-routing/gateway-api.mdx) — route requests through the Dynamo EPP.
 - [API Reference — IngressSpec](../../reference/kubernetes-api/full-api-reference.mdx#ingressspec) — full field reference.

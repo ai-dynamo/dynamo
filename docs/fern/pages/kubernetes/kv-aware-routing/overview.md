@@ -18,20 +18,20 @@ fewer components, requires no Gateway API installation, and works with a standar
 
 If traffic must enter through a Kubernetes Gateway, for example because a platform team
 standardizes ingress, authentication, rate limiting, traffic policy, or gateway-level telemetry
-through Gateway API, keep the Frontend topology and put it behind the Gateway. An `HTTPRoute` sends
-requests to the Frontend Service, with or without the Gateway API Inference Extension (GAIE)
-installed. See
-[Expose the Frontend](../model-deployment/expose-the-frontend.md#option-3-a-gateway-api-httproute).
+through Gateway API, keep Dynamo Frontend routing and put the Frontend behind the Gateway. An
+`HTTPRoute` sends requests to the Frontend Service, with or without the Gateway API Inference
+Extension (GAIE) installed. See
+[Expose the Frontend](../model-deployment/expose-the-frontend.md#option-3-a-gateway-api-httproute-to-the-frontend-service).
 
-For an EPP-style deployment, in which GAIE calls the Dynamo EPP through the `ext_proc` protocol to
-pick the worker for each request, see [Using GAIE with Dynamo](gateway-api.mdx). This deployment
-does not have full feature parity with the Frontend topology. Before you choose it, review
+For GAIE routing, in which the Gateway calls the Dynamo EPP through the `ext_proc` protocol to pick
+the worker for each request, see [Using GAIE with Dynamo](gateway-api.mdx). GAIE routing does not
+have full feature parity with Dynamo Frontend routing. Before you choose it, review
 [Features Not Supported by the Dynamo EPP](#features-not-supported-by-the-dynamo-epp).
 
 | Choose | When it fits | Additional infrastructure | Where routing is configured |
 |---|---|---|---|
-| Using the Dynamo Frontend | Recommended for most deployments, whether clients call the Frontend Service directly or through a Kubernetes Gateway. | None beyond the normal Dynamo platform. | Frontend with `--router-mode kv`. |
-| Using GAIE with Dynamo | Traffic enters through a Gateway with GAIE. Use the Frontend deployment style, in which the Gateway routes requests to the Frontend Service, or the EPP deployment style, in which the Dynamo EPP picks the worker for each request. The EPP deployment style does not have [full feature parity](#features-not-supported-by-the-dynamo-epp) with Dynamo Frontend routing. | Gateway API, GAIE, and a compatible Gateway implementation. The EPP deployment style also needs a Dynamo EPP. | Frontend deployment style: Frontend with `--router-mode kv`. EPP deployment style: EPP; worker Frontend sidecars use `--router-mode direct`. |
+| Using the Dynamo Frontend | Recommended for most deployments, whether clients call the Frontend Service directly or through a Kubernetes Gateway. | None beyond the normal Dynamo platform for direct calls. Behind a Gateway, also Gateway API and a compatible Gateway implementation, but not GAIE. | Frontend with `--router-mode kv`. |
+| Using GAIE with Dynamo | Traffic enters through a Gateway, and the Dynamo EPP picks the worker for each request. GAIE routing does not have [full feature parity](#features-not-supported-by-the-dynamo-epp) with Dynamo Frontend routing. | Gateway API, GAIE, a compatible Gateway implementation, and a Dynamo EPP. | EPP; worker Frontend sidecars use `--router-mode direct`. |
 | Using GAIE with vanilla vLLM | You already run upstream vLLM pods and want to add Dynamo's advanced KV-aware routing without migrating the fleet to Dynamo workers. | Gateway API, GAIE, a compatible Gateway implementation, and standalone Dynamo EPP support. | EPP with direct vLLM worker discovery and vLLM token rendering. |
 
 The Frontend and GAIE topologies are alternatives for a request path. Do not configure the Frontend
@@ -52,7 +52,7 @@ Choose this topology when:
 
 This topology works out of the box with the normal Dynamo platform; no Gateway API components are
 required. When your platform requires a Gateway, route it to the Frontend Service as shown in
-[Expose the Frontend](../model-deployment/expose-the-frontend.md#option-3-a-gateway-api-httproute).
+[Expose the Frontend](../model-deployment/expose-the-frontend.md#option-3-a-gateway-api-httproute-to-the-frontend-service).
 Use [the Dynamo Frontend](dynamo-frontend.md) to enable KV-aware worker selection in a DGD.
 
 ## GAIE Routing
@@ -68,13 +68,13 @@ Choose this topology when:
 - Multiple model routes should share a platform-managed address and listener.
 - A platform team manages the Gateway while an application team manages the DGD and `HTTPRoute`.
 
-These reasons alone do not call for this topology, because the Frontend
-topology also runs behind a Gateway. Choose GAIE routing when your platform requires the Gateway to
-pick the worker through the GAIE EPP `ext_proc` mechanism. This EPP deployment style does not have
-full feature parity with Dynamo Frontend routing; see
+These reasons alone do not call for this topology, because Dynamo Frontend routing also works
+behind a Gateway. Choose GAIE routing when your platform requires the Gateway to call the Dynamo EPP
+over `ext_proc` to pick the worker. GAIE routing does not have full feature parity with Dynamo
+Frontend routing; see
 [Features Not Supported by the Dynamo EPP](#features-not-supported-by-the-dynamo-epp).
 
-Gateway API routing requires a separate installation. See
+GAIE routing requires a separate installation. See
 [Install Gateway API Inference Extension](../installation/gateway-api-routing.mdx), then
 [GAIE with Dynamo](gateway-api.mdx) or [GAIE with vanilla vLLM](vanilla-vllm-onramp.mdx).
 
@@ -104,15 +104,20 @@ guidance, see [Configuration and Tuning](../../developer-guide/knowledge-base/mo
 
 ## Features Not Supported by the Dynamo EPP
 
-The Dynamo EPP in [Using GAIE with Dynamo](gateway-api.mdx) routes OpenAI Chat Completions and
-Completions requests with KV-aware routing, in aggregated and disaggregated prefill and decode
-deployments. It does not have full feature parity with the Frontend topology: the features below
-work when the Dynamo Frontend routes requests, but not when the Dynamo EPP does. If your deployment
-needs any of them, use the Frontend topology, behind a Gateway if your platform requires one.
+This section covers the Dynamo EPP in Dynamo mode (`DYN_EPP_MODE=dynamo`, the default), which the
+Dynamo operator deploys from a DGD component with `type: epp`, as in
+[Using GAIE with Dynamo](gateway-api.mdx). It does not cover standalone mode, which
+[Using GAIE with vanilla vLLM](vanilla-vllm-onramp.mdx) uses.
+
+The Dynamo EPP routes OpenAI Chat Completions and Completions requests with KV-aware routing, in
+aggregated and disaggregated prefill and decode deployments. It does not have full feature parity
+with Dynamo Frontend routing: the features below work when the Dynamo Frontend routes requests, but
+not when the Dynamo EPP does. If your deployment needs any of them, use Dynamo Frontend routing,
+behind a Gateway if your platform requires one.
 
 > [!NOTE]
 > This list changes over time. For the current status of each feature, check
-> [DEP #16595: Production Readiness for the Dynamo Runtime EPP](https://github.com/ai-dynamo/dynamo/issues/16595).
+> [DEP #16595](https://github.com/ai-dynamo/dynamo/issues/16595).
 
 ### Request Handling
 
@@ -163,7 +168,7 @@ The EPP supports the OpenAI Chat Completions (`/v1/chat/completions`) and Comple
 (`/v1/completions`) APIs. It does not support the other APIs the Frontend serves, including the
 OpenAI Responses API (`/v1/responses`), the Anthropic Messages API (`/v1/messages`), embeddings,
 rerank, images, video, audio, batches, files, realtime, and KServe gRPC. To serve those APIs, route
-them to a deployment that uses the Frontend topology. For the Frontend's endpoints, see
+them to a deployment that uses Dynamo Frontend routing. For the Frontend's endpoints, see
 [HTTP endpoints](../../reference/components/frontend-configuration.mdx#http-endpoints).
 
 ### Observability

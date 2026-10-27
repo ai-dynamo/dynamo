@@ -11,9 +11,8 @@ Use this guide to choose a router deployment topology. It does not replace the l
 
 | Topology | Where selection runs | Use it when | Setup guide |
 | --- | --- | --- | --- |
-| Frontend-embedded | Dynamo Frontend | Clients can call one Dynamo service directly. | [KV-Aware Routing for the CLI](../../../../cli/kv-aware-routing/overview.mdx) or [Dynamo Frontend Routing](../../../../kubernetes/kv-aware-routing/dynamo-frontend.md) |
-| Gateway API | Dynamo Frontend | A Kubernetes Gateway owns ingress policy, and the Dynamo Frontend selects the worker. | [Expose the Frontend with a Gateway API HTTPRoute](../../../../kubernetes/model-deployment/expose-the-frontend.md#option-3-a-gateway-api-httproute) |
-| Gateway API | Dynamo Endpoint Picker Plugin (EPP) | A Kubernetes Gateway owns ingress policy and endpoint selection. | [KV-Aware Routing on Kubernetes](../../../../kubernetes/kv-aware-routing/overview.md) |
+| Frontend-embedded | Dynamo Frontend | Clients can call one Dynamo service directly or through a Kubernetes Gateway that owns ingress policy. | [KV-Aware Routing for the CLI](../../../../cli/kv-aware-routing/overview.mdx) or [Dynamo Frontend Routing](../../../../kubernetes/kv-aware-routing/dynamo-frontend.md); behind a Gateway, [Expose the Frontend](../../../../kubernetes/model-deployment/expose-the-frontend.md#option-3-a-gateway-api-httproute-to-the-frontend-service) |
+| GAIE | Dynamo Endpoint Picker Plugin (EPP) | A Kubernetes Gateway owns ingress policy and endpoint selection. | [KV-Aware Routing on Kubernetes](../../../../kubernetes/kv-aware-routing/overview.md) |
 | Standalone | Dynamo router service | A custom request path or multi-tier architecture needs selection outside the Frontend. | [Standalone Router](../../../../cli/kv-aware-routing/standalone-router.md) |
 
 The EPP embeds the same KV router as the Frontend but does not support every Frontend feature; see [Features Not Supported by the Dynamo EPP](../../../../kubernetes/kv-aware-routing/overview.md#features-not-supported-by-the-dynamo-epp). Do not configure the Frontend to make another selection after an EPP has selected a worker.

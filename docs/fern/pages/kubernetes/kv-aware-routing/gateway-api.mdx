@@ -6,16 +6,16 @@ sidebar-title: Using GAIE with Dynamo
 subtitle: Add a Dynamo Endpoint Picker Plugin and HTTPRoute to an existing DynamoGraphDeployment.
 ---
 
-This how-to places a Kubernetes Gateway in front of an existing `DynamoGraphDeployment` (DGD). The
-Gateway API Inference Extension (GAIE) calls the Dynamo Endpoint Picker Plugin (EPP), and the Gateway
-forwards each request to the worker selected by the EPP.
+This how-to places a Kubernetes Gateway in front of an existing `DynamoGraphDeployment` (DGD).
+Through the Gateway API Inference Extension (GAIE), the Gateway calls the Dynamo Endpoint Picker
+Plugin (EPP) and forwards each request to the worker selected by the EPP.
 
 Use this topology when Gateway API should own traffic entry, policy, and gateway-level observability.
 For direct-to-Frontend routing, use [the Dynamo Frontend](dynamo-frontend.md).
 
 <Warning>
-The Dynamo EPP does not have full feature parity with the standard Dynamo deployment, in which the
-Dynamo Frontend routes requests. Before you continue, review
+The Dynamo EPP does not have full feature parity with Dynamo Frontend routing. Before you
+continue, review
 [Features Not Supported by the Dynamo EPP](overview.md#features-not-supported-by-the-dynamo-epp).
 </Warning>
 
