@@ -507,6 +507,8 @@ class OmniHandler(BaseOmniHandler):
                 logger.info(f"Request {request_id} aborted due to shutdown")
                 raise
             except InvalidArgument:
+                # Client-input failure (e.g. unknown or unloaded LoRA adapter):
+                # surface it as a public 400, not an in-band error chunk.
                 raise
             except Exception as e:
                 logger.error(

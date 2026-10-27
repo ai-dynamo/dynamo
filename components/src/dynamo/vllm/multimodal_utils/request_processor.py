@@ -70,7 +70,7 @@ def mark_forwarded_mm_hashes_for_routing(
         if len(prefix) != 16 or any(
             char not in "0123456789abcdefABCDEF" for char in prefix
         ):
-            raise InvalidArgument(
+            raise ValueError(
                 "forwarded multimodal routing hashes must start with 16 hex characters"
             )
         marked_hashes.append(prefix + "0" * 48)

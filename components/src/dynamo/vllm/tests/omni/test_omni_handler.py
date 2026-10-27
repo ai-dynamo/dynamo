@@ -1365,6 +1365,69 @@ class TestLoraEnablement:
         ):
             assert handler._resolve_lora_request("test-model-alias") is None
 
+    @pytest.mark.asyncio
+    async def test_unknown_adapter_chat_rejected_before_generation(self):
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+        handler._abort_monitor = MagicMock(return_value=nullcontext())
+        handler.engine_client.generate = MagicMock(
+            side_effect=AssertionError("engine must not run for a rejected request")
+        )
+        request = {
+            "model": "ghost-adapter",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        with patch(
+            "dynamo.vllm.omni.omni_handler.get_lora_manager",
+            return_value=MagicMock(),
+        ):
+            with pytest.raises(InvalidArgument, match="unknown model or LoRA adapter"):
+                async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                    pass
+
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_admission_recheck_failure_propagates_as_invalid_argument(self):
+        """An adapter unloaded between input build and lock admission must
+        surface as a public InvalidArgument (HTTP 400), not an in-band error
+        chunk inside a 200 stream."""
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+        handler._abort_monitor = MagicMock(return_value=nullcontext())
+        handler.engine_client.generate = MagicMock(
+            side_effect=AssertionError("engine must not run for a rejected request")
+        )
+        handler._lora_state.loaded_loras["adapterA"] = LoRAInfo(
+            id=123, path="/cache/adapterA"
+        )
+
+        original_build = handler.build_engine_inputs
+
+        async def _build_then_unload(*args, **kwargs):
+            inputs = await original_build(*args, **kwargs)
+            # A concurrent unload_lora lands between input build and
+            # admission-lock acquisition.
+            handler._lora_state.loaded_loras.pop("adapterA")
+            return inputs
+
+        handler.build_engine_inputs = _build_then_unload
+
+        request = {
+            "model": "adapterA",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        with patch(
+            "dynamo.vllm.omni.omni_handler.get_lora_manager",
+            return_value=MagicMock(),
+        ):
+            with pytest.raises(InvalidArgument, match="unknown model or LoRA adapter"):
+                async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                    pass
+
+        handler.engine_client.generate.assert_not_called()
+
 
 class TestLoraCapacity:
     def test_resolve_lora_capacity_uses_configured_max_loras(self):
