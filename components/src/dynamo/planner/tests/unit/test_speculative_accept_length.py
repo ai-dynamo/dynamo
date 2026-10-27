@@ -18,6 +18,7 @@ pytestmark = [
 
 
 def _config(speculative_nextn: int) -> PlannerConfig:
+    """Build a decode planner config with the requested speculation setting."""
     return PlannerConfig(
         mode="decode",
         optimization_target="sla",
@@ -30,6 +31,7 @@ def _config(speculative_nextn: int) -> PlannerConfig:
 
 
 def _caps(decode_nextn=None, decode=True) -> WorkerCapabilities:
+    """Build worker capabilities with an optional decode speculation setting."""
     if not decode:
         return WorkerCapabilities()
     return WorkerCapabilities(
@@ -60,5 +62,6 @@ def _caps(decode_nextn=None, decode=True) -> WorkerCapabilities:
 def test_normalize_speculative_accept_length(
     accept_length, caps, config_nextn, expected
 ):
+    """Check capability precedence, fallbacks, and accept-length bounds."""
     config = _config(config_nextn)
     assert normalize_speculative_accept_length(accept_length, caps, config) == expected

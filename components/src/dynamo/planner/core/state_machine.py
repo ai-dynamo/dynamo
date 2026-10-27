@@ -496,6 +496,7 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             logger.info(f"FPM load stats: {len(obs.decode)} decode engines observed")
 
     def _observe_accept_length(self, accept_length: Optional[float]) -> None:
+        """Keep the normalized observation, ignoring missing or non-finite values."""
         if accept_length is None or not math.isfinite(accept_length):
             return
         self._last_accept_length = normalize_speculative_accept_length(
@@ -503,6 +504,7 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         )
 
     def _current_decode_accept_length(self) -> float:
+        """Return the stored accept length within the current speculation bounds."""
         return normalize_speculative_accept_length(
             self._last_accept_length, self._capabilities, self._config
         )

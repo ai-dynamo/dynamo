@@ -123,6 +123,7 @@ class BuiltinLoadPredict:
         self._last_accept_length: float = 1.0
 
     def update_capabilities(self, capabilities: WorkerCapabilities) -> None:
+        """Replace worker capabilities and bound the stored accept length."""
         self._capabilities = capabilities
         self._last_accept_length = normalize_speculative_accept_length(
             self._last_accept_length, self._capabilities, self._config
@@ -188,6 +189,7 @@ class BuiltinLoadPredict:
         self._seen_live_traffic = prepared._seen_live_traffic
 
     def _observe_traffic(self, traffic: TrafficObservation) -> None:
+        """Update traffic history and retain valid cache and acceptance metrics."""
         self._observe_load(traffic)
         if traffic.kv_hit_rate is not None and not math.isnan(traffic.kv_hit_rate):
             self._last_kv_hit_rate = traffic.kv_hit_rate
@@ -219,6 +221,7 @@ class BuiltinLoadPredict:
             return None, None, None
 
     async def Predict(self, req: PredictStageRequest) -> PredictStageResponse:
+        """Forecast traffic and return acceptance bounded by current capabilities."""
         # Keep builtin stage methods async: InProcessTransport runs sync plugin
         # methods in a thread pool, but these methods mutate plugin-local state.
         if not self._config.enable_throughput_scaling:
