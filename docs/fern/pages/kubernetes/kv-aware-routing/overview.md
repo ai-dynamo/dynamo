@@ -122,10 +122,12 @@ behind a Gateway if your platform requires one.
 - **[Session affinity](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity):**
   the EPP does not read session IDs, so requests from one multi-turn or agent session can land on
   different workers and lose the KV cache from earlier turns.
-- **Priority headers:** the EPP ignores the `x-dynamo-request-priority` and
-  `x-dynamo-request-strict-priority` headers. To set
-  [request priority](../../use-cases/agents/priority-scheduling.md) through the EPP, use
-  `nvext.agent_hints` in the request body.
+- **Priority headers:** the EPP's router queue reads priority only from `nvext.agent_hints` in the
+  request body, not from the `x-dynamo-request-priority` and `x-dynamo-request-strict-priority`
+  headers. The worker's Frontend sidecar still applies `x-dynamo-request-priority` to engine
+  scheduling, so the header loses only router-queue ordering, which applies when router queueing is
+  enabled. To set [request priority](../../use-cases/agents/priority-scheduling.md) in both places,
+  use `nvext.agent_hints`.
 - **[Request classification](../../developer-guide/knowledge-base/modular-components/router/custom-admission-control.md):**
   request classifiers do not run for requests the EPP routes, and the EPP does not run custom
   worker-selection policies.
