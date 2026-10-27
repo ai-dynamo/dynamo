@@ -324,27 +324,28 @@ disabled hooks do not enforce the check. When the operator subchart is disabled,
 because the separately managed operator release owns its upgrade policy.
 
 If you have separately validated an unsupported forward upgrade, set
-`unsupportedUpgradeOverride` to the currently installed minor version:
+`unsupportedUpgradeOverride` to the target minor version. For example, to upgrade from `1.2.x` to
+`1.5.x`, set:
 
 ```bash
 helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
   --namespace $NAMESPACE \
-  --set-string dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride=1.2
+  --set-string dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride=1.5
 ```
 
-For an unsupported downgrade, use the corresponding downgrade override:
+For an unsupported downgrade from `1.5.x` to `1.2.x`, unlock the lower target minor with the
+corresponding downgrade override:
 
 ```bash
 helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
   --namespace $NAMESPACE \
-  --set-string dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride=1.5
+  --set-string dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride=1.2
 ```
 
-The override must match the installed operator's `N.M` version. After the transition changes the
-installed minor, the old value no longer matches and cannot authorize another unsupported
-transition. The override applies only to the `upgradePath` check and cannot bypass sibling
-preflight checks. It permits the Helm operation; it does not make that transition a supported
-upgrade or downgrade path.
+The override must match the target operator's `N.M` version. It does not match a later operation
+that targets another minor and cannot authorize that transition. The override applies only to the
+`upgradePath` check and cannot bypass sibling preflight checks. It permits the Helm operation; it
+does not make that transition a supported upgrade or downgrade path.
 
 The check uses Python's standard library with read-only access to the operator Deployment. Set
 `dynamo-operator.upgradePreflight.job.image` and `imagePullSecrets` if the cluster must pull the

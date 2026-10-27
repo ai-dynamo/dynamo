@@ -28,7 +28,7 @@ def version(value):
 
 
 def minor_version(value, field_name):
-    """Parse an override that identifies one installed minor release."""
+    """Parse an override that identifies one target minor release."""
     match = MINOR_VERSION_PATTERN.fullmatch(value.strip())
     if match is None:
         raise ValueError(
@@ -60,21 +60,21 @@ def validate_upgrade_path(
     override = (
         unsupported_upgrade_override if is_upgrade else unsupported_downgrade_override
     )
-    if override and minor_version(override, field_name) == installed[:2]:
+    if override and minor_version(override, field_name) == target[:2]:
         print(
             f"WARNING: allowing unsupported Dynamo {direction} from {installed_value} to {target_value} "
-            f"because {field_path}={override} matches the installed minor release."
+            f"because {field_path}={override} matches the target minor release."
         )
         return
 
-    installed_minor = f"{installed[0]}.{installed[1]}"
+    target_minor = f"{target[0]}.{target[1]}"
     raise ValueError(
         f"Unsupported Dynamo {direction} from {installed_value} to {target_value}. "
         "Dynamo supports Helm transitions only within the installed minor release or to an adjacent minor release. "
         "Move through every intermediate minor release. "
         f"To allow this specific unsupported {direction}, set "
-        f"{field_path}={installed_minor}. The override applies only while "
-        f"the installed operator minor is {installed_minor}"
+        f"{field_path}={target_minor}. The override authorizes only "
+        f"target operator minor {target_minor}"
     )
 
 

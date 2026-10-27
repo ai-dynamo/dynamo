@@ -38,14 +38,14 @@ tests:
       - equal: {path: 'rules[0].resourceNames', value: [RELEASE-NAME-dynamo-operator-controller-manager]}
       - equal: {path: 'rules[0].verbs', value: [get]}
 
-  - it: passes source-bound upgrade and downgrade overrides to the check
+  - it: passes target-bound upgrade and downgrade overrides to the check
     set:
-      dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride: "1.2"
-      dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride: "1.5"
+      dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride: "1.5"
+      dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride: "1.2"
     documentSelector: {path: kind, value: Job}
     asserts:
-      - equal: {path: 'spec.template.spec.containers[0].args[4]', value: "1.2"}
-      - equal: {path: 'spec.template.spec.containers[0].args[5]', value: "1.5"}
+      - equal: {path: 'spec.template.spec.containers[0].args[4]', value: "1.5"}
+      - equal: {path: 'spec.template.spec.containers[0].args[5]', value: "1.2"}
 
   - it: overlays check-specific Job settings by field
     set:
