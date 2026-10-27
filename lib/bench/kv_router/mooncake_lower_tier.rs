@@ -124,7 +124,8 @@ impl KvcrCache {
 /// Adds the KVCR layer to one worker's timeline. Each completed CPU-tier store (a worker-owned
 /// host-tier `Stored`) is copied into the worker's KVCR tier: its evictions become one `Removed`,
 /// and each run of blocks KVCR didn't hold becomes one `Stored`, right after the CPU-tier event.
-/// A copy refreshes recency tail to head, so a chain's tail is evicted before its head.
+/// A copy refreshes recency tail to head, so a chain's tail is evicted before its head, and a
+/// store longer than the tier keeps only its head.
 pub(crate) fn derive_kvcr_layer(
     timeline: Vec<WorkerTrace>,
     capacity: usize,
@@ -150,17 +151,12 @@ pub(crate) fn derive_kvcr_layer(
         let Some((store, dp_rank)) = copy else {
             continue;
         };
-        anyhow::ensure!(
-            store.blocks.len() <= capacity,
-            "a CPU-tier store of {} blocks exceeds the KVCR capacity of {capacity}",
-            store.blocks.len()
-        );
-        let missing: Vec<bool> = store
-            .blocks
+        let blocks = &store.blocks[..store.blocks.len().min(capacity)];
+        let missing: Vec<bool> = blocks
             .iter()
             .map(|block| !cache.resident.contains_key(&block.block_hash.0))
             .collect();
-        for block in store.blocks.iter().rev() {
+        for block in blocks.iter().rev() {
             cache.touch(block.block_hash.0);
         }
         let mut push = |data| {
@@ -196,10 +192,10 @@ pub(crate) fn derive_kvcr_layer(
             push(KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: match start {
                     0 => store.parent_hash,
-                    _ => Some(store.blocks[start - 1].block_hash),
+                    _ => Some(blocks[start - 1].block_hash),
                 },
                 start_position: store.start_position.map(|position| position + start as u32),
-                blocks: store.blocks[start..end].to_vec(),
+                blocks: blocks[start..end].to_vec(),
             }));
             start = end;
         }
@@ -308,7 +304,6 @@ fn heap_allocated() -> anyhow::Result<Option<(Allocator, u64)>> {
     Ok(None)
 }
 
-/// The lower tier's memberships and heap at the end of a run.
 pub(crate) struct Footprint {
     pub(crate) cpu_tier_memberships: usize,
     pub(crate) kvcr_memberships: usize,

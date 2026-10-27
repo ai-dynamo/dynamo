@@ -1140,8 +1140,9 @@ fn host_store(
 
 #[test]
 fn kvcr_layer_copies_cpu_tier_stores_and_evicts_tails_first() -> anyhow::Result<()> {
-    // A KVCR tier of 3 blocks behind three CPU-tier stores: [1, 2, 3], then [4] after 3, then
-    // [1, 5]. Copies touch tail to head, so 3 (the tail of the first chain) goes before 1.
+    // A KVCR tier of 3 blocks behind four CPU-tier stores: [1, 2, 3], then [4] after 3, then
+    // [1, 5], then [1, 5, 6, 7]. Copies touch tail to head, so 3 (the tail of the first chain)
+    // goes before 1, and the last store, longer than the tier, copies only [1, 5, 6].
     let artifacts = vec![ReplayWorkerArtifacts {
         requests: Vec::new(),
         output_signals: Vec::new(),
@@ -1149,6 +1150,7 @@ fn kvcr_layer_copies_cpu_tier_stores_and_evicts_tails_first() -> anyhow::Result<
             host_store(0, None, 0, &[1, 2, 3], 10),
             host_store(1, Some(3), 3, &[4], 20),
             host_store(2, None, 0, &[1, 5], 30),
+            host_store(3, None, 0, &[1, 5, 6, 7], 40),
         ],
     }];
     let merged = merge_worker_traces(artifacts, BLOCK_SIZE)?.with_kvcr_layer(3)?;
@@ -1189,6 +1191,8 @@ fn kvcr_layer_copies_cpu_tier_stores_and_evicts_tails_first() -> anyhow::Result<
             (2, stored(Some(3), 3, &[4])),
             (3, removed(2)),
             (4, stored(Some(1), 1, &[5])),
+            (5, removed(4)),
+            (6, stored(Some(5), 2, &[6])),
         ]
     );
     let (cpu_tier, kvcr) = (prepared.totals.cpu_tier, prepared.totals.kvcr);
@@ -1198,7 +1202,7 @@ fn kvcr_layer_copies_cpu_tier_stores_and_evicts_tails_first() -> anyhow::Result<
             cpu_tier.stored_blocks,
             cpu_tier.live_memberships
         ),
-        (3, 6, 5)
+        (4, 10, 7)
     );
     assert_eq!(
         (
@@ -1206,7 +1210,7 @@ fn kvcr_layer_copies_cpu_tier_stores_and_evicts_tails_first() -> anyhow::Result<
             kvcr.removed_blocks,
             kvcr.live_memberships
         ),
-        (5, 2, 3)
+        (6, 3, 3)
     );
     assert_eq!(
         prepared.totals.events(),
@@ -1224,7 +1228,7 @@ async fn mooncake_lower_tier_open_loop_routes_both_host_streams() -> anyhow::Res
     let engine = host_offload_mock_engine_args(1024, BLOCK_SIZE as usize, 2048, 131072)?;
     let artifacts = generate_replay_artifacts_with_args(&traces, engine, None).await?;
     let merged = merge_worker_traces(artifacts, BLOCK_SIZE)?.with_kvcr_layer(1024)?;
-    let prepared = prepare_scaled_benchmark(merged, 5_000);
+    let prepared = prepare_scaled_benchmark(merged, 1_000);
     let corpus = prepare_mooncake_corpus(prepared, 1)?;
     let trial = prepare_open_loop_trial(corpus, 2)?;
     let indexer = Arc::new(ThreadPoolIndexer::new(

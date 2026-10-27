@@ -406,7 +406,6 @@ pub(crate) fn merge_worker_traces(
 }
 
 impl MergedMooncakeBenchmark {
-    /// Adds each worker's KVCR tier of `capacity` blocks (`derive_kvcr_layer`).
     pub(crate) fn with_kvcr_layer(self, capacity: usize) -> anyhow::Result<Self> {
         let worker_traces = self
             .worker_traces
@@ -437,7 +436,6 @@ pub(crate) fn prepare_scaled_benchmark(
     let mut totals = MooncakeTraceTotals::default();
 
     for timeline in worker_traces.iter() {
-        // Each host tier's resident blocks on this worker: its live memberships at the end.
         let mut cpu_tier_live = HashSet::new();
         let mut kvcr_live = HashSet::new();
         for entry in timeline {
