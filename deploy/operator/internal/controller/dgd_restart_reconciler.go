@@ -137,13 +137,15 @@ func computeParallelRestartStatus(
 }
 
 // computeSequentialRestartStatus handles sequential restart where components restart one at a time.
-func (r *dgdRestartReconciler) computeSequentialRestartStatus(
+// Each workload program supplies its own progress resolver, next-component policy, and logger.
+func computeSequentialRestartStatus(
 	ctx context.Context,
+	logger logr.Logger,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	order []string,
 	resolveProgress restartProgressResolver,
+	nextComponentInOrder func(order []string, currentComponent string) (string, bool),
 ) *nvidiacomv1beta1.RestartStatus {
-	logger := log.FromContext(ctx)
 	specID := dgd.Spec.Restart.ID
 	if len(order) == 0 {
 		logger.Info("Sequential restart completed with no components", "specID", specID)
@@ -185,7 +187,7 @@ func (r *dgdRestartReconciler) computeSequentialRestartStatus(
 	}
 
 	logger.Info("Component restart completed", "component", currentComponent)
-	nextComponent, currentFound := getNextComponentInOrder(order, currentComponent)
+	nextComponent, currentFound := nextComponentInOrder(order, currentComponent)
 	if !currentFound {
 		logger.Info("Current restart component is no longer in order, restarting sequence from first component", "component", currentComponent, "firstComponent", order[0])
 		return &nvidiacomv1beta1.RestartStatus{
@@ -254,5 +256,12 @@ func (r *dgdRestartReconciler) computeRestartStatusWithProgressResolver(
 	if dynamo.IsParallelRestart(dgd) {
 		return computeParallelRestartStatus(ctx, log.FromContext(ctx), dgd, resolveProgress)
 	}
-	return r.computeSequentialRestartStatus(ctx, dgd, dynamo.GetRestartOrder(dgd), resolveProgress)
+	return computeSequentialRestartStatus(
+		ctx,
+		log.FromContext(ctx),
+		dgd,
+		dynamo.GetRestartOrder(dgd),
+		resolveProgress,
+		getNextComponentInOrder,
+	)
 }

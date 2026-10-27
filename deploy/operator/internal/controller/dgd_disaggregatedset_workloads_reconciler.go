@@ -254,73 +254,18 @@ func (r *disaggregatedSetWorkloadsReconciler) computeRestartStatus(
 		// The DisaggregatedSet path does not log restart progress.
 		return computeParallelRestartStatus(ctx, logr.Discard(), dgd, r.restartProgress.Resolve)
 	}
-	return r.computeSequentialRestartStatus(ctx, dgd, dynamo.GetRestartOrder(dgd))
-}
-
-func (r *disaggregatedSetWorkloadsReconciler) computeSequentialRestartStatus(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	order []string,
-) *nvidiacomv1beta1.RestartStatus {
-	specID := dgd.Spec.Restart.ID
-	if len(order) == 0 {
-		return &nvidiacomv1beta1.RestartStatus{
-			ObservedID: specID,
-			Phase:      nvidiacomv1beta1.RestartPhaseCompleted,
-		}
-	}
-	if isNewRestartRequest(dgd) {
-		return &nvidiacomv1beta1.RestartStatus{
-			ObservedID: specID,
-			Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
-			InProgress: []string{order[0]},
-		}
-	}
-
-	currentComponent := ""
-	if dgd.Status.Restart != nil && len(dgd.Status.Restart.InProgress) > 0 {
-		currentComponent = dgd.Status.Restart.InProgress[0]
-	}
-	if currentComponent == "" {
-		return &nvidiacomv1beta1.RestartStatus{
-			ObservedID: specID,
-			Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
-			InProgress: []string{order[0]},
-		}
-	}
-
-	updatedInProgress := r.restartProgress.Resolve(
+	// The DisaggregatedSet path does not log restart progress. Its next-component
+	// policy restarts the selected DisaggregatedSet roles as one step.
+	return computeSequentialRestartStatus(
 		ctx,
+		logr.Discard(),
 		dgd,
-		[]string{currentComponent},
+		dynamo.GetRestartOrder(dgd),
+		r.restartProgress.Resolve,
+		func(order []string, currentComponent string) (string, bool) {
+			return r.getNextSequentialRestartComponent(dgd, order, currentComponent)
+		},
 	)
-	if len(updatedInProgress) > 0 {
-		return &nvidiacomv1beta1.RestartStatus{
-			ObservedID: specID,
-			Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
-			InProgress: []string{currentComponent},
-		}
-	}
-
-	nextComponent, currentFound := r.getNextSequentialRestartComponent(dgd, order, currentComponent)
-	if !currentFound {
-		return &nvidiacomv1beta1.RestartStatus{
-			ObservedID: specID,
-			Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
-			InProgress: []string{order[0]},
-		}
-	}
-	if nextComponent == "" {
-		return &nvidiacomv1beta1.RestartStatus{
-			ObservedID: specID,
-			Phase:      nvidiacomv1beta1.RestartPhaseCompleted,
-		}
-	}
-	return &nvidiacomv1beta1.RestartStatus{
-		ObservedID: specID,
-		Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
-		InProgress: []string{nextComponent},
-	}
 }
 
 func (r *disaggregatedSetWorkloadsReconciler) getNextSequentialRestartComponent(
