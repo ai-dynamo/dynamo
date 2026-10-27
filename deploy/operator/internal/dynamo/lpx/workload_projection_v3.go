@@ -17,6 +17,8 @@ const (
 	v3CompilerEnvelopeSchema = "dynamo.lpx.v3-capnp/v1"
 	v3ProjectionVersion      = "v3-hx-capnp/v1"
 	v3LPUDevice              = "lpu"
+	// maxHXPropSyncConnections bounds the logical device pairs across one request's HX connectors.
+	maxHXPropSyncConnections = 8192
 )
 
 func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
@@ -163,15 +165,14 @@ func projectV3PropSync(partitions []buildPartition, edgePositions []int) (json.R
 	}
 
 	// Project validated edges into runtime metadata and scheduler connector order.
-	const maxConnections = 8192
-	remainingConnections := maxConnections
+	remainingConnections := maxHXPropSyncConnections
 	propSyncPairs := make([]any, 0)
 	connectors := make([]lpxv1alpha1.PropSyncConnectorRequest, 0, len(edgePositions))
 	for _, fromPosition := range edgePositions {
 		source := partitions[fromPosition]
 		destination := partitions[fromPosition+1]
 		if source.devicesPerNode > remainingConnections {
-			return nil, nil, fmt.Errorf("HX prop-sync graph exceeds %d logical connections", maxConnections)
+			return nil, nil, fmt.Errorf("HX prop-sync graph exceeds %d logical connections", maxHXPropSyncConnections)
 		}
 		remainingConnections -= source.devicesPerNode
 

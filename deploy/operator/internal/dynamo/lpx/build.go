@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 )
 
 // BuildFamily identifies the physical LPU target family of a normalized build.
@@ -40,6 +42,10 @@ type Build struct {
 	partitions []buildPartition
 	// selectedPropSyncChains contains source partition IDs grouped into selected prop-sync chains.
 	selectedPropSyncChains [][]int
+	// lpuUnits is the validated compiler-owned LPU placement in Agent order. Nil
+	// means the compiler predates units, so projection derives placement from
+	// partitions and selectedPropSyncChains.
+	lpuUnits []lpuUnit
 	// standaloneTokenEmbeddings reports whether token embeddings occupy a standalone partition.
 	standaloneTokenEmbeddings bool
 	// supportsCPUEmbeddings reports whether standalone token embeddings may run on the CPU.
@@ -74,6 +80,43 @@ type buildPartition struct {
 	// runtimeNodeCount sums physical endpoints for a collapsed hybrid chain;
 	// numChips retains the original root stage.
 	runtimeNodeCount int
+}
+
+// lpuUnit is one compiler-owned runtime group: a selected prop-sync chain or a
+// single LPU partition. Its root, the first partition of its first reservation,
+// names the unit in localPartitions and LPX_LOCAL_PARTITION_IDS. The exported
+// fields define the unit's digest encoding.
+type lpuUnit struct {
+	// Reservations lists the unit's scheduler partitions in Agent order.
+	Reservations []lpuReservation `json:"reservations"`
+	// Connectors[i] joins Reservations[i] to Reservations[i+1].
+	Connectors []lpxv1alpha1.PropSyncConnectorRequirement `json:"connectors"`
+}
+
+// lpuReservation is the set of hosts that one LPU partition, or several packed
+// stages of one chain, run on.
+type lpuReservation struct {
+	// PartitionIDs lists consecutive ascending compiler partition IDs.
+	PartitionIDs []int `json:"partitionIds"`
+	// Hosts is the reservation's Agent count.
+	Hosts int `json:"hosts"`
+	// HXExtent is the LP30 scheduler extent [devicesPerNode, traysPerHemisphere,
+	// hemispheres, racks]; nil when the compiler sized the reservation in nodes.
+	HXExtent []int64 `json:"hxExtent,omitempty"`
+}
+
+// root returns the unit's first partition ID.
+func (u lpuUnit) root() int {
+	return u.Reservations[0].PartitionIDs[0]
+}
+
+// partitionIDs returns the unit's partition IDs across its reservations.
+func (u lpuUnit) partitionIDs() []int {
+	var ids []int
+	for _, reservation := range u.Reservations {
+		ids = append(ids, reservation.PartitionIDs...)
+	}
+	return ids
 }
 
 // effectiveNodeCount returns the number of Agent endpoints assigned to the

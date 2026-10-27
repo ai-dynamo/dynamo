@@ -27,6 +27,8 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
+	commoncapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/common/v1"
+	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
 	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -78,6 +80,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 		"from_dgd_yaml/node-local-v3-hx-hybrid",
 		"from_dgd_yaml/node-local-v3-hx-hybrid-all-local",
 		"from_dgd_yaml/lpx-v3-hx-local-partitions",
+		"from_dgd_yaml/node-local-v2-hybrid-units",
 		"from_dgd_yaml/single_v2",
 		"from_dgd_yaml/lpu-cyborg-specdec",
 		"from_dgd_yaml/lpu-gpu-specdecode",
@@ -759,6 +762,18 @@ func newTestDataModelRegistry(t *testing.T, registryRoot string) lpx.ModelRegist
 		writeTestGraphBuild(t, registryRoot, buildID, testV3GraphManifestCapnp(t, fixture))
 	}
 
+	deploymentBuilds := map[string]testDeploymentV1UnitsFixture{
+		"node-local-v2-hybrid-units-lpx": {
+			partitionCount:        4,
+			numChips:              16,
+			devicesPerNode:        8,
+			selectedPropSyncChain: []uint32{1, 2},
+		},
+	}
+	for buildID, fixture := range deploymentBuilds {
+		writeTestDeploymentBuild(t, registryRoot, buildID, testDeploymentV1UnitsCapnp(t, fixture))
+	}
+
 	registry, err := lpx.NewModelRegistry(registryRoot, nil)
 	require.NoError(t, err)
 	return registry
@@ -1047,6 +1062,108 @@ func writeTestGraphBuild(t *testing.T, registryRoot, buildID string, manifest []
 	require.NoError(t, os.MkdirAll(buildDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(buildDir, "manifest.v2.capnp.bin"), manifest, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(buildDir, "manifest.json"), []byte(`{}`), 0o600))
+}
+
+// testDeploymentV1UnitsFixture describes a hybrid LP20 deployment.v1 build with
+// compiler-owned LPU units: the selected chain is one unit and every other LPU
+// partition is its own unit. A CUDA partition follows the LPU partitions.
+type testDeploymentV1UnitsFixture struct {
+	partitionCount        int
+	numChips              uint32
+	devicesPerNode        uint32
+	selectedPropSyncChain []uint32
+}
+
+func testDeploymentV1UnitsCapnp(t *testing.T, fixture testDeploymentV1UnitsFixture) []byte {
+	t.Helper()
+
+	t.Log("Encode the hybrid deployment program, runtime I/O and selected chain")
+	message, segment := capnp.NewSingleSegmentMessage(nil)
+	deployment, err := deploymentcapnpv1.NewRootDeployment(segment)
+	require.NoError(t, err)
+	deployment.SetContractRevision(deploymentcapnpv1.CurrentContractRevision)
+	config, err := deployment.NewConfig()
+	require.NoError(t, err)
+	config.SetCompilationMode(deploymentcapnpv1.CompilationMode_lpx)
+	_, err = config.NewProgram()
+	require.NoError(t, err)
+	runtimeIO, err := config.NewRuntimeIo()
+	require.NoError(t, err)
+	runtimeIO.SetIoFpgaCount(1)
+	runtimeIO.SetFanoutFactor(1)
+	chains, err := config.NewSelectedPropSyncChains(1)
+	require.NoError(t, err)
+	chainIDs, err := chains.At(0).NewPartitionIds(int32(len(fixture.selectedPropSyncChain)))
+	require.NoError(t, err)
+	for index, id := range fixture.selectedPropSyncChain {
+		chainIDs.Set(index, id)
+	}
+
+	t.Log("Encode one unit per runtime partition, joining the chain's reservations with xt8888Gap connectors")
+	nodes := max(1, fixture.numChips/fixture.devicesPerNode)
+	unitCount := fixture.partitionCount - len(fixture.selectedPropSyncChain) + 1
+	units, err := config.NewLpuUnits(int32(unitCount))
+	require.NoError(t, err)
+	unitIndex := 0
+	for id := uint32(0); id < uint32(fixture.partitionCount); {
+		members := []uint32{id}
+		if id == fixture.selectedPropSyncChain[0] {
+			members = fixture.selectedPropSyncChain
+		}
+		reservations, err := units.At(unitIndex).NewReservations(int32(len(members)))
+		require.NoError(t, err)
+		for index, member := range members {
+			ids, err := reservations.At(index).NewPartitionIds(1)
+			require.NoError(t, err)
+			ids.Set(0, member)
+			reservations.At(index).Size().SetNodes(nodes)
+		}
+		connectors, err := units.At(unitIndex).NewConnectors(int32(len(members) - 1))
+		require.NoError(t, err)
+		for index := range len(members) - 1 {
+			_, err := connectors.At(index).NewXt8888Gap()
+			require.NoError(t, err)
+		}
+		unitIndex++
+		id += uint32(len(members))
+	}
+
+	t.Log("Encode the LP20 partitions and the CUDA partition")
+	partitions, err := deployment.NewPartitions(int32(fixture.partitionCount + 1))
+	require.NoError(t, err)
+	for index := range fixture.partitionCount {
+		ref, err := partitions.At(index).NewPartition()
+		require.NoError(t, err)
+		ref.SetDeviceType(commoncapnpv1.DeviceType_lpu)
+		ref.SetPartitionId(uint32(index))
+		detail, err := partitions.At(index).Detail().NewLpu()
+		require.NoError(t, err)
+		require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", index)))
+		require.NoError(t, detail.SetTopology("test-topology"))
+		detail.SetNumChips(fixture.numChips)
+		detail.SetDevicesPerNode(fixture.devicesPerNode)
+		detail.SetArchitecture(deploymentcapnpv1.LpuArchitecture_lp20)
+	}
+	ref, err := partitions.At(fixture.partitionCount).NewPartition()
+	require.NoError(t, err)
+	ref.SetDeviceType(commoncapnpv1.DeviceType_cuda)
+	ref.SetPartitionId(uint32(fixture.partitionCount))
+	_, err = partitions.At(fixture.partitionCount).Detail().NewCuda()
+	require.NoError(t, err)
+
+	data, err := message.Marshal()
+	require.NoError(t, err)
+	return data
+}
+
+// writeTestDeploymentBuild publishes a deployment.v1 build, the only contract the
+// operator reads from a split bundle.
+func writeTestDeploymentBuild(t *testing.T, registryRoot, buildID string, deployment []byte) {
+	t.Helper()
+
+	buildDir := filepath.Join(registryRoot, buildID)
+	require.NoError(t, os.MkdirAll(buildDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(buildDir, "deployment.v1.capnp.bin"), deployment, 0o600))
 }
 
 func renderLPXTestPodCliqueSet(

@@ -19,12 +19,16 @@ import (
 
 // configureHybridCyborg consumes a fresh hybrid clique from an admitted source
 // whose conductor resources were validated during workload selection.
-// cyborgConfigMap is the nonnil Agent-address ConfigMap rendered for that workload.
+// agentTemplateName names the workload's Agent template, which Cyborg addresses
+// even when no Agent replicas remain; agentTemplateNames lists the templates with
+// replicas. cyborgConfigMap is the nonnil Agent-address ConfigMap rendered for
+// that workload.
 func configureHybridCyborg(
 	cyborg *grovev1alpha1.PodCliqueTemplateSpec,
 	projection *ModelProjection,
 	workloadDigest string,
 	modelStoragePath string,
+	agentTemplateName string,
 	agentTemplateNames []string,
 	cyborgConfigMap *corev1.ConfigMap,
 	cyborgConfigHash string,
@@ -47,6 +51,10 @@ func configureHybridCyborg(
 	}
 	applyLocalPartitionIDs(container, projection)
 	applyCyborgWeightsPath(container, projection, modelStoragePath)
+	if projection.placesLPUUnits() {
+		// Unit-aware Cyborg derives Agent addresses from this template name.
+		applyAllocation(container, agentTemplateName)
+	}
 
 	cyborg.Annotations = roleAnnotations(
 		cyborg.Annotations,

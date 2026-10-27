@@ -158,11 +158,15 @@ func RenderNodeLocal(
 				continue
 			}
 
-			// Publish the model path before template-owned hybrid Agent bindings.
+			// Publish the model path, and for unit placement the GPU-local units,
+			// before template-owned hybrid Agent bindings.
 			if hybrid {
 				container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
 				if err := applyModelPaths(container, projections, modelStoragePath); err != nil {
 					return nil, fmt.Errorf("stage %s: %w", stage, err)
+				}
+				if projection.placesLPUUnits() {
+					applyLocalPartitionIDs(container, projection)
 				}
 			} else {
 				storagePath, err := lpuModelStoragePath(template.Spec)
@@ -218,6 +222,7 @@ func RenderNodeLocal(
 			projections[0],
 			workloadDigest,
 			modelStoragePath,
+			plan.Agents[0].TemplateName,
 			agentTemplateNames,
 			cyborgConfigMap,
 			cyborgConfigHash,

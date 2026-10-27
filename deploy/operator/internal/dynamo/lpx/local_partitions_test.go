@@ -131,6 +131,7 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 	tests := []struct {
 		name     string
 		localIDs []int
+		units    bool
 		env      []corev1.EnvVar
 		envFrom  []corev1.EnvFromSource
 		wantEnv  []corev1.EnvVar
@@ -139,6 +140,18 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 			name:    "no local partitions removes authored values",
 			env:     []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "authored"}, {Name: "OTHER", Value: "kept"}},
 			wantEnv: []corev1.EnvVar{{Name: "OTHER", Value: "kept"}},
+		},
+		{
+			name:    "unit placement publishes an empty selection",
+			units:   true,
+			env:     []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "authored"}, {Name: "OTHER", Value: "kept"}},
+			wantEnv: []corev1.EnvVar{{Name: localPartitionIDsEnv}, {Name: "OTHER", Value: "kept"}},
+		},
+		{
+			name:     "unit placement publishes its local unit roots",
+			localIDs: []int{0, 15},
+			units:    true,
+			wantEnv:  []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "0,15"}},
 		},
 		{
 			name:    "no local partitions shadows envFrom sources",
@@ -186,9 +199,13 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			t.Log("Publish the resolved local partitions into the Cyborg container")
+			t.Log("Publish the resolved local partitions into the runtime container")
+			projection := &ModelProjection{localPartitionIDs: test.localIDs}
+			if test.units {
+				projection.configuredBuild.lpuUnits = []lpuUnit{}
+			}
 			container := &corev1.Container{Env: test.env, EnvFrom: test.envFrom}
-			applyLocalPartitionIDs(container, &ModelProjection{localPartitionIDs: test.localIDs})
+			applyLocalPartitionIDs(container, projection)
 			require.Equal(t, test.wantEnv, container.Env)
 		})
 	}

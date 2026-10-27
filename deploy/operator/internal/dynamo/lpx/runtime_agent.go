@@ -20,17 +20,21 @@ func configureNodeLocalConductorRuntime(
 	allocation string,
 ) {
 	// Bind placement data without interpreting the template's executable or arguments.
-	conductor := common.FindContainerByName(conductorPodSpec.Containers, commonconsts.MainContainerName)
+	applyAllocation(common.FindContainerByName(conductorPodSpec.Containers, commonconsts.MainContainerName), allocation)
+}
 
+// applyAllocation publishes the Agent PodClique template names into one fresh
+// runtime container, replacing any authored value.
+func applyAllocation(container *corev1.Container, allocation string) {
 	// Kubernetes expands environment references in order; publish allocation before authored bindings.
-	env := make([]corev1.EnvVar, 0, len(conductor.Env)+1)
+	env := make([]corev1.EnvVar, 0, len(container.Env)+1)
 	env = append(env, corev1.EnvVar{Name: allocationEnvVar, Value: allocation})
-	for _, variable := range conductor.Env {
+	for _, variable := range container.Env {
 		if variable.Name != allocationEnvVar {
 			env = append(env, variable)
 		}
 	}
-	conductor.Env = env
+	container.Env = env
 }
 
 // applyModelPaths binds nonempty canonical projections into a fresh runtime container.

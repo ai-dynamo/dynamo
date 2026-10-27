@@ -12,6 +12,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -472,4 +473,91 @@ func namedClique(t *testing.T, pcs *grovev1alpha1.PodCliqueSet, name string) *gr
 	}
 	t.Fatalf("clique %q not found", name)
 	return nil
+}
+
+func TestRenderHybridUnitRuntimeEnvironment(t *testing.T) {
+	t.Parallel()
+	bundle := testUnitBundle{
+		architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8, hybrid: true, chains: [][]uint32{{1, 2}},
+		partitions: testUnitPartitions(16, nil, 0, 1, 2, 3),
+		units: []testLPUUnit{
+			{reservations: []testLPUReservation{testNodesReservation(2, 0)}},
+			{reservations: []testLPUReservation{testNodesReservation(2, 1), testNodesReservation(2, 2)}, connectors: []testLPUConnector{{}}},
+			{reservations: []testLPUReservation{testNodesReservation(2, 3)}},
+		},
+	}
+	for _, test := range []struct {
+		name          string
+		legacy        bool
+		selection     *v1beta1.LPXLocalPartitions
+		wantAgentEnv  []corev1.EnvVar
+		wantCyborgEnv []corev1.EnvVar
+	}{
+		{
+			name:          "legacy placement keeps the selection on Cyborg only",
+			legacy:        true,
+			selection:     &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{0}},
+			wantAgentEnv:  []corev1.EnvVar{},
+			wantCyborgEnv: []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "0"}},
+		},
+		{
+			name:          "legacy placement omits an empty selection",
+			legacy:        true,
+			wantAgentEnv:  []corev1.EnvVar{},
+			wantCyborgEnv: []corev1.EnvVar{},
+		},
+		{
+			name:          "unit placement publishes an empty selection and the Agent template",
+			wantAgentEnv:  []corev1.EnvVar{{Name: localPartitionIDsEnv}},
+			wantCyborgEnv: []corev1.EnvVar{{Name: allocationEnvVar, Value: testAgentTemplateName}, {Name: localPartitionIDsEnv}},
+		},
+		{
+			name:          "unit placement publishes local unit roots",
+			selection:     &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{0}},
+			wantAgentEnv:  []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "0"}},
+			wantCyborgEnv: []corev1.EnvVar{{Name: allocationEnvVar, Value: testAgentTemplateName}, {Name: localPartitionIDsEnv, Value: "0"}},
+		},
+		{
+			name:          "unit placement names the Agent template without Agents",
+			selection:     &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll},
+			wantCyborgEnv: []corev1.EnvVar{{Name: allocationEnvVar, Value: testAgentTemplateName}, {Name: localPartitionIDsEnv, Value: "0,1,3"}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Project the hybrid bundle through its units or the legacy derivation")
+			build, err := acquireTestUnitBundle(t, bundle)
+			require.NoError(t, err)
+			if test.legacy {
+				build.lpuUnits = nil
+			}
+			projections, err := projectTestUnits(build, test.selection)
+			require.NoError(t, err)
+
+			t.Log("Render the hybrid workload")
+			rendered, err := renderSelectedForTest(renderTestPCS(true), projections, RenderInput{
+				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
+			})
+			require.NoError(t, err)
+
+			t.Log("Publish placement variables to hybrid Agents and Cyborg in binding order")
+			require.Equal(t, test.wantCyborgEnv, placementEnv(namedClique(t, rendered, "cond").Spec.PodSpec.Containers[0].Env))
+			agentIndex := slices.IndexFunc(rendered.Spec.Template.Cliques, func(clique *grovev1alpha1.PodCliqueTemplateSpec) bool {
+				return clique.Name == testAgentTemplateName
+			})
+			if test.wantAgentEnv == nil {
+				require.Equal(t, -1, agentIndex)
+				return
+			}
+			require.Equal(t, test.wantAgentEnv, placementEnv(rendered.Spec.Template.Cliques[agentIndex].Spec.PodSpec.Containers[0].Env))
+		})
+	}
+}
+
+// placementEnv returns the unit placement variables of env in order.
+func placementEnv(env []corev1.EnvVar) []corev1.EnvVar {
+	return slices.DeleteFunc(slices.Clone(env), func(variable corev1.EnvVar) bool {
+		return variable.Name != localPartitionIDsEnv && variable.Name != allocationEnvVar
+	})
 }
