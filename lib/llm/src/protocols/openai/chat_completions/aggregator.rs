@@ -178,6 +178,7 @@ struct DeltaChoice {
     role: Option<dynamo_protocols::types::Role>,
     /// The reason the completion was finished (if applicable).
     finish_reason: Option<dynamo_protocols::types::FinishReason>,
+    model_eos: bool,
     /// Optional log probabilities for the chat choice.
     logprobs: Option<dynamo_protocols::types::ChatChoiceLogprobs>,
     // Tool-call chunks accumulated in the order they arrived from the stream,
@@ -576,6 +577,7 @@ impl DeltaAggregator {
                                     text: "".to_string(),
                                     role: choice_role,
                                     finish_reason: None,
+                                    model_eos: false,
                                     logprobs: None,
                                     tool_call_chunks: BTreeMap::new(),
                                     parser_call_completion: HashMap::new(),
@@ -638,6 +640,7 @@ impl DeltaAggregator {
                         // Update finish reason if provided.
                         if let Some(finish_reason) = choice.finish_reason {
                             state_choice.finish_reason = Some(finish_reason);
+                            state_choice.model_eos = delta.model_eos.contains(&choice.index);
                         }
 
                         // Update logprobs
@@ -750,7 +753,7 @@ impl DeltaAggregator {
                 {
                     continue;
                 }
-                match super::unified_parser::parse_complete_with_policy(
+                match super::unified_parser::parse_complete_with_eos(
                     family,
                     &choice.text,
                     &parsing_options.guided_tool_constraint,
@@ -759,6 +762,9 @@ impl DeltaAggregator {
                         reasoning_disabled: parsing_options.reasoning_disabled,
                         structured_response: parsing_options.structured_response,
                     },
+                    choice.model_eos
+                        && choice.finish_reason
+                            == Some(dynamo_protocols::types::FinishReason::Stop),
                 ) {
                     Ok(parsed) => {
                         if choice.index == 0
@@ -800,6 +806,12 @@ impl DeltaAggregator {
                                     Some(dynamo_protocols::types::FinishReason::ToolCalls);
                             }
                         }
+                    }
+                    Err(error) if family == super::unified_parser::BEAM_UNIFIED_FAMILY => {
+                        return Err(DynamoError::builder()
+                            .class(dynamo_runtime::error::ErrorClass::Internal)
+                            .diagnostic(format!("Invalid Beam tool output: {error}"))
+                            .build());
                     }
                     Err(error) => {
                         // Best-effort: the aggregated text is served as-is rather than
@@ -1207,6 +1219,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
 
         Annotated {
@@ -1258,6 +1271,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
         Annotated {
             data: Some(data),
@@ -1382,6 +1396,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
         let annotated = Annotated {
             data: Some(data),
@@ -1443,6 +1458,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
         Annotated {
             data: Some(data),
@@ -2102,6 +2118,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
 
         // Wrap it in Annotated and create a stream
@@ -3699,6 +3716,7 @@ mod tests {
             logprobs: None,
             tool_call_chunks: BTreeMap::new(),
             parser_call_completion: HashMap::new(),
+            model_eos: false,
             tool_calls: None,
             reasoning_content: Some("Analyzing the question.".to_string()),
             refusal: None,

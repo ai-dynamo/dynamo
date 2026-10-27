@@ -356,6 +356,12 @@ pub struct NvCreateChatCompletionStreamResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schema(ignore)]
     pub tool_call_completion: Vec<ToolCallCompletion>,
+    /// Choice indices with confirmed model EOS under an installed Beam turn grammar.
+    /// User stops, unconstrained output and transport EOF never authorize closure.
+    /// Defaulting makes older frontend/worker transports conservative; HTTP removes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(ignore)]
+    pub model_eos: Vec<u32>,
 }
 
 fn deserialize_prompt_logprobs<'de, D>(
@@ -429,6 +435,7 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     data.llm_metrics = None;
     data.tool_call_completion.clear();
     data.message_boundary = None;
+    data.model_eos.clear();
     data.nvext = None;
     data.prompt_logprobs = None;
     Some(())
