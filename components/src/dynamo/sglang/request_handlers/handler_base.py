@@ -38,6 +38,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.sglang._compat import supports_disagg_prefill_cancel_anytime
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import kv_event_block_size
+from dynamo.sglang.elastic_ep import scale_external_elastic_ep
 from dynamo.sglang.engine_generate import native_generate_payload
 from dynamo.sglang.engine_routes import resolve_configured_engine_routes
 from dynamo.sglang.gateway import follow_pause_broadcasts
@@ -811,52 +812,17 @@ class BaseWorkerHandler(
         the current EP size. ``new_ep_size`` is the target number of EP ranks.
         """
 
-        def err(message: str) -> dict:
-            return {"status": "error", "message": message}
-
-        body = body or {}
-        if not isinstance(body, dict):
-            return err("request body must be a JSON object")
-
-        new_ep_size = body.get("new_ep_size")
-        if new_ep_size is None:
-            return err("Missing required field: new_ep_size")
-        # bool is an int subclass — reject it so True/False can't pose as a size.
-        if isinstance(new_ep_size, bool) or not isinstance(new_ep_size, int):
-            return err(f"new_ep_size must be an integer, got: {new_ep_size!r}")
-        if new_ep_size <= 0:
-            return err("new_ep_size must be a positive integer")
-
         backend_error = self._require_elastic_ep_backend()
         if backend_error:
             return backend_error
-
-        from sglang.srt.managers.io_struct import ScaleElasticEPReqInput
-
-        tokenizer_manager = self.engine.tokenizer_manager
         async with self._scale_ep_lock:
             try:
-                result = await tokenizer_manager.scale_elastic_ep(
-                    ScaleElasticEPReqInput(new_ep_size=new_ep_size)
+                return await scale_external_elastic_ep(
+                    self.engine.tokenizer_manager, body
                 )
-            except Exception as e:
-                logger.error("[ElasticEP] Scaling failed: %s", e)
-                return err(str(e))
-
-        response = {
-            "status": "ok" if result.success else "error",
-            "message": result.message
-            or (
-                f"Scaled to ep_size={new_ep_size}"
-                if result.success
-                else "scale_elastic_ep failed"
-            ),
-            "old_ep_size": result.old_ep_size,
-            "new_ep_size": result.new_ep_size,
-        }
-        if not result.success:
-            response["pending_ep_size"] = result.pending_ep_size
-        return response
+            except Exception as error:
+                logger.error("[ElasticEP] Scaling outcome is unknown: %s", error)
+                return {"status": "error", "message": str(error)}
 
     async def is_scaling_elastic_ep(self, body: dict) -> dict:
         """Return the engine's current elastic-EP scale state.

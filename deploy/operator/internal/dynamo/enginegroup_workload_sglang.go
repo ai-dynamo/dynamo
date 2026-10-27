@@ -1,0 +1,196 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package dynamo
+
+import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+)
+
+// ResolveSGLangComponentEngineGroup validates the implemented Grove growth profile before creation.
+// component and component.EngineGroup must not be nil. parentEnv may be nil. No input is mutated.
+func ResolveSGLangComponentEngineGroup(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentEnv []corev1.EnvVar) (ResolvedSGLangElasticEPProfile, error) {
+	// Resolve only explicitly declared parent/component environment, with component precedence.
+	component = component.DeepCopy()
+	if main := GetMainContainer(component); main != nil {
+		main.Env = MergeEnvs(parentEnv, main.Env)
+	}
+	// Unsupported lifecycle combinations must never fall through to ordinary DGD rendering.
+	if !IsWorkerComponent(string(component.ComponentType)) || ptr.Deref(component.Replicas, 1) != 1 {
+		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("Engine Group components require one independent worker world")
+	}
+	if component.EngineGroup.InitialSize < 1 {
+		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("Engine Group initialSize must be positive")
+	}
+	if component.Multinode != nil || len(component.Roles) != 0 || component.ScalingAdapter != nil || component.Experimental != nil {
+		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("Engine Group growth does not support multinode, roles, scalingAdapter, or experimental lifecycle features")
+	}
+	if component.ProviderOverride != nil {
+		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("Engine Group workload overrides cannot bypass the resolved launch profile")
+	}
+	if component.PodTemplate == nil {
+		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("Engine Group capacity requires an explicit podTemplate")
+	}
+	if component.PodTemplate.Spec.HostNetwork {
+		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("SGLang Engine Groups require Pod networking")
+	}
+	if err := validateEngineGroupPodTemplate(component.PodTemplate); err != nil {
+		return ResolvedSGLangElasticEPProfile{}, err
+	}
+	main := GetMainContainer(component)
+	if main == nil || main.Image == "" || len(main.Command) != 3 || !isSupportedProfilePythonExecutable(main.Command[0]) ||
+		main.Command[1] != "-m" || main.Command[2] != sglangDynamoModule {
+		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("Engine Group growth requires the native Dynamo SGLang worker")
+	}
+	if err := validateSGLangEngineGroupLaunch(main); err != nil {
+		return ResolvedSGLangElasticEPProfile{}, err
+	}
+
+	// The first profile resolves scalar GPUs owned exclusively by the main container.
+	gpuCount, err := resolveEngineGroupGPUAllocation(&component.PodTemplate.Spec, main)
+	if err != nil {
+		return ResolvedSGLangElasticEPProfile{}, err
+	}
+
+	// Resolve the same geometry used by the runtime, binding it to the immutable declaration.
+	podTemplate, err := json.Marshal(component.PodTemplate)
+	if err != nil {
+		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("encode Engine Group pod template: %w", err)
+	}
+	digest := sha256.Sum256(podTemplate)
+	resolved, err := ResolveSGLangElasticEPProfile(SGLangProfileGeometrySource{
+		Command: main.Command, Args: main.Args, InitialReplicas: component.EngineGroup.InitialSize,
+		MainContainerGPUs: gpuCount, DedicatedMainGPUAllocation: true,
+		WorkloadRevisionDigest: fmt.Sprintf("pod-template:%x", digest),
+	})
+	if err != nil {
+		return ResolvedSGLangElasticEPProfile{}, err
+	}
+
+	// Declared policy may narrow, but never exceed, the growth-only engine bounds.
+	if policy := component.EngineGroup.Policy; policy != nil {
+		if policy.MinSize != nil && *policy.MinSize != resolved.InitialReplicas {
+			return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("policy.minSize must equal the growth-only initial size")
+		}
+		if policy.MaxSize != nil && (*policy.MaxSize < component.EngineGroup.InitialSize || *policy.MaxSize > resolved.MaximumReplicas) {
+			return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("policy.maxSize must be between initialSize and the engine maximum")
+		}
+	}
+	return resolved, nil
+}
+
+// validateSGLangEngineGroupLaunch checks native routing, identity and control declarations.
+// main must not be nil. No input is mutated.
+func validateSGLangEngineGroupLaunch(main *corev1.Container) error {
+	// Native internal admission must not be confused with externally selected rank routing.
+	values, _, err := collectSGLangProfileOptions(main.Args)
+	if err != nil {
+		return err
+	}
+	if values[sglangJoinModeOption] != sglangJoinModeAuto {
+		return fmt.Errorf("Engine Group growth requires --elastic-ep-join-mode auto")
+	}
+	if mode := values[sglangDisaggregationModeOption]; mode != "" && mode != "null" {
+		return fmt.Errorf("native SGLang Engine Groups require aggregated inference")
+	}
+	if _, present := values[sglangKVEventsConfigOption]; present {
+		return fmt.Errorf("native SGLang Engine Groups do not support per-rank KV routing")
+	}
+
+	// Identity and rendezvous remain visible in the template, never appended by the operator.
+	if values[sglangAllocationIndexOption] != engineGroupOrdinalRef ||
+		values[sglangAllocationIDOption] != "$(DYNAMO_ALLOCATION_UID)" ||
+		values[sglangDistInitAddressOption] != engineGroupRendezvousRef+":29500" {
+		return fmt.Errorf("SGLang Engine Group template must explicitly declare --elastic-ep-allocation-index=%s, --elastic-ep-allocation-id=$(DYNAMO_ALLOCATION_UID) and --dist-init-addr=%s:29500", engineGroupOrdinalRef, engineGroupRendezvousRef)
+	}
+	if err := requireEngineGroupFieldEnv(main, "DYNAMO_ALLOCATION_UID", "metadata.uid"); err != nil {
+		return err
+	}
+
+	// The shared worker defaults provide port 9090; explicit overrides must match this runtime profile.
+	for _, variable := range main.Env {
+		if variable.Name == "DYN_SYSTEM_PORT" && (variable.ValueFrom != nil || variable.Value != "9090") {
+			return fmt.Errorf("SGLang Engine Group control requires DYN_SYSTEM_PORT=9090")
+		}
+	}
+	return nil
+}
+
+// resolveEngineGroupGPUAllocation proves scalar GPU ownership for the implemented profile.
+// podSpec and main must not be nil; main must be the pod's main container.
+func resolveEngineGroupGPUAllocation(podSpec *corev1.PodSpec, main *corev1.Container) (int64, error) {
+	// Dynamic claims cannot establish geometry before allocation, and sidecars must not own GPUs.
+	if len(podSpec.ResourceClaims) != 0 || len(main.Resources.Claims) != 0 {
+		return 0, fmt.Errorf("Engine Group growth does not yet support DRA GPU allocation")
+	}
+	containers := append([]corev1.Container(nil), podSpec.InitContainers...)
+	containers = append(containers, podSpec.Containers...)
+	for _, container := range containers {
+		if container.Name == consts.MainContainerName {
+			continue
+		}
+		gpuLimit := container.Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]
+		if !gpuLimit.IsZero() || len(container.Resources.Claims) != 0 {
+			return 0, fmt.Errorf("Engine Group GPUs must belong exclusively to the main container")
+		}
+	}
+
+	// Fractional or absent limits cannot define a fixed accelerator allocation.
+	gpuLimit := main.Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]
+	gpuCount, exact := gpuLimit.AsInt64()
+	if !exact || gpuCount < 1 {
+		return 0, fmt.Errorf("Engine Group main container requires a positive whole-GPU limit")
+	}
+	return gpuCount, nil
+}
+
+// RenderSGLangEngineGroup declares one world from a validated SGLang launch profile.
+// dgd, component and component.EngineGroup must not be nil; no input is mutated.
+func RenderSGLangEngineGroup(
+	dgd *v1beta1.DynamoGraphDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	worldIndex int32,
+	profile ResolvedSGLangElasticEPProfile,
+) *v1beta1.DynamoGraphDeploymentEngineGroup {
+	group := &v1beta1.DynamoGraphDeploymentEngineGroup{
+		Name:      EngineGroupNameForComponent(dgd.Name, component.ComponentName, worldIndex),
+		Namespace: dgd.Namespace,
+		Labels: map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName:   dgd.Name,
+			consts.KubeLabelDynamoComponent:             component.ComponentName,
+			consts.KubeLabelDynamoEngineGroupWorldIndex: fmt.Sprint(worldIndex),
+			consts.KubeLabelDynamoEngineGroupRuntime:    consts.KubeLabelDynamoEngineGroupSGLang,
+		},
+		Annotations:     map[string]string{consts.KubeAnnotationDynamoEngineGroupProfile: profile.Geometry.Fingerprint},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.GroupVersion.WithKind("DynamoGraphDeployment"))},
+		Spec:            v1beta1.DynamoGraphDeploymentEngineGroupSpec{Replicas: component.EngineGroup.InitialSize},
+	}
+	if policy := component.EngineGroup.Policy; policy != nil {
+		group.Spec.Policy = &v1beta1.EngineGroupScalingPolicy{
+			MinReplicas: new(ptr.Deref(policy.MinSize, profile.InitialReplicas)),
+			MaxReplicas: new(ptr.Deref(policy.MaxSize, profile.MaximumReplicas)),
+		}
+	}
+
+	// Verify through a stable frontend Service rather than an ephemeral Pod address.
+	for i := range dgd.Spec.Components {
+		frontend := &dgd.Spec.Components[i]
+		if string(frontend.ComponentType) == consts.ComponentTypeFrontend {
+			group.Annotations[consts.KubeAnnotationDynamoEngineGroupVerifyURL] = fmt.Sprintf(
+				"http://%s.%s.svc:8000/v1/completions", GetDCDResourceName(dgd, frontend.ComponentName, ""), dgd.Namespace,
+			)
+			break
+		}
+	}
+	return group
+}

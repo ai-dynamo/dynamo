@@ -481,7 +481,7 @@ class DynamoSglangPublisher:
         # FPM uses per-scheduler IPC endpoints suffixed by dp_rank.
         # Unlike KV events (per-request, routed), every scheduler emits FPM
         # independently — subscribe to all local DP ranks.
-        dp_ranks = range(*local_dp_rank_bounds(self.server_args))
+        dp_ranks = get_local_dp_rank_range(self.server_args)
 
         relays = []
         for dp_rank in dp_ranks:
