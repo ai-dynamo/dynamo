@@ -143,6 +143,66 @@ async def test_resolver_chain_raises_typed_not_found(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["wandb-artifact", "wandb-artifact:"])
+async def test_chain_rejects_missing_uri_separator_or_reference(tmp_path, source):
+    resolver = Resolver()
+    chain = RuntimeLoRAResolverChain([resolver], {"wandb-artifact"})
+    context = _context(tmp_path)
+
+    with pytest.raises(RuntimeLoRANotFoundError):
+        await chain.resolve(source_uri=source, context=context)
+    assert resolver.calls == []
+
+
+def _context(cache_root):
+    return ResolveContext(
+        adapter_key="dyn-lora-0123456789abcdef0123456789abcdef",
+        base_model_name="base",
+        cache_root=cache_root,
+        deadline_monotonic=asyncio.get_running_loop().time() + 1,
+        max_download_bytes=1024,
+        request_id="request-id",
+    )
+
+
+@pytest.mark.asyncio
+async def test_chain_preserves_case_variant_source_spelling(tmp_path):
+    source = "WANDB-ARTIFACT:///test/adapter:v1"
+    resolver = Resolver(ResolvedLoRA(tmp_path, "immutable"))
+    chain = RuntimeLoRAResolverChain([resolver], {"wandb-artifact"})
+
+    await chain.resolve(source_uri=source, context=_context(tmp_path))
+
+    assert resolver.calls == [source]
+
+
+@pytest.mark.asyncio
+async def test_chain_does_not_deduplicate_concurrent_calls(tmp_path):
+    both_entered = asyncio.Event()
+
+    class GatedResolver(Resolver):
+        async def resolve(self, *, source_uri, context):
+            self.calls.append(source_uri)
+            if len(self.calls) == 2:
+                both_entered.set()
+            await both_entered.wait()
+            return ResolvedLoRA(tmp_path, "immutable")
+
+    resolver = GatedResolver()
+    chain = RuntimeLoRAResolverChain([resolver], {"wandb-artifact"})
+    context = _context(tmp_path)
+    source = "wandb-artifact:///test/adapter:v1"
+
+    results = await asyncio.gather(
+        chain.resolve(source_uri=source, context=context),
+        chain.resolve(source_uri=source, context=context),
+    )
+
+    assert len(results) == 2
+    assert resolver.calls == [source, source]
+
+
+@pytest.mark.asyncio
 async def test_timeout_cancels_resolver(tmp_path):
     cancelled = asyncio.Event()
 

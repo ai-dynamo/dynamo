@@ -9,7 +9,7 @@ import asyncio
 import logging
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -105,21 +105,27 @@ class LoRAManager:
 
     def _validate_runtime_snapshot_path(self, resolved: ResolvedLoRA) -> ResolvedLoRA:
         raw_local_path = resolved.local_path
-        if raw_local_path.is_symlink():
-            raise RuntimeLoRAPluginError(
-                "runtime LoRA resolver returned a symlinked snapshot root"
-            )
         try:
+            if not raw_local_path.is_absolute() or raw_local_path.is_symlink():
+                raise RuntimeLoRAPluginError(
+                    "runtime LoRA resolver returned an invalid snapshot root"
+                ) from None
             cache_root = self._cache_root.resolve(strict=True)
             local_path = raw_local_path.resolve(strict=True)
-        except OSError as exc:
+            if (
+                not local_path.is_dir()
+                or local_path == cache_root
+                or not local_path.is_relative_to(cache_root)
+            ):
+                raise RuntimeLoRAPluginError(
+                    "runtime LoRA resolver returned a path outside DYN_LORA_PATH"
+                ) from None
+        except RuntimeLoRAPluginError:
+            raise
+        except (OSError, RuntimeError):
             raise RuntimeLoRAPluginError(
                 "runtime LoRA resolver returned an unavailable local snapshot"
-            ) from exc
-        if not local_path.is_dir() or not local_path.is_relative_to(cache_root):
-            raise RuntimeLoRAPluginError(
-                "runtime LoRA resolver returned a path outside DYN_LORA_PATH"
-            )
+            ) from None
         return ResolvedLoRA(
             local_path=local_path,
             source_revision=resolved.source_revision,
@@ -141,7 +147,7 @@ class LoRAManager:
 
         resolved = await self._runtime_resolvers.resolve(
             source_uri=source_uri,
-            context=context,
+            context=replace(context, cache_root=self._cache_root),
         )
         return await asyncio.to_thread(
             self._validate_runtime_snapshot_path,
@@ -241,6 +247,10 @@ def _configure_runtime_lora(manager: LoRAManager) -> None:
     with _runtime_lora_config_lock:
         if manager.runtime_lora_schemes:
             return
+        if not manager.cache_root.is_absolute():
+            raise RuntimeLoRAConfigurationError(
+                "runtime LoRA cache root must be an absolute path"
+            )
         try:
             manager.cache_root.mkdir(parents=True, exist_ok=True)
         except OSError as exc:

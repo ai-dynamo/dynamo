@@ -64,6 +64,12 @@ class RuntimeLoRAResolverProtocol(Protocol):
 
     Protocol version 2 leaves cache reclamation to worker drain/shutdown. A
     resolver must not delete or mutate a returned path while the worker runs.
+    The chain may call resolve concurrently, including for the same adapter_key;
+    it provides no deduplication. Publish complete snapshots atomically from
+    separate staging directories, and handle an already-published destination.
+    Resolution is cancelled when deadline_monotonic expires. Propagate
+    cancellation and never expose a partially written snapshot, even if an SDK
+    operation continues in a background thread after cancellation.
     """
 
     protocol_version: int
@@ -199,8 +205,9 @@ class RuntimeLoRAResolverChain:
     async def resolve(
         self, *, source_uri: str, context: ResolveContext
     ) -> ResolvedLoRA:
-        scheme = source_uri.partition(":")[0].lower()
-        if scheme not in self.schemes:
+        raw_scheme, separator, reference = source_uri.partition(":")
+        scheme = raw_scheme.lower()
+        if not separator or not reference or scheme not in self.schemes:
             raise RuntimeLoRANotFoundError("runtime LoRA source is not supported")
 
         loop = asyncio.get_running_loop()
