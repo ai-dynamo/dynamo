@@ -21,7 +21,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -59,7 +58,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
-	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
 func noContainerGPUs() dynamo.ContainerGPUCount {
@@ -2302,8 +2300,6 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 			err = leaderworkersetv1.AddToScheme(s)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
-			err = volcanov1beta1.AddToScheme(s)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Create DynamoComponentDeployment
 			dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
@@ -2391,137 +2387,6 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			// Assert the ComponentReconcileResult
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
-	}
-}
-
-func Test_reconcileLeaderWorkerSetResources_UpgradesLegacyIndexedLWSReplicas(t *testing.T) {
-	ctx := context.Background()
-	s := scheme.Scheme
-	require.NoError(t, v1alpha1.AddToScheme(s))
-	require.NoError(t, v1beta1.AddToScheme(s))
-	require.NoError(t, corev1.AddToScheme(s))
-	require.NoError(t, leaderworkersetv1.AddToScheme(s))
-	require.NoError(t, volcanov1beta1.AddToScheme(s))
-
-	replicas := int32(3)
-	makeDCD := func() *v1beta1.DynamoComponentDeployment {
-		dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
-			Name:      "test-component",
-			Namespace: "default",
-			UID:       "test-dcd-uid",
-			Spec: v1alpha1.DynamoComponentDeploymentSpec{
-				BackendFramework: string(dynamo.BackendFrameworkVLLM),
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					ServiceName:     "test-service",
-					DynamoNamespace: new("default"),
-					ComponentType:   string(commonconsts.ComponentTypeDecode),
-					Replicas:        &replicas,
-					Multinode: &v1alpha1.MultinodeSpec{
-						NodeCount: 2,
-					},
-					Resources: &v1alpha1.Resources{
-						Limits: &v1alpha1.ResourceItem{
-							GPU: "1",
-						},
-					},
-					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-						MainContainer: &corev1.Container{
-							Image:   "test-image:latest",
-							Command: []string{"python3"},
-							Args:    []string{"-m", "dynamo.vllm"},
-						},
-					},
-				},
-			},
-		})
-		dcd.UID = "test-dcd-uid"
-		return dcd
-	}
-
-	makeOwnerRef := func(dcd *v1beta1.DynamoComponentDeployment) metav1.OwnerReference {
-		return metav1.OwnerReference{
-			APIVersion: v1beta1.GroupVersion.String(),
-			Kind:       "DynamoComponentDeployment",
-			Name:       dcd.Name,
-			UID:        dcd.UID,
-			Controller: new(true),
-		}
-	}
-	serviceAccount := &corev1.ServiceAccount{
-		Name:      "default-test-sa",
-		Namespace: "default",
-		Labels: map[string]string{
-			commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
-		},
-	}
-	makeReconciler := func(objs ...client.Object) *DynamoComponentDeploymentReconciler {
-		return &DynamoComponentDeploymentReconciler{
-			Client: fake.NewClientBuilder().
-				WithScheme(s).
-				WithObjects(objs...).
-				WithStatusSubresource(objs...).
-				Build(),
-			Recorder:      events.NewFakeRecorder(100),
-			Config:        &configv1alpha1.OperatorConfiguration{},
-			RuntimeConfig: &controller_common.RuntimeConfig{},
-			DockerSecretRetriever: &mockDockerSecretRetriever{
-				GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
-					return []string{}, nil
-				},
-			},
-		}
-	}
-
-	dcd := makeDCD()
-	objects := make([]client.Object, 0, 2+2*int(replicas))
-	objects = append(objects, dcd, serviceAccount.DeepCopy())
-	// v1.1.0 represented DCD replicas as separate one-replica LWS objects.
-	// Native LWS scaling should adopt the old "-0" object, set its
-	// Spec.Replicas to the DCD replica count, and delete the excess indexed
-	// objects and their legacy PodGroups.
-	for i := range int(replicas) {
-		instanceID := fmt.Sprintf("%d", i)
-		name := fmt.Sprintf("%s-%d", dcd.Name, i)
-		objects = append(objects,
-			&leaderworkersetv1.LeaderWorkerSet{
-				Name:      name,
-				Namespace: "default",
-				Labels: map[string]string{
-					legacyLWSInstanceIDLabel: instanceID,
-				},
-				OwnerReferences: []metav1.OwnerReference{makeOwnerRef(dcd)},
-				Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-					Replicas: new(int32(1)),
-				},
-			},
-			&volcanov1beta1.PodGroup{
-				Name:      name,
-				Namespace: "default",
-				Labels: map[string]string{
-					legacyLWSInstanceIDLabel: instanceID,
-				},
-				OwnerReferences: []metav1.OwnerReference{makeOwnerRef(dcd)},
-			},
-		)
-	}
-	r := makeReconciler(objects...)
-
-	_, err := r.reconcileLeaderWorkerSetResources(ctx, dcd)
-	require.NoError(t, err)
-
-	got := &leaderworkersetv1.LeaderWorkerSet{}
-	require.NoError(t, r.Get(ctx, client.ObjectKey{Name: "test-component-0", Namespace: "default"}, got))
-	require.NotContains(t, got.Labels, legacyLWSInstanceIDLabel)
-	require.NotNil(t, got.Spec.Replicas)
-	require.Equal(t, replicas, *got.Spec.Replicas)
-
-	for _, name := range []string{"test-component-1", "test-component-2"} {
-		err = r.Get(ctx, client.ObjectKey{Name: name, Namespace: "default"}, &leaderworkersetv1.LeaderWorkerSet{})
-		require.True(t, k8serrors.IsNotFound(err), "expected legacy LeaderWorkerSet %q to be deleted, got %v", name, err)
-	}
-	for _, name := range []string{"test-component-0", "test-component-1", "test-component-2"} {
-		err = r.Get(ctx, client.ObjectKey{Name: name, Namespace: "default"}, &volcanov1beta1.PodGroup{})
-		require.True(t, k8serrors.IsNotFound(err), "expected legacy PodGroup %q to be deleted, got %v", name, err)
 	}
 }
 

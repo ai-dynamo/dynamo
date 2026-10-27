@@ -50,6 +50,24 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 #### Operator behavior breaking changes
 
+##### Legacy LWS migration cleanup removed
+
+**Change:** The operator no longer cleans up the per-replica LWS objects
+and Volcano PodGroups created by Dynamo v1.1.x and earlier.
+
+**Affected:** LWS deployments that still use the legacy per-replica layout.
+
+**Action:**
+
+> [!WARNING]
+> Complete the native-scaling migration before upgrading to v1.7.0.
+> Use an intermediate operator version that includes migration cleanup,
+> such as v1.2.x. Verify that reconciliation has removed excess indexed
+> LWS objects and legacy Volcano PodGroups before proceeding.
+
+**Existing deployments:** Unmigrated legacy resources remain after
+upgrading, and excess LWS objects can continue consuming cluster resources.
+
 ##### Native sidecar backend inference
 
 **Change:** Backend inference recognizes a direct `vllm-rs` engine command in `main`,
@@ -97,6 +115,26 @@ own value; rename that variable before upgrading.
 
 **Existing deployments:** Reconciliation rolls each LPX workload once without an
 authored manifest change.
+
+#### New behavior
+
+##### LWS no longer requires Volcano
+
+**Change:** LWS auto-detection and explicit enablement require only the
+LWS API.
+
+**Affected:** Clusters with LWS installed but without the Volcano API.
+
+**Action:** Configure gang scheduling separately through LWS. For the
+documented Volcano setup, install Volcano and set the LWS Helm value
+`gangSchedulingManagement.schedulerProvider=volcano`. Native Kubernetes
+gang scheduling is not supported for Dynamo-managed LWS workloads.
+
+**Existing deployments:** After the operator upgrade, clusters with LWS
+installed but no Volcano API automatically enable LWS orchestration.
+Without separately configured gang scheduling or group admission
+(e.g., through Kueue), multinode DGD/DCD workloads using LWS may remain
+partially scheduled.
 
 ### v1.6.0
 
