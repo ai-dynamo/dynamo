@@ -325,9 +325,9 @@ func lpuReservationPlacement(members []buildPartition, family BuildFamily) (int,
 }
 
 // lpuReservationFromDeploymentV1 decodes one reservation's partitions and size.
-// An LP30 reservation sized in nodes requests the extent of a packed chain on
-// that many hosts. The caller validates the partition IDs and the size against
-// the partitions.
+// An LP30 reservation sized in nodes is refused: an HX LPU pipeline request
+// takes only an extent. The caller validates the partition IDs and the size
+// against the partitions.
 func lpuReservationFromDeploymentV1(
 	raw deploymentcapnpv1.LpuReservation,
 	subject string,
@@ -346,23 +346,22 @@ func lpuReservationFromDeploymentV1(
 		reservation.PartitionIDs[index] = int(rawIDs.At(index))
 	}
 
-	// LP20 sizes reservations in nodes; LP30 may also use an HX extent.
+	// LP20 sizes reservations in nodes and LP30 in an HX extent.
 	size := raw.Size()
 	switch size.Which() {
 	case deploymentcapnpv1.LpuReservation_size_Which_nodes:
+		// An HX LPU pipeline request has no node-count form, so LP30 nodes fail closed.
+		if family == BuildFamilyHX {
+			return lpuReservation{}, fmt.Errorf("%w: %s.size.nodes sizes an LP30 reservation, which an HX LPU pipeline request cannot express; LP30 reservations use size.hx",
+				ErrUnsupportedRuntime, subject)
+		}
+
 		// Bound hosts to the Agent replica range, which also keeps device counts in int64.
 		nodes := size.Nodes()
 		if nodes == 0 || nodes > math.MaxInt32 {
 			return lpuReservation{}, fmt.Errorf("%s.size.nodes must be in [1, %d], got %d", subject, math.MaxInt32, nodes)
 		}
 		reservation.Hosts = int(nodes)
-		if family == BuildFamilyHX {
-			extent, fits := packedHXExtent(int64(nodes), int64(devicesPerNode))
-			if !fits {
-				return lpuReservation{}, fmt.Errorf("%s.size.nodes = %d fits no HX extent", subject, nodes)
-			}
-			reservation.HXExtent = extent
-		}
 	case deploymentcapnpv1.LpuReservation_size_Which_hx:
 		if family != BuildFamilyHX {
 			return lpuReservation{}, fmt.Errorf("%s.size.hx sizes an LP30 reservation; LP20 reservations use size.nodes", subject)

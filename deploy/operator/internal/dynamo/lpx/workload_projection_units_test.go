@@ -478,6 +478,9 @@ func TestUnitProjectionMatchesLegacy(t *testing.T) {
 		name      string
 		bundle    testUnitBundle
 		selection *dynamov1beta1.LPXLocalPartitions
+		// wantUnitsErr is the units path's refusal of a bundle whose partitions
+		// the legacy derivation deploys.
+		wantUnitsErr string
 	}{
 		{
 			name: "LP20 LPU-only chain after a CPU embedding partition",
@@ -542,18 +545,20 @@ func TestUnitProjectionMatchesLegacy(t *testing.T) {
 			},
 		},
 		{
-			name: "LP30 LPU-only one-node partition without topology metadata",
+			name: "LP30 one-node partition without topology metadata sized in nodes",
 			bundle: testUnitBundle{
 				architecture: lp30, devicesPerNode: 16, partitions: testUnitPartitions(8, nil, 1),
 				units: testSingleUnits(testNodesReservation(1, 1)),
 			},
+			wantUnitsErr: "config.lpuUnits[0].reservations[0].size.nodes sizes an LP30 reservation",
 		},
 		{
-			name: "LP30 packed chain without topology metadata",
+			name: "LP30 packed chain without topology metadata sized in nodes",
 			bundle: testUnitBundle{
 				architecture: lp30, devicesPerNode: 16, chains: [][]uint32{{1, 2, 3, 4}}, partitions: testUnitPartitions(8, nil, 1, 2, 3, 4),
 				units: testSingleUnits(testNodesReservation(2, 1, 2, 3, 4)),
 			},
+			wantUnitsErr: "config.lpuUnits[0].reservations[0].size.nodes sizes an LP30 reservation",
 		},
 		{
 			name: "LP30 four four-chip stages packed on one host",
@@ -587,6 +592,22 @@ func TestUnitProjectionMatchesLegacy(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
+
+			if test.wantUnitsErr != "" {
+				t.Log("Refuse the units, which have no LPX encoding")
+				_, err := acquireTestUnitBundle(t, test.bundle)
+				require.ErrorIs(t, err, ErrUnsupportedRuntime)
+				require.ErrorContains(t, err, test.wantUnitsErr)
+
+				t.Log("Deploy the same partitions through the legacy derivation")
+				legacyBundle := test.bundle
+				legacyBundle.units = nil
+				build, err := acquireTestUnitBundle(t, legacyBundle)
+				require.NoError(t, err)
+				_, err = projectTestUnits(build, test.selection)
+				require.NoError(t, err)
+				return
+			}
 
 			t.Log("Decode the synthetic bundle and compare unit placement with the legacy derivation")
 			build, err := acquireTestUnitBundle(t, test.bundle)
@@ -901,8 +922,8 @@ func requirePlacementRequest(
 // lpuUnit converts the reviewed unit to the decoded form for family and
 // devicesPerNode by SPEC rule 5: an LP20 reservation runs on size.nodes hosts,
 // and an LP30 reservation on the product of its size.hx dimensions with extent
-// [devicesPerNode, traysPerHemisphere, hemispheres, racks]. No reviewed fixture
-// sizes an LP30 reservation in nodes.
+// [devicesPerNode, traysPerHemisphere, hemispheres, racks]. The operator refuses
+// an LP30 reservation sized in nodes, and no reviewed fixture has one.
 func (u expectedPlacementUnit) lpuUnit(t *testing.T, family BuildFamily, devicesPerNode int) lpuUnit {
 	t.Helper()
 	unit := lpuUnit{Connectors: []lpxv1alpha1.PropSyncConnectorRequirement{}}

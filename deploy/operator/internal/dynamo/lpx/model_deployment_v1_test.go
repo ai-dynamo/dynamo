@@ -799,29 +799,6 @@ func TestDeploymentContractLPUUnits(t *testing.T) {
 			}},
 		},
 		{
-			name: "LP30 one-node partition without topology metadata sized in nodes",
-			bundle: testUnitBundle{
-				architecture: lp30, devicesPerNode: 16, partitions: testUnitPartitions(8, nil, 1),
-				units: testSingleUnits(testNodesReservation(1, 1)),
-			},
-			want: []lpuUnit{{
-				Reservations: []lpuReservation{{PartitionIDs: []int{1}, Hosts: 1, HXExtent: []int64{16, 1, 1, 1}}},
-				Connectors:   []lpxv1alpha1.PropSyncConnectorRequirement{},
-			}},
-		},
-		{
-			name: "LP30 packed chain without topology metadata sized in nodes",
-			bundle: testUnitBundle{
-				architecture: lp30, devicesPerNode: 16, chains: [][]uint32{{1, 2, 3, 4}},
-				partitions: testUnitPartitions(8, nil, 1, 2, 3, 4),
-				units:      testSingleUnits(testNodesReservation(2, 1, 2, 3, 4)),
-			},
-			want: []lpuUnit{{
-				Reservations: []lpuReservation{{PartitionIDs: []int{1, 2, 3, 4}, Hosts: 2, HXExtent: []int64{16, 2, 1, 1}}},
-				Connectors:   []lpxv1alpha1.PropSyncConnectorRequirement{},
-			}},
-		},
-		{
 			name: "hybrid chain of small stages keeps one reservation per stage",
 			bundle: testUnitBundle{
 				architecture: lp20, devicesPerNode: 8, hybrid: true, chains: [][]uint32{{1, 2}}, partitions: testUnitPartitions(4, nil, 1, 2),
@@ -998,20 +975,13 @@ func TestDeploymentContractLPUUnits(t *testing.T) {
 			wantErr: "config.lpuUnits[0].reservations[0].size requests HX extent [16 2 1 1], want [16 1 2 1] for partitions [1]",
 		},
 		{
-			name: "LP30 partition without topology metadata on two nodes",
+			name: "LP30 one-node partition without topology metadata sized in nodes",
 			bundle: testUnitBundle{
 				architecture: lp30, devicesPerNode: 16, partitions: testUnitPartitions(8, nil, 1),
-				units: testSingleUnits(testNodesReservation(2, 1)),
+				units: testSingleUnits(testNodesReservation(1, 1)),
 			},
-			wantErr: "config.lpuUnits[0].reservations[0].size requests HX extent [16 2 1 1], want [16 1 1 1] for partitions [1]",
-		},
-		{
-			name: "LP30 nodes that fit no HX extent",
-			bundle: testUnitBundle{
-				architecture: lp30, devicesPerNode: 16, partitions: testUnitPartitions(8, nil, 1),
-				units: testSingleUnits(testNodesReservation(9, 1)),
-			},
-			wantErr: "config.lpuUnits[0].reservations[0].size.nodes = 9 fits no HX extent",
+			wantErr: "unsupported LPX runtime: deployment.v1.capnp.bin config.lpuUnits[0].reservations[0].size.nodes sizes an LP30 reservation, " +
+				"which an HX LPU pipeline request cannot express; LP30 reservations use size.hx",
 		},
 		{
 			name: "LP20 packed stages that fill their nodes",

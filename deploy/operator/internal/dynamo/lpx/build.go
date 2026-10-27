@@ -101,8 +101,7 @@ type lpuReservation struct {
 	// Hosts is the reservation's Agent count.
 	Hosts int `json:"hosts"`
 	// HXExtent is the LP30 scheduler extent [devicesPerNode, traysPerHemisphere,
-	// hemispheres, racks]: size.hx, or for size.nodes the packed-chain extent on
-	// that many hosts. Nil on LP20.
+	// hemispheres, racks] from size.hx. Nil on LP20.
 	HXExtent []int64 `json:"hxExtent,omitempty"`
 }
 
