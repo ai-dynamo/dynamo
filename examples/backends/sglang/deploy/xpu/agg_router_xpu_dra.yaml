@@ -72,7 +72,7 @@ spec:
             claims:
             - name: gpu
             requests:
-              ephemeral-storage: 2Gi
+              ephemeral-storage: 8Gi
           workingDir: /workspace/examples/backends/sglang
         resourceClaims:
         - name: gpu
