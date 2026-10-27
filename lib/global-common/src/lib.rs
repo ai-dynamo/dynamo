@@ -6,7 +6,7 @@
 //! - A pool's identity and location: [`PoolKey`], [`PoolId`] and its deriver
 //!   [`V1PoolIdDeriver`], and [`PoolLocation`].
 //! - The JSON of the Global Discovery Service's HTTP API, which the service
-//!   writes and its clients read:
+//!   and its clients exchange:
 //!
 //!   | Call | Body | Reply |
 //!   |---|---|---|

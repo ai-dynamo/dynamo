@@ -4,8 +4,7 @@
 //! Runtime-independent identities for pools in a Global View.
 //!
 //! A routing pool is one DGD in the initial deployment. Its identity is stable
-//! across process and relay restarts, while relay and KV producer generations
-//! are tracked separately by the source adapter.
+//! across process and relay restarts.
 
 use std::fmt;
 
@@ -29,7 +28,7 @@ impl fmt::Display for PoolId {
     }
 }
 
-/// Stable deployment coordinates used by the POC derivation.
+/// Stable deployment coordinates that a [`PoolIdDeriver`] turns into a [`PoolId`].
 ///
 /// `namespace` is the Kubernetes namespace containing the DGD, not the
 /// Dynamo runtime namespace derived by the operator. In JSON it is
@@ -106,7 +105,7 @@ impl PoolKey {
     }
 }
 
-fn validate(value: &str, field: &'static str) -> Result<(), PoolKeyError> {
+pub(crate) fn validate(value: &str, field: &'static str) -> Result<(), PoolKeyError> {
     if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
         return Err(PoolKeyError::InvalidField { field });
     }

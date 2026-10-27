@@ -8,11 +8,11 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use url::Url;
 
-use crate::pool::{PoolKey, PoolLocation};
+use crate::pool::{self, PoolKey, PoolLocation};
 use crate::replicas::ReplicaEndpoint;
 
 /// `POST /pools` body. A PoolRelay sends it on a timer, and each call is also
@@ -21,7 +21,9 @@ use crate::replicas::ReplicaEndpoint;
 pub struct PoolRegistration {
     pub key: PoolKey,
     pub location: PoolLocation,
-    /// The model or checkpoint the pool serves.
+    /// The model or checkpoint the pool serves. Reading it checks it as
+    /// [`PoolKey::new`] checks the key's fields.
+    #[serde(deserialize_with = "checked_model")]
     pub model: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -30,6 +32,12 @@ pub struct PoolRegistration {
     pub frontends: Vec<Url>,
     #[serde(default)]
     pub capacity: Vec<Capacity>,
+}
+
+fn checked_model<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let model = String::deserialize(deserializer)?;
+    pool::validate(&model, "model").map_err(serde::de::Error::custom)?;
+    Ok(model)
 }
 
 /// The workers of one hardware SKU.
@@ -174,14 +182,17 @@ mod tests {
             "cluster": "aws-west",
             "datacenter": null
         });
-        round_trip::<PoolRegistration>(json!({
+        let mut registration = json!({
             "key": key,
             "location": location,
             "model": "Qwen/Qwen3-0.6B",
             "capabilities": ["aggregated"],
             "frontends": ["http://10.43.1.2:8000/"],
             "capacity": [{"sku": "H100", "count": 8}]
-        }));
+        });
+        round_trip::<PoolRegistration>(registration.clone());
+        registration["model"] = json!(" ");
+        assert!(serde_json::from_value::<PoolRegistration>(registration).is_err());
         let pools = round_trip::<PoolsResponse>(json!({
             "pools": [{
                 "key": key,
