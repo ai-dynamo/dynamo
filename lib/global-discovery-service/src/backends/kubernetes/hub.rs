@@ -37,8 +37,9 @@ impl McsPoolDirectory {
     /// collects every exported Service's slices, so no per-pool
     /// `ServiceImport` is needed. A member cluster with a `ServiceImport` per
     /// pool also works. Each PoolRelay Service is named
-    /// `<DGD name><pool_service_suffix>`. The client should read with a timeout
-    /// under 90 s, so a server that stops answering shows up as failures.
+    /// `<DGD name><pool_service_suffix>`. The client's connect and read
+    /// timeouts should add up to under 90 s, so a server that stops answering
+    /// shows up as failures.
     pub fn new(imports: Client, mcs: McsImplementation, pool_service_suffix: String) -> Self {
         Self(SliceDirectory::new(
             Api::all(imports),
@@ -283,7 +284,7 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::runtime::watcher;
 
-    use super::super::cache::{RECOVERED_AFTER, STALE_AFTER, SliceCache};
+    use super::super::cache::{RECOVERED_AFTER, STALE_AFTER, SliceCache, follow};
     use super::mcs::{KARMADA_SLICE_MANAGER, KUBERNETES_SERVICE_NAME_LABEL, MANAGED_BY_LABEL};
     use super::*;
 
@@ -395,8 +396,11 @@ mod tests {
         assert_eq!(stale.items.len(), 1);
         assert_eq!(stale.completeness, Completeness::Estimated);
 
-        // A listed slice means the watch works again.
+        // A relist that completes means the watch works again. Until then the
+        // old view stays `Estimated`.
         cache.apply(watcher::Event::InitApply(ready()));
+        assert_eq!(completeness(&cache), Completeness::Estimated);
+        cache.apply(watcher::Event::InitDone);
         assert_eq!(completeness(&cache), Completeness::Exact);
     }
 
@@ -631,6 +635,67 @@ mod tests {
         assert_eq!(next_resync(), Some(Completeness::Exact));
         cache.quiet();
         assert_eq!(next_resync(), None);
+
+        // Recovered by a relist, which announces only its own view.
+        for _ in 0..3 {
+            cache.failed();
+            tokio::time::advance(STALE_AFTER / 2).await;
+        }
+        assert_eq!(next_resync(), Some(Completeness::Estimated));
+        cache.apply(watcher::Event::InitApply(ready()));
+        assert_eq!(next_resync(), None);
+        cache.apply(watcher::Event::InitDone);
+        assert_eq!(next_resync(), Some(Completeness::Exact));
+        assert_eq!(next_resync(), None);
+
+        // An error after a quiet spell ends the old run first, though
+        // `quiet` has not run.
+        for _ in 0..3 {
+            cache.failed();
+            tokio::time::advance(STALE_AFTER / 2).await;
+        }
+        assert_eq!(next_resync(), Some(Completeness::Estimated));
+        tokio::time::advance(RECOVERED_AFTER).await;
+        assert_eq!(cache.failed(), Duration::ZERO);
+        assert_eq!(next_resync(), Some(Completeness::Exact));
+        assert_eq!(next_resync(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_watch_ends_a_run_of_errors_that_falls_silent() {
+        let cache = cache();
+        sync(
+            &cache,
+            vec![slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)])],
+        );
+        let mut events = cache.events.subscribe();
+        let (errors, watch) = futures::channel::mpsc::unbounded();
+        let stop = CancellationToken::new();
+        let following = tokio::spawn({
+            let (cache, stop) = (Arc::clone(&cache), stop.clone());
+            async move { follow(watch, "test", &cache, &stop).await }
+        });
+        for _ in 0..3 {
+            errors
+                .unbounded_send(Err(watcher::Error::NoResourceVersion))
+                .unwrap();
+            tokio::task::yield_now().await;
+            tokio::time::advance(STALE_AFTER / 2).await;
+        }
+        let resync = tokio::time::timeout(Duration::from_secs(1), events.recv()).await;
+        assert!(
+            matches!(resync, Ok(Ok(WatchEvent::Resync(s))) if s.completeness == Completeness::Estimated)
+        );
+
+        // kube resumed the watch without an event, so only the loop's timer
+        // can end the run.
+        tokio::time::advance(RECOVERED_AFTER).await;
+        let resync = tokio::time::timeout(Duration::from_secs(1), events.recv()).await;
+        assert!(
+            matches!(resync, Ok(Ok(WatchEvent::Resync(s))) if s.completeness == Completeness::Exact)
+        );
+        stop.cancel();
+        following.await.unwrap();
     }
 
     #[test]

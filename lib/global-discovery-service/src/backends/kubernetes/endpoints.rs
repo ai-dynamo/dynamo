@@ -41,8 +41,8 @@ pub struct McsReplicaDirectory(SliceDirectory<ReplicaIndex>);
 
 impl McsReplicaDirectory {
     /// The Service's slices as MCS imports them into the cluster `client`
-    /// reaches. The client should read with a timeout under 90 s, so a server
-    /// that stops answering shows up as failures.
+    /// reaches. The client's connect and read timeouts should add up to under
+    /// 90 s, so a server that stops answering shows up as failures.
     pub fn new(client: Client, service: &ExportedService, mcs: McsImplementation) -> Self {
         Self(SliceDirectory::new(
             Api::namespaced(client, &service.namespace),

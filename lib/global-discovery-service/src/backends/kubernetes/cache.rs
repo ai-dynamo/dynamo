@@ -32,9 +32,10 @@ pub(super) const STALE_AFTER: Duration = Duration::from_secs(60);
 /// How long without an error before a failing watch counts as working again.
 /// kube resumes a watch without an event, so silence is the only sign of it.
 /// While the watch fails, errors come at least every 30 s backoff plus the
-/// time an attempt takes to fail: within the client's read timeout, which
-/// should be under 90 s (the service's is 75 s), since a watch asks the server
-/// to end it after [`WATCH_TIMEOUT_SECS`].
+/// time an attempt takes to fail: within the client's connect and read
+/// timeouts, which together should be under 90 s (the service's are 10 s and
+/// 75 s), since a watch asks the server to end it after
+/// [`WATCH_TIMEOUT_SECS`].
 pub(super) const RECOVERED_AFTER: Duration = Duration::from_secs(120);
 
 /// Each watch asks the server to end it after this long and starts again, so
@@ -206,9 +207,11 @@ impl<I: SliceIndex> SliceCache<I> {
     /// nothing.
     pub(super) fn apply(&self, event: watcher::Event<EndpointSlice>) -> bool {
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
-        // Every event but `Init` came from the API server, so the watch works.
-        // kube sends `Init` before each relist attempt, before any request.
-        let ended_long_run = !matches!(event, watcher::Event::Init)
+        // `Apply`, `Delete` and `InitDone` show that the watch works and the
+        // index is current. A relist's slices replace the index only at
+        // `InitDone`, so `InitApply` does not end a run of errors, and kube
+        // sends `Init` before each relist attempt, before any request.
+        let ended_long_run = !matches!(event, watcher::Event::Init | watcher::Event::InitApply(_))
             && state
                 .failures
                 .take()
@@ -265,15 +268,18 @@ impl<I: SliceIndex> SliceCache<I> {
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
         // A relist that failed starts over, so its slices so far are dropped.
         state.relist = None;
+        // A run that has been quiet for `RECOVERED_AFTER` is over, though
+        // `quiet` may not have run yet; this error starts a new one.
+        self.end_quiet_run(&mut state, now);
         let (failures, was_long) = match state.failures {
-            Some(failures) if now.saturating_duration_since(failures.last) < RECOVERED_AFTER => (
+            Some(failures) => (
                 Failures {
                     last: now,
                     ..failures
                 },
                 failures.long(),
             ),
-            _ => (
+            None => (
                 Failures {
                     first: now,
                     last: now,
@@ -297,8 +303,13 @@ impl<I: SliceIndex> SliceCache<I> {
     /// resumed the watch without an event. Watchers learn that the view is
     /// complete again.
     pub(super) fn quiet(&self) {
-        let now = Instant::now();
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
+        self.end_quiet_run(&mut state, Instant::now());
+    }
+
+    /// Ends the run of errors if it has been quiet for `RECOVERED_AFTER`, and
+    /// tells watchers if it had made the view `Estimated`.
+    fn end_quiet_run(&self, state: &mut CacheState<I>, now: Instant) {
         let Some(failures) = state.failures else {
             return;
         };
@@ -350,7 +361,17 @@ async fn watch_slices<I: SliceIndex>(
             .any_semantic()
             .timeout(WATCH_TIMEOUT_SECS)
     };
-    let mut events = std::pin::pin!(retried(watcher(slices, config)));
+    follow(retried(watcher(slices, config)), &selector, &cache, &stop).await;
+}
+
+/// Applies `events` to `cache` until they end or `stop` is cancelled.
+pub(super) async fn follow<I: SliceIndex>(
+    events: impl Stream<Item = watcher::Result<watcher::Event<EndpointSlice>>>,
+    selector: &str,
+    cache: &SliceCache<I>,
+    stop: &CancellationToken,
+) {
+    let mut events = std::pin::pin!(events);
     // When a run of errors counts as over, unless another error comes first.
     let mut quiet_at = None;
     loop {
