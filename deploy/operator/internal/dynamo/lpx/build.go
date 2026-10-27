@@ -76,10 +76,6 @@ type buildPartition struct {
 	devicesPerNode int
 	// hxExtent is the scheduler-facing four-dimensional HX allocation.
 	hxExtent []int64
-
-	// runtimeNodeCount sums physical endpoints for a collapsed hybrid chain;
-	// numChips retains the original root stage.
-	runtimeNodeCount int
 }
 
 // lpuUnit is one compiler-owned runtime group: a selected prop-sync chain or a
@@ -120,12 +116,8 @@ func (u lpuUnit) partitionIDs() []int {
 }
 
 // effectiveNodeCount returns the number of Agent endpoints assigned to the
-// partition. Source partitions derive it from topology; collapsed runtime
-// partitions preserve the sum of their physical scheduler endpoints.
+// partition. A partial-node stage still occupies one node.
 func (p buildPartition) effectiveNodeCount() int {
-	if p.runtimeNodeCount > 0 {
-		return p.runtimeNodeCount
-	}
 	return max(1, p.numChips/p.devicesPerNode)
 }
 

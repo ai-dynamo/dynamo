@@ -68,6 +68,30 @@ and Volcano PodGroups created by Dynamo v1.1.x and earlier.
 **Existing deployments:** Unmigrated legacy resources remain after
 upgrading, and excess LWS objects can continue consuming cluster resources.
 
+##### LPX runtime ConfigMaps removed
+
+**Change:** The operator no longer renders the LPX runtime ConfigMaps
+(`<prefix>-lpu-<hash>` partition rows and `<prefix>-decode-<hash>` `lpu_servers`),
+no longer adds the `config` volume to LPX conductor, Agent, and Cyborg Pods, and no
+longer sets their `nvidia.com/extra-resources-hash` annotation. This applies to every
+LPX build, including builds without compiler placement units (`lpuUnits`). LPU
+pipeline requests and workload digests are unchanged.
+
+**Affected:** LPX DGDs whose role templates mount the `config` volume at `/configs`,
+or whose runtimes read it: Nova `NOVA_RESOLVED_PARTITIONS_DIR` and its draft and
+target variants, Quasar `--partition-metadata`, the Hydra `/configs` fallback, and
+Cyborg `cyborg-entrypoint --expand-hosts` with `render_grove_lpu_addr_files` and
+`--lpu-rdma-addr-file`.
+
+**Action:** Before upgrading, move LPX workloads to builds that record `lpuUnits` and
+to runtime images that read placement from them. Remove those mounts, variables, and
+flags from the role templates. A template that still mounts `config` without
+declaring the volume fails Pod validation.
+
+**Existing deployments:** The upgrade changes every LPX Pod template and rolls LPX
+workloads. ConfigMaps rendered by an older operator remain until their
+LPXGraphDeployment is deleted.
+
 ##### Native sidecar backend inference
 
 **Change:** Backend inference recognizes a direct `vllm-rs` engine command in `main`,

@@ -22,12 +22,11 @@ const (
 )
 
 func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
-	runtimeBuild := *intent.Build
-	manifestPartitions := runtimeBuild.partitions
+	manifestPartitions := intent.Build.partitions
 
-	ioFPGACount, ioFanoutFactor := runtimeBuild.ioFPGACount, runtimeBuild.ioFanoutFactor
+	ioFPGACount, ioFanoutFactor := intent.Build.ioFPGACount, intent.Build.ioFanoutFactor
 
-	edgePositions, err := validateSelectedPropSyncGraph(manifestPartitions, runtimeBuild.selectedPropSyncChains, "selected V3 prop-sync chain")
+	edgePositions, err := validateSelectedPropSyncGraph(manifestPartitions, intent.Build.selectedPropSyncChains, "selected V3 prop-sync chain")
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +55,7 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		partition.hxExtent = extent
 	}
 
-	// Keep GPU-local runtime partitions out of every LPU reservation and runtime record.
+	// Keep GPU-local runtime partitions out of every LPU reservation.
 	// Selection requires a hybrid build, which is never packed, so partitions still
 	// match the manifest order.
 	remote, localPartitionIDs, err := selectRemotePartitions(intent.LocalPartitions, intent.Pipeline, intent.Build, partitions)
@@ -66,11 +65,9 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	if len(localPartitionIDs) > 0 {
 		edgePositions = retainedPropSyncEdges(partitions, remote, edgePositions)
 		partitions = remote
-		runtimeBuild.partitions = remote
 	}
 
 	// Selected chains are represented by the allocation metadata and connectors below.
-	runtimeBuild.selectedPropSyncChains = nil
 	allocationMetadata, connectors, err := projectV3PropSync(partitions, edgePositions)
 	if err != nil {
 		return nil, err
@@ -112,11 +109,10 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 			runtimeBuildRef:        intent.RuntimeBuildRef,
 			model:                  intent.Models[index],
 			pipeline:               intent.Pipeline,
-			configuredBuild:        runtimeBuild,
+			configuredBuild:        *intent.Build,
 			allocationMetadata:     allocationMetadata,
 			partitions:             partitions,
 			connectors:             connectors,
-			propSyncEdges:          edgePositions,
 			agentReplicas:          agentReplicas,
 			localPartitionIDs:      localPartitionIDs,
 		})

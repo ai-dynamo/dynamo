@@ -12,7 +12,6 @@ podTemplate:
         limits:
           nvidia.com/gpu: 1
       volumeMounts:
-      - {name: config, mountPath: /configs}
       - {name: model-storage, mountPath: /models}
     volumes:
     - {name: model-storage, emptyDir: {}}

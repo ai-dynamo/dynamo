@@ -19,12 +19,6 @@ const (
 	// role's podTemplate as the root for compiled model artifacts.
 	ModelStorageVolumeName = "model-storage"
 
-	// AnnotationExtraResourcesHash records an opaque content hash of the role's
-	// generated immutable runtime ConfigMap on PodClique templates
-	// (PodCliqueSet.spec.template.cliques[].annotations). Grove propagates it to
-	// PodClique and Pod metadata.
-	AnnotationExtraResourcesHash = "nvidia.com/extra-resources-hash"
-
 	// LPXReadyCondition reports if LPXGraphDeployment object is ready.
 	// Note: This condition type is defined to ensure consistent naming of conditions across objects.
 	// Please use object specific variants of this condition which provides more details for each context where

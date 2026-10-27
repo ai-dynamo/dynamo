@@ -45,7 +45,7 @@ type ExpectedAgent struct {
 type MaterializationPlan struct {
 	// ScalingGroupTemplate is unique within the shared PCS.
 	ScalingGroupTemplate string
-	// ResourcePrefix scopes runtime ConfigMaps and discovery Services to this workload.
+	// ResourcePrefix scopes discovery Services to this workload.
 	ResourcePrefix string
 	// PodCliqueSetName is the actual PCS used for every generated child address.
 	PodCliqueSetName string
@@ -193,7 +193,7 @@ func (p *MaterializationPlan) WithGroup(groupName string) (*MaterializationPlan,
 		return nil, fmt.Errorf("naming group %q in PCS %q: %w", groupName, p.PodCliqueSetName, err)
 	}
 
-	// ConfigMaps and Services retain more of the group name than Grove allows.
+	// Services retain more of the group name than Grove allows.
 	const maxResourcePrefixLength = validation.DNS1123LabelMaxLength - len("-serve")
 	resourceName, err := boundedGroupName(groupName, maxResourcePrefixLength-len(p.PodCliqueSetName)-1)
 	if err != nil {

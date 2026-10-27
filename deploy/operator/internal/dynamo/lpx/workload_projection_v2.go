@@ -54,7 +54,6 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		for index := range transcripts {
 			transcripts[index].field("local-partition-ids", encoded)
 		}
-		configured.partitions = partitions
 	}
 
 	// Bind validated physical partitions into projection identity while counting runtime endpoints.
@@ -78,32 +77,6 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	connectors, err := v2Connectors(connectorBuild, partitions)
 	if err != nil {
 		return nil, err
-	}
-
-	// Preserve physical scheduler partitions while collapsing selected chains only in LPU runtime state.
-	if intent.Pipeline == PipelineHybrid && len(configured.selectedPropSyncChains) != 0 {
-		runtimeChainByRoot := make(map[int][]int, len(connectorBuild.selectedPropSyncChains))
-		for _, chain := range connectorBuild.selectedPropSyncChains {
-			runtimeChainByRoot[chain[0]] = chain
-		}
-		collapsed := make([]buildPartition, 0, len(partitions))
-		for partitionIndex := 0; partitionIndex < len(partitions); {
-			partition := partitions[partitionIndex]
-			chain, selected := runtimeChainByRoot[partition.sourcePartitionID]
-			if !selected {
-				collapsed = append(collapsed, partition)
-				partitionIndex++
-				continue
-			}
-			chainEnd := partitionIndex + len(chain)
-			for _, stage := range partitions[partitionIndex:chainEnd] {
-				partition.runtimeNodeCount += stage.effectiveNodeCount()
-			}
-			collapsed = append(collapsed, partition)
-			partitionIndex = chainEnd
-		}
-		configured.partitions = collapsed
-		configured.selectedPropSyncChains = nil
 	}
 
 	// Encode shared connectors once without changing any model's digest field order.

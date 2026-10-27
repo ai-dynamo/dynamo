@@ -48,8 +48,8 @@ type ModelProjectionInput struct {
 	LocalPartitions *dynamov1beta1.LPXLocalPartitions
 }
 
-// ModelProjection holds scheduler request inputs and runtime rendering state
-// derived for one model. Completed component data is shared read-only; only the
+// ModelProjection holds scheduler request inputs and runtime bindings derived
+// for one model. Completed component data is shared read-only; only the
 // resolver assigns the stage before publishing the immutable projections.
 type ModelProjection struct {
 	digest                 WorkloadDigest
@@ -62,13 +62,9 @@ type ModelProjection struct {
 	contractFormat         buildContractFormat
 	allocationMetadata     json.RawMessage
 	// partitions describes the partitions requested from LPX. Packing can combine
-	// several configuredBuild.Partitions into one LPX partition.
-	partitions []buildPartition
-	connectors []lpxv1alpha1.PropSyncConnectorRequest
-	// propSyncEdges lists each position in partitions whose successor continues
-	// a selected prop-sync chain. Only unpacked HX projections, including unit
-	// projections, set it; XT collapses selected chains in configuredBuild instead.
-	propSyncEdges []int
+	// several configuredBuild.partitions into one LPX partition.
+	partitions    []buildPartition
+	connectors    []lpxv1alpha1.PropSyncConnectorRequest
 	agentReplicas int
 	// localPartitionIDs lists the runtime partitions that run on the Cyborg GPU, in build order.
 	localPartitionIDs []int

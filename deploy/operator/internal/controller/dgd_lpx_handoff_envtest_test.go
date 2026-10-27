@@ -206,7 +206,6 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 						Name: consts.MainContainerName, Image: "example/lpu-runtime:1.4.0",
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: v1alpha1.ModelStorageVolumeName, MountPath: "/models"},
-							{Name: "config", MountPath: "/configs"},
 							{Name: "host-dev", MountPath: "/dev"},
 							{Name: "host-sys", MountPath: "/sys"},
 							{Name: "hugepages", MountPath: "/dev/hugepages"},
@@ -296,23 +295,23 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 	require.Equal(t, childGeneration, child.Generation)
 	require.Empty(t, source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.NodeName)
 
-	t.Log("Release quota and observe alpha LGD ownership of the published PCS and runtime resources without waiting for scheduling")
+	t.Log("Release quota and observe alpha LGD ownership of the published PCS and discovery Service without waiting for scheduling")
 	require.NoError(t, env.Client().Delete(t.Context(), quota))
 	pcs := &grovev1alpha1.PodCliqueSet{Name: dynamo.PCSNameForLPX(child), Namespace: source.Namespace}
-	configMap := &corev1.ConfigMap{Namespace: source.Namespace}
 	service := &corev1.Service{Name: pcs.Name + "-serve", Namespace: source.Namespace}
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		if !assert.NoError(c, env.Client().Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs)) {
-			return
-		}
-		configMap.Name = fmt.Sprintf("%s-lpu-%.16s", pcs.Name, pcs.Spec.Template.Cliques[0].Annotations[v1alpha1.AnnotationExtraResourcesHash])
-		for _, resource := range []client.Object{pcs, configMap, service} {
+		for _, resource := range []client.Object{pcs, service} {
 			if assert.NoError(c, env.Client().Get(t.Context(), client.ObjectKeyFromObject(resource), resource)) {
 				assert.Equal(c, metav1.NewControllerRef(child, v1alpha1.LPXGraphDeploymentGVK), metav1.GetControllerOf(resource))
 			}
 		}
-		assert.Equal(c, new(true), configMap.Immutable)
 	}, 20*time.Second, 50*time.Millisecond)
+
+	t.Log("Publish no runtime ConfigMaps for the LPX child")
+	configMaps := &corev1.ConfigMapList{}
+	require.NoError(t, env.Client().List(t.Context(), configMaps, client.InNamespace(source.Namespace),
+		client.MatchingLabels{"lpx.nvidia.com/deployment-uid": string(child.UID)}))
+	require.Empty(t, configMaps.Items)
 }
 
 func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
