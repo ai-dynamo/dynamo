@@ -640,9 +640,7 @@ class SglangProcessor:
         named_zero_arg_tool: str | None,
         prompt_token_ids: list[int],
     ) -> SglangStreamingPostProcessor:
-        """Build the per-request postprocessor shared by the inline and pool paths.
-
-        Parsers are passed in because the pool path must recreate them in the
+        """Parsers are passed in because the pool path must recreate them in the
         main process; they are not picklable.
         """
         return SglangStreamingPostProcessor(
