@@ -480,6 +480,7 @@ pub(crate) fn worker_request_from_runtime_config(
         }
     }
     WorkerRequest {
+        prefix_cache_read_policy: config.prefix_cache_read_policy().map(str::to_owned),
         worker_id,
         model_name: key.model_name.clone(),
         routing_group: key.routing_group.clone(),

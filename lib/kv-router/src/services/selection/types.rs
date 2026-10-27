@@ -41,6 +41,9 @@ pub enum WorkerLifecycle {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SelectionWorkerConfig {
+    /// Backend-declared request cache-read semantics; unknown identifiers are preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_cache_read_policy: Option<String>,
     pub endpoint: String,
     pub data_parallel_start_rank: u32,
     pub data_parallel_size: u32,
@@ -73,6 +76,10 @@ pub struct SelectionWorkerConfig {
 }
 
 impl WorkerConfigLike for SelectionWorkerConfig {
+    fn prefix_cache_read_policy(&self) -> Option<&str> {
+        self.prefix_cache_read_policy.as_deref()
+    }
+
     fn data_parallel_start_rank(&self) -> u32 {
         self.data_parallel_start_rank
     }
@@ -140,6 +147,9 @@ impl WorkerConfigLike for SelectionWorkerConfig {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkerCatalogRecord {
+    /// Backend-declared request cache-read semantics; unknown identifiers are preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_cache_read_policy: Option<String>,
     pub worker_id: WorkerId,
     pub model_name: String,
     pub routing_group: String,
@@ -176,6 +186,7 @@ pub struct WorkerCatalogRecord {
 impl WorkerCatalogRecord {
     pub fn new(req: WorkerRequest) -> Self {
         Self {
+            prefix_cache_read_policy: req.prefix_cache_read_policy,
             worker_id: req.worker_id,
             model_name: req.model_name,
             routing_group: req.routing_group,
@@ -223,6 +234,7 @@ impl WorkerCatalogRecord {
 
     pub(super) fn scheduler_config(&self) -> Option<SelectionWorkerConfig> {
         Some(SelectionWorkerConfig {
+            prefix_cache_read_policy: self.prefix_cache_read_policy.clone(),
             endpoint: self.endpoint.clone()?,
             data_parallel_start_rank: self.dp_start(),
             data_parallel_size: self.dp_size(),
@@ -278,6 +290,7 @@ impl WorkerCatalogRecord {
 impl Default for WorkerRequest {
     fn default() -> Self {
         Self {
+            prefix_cache_read_policy: None,
             worker_id: 0,
             model_name: default_model_name(),
             routing_group: default_routing_group(),
@@ -306,6 +319,9 @@ impl Default for WorkerRequest {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct WorkerRequest {
+    /// Backend-declared request cache-read semantics; unknown identifiers are preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_cache_read_policy: Option<String>,
     pub worker_id: WorkerId,
     #[serde(default = "default_model_name")]
     pub model_name: String,
@@ -343,6 +359,9 @@ pub struct WorkerRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct WorkerPatchRequest {
+    /// Backend-declared request cache-read semantics; unknown identifiers are preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_cache_read_policy: Option<String>,
     pub endpoint: Option<String>,
     pub kv_events_endpoint: Option<String>,
     pub kv_events_endpoints: Option<HashMap<u32, String>>,
@@ -369,6 +388,10 @@ pub struct WorkerPatchRequest {
 
 impl WorkerCatalogRecord {
     pub(super) fn apply_patch(&mut self, patch: WorkerPatchRequest) {
+        if let Some(policy) = patch.prefix_cache_read_policy {
+            self.prefix_cache_read_policy = Some(policy);
+        }
+
         // TODO(rank-aware-kv-capacity): when the rank map is added, treat rank range, map,
         // scalar fallback, and provenance as one replace-only snapshot. A legacy scalar/range
         // patch must clear stale exact data rather than leave it winning lookup precedence.

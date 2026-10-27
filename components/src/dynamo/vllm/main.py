@@ -57,6 +57,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.cache_read_policy import publish_prefix_cache_read_policy
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
 from dynamo.vllm.worker_factory import WorkerFactory
@@ -930,6 +931,9 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    publish_prefix_cache_read_policy(
+        runtime_config, model_input, model_type, worker_type
+    )
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)

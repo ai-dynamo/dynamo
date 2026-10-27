@@ -46,6 +46,7 @@ use crate::{
 };
 
 mod builtin;
+mod cache_read;
 mod cancellation;
 mod kv;
 mod kv_selection;

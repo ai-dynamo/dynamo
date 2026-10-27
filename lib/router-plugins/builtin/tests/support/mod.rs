@@ -27,6 +27,7 @@ pub fn fixture(
     prompt_tokens: usize,
 ) -> (HashMap<u64, TestWorker>, SchedulingRequest) {
     let mut request = SchedulingRequest {
+        prefix_cache_read_resolver: None,
         mode: ScheduleMode::QueryOnly { request_id: None },
         token_seq: None,
         isl_tokens: prompt_tokens,

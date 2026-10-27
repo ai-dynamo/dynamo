@@ -247,6 +247,12 @@ impl<'a> MaterializedSelectionInput<'a> {
         worker: WorkerWithDpRank,
     ) -> Option<KvTransferSourceChoice> {
         self.request.kv_transfer_candidates.as_ref()?;
+        if workers
+            .get(&worker.worker_id)
+            .is_some_and(|config| self.request.prefix_cache_read_allowed(config) == Some(false))
+        {
+            return None;
+        }
         let target = workers
             .get(&worker.worker_id)?
             .kv_transfer_keys()
@@ -277,11 +283,13 @@ impl<'a> MaterializedSelectionInput<'a> {
     fn row(
         &self,
         worker: WorkerWithDpRank,
+        config: &impl WorkerConfigLike,
         preferred_taint_multiplier: Option<f64>,
         inputs: WorkerInputs,
     ) -> CandidateData {
         self.row_with_device_overlap(
             worker,
+            config,
             preferred_taint_multiplier,
             inputs,
             |_, device_overlap_blocks| device_overlap_blocks,
@@ -292,12 +300,18 @@ impl<'a> MaterializedSelectionInput<'a> {
     fn row_with_device_overlap(
         &self,
         worker: WorkerWithDpRank,
+        config: &impl WorkerConfigLike,
         preferred_taint_multiplier: Option<f64>,
         inputs: WorkerInputs,
         select_device_overlap: impl FnOnce(f64, f64) -> f64,
     ) -> CandidateData {
+        let cache_read_allowed = inputs
+            .contains(WorkerInputs::CACHE)
+            .then(|| self.request.prefix_cache_read_allowed(config))
+            .flatten();
         let cached_tokens = if inputs.contains(WorkerInputs::CACHE) {
-            self.request.effective_cached_tokens_for(worker)
+            self.request
+                .effective_cached_tokens_for(worker, cache_read_allowed)
         } else {
             0
         };
@@ -307,7 +321,9 @@ impl<'a> MaterializedSelectionInput<'a> {
             None
         };
         let cache = if inputs.contains(WorkerInputs::CACHE) {
-            let effective_overlap_blocks = self.request.effective_overlap_blocks_for(worker);
+            let effective_overlap_blocks = self
+                .request
+                .effective_overlap_blocks_for(worker, cache_read_allowed);
             let reported_device_overlap_blocks = self
                 .request
                 .overlap
@@ -320,6 +336,7 @@ impl<'a> MaterializedSelectionInput<'a> {
             let device_overlap_blocks =
                 select_device_overlap(effective_overlap_blocks, reported_device_overlap_blocks);
             WorkerCacheData {
+                prefix_cache_read_allowed: cache_read_allowed,
                 effective_overlap_blocks,
                 estimated_cached_tokens: cached_tokens,
                 device_overlap_blocks,
@@ -374,15 +391,17 @@ fn source_prefix_blocks(source: KvTransferSourceChoice) -> u32 {
 fn selection_result(
     request: &SchedulingRequest,
     worker: WorkerWithDpRank,
+    config: &impl WorkerConfigLike,
     block_size: u32,
     max_raw_cached_tokens: Option<usize>,
     kv_transfer_source: Option<KvTransferSourceChoice>,
 ) -> WorkerSelectionResult {
+    let cache_read_allowed = request.prefix_cache_read_allowed(config);
     WorkerSelectionResult {
         worker,
         required_blocks: request.request_blocks(block_size),
-        effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
-        cached_tokens: request.effective_cached_tokens_for(worker),
+        effective_overlap_blocks: request.effective_overlap_blocks_for(worker, cache_read_allowed),
+        cached_tokens: request.effective_cached_tokens_for(worker, cache_read_allowed),
         max_raw_cached_tokens,
         selected_raw_cached_tokens: max_raw_cached_tokens
             .map(|_| request.raw_cached_tokens_for(worker, block_size)),
@@ -645,6 +664,9 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     let result = selection_result(
         request,
         worker,
+        workers
+            .get(&worker.worker_id)
+            .expect("validated selected worker"),
         block_size,
         input.max_raw_cached_tokens(),
         kv_transfer_source,
@@ -759,6 +781,7 @@ mod test_support {
 
     pub(super) fn base_request(isl_tokens: usize) -> SchedulingRequest {
         SchedulingRequest {
+            prefix_cache_read_resolver: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -837,7 +860,14 @@ mod cache_reuse_tests {
         input.track_kept_candidate(second);
 
         assert_eq!(input.max_raw_cached_tokens(), Some(96));
-        let result = selection_result(&request, first, 16, input.max_raw_cached_tokens(), None);
+        let result = selection_result(
+            &request,
+            first,
+            &crate::test_utils::SimpleWorkerConfig::default(),
+            16,
+            input.max_raw_cached_tokens(),
+            None,
+        );
         assert_eq!(result.max_raw_cached_tokens, Some(96));
         assert_eq!(result.selected_raw_cached_tokens, Some(48));
         assert_eq!(result.cached_tokens, 120);
@@ -854,7 +884,14 @@ mod cache_reuse_tests {
         input.track_kept_candidate(worker);
 
         assert_eq!(input.max_raw_cached_tokens(), None);
-        let result = selection_result(&request, worker, 16, input.max_raw_cached_tokens(), None);
+        let result = selection_result(
+            &request,
+            worker,
+            &crate::test_utils::SimpleWorkerConfig::default(),
+            16,
+            input.max_raw_cached_tokens(),
+            None,
+        );
         assert_eq!(result.max_raw_cached_tokens, None);
         assert_eq!(result.selected_raw_cached_tokens, None);
     }
@@ -883,7 +920,14 @@ mod cache_reuse_tests {
         request.overlap.effective_cached_tokens.insert(selected, 3);
         assert_eq!(request.raw_cached_tokens_for(selected, 16), 64);
         assert_eq!(request.raw_cached_tokens_for(other_rank, 16), 112);
-        let result = selection_result(&request, selected, 16, Some(112), None);
+        let result = selection_result(
+            &request,
+            selected,
+            &crate::test_utils::SimpleWorkerConfig::default(),
+            16,
+            Some(112),
+            None,
+        );
         assert_eq!(result.selected_raw_cached_tokens, Some(64));
     }
 

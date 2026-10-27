@@ -2244,13 +2244,16 @@ mod tests {
             }
 
             let mut best_worker = None;
-            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+            eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
                 let load = request.worker_load_for(worker);
                 let potential_prefill_tokens = if request.track_prefill_tokens {
                     load.active_prefill_tokens
                         .saturating_add(effective_prefill_tokens(
                             request.isl_tokens,
-                            request.effective_cached_tokens_for(worker),
+                            request.effective_cached_tokens_for(
+                                worker,
+                                request.prefix_cache_read_allowed(config),
+                            ),
                         ))
                 } else {
                     0
@@ -2274,8 +2277,14 @@ mod tests {
             Ok(WorkerSelectionResult {
                 worker,
                 required_blocks: request.request_blocks(block_size),
-                effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
-                cached_tokens: request.effective_cached_tokens_for(worker),
+                effective_overlap_blocks: request.effective_overlap_blocks_for(
+                    worker,
+                    request.prefix_cache_read_allowed(&workers[&worker.worker_id]),
+                ),
+                cached_tokens: request.effective_cached_tokens_for(
+                    worker,
+                    request.prefix_cache_read_allowed(&workers[&worker.worker_id]),
+                ),
                 max_raw_cached_tokens: None,
                 selected_raw_cached_tokens: None,
                 potential_decode_blocks: request
@@ -2709,6 +2718,7 @@ mod tests {
     ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = SchedulingRequest {
+            prefix_cache_read_resolver: None,
             mode: ScheduleMode::Tracked {
                 request_id: request_id.to_string(),
             },

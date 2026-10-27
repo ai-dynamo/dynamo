@@ -146,7 +146,10 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         let load = candidate
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        let (cached_tokens, credit) = if let Some(cache) = candidate.cache() {
+        let (cached_tokens, credit) = if let Some(cache) = candidate
+            .cache()
+            .filter(|cache| cache.prefix_cache_read_allowed() != Some(false))
+        {
             let (estimated_overlap, cached_tokens) = cache.accounting_cache_estimate();
             let device = if cache.has_tier_matches() {
                 cache.device_overlap_blocks()

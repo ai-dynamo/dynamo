@@ -327,6 +327,10 @@ fn push_transfer_target<C: WorkerConfigLike>(
     worker: WorkerWithDpRank,
     config: &C,
 ) {
+    if request.prefix_cache_read_allowed(config) == Some(false) {
+        targets.push(None);
+        return;
+    }
     let target = config.kv_transfer_keys().target();
     targets.push(target.map(|target| (target, request.transfer_local_prefix_blocks_for(worker))));
 }
@@ -363,6 +367,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             };
             let candidate = input.row(
                 worker,
+                config,
                 preferred_taint_multiplier,
                 state.scorer_picker_inputs,
             );
@@ -402,6 +407,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
         };
         let filter_candidate = input.row(
             worker,
+            config,
             filter_preferred_taint_multiplier,
             state.filter_inputs,
         );
@@ -428,6 +434,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
         };
         let additional = input.row(
             worker,
+            config,
             additional_preferred_taint_multiplier,
             additional_inputs,
         );

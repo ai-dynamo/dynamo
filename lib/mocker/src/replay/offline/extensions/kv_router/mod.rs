@@ -425,6 +425,7 @@ impl PendingRequest {
         worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
     ) -> SchedulingRequest {
         SchedulingRequest {
+            prefix_cache_read_resolver: None,
             mode: ScheduleMode::Tracked {
                 request_id: self.request_id(),
             },

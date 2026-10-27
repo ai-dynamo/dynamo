@@ -197,6 +197,7 @@ mod tests {
         let mut ids = Vec::new();
         for (worker_id, model) in [(1, "first"), (2, "second")] {
             core.upsert_worker(WorkerRequest {
+                prefix_cache_read_policy: None,
                 worker_id,
                 model_name: model.into(),
                 routing_group: "default".into(),

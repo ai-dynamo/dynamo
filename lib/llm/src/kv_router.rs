@@ -1296,6 +1296,7 @@ impl KvRouter {
             allowed_worker_ids,
             routing_constraints,
             FindBestMatchAdmission::WithAdmission,
+            None,
         )
         .await
     }
@@ -1321,6 +1322,7 @@ impl KvRouter {
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
         admission: FindBestMatchAdmission,
+        prefix_cache_read_resolver: Option<dynamo_kv_router::protocols::PrefixCacheReadResolver>,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         let start = Instant::now();
         if update_states && context_id.is_none() {
@@ -1352,6 +1354,7 @@ impl KvRouter {
         } = self
             .selection
             .run_selection(SelectionOperation {
+                prefix_cache_read_resolver,
                 key: self.selection.partition_key().clone(),
                 prompt: PromptView {
                     token_ids: Some(tokens),
@@ -2754,6 +2757,7 @@ mod tests {
                     None,
                     RoutingConstraints::default(),
                     admission,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -2939,6 +2943,7 @@ mod tests {
                     None,
                     RoutingConstraints::default(),
                     FindBestMatchAdmission::WithAdmission,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -3087,6 +3092,7 @@ mod tests {
                 None,
                 RoutingConstraints::default(),
                 FindBestMatchAdmission::WithAdmission,
+                None,
             )
             .await
             .unwrap();

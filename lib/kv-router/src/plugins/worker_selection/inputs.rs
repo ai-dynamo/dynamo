@@ -186,6 +186,7 @@ pub(crate) struct CacheSnapshot<'a> {
 /// Numeric cache row retained in host buffers between selections.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct WorkerCacheData {
+    pub(crate) prefix_cache_read_allowed: Option<bool>,
     pub(crate) effective_overlap_blocks: f64,
     pub(crate) estimated_cached_tokens: usize,
     pub(crate) device_overlap_blocks: f64,
@@ -312,6 +313,15 @@ impl ScoredWorkerCandidate {
 }
 
 impl<'a> WorkerCacheInput<'a> {
+    /// Whether this request may read this worker's prefix cache under its advertised
+    /// adapter contract. None means no resolver or no known worker contract. The
+    /// host resolves this from immutable request controls and the current worker
+    /// config for this callback; it is not a cache-membership or liveness proof.
+    /// Raw overlap accessors remain unchanged when this returns Some(false).
+    pub fn prefix_cache_read_allowed(self) -> Option<bool> {
+        self.data.prefix_cache_read_allowed
+    }
+
     /// Unweighted shared-cache ranges in KV block positions, or None if no result was supplied.
     /// The host owns this snapshot. It does not change during the callback, and may lag engine state.
     /// Use `hits_beyond(prefix)` to exclude hits already covered by the policy's chosen prefix.

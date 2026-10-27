@@ -229,6 +229,7 @@ mod tests {
 
     fn select_with(parameters: Parameters, workers: [(u64, usize, usize); 2]) -> WorkerWithDpRank {
         let mut request = SchedulingRequest {
+            prefix_cache_read_resolver: None,
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
             isl_tokens: TEN_BLOCKS,

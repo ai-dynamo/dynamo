@@ -9,6 +9,7 @@ use dynamo_kv_router::{KvRouterConfig, RoutingPartitionId};
 
 fn worker(worker_id: u64) -> WorkerRequest {
     WorkerRequest {
+        prefix_cache_read_policy: None,
         worker_id,
         model_name: "model".to_string(),
         routing_group: "default".to_string(),

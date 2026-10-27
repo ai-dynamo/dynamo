@@ -69,6 +69,7 @@ fn core_with_config(
     runtime.block_on(async {
         for worker_id in 1..=workers {
             let mut request = WorkerRequest {
+                prefix_cache_read_policy: None,
                 worker_id,
                 endpoint: Some(format!("http://worker-{worker_id}:8000")),
                 kv_events_endpoint: Some(format!("tcp://127.0.0.1:{}", 40_000 + worker_id)),

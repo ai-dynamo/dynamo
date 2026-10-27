@@ -1137,6 +1137,7 @@ mod tests {
         for worker_id in [42, 43] {
             service
                 .upsert_worker(WorkerRequest {
+                    prefix_cache_read_policy: None,
                     worker_id,
                     endpoint: Some("http://127.0.0.1:8000".into()),
                     block_size: Some(4),

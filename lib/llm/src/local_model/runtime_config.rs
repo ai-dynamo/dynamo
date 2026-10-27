@@ -140,6 +140,10 @@ impl StructuralTagConfig {
 pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
 pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 
+/// Versioned worker declaration of request cache-read override semantics.
+/// Missing declarations preserve legacy estimates without affecting model identity.
+pub const PREFIX_CACHE_READ_POLICY_RUNTIME_KEY: &str = "prefix_cache_read_policy";
+
 /// Worker-advertised support for Dynamo's vLLM-compatible
 /// `POST /inference/v1/generate` adapter.
 ///
@@ -528,6 +532,12 @@ impl ModelRuntimeConfig {
 }
 
 impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
+    fn prefix_cache_read_policy(&self) -> Option<&str> {
+        self.runtime_data
+            .get(PREFIX_CACHE_READ_POLICY_RUNTIME_KEY)
+            .and_then(serde_json::Value::as_str)
+    }
+
     fn data_parallel_start_rank(&self) -> u32 {
         self.data_parallel_start_rank
     }

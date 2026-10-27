@@ -43,6 +43,7 @@ fn bench(c: &mut Criterion) {
             runtime.block_on(async {
                 for worker_id in 0..count {
                     core.upsert_worker(WorkerRequest {
+                        prefix_cache_read_policy: None,
                         worker_id,
                         endpoint: Some(format!("http://worker-{worker_id}:8000")),
                         block_size: Some(16),

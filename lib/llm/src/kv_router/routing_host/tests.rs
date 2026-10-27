@@ -58,6 +58,132 @@ fn request() -> PreprocessedRequest {
         .unwrap()
 }
 
+#[rstest::rstest]
+#[case::ordinary(None, None, false, 64)]
+#[case::prompt_zero(Some(0), None, false, 0)]
+#[case::prompt_one(Some(1), None, false, 0)]
+#[case::explicit_false(Some(1), Some(serde_json::json!({"sampling_options": {"skip_reading_prefix_cache": false}})), false, 64)]
+#[case::explicit_true(None, Some(serde_json::json!({"sampling_options": {"skip_reading_prefix_cache": true}})), false, 0)]
+#[case::direct_false(Some(1), Some(serde_json::json!({"skip_reading_prefix_cache": false})), false, 64)]
+#[case::ordinary_direct_extra_ignored(None, Some(serde_json::json!({"skip_reading_prefix_cache": true})), false, 64)]
+#[case::legacy_worker(Some(1), None, true, 64)]
+#[tokio::test]
+#[serial_test::serial]
+async fn prefix_cache_bypass_preserves_raw_overlap_but_books_fresh_work(
+    #[case] prompt_logprobs: Option<u32>,
+    #[case] extra_args: Option<serde_json::Value>,
+    #[case] legacy_worker: bool,
+    #[case] expected_cached: usize,
+) {
+    use dynamo_kv_router::protocols::{BlockHashOptions, StorageTier, compute_block_hash_for_seq};
+    let mut config = ModelRuntimeConfig::default();
+    if !legacy_worker {
+        config.runtime_data.insert(
+            "prefix_cache_read_policy".to_string(),
+            serde_json::json!("vllm_python_v1"),
+        );
+    }
+    let (host, runtime) = router_with_config(
+        None,
+        HashMap::from([(7, config)]),
+        KvRouterConfig {
+            // Apply the known STORE directly; no network event subscriber is
+            // needed for this request-plane regression.
+            use_kv_events: false,
+            skip_initial_worker_wait: true,
+            router_track_active_blocks: false,
+            router_track_prefill_tokens: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let prefix = vec![1; 64];
+    let hashes = compute_block_hash_for_seq(&prefix, 16, BlockHashOptions::default());
+    let event = crate::kv_router::indexer::test_util::store_event(
+        7,
+        0,
+        1,
+        &[],
+        &hashes.iter().map(|hash| hash.0).collect::<Vec<_>>(),
+        StorageTier::Device,
+    );
+    host.kv_router()
+        .indexer()
+        .apply_event_routed(event)
+        .await
+        .unwrap();
+    let mut req = request();
+    req.token_ids = Arc::new([prefix, vec![2]].concat());
+    let options = |admission| SelectionOptions {
+        pinned_target: None,
+        affinity_target: None,
+        planned_worker: None,
+        policy_class: None,
+        session_context: None,
+        admission,
+    };
+    // The real event-driven indexer must expose the physical prefix before we
+    // assert anything about this request's eligibility to read it.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let selected = host
+                .select_worker_outcome(
+                    "cache-read-warm",
+                    &req,
+                    RoutingRequestParts::new(&req),
+                    RequestPhase::Aggregated,
+                    true,
+                    options(crate::kv_router::FindBestMatchAdmission::WithoutAdmission),
+                )
+                .await
+                .unwrap()
+                .into_result()
+                .unwrap();
+            if selected.overlap_amount == 4 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    req.output_options.prompt_logprobs = prompt_logprobs;
+    req.extra_args = extra_args;
+    let selected = host
+        .select_worker_outcome(
+            "cache-read-subject",
+            &req,
+            RoutingRequestParts::new(&req),
+            RequestPhase::Aggregated,
+            false,
+            options(crate::kv_router::FindBestMatchAdmission::WithAdmission),
+        )
+        .await
+        .unwrap()
+        .into_result()
+        .unwrap();
+    let loads = potential_loads(&host).await;
+    let observed = (
+        selected.cached_tokens,
+        selected.selected_raw_cached_tokens,
+        loads
+            .iter()
+            .find(|load| load.worker_id == 7)
+            .unwrap()
+            .potential_prefill_tokens,
+    );
+    drop(selected);
+    host.kv_router()
+        .selection
+        .scheduler()
+        .admission_barrier()
+        .await
+        .unwrap();
+    drop(host);
+    runtime.shutdown();
+    assert_eq!(observed, (expected_cached, Some(64), 65 - expected_cached));
+}
+
 async fn test_load_context(client: &Client) -> Arc<RoutingLoadContext> {
     RoutingLoadContext::start(
         client.clone(),

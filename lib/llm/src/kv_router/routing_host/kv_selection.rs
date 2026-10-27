@@ -86,6 +86,7 @@ pub(super) struct SelectionOptions {
 }
 
 struct BestMatchArgs<'a> {
+    prefix_cache_read_resolver: Option<dynamo_kv_router::protocols::PrefixCacheReadResolver>,
     context_id: &'a str,
     routing_parts: RoutingRequestParts<'a>,
     router_config_override: Option<&'a RouterConfigOverride>,
@@ -128,6 +129,7 @@ impl RoutingHost {
                 args.allowed_worker_ids,
                 args.routing_constraints,
                 args.admission,
+                args.prefix_cache_read_resolver,
             )
             .await?;
         match admitted.outcome {
@@ -172,6 +174,7 @@ impl RoutingHost {
         options: SelectionOptions,
     ) -> Result<SelectionOutcome, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
+        let prefix_cache_read_resolver = super::cache_read::resolver(request, phase);
         let routing = request.routing.as_ref();
         let explicit_pin = pinned_worker_hint(phase, routing);
         let lora_name = routing.and_then(|routing| routing.lora_name.clone());
@@ -277,6 +280,7 @@ impl RoutingHost {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
                 .select_best_match(BestMatchArgs {
+                    prefix_cache_read_resolver,
                     context_id,
                     routing_parts,
                     router_config_override: request.router_config_override.as_ref(),
@@ -345,6 +349,7 @@ impl RoutingHost {
         );
 
         self.select_best_match(BestMatchArgs {
+            prefix_cache_read_resolver,
             context_id,
             routing_parts,
             router_config_override: request.router_config_override.as_ref(),

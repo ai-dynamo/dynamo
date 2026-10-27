@@ -3627,6 +3627,17 @@ mod ownership_tests {
     }
 
     #[test]
+    fn prefix_cache_read_declaration_preserves_model_identity() {
+        let old_worker = ModelDeploymentCard::with_name_only("model");
+        let mut declared_worker = old_worker.clone();
+        declared_worker.runtime_config.runtime_data.insert(
+            crate::local_model::runtime_config::PREFIX_CACHE_READ_POLICY_RUNTIME_KEY.to_string(),
+            serde_json::json!("vllm_python_v1"),
+        );
+        assert_eq!(old_worker.mdcsum(), declared_worker.mdcsum());
+    }
+
+    #[test]
     fn tower_connector_lora_runtime_flag_isolates_worker_sets() {
         use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 

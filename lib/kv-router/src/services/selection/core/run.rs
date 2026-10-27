@@ -87,6 +87,7 @@ impl SelectionCore {
         };
         let (selected, endpoint) = self
             .select_or_reject(SelectionOperation {
+                prefix_cache_read_resolver: None,
                 key: RoutingPartitionId::new(req.model_name, req.routing_group),
                 prompt: req.prompt.view(),
                 router_config_override: req.router_config_override,
@@ -129,6 +130,7 @@ impl SelectionCore {
         let session = session_binding(session_context.as_ref(), is_steerable, true);
         let (selected, endpoint) = self
             .select_or_reject(SelectionOperation {
+                prefix_cache_read_resolver: None,
                 key: RoutingPartitionId::new(req.model_name, req.routing_group),
                 prompt: req.prompt.view(),
                 router_config_override: req.router_config_override,
@@ -264,6 +266,7 @@ impl SelectionCore {
         lookup: &mut Option<LookupTimings>,
     ) -> Result<SelectionOutcome, SelectionError> {
         let SelectionOperation {
+            prefix_cache_read_resolver,
             key,
             prompt,
             router_config_override,
@@ -418,6 +421,7 @@ impl SelectionCore {
             matches!(admission, SelectionAdmission::Book { .. }).then(|| sequence_hashes.clone());
         let returned_routing_hashes = return_routing_hashes.then(|| block_hashes.clone());
         let schedule_request = ScheduleRequest {
+            prefix_cache_read_resolver,
             mode,
             token_seq: track_active_blocks.then_some(sequence_hashes),
             block_hashes: Some(block_hashes),

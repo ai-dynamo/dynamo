@@ -436,6 +436,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | Group | Accessor | Meaning |
 |---|---|---|
 | `CACHE` | `device_overlap_blocks()` | Device-resident prefix overlap in blocks |
+| `CACHE` | `prefix_cache_read_allowed()` | Request-specific eligibility under the worker's declared adapter contract: `Some(false)` disables prefix cost credit; `None` means the request or worker contract is unknown |
 | `CACHE` | `host_overlap_blocks()` | Host-pinned prefix overlap in blocks |
 | `CACHE` | `disk_overlap_blocks()` | Disk prefix overlap in blocks |
 | `CACHE` | `accounting_cache_estimate()` | Accounting estimate as weighted KV blocks and rounded tokens; zero if missing, not clamped to prompt length |
@@ -452,6 +453,21 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
 A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned views through `WorkerInputView`; its cache view supports `get(row)` and `iter()`. Each component must declare every group it reads; another component requesting a group does not grant access.
+
+`prefix_cache_read_allowed()` is resolved from immutable request controls and the
+worker configuration used for the current candidate callback. It has no weights or
+clamping. It does not prove cache membership, readiness, or liveness. When it is
+`Some(false)`, raw device/host/disk overlap remains available, while the host's
+accounting estimate is zero and the default scorer grants no cache credit.
+Cache-derived custom scorers should check this value before subtracting raw
+overlap. Missing declarations and unsupported adapter versions return `None` and
+preserve the previous estimates.
+
+The frontend currently recognizes declared request overrides on aggregated text
+Python vLLM workers: prompt logprobs (including width zero and the completion echo
+mapping) and explicit sampling cache-read controls. Native Generate, remote
+prefill, multimodal requests, and model-specific defaults are not inferred by
+this resolver. Ordinary requests without such controls retain the existing path.
 
 A scorer reads `KV_TRANSFER` through `WorkerCandidate::kv_transfer()`. Filters and pickers do not receive it, and declaring it there has no effect. The host picks each worker's source with the [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints) rules, including topology islands, and booking a worker attaches a fetch hint for that same source. Fetches are best effort: the source may no longer hold the blocks when the request runs.
 

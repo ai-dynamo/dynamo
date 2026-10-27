@@ -88,6 +88,7 @@ where
             .and_then(|cfg| cfg.track_prefill_tokens)
             .unwrap_or(self.track_prefill_tokens_default);
         let ScheduleRequest {
+            prefix_cache_read_resolver,
             mode,
             token_seq,
             block_hashes,
@@ -109,6 +110,7 @@ where
             shared_cache_hits,
         } = request;
         let request = SchedulingRequest {
+            prefix_cache_read_resolver,
             mode,
             token_seq,
             isl_tokens,
@@ -602,6 +604,7 @@ where
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let mode = ScheduleMode::from_legacy(maybe_request_id, update_states)?;
         self.schedule_request(ScheduleRequest {
+            prefix_cache_read_resolver: None,
             mode,
             token_seq,
             block_hashes,
@@ -1171,6 +1174,7 @@ mod tests {
 
     fn request(mode: ScheduleMode) -> ScheduleRequest {
         ScheduleRequest {
+            prefix_cache_read_resolver: None,
             mode,
             token_seq: Some(vec![1, 2, 3, 4]),
             block_hashes: None,

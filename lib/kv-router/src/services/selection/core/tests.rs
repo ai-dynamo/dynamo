@@ -116,6 +116,7 @@ fn replay_reservation(selection_id: &str) -> ReservationRequest {
 
 fn worker(worker_id: WorkerId) -> WorkerRequest {
     WorkerRequest {
+        prefix_cache_read_policy: None,
         worker_id,
         model_name: "model".to_string(),
         routing_group: "default".to_string(),
@@ -143,6 +144,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
 
 fn worker_with_kv_events(worker_id: WorkerId) -> WorkerRequest {
     WorkerRequest {
+        prefix_cache_read_policy: None,
         kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
         ..worker(worker_id)
     }
@@ -244,6 +246,7 @@ fn lease_operation<'a>(
     track_active_blocks: bool,
 ) -> SelectionOperation<'a> {
     SelectionOperation {
+        prefix_cache_read_resolver: None,
         key: default_key(),
         prompt,
         router_config_override: None,
@@ -1217,6 +1220,7 @@ async fn multi_rank_worker_with_replay_endpoint_is_incomplete() {
 
     let record = core
         .upsert_worker(WorkerRequest {
+            prefix_cache_read_policy: None,
             data_parallel_size: Some(2),
             kv_events_endpoints: HashMap::from([
                 (0, "tcp://127.0.0.1:5557".to_string()),
@@ -1477,6 +1481,7 @@ async fn lease_admission_keeps_a_selection_whose_worker_drained_while_queued() {
 async fn lease_admission_installs_no_index_row_and_records_nothing() {
     let core = local_core(test_config(false));
     core.upsert_worker(WorkerRequest {
+        prefix_cache_read_policy: None,
         total_kv_blocks: Some(2048),
         ..worker(1)
     })
@@ -1982,6 +1987,7 @@ async fn replaced_claim_cannot_remove_or_overwrite_a_new_reservation(
     core.upsert_worker(worker(1)).await.unwrap();
     let other_key = RoutingPartitionId::new("model", "other");
     core.upsert_worker(WorkerRequest {
+        prefix_cache_read_policy: None,
         routing_group: other_key.routing_group.clone(),
         ..worker(2)
     })
@@ -2729,6 +2735,7 @@ async fn session_dp_rank_shrink_rebinds_only_removed_targets(
     let core = core_with_session_affinity();
     let key = default_key();
     core.upsert_worker(WorkerRequest {
+        prefix_cache_read_policy: None,
         data_parallel_size: Some(2),
         ..worker(1)
     })
@@ -3501,6 +3508,7 @@ fn transfer_hint_for_selection(
 
 fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerConfig {
     SelectionWorkerConfig {
+        prefix_cache_read_policy: None,
         endpoint: "http://worker:8000".to_string(),
         data_parallel_start_rank: 0,
         data_parallel_size: endpoints.len().max(1) as u32,
