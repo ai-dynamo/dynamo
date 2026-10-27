@@ -12,9 +12,8 @@ and governs traffic, not because one topology uses a different KV-routing algori
 
 ## Recommendation
 
-Use **Dynamo Frontend routing**. It has
-fewer components, requires no Gateway API installation, and works with a standard
-`DynamoGraphDeployment`.
+Use **Dynamo Frontend routing**. It has fewer components, does not need GAIE, and works with a
+standard `DynamoGraphDeployment`.
 
 If traffic must enter through a Kubernetes Gateway, for example because a platform team
 standardizes ingress, authentication, rate limiting, traffic policy, or gateway-level telemetry
@@ -46,7 +45,6 @@ component.
 Choose this topology when:
 
 - Each deployment can expose its own Frontend Service.
-- You do not need Gateway API policy in the request path.
 - You want the fewest routing components to install and operate.
 - Dynamo should own both HTTP request handling and worker selection.
 
@@ -61,7 +59,7 @@ GAIE routing moves worker selection into the Gateway's request path. A Kubernete
 the request and asks the Dynamo Endpoint Picker Plugin (EPP) to select an endpoint before forwarding
 the request to a worker pod.
 
-Choose this topology when:
+Teams often give these reasons for GAIE routing:
 
 - Your organization already uses Gateway API as the standard ingress layer.
 - Authentication, authorization, rate limiting, traffic policy, or telemetry belongs at the Gateway.

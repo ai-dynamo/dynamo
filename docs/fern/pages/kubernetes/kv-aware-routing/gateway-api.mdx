@@ -10,8 +10,10 @@ This how-to places a Kubernetes Gateway in front of an existing `DynamoGraphDepl
 Through the Gateway API Inference Extension (GAIE), the Gateway calls the Dynamo Endpoint Picker
 Plugin (EPP) and forwards each request to the worker selected by the EPP.
 
-Use this topology when Gateway API should own traffic entry, policy, and gateway-level observability.
-For direct-to-Frontend routing, use [the Dynamo Frontend](dynamo-frontend.md).
+Use this topology when the Gateway must pick the worker for each request through the Dynamo EPP. If
+the Gateway only needs to own traffic entry, policy, and gateway-level observability, use
+[the Dynamo Frontend](dynamo-frontend.md) behind the Gateway instead, as shown in
+[Expose the Frontend](../model-deployment/expose-the-frontend.md#option-3-a-gateway-api-httproute-to-the-frontend-service).
 
 <Warning>
 The Dynamo EPP does not have full feature parity with Dynamo Frontend routing. Before you
