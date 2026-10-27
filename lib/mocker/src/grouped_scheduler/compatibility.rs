@@ -40,12 +40,20 @@ impl CompatibilityState {
         }
     }
 
-    pub(super) fn native_request(&self, request: DirectRequest) -> Request {
+    pub(super) fn native_request(&self, request: DirectRequest) -> Result<Request> {
+        anyhow::ensure!(
+            request.kv_hints.is_none(),
+            "Dynamo grouped live engines do not support authored KV fetch hints"
+        );
+        anyhow::ensure!(
+            request.images.is_empty(),
+            "Dynamo grouped live engines do not support image requests"
+        );
         let request_id = request.uuid.unwrap_or_else(Uuid::new_v4);
         self.request_prompt_lengths
             .lock()
             .insert(request_id, request.tokens.len());
-        Request {
+        Ok(Request {
             request_id,
             tokens: request.tokens,
             max_output_tokens: request.max_output_tokens,
@@ -53,7 +61,9 @@ impl CompatibilityState {
             session_id: request
                 .replay_context
                 .and_then(|context| context.session_id().map(str::to_owned)),
-        }
+            images: Vec::new(),
+            kv_hint: None,
+        })
     }
 
     pub(super) fn engine_handoff(&self, handoff_id: DynamoHandoffId) -> Result<EngineHandoffId> {
@@ -146,6 +156,11 @@ impl CompatibilityState {
                 request_id,
                 transferable_prompt_tokens,
             },
+            LifecycleEvent::TtftMilestone { .. } => {
+                return Err(anyhow!(
+                    "host-aware TTFT milestones are not supported by Dynamo grouped live engines"
+                ));
+            }
         })
     }
 }
@@ -316,14 +331,72 @@ mod tests {
             (Some(" "), None),
             (None, None),
         ] {
-            let request = state.native_request(DirectRequest {
-                replay_context: session_id.map(|id| ReplayRequestContext {
-                    session_id: Some(id.to_owned()),
+            let request = state
+                .native_request(DirectRequest {
+                    replay_context: session_id.map(|id| ReplayRequestContext {
+                        session_id: Some(id.to_owned()),
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            });
+                })
+                .unwrap();
             assert_eq!(request.session_id.as_deref(), expected);
+            assert!(request.images.is_empty());
+            assert!(request.kv_hint.is_none());
         }
+    }
+
+    #[test]
+    fn host_aware_ttft_milestones_are_rejected_explicitly() {
+        let state = CompatibilityState::new(MockerConfig::default());
+        let error = state
+            .lifecycle_event(LifecycleEvent::TtftMilestone {
+                request_id: Uuid::from_u128(12),
+                stage: aisimulate_core::engine::TtftMilestone::Received,
+                at_ms: 0.0,
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("host-aware TTFT milestones"));
+    }
+
+    #[test]
+    fn unhandled_request_fields_do_not_mutate_compatibility_state() {
+        let state = CompatibilityState::new(MockerConfig::default());
+        let mut request = DirectRequest {
+            kv_hints: Some(aisimulate_core::replay::AuthoredKvHints {
+                source_worker: 0,
+                source_dp_rank: 0,
+            }),
+            ..Default::default()
+        };
+        assert!(
+            state
+                .native_request(request.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("authored KV fetch hints")
+        );
+        assert!(state.request_prompt_lengths.lock().is_empty());
+        request.kv_hints = None;
+        request.images.push(aisimulate_core::engine::ImageSpec {
+            identity: 1,
+            token_start: 0,
+            token_end: 1,
+            encoder: aisimulate_core::engine::EncoderShape {
+                sequences: 1,
+                patch_tokens: 1,
+                transformer_tokens: 1,
+                output_tokens: 1,
+            },
+            embedding_bytes: 1,
+        });
+        assert!(
+            state
+                .native_request(request)
+                .unwrap_err()
+                .to_string()
+                .contains("image requests")
+        );
+        assert!(state.request_prompt_lengths.lock().is_empty());
     }
 }

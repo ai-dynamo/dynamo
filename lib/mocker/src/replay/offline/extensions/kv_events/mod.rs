@@ -201,6 +201,7 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
         max_in_flight: None,
         record_per_request: false,
         sla: Default::default(),
+        encoder: None,
         requests: Vec::new(),
     };
     let visibility = match router_event_visibility_override {

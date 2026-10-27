@@ -518,7 +518,7 @@ These fields default from environment variables and are excluded from serialized
 ### Advisory and diagnostics
 
 <ParamField path="advisory" type="boolean" default="false">
-  Suggestion-only mode. The Planner computes, logs, exports, and reports recommended replica counts without executing scaling actions or changing the deployment. Use it to evaluate a new configuration or validate SLA targets against production traffic.
+  Suggestion-only mode. The Planner computes, logs, exports, and reports recommended replica counts without executing scaling actions or changing the deployment. Use it to evaluate a new configuration or validate SLA targets against production traffic. A planner-in-the-loop replay of the same configuration also keeps the simulated deployment fixed.
 </ParamField>
 
 <ParamField path="report_interval_hours" type="number" default="24.0">
