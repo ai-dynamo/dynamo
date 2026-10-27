@@ -33,6 +33,11 @@ def _runtime_error(status: int, code: str) -> HttpError:
     return HttpError(status, code)
 
 
+def _cache_scan_error(error: OSError) -> None:
+    if not isinstance(error, FileNotFoundError):
+        raise error
+
+
 async def _release_cache_reservation(
     state: LoRAState,
     guard: asyncio.Lock,
@@ -50,9 +55,14 @@ def _cache_size(cache_root: Path, stop_after: int) -> int:
 
     total_bytes = 0
     try:
-        for root, directories, files in os.walk(canonical_root, followlinks=False):
+        for root, directories, files in os.walk(
+            canonical_root, followlinks=False, onerror=_cache_scan_error
+        ):
             for name in [*directories, *files]:
-                metadata = (Path(root) / name).lstat()
+                try:
+                    metadata = (Path(root) / name).lstat()
+                except FileNotFoundError:
+                    continue
                 if stat.S_ISREG(metadata.st_mode):
                     total_bytes += metadata.st_size
                     if total_bytes > stop_after:
