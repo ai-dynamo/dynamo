@@ -23,13 +23,11 @@ them to the Mocker server.
 That commit merged
 [sgl-project/sglang#42833](https://github.com/sgl-project/sglang/pull/42833),
 which adds the `GenerateRequest` media fields 19 to 21 (`image_data`,
-`video_data`, and `audio_data`); no SGLang release has them yet. The local file
-also adds `GenerateRequest` field 22 (`mm_hashes`) from
-[sgl-project/sglang#43886](https://github.com/sgl-project/sglang/pull/43886),
-which also adds the `GetServerInfo` `grpc_features` list and is not merged yet.
-Until it merges, the local descriptor does not match the commit above. When it
-merges, copy the file again from the SGLang merge commit and update the commit
-and the SHA-256. The sidecar sends each media kind only to servers that
-list it in `grpc_features` (`image_inputs`, `video_inputs`, or `audio_inputs`),
+`video_data`, and `audio_data`); no SGLang release has them yet. The sidecar
+sends each media kind only to servers that list it in the `GetServerInfo`
+`grpc_features` list (`image_inputs`, `video_inputs`, or `audio_inputs`),
 because older servers drop unknown fields and a model processor drops each
 media kind it has no placeholder for, both silently.
+[sgl-project/sglang#46882](https://github.com/sgl-project/sglang/pull/46882)
+adds that list and is not merged yet. Until a server has it, the sidecar
+refuses all media.
