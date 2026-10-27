@@ -42,11 +42,9 @@ class _RuntimeRequest:
 
 def _positive_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
-    if raw is None:
-        return default
     try:
-        value = int(raw)
-    except ValueError as exc:
+        value = int(default if raw is None else raw)
+    except (TypeError, ValueError) as exc:
         raise ValueError(f"runtime_lora_unsupported: invalid {name}") from exc
     if value <= 0:
         raise ValueError(f"runtime_lora_unsupported: invalid {name}")
@@ -70,7 +68,7 @@ class RuntimeLoRASettings:
         try:
             max_loras = int(getattr(engine_args, "max_loras", 4))
             max_cpu_loras = getattr(engine_args, "max_cpu_loras", None)
-            max_registered = int(max_cpu_loras or max_loras)
+            max_registered = int(max_loras if max_cpu_loras is None else max_cpu_loras)
             if max_loras <= 0 or max_registered <= 0:
                 raise ValueError("vLLM LoRA capacity must be positive")
             max_resident = _positive_int(
@@ -85,9 +83,10 @@ class RuntimeLoRASettings:
             resolve_timeout = _positive_int("DYN_LORA_RESOLVE_TIMEOUT_SECONDS", 300)
             max_concurrent = _positive_int("DYN_LORA_MAX_CONCURRENT_RESOLUTIONS", 2)
             max_pending = _positive_int("DYN_LORA_MAX_PENDING_RUNTIME_KEYS", 64)
+            max_num_seqs = getattr(engine_args, "max_num_seqs", None)
             max_pending_admissions = _positive_int(
                 "DYN_LORA_MAX_PENDING_ADMISSIONS",
-                int(getattr(engine_args, "max_num_seqs", 256)),
+                256 if max_num_seqs is None else max_num_seqs,
             )
             pending_admission_timeout = _positive_int(
                 "DYN_LORA_PENDING_ADMISSION_TIMEOUT_SECONDS", 30
@@ -96,7 +95,7 @@ class RuntimeLoRASettings:
             raise RuntimeLoRAConfigurationError(str(exc)) from exc
         if max_resident > max_registered:
             raise RuntimeLoRAConfigurationError(
-                "DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS cannot exceed vLLM max_cpu_loras"
+                "DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS cannot exceed vLLM LoRA CPU capacity"
             )
         if max_download > max_cache:
             raise RuntimeLoRAConfigurationError(
@@ -166,13 +165,18 @@ def _parse_request(request: Mapping[str, Any]) -> _RuntimeRequest | None:
         not has_runtime_key
         or not isinstance(base_model_name, str)
         or not isinstance(source_uri, str)
-        or isinstance(protocol_version, bool)
+        or type(protocol_version) is not int
         or protocol_version != _RUNTIME_PROTOCOL_VERSION
     ):
         raise _runtime_error(400, "invalid_lora_model_id")
+    try:
+        base_bytes = base_model_name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise _runtime_error(400, "invalid_lora_model_id") from exc
     if (
         not base_model_name
-        or len(base_model_name.encode("utf-8")) > _MAX_BASE_BYTES
+        or len(base_bytes) > _MAX_BASE_BYTES
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in base_model_name)
         or request.get("model") != base_model_name
     ):
         raise _runtime_error(400, "invalid_lora_model_id")
@@ -214,13 +218,12 @@ def publish_runtime_lora_capability(
             "runtime LoRA protocol version 2 requires Dynamo's tokenized request path"
         )
 
+    settings = RuntimeLoRASettings.from_engine_args(handler_config.engine_args)
     manager = get_lora_manager(configure_runtime=True)
     if manager is None or not manager.runtime_lora_schemes:
         raise RuntimeLoRAConfigurationError(
             "runtime LoRA resolver did not advertise any allowed schemes"
         )
-    settings = RuntimeLoRASettings.from_engine_args(handler_config.engine_args)
-    handler_config.runtime_lora_settings = settings
     try:
         cache_root = manager.cache_root.resolve(strict=True)
     except OSError as exc:
@@ -242,3 +245,4 @@ def publish_runtime_lora_capability(
     runtime_config.taints = set(runtime_config.taints) | {
         f"dynamo.runtime-lora/v{_RUNTIME_PROTOCOL_VERSION}"
     }
+    handler_config.runtime_lora_settings = settings

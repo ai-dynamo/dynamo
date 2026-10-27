@@ -3,11 +3,12 @@
 
 import hashlib
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
 
-from dynamo.llm import WorkerType
+from dynamo.llm import ModelRuntimeConfig, WorkerType
 from dynamo.vllm import runtime_lora_protocol as protocol_mod
 from dynamo.vllm.runtime_lora_protocol import publish_runtime_lora_capability
 
@@ -19,6 +20,13 @@ pytestmark = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def clean_runtime_lora_environment(monkeypatch):
+    for name in tuple(os.environ):
+        if name.startswith("DYN_LORA_"):
+            monkeypatch.delenv(name)
+
+
 @pytest.mark.parametrize(
     "request_payload",
     [
@@ -26,6 +34,7 @@ pytestmark = [
         {"routing": None},
         {"routing": []},
         {"routing": {"lora_name": "known-adapter"}},
+        {"routing": {"lora_name": "dyn-lora-" + "0" * 32}},
     ],
 )
 def test_explicit_requests_do_not_use_runtime_protocol(request_payload):
@@ -63,6 +72,7 @@ def test_source_with_unpaired_surrogate_is_rejected():
         ("base_model_name", "b" * 513),
         ("lora_source_uri", None),
         ("lora_resolution_version", True),
+        ("lora_resolution_version", 2.0),
         ("lora_resolution_version", 1),
     ],
 )
@@ -103,6 +113,7 @@ def test_runtime_settings_reject_invalid_positive_limits(monkeypatch, value):
         SimpleNamespace(max_loras=-1),
         SimpleNamespace(max_loras=None),
         SimpleNamespace(max_cpu_loras=-1),
+        SimpleNamespace(max_cpu_loras=0),
     ],
 )
 def test_runtime_settings_reject_invalid_engine_capacity(engine_args):
@@ -183,12 +194,15 @@ def test_capability_requires_usable_resolver_cache(monkeypatch, tmp_path, manage
     monkeypatch.setattr(
         protocol_mod, "get_lora_manager", lambda **_kwargs: managers[manager_kind]
     )
-    with pytest.raises(protocol_mod.RuntimeLoRAConfigurationError):
+    handler_config = SimpleNamespace(engine_args=SimpleNamespace(enable_lora=True))
+    expected = "cache root" if manager_kind.endswith("root") else "allowed schemes"
+    with pytest.raises(protocol_mod.RuntimeLoRAConfigurationError, match=expected):
         publish_runtime_lora_capability(
             SimpleNamespace(),
-            SimpleNamespace(engine_args=SimpleNamespace(enable_lora=True)),
+            handler_config,
             WorkerType.Aggregated,
         )
+    assert not hasattr(handler_config, "runtime_lora_settings")
 
 
 def _identity(base_model: str, source_uri: str) -> str:
@@ -392,7 +406,7 @@ def test_runtime_capability_rejects_invalid_resource_bounds_with_cpu_capacity(
     )
     monkeypatch.setenv("DYN_LORA_ENABLED", "true")
     monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", "true")
-    monkeypatch.setenv("DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS", "5")
+    monkeypatch.setenv("DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS", "9")
     monkeypatch.setattr(protocol_mod, "get_lora_manager", lambda **_kwargs: manager)
 
     with pytest.raises(
@@ -401,6 +415,129 @@ def test_runtime_capability_rejects_invalid_resource_bounds_with_cpu_capacity(
     ):
         publish_runtime_lora_capability(
             SimpleNamespace(),
-            SimpleNamespace(engine_args=SimpleNamespace(enable_lora=True, max_loras=4)),
+            SimpleNamespace(
+                engine_args=SimpleNamespace(
+                    enable_lora=True, max_loras=4, max_cpu_loras=8
+                )
+            ),
             WorkerType.Aggregated,
         )
+
+
+@pytest.mark.parametrize("max_num_seqs", [None, 32])
+def test_pending_admission_default_handles_optional_engine_limit(max_num_seqs):
+    settings = protocol_mod.RuntimeLoRASettings.from_engine_args(
+        SimpleNamespace(max_num_seqs=max_num_seqs)
+    )
+    assert settings.max_pending_admissions == (256 if max_num_seqs is None else 32)
+
+
+@pytest.mark.parametrize("max_num_seqs", [None, "invalid", 0])
+def test_pending_admission_override_does_not_eagerly_parse_default(
+    monkeypatch, max_num_seqs
+):
+    monkeypatch.setenv("DYN_LORA_MAX_PENDING_ADMISSIONS", "17")
+    settings = protocol_mod.RuntimeLoRASettings.from_engine_args(
+        SimpleNamespace(max_num_seqs=max_num_seqs)
+    )
+    assert settings.max_pending_admissions == 17
+
+
+@pytest.mark.parametrize("max_num_seqs", [0, -1, "invalid"])
+def test_pending_admission_engine_default_must_be_positive(max_num_seqs):
+    with pytest.raises(
+        protocol_mod.RuntimeLoRAConfigurationError,
+        match="DYN_LORA_MAX_PENDING_ADMISSIONS",
+    ):
+        protocol_mod.RuntimeLoRASettings.from_engine_args(
+            SimpleNamespace(max_num_seqs=max_num_seqs)
+        )
+
+
+def test_invalid_settings_fail_before_plugin_initialization(monkeypatch):
+    monkeypatch.setenv("DYN_LORA_ENABLED", "true")
+    monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", "true")
+    monkeypatch.setenv("DYN_LORA_MAX_DOWNLOAD_BYTES", "20")
+    monkeypatch.setenv("DYN_LORA_MAX_CACHE_BYTES", "10")
+
+    def reject_plugin_load(**_kwargs):
+        pytest.fail("invalid settings must not initialize the plugin")
+
+    monkeypatch.setattr(protocol_mod, "get_lora_manager", reject_plugin_load)
+    with pytest.raises(
+        protocol_mod.RuntimeLoRAConfigurationError, match="cannot exceed"
+    ):
+        publish_runtime_lora_capability(
+            ModelRuntimeConfig(),
+            SimpleNamespace(engine_args=SimpleNamespace(enable_lora=True)),
+            WorkerType.Aggregated,
+        )
+
+
+@pytest.mark.parametrize("base", ["\ud800", "base\x00name", "base\x7fname"])
+def test_base_envelope_errors_are_sanitized(base):
+    request = _request("custom:adapter")
+    request = {
+        **request,
+        "model": base,
+        "routing": {**request["routing"], "base_model_name": base},
+    }
+    with pytest.raises(protocol_mod.HttpError, match="invalid_lora_model_id") as error:
+        protocol_mod._parse_request(request)
+    assert error.value.code == 400
+
+
+def test_utf8_envelope_boundaries_are_accepted_without_source_normalization():
+    base = "é" * 256
+    source = "CuStOm:" + "x" * (3072 - len("CuStOm:"))
+    metadata = protocol_mod._parse_request(
+        {
+            "model": base,
+            "routing": {
+                "lora_name": _identity(base, source),
+                "base_model_name": base,
+                "lora_source_uri": source,
+                "lora_resolution_version": 2,
+            },
+        }
+    )
+    assert metadata.base_model_name == base
+    assert metadata.source_uri == source
+    assert metadata.scheme == "custom"
+
+
+def test_resident_capacity_can_exceed_gpu_slots_with_larger_cpu_capacity(monkeypatch):
+    monkeypatch.setenv("DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS", "5")
+    settings = protocol_mod.RuntimeLoRASettings.from_engine_args(
+        SimpleNamespace(max_loras=4, max_cpu_loras=8)
+    )
+    assert settings.max_registered_loras == 8
+    assert settings.max_resident_runtime_loras == 5
+
+
+def test_capability_updates_real_runtime_binding(monkeypatch, tmp_path):
+    monkeypatch.setenv("DYN_LORA_ENABLED", "true")
+    monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", "true")
+    monkeypatch.setattr(
+        protocol_mod,
+        "get_lora_manager",
+        lambda **_kwargs: SimpleNamespace(
+            cache_root=tmp_path, runtime_lora_schemes=frozenset({"custom"})
+        ),
+    )
+    runtime_config = ModelRuntimeConfig()
+    runtime_config.taints = {"existing"}
+    handler_config = SimpleNamespace(engine_args=SimpleNamespace(enable_lora=True))
+    publish_runtime_lora_capability(
+        runtime_config, handler_config, WorkerType.Aggregated
+    )
+    assert runtime_config.taints == {"existing", "dynamo.runtime-lora/v2"}
+    assert (
+        json.loads(runtime_config.runtime_data["supports_runtime_lora_resolution"])
+        is True
+    )
+    assert json.loads(
+        runtime_config.runtime_data["runtime_lora_protocol_versions"]
+    ) == [2]
+    assert json.loads(runtime_config.runtime_data["runtime_lora_schemes"]) == ["custom"]
+    assert handler_config.runtime_lora_settings.max_registered_loras == 4
