@@ -65,6 +65,14 @@ fn trtllm_invalid_image_metadata_fails_closed() {
     });
     for (pointer, replacement) in [
         ("/trtllm_image_routing/version", serde_json::json!(2)),
+        (
+            "/trtllm_image_routing",
+            serde_json::json!({"version": 2, "future_payload": [1, 2]}),
+        ),
+        (
+            "/trtllm_image_routing/token_id_offset",
+            serde_json::json!("invalid"),
+        ),
         ("/trtllm_image_routing/keys", serde_json::json!([])),
         (
             "/trtllm_image_routing/keys/0/0/hash",
@@ -83,6 +91,11 @@ fn trtllm_invalid_image_metadata_fails_closed() {
         *event.pointer_mut(pointer).unwrap() = replacement;
         let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
         assert!(matches!(raw, RawKvEvent::Ignored), "{pointer}");
+        let batch = serde_json::json!([0.0, [event,
+            {"type": "BlockRemoved", "block_hashes": [100]}
+        ], 0]);
+        let decoded = decode_event_batch(&to_vec_named(&batch).unwrap()).unwrap();
+        assert!(matches!(decoded.events[1], RawKvEvent::BlockRemoved { .. }));
     }
 }
 

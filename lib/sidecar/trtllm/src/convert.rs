@@ -49,7 +49,7 @@ pub(crate) fn build_generate_request_with_routing(
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(&request, mode, allow_dp_rank)?;
     let request_has_media = has_media(&request);
-    let media = image_media(&mut request, limits)?;
+    let media = image_media(&mut request, limits, mode)?;
 
     let sampling = &request.sampling_options;
     let stop = &request.stop_conditions;
@@ -212,6 +212,7 @@ const IMAGE_KEY: &str = "image_url";
 fn image_media(
     request: &mut PreprocessedRequest,
     limits: Option<ModelLimits>,
+    mode: DisaggregationMode,
 ) -> Result<Vec<pb::MediaItem>, DynamoError> {
     reject_media_override("mm_processor_kwargs", request.mm_processor_kwargs.as_ref())?;
     reject_media_override("media_io_kwargs", request.media_io_kwargs.as_ref())?;
@@ -276,7 +277,8 @@ fn image_media(
     }
 
     let mut uuids = user_image_uuids.unwrap_or_else(|| vec![None; images.len()]);
-    if limits.is_some_and(|limits| limits.supports_image_routing)
+    if matches!(mode, DisaggregationMode::Aggregated)
+        && limits.is_some_and(|limits| limits.supports_image_routing)
         && request
             .mm_routing_info
             .as_ref()

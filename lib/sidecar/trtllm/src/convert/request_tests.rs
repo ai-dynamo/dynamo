@@ -147,6 +147,12 @@ fn image_routing_hints_require_capability_and_exact_frontend_metadata() {
     let proto = build_generate_request(req.clone(), "req", "model", Some(enabled), AGG).unwrap();
     assert_eq!(proto.media[0].uuid, "dynamo-image-v1:0123456789abcdef");
 
+    for mode in [DisaggregationMode::Prefill, DisaggregationMode::Decode] {
+        let proto =
+            build_generate_request(req.clone(), "req", "model", Some(enabled), mode).unwrap();
+        assert!(proto.media[0].uuid.is_empty());
+    }
+
     let proto =
         build_generate_request(req.clone(), "req", "model", image_limits(4096), AGG).unwrap();
     assert!(proto.media[0].uuid.is_empty());

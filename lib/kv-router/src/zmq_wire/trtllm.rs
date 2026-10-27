@@ -28,7 +28,14 @@ pub(super) struct MediaKey {
 }
 
 #[derive(Deserialize)]
-pub(super) struct RoutingMetadata {
+#[serde(untagged)]
+pub(super) enum RoutingMetadata {
+    Fields(RoutingFields),
+    Ignored(serde::de::IgnoredAny),
+}
+
+#[derive(Deserialize)]
+pub(super) struct RoutingFields {
     pub version: u32,
     pub token_id_offset: u32,
     pub keys: Vec<Vec<MediaKey>>,

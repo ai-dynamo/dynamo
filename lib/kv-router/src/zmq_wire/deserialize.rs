@@ -142,7 +142,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     (MapTokenIds::Bigram(ids), None) => {
                         normalize_token_ids(KvTokenIds::Bigram(ids))
                     }
-                    (ids, Some(metadata)) => {
+                    (ids, Some(trtllm::RoutingMetadata::Fields(metadata))) => {
                         if metadata.version != 1 {
                             return Ok(RawKvEvent::Ignored);
                         }
