@@ -27,6 +27,15 @@
 //! `ServiceExport` made karmada-agent delete the Service's EndpointSlice
 //! too. Exporting the Service again then found no slice until the Service
 //! changed.
+//!
+//! ```ignore
+//! let store = DiscoveryStore {
+//!     pools: Arc::new(McsPoolDirectory::new(client.clone(), mcs, suffix)),
+//!     routers: Arc::new(EndpointSliceReplicaDirectory::imported(client, &router, mcs)),
+//!     registrar: None,
+//! };
+//! service::serve(listener, store, None, shutdown).await?;
+//! ```
 
 mod cache;
 mod endpoints;
