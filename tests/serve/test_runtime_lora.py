@@ -184,13 +184,16 @@ def _calls(path):
     return Counter(json.loads(line)["source"] for line in path.read_text().splitlines())
 
 
-def test_runtime_lora_plugin_serving_and_recovery(runtime_lora_server, record_property):
+def test_runtime_lora_plugin_serving_and_recovery(runtime_lora_server, request):
     base_url, calls, revision, base_revision = runtime_lora_server
-    record_property("base_model", BASE_MODEL)
-    record_property("base_revision", base_revision)
-    record_property("adapter_model", ADAPTER_REPO)
-    record_property("adapter_revision", revision)
-    record_property("serving_mode", "aggregated-dynamo.vllm")
+    request.node.user_properties = [
+        *request.node.user_properties,
+        ("base_model", BASE_MODEL),
+        ("base_revision", base_revision),
+        ("adapter_model", ADAPTER_REPO),
+        ("adapter_revision", revision),
+        ("serving_mode", "aggregated-dynamo.vllm"),
+    ]
     source_a = adapter_source(revision, "replica-a")
     source_b = adapter_source(revision, "replica-b")
     _assert_chat(base_url, BASE_MODEL)
@@ -263,4 +266,7 @@ def test_runtime_lora_plugin_serving_and_recovery(runtime_lora_server, record_pr
         assert CHANGED_SOURCE not in response.text
     _assert_chat(base_url, source_b)
     _assert_chat(base_url, BASE_MODEL)
-    record_property("resolver_invocations", json.dumps(_calls(calls), sort_keys=True))
+    request.node.user_properties = [
+        *request.node.user_properties,
+        ("resolver_invocations", json.dumps(_calls(calls), sort_keys=True)),
+    ]
