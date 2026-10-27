@@ -63,7 +63,7 @@ tests:
       - equal: {path: 'metadata.annotations["helm.sh/hook-delete-policy"]', value: 'before-hook-creation,hook-succeeded'}
       - equal: {path: 'metadata.annotations["helm.sh/hook-output-log-policy"]', value: hook-failed}
       - equal: {path: spec.backoffLimit, value: 6}
-  - it: waits for queue-controller to be created and Available, then dry-runs a Queue through the webhook
+  - it: waits for queue-controller and its webhook registration, then dry-runs a Queue through the webhook
     set: {global.kai-scheduler.install: true}
     documentSelector: {path: kind, value: Job}
     asserts:
@@ -73,6 +73,10 @@ tests:
       - equal:
           path: 'spec.template.spec.initContainers[1].args'
           value: [wait, --for=condition=Available, deployment/queue-controller, --namespace=dynamo-system, --timeout=600s]
+      # A dry-run passes while no webhook is registered, so this step must precede check-admission.
+      - equal:
+          path: 'spec.template.spec.initContainers[2].args'
+          value: [wait, --for=create, validatingwebhookconfiguration/kai-queue-validation-v2, --timeout=600s]
       - equal:
           path: 'spec.template.spec.containers[0].args'
           value: [create, --dry-run=server, --filename=/probe/queue.yaml]
@@ -85,7 +89,7 @@ tests:
       - matchRegex: {path: 'data["queue.yaml"]', pattern: 'kind: Queue'}
       - matchRegex: {path: 'data["queue.yaml"]', pattern: 'name: dynamo-platform-kai-queue-wait-probe\n'}
       - notMatchRegex: {path: 'data["queue.yaml"]', pattern: parentQueue}
-  - it: grants only Queue create for the dry-run, cluster-wide, and removes it on success
+  - it: grants only Queue create and read of the Queue webhook configuration, cluster-wide, and removes it on success
     set: {global.kai-scheduler.install: true}
     documentSelector: {path: kind, value: ClusterRole}
     asserts:
@@ -98,6 +102,10 @@ tests:
             - apiGroups: [scheduling.run.ai]
               resources: [queues]
               verbs: [create]
+            - apiGroups: [admissionregistration.k8s.io]
+              resources: [validatingwebhookconfigurations]
+              resourceNames: [kai-queue-validation-v2]
+              verbs: [get]
   - it: grants only Deployment read access in the release namespace before the Job and removes it on success
     set: {global.kai-scheduler.install: true}
     documentSelector: {path: kind, value: Role}

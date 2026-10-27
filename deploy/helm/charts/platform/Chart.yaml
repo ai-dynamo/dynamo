@@ -39,7 +39,8 @@ dependencies:
     version: 12.0.18
     repository: "https://charts.bitnami.com/bitnami"
     condition: global.etcd.install
-  # templates/kai-queue-wait.yaml depends on KAI's queue-controller Deployment name.
+  # templates/kai-queue-wait.yaml depends on KAI's queue-controller Deployment and
+  # kai-queue-validation-v2 webhook configuration names.
   - name: kai-scheduler
     version: v0.17.0
     repository: oci://ghcr.io/kai-scheduler/kai-scheduler

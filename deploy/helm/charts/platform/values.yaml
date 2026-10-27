@@ -338,7 +338,7 @@ kai-scheduler:
 
 # Hook Job that holds the Dynamo Queues until bundled KAI's queue-controller webhook admits Queues.
 kaiQueueWait:
-  # -- Wait for the bundled KAI queue-controller before creating the Dynamo Queues. Disable only when the webhook is known to be serving.
+  # -- Wait for the bundled KAI queue-controller before creating the Dynamo Queues. Disable only when the webhook is known to be serving, or when Queue validation is disabled in kai-config.
   enabled: true
   # -- Image providing kubectl 1.31 or later, which can wait for a resource to be created. Override for an internal registry.
   image: registry.k8s.io/kubectl:v1.34.12
