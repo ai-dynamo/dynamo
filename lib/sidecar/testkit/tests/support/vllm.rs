@@ -218,6 +218,7 @@ impl WireFixture for Fixture {
         );
         assert!(native.response.as_ref().unwrap().output_logprobs);
         assert!(native.response.as_ref().unwrap().prompt_logprobs);
+        assert_eq!(native.response.as_ref().unwrap().output_text, Some(false));
         let native_outputs: Vec<_> = handle
             .native_responses()
             .into_iter()
@@ -244,16 +245,7 @@ impl WireFixture for Fixture {
                 .collect::<Vec<_>>(),
             native_tokens
         );
-        assert_eq!(
-            outputs
-                .iter()
-                .filter_map(|output| output.text.as_deref())
-                .collect::<String>(),
-            native_outputs
-                .iter()
-                .map(|output| output.text.as_str())
-                .collect::<String>()
-        );
+        assert!(outputs.iter().all(|output| output.text.is_none()));
         assert_eq!(
             outputs
                 .iter()
@@ -313,12 +305,13 @@ impl WireFixture for Fixture {
                 expected
             );
         }
+        // The first output carries them, before any frontend stop string.
         assert!(
-            outputs[..outputs.len() - 1]
+            outputs[1..]
                 .iter()
                 .all(|output| output.engine_data.is_none())
         );
-        let prompts = &outputs.last().unwrap().engine_data.as_ref().unwrap()["prompt_logprobs"];
+        let prompts = &outputs[0].engine_data.as_ref().unwrap()["prompt_logprobs"];
         let prompt_info = handle
             .native_responses()
             .into_iter()
