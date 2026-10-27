@@ -165,19 +165,11 @@ fn acquire_admission(
                     "request needs {branches} branches; the System One branch limit is {limit}"
                 ),
             ),
-            decision_lifecycle::AdmissionError::CapacityExhausted => {
-                let mut response = error(
-                    dialect,
-                    super::error::overload_status_code(),
-                    "System One request capacity is exhausted",
-                );
-                response.extensions_mut().insert(DecisionCapacityRejection);
-                response.headers_mut().insert(
-                    axum::http::header::RETRY_AFTER,
-                    HeaderValue::from_static("1"),
-                );
-                response
-            }
+            decision_lifecycle::AdmissionError::CapacityExhausted => response::capacity_error(
+                dialect,
+                super::error::overload_status_code(),
+                "System One request capacity is exhausted",
+            ),
         };
         Box::new(response)
     })
@@ -278,17 +270,11 @@ async fn handle_request(
     let preflight_permit = match state.systemone_preflight_admission().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
-            let mut response = error(
+            return response::capacity_error(
                 dialect,
                 super::error::overload_status_code(),
                 "System One preprocessing capacity is exhausted",
             );
-            response.extensions_mut().insert(DecisionCapacityRejection);
-            response.headers_mut().insert(
-                axum::http::header::RETRY_AFTER,
-                HeaderValue::from_static("1"),
-            );
-            return response;
         }
     };
     let preflight_started = Instant::now();
@@ -616,10 +602,10 @@ fn dispatch_error(
     } else {
         tracing::error!(%request_id, error = %cause.detail, "System One scoring failed");
     }
-    let mut response = error(dialect, cause.status, cause.public_message);
     if cause.is_capacity_exhausted {
-        response.extensions_mut().insert(DecisionCapacityRejection);
+        return response::capacity_error(dialect, cause.status, cause.public_message);
     }
+    let mut response = error(dialect, cause.status, cause.public_message);
     if cause.retry_after {
         response.headers_mut().insert(
             axum::http::header::RETRY_AFTER,

@@ -27,6 +27,25 @@ pub(super) fn error(dialect: Dialect, status: StatusCode, message: impl Into<Str
     decision_error(DecisionError::new(dialect, status.as_u16(), code, message))
 }
 
+pub(super) fn capacity_error(
+    dialect: Dialect,
+    status: StatusCode,
+    message: impl Into<String>,
+) -> Response {
+    let mut response = decision_error(DecisionError::new(
+        dialect,
+        status.as_u16(),
+        "rate_limit_exceeded",
+        message,
+    ));
+    response.extensions_mut().insert(DecisionCapacityRejection);
+    response.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        HeaderValue::from_static("1"),
+    );
+    response
+}
+
 pub(in crate::http::service) fn attach_request_ids(response: &mut Response, request_id: &str) {
     response.headers_mut().insert(
         HeaderName::from_static("x-dynamo-systemone-version"),
