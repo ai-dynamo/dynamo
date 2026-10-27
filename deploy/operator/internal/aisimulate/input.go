@@ -18,10 +18,11 @@
 package aisimulate
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
-	"unicode"
 
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -82,8 +83,13 @@ func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 		return nil, nil
 	}
 	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
 		return nil, fmt.Errorf("spec.aisimulate.inputOverrides: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("spec.aisimulate.inputOverrides: trailing JSON value")
 	}
 	switch typed := value.(type) {
 	case nil:
@@ -163,7 +169,12 @@ func Underlay(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 				b.set(TargetPareto, optimizationTarget)
 			}
 		} else if objective.Metric != nil {
-			b.set(publicMetric(*objective.Metric), optimizationTarget)
+			target, err := publicMetric(*objective.Metric)
+			if err != nil {
+				b.err = err
+			} else {
+				b.set(target, optimizationTarget)
+			}
 		}
 		if sla := objective.SLA; sla != nil {
 			if sla.TTFTMs != nil {
@@ -221,28 +232,30 @@ func (b *builder) setStrings(values []string, path []string) {
 	}
 }
 
-// publicMetric maps an API metric to AISimulate's optimization.target by converting its CamelCase
-// name to snake_case: ThroughputPerGPU becomes throughput_per_gpu and E2ELatency becomes
-// e2e_latency. A run of capitals stays together, a digit does not start a word, and the last
-// capital of a run starts the next word when a lowercase letter follows it.
-func publicMetric(metric v1beta2.ObjectiveMetric) string {
-	name := []rune(string(metric))
-	var out []rune
-	for i, r := range name {
-		if i > 0 && unicode.IsUpper(r) {
-			prev := name[i-1]
-			nextLower := i+1 < len(name) && unicode.IsLower(name[i+1])
-			if unicode.IsLower(prev) || (unicode.IsUpper(prev) && nextLower) {
-				out = append(out, '_')
-			}
-		}
-		out = append(out, unicode.ToLower(r))
+// publicMetric maps each public API metric to its explicit AISimulate optimization target.
+func publicMetric(metric v1beta2.ObjectiveMetric) (string, error) {
+	switch metric {
+	case v1beta2.ObjectiveMetric("Throughput"):
+		return "throughput", nil
+	case v1beta2.ObjectiveMetric("ThroughputPerGPU"):
+		return "throughput_per_gpu", nil
+	case v1beta2.ObjectiveMetric("ThroughputPerUser"):
+		return "throughput_per_user", nil
+	case v1beta2.ObjectiveMetric("TTFT"):
+		return "ttft", nil
+	case v1beta2.ObjectiveMetric("E2ELatency"):
+		return "e2e_latency", nil
+	case v1beta2.ObjectiveMetric("Goodput"):
+		return "goodput", nil
+	case v1beta2.ObjectiveMetric("GoodputPerGPU"):
+		return "goodput_per_gpu", nil
+	default:
+		return "", fmt.Errorf("spec.objective.metric: unsupported value %q", metric)
 	}
-	return string(out)
 }
 
-// normalize round-trips through JSON so every number is a float64, the type the
-// input overrides decode to. Merge and validation then see one representation.
+// normalize round-trips operator-owned maps through JSON so their Go-specific numeric types
+// become JSON-compatible values before merging them with the user-owned input overrides.
 func normalize(value map[string]any) (map[string]any, error) {
 	if value == nil {
 		return nil, nil

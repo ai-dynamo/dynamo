@@ -192,7 +192,7 @@ func TestInputOverridesWinOverTheTypedUnderlay(t *testing.T) {
 	})
 	t.Run("a value overrides a typed field", func(t *testing.T) {
 		input := lower(t, withInputOverrides(defaultedSpec(), `{"traffic":{"source":{"input_tokens":8000}},"optimization":{"constraints":{"max_candidate_gpus":16}}}`))
-		if nested(t, input, "traffic", "source", "input_tokens") != 8000.0 || nested(t, input, "optimization", "constraints", "max_candidate_gpus") != 16.0 {
+		if nested(t, input, "traffic", "source", "input_tokens") != json.Number("8000") || nested(t, input, "optimization", "constraints", "max_candidate_gpus") != json.Number("16") {
 			t.Fatalf("input overrides did not win: %s", encode(t, input))
 		}
 	})
@@ -204,7 +204,7 @@ func TestInputOverridesWinOverTheTypedUnderlay(t *testing.T) {
 	})
 	t.Run("an SLA bound overrides only the bound it names", func(t *testing.T) {
 		input := lower(t, withInputOverrides(withSLA(defaultedSpec()), `{"evaluation":{"sla":{"ttft_ms":500}}}`))
-		if nested(t, input, "evaluation", "sla", "ttft_ms") != 500.0 || nested(t, input, "evaluation", "sla", "itl_ms") != 30.0 {
+		if nested(t, input, "evaluation", "sla", "ttft_ms") != json.Number("500") || nested(t, input, "evaluation", "sla", "itl_ms") != 30.0 {
 			t.Fatalf("unexpected SLA: %s", encode(t, input))
 		}
 	})
@@ -218,7 +218,7 @@ func TestRequestCountDefault(t *testing.T) {
 	})
 	t.Run("an override ratio deletes the derived count itself", func(t *testing.T) {
 		input := lower(t, withInputOverrides(defaultedSpec(), `{"traffic":{"stop":{"requests_per_load_unit":10,"requests":null}}}`))
-		if nested(t, input, "traffic", "stop", "requests") != nil || nested(t, input, "traffic", "stop", "requests_per_load_unit") != 10.0 {
+		if nested(t, input, "traffic", "stop", "requests") != nil || nested(t, input, "traffic", "stop", "requests_per_load_unit") != json.Number("10") {
 			t.Fatalf("unexpected workload: %s", encode(t, input))
 		}
 	})
@@ -260,7 +260,7 @@ func TestMaxTrialsDefault(t *testing.T) {
 		}
 	})
 	t.Run("override value or null wins", func(t *testing.T) {
-		if nested(t, lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"optimizer":{"max_trials":7}}`)), "optimizer", "max_trials") != 7.0 {
+		if nested(t, lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"optimizer":{"max_trials":7}}`)), "optimizer", "max_trials") != json.Number("7") {
 			t.Fatal("override max_trials ignored")
 		}
 		if nested(t, lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"optimizer":{"max_trials":null}}`)), "optimizer", "max_trials") != nil {
@@ -291,7 +291,7 @@ func TestStrictSLADerivation(t *testing.T) {
 	})
 	t.Run("an override bound alone does not derive it", func(t *testing.T) {
 		input := lower(t, withInputOverrides(defaultedSpec(), `{"evaluation":{"sla":{"ttft_ms":500}}}`))
-		if nested(t, input, "evaluation", "sla", "ttft_ms") != 500.0 || nested(t, input, "optimization", "strict_sla") != nil {
+		if nested(t, input, "evaluation", "sla", "ttft_ms") != json.Number("500") || nested(t, input, "optimization", "strict_sla") != nil {
 			t.Fatalf("unexpected optimization input: %s", encode(t, input))
 		}
 	})
@@ -317,13 +317,13 @@ func TestInputOverridesApplyOnceAfterDerivedDefaults(t *testing.T) {
 	})
 	t.Run("max_trials null removes only max_trials", func(t *testing.T) {
 		input := lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"optimizer":{"max_trials":null,"seed":3}}`))
-		if nested(t, input, "optimizer", "max_trials") != nil || nested(t, input, "optimizer", "seed") != 3.0 {
+		if nested(t, input, "optimizer", "max_trials") != nil || nested(t, input, "optimizer", "seed") != json.Number("3") {
 			t.Fatalf("unexpected optimizer: %s", encode(t, input))
 		}
 	})
 	t.Run("an override max_trials replaces the derived value", func(t *testing.T) {
 		input := lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"optimizer":{"max_trials":7}}`))
-		if nested(t, input, "optimizer", "max_trials") != 7.0 {
+		if nested(t, input, "optimizer", "max_trials") != json.Number("7") {
 			t.Fatalf("unexpected optimizer: %s", encode(t, input))
 		}
 	})
@@ -428,6 +428,19 @@ func TestInputOverridesMustBeAnObject(t *testing.T) {
 	}
 }
 
+func TestInputOverridesPreserveLargeIntegers(t *testing.T) {
+	const seed = "9007199254740993"
+
+	t.Log("Lowering the opaque override without passing its integer through float64")
+	input := lower(t, withInputOverrides(defaultedSpec(), `{"optimizer":{"seed":`+seed+`}}`))
+	if got := nested(t, input, "optimizer", "seed"); got != json.Number(seed) {
+		t.Fatalf("optimizer.seed = %#v, want exact JSON number %s", got, seed)
+	}
+	if got := encode(t, input); !strings.Contains(got, `"seed":`+seed) {
+		t.Fatalf("encoded input lost integer precision: %s", got)
+	}
+}
+
 func TestHasPath(t *testing.T) {
 	overrides := map[string]any{
 		"optimization": map[string]any{"target": nil},
@@ -464,8 +477,11 @@ func TestPublicMetricNames(t *testing.T) {
 		"Goodput":           "goodput",
 		"GoodputPerGPU":     "goodput_per_gpu",
 	} {
-		if got := publicMetric(metric); got != want {
-			t.Errorf("publicMetric(%s) = %q, want %q", metric, got, want)
+		if got, err := publicMetric(metric); err != nil || got != want {
+			t.Errorf("publicMetric(%s) = %q, %v; want %q", metric, got, err, want)
 		}
+	}
+	if got, err := publicMetric("FutureMetric"); err == nil || got != "" {
+		t.Errorf("publicMetric(FutureMetric) = %q, %v; want an explicit rejection", got, err)
 	}
 }
