@@ -76,8 +76,9 @@ leaves the link unresolved. In order:
 3. The title, as a plain `###` heading. Do not link it: Fern's heading click handler copies the
    heading anchor instead of following a link inside the heading.
 4. A one-line description.
-5. `<ExampleTargets targets="…" />` with the same pairs as `data-targets`. It renders one chip per
-   backend, with a Kubernetes or Local / CLI glyph for each platform that backend supports.
+5. `<ExampleTargets targets="…" />` with the same pairs as `data-targets`. It renders a Kubernetes
+   or Local / CLI tag for each platform, then one chip per backend, with a glyph for each platform
+   that backend supports.
 6. `<a className="dynamo-example-card-link" href="<page>.mdx">Open <title> example</a>`: the card's
    only link, stretched over the whole card.
 
@@ -99,10 +100,14 @@ notes in the corresponding source bundle.
 Set `hide-toc: true` on these source-picker pages. The shared `examples-layout.ts` stylesheet keeps
 TOC-less articles aligned with the normal content column without changing Fern's width limits.
 
-`ExamplesCatalog.tsx` discovers the cards, builds topic options, and filters by search text and target
-pairs. Search also reads `data-topic-label`, which subsection cards do not display. Cards and links
-remain readable without JavaScript. Keep native links in MDX; moving them into component data would
-bypass Fern's version/locale rewriting.
+`ExamplesCatalog.tsx` discovers the cards, builds topic, platform, and backend options from the
+values the page's cards declare, and filters by search text and target pairs. Each filter row is a
+set of multi-select toggle chips: options in a row combine with OR, rows with AND, and a row with a
+single option stays hidden. Topic chips use the compact labels in `example-options.ts`; add one
+for each new topic, as a part of its `data-topic-label`. The panel closes with the result count, a
+removable chip for each active option, and **Reset filters**. Search also reads `data-topic-label`, which subsection cards
+do not display. Cards and links remain readable without JavaScript. Keep native links in MDX;
+moving them into component data would bypass Fern's version/locale rewriting.
 
 Supporting assets are deferred from the site catalog for now: Helm values, infrastructure manifests,
 clients, setup helpers, standalone engine configurations, chat templates, policy snippets, ECS task

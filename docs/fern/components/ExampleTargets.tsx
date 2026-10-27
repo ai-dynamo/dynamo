@@ -2,10 +2,11 @@
  * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Backend chips for an Examples catalog card: one chip per backend, with a
- * glyph for each platform that backend runs on. The chips derive from the
- * card's platform:backend pairs, so they cannot advertise a combination the
- * card does not declare. ExamplesCatalog owns the chip styles.
+ * Tags for an Examples catalog card: one outlined chip per platform, then one
+ * tinted chip per backend with a glyph for each platform that backend runs on.
+ * The platform chips label those glyphs. The chips derive from the card's
+ * platform:backend pairs, so they cannot advertise a combination the card does
+ * not declare. ExamplesCatalog owns the chip styles.
  */
 import type { ReactNode } from "react";
 
@@ -66,9 +67,19 @@ export function ExampleTargets({ targets }: { targets: string }) {
   const backends = Array.from(platforms.keys()).sort(
     (a, b) => rank(EXAMPLE_BACKENDS, a) - rank(EXAMPLE_BACKENDS, b)
   );
+  const cardPlatforms = Array.from(new Set(Array.from(platforms.values()).flat())).sort(
+    (a, b) => rank(EXAMPLE_PLATFORMS, a) - rank(EXAMPLE_PLATFORMS, b)
+  );
 
+  // One flat row, so chips wrap individually rather than as platform and backend groups.
   return (
     <div className="dynamo-example-chips">
+      {cardPlatforms.map((platform) => (
+        <span key={platform} className="dynamo-example-chip" data-platform={platform}>
+          <PlatformGlyph platform={platform} />
+          {EXAMPLE_PLATFORMS[platform] ?? platform}
+        </span>
+      ))}
       {backends.map((backend) => {
         const supported = (platforms.get(backend) ?? []).sort(
           (a, b) => rank(EXAMPLE_PLATFORMS, a) - rank(EXAMPLE_PLATFORMS, b)
