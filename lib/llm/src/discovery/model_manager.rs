@@ -1636,12 +1636,26 @@ impl ModelManager {
         ),
         ModelManagerError,
     > {
+        self.get_chat_completions_engine_with_parsing_where(model, |_| true)
+    }
+
+    pub(crate) fn get_chat_completions_engine_with_parsing_where(
+        &self,
+        model: &str,
+        predicate: impl Fn(&WorkerSet) -> bool,
+    ) -> Result<
+        (
+            OpenAIChatCompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+        ),
+        ModelManagerError,
+    > {
         self.catalog
             .load()
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_chat_engine_with_parsing()
+            .get_chat_engine_with_parsing_where(predicate)
     }
 
     pub fn get_completions_engine_with_parsing(
@@ -1654,12 +1668,26 @@ impl ModelManager {
         ),
         ModelManagerError,
     > {
+        self.get_completions_engine_with_parsing_where(model, |_| true)
+    }
+
+    pub(crate) fn get_completions_engine_with_parsing_where(
+        &self,
+        model: &str,
+        predicate: impl Fn(&WorkerSet) -> bool,
+    ) -> Result<
+        (
+            OpenAICompletionsStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+        ),
+        ModelManagerError,
+    > {
         self.catalog
             .load()
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_completions_engine_with_parsing()
+            .get_completions_engine_with_parsing_where(predicate)
     }
 
     pub fn get_generate_engine_with_parsing(
@@ -3642,12 +3670,22 @@ mod tests {
         ));
         assert_eq!(mm.unique_committed_canonical_base_model(), None);
 
+        assert!(
+            mm.get_committed_model("token-base")
+                .unwrap()
+                .has_runtime_lora_base_deployment()
+        );
         assert!(mm.add_worker_set(
             "token-base",
             "mixed-text",
             make_worker_set("mixed-text", "ghi"),
         ));
         assert_eq!(mm.unique_committed_canonical_base_model(), None);
+        assert!(
+            !mm.get_committed_model("token-base")
+                .unwrap()
+                .has_runtime_lora_base_deployment()
+        );
     }
 
     #[test]

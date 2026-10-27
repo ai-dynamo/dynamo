@@ -136,10 +136,30 @@ fn routable_lora_worker_ids(
 use super::*;
 
 impl RoutingHost {
-    fn select_lora_target(
+    pub(super) fn select_lora_target(
         &self,
         request: &PreprocessedRequest,
     ) -> Result<Option<LoraSelection>, Error> {
+        let is_runtime_lora = request
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.lora_resolution_version)
+            .is_some();
+        if is_runtime_lora
+            && (self.lora.is_none()
+                || request
+                    .routing
+                    .as_ref()
+                    .and_then(|routing| routing.lora_name.as_ref())
+                    .is_none())
+        {
+            return Err(anyhow::anyhow!(
+                DynamoError::builder()
+                    .error_type(ErrorType::Unavailable)
+                    .message("runtime_lora_capability_unavailable")
+                    .build()
+            ));
+        }
         let Some(lora) = self.lora.as_ref() else {
             return Ok(None);
         };
@@ -150,11 +170,6 @@ impl RoutingHost {
         else {
             return Ok(None);
         };
-        let is_runtime_lora = request
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.lora_resolution_version)
-            .is_some();
         let load_guard = (!is_runtime_lora)
             .then(|| LoraLoadGuard::new(Arc::clone(&lora.load_estimator), lora_name.clone()));
         let routing = request.routing.as_ref();
@@ -375,6 +390,16 @@ impl RoutingHost {
                 ),
                 None => (None, None, None),
             };
+        if let (Some(target), Some(explicit)) = (lora_target, explicit)
+            && target != explicit.worker_id
+            && request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.lora_resolution_version)
+                .is_some()
+        {
+            return Err(invalid_argument("runtime_lora_affinity_conflict"));
+        }
         let (selection, mut operation) = if let Some(target) = lora_target {
             (
                 HostedSelection {

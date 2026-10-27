@@ -442,7 +442,7 @@ pub mod llm {
     /// Maximum materialized bytes for one request-time adapter.
     pub const DYN_LORA_MAX_DOWNLOAD_BYTES: &str = "DYN_LORA_MAX_DOWNLOAD_BYTES";
 
-    /// Maximum request-time resolver cache size.
+    /// Request-time resolver cache admission bound; exceeding it does not trigger disk eviction.
     pub const DYN_LORA_MAX_CACHE_BYTES: &str = "DYN_LORA_MAX_CACHE_BYTES";
 
     /// LoRA cache directory path

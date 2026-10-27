@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+use crate::local_model::runtime_config::ModelRuntimeConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -11,7 +12,36 @@ pub const RUNTIME_LORA_KEY_PREFIX: &str = "dyn-lora-";
 pub const MAX_RUNTIME_MODEL_ID_BYTES: usize = 4096;
 pub const MAX_RUNTIME_BASE_MODEL_BYTES: usize = 512;
 pub const MAX_RUNTIME_SOURCE_URI_BYTES: usize = 3072;
+// Adapter identity is versioned independently of the worker wire protocol.
 const IDENTITY_DOMAIN: &[u8] = b"dynamo-runtime-lora-v1\0";
+pub(crate) const RUNTIME_LORA_SCHEMES_RUNTIME_KEY: &str = "runtime_lora_schemes";
+pub(crate) const RUNTIME_LORA_SUPPORT_RUNTIME_KEY: &str = "supports_runtime_lora_resolution";
+pub(crate) const RUNTIME_LORA_VERSIONS_RUNTIME_KEY: &str = "runtime_lora_protocol_versions";
+
+pub(crate) fn runtime_lora_worker_schemes(config: &ModelRuntimeConfig) -> Option<Vec<String>> {
+    if config
+        .get_engine_specific::<bool>(RUNTIME_LORA_SUPPORT_RUNTIME_KEY)
+        .ok()
+        .flatten()
+        != Some(true)
+    {
+        return None;
+    }
+    let versions = config
+        .get_engine_specific::<Vec<u32>>(RUNTIME_LORA_VERSIONS_RUNTIME_KEY)
+        .ok()
+        .flatten()?;
+    if !versions.contains(&u32::from(RUNTIME_LORA_PROTOCOL_VERSION)) {
+        return None;
+    }
+    let mut schemes = config
+        .get_engine_specific::<Vec<String>>(RUNTIME_LORA_SCHEMES_RUNTIME_KEY)
+        .ok()
+        .flatten()?;
+    schemes.sort_unstable();
+    schemes.dedup();
+    (!schemes.is_empty()).then_some(schemes)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeLoraConfig {

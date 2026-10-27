@@ -254,6 +254,21 @@ pub struct WorkerSet {
 }
 
 impl WorkerSet {
+    pub(crate) fn supports_runtime_lora(&self) -> bool {
+        self.card.lora.is_none()
+            && self.card.requires_preprocessing()
+            && matches!(
+                self.card.worker_type,
+                None | Some(crate::worker_type::WorkerType::Aggregated)
+            )
+            && self
+                .card
+                .runtime_config
+                .taints
+                .contains("dynamo.runtime-lora/v2")
+            && crate::lora::runtime::runtime_lora_worker_schemes(&self.card.runtime_config)
+                .is_some()
+    }
     /// Create an unbound set; engines and discovery admission are installed later.
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
         Self {

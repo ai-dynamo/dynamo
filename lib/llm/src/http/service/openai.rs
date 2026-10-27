@@ -1465,7 +1465,9 @@ async fn completions_single(
     // todo - error handling should be more robust
     let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine_with_parsing(&model)
+        .get_completions_engine_with_parsing_where(&model, |worker_set| {
+            runtime_lora.is_none() || worker_set.supports_runtime_lora()
+        })
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1762,7 +1764,9 @@ async fn completions_batch(
 
     let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine_with_parsing(&model)
+        .get_completions_engine_with_parsing_where(&model, |worker_set| {
+            runtime_lora.is_none() || worker_set.supports_runtime_lora()
+        })
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -3755,7 +3759,9 @@ async fn chat_completions(
 
     let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(&model)
+        .get_chat_completions_engine_with_parsing_where(&model, |worker_set| {
+            runtime_lora.is_none() || worker_set.supports_runtime_lora()
+        })
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));

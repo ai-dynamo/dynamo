@@ -24,7 +24,7 @@ use dynamo_runtime::{
 use crate::{
     kv_router::{FindBestMatchAdmission, FindBestMatchOutcome, routing_host::RoutingHost},
     local_model::runtime_config::ModelRuntimeConfig,
-    lora::{LoraFilter, runtime::RUNTIME_LORA_PROTOCOL_VERSION},
+    lora::{LoraFilter, runtime::runtime_lora_worker_schemes},
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
@@ -32,35 +32,6 @@ use crate::{
     },
     session_affinity::AffinityTarget,
 };
-
-const RUNTIME_LORA_SCHEMES_RUNTIME_KEY: &str = "runtime_lora_schemes";
-const RUNTIME_LORA_SUPPORT_RUNTIME_KEY: &str = "supports_runtime_lora_resolution";
-const RUNTIME_LORA_VERSIONS_RUNTIME_KEY: &str = "runtime_lora_protocol_versions";
-
-fn runtime_lora_worker_schemes(config: &ModelRuntimeConfig) -> Option<Vec<String>> {
-    if config
-        .get_engine_specific::<bool>(RUNTIME_LORA_SUPPORT_RUNTIME_KEY)
-        .ok()
-        .flatten()
-        != Some(true)
-    {
-        return None;
-    }
-    let versions = config
-        .get_engine_specific::<Vec<u32>>(RUNTIME_LORA_VERSIONS_RUNTIME_KEY)
-        .ok()
-        .flatten()?;
-    if !versions.contains(&u32::from(RUNTIME_LORA_PROTOCOL_VERSION)) {
-        return None;
-    }
-    let mut schemes = config
-        .get_engine_specific::<Vec<String>>(RUNTIME_LORA_SCHEMES_RUNTIME_KEY)
-        .ok()
-        .flatten()?;
-    schemes.sort_unstable();
-    schemes.dedup();
-    (!schemes.is_empty()).then_some(schemes)
-}
 
 pub(super) fn runtime_lora_workers_have_homogeneous_resolvers(
     worker_ids: &[WorkerId],
@@ -95,16 +66,42 @@ pub(super) fn constrain_runtime_lora_workers(
     }
 
     let mut eligible = allowed_worker_ids.unwrap_or_else(|| live_worker_ids.clone());
+    let mut malformed_workers = 0;
     eligible.retain(|worker_id| {
         live_worker_ids.contains(worker_id)
             && worker_configs.get(worker_id).is_some_and(|config| {
-                routing_constraints.is_compatible_with_worker_taints(&config.taints)
+                if !routing_constraints.is_compatible_with_worker_taints(&config.taints) {
+                    return false;
+                }
+                if runtime_lora_worker_schemes(config).is_none() {
+                    malformed_workers += 1;
+                    return false;
+                }
+                true
             })
     });
+    if malformed_workers > 0 {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                reason = "malformed_capability",
+                excluded_workers = malformed_workers,
+                "Excluding malformed runtime LoRA workers"
+            )
+        });
+    }
     let eligible_workers = eligible.iter().copied().collect::<Vec<_>>();
     if !eligible.is_empty()
         && !runtime_lora_workers_have_homogeneous_resolvers(&eligible_workers, worker_configs)
     {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                reason = "heterogeneous_resolvers",
+                workers = eligible.len(),
+                "Runtime LoRA workers advertise incompatible resolver policies"
+            )
+        });
         eligible.clear();
     }
     Some(eligible)
@@ -301,7 +298,22 @@ impl RoutingHost {
                 lora_name.as_deref(),
                 allowed_worker_ids.as_ref(),
             ) {
-                allowed_worker_ids = Some(pin_runtime_lora_workers(filter, lora_name, eligible));
+                allowed_worker_ids = Some(pin_runtime_lora_workers(
+                    filter,
+                    lora_name,
+                    eligible,
+                    explicit_pin
+                        .map(|(worker, _)| worker)
+                        .into_iter()
+                        .chain(options.pinned_target.map(|target| target.worker_id)),
+                )?);
+            } else {
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Unavailable)
+                        .message("runtime_lora_capability_unavailable")
+                        .build()
+                ));
             }
         }
         let migration_excluded_worker_ids = request
@@ -488,12 +500,25 @@ fn pin_runtime_lora_workers(
     filter: &LoraFilter,
     lora_name: &str,
     eligible: &HashSet<u64>,
-) -> HashSet<u64> {
+    requested_workers: impl IntoIterator<Item = u64>,
+) -> Result<HashSet<u64>, Error> {
     let universe = eligible.iter().copied().collect::<Vec<_>>();
-    filter
+    let pinned = filter
         .filter_worker_ids_for_runtime_lora(lora_name, &universe)
         .into_iter()
-        .collect()
+        .collect::<HashSet<_>>();
+    if requested_workers
+        .into_iter()
+        .any(|worker| !pinned.contains(&worker))
+    {
+        return Err(anyhow::anyhow!(
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message("runtime_lora_affinity_conflict")
+                .build()
+        ));
+    }
+    Ok(pinned)
 }
 
 fn merge_affinity_pin(
@@ -549,6 +574,10 @@ fn pinned_worker_hint(
 
 #[cfg(test)]
 mod tests {
+    use crate::lora::runtime::{
+        RUNTIME_LORA_PROTOCOL_VERSION, RUNTIME_LORA_SCHEMES_RUNTIME_KEY,
+        RUNTIME_LORA_SUPPORT_RUNTIME_KEY, RUNTIME_LORA_VERSIONS_RUNTIME_KEY,
+    };
     use std::collections::{HashMap, HashSet};
 
     use dynamo_kv_router::{
@@ -647,7 +676,6 @@ mod tests {
             required_taints: HashSet::from([capability.clone()]),
             ..Default::default()
         };
-        let live = HashSet::from([1]);
         let mut missing_support = runtime_config(&capability, "wandb-artifact");
         missing_support
             .runtime_data
@@ -662,10 +690,19 @@ mod tests {
             .unwrap();
 
         for config in [missing_support, false_support, wrong_version] {
-            let workers = HashMap::from([(1, config)]);
+            let workers = HashMap::from([
+                (1, config),
+                (2, runtime_config(&capability, "wandb-artifact")),
+            ]);
             assert_eq!(
-                constrain_runtime_lora_workers(true, None, &live, &workers, &constraints,),
-                Some(HashSet::new())
+                constrain_runtime_lora_workers(
+                    true,
+                    None,
+                    &HashSet::from([1, 2]),
+                    &workers,
+                    &constraints,
+                ),
+                Some(HashSet::from([2]))
             );
         }
     }
@@ -691,12 +728,24 @@ mod tests {
         let filter = LoraFilter::new(LoraRoutingTable::new(), LoraStateTracker::new());
         let eligible = HashSet::from([1, 2, 3]);
 
-        let first = pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible);
-        let second = pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible);
+        let first = pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible, []).unwrap();
+        let second = pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible, []).unwrap();
 
         assert_eq!(first.len(), 1);
         assert_eq!(first, second);
         assert!(first.is_subset(&eligible));
+        let pinned = *first.iter().next().unwrap();
+        assert_eq!(
+            pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible, [pinned]).unwrap(),
+            first
+        );
+        let conflicting = *eligible.difference(&first).next().unwrap();
+        let error = pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible, [conflicting])
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().error_type(),
+            ErrorType::InvalidArgument
+        );
     }
 
     #[test]

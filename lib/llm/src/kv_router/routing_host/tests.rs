@@ -133,6 +133,22 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         .unwrap();
     let host = RoutingHost::new_builtin(inner, load_context.clone()).unwrap();
 
+    let mut runtime_request = request();
+    runtime_request.routing = Some(RoutingHints {
+        lora_name: Some("dyn-lora-test".to_string()),
+        lora_resolution_version: Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION),
+        ..Default::default()
+    });
+    let error = match host.select_lora_target(&runtime_request) {
+        Err(error) => error,
+        Ok(_) => panic!("runtime LoRA requires an enabled routing filter"),
+    };
+    assert!(match_error_chain(
+        error.as_ref(),
+        &[ErrorType::Unavailable],
+        &[]
+    ));
+
     assert_eq!(host.required_worker_inputs(), WorkerInputs::NONE);
     assert!(host.hosted_occupancy.is_none());
 
@@ -427,11 +443,27 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
     );
     let filter = Arc::new(LoraFilter::new(routing_table, LoraStateTracker::new()));
     let estimator = Arc::new(LoadEstimator::new());
-    let host = RoutingHost::new_builtin_with_capabilities(
+    let mut runtime_config = ModelRuntimeConfig::default();
+    runtime_config
+        .taints
+        .insert("dynamo.runtime-lora/v2".to_string());
+    runtime_config
+        .set_engine_specific("supports_runtime_lora_resolution", true)
+        .unwrap();
+    runtime_config
+        .set_engine_specific("runtime_lora_protocol_versions", vec![2_u32])
+        .unwrap();
+    runtime_config
+        .set_engine_specific("runtime_lora_schemes", vec!["custom"])
+        .unwrap();
+    let (_runtime_configs_tx, runtime_configs_rx) =
+        watch::channel(HashMap::from([(worker_id, runtime_config)]));
+    let host = RoutingHost::new_builtin_with_runtime_configs(
         inner,
         load_context,
         None,
         Some((filter, Arc::clone(&estimator))),
+        Some(runtime_configs_rx),
     )
     .unwrap();
 
@@ -448,6 +480,24 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
     assert_eq!(dispatch.worker_ids.lock().unwrap().len(), 2);
     assert_eq!(dispatch.worker_ids.lock().unwrap()[1], worker_id);
     assert!(!estimator.get_inflight_counts().contains_key("adapter"));
+
+    let mut runtime_request = request();
+    runtime_request.routing = Some(RoutingHints {
+        lora_name: Some("dyn-lora-test".to_string()),
+        lora_resolution_version: Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION),
+        backend_instance_id: Some(stale_worker),
+        ..Default::default()
+    });
+    let error = match host.generate(Context::new(runtime_request)).await {
+        Err(error) => error,
+        Ok(_) => panic!("runtime LoRA must not ignore a conflicting explicit worker pin"),
+    };
+    assert!(match_error_chain(
+        error.as_ref(),
+        &[ErrorType::InvalidArgument],
+        &[]
+    ));
+    assert_eq!(dispatch.worker_ids.lock().unwrap().len(), 2);
 
     drop(host);
     runtime.shutdown();

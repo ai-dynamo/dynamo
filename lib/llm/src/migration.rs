@@ -1930,7 +1930,7 @@ mod tests {
         let mut request = create_mock_request(1);
         request.routing = Some(RoutingHints {
             lora_name: Some("dyn-lora-0123456789abcdef0123456789abcdef".to_string()),
-            lora_resolution_version: Some(1),
+            lora_resolution_version: Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION),
             ..Default::default()
         });
         let context = Arc::new(Controller::new(context_id));
