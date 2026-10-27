@@ -74,8 +74,8 @@ pub enum RuntimeLoraError {
     InvalidModelId,
     #[error("runtime LoRA base model must be specified when it cannot be inferred")]
     BaseModelRequired,
-    #[error("runtime LoRA base model '{0}' was not found")]
-    BaseModelNotFound(String),
+    #[error("runtime LoRA base model was not found")]
+    BaseModelNotFound,
     #[error("runtime LoRA is unsupported for base model '{0}'")]
     BaseModelUnsupported(String),
 }
@@ -175,7 +175,7 @@ where
             None if is_known_exact(base) => {
                 return Err(RuntimeLoraError::BaseModelUnsupported(base.to_string()));
             }
-            None => return Err(RuntimeLoraError::BaseModelNotFound(base.to_string())),
+            None => return Err(RuntimeLoraError::BaseModelNotFound),
         };
         (canonical, source)
     } else {
@@ -392,7 +392,7 @@ mod tests {
                 resolve_base,
                 || Err(RuntimeLoraError::BaseModelRequired),
             ),
-            Err(RuntimeLoraError::BaseModelNotFound("missing".to_string()))
+            Err(RuntimeLoraError::BaseModelNotFound)
         );
         let opaque = "not-a-uri?token=opaque#provider-syntax";
         let selection = resolve_runtime_lora_model(

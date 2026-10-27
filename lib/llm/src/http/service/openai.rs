@@ -1194,11 +1194,11 @@ fn runtime_lora_error_response(error: RuntimeLoraError) -> ErrorResponse {
                 message: "runtime_lora_base_model_required".to_string(),
             },
         ),
-        RuntimeLoraError::BaseModelNotFound(base) => ErrorMessage::from_http_error(
+        RuntimeLoraError::BaseModelNotFound => ErrorMessage::from_http_error(
             ErrorClass::NotFound,
             HttpError {
                 code: 404,
-                message: format!("model_not_found: {base}"),
+                message: "runtime_lora_base_model_not_found".to_string(),
             },
         ),
         RuntimeLoraError::BaseModelUnsupported(_) => ErrorMessage::from_http_error(
@@ -3220,7 +3220,7 @@ fn is_annotation_frame<T>(e: &Annotated<T>) -> bool {
 }
 
 /// Cap on how many leading annotation frames `check_for_backend_error`
-/// will buffer before giving up the inspection. A pathological backend
+/// will buffer before rejecting the response. A pathological backend
 /// (or attacker who can influence the engine output) that emits only
 /// annotation frames must not be able to pin unbounded memory per
 /// request. The handful of real annotations a frontend prepends
@@ -3276,7 +3276,13 @@ where
             return Ok(Box::pin(futures::stream::iter(buffered)));
         };
 
-        if is_annotation_frame(&event) && buffered.len() < MAX_LEADING_ANNOTATIONS {
+        if is_annotation_frame(&event) {
+            if buffered.len() == MAX_LEADING_ANNOTATIONS {
+                return Err(BackendErrorInfo::from_status(
+                    "Too many leading backend annotations".to_string(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ));
+            }
             buffered.push(event);
             continue;
         }
@@ -9836,6 +9842,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_check_for_backend_error_rejects_excess_leading_annotations() {
+        use futures::stream;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for check in [
+            BackendErrorCheck::UntilFirstEvent,
+            BackendErrorCheck::Bounded(std::time::Duration::from_secs(1)),
+        ] {
+            let polled = Arc::new(AtomicUsize::new(0));
+            let annotations = stream::iter((0..MAX_LEADING_ANNOTATIONS + 1).map(|_| {
+                Annotated::<serde_json::Value>::from_annotation(ANNOTATION_REQUEST_ID, &"req-123")
+                    .expect("request-id annotation")
+            }));
+            let errors = stream::once(async {
+                Annotated::<serde_json::Value>::from_error("private backend failure")
+            });
+            let events = annotations.chain(errors).inspect({
+                let polled = polled.clone();
+                move |_| {
+                    polled.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+
+            let response = match check_for_backend_error(events, check).await {
+                Err(response) => response,
+                Ok(_) => panic!("annotation overflow must not commit HTTP success"),
+            };
+            assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(polled.load(Ordering::Relaxed), MAX_LEADING_ANNOTATIONS + 1);
+            assert!(!response.1.0.message.contains("private"));
+        }
+    }
+
+    #[tokio::test]
     async fn test_check_for_backend_error_replays_leading_annotation_frames() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use dynamo_protocols::types::CreateChatCompletionStreamResponse;
@@ -9871,16 +9911,21 @@ mod tests {
             error: None,
         };
 
-        let test_stream = stream::iter(vec![annotation, normal_event]);
+        let test_stream = stream::iter(vec![annotation; MAX_LEADING_ANNOTATIONS])
+            .chain(stream::once(async { normal_event }));
         let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         assert!(result.is_ok());
         let mut returned: Vec<_> = result.unwrap().collect().await;
-        assert_eq!(returned.len(), 2, "annotation + data event must replay");
+        assert_eq!(returned.len(), MAX_LEADING_ANNOTATIONS + 1);
         let first = returned.remove(0);
         assert_eq!(first.event.as_deref(), Some(ANNOTATION_REQUEST_ID));
-        let second = returned.remove(0);
-        assert_eq!(second.id, Some("msg-1".to_string()));
+        assert!(
+            returned[..MAX_LEADING_ANNOTATIONS - 1]
+                .iter()
+                .all(|event| event.event.as_deref() == Some(ANNOTATION_REQUEST_ID))
+        );
+        assert_eq!(returned.last().unwrap().id.as_deref(), Some("msg-1"));
     }
 
     /// The timeout branch of a `Bounded` check is the one path that hands back
@@ -10071,6 +10116,23 @@ mod tests {
             classify_error_for_metrics(StatusCode::FORBIDDEN),
             ErrorType::Validation
         );
+    }
+
+    #[test]
+    fn runtime_lora_unknown_base_does_not_echo_source_prefix() {
+        let error = resolve_runtime_lora_model(
+            "opaque-secret-reference|provider-reference",
+            &crate::lora::runtime::RuntimeLoraConfig { enabled: true },
+            |_| false,
+            |_| None,
+            || Err(RuntimeLoraError::BaseModelRequired),
+        )
+        .expect_err("unknown base must fail");
+        assert!(!error.to_string().contains("opaque-secret-reference"));
+        assert!(!format!("{error:?}").contains("opaque-secret-reference"));
+        let response = runtime_lora_error_response(error);
+        assert_eq!(response.0, StatusCode::NOT_FOUND);
+        assert!(!response.1.0.message.contains("opaque-secret-reference"));
     }
 
     #[test]
