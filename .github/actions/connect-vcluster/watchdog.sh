@@ -180,7 +180,7 @@ start_candidate() {
         "$(date -u +%FT%TZ)" >> "${pf_log}"
     candidate_log_start="$(wc -c < "${pf_log}" | tr -d ' ')"
     kubectl port-forward -n "${namespace}" "svc/${vcluster_name}" 8443:443 \
-        >> "${pf_log}" 2>&1 &
+        >> "${pf_log}" 2>&1 9>&- &
     candidate_pid=$!
     log "Started candidate pid ${candidate_pid}"
 }
@@ -421,13 +421,15 @@ stop_published_port_forward() {
 }
 
 on_watchdog_exit() {
-    if [ "${shutdown_requested}" -eq 1 ] &&
-        [ -n "${candidate_pid}" ] &&
-        pid_file_still_matches "${candidate_pid}" &&
-        process_is_port_forward "${candidate_pid}"; then
-        stop_port_forward "${candidate_pid}" || true
-        remove_pid_file_if_matches "${candidate_pid}" || true
-        wait "${candidate_pid}" 2>/dev/null || true
+    if [ "${shutdown_requested}" -eq 1 ] && [ -n "${candidate_pid}" ]; then
+        if pid_file_still_matches "${candidate_pid}" &&
+            process_is_port_forward "${candidate_pid}"; then
+            stop_port_forward "${candidate_pid}" || true
+            remove_pid_file_if_matches "${candidate_pid}" || true
+            wait "${candidate_pid}" 2>/dev/null || true
+        else
+            cleanup_candidate "${candidate_pid}"
+        fi
     fi
     remove_watchdog_pid_if_matches "$$" || true
 }

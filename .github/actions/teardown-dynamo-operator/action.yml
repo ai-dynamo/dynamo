@@ -28,7 +28,7 @@ runs:
         WATCHDOG_PID_FILE="${{ github.workspace }}/.vcluster-port-forward-watchdog.pid"
         WATCHDOG_LOCK_FILE="${{ github.workspace }}/.vcluster-port-forward-watchdog.lock"
 
-        env \
+        if ! env \
           PF_PID_FILE="${PF_PID_FILE}" \
           PF_LOG="${PF_LOG}" \
           WATCHDOG_LOG="${WATCHDOG_LOG}" \
@@ -36,15 +36,19 @@ runs:
           WATCHDOG_LOCK_FILE="${WATCHDOG_LOCK_FILE}" \
           NAMESPACE="${{ inputs.vcluster_namespace }}" \
           VCLUSTER_NAME="${{ inputs.vcluster_name }}" \
-          "${WATCHDOG_SCRIPT}" stop-watchdog
+          "${WATCHDOG_SCRIPT}" stop-watchdog; then
+          echo "::warning::Failed to stop vCluster port-forward watchdog"
+        fi
 
-        env \
+        if ! env \
           PF_PID_FILE="${PF_PID_FILE}" \
           PF_LOG="${PF_LOG}" \
           WATCHDOG_LOG="${WATCHDOG_LOG}" \
           NAMESPACE="${{ inputs.vcluster_namespace }}" \
           VCLUSTER_NAME="${{ inputs.vcluster_name }}" \
-          "${WATCHDOG_SCRIPT}" stop-port-forward
+          "${WATCHDOG_SCRIPT}" stop-port-forward; then
+          echo "::warning::Failed to stop vCluster port-forward"
+        fi
 
         echo "::endgroup::"
 

@@ -1,14 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import fcntl
 import os
 import subprocess
 import tempfile
+import textwrap
 import time
 import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).with_name("watchdog.sh")
+TEARDOWN_ACTION = SCRIPT.parents[1] / "teardown-dynamo-operator" / "action.yml"
 
 
 class WatchdogTest(unittest.TestCase):
@@ -572,6 +575,135 @@ watchdog_iteration
         self.assertEqual(result.stdout.splitlines(), ["replace"])
         self.assertIsNone(unrelated.poll())
 
+    def test_candidate_does_not_inherit_watchdog_lock(self):
+        lock_file = self.root / "watchdog.lock"
+        kubectl_started = self.root / "kubectl-started"
+        self.make_fake_flock()
+        self.make_executable(
+            "bin/kubectl",
+            f"""
+echo "$$" > "{kubectl_started}"
+trap 'exit 0' TERM
+while :; do sleep 0.1; done
+""",
+        )
+        env = {
+            "PATH": str(self.root / "bin") + os.pathsep + os.environ["PATH"],
+            "WATCHDOG_LOCK_FILE": str(lock_file),
+        }
+
+        result = self.run_shell(
+            """
+exec 9>"${WATCHDOG_LOCK_FILE}"
+flock -n 9
+start_candidate
+""",
+            env,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertTrue(self.wait_for_path(kubectl_started))
+        candidate_pid = int(kubectl_started.read_text())
+
+        def stop_candidate():
+            try:
+                os.kill(candidate_pid, 15)
+            except ProcessLookupError:
+                return
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(candidate_pid, 0)
+                except ProcessLookupError:
+                    return
+                time.sleep(0.02)
+            try:
+                os.kill(candidate_pid, 9)
+            except ProcessLookupError:
+                pass
+
+        self.addCleanup(stop_candidate)
+        with lock_file.open("a") as lock:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                self.fail("candidate kept the watchdog lock descriptor open")
+
+    def test_shutdown_during_readiness_reaps_unpublished_candidate(self):
+        watchdog_pid_file = self.root / "watchdog.pid"
+        lock_file = self.root / "watchdog.lock"
+        kubectl_started = self.root / "kubectl-started"
+        self.make_fake_flock()
+        self.make_executable("bin/curl", "exit 7\n")
+        self.make_executable(
+            "bin/kubectl",
+            f"""
+echo "$$" > "{kubectl_started}"
+trap 'exit 0' TERM
+while :; do sleep 0.1; done
+""",
+        )
+        env = self.watchdog_env(watchdog_pid_file, lock_file)
+        env["READINESS_TIMEOUT"] = "30"
+        env["STOP_WAIT_ATTEMPTS"] = "30"
+        watchdog = subprocess.Popen([str(SCRIPT), "run"], env=env)
+        self.processes.append(watchdog)
+        self.assertTrue(self.wait_for_path(kubectl_started))
+        candidate_pid = int(kubectl_started.read_text())
+        self.assertFalse(self.pf_pid_file.exists())
+
+        result = subprocess.run(
+            [str(SCRIPT), "stop-watchdog"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        watchdog.wait(timeout=2)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(candidate_pid, 0)
+        self.assertFalse(self.pf_pid_file.exists())
+
+    def test_teardown_continues_when_watchdog_stop_commands_fail(self):
+        calls = self.root / "watchdog-calls"
+        self.make_executable(
+            ".github/actions/connect-vcluster/watchdog.sh",
+            f'echo "$1" >> "{calls}"\nexit 1\n',
+        )
+        action = TEARDOWN_ACTION.read_text()
+        step = action.split("    - name: Stop vCluster port-forward watchdog\n", 1)[
+            1
+        ].split("\n    - name: Setup host kubeconfig", 1)[0]
+        body = textwrap.dedent(step.split("      run: |\n", 1)[1])
+        body = (
+            body.replace("${{ github.workspace }}", str(self.root))
+            .replace("${{ inputs.vcluster_namespace }}", "test-namespace")
+            .replace("${{ inputs.vcluster_name }}", "test-vcluster")
+        )
+
+        result = subprocess.run(
+            ["bash", "-c", body],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(
+            calls.read_text().splitlines(),
+            ["stop-watchdog", "stop-port-forward"],
+        )
+        self.assertIn(
+            "::warning::Failed to stop vCluster port-forward watchdog",
+            result.stdout,
+        )
+        self.assertIn(
+            "::warning::Failed to stop vCluster port-forward",
+            result.stdout,
+        )
+
     def test_stopping_watchdog_leaves_sibling_port_forward_for_teardown(self):
         watchdog_pid_file = self.root / "watchdog.pid"
         lock_file = self.root / "watchdog.lock"
@@ -642,6 +774,7 @@ esac
         self.make_fake_flock()
         env = self.watchdog_env(watchdog_pid_file, lock_file)
         env["READINESS_TIMEOUT"] = "10"
+        env["STOP_WAIT_ATTEMPTS"] = "30"
         watchdog = subprocess.Popen([str(SCRIPT), "run"], env=env)
         self.processes.append(watchdog)
         self.assertTrue(self.wait_for_path(self.pf_pid_file))
