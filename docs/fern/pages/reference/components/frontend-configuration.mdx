@@ -874,7 +874,11 @@ Before conversion, the frontend validates these
 - `metadata` accepts an object; `user_id`, when supplied, accepts a string of at most 512
   characters or `null`.
 - `thinking.type: "enabled"` requires an integer `budget_tokens` of at least 1,024 and less
-  than `max_tokens`. Budgets are invalid with `disabled` or `adaptive`.
+  than `max_tokens`, except when `anthropic-beta` includes
+  `interleaved-thinking-2025-05-14`. Budgets are invalid with `disabled`, `adaptive`,
+  or `between_tools`. The latter is accepted as a wire mode; this admission change
+  does not implement model-specific progress updates.
+- `top_k` must fit the backend's signed 32-bit field (at most 2,147,483,647).
 
 For `system`, `metadata`, `tool_choice`, and `thinking`, `null` is treated as omission.
 These checks validate admission; thinking-budget enforcement by the backend is not implemented.

@@ -382,3 +382,137 @@ async fn handler_errors_and_token_counts_have_request_ids() {
     })
     .await;
 }
+
+#[tokio::test]
+#[serial]
+async fn thinking_admission_observes_interleaved_beta_and_current_modes() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(std::iter::repeat_n(script, 4)).await;
+        for path in ["/v1/messages", "/v1/messages/count_tokens"] {
+            for (thinking, beta, accepted) in [
+                (json!({"type": "between_tools"}), None, true),
+                (
+                    json!({"type": "enabled", "budget_tokens": 4096}),
+                    None,
+                    false,
+                ),
+                (
+                    json!({"type": "enabled", "budget_tokens": 4096}),
+                    Some("other-beta, interleaved-thinking-2025-05-14"),
+                    true,
+                ),
+                (
+                    json!({"type": "enabled", "budget_tokens": 4096}),
+                    Some("interleaved-thinking-2025-05-14-extra"),
+                    false,
+                ),
+                (
+                    json!({"type": "between_tools", "budget_tokens": 1024}),
+                    None,
+                    false,
+                ),
+            ] {
+                let mut body = request();
+                body["thinking"] = thinking;
+                let mut post = svc
+                    .client
+                    .post(format!("{}{path}", svc.base_url))
+                    .json(&body);
+                if let Some(beta) = beta {
+                    post = post.header("anthropic-beta", beta);
+                }
+                let response = post.send().await.unwrap();
+                if accepted {
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::OK,
+                        "{}",
+                        response.text().await.unwrap()
+                    );
+                } else {
+                    assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+                }
+            }
+        }
+        assert_eq!(svc.engine.take_requests().await.len(), 2);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn admission_retains_typed_paths_unknown_fields_and_nonempty_method_errors() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script]).await;
+        let mut body = request();
+        body["messages"][0]["role"] = json!("invalid");
+        let response = svc
+            .client
+            .post(format!("{}/v1/messages", svc.base_url))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let error = assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("messages[0].role"),
+            "{error}"
+        );
+        let raw = request().to_string();
+        let raw = format!("{},\"unknown\":1e999}}", raw.strip_suffix('}').unwrap());
+        let response = svc
+            .client
+            .post(format!("{}/v1/messages", svc.base_url))
+            .header("content-type", "application/json")
+            .body(raw)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{}",
+            response.text().await.unwrap()
+        );
+        for top_k in [2147483648_u64, u32::MAX as u64] {
+            let mut body = request();
+            body["top_k"] = json!(top_k);
+            let response = svc
+                .client
+                .post(format!("{}/v1/messages", svc.base_url))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            let error =
+                assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+            assert!(
+                error["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("top_k")
+            );
+        }
+        let response = svc
+            .client
+            .get(format!("{}/v1/messages", svc.base_url))
+            .send()
+            .await
+            .unwrap();
+        assert_error(
+            response,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "invalid_request_error",
+        )
+        .await;
+        assert_eq!(svc.engine.take_requests().await.len(), 1);
+        svc.shutdown().await;
+    })
+    .await;
+}

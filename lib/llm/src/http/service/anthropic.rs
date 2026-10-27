@@ -167,7 +167,11 @@ async fn anthropic_error_middleware(mut request: Request<Body>, next: Next) -> R
                     "type": "error",
                     "error": {
                         "type": anthropic_error_type_for_status(parts.status, "api_error"),
-                        "message": String::from_utf8_lossy(&body_bytes),
+                        "message": if body_bytes.is_empty() {
+                            parts.status.canonical_reason().unwrap_or("Request failed").into()
+                        } else {
+                            String::from_utf8_lossy(&body_bytes)
+                        },
                     },
                 })
             }
@@ -415,10 +419,10 @@ async fn handler_anthropic_messages(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Extension(AnthropicRequestId(request_id)): Extension<AnthropicRequestId>,
     headers: HeaderMap,
-    Json(ValidatedRequest(mut request)): Json<ValidatedRequest<AnthropicCreateMessageRequest>>,
+    Json(request): Json<ValidatedRequest<AnthropicCreateMessageRequest>>,
 ) -> Result<Response, Response> {
-    let streaming = request.stream;
-    let resolved_model = resolve_request_model(&request.model, template.as_ref());
+    let (model, streaming) = request.identity();
+    let resolved_model = resolve_request_model(&model, template.as_ref());
     let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let metric_model = state
         .manager()
@@ -430,6 +434,9 @@ async fn handler_anthropic_messages(
         streaming,
         &request_id,
     );
+    let mut request = request.into_request(&headers).map_err(|error| {
+        AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
+    })?;
 
     validate_anthropic_messages(&request.messages).map_err(|error| {
         AnthropicHandlerError::from_request_validation(error)
@@ -1005,8 +1012,12 @@ async fn anthropic_messages(
 /// Returns an estimated input token count using a len/3 heuristic.
 async fn handler_count_tokens(
     State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    Json(ValidatedRequest(mut request)): Json<ValidatedRequest<AnthropicCountTokensRequest>>,
+    headers: HeaderMap,
+    Json(request): Json<ValidatedRequest<AnthropicCountTokensRequest>>,
 ) -> Result<Response, Response> {
+    let mut request = request
+        .into_request(&headers)
+        .map_err(|error| AnthropicHandlerError::validation(error).into_response())?;
     if let Err(error) = validate_anthropic_messages(&request.messages) {
         return Err(AnthropicHandlerError::from_request_validation(error).into_response());
     }

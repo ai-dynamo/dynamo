@@ -1,28 +1,85 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{collections::HashMap, marker::PhantomData};
+
+use axum::{Json, http::HeaderMap};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, value::RawValue};
 
-/// Validate wire fields before the shared protocol types discard their shape
-/// (notably system block types and malformed untagged tool-choice variants).
-pub(super) struct ValidatedRequest<T>(pub T);
+/// Retain the original JSON until header-aware admission. Typed deserialization
+/// must read the original bytes, since a Value loses duplicate object keys.
+pub(super) struct ValidatedRequest<T> {
+    raw: Box<RawValue>,
+    marker: PhantomData<T>,
+}
 
-impl<'de, T: DeserializeOwned> Deserialize<'de> for ValidatedRequest<T> {
+impl<'de, T> Deserialize<'de> for ValidatedRequest<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // Axum's JSON extractor buffers the body, so borrow its original JSON.
-        // Parsing T from a Value would silently discard duplicate object keys.
-        let raw = <&RawValue>::deserialize(deserializer)?;
-        let value = serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
-        validate(&value).map_err(serde::de::Error::custom)?;
-        drop(value);
-        serde_json::from_str(raw.get())
-            .map(Self)
-            .map_err(serde::de::Error::custom)
+        Ok(Self {
+            raw: Box::<RawValue>::deserialize(deserializer)?,
+            marker: PhantomData,
+        })
     }
 }
 
-fn validate(request: &Value) -> Result<(), String> {
+impl<T: DeserializeOwned> ValidatedRequest<T> {
+    fn fields(&self) -> Result<HashMap<String, &RawValue>, String> {
+        serde_json::from_str(self.raw.get()).map_err(|error| error.to_string())
+    }
+
+    /// Best-effort labels only; admission below still rejects malformed fields.
+    pub(super) fn identity(&self) -> (String, bool) {
+        let fields = self.fields().unwrap_or_default();
+        let model = fields
+            .get("model")
+            .and_then(|raw| serde_json::from_str(raw.get()).ok())
+            .unwrap_or_default();
+        let stream = fields
+            .get("stream")
+            .and_then(|raw| serde_json::from_str(raw.get()).ok())
+            .unwrap_or(false);
+        (model, stream)
+    }
+
+    pub(super) fn into_request(self, headers: &HeaderMap) -> Result<T, String> {
+        let fields = self.fields()?;
+        // Inspect only fields whose shape the shared types would discard. Unknown
+        // fields keep the typed parser's permissive behavior and numeric range.
+        let mut values = serde_json::Map::new();
+        for name in [
+            "system",
+            "tool_choice",
+            "metadata",
+            "thinking",
+            "max_tokens",
+            "top_k",
+        ] {
+            if let Some(raw) = fields.get(name) {
+                values.insert(
+                    name.into(),
+                    serde_json::from_str(raw.get()).map_err(|error| format!("{name}: {error}"))?,
+                );
+            }
+        }
+        validate(&Value::Object(values), headers)?;
+        // Axum retains typed field paths in diagnostics, including nested ones.
+        Json::<T>::from_bytes(self.raw.get().as_bytes())
+            .map(|Json(request)| request)
+            .map_err(|error| error.body_text())
+    }
+}
+
+fn has_beta(headers: &HeaderMap, beta: &str) -> bool {
+    headers
+        .get_all("anthropic-beta")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|value| value.trim() == beta)
+}
+
+fn validate(request: &Value, headers: &HeaderMap) -> Result<(), String> {
     if let Some(system) = request.get("system").filter(|value| !value.is_null()) {
         match system {
             Value::String(_) => {}
@@ -97,17 +154,29 @@ fn validate(request: &Value) -> Result<(), String> {
                     .ok_or("thinking.budget_tokens: must be an integer of at least 1024 for type enabled")?;
                 if let Some(max_tokens) = request.get("max_tokens").and_then(Value::as_u64)
                     && budget >= max_tokens
+                    && !has_beta(headers, "interleaved-thinking-2025-05-14")
                 {
                     return Err("thinking.budget_tokens: must be less than max_tokens".into());
                 }
             }
-            Some("disabled" | "adaptive") => {
+            Some("disabled" | "adaptive" | "between_tools") => {
                 if thinking.get("budget_tokens").is_some() {
                     return Err("thinking.budget_tokens: only allowed for type enabled".into());
                 }
             }
-            _ => return Err("thinking.type: must be enabled, disabled, or adaptive".into()),
+            _ => {
+                return Err(
+                    "thinking.type: must be enabled, disabled, adaptive, or between_tools".into(),
+                );
+            }
         }
+    }
+    if request
+        .get("top_k")
+        .and_then(Value::as_u64)
+        .is_some_and(|value| value > i32::MAX as u64)
+    {
+        return Err("top_k: must be at most 2147483647".into());
     }
     Ok(())
 }
