@@ -52,7 +52,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # The operator reads each component's Dynamo version from its image tag and
 # rejects the DGD when the tag has none. CI passes these tests the raw build tag
 # (<sha>-<framework>-runtime-efa-nightly), which has none.
-_VERSIONED_TAG = re.compile(r"[vV]?\d+\.\d+\.\d+(?:[-+]|$)")
+_VERSIONED_TAG = re.compile(
+    r"^[vV]?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 
 # Comfortably under the tests' own pytest timeout, so a deployment that never
 # becomes ready loses the race to _wait_for_condition, which raises with pod
@@ -142,8 +147,10 @@ def runtime_version_override(image: str) -> str | None:
     how CI derives the version it puts in the image tags of the other deploy
     tests.
     """
-    tag = image.split("@", 1)[0].rpartition(":")[2]
-    if _VERSIONED_TAG.match(tag):
+    ref = image.strip().split("@", 1)[0]
+    tag = ref.rpartition(":")[2].strip() if ref.rfind(":") > ref.rfind("/") else ""
+    match = _VERSIONED_TAG.fullmatch(tag)
+    if match and all(int(part) <= 2**64 - 1 for part in match.groups()):
         return None
     with open(REPO_ROOT / "Cargo.toml", "rb") as f:
         version = tomllib.load(f)["workspace"]["package"]["version"]

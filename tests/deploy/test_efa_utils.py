@@ -124,11 +124,15 @@ def test_sum_nixl_agent_samples_reports_absent() -> None:
         "registry.example/ai-dynamo/dynamo:1.6.0-ci-0123abc-vllm-runtime-nightly",
         "registry.example/ai-dynamo/vllm-runtime:1.2.0-efa",
         "registry.example/ai-dynamo/dynamo:v1.5.1",
+        "registry.example/ai-dynamo/dynamo:V1.5.1",
+        "registry.example/ai-dynamo/dynamo:0.0.0-0.alpha-1.2+build.01",
+        "registry.example:5000/ai-dynamo/dynamo:1.6.0+build.01",
+        " registry.example/ai-dynamo/dynamo: v1.6.0 ",
+        "registry.example/ai-dynamo/dynamo:18446744073709551615.0.0",
         "registry.example/ai-dynamo/dynamo:1.5.1@sha256:" + "0" * 64,
     ],
 )
 def test_runtime_version_override_leaves_versioned_tags_alone(image: str) -> None:
-    """The operator reads the version from these tags, so none is declared."""
     assert runtime_version_override(image) is None
 
 
@@ -141,10 +145,28 @@ def test_runtime_version_override_leaves_versioned_tags_alone(image: str) -> Non
         "registry.example/ai-dynamo/dynamo:0123abc-vllm-runtime-efa-nightly",
         "registry.example:5000/ai-dynamo/dynamo",
         "registry.example/ai-dynamo/dynamo@sha256:" + "0" * 64,
+        "",
+        "1.6.0",
+        "registry.example/ai-dynamo/dynamo:01.2.3",
+        "registry.example/ai-dynamo/dynamo:1.02.3",
+        "registry.example/ai-dynamo/dynamo:1.2.03",
+        "registry.example/ai-dynamo/dynamo:1.6.0-bad_suffix",
+        "registry.example/ai-dynamo/dynamo:1.6.0-01",
+        "registry.example/ai-dynamo/dynamo:1.6.0-alpha.01",
+        "registry.example/ai-dynamo/dynamo:1.6.0-alpha..1",
+        "registry.example/ai-dynamo/dynamo:1.6.0-",
+        "registry.example/ai-dynamo/dynamo:1.6.0+",
+        "registry.example/ai-dynamo/dynamo:1.6.0+bad_suffix",
+        "registry.example/ai-dynamo/dynamo:1.6.0+build..1",
+        "registry.example/ai-dynamo/dynamo:1.6.0junk",
+        "registry.example/ai-dynamo/dynamo:1.6.0-alpha\njunk",
+        "registry.example/ai-dynamo/dynamo:１.6.0",
+        "registry.example/ai-dynamo/dynamo:18446744073709551616.0.0",
+        "registry.example:1.6.0/ai-dynamo/dynamo",
+        "registry.example/ai-dynamo/dynamo:01.2.3@sha256:" + "0" * 64,
     ],
 )
 def test_runtime_version_override_for_unversioned_tags(image: str) -> None:
-    """CI's raw build tag gets the workspace version, in the form the CRD accepts."""
     version = runtime_version_override(image)
     assert version is not None
     assert re.fullmatch(r"\d+\.\d+\.\d+", version)
