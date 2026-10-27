@@ -145,12 +145,17 @@ jobs:
           yq -i 'with(select(.kind == "Job");
             (.spec.template.spec.containers[].envFrom[]? | select(.secretRef.name == "hf-token-secret").secretRef.name) = strenv(HF_SECRET) |
             (.spec.template.spec.containers[].env[]? | select(.name == "HF_TOKEN").valueFrom.secretKeyRef.name) = strenv(HF_SECRET))' "$ARTIFACTS/rendered.yaml"
+          # The rewrite below expects the recipe command to be [shell, -c, script].
+          yq -e 'select(.kind == "Job" and .metadata.name == strenv(BENCHMARK)).spec.template.spec.containers[0].command | length == 3' "$ARTIFACTS/rendered.yaml" > /dev/null
           # Reserve ten minutes for collection plus termination grace after the benchmark timeout.
+          # PERF_LIFECYCLE uses Bash syntax, so run it under /bin/bash whatever shell the recipe picked.
           yq -i 'with(select(.kind == "Job" and .metadata.name == strenv(BENCHMARK));
             .spec.template.spec.containers[0].env += [{"name": "AIPERF_BENCHMARK_TIMEOUT", "value": (.spec.activeDeadlineSeconds | tostring)}] |
             .spec.activeDeadlineSeconds += 660 |
             .spec.template.spec.containers[0].command[4] = .spec.template.spec.containers[0].command[2] |
             .spec.template.spec.containers[0].command[3] = "aiperf-ci" |
+            .spec.template.spec.containers[0].command[0] = "/bin/bash" |
+            .spec.template.spec.containers[0].command[1] = "-c" |
             .spec.template.spec.containers[0].command[2] = strenv(PERF_LIFECYCLE) + "\ntimeout --kill-after=30s \"$AIPERF_BENCHMARK_TIMEOUT\" /bin/bash -c \"$1\"")' "$ARTIFACTS/rendered.yaml"
           yq 'select(.kind == "DynamoGraphDeployment")' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/deploy.yaml"
           yq 'select(.kind == "Job" and .metadata.name == strenv(BENCHMARK))' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/perf.yaml"
