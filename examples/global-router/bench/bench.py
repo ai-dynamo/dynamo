@@ -11,6 +11,7 @@ existing CDK kubectl provider (``rr-backend/cluster.py``).
 """
 
 import argparse
+import base64
 import importlib.util
 import json
 import sys
@@ -35,12 +36,19 @@ mcs = _load("rr_mcs", "rr-backend/mcs.py")
 PURPOSE = "cpu-bench"
 NODE_SELECTOR = {"dynamo.nvidia.com/purpose": PURPOSE}
 TAINT_KEY = "dynamo.nvidia.com/bench"
-TOLERATION = {"key": TAINT_KEY, "operator": "Equal", "value": "true", "effect": "NoSchedule"}
+TOLERATION = {
+    "key": TAINT_KEY,
+    "operator": "Equal",
+    "value": "true",
+    "effect": "NoSchedule",
+}
 NODEGROUP = "global-router-bench-cpu"
 AIPERF_VERSION = "0.13.0"
 LOADGEN_IMAGE = (
     "python@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704"
 )
+SLOW_START_SYSCTL = "net.ipv4.tcp_slow_start_after_idle"
+NODELAY_DIR = "/opt/nodelay"
 
 
 def stack(member, suffix):
@@ -139,6 +147,70 @@ def render_nodegroup(cfg, member):
     return nodegroup_template(member, cfg["nodegroup"], gpu, data)
 
 
+# TCP settings -----------------------------------------------------------------------
+# Every run measures with the TCP settings a tuned deployment has: Nagle off on each
+# HTTP server in the request path, and no slow-start restart on any sender, so an
+# idle connection keeps its send window. Without them a cross-region hop costs 2-4
+# round trips instead of 1.
+
+
+def nodelay_configmap(cfg, name):
+    """The LD_PRELOAD accept shim (``nodelay.c``, built to ``cfg["nodelayShim"]``)."""
+    shim = Path(cfg["nodelayShim"]).read_bytes()
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": name, "namespace": cfg["namespace"]},
+        "binaryData": {"libnodelay.so": base64.b64encode(shim).decode()},
+    }
+
+
+def nagle_off(pod, configmap):
+    """Preloads the accept shim into every container of ``pod``: the frontend
+    images here predate the frontend's own TCP_NODELAY (#16728)."""
+    pod.setdefault("volumes", []).append(
+        {"name": "nodelay", "configMap": {"name": configmap, "defaultMode": 0o755}}
+    )
+    for container in pod["containers"]:
+        container.setdefault("env", []).append(
+            {"name": "LD_PRELOAD", "value": f"{NODELAY_DIR}/libnodelay.so"}
+        )
+        container.setdefault("volumeMounts", []).append(
+            {"name": "nodelay", "mountPath": NODELAY_DIR, "readOnly": True}
+        )
+
+
+def no_slow_start_after_idle(pod):
+    """Sets the sysctl in the pod's own network namespace, which does not
+    inherit the node's value. Kubelet allows no unsafe sysctls here, so a
+    privileged init container writes it."""
+    path = "/proc/sys/" + SLOW_START_SYSCTL.replace(".", "/")
+    pod.setdefault("initContainers", []).append(
+        {
+            "name": "tcp-sysctl",
+            "image": LOADGEN_IMAGE,
+            "command": ["sh", "-c", f"echo 0 > {path}"],
+            "securityContext": {
+                "privileged": True,
+                "runAsUser": 0,
+                "runAsNonRoot": False,
+            },
+        }
+    )
+
+
+def tune_http_servers(manifest, cfg, configmap, names):
+    """Both TCP settings for the Deployments in ``names``, with the shim's
+    ConfigMap in the same manifest."""
+    for item in manifest["items"]:
+        if item["kind"] == "Deployment" and item["metadata"]["name"] in names:
+            pod = item["spec"]["template"]["spec"]
+            nagle_off(pod, configmap)
+            no_slow_start_after_idle(pod)
+    manifest["items"].append(nodelay_configmap(cfg, configmap))
+    return manifest
+
+
 # Kubernetes workloads ---------------------------------------------------------------
 
 
@@ -161,7 +233,12 @@ def backend_manifest(cfg, member):
         )
         for item in rendered["items"]:
             items[(item["kind"], item["metadata"]["name"])] = item
-    return {"apiVersion": "v1", "kind": "List", "items": list(items.values())}
+    return tune_http_servers(
+        {"apiVersion": "v1", "kind": "List", "items": list(items.values())},
+        cfg,
+        "nodelay-backend",
+        {f"{pool['stem']}-frontend" for pool in cfg["pools"]},
+    )
 
 
 def routing_config(cfg):
@@ -182,7 +259,7 @@ def routing_config(cfg):
 
 
 def control_manifest(cfg, member, policy):
-    return control.render(
+    rendered = control.render(
         cfg["namespace"],
         member["controlImage"],
         routing_config(cfg),
@@ -192,6 +269,7 @@ def control_manifest(cfg, member, policy):
         node_selector=NODE_SELECTOR,
         tolerations=[TOLERATION],
     )
+    return tune_http_servers(rendered, cfg, "nodelay-control", {"global-router"})
 
 
 def aiperf_config(cfg, concurrency):
@@ -266,7 +344,7 @@ def loadgen_manifest(cfg, label, concurrency, start_at):
         "PYTHONUNBUFFERED": "1",
     }
     meta = {"name": name, "namespace": cfg["namespace"]}
-    return {
+    manifest = {
         "apiVersion": "v1",
         "kind": "List",
         "items": [
@@ -328,6 +406,9 @@ def loadgen_manifest(cfg, label, concurrency, start_at):
             },
         ],
     }
+    # aiperf uploads the prompts, so it is a sender too.
+    no_slow_start_after_idle(manifest["items"][1]["spec"]["template"]["spec"])
+    return manifest
 
 
 # Node access over SSM ---------------------------------------------------------------
@@ -432,8 +513,13 @@ def http_probe_script(model, targets, sizes, requests, warmup, idle_s):
     ``idle_s`` quiet, which shrinks Linux's congestion window) and ``cold`` (a
     new connection per request). The prompt repeats, so after ``warmup``
     requests every worker serves it from its prefix cache, and the difference
-    between a remote and the local target is the cost of the path."""
-    return f"""python3 - <<'PY'
+    between a remote and the local target is the cost of the path. The probe
+    uploads the prompts from the node's own network namespace, so it turns off
+    slow-start restart there for its run, as for every other sender."""
+    return f"""previous=$(sysctl -n {SLOW_START_SYSCTL})
+sysctl -qw {SLOW_START_SYSCTL}=0
+trap 'sysctl -qw {SLOW_START_SYSCTL}='"$previous" EXIT
+python3 - <<'PY'
 import http.client, json, statistics, time
 targets = {json.dumps(targets)}
 sizes = {json.dumps(sizes)}
@@ -507,6 +593,65 @@ for name, ip in {json.dumps(targets)}.items():
         "tcp_connect_ms_min": round(min(connect), 2),
     }}
 print("BENCH_PING " + json.dumps(out, sort_keys=True))
+PY"""
+
+
+def tcp_check_script(namespace):
+    """For each HTTP server on a node in ``namespace`` (pool frontends and the
+    Global Ingress): whether the accept shim is loaded, whether a connection it
+    accepts has TCP_NODELAY set, and its pod's slow-start sysctl. The check
+    connects from inside the pod's network namespace and reads the accepted
+    socket's option through ``pidfd_getfd``."""
+    return f"""python3 - <<'PY'
+import ctypes, glob, json, os, socket, subprocess, time
+libc = ctypes.CDLL(None, use_errno=True)
+CLONE_NEWNET, SYS_PIDFD_GETFD = 0x40000000, 438
+SERVERS = (b"dynamo.frontend", b"global-ingress")
+def cmdline(pid):
+    try:
+        return open("/proc/%d/cmdline" % pid, "rb").read()
+    except OSError:
+        return b""
+def accepted_nodelay(pid):
+    host = os.open("/proc/self/ns/net", os.O_RDONLY)
+    libc.setns(os.open("/proc/%d/ns/net" % pid, os.O_RDONLY), CLONE_NEWNET)
+    client = socket.create_connection(("127.0.0.1", 8000), timeout=5)
+    libc.setns(host, CLONE_NEWNET)
+    time.sleep(0.5)
+    mine, value = client.getsockname(), None
+    pidfd = os.pidfd_open(pid)
+    for fd in os.listdir("/proc/%d/fd" % pid):
+        copy = libc.syscall(SYS_PIDFD_GETFD, pidfd, int(fd), 0)
+        if copy < 0:
+            continue
+        try:
+            sock = socket.socket(fileno=copy)
+        except OSError:
+            os.close(copy)
+            continue
+        try:
+            if sock.family == socket.AF_INET and sock.getpeername() == mine:
+                value = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+        except OSError:
+            pass
+        finally:
+            sock.close()
+    client.close()
+    return value
+out = []
+for logdir in glob.glob("/var/log/pods/{namespace}_*"):
+    pod, uid = os.path.basename(logdir).split("_")[1:3]
+    procs = glob.glob("/sys/fs/cgroup/kubepods.slice/**/kubepods*-pod%s.slice/**/cgroup.procs"
+                      % uid.replace("-", "_"), recursive=True)
+    pids = [int(p) for f in procs for p in open(f).read().split()]
+    pid = next((p for p in pids if any(s in cmdline(p) for s in SERVERS)), None)
+    if pid is None:
+        continue
+    sysctl = subprocess.run(["nsenter", "-t", str(pid), "-n", "sysctl", "-n", "{SLOW_START_SYSCTL}"],
+                            capture_output=True, text=True).stdout.strip()
+    out.append(dict(pod=pod, shim_loaded="libnodelay.so" in open("/proc/%d/maps" % pid).read(),
+                    accepted_nodelay=accepted_nodelay(pid), slow_start_after_idle=sysctl))
+print("BENCH_TCP " + json.dumps(out, sort_keys=True))
 PY"""
 
 
@@ -596,6 +741,31 @@ def from_every_region(cfg, script, marker, timeout_s):
     return matrix
 
 
+def from_every_node(cfg, script, marker, timeout_s):
+    """Runs ``script`` on every bench node and returns, per region, the
+    concatenated JSON lists from the output lines that start with ``marker``."""
+    sent = [
+        (member, nodes, ssm_send(member, nodes, script, timeout_s))
+        for member in cfg["regions"]
+        for nodes in [bench_nodes(member)]
+    ]
+    out = {}
+    for member, nodes, command_id in sent:
+        for node in nodes:
+            result = ssm_output(member, command_id, node)
+            lines = [
+                line.removeprefix(marker)
+                for line in result["StandardOutputContent"].splitlines()
+                if line.startswith(marker)
+            ]
+            if not lines:
+                sys.exit(
+                    f"{member['short']}/{node}: {result['StandardErrorContent'][-800:]}"
+                )
+            out.setdefault(member["short"], []).extend(json.loads(lines[-1]))
+    return out
+
+
 def write_matrix(path, targets, matrix):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"targets": targets, "from": matrix}, indent=2))
@@ -636,16 +806,42 @@ def main():
     )
     ping.add_argument("--count", type=int, default=20)
     probe = commands.add_parser(
-        "probe", help="first-token time from each region to every region's pool frontend"
+        "probe",
+        help="first-token time from each region to every region's pool frontend",
     )
     probe.add_argument("--requests", type=int, default=10)
     probe.add_argument(
-        "--warmup", type=int, default=8, help="Per target and size; at least the pool's workers"
+        "--warmup",
+        type=int,
+        default=8,
+        help="Per target and size; at least the pool's workers",
     )
     probe.add_argument("--idle-s", type=float, default=2.0)
+    probe.add_argument(
+        "--out",
+        default="probe.json",
+        help="File name under the evidence results directory",
+    )
+    commands.add_parser(
+        "tcp-check", help="whether every HTTP server pod has the bench's TCP settings"
+    )
     args = parser.parse_args()
 
     cfg = json.loads(args.config.read_text())
+    if args.command == "tcp-check":
+        servers = from_every_node(
+            cfg, tcp_check_script(cfg["namespace"]), "BENCH_TCP ", 120
+        )
+        print(json.dumps(servers, indent=2))
+        expected = len(cfg["pools"]) + cfg["routerReplicas"]
+        for member in cfg["regions"]:
+            pods = servers.get(member["short"], [])
+            if len(pods) != expected or not all(
+                pod["accepted_nodelay"] == 1 and pod["slow_start_after_idle"] == "0"
+                for pod in pods
+            ):
+                sys.exit(f"{member['short']}: HTTP servers without the TCP settings")
+        return
     if args.command == "ping":
         targets = frontend_ips(cfg, args.evidence)
         matrix = from_every_region(
@@ -661,7 +857,7 @@ def main():
             cfg["model"], targets, sizes, args.requests, args.warmup, args.idle_s
         )
         matrix = from_every_region(cfg, script, "BENCH_HTTP ", 3600)
-        write_matrix(args.evidence / "results" / "probe.json", targets, matrix)
+        write_matrix(args.evidence / "results" / args.out, targets, matrix)
         return
     if args.command == "hub":
         members = [member["site"] for member in cfg["regions"]]
@@ -708,23 +904,32 @@ def main():
             )
             print(f"submitted {name}")
         else:
-            cluster.aws(member["region"], "cloudformation", "delete-stack", "--stack-name", name)
+            cluster.aws(
+                member["region"], "cloudformation", "delete-stack", "--stack-name", name
+            )
             print(f"deleting {name}")
     elif args.command == "backend":
         value = cluster.deploy(
-            member, stack(member, "backend"), backend_manifest(cfg, member), args.evidence
+            member,
+            stack(member, "backend"),
+            backend_manifest(cfg, member),
+            args.evidence,
         )
         print(json.dumps(value))
     elif args.command == "control":
         value = cluster.deploy(
             member,
             stack(member, "control"),
-            control_manifest(cfg, member, None if args.policy == "none" else args.policy),
+            control_manifest(
+                cfg, member, None if args.policy == "none" else args.policy
+            ),
             args.evidence,
         )
         print(json.dumps(value))
     elif args.command == "pods":
-        pods = cluster.read(member, "pods", cfg["namespace"], "", ".items", args.evidence)
+        pods = cluster.read(
+            member, "pods", cfg["namespace"], "", ".items", args.evidence
+        )
         for pod in pods or []:
             statuses = pod["status"].get("containerStatuses", [])
             ready = sum(status.get("ready", False) for status in statuses)
@@ -737,7 +942,9 @@ def main():
     elif args.command == "loadgen":
         name = stack(member, f"loadgen-{args.label}")
         if args.action == "down":
-            cluster.aws(member["region"], "cloudformation", "delete-stack", "--stack-name", name)
+            cluster.aws(
+                member["region"], "cloudformation", "delete-stack", "--stack-name", name
+            )
             print(f"deleting {name}")
             return
         if args.concurrency is None or args.start_at is None:
@@ -753,7 +960,9 @@ def main():
         command_id = ssm_send(
             member, bench_nodes(member), script, delay + samples * 15 + 600
         )
-        record = args.evidence / "results" / args.label / f"{member['region']}.cpu-command"
+        record = (
+            args.evidence / "results" / args.label / f"{member['region']}.cpu-command"
+        )
         record.parent.mkdir(parents=True, exist_ok=True)
         record.write_text(command_id)
         print(f"cpu sampler {command_id}")
@@ -765,20 +974,26 @@ def main():
         )
         summary = None
         for instance in instances:
-            text = ssm_output(member, command_id, instance)["StandardOutputContent"].strip()
+            text = ssm_output(member, command_id, instance)[
+                "StandardOutputContent"
+            ].strip()
             if text:
                 summary = json.loads(text)
         if summary is None:
             sys.exit(f"no BENCH_SUMMARY for {args.label} in {member['region']}")
         cpu = {}
-        cpu_command = (directory / f"{member['region']}.cpu-command").read_text().strip()
+        cpu_command = (
+            (directory / f"{member['region']}.cpu-command").read_text().strip()
+        )
         for instance in instances:
             text = ssm_output(member, cpu_command, instance)["StandardOutputContent"]
             for line in text.splitlines():
                 if line.startswith("BENCH_CPU "):
                     cpu.update(json.loads(line.removeprefix("BENCH_CPU ")))
         out = directory / f"{member['region']}.json"
-        out.write_text(json.dumps({"summary": summary, "peak_cpu_cores": cpu}, indent=2))
+        out.write_text(
+            json.dumps({"summary": summary, "peak_cpu_cores": cpu}, indent=2)
+        )
         print(f"wrote {out}")
 
 

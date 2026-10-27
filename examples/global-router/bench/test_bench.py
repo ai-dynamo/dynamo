@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 import importlib.util
 import unittest
 from pathlib import Path
@@ -40,6 +41,8 @@ CONFIG = {
     "frontendCpu": "2",
     "routerReplicas": 2,
     "routerCpu": "2",
+    # Any file stands in for the built shim.
+    "nodelayShim": str(HERE / "nodelay.c"),
 }
 
 
@@ -60,7 +63,9 @@ class BenchTest(unittest.TestCase):
             self.assertEqual(pod["nodeSelector"], bench.NODE_SELECTOR)
             self.assertEqual(pod["tolerations"], [bench.TOLERATION])
             ratio = "5" if stem == "fast-worker" else "2"
-            self.assertEqual(pod["containers"][0]["args"][-2:], ["--speedup-ratio", ratio])
+            self.assertEqual(
+                pod["containers"][0]["args"][-2:], ["--speedup-ratio", ratio]
+            )
 
     def test_every_gds_sees_every_regions_pools(self):
         pools = bench.routing_config(CONFIG)["pools"]
@@ -72,13 +77,42 @@ class BenchTest(unittest.TestCase):
     def test_control_passes_the_policy_to_the_ingress(self):
         items = bench.control_manifest(CONFIG, REGION, "least-in-flight")["items"]
         ingress = next(
-            item for item in items
-            if item["kind"] == "Deployment" and item["metadata"]["name"] == "global-router"
+            item
+            for item in items
+            if item["kind"] == "Deployment"
+            and item["metadata"]["name"] == "global-router"
         )
         container = ingress["spec"]["template"]["spec"]["containers"][0]
         self.assertEqual(container["args"][-2:], ["--router-policy", "least-in-flight"])
         self.assertEqual(container["resources"]["limits"]["cpu"], "2")
         self.assertEqual(ingress["spec"]["replicas"], 2)
+
+    def test_only_http_servers_get_the_tcp_settings(self):
+        for items, servers in (
+            (
+                bench.backend_manifest(CONFIG, REGION)["items"],
+                {"fast-frontend", "slow-frontend"},
+            ),
+            (bench.control_manifest(CONFIG, REGION, None)["items"], {"global-router"}),
+        ):
+            (shim,) = [item for item in items if "binaryData" in item]
+            self.assertEqual(
+                base64.b64decode(shim["binaryData"]["libnodelay.so"]),
+                Path(CONFIG["nodelayShim"]).read_bytes(),
+            )
+            for item in items:
+                if item["kind"] != "Deployment":
+                    continue
+                pod = item["spec"]["template"]["spec"]
+                tuned = item["metadata"]["name"] in servers
+                env = {
+                    e["name"]: e["value"] for e in pod["containers"][0].get("env", [])
+                }
+                self.assertEqual("LD_PRELOAD" in env, tuned, item["metadata"]["name"])
+                self.assertEqual(
+                    [c["name"] for c in pod.get("initContainers", [])],
+                    ["tcp-sysctl"] if tuned else [],
+                )
 
     def test_nodegroup_copies_the_gpu_groups(self):
         settings = {"instanceType": "m7i.4xlarge", "count": 2, "diskGiB": 100}
@@ -89,7 +123,9 @@ class BenchTest(unittest.TestCase):
             # No groups: EKS attaches the cluster security group to both.
             ({}, None),
         ):
-            resources = bench.nodegroup_template(REGION, settings, gpu, data)["Resources"]
+            resources = bench.nodegroup_template(REGION, settings, gpu, data)[
+                "Resources"
+            ]
             launch = resources["LaunchTemplate"]["Properties"]["LaunchTemplateData"]
             self.assertEqual(launch.get("SecurityGroupIds"), expected)
             group = resources["Nodegroup"]["Properties"]
