@@ -13,15 +13,23 @@ PLANNER_IMAGE_NAME = "dynamo-planner"
 
 
 def _replace_image_name(image_ref: str, new_name: str) -> str:
-    """Replace the image name while preserving its registry, tag and digest."""
+    """Replace the image name using the source image's shared release tag.
+
+    OCI digests identify a manifest within one repository. They cannot be
+    copied from a Dynamo image to a sibling planner or backend repository.
+    """
     slash_idx = image_ref.rfind("/")
     prefix = image_ref[: slash_idx + 1] if slash_idx >= 0 else ""
     suffix = image_ref[slash_idx + 1 :]
-    name_and_tag, has_digest, digest = suffix.partition("@")
+    name_and_tag = suffix.partition("@")[0]
     colon_idx = name_and_tag.rfind(":")
-    tag = name_and_tag[colon_idx:] if colon_idx >= 0 else ""
-    digest_suffix = f"@{digest}" if has_digest else ""
-    return f"{prefix}{new_name}{tag}{digest_suffix}"
+    if colon_idx < 0 or colon_idx == len(name_and_tag) - 1:
+        raise ValueError(
+            f"Cannot derive {new_name!r} from image {image_ref!r}: "
+            "a shared release tag is required; repository-specific digests "
+            "cannot be transferred to sibling images"
+        )
+    return f"{prefix}{new_name}{name_and_tag[colon_idx:]}"
 
 
 def derive_planner_image(source_image: str) -> str:
