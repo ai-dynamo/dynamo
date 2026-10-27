@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{ $operator := index .Values "dynamo-operator" -}}
+{{- if $operator.enabled -}}
+{{- $operatorChart := index .Subcharts "dynamo-operator" -}}
+{{- $target := $operatorChart.Chart.AppVersion | required "Operator appVersion is missing from the operator subchart" -}}
+{{- $config := $operator.upgradePreflight.checks.upgradePath -}}
+{{- $fullname := include "dynamo-operator.fullname" $operatorChart -}}
+{{- $name := printf "%s-check-upgrade-path" ($fullname | trunc 44 | trimSuffix "-") -}}
+{{- $deployment := printf "%s-controller-manager" $fullname -}}
+{{- $annotations := dict "helm.sh/hook" "pre-install,pre-upgrade" "helm.sh/hook-weight" "-20" "helm.sh/hook-delete-policy" "before-hook-creation" -}}
+{{- $script := printf "%s\n%s" (.Files.Get "files/preflight/kubernetes.py") (.Files.Get "files/upgrade-preflight/checks/upgrade-path/check.py") -}}
+{{- $args := list .Release.Namespace $deployment $target $config.unsupportedUpgradeOverride $config.unsupportedDowngradeOverride -}}
+{{ include "dynamo-platform.upgradePreflight.serviceAccount" (dict "root" . "name" $name) }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [{{ $deployment }}]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  annotations: {{- toYaml $annotations | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+{{ include "dynamo-platform.upgradePreflight.job" (dict "root" . "operator" $operator "name" $name "checkID" "upgrade-path" "script" $script "args" $args) }}
+{{- end }}
+

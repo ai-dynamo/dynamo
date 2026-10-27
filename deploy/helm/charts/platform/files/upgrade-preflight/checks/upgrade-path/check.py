@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Read-only Dynamo version check for the Helm pre-install/pre-upgrade Job."""
+"""Validate the Dynamo release path before a Helm install or upgrade."""
 
 import re
 import sys
@@ -16,6 +16,7 @@ VERSION_PATTERN = re.compile(
     rf"(?:\+{BUILD_IDENTIFIER}(?:\.{BUILD_IDENTIFIER})*)?$"
 )
 MINOR_VERSION_PATTERN = re.compile(r"^v?(\d+)\.(\d+)$")
+VALUES_PREFIX = "dynamo-operator.upgradePreflight.checks.upgradePath"
 
 
 def version(value):
@@ -36,7 +37,7 @@ def minor_version(value, field_name):
     return tuple(int(component) for component in match.groups())
 
 
-def validate_transition(
+def validate_upgrade_path(
     installed_value,
     target_value,
     unsupported_upgrade_override="",
@@ -55,13 +56,14 @@ def validate_transition(
     field_name = (
         "unsupportedUpgradeOverride" if is_upgrade else "unsupportedDowngradeOverride"
     )
+    field_path = f"{VALUES_PREFIX}.{field_name}"
     override = (
         unsupported_upgrade_override if is_upgrade else unsupported_downgrade_override
     )
     if override and minor_version(override, field_name) == installed[:2]:
         print(
             f"WARNING: allowing unsupported Dynamo {direction} from {installed_value} to {target_value} "
-            f"because {field_name}={override} matches the installed minor release."
+            f"because {field_path}={override} matches the installed minor release."
         )
         return
 
@@ -71,12 +73,12 @@ def validate_transition(
         "Dynamo supports Helm transitions only within the installed minor release or to an adjacent minor release. "
         "Move through every intermediate minor release. "
         f"To allow this specific unsupported {direction}, set "
-        f"dynamo-operator.{field_name}={installed_minor}. The override applies only while "
+        f"{field_path}={installed_minor}. The override applies only while "
         f"the installed operator minor is {installed_minor}"
     )
 
 
-def check(
+def check_upgrade_path(
     get, namespace, deployment, target, upgrade_override="", downgrade_override=""
 ):
     """Read the installed operator Deployment and validate the requested transition."""
@@ -100,17 +102,17 @@ def check(
         )
 
     print(f"Checking Dynamo Helm transition {installed} -> {target}")
-    validate_transition(installed, target, upgrade_override, downgrade_override)
+    validate_upgrade_path(installed, target, upgrade_override, downgrade_override)
     print("Dynamo version transition is supported.")
 
 
 def main():
     get = globals()["kubernetes_client"]()
-    check(lambda path: get(path, missing_ok=True), *sys.argv[1:])
+    check_upgrade_path(lambda path: get(path, missing_ok=True), *sys.argv[1:])
 
 
 if __name__ == "__main__":
     try:
         main()
     except (OSError, ValueError, KeyError) as error:
-        sys.exit(f"Dynamo version preflight failed: {error}.")
+        sys.exit(f"Dynamo upgrade-path preflight failed: {error}.")
