@@ -723,6 +723,8 @@ async def test_admin_hot_swap_false_add_restores_old_adapter(monkeypatch):
 @pytest.mark.asyncio
 async def test_admin_hot_swap_false_restore_drops_tracking(monkeypatch):
     handler = _make_prefill_handler()
+    published = {"adapterA"}
+    handler._unregister_lora_discovery = AsyncMock(side_effect=published.discard)
     handler._lora_state.loaded_loras["adapterA"] = LoRAInfo(id=123, path="/cache/old")
     handler._engine_loaded_loras.add("adapterA")
     handler.engine_client.add_lora.side_effect = [False, False]
@@ -745,6 +747,10 @@ async def test_admin_hot_swap_false_restore_drops_tracking(monkeypatch):
     assert "adapterA" not in handler._lora_state.loaded_loras
     assert "adapterA" not in handler._engine_loaded_loras
     assert handler.engine_client.add_lora.await_count == 2
+    handler._unregister_lora_discovery.assert_awaited_once_with("adapterA")
+    assert not published
+    assert "adapterA" not in handler._lora_state.discovery_uncertain_loras
+    assert "reload" in results[-1]["message"]
 
 
 @pytest.mark.asyncio
