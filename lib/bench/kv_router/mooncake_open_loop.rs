@@ -1079,18 +1079,16 @@ pub async fn run_open_loop<T: SyncIndexer>(
     if trial.totals.host_events() > 0 && lower_tier.is_none() {
         anyhow::bail!("the corpus has host-tier events but the run has no lower tier");
     }
-    if let Some(lower) = &lower_tier {
-        if trial.totals.kvcr.stored_events > 0 {
-            let workers = trial
-                .expected_events_by_worker
-                .iter()
-                .map(|&(worker, _)| worker);
-            lower
-                .indexers
-                .set_residency_routing_snapshot(routing_snapshot(workers)?);
-        }
-        // Allocated before the run, so no event takes the tier map's write lock.
-        lower.indexers.get_or_create(StorageTier::HostPinned);
+    if let Some(lower) = &lower_tier
+        && trial.totals.kvcr.stored_events > 0
+    {
+        let workers = trial
+            .expected_events_by_worker
+            .iter()
+            .map(|&(worker, _)| worker);
+        lower
+            .indexers
+            .set_residency_routing_snapshot(routing_snapshot(workers)?);
     }
     let lower_tier = lower_tier.map(Arc::new);
     trial.page_touch_untimed();

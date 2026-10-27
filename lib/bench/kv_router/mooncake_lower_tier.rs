@@ -225,8 +225,12 @@ impl LowerTierRun<ConcurrentRadixTreeCompressed> {
         metrics: Option<Arc<KvIndexerMetrics>>,
         kvcr: bool,
     ) -> Self {
+        let indexers = LowerTierIndexers::new_with_metrics(lanes, block_size, metrics);
+        // Start the host tier's lanes now, alongside the primary's. Created inside the run, they
+        // would inherit the coordinator's pin to the query-issuer CPU.
+        indexers.get_or_create(StorageTier::HostPinned);
         Self {
-            indexers: LowerTierIndexers::new_with_metrics(lanes, block_size, metrics),
+            indexers,
             options: LowerTierQueryOptions {
                 retain_kv_transfer_chain: kvcr,
             },
