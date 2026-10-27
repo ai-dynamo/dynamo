@@ -572,8 +572,8 @@ where
     rt.block_on(selection::run_server(config.port, service))
 }
 
-/// Depythonize a prompt-carrying request dict. `token_ids` is extracted with pyo3's typed
-/// list conversion: pythonize's per-element serde path costs several times more per token,
+/// Depythonize a prompt-carrying request dict. `token_ids` is read by [`extract_token_ids`]
+/// rather than pythonize, whose per-element serde path costs several times more per token,
 /// all of it on the calling thread under the GIL.
 #[cfg(feature = "select-service")]
 fn depythonize_prompt_request<T: serde::de::DeserializeOwned>(
@@ -590,14 +590,50 @@ fn depythonize_prompt_request<T: serde::de::DeserializeOwned>(
     else {
         return depythonize(request).map_err(invalid);
     };
-    let token_ids = tokens
-        .extract::<Vec<u32>>()
-        .map_err(|e| PyValueError::new_err(format!("token_ids: {e}")))?;
+    let token_ids = extract_token_ids(&tokens)?;
     let rest = dict.copy()?;
     rest.del_item("token_ids")?;
     let mut req: T = depythonize(rest.as_any()).map_err(invalid)?;
     prompt(&mut req).token_ids = Some(token_ids);
     Ok(req)
+}
+
+/// `token_ids` as `Vec<u32>`. An exact `list` of `int`s is read by index with borrowed
+/// items, skipping the per-element iterator and refcount work of pyo3's generic
+/// conversion, which costs more than converting the ints at prompt sizes. Everything
+/// else (list subclasses, whose `__iter__` the generic conversion honors; other
+/// sequences; any element the fast read declines) takes the generic conversion, so
+/// accepted inputs and errors are unchanged.
+#[cfg(feature = "select-service")]
+fn extract_token_ids(tokens: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
+    let generic = || {
+        tokens
+            .extract::<Vec<u32>>()
+            .map_err(|e| PyValueError::new_err(format!("token_ids: {e}")))
+    };
+    let Ok(list) = tokens.downcast_exact::<pyo3::types::PyList>() else {
+        return generic();
+    };
+    let mut token_ids = Vec::with_capacity(list.len());
+    // SAFETY: the GIL is held and the loop runs no Python code (only exact `int`s are
+    // converted, and `PyLong_AsUnsignedLong` does not call `__index__`), so the exact
+    // list cannot change, every index is in range, and the borrowed items stay valid.
+    unsafe {
+        for index in 0..list.len() {
+            let item = pyo3::ffi::PyList_GetItem(list.as_ptr(), index as pyo3::ffi::Py_ssize_t);
+            if pyo3::ffi::PyLong_CheckExact(item) == 0 {
+                return generic();
+            }
+            // A negative int sets OverflowError and returns `c_ulong::MAX`; both it and
+            // values past `u32::MAX` fail `try_from`, and the generic path raises.
+            let Ok(id) = u32::try_from(pyo3::ffi::PyLong_AsUnsignedLong(item)) else {
+                pyo3::ffi::PyErr_Clear();
+                return generic();
+            };
+            token_ids.push(id);
+        }
+    }
+    Ok(token_ids)
 }
 
 /// Map a [`SelectionError`] to a Python exception: invalid input becomes a
