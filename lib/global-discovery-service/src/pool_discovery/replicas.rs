@@ -3,7 +3,7 @@
 
 //! Global Router replicas a pool must connect to. Every replica needs every
 //! pool's state, so a PoolRelay opens one connection per replica, and gets
-//! the list from the service as `GET /routers`.
+//! the list from the service.
 //!
 //! A replica's readiness must not wait for its pools: Relays dial only
 //! listed (Ready) replicas, so otherwise no pool could ever reach it. Pool

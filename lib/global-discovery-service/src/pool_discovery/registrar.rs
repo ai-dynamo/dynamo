@@ -2,29 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_trait::async_trait;
-use dynamo_global_common::Lease;
+pub use dynamo_global_common::{Lease, PoolRegistration};
 
-use super::PoolDiscoveryError;
-use super::record::PoolRecord;
+use super::DiscoveryError;
 
-/// Reply to `register`. A PoolRelay registers again every heartbeat
-/// interval, and the record expires a lease duration after the last
-/// registration the store saw, measured on the store's clock. It does not
-/// list router replicas: Relays get those from a [`super::ReplicaDirectory`],
-/// served as `GET /routers`.
-#[derive(Clone, Debug)]
-pub struct Registration {
-    pub lease: Lease,
-}
-
-/// Write side behind `POST /pools`. A PoolRelay calls `register` on a timer,
-/// and each call is also the pool's heartbeat: registering an unchanged
-/// record again only renews it. The memory store keeps records in this
-/// process; the MCS store has no registrar.
+/// The write side. A PoolRelay registers its pool on a timer, and each call
+/// is also the pool's heartbeat: registering an unchanged pool again only
+/// renews it. The [`Lease`] says when to register again, and how long the
+/// pool stays listed after its last registration, measured on the store's
+/// clock. PoolRelays get router replicas from a [`super::ReplicaDirectory`],
+/// not from this reply.
 ///
 /// V1 assumes a trusted network, where any caller may register any pool, so
 /// `register` does not take the caller.
 #[async_trait]
 pub trait PoolRegistrar: Send + Sync {
-    async fn register(&self, record: PoolRecord) -> Result<Registration, PoolDiscoveryError>;
+    async fn register(&self, registration: PoolRegistration) -> Result<Lease, DiscoveryError>;
 }

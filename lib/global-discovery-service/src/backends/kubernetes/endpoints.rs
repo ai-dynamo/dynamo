@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 
 use crate::pool_discovery::{
-    Completeness, Directory, PoolDiscoveryError, ReplicaEndpoint, ReplicaEvent, ReplicaId,
-    Snapshot, WatchEvent, WatchStream,
+    Completeness, Directory, DiscoveryError, ReplicaEndpoint, ReplicaEvent, ReplicaId, Snapshot,
+    WatchEvent, WatchStream,
 };
 use async_trait::async_trait;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
@@ -36,12 +36,13 @@ pub struct ExportedService {
 /// Ready replicas from a Service's imported slices, named
 /// `<source cluster>/<pod>`, or `<source cluster>/<address>` when a slice
 /// does not name the pod. Lists are `Exact`.
-pub struct EndpointSliceReplicaDirectory(SliceDirectory<ReplicaIndex>);
+#[derive(Debug)]
+pub struct McsReplicaDirectory(SliceDirectory<ReplicaIndex>);
 
-impl EndpointSliceReplicaDirectory {
+impl McsReplicaDirectory {
     /// The Service's slices as MCS imports them into the cluster `client`
     /// reaches.
-    pub fn imported(client: Client, service: &ExportedService, mcs: McsImplementation) -> Self {
+    pub fn new(client: Client, service: &ExportedService, mcs: McsImplementation) -> Self {
         Self(SliceDirectory::new(
             Api::namespaced(client, &service.namespace),
             mcs::service_selector(mcs, &service.name),
@@ -55,15 +56,15 @@ impl EndpointSliceReplicaDirectory {
 }
 
 #[async_trait]
-impl Directory<ReplicaEndpoint, ReplicaId> for EndpointSliceReplicaDirectory {
-    async fn list(&self) -> Result<Snapshot<ReplicaEndpoint>, PoolDiscoveryError> {
+impl Directory<ReplicaEndpoint, ReplicaId> for McsReplicaDirectory {
+    async fn list(&self) -> Result<Snapshot<ReplicaEndpoint>, DiscoveryError> {
         self.0.list().await
     }
 
     async fn list_and_watch(
         &self,
         cancel_token: Option<CancellationToken>,
-    ) -> Result<WatchStream<ReplicaEndpoint, ReplicaId>, PoolDiscoveryError> {
+    ) -> Result<WatchStream<ReplicaEndpoint, ReplicaId>, DiscoveryError> {
         self.0.list_and_watch(cancel_token).await
     }
 }
@@ -85,7 +86,10 @@ impl ReplicaNaming {
         if mcs::service_name(self.mcs, slice) != Some(self.service.as_str()) {
             return None;
         }
-        let cluster = mcs::source_cluster(self.mcs, slice)?;
+        let Some(cluster) = mcs::source_cluster(self.mcs, slice) else {
+            mcs::warn_unknown_cluster(slice, &self.service);
+            return None;
+        };
         let Some(port) = slice
             .ports
             .iter()
@@ -127,15 +131,20 @@ impl ReplicaNaming {
 struct ReplicaIndex {
     /// The replicas each slice lists.
     slices: HashMap<SliceKey, Vec<ReplicaEndpoint>>,
-    /// Every listed replica, with the slices that list it. A replica in
-    /// several slices, one per address family for example, is served from the
-    /// first slice in key order.
+    /// Every listed replica, with the slices that list it.
     replicas: HashMap<ReplicaId, BTreeMap<SliceKey, ReplicaEndpoint>>,
 }
 
 impl ReplicaIndex {
+    /// A replica in several slices is served at its IPv4 address if it has
+    /// one, as on a dual-stack cluster, so its URL does not depend on how the
+    /// slices are named. Otherwise from the first slice in key order.
     fn served(&self, id: &ReplicaId) -> Option<&ReplicaEndpoint> {
-        self.replicas.get(id)?.values().next()
+        let listed = self.replicas.get(id)?;
+        listed
+            .values()
+            .find(|endpoint| matches!(endpoint.url.host(), Some(url::Host::Ipv4(_))))
+            .or_else(|| listed.values().next())
     }
 }
 
@@ -459,6 +468,31 @@ mod tests {
         cache.apply(watcher::Event::Delete(slice("ohio", "d3e4f", &[])));
         assert!(matches!(events.try_recv().unwrap(), WatchEvent::Removed(_)));
         assert!(served(&cache).is_empty());
+    }
+
+    #[test]
+    fn a_dual_stack_replica_is_served_at_its_ipv4_address() {
+        let cache = cache();
+        // The IPv6 slice's name sorts first.
+        let mut ipv6 = slice(
+            "ohio",
+            "a1b2c",
+            &[("fd00::5", Some(true), Some("global-router-0"))],
+        );
+        ipv6.address_type = "IPv6".to_owned();
+        let ipv4 = slice(
+            "ohio",
+            "d3e4f",
+            &[("10.42.0.5", Some(true), Some("global-router-0"))],
+        );
+        sync(&cache, vec![ipv6, ipv4]);
+        assert_eq!(
+            served(&cache),
+            [(
+                "ohio/global-router-0".to_owned(),
+                "http://10.42.0.5:50051/".to_owned()
+            )]
+        );
     }
 
     #[test]

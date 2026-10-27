@@ -13,18 +13,18 @@ use tokio_util::sync::CancellationToken;
 
 pub use dynamo_global_common::{Completeness, Snapshot, WatchEvent};
 
-use super::PoolDiscoveryError;
+use super::DiscoveryError;
 
 pub type WatchStream<T, K> =
-    Pin<Box<dyn Stream<Item = Result<WatchEvent<T, K>, PoolDiscoveryError>> + Send>>;
+    Pin<Box<dyn Stream<Item = Result<WatchEvent<T, K>, DiscoveryError>> + Send>>;
 
 /// Read side. Method names follow `dynamo_runtime::discovery::Discovery`.
 #[async_trait]
 pub trait Directory<T, K>: Send + Sync {
-    async fn list(&self) -> Result<Snapshot<T>, PoolDiscoveryError>;
+    async fn list(&self) -> Result<Snapshot<T>, DiscoveryError>;
 
     async fn list_and_watch(
         &self,
         cancel_token: Option<CancellationToken>,
-    ) -> Result<WatchStream<T, K>, PoolDiscoveryError>;
+    ) -> Result<WatchStream<T, K>, DiscoveryError>;
 }

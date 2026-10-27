@@ -71,6 +71,23 @@ pub fn service_name(mcs: McsImplementation, slice: &EndpointSlice) -> Option<&st
     }
 }
 
+/// The longest Service name whose slices Karmada can name a cluster for.
+/// Kubernetes names a Service's slices `<service>-<5 random characters>`, but
+/// shortens `<service>-` to 58 characters, and Karmada's names build on those.
+pub const KARMADA_MAX_SERVICE_NAME: usize = 57;
+
+/// Logs a slice of a Service the directory wants, but from an unknown
+/// cluster. Such a slice is skipped, so its pool or router replica is not
+/// listed.
+pub fn warn_unknown_cluster(slice: &EndpointSlice, service: &str) {
+    tracing::warn!(
+        slice = slice.metadata.name.as_deref().unwrap_or_default(),
+        service,
+        karmada_max_service_name = KARMADA_MAX_SERVICE_NAME,
+        "skipping an imported EndpointSlice that does not say which cluster it came from; with Karmada, check that the Service name is not too long"
+    );
+}
+
 /// The cluster the slice came from. With Karmada this is the Karmada member
 /// name, which must equal the About API cluster ID.
 ///

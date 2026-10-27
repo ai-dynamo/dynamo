@@ -4,12 +4,12 @@
 //! Pools from imported EndpointSlices: the Global Discovery Service's MCS
 //! store.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::IpAddr;
 
 use crate::pool_discovery::{
-    Completeness, Directory, PoolDiscoveryError, PoolEvent, PoolRecord, Revision, Snapshot,
-    WatchEvent, WatchStream,
+    Completeness, Directory, DiscoveryError, PoolEvent, PoolListing, Snapshot, WatchEvent,
+    WatchStream,
 };
 use async_trait::async_trait;
 use dynamo_global_common::{PoolKey, PoolLocation, address_identity};
@@ -28,6 +28,7 @@ use super::mcs::{self, McsImplementation};
 /// One watch per directory feeds a cache that serves `list` and every
 /// `list_and_watch` stream. The watch starts on first use and stops when the
 /// directory is dropped.
+#[derive(Debug)]
 pub struct McsPoolDirectory(SliceDirectory<PoolIndex>);
 
 impl McsPoolDirectory {
@@ -50,20 +51,20 @@ impl McsPoolDirectory {
 }
 
 #[async_trait]
-impl Directory<PoolRecord, PoolKey> for McsPoolDirectory {
-    async fn list(&self) -> Result<Snapshot<PoolRecord>, PoolDiscoveryError> {
+impl Directory<PoolListing, PoolKey> for McsPoolDirectory {
+    async fn list(&self) -> Result<Snapshot<PoolListing>, DiscoveryError> {
         self.0.list().await
     }
 
     async fn list_and_watch(
         &self,
         cancel_token: Option<CancellationToken>,
-    ) -> Result<WatchStream<PoolRecord, PoolKey>, PoolDiscoveryError> {
+    ) -> Result<WatchStream<PoolListing, PoolKey>, DiscoveryError> {
         self.0.list_and_watch(cancel_token).await
     }
 }
 
-/// Turns imported slices into pool records.
+/// Turns imported slices into pool listings.
 struct PoolNaming {
     mcs: McsImplementation,
     pool_service_suffix: String,
@@ -72,13 +73,17 @@ struct PoolNaming {
 impl PoolNaming {
     /// Source cluster from [`mcs::source_cluster`]; DGD name from the
     /// Service name without `pool_service_suffix`. `None` for imports that
-    /// are not pools.
+    /// are not pools, and for a pool slice from an unknown cluster, which is
+    /// logged.
     fn pool_key(&self, slice: &EndpointSlice) -> Option<PoolKey> {
         let service = mcs::service_name(self.mcs, slice)?;
         let dgd_name = service
             .strip_suffix(self.pool_service_suffix.as_str())
             .filter(|name| !name.is_empty())?;
-        let cluster = mcs::source_cluster(self.mcs, slice)?;
+        let Some(cluster) = mcs::source_cluster(self.mcs, slice) else {
+            mcs::warn_unknown_cluster(slice, service);
+            return None;
+        };
         let namespace = slice.metadata.namespace.as_deref()?;
         PoolKey::new(cluster, namespace, dgd_name).ok()
     }
@@ -86,7 +91,7 @@ impl PoolNaming {
     fn slice(&self, slice: &EndpointSlice) -> Option<SliceEntry> {
         Some(SliceEntry {
             pool: self.pool_key(slice)?,
-            ready: ready_addresses(slice),
+            relays: ready_relays(slice),
         })
     }
 }
@@ -101,43 +106,51 @@ fn location(cluster: &str) -> PoolLocation {
     }
 }
 
-/// A pool is live while its PoolRelay endpoint is Ready. Ready can be stale
+/// A pool is live while a PoolRelay endpoint is Ready. Ready can be stale
 /// when a cluster loses contact with the MCS implementation, so the runtime
 /// also drops a pool whose Relay connection is gone.
-fn ready_addresses(slice: &EndpointSlice) -> Vec<IpAddr> {
+///
+/// Each Ready address comes with its pod: the endpoint's `targetRef`, or the
+/// address itself when the endpoint has none. A dual-stack pod is in two
+/// slices, one per address family.
+fn ready_relays(slice: &EndpointSlice) -> Vec<(String, IpAddr)> {
     ready_endpoints(slice)
         .flat_map(|endpoint| {
-            endpoint
-                .addresses
-                .iter()
-                .filter_map(|address| address.parse().ok())
+            let pod = endpoint
+                .target_ref
+                .as_ref()
+                .and_then(|target| target.name.as_deref());
+            endpoint.addresses.iter().filter_map(move |address| {
+                let address: IpAddr = address.parse().ok()?;
+                let pod = pod.map_or_else(|| address.to_string(), str::to_owned);
+                Some((pod, address))
+            })
         })
         .collect()
 }
 
 struct SliceEntry {
     pool: PoolKey,
-    ready: Vec<IpAddr>,
+    relays: Vec<(String, IpAddr)>,
 }
 
 #[derive(Default)]
 struct PoolState {
     slices: HashSet<SliceKey>,
     /// `Some` while the pool is live.
-    record: Option<PoolRecord>,
-    /// The Relay address in `record.relay_identity`.
-    bound: Option<IpAddr>,
+    listing: Option<PoolListing>,
+    /// The PoolRelay pod in `listing.relay_identities`.
+    bound: Option<String>,
 }
 
 #[derive(Default)]
 struct PoolIndex {
     slices: HashMap<SliceKey, SliceEntry>,
     pools: HashMap<PoolKey, PoolState>,
-    last_revision: u64,
 }
 
 impl SliceIndex for PoolIndex {
-    type Item = PoolRecord;
+    type Item = PoolListing;
     type Key = PoolKey;
     type Rules = PoolNaming;
     type Entry = SliceEntry;
@@ -196,12 +209,12 @@ impl SliceIndex for PoolIndex {
         }
     }
 
-    fn snapshot(&self) -> Snapshot<PoolRecord> {
+    fn snapshot(&self) -> Snapshot<PoolListing> {
         Snapshot {
             items: self
                 .pools
                 .values()
-                .filter_map(|pool| pool.record.clone())
+                .filter_map(|pool| pool.listing.clone())
                 .collect(),
             completeness: Completeness::Exact,
         }
@@ -210,54 +223,62 @@ impl SliceIndex for PoolIndex {
 
 impl PoolIndex {
     /// Recomputes one pool from its slices. Returns the event to publish if
-    /// the record changed.
+    /// the listing changed.
     fn rebuild(&mut self, key: &PoolKey) -> Option<PoolEvent> {
         let state = self.pools.get(key)?;
-        let mut ready: Vec<IpAddr> = state
+        let mut relays: BTreeMap<&str, BTreeSet<IpAddr>> = BTreeMap::new();
+        for entry in state
             .slices
             .iter()
             .filter_map(|slice| self.slices.get(slice))
-            .flat_map(|entry| entry.ready.iter().copied())
-            .collect();
-        ready.sort_unstable();
-        ready.dedup();
+        {
+            for (pod, address) in &entry.relays {
+                relays.entry(pod).or_default().insert(*address);
+            }
+        }
+        // Keep the bound pod while it stays Ready, so a rolling update that
+        // briefly shows two Ready PoolRelays does not switch back and forth.
+        // Otherwise bind the pod with the lowest address.
+        let bound = state
+            .bound
+            .as_deref()
+            .filter(|pod| relays.contains_key(*pod))
+            .or_else(|| {
+                relays
+                    .iter()
+                    .min_by_key(|(_, addresses)| addresses.first())
+                    .map(|(pod, _)| *pod)
+            })
+            .map(|pod| {
+                let identities: Vec<String> =
+                    relays[pod].iter().copied().map(address_identity).collect();
+                (pod.to_owned(), identities)
+            });
 
         let state = self.pools.get_mut(key)?;
-        let Some(&lowest) = ready.first() else {
+        let Some((pod, relay_identities)) = bound else {
             state.bound = None;
-            let was_live = state.record.take().is_some();
+            let was_live = state.listing.take().is_some();
             if state.slices.is_empty() {
                 self.pools.remove(key);
             }
             return was_live.then(|| WatchEvent::Removed(key.clone()));
         };
-        // Keep the bound Relay while it stays Ready, so a rolling update
-        // that briefly shows two Ready Relays does not switch back and forth.
-        let bound = match state.bound {
-            Some(current) if ready.contains(&current) => current,
-            _ => lowest,
-        };
-        let mut record = PoolRecord {
+        let listing = PoolListing {
             key: key.clone(),
             location: location(key.site_id()),
             model: None,
             capabilities: Vec::new(),
             frontends: Vec::new(),
             capacity: Vec::new(),
-            relay_identity: Some(address_identity(bound)),
-            revision: Revision::default(),
+            relay_identities,
         };
-        if let Some(old) = &state.record {
-            record.revision = old.revision;
-            if *old == record {
-                return None;
-            }
+        state.bound = Some(pod);
+        if state.listing.as_ref() == Some(&listing) {
+            return None;
         }
-        self.last_revision += 1;
-        record.revision = Revision(self.last_revision);
-        state.bound = Some(bound);
-        state.record = Some(record.clone());
-        Some(WatchEvent::Added(record))
+        state.listing = Some(listing.clone());
+        Some(WatchEvent::Added(listing))
     }
 }
 
@@ -267,11 +288,14 @@ mod tests {
     use std::sync::Arc;
 
     use futures::{FutureExt, StreamExt};
+    use std::time::Duration;
+
+    use k8s_openapi::api::core::v1::ObjectReference;
     use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::runtime::watcher;
 
-    use super::super::cache::{STALE_AFTER, SliceCache};
+    use super::super::cache::{RECOVERED_AFTER, STALE_AFTER, SliceCache};
     use super::mcs::{KARMADA_SLICE_MANAGER, KUBERNETES_SERVICE_NAME_LABEL, MANAGED_BY_LABEL};
     use super::*;
 
@@ -319,6 +343,30 @@ mod tests {
         }
     }
 
+    /// Like [`slice`], with each endpoint's pod named.
+    fn pod_slice(
+        cluster: &str,
+        suffix: &str,
+        address_type: &str,
+        endpoints: &[(&str, &str)],
+    ) -> EndpointSlice {
+        let mut slice = slice(cluster, "mocker", suffix, &[]);
+        slice.address_type = address_type.to_owned();
+        slice.endpoints = endpoints
+            .iter()
+            .map(|(pod, address)| Endpoint {
+                addresses: vec![(*address).to_owned()],
+                target_ref: Some(ObjectReference {
+                    kind: Some("Pod".to_owned()),
+                    name: Some((*pod).to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .collect();
+        slice
+    }
+
     fn key(cluster: &str, dgd: &str) -> PoolKey {
         PoolKey::new(cluster, "dynamo", dgd).unwrap()
     }
@@ -335,44 +383,111 @@ mod tests {
         cache.apply(watcher::Event::InitDone);
     }
 
+    fn completeness(cache: &SliceCache<PoolIndex>) -> Completeness {
+        cache.snapshot().unwrap().completeness
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn a_failing_watch_keeps_its_last_list_but_marks_it_incomplete() {
+    async fn a_watch_that_keeps_failing_marks_its_last_list_incomplete() {
         let cache = cache();
         let ready = || slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]);
         sync(&cache, vec![ready()]);
-        cache.failing();
-        tokio::time::advance(STALE_AFTER).await;
-        assert_eq!(cache.failing(), STALE_AFTER);
+        // A relist that keeps failing: kube sends `Init` before each attempt,
+        // which is no sign that the watch works.
+        for _ in 0..3 {
+            cache.apply(watcher::Event::Init);
+            cache.failed();
+            tokio::time::advance(STALE_AFTER / 3).await;
+        }
+        assert_eq!(completeness(&cache), Completeness::Exact);
+        cache.apply(watcher::Event::Init);
+        assert_eq!(cache.failed(), STALE_AFTER);
         let stale = cache.snapshot().unwrap();
         assert_eq!(stale.items.len(), 1);
         assert_eq!(stale.completeness, Completeness::Estimated);
 
-        // Any event means the watch works again.
-        cache.apply(watcher::Event::Apply(ready()));
-        assert_eq!(cache.snapshot().unwrap().completeness, Completeness::Exact);
+        // A listed slice means the watch works again.
+        cache.apply(watcher::Event::InitApply(ready()));
+        assert_eq!(completeness(&cache), Completeness::Exact);
     }
 
-    fn record(cache: &SliceCache<PoolIndex>, key: &PoolKey) -> Option<PoolRecord> {
+    #[tokio::test(start_paused = true)]
+    async fn one_error_then_silence_is_a_resumed_watch() {
+        let cache = cache();
+        sync(
+            &cache,
+            vec![slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)])],
+        );
+        // kube resumes the watch without an event.
+        cache.failed();
+        tokio::time::advance(STALE_AFTER + Duration::from_secs(1)).await;
+        assert_eq!(completeness(&cache), Completeness::Exact);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_watch_that_falls_silent_counts_as_recovered() {
+        let cache = cache();
+        sync(
+            &cache,
+            vec![slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)])],
+        );
+        for _ in 0..3 {
+            cache.failed();
+            tokio::time::advance(STALE_AFTER / 2).await;
+        }
+        assert_eq!(completeness(&cache), Completeness::Estimated);
+        tokio::time::advance(RECOVERED_AFTER).await;
+        assert_eq!(completeness(&cache), Completeness::Exact);
+        // A later error starts a new run.
+        assert_eq!(cache.failed(), Duration::ZERO);
+        assert_eq!(completeness(&cache), Completeness::Exact);
+    }
+
+    fn listing(cache: &SliceCache<PoolIndex>, key: &PoolKey) -> Option<PoolListing> {
         cache
             .read()
             .index
             .pools
             .get(key)
-            .and_then(|pool| pool.record.clone())
+            .and_then(|pool| pool.listing.clone())
     }
 
     #[test]
-    fn pool_record_from_imported_slice() {
+    fn pool_listing_from_imported_slice() {
         let cache = cache();
         sync(
             &cache,
             vec![slice("west", "mocker", "a1b2c", &[("10.43.66.175", true)])],
         );
-        let record = record(&cache, &key("west", "mocker")).expect("live pool");
-        assert_eq!(record.location.region, "west");
-        assert_eq!(record.location.cluster.as_deref(), Some("west"));
-        assert_eq!(record.relay_identity.as_deref(), Some("ip:10.43.66.175"));
-        assert_eq!(record.model, None);
+        let listing = listing(&cache, &key("west", "mocker")).expect("live pool");
+        assert_eq!(listing.location.region, "west");
+        assert_eq!(listing.location.cluster.as_deref(), Some("west"));
+        assert_eq!(listing.relay_identities, ["ip:10.43.66.175"]);
+        assert_eq!(listing.model, None);
+    }
+
+    #[test]
+    fn a_dual_stack_relay_is_one_pod_with_both_addresses() {
+        let cache = cache();
+        sync(
+            &cache,
+            vec![
+                pod_slice(
+                    "west",
+                    "a1b2c",
+                    "IPv4",
+                    &[("relay-a", "10.43.0.7"), ("relay-b", "10.43.0.9")],
+                ),
+                pod_slice(
+                    "west",
+                    "d3e4f",
+                    "IPv6",
+                    &[("relay-a", "fd00::7"), ("relay-b", "fd00::1")],
+                ),
+            ],
+        );
+        let listing = listing(&cache, &key("west", "mocker")).expect("live pool");
+        assert_eq!(listing.relay_identities, ["ip:10.43.0.7", "ip:fd00::7"]);
     }
 
     #[test]
@@ -397,8 +512,8 @@ mod tests {
                 slice("ohio", "mocker", "d3e4f", &[("10.42.0.1", true)]),
             ],
         );
-        assert!(record(&cache, &key("west", "mocker")).is_some());
-        assert!(record(&cache, &key("ohio", "mocker")).is_some());
+        assert!(listing(&cache, &key("west", "mocker")).is_some());
+        assert!(listing(&cache, &key("ohio", "mocker")).is_some());
     }
 
     #[test]
@@ -419,9 +534,7 @@ mod tests {
 
         let live = slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]);
         cache.apply(watcher::Event::Apply(live.clone()));
-        let WatchEvent::Added(first) = events.try_recv().unwrap() else {
-            panic!("expected Added");
-        };
+        assert!(matches!(events.try_recv().unwrap(), WatchEvent::Added(_)));
         // The same slice again changes nothing.
         cache.apply(watcher::Event::Apply(live.clone()));
         assert!(events.try_recv().is_err());
@@ -435,12 +548,9 @@ mod tests {
         assert!(
             matches!(events.try_recv().unwrap(), WatchEvent::Removed(k) if k == key("west", "mocker"))
         );
-        // Ready again: a newer revision.
+        // Ready again.
         cache.apply(watcher::Event::Apply(live.clone()));
-        let WatchEvent::Added(second) = events.try_recv().unwrap() else {
-            panic!("expected Added");
-        };
-        assert!(second.revision > first.revision);
+        assert!(matches!(events.try_recv().unwrap(), WatchEvent::Added(_)));
         cache.apply(watcher::Event::Delete(live));
         assert!(matches!(events.try_recv().unwrap(), WatchEvent::Removed(_)));
         assert!(cache.read().index.pools.is_empty());
@@ -456,7 +566,7 @@ mod tests {
                 slice("west", "mocker", "d3e4f", &[("10.43.0.2", true)]),
             ],
         );
-        assert!(record(&cache, &key("west", "mocker")).is_some());
+        assert!(listing(&cache, &key("west", "mocker")).is_some());
         // Losing the slice with the Ready Relay ends the pool.
         cache.apply(watcher::Event::Delete(slice(
             "west",
@@ -464,7 +574,7 @@ mod tests {
             "d3e4f",
             &[],
         )));
-        assert!(record(&cache, &key("west", "mocker")).is_none());
+        assert!(listing(&cache, &key("west", "mocker")).is_none());
     }
 
     #[test]
@@ -483,8 +593,8 @@ mod tests {
             &[("10.43.0.9", true), ("10.43.0.2", true)],
         )));
         assert_eq!(
-            record(&cache, &pool).unwrap().relay_identity,
-            Some(address_identity("10.43.0.9".parse().unwrap()))
+            listing(&cache, &pool).unwrap().relay_identities,
+            [address_identity("10.43.0.9".parse().unwrap())]
         );
         // The old Relay leaves; the new one is bound.
         cache.apply(watcher::Event::Apply(slice(
@@ -494,8 +604,8 @@ mod tests {
             &[("10.43.0.2", true)],
         )));
         assert_eq!(
-            record(&cache, &pool).unwrap().relay_identity,
-            Some(address_identity("10.43.0.2".parse().unwrap()))
+            listing(&cache, &pool).unwrap().relay_identities,
+            [address_identity("10.43.0.2".parse().unwrap())]
         );
     }
 
@@ -515,7 +625,7 @@ mod tests {
             &[("10.43.0.2", true)],
         )));
         // The old view stays until the relist completes.
-        assert!(record(&cache, &key("west", "old")).is_some());
+        assert!(listing(&cache, &key("west", "old")).is_some());
         cache.apply(watcher::Event::InitDone);
         let WatchEvent::Resync(snapshot) = events.try_recv().unwrap() else {
             panic!("expected Resync");
@@ -523,7 +633,7 @@ mod tests {
         let keys: Vec<PoolKey> = snapshot
             .items
             .into_iter()
-            .map(|record| record.key)
+            .map(|listing| listing.key)
             .collect();
         assert_eq!(keys, [key("west", "new")]);
         assert!(events.try_recv().is_err());
