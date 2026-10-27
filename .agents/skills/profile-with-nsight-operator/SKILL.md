@@ -58,6 +58,10 @@ not repeat them.
 ### 1. Preflight
 
 - Pin `--context` and `-n` on every `kubectl` call, as the commands below do, and bound every wait with a timeout.
+- `nsight_operator_dynamo.py` and `nsight_operator.py` have no `--context` option; they use the kubeconfig's current
+  context. Before each call to either script, check that `kubectl config current-context` prints `<context>`. If it
+  does not, stop and ask the user: do not switch the shared kubeconfig's context on your own. With the user's approval,
+  run the scripts with `KUBECONFIG` set to a kubeconfig whose current context is `<context>`.
 - Check which profile-config fields the API server accepts:
   `kubectl --context <context> -n <namespace> explain nsightoperatorprofileconfig.spec.injectionRules`.
   Nsight Operator 26.3 has `podObjectSelector`, `nsightTags`, and `processIncludePatterns` on each rule; 26.2 has
@@ -170,8 +174,10 @@ Only pods created after the config exists are profiled.
   incomplete capture; do not present partial results as complete.
 - If the deadline passed, check `status` and injection for each missing pod, and report the capture as incomplete
   with the reports you have.
-- Only then remove the profile config (`python3 nsight_operator_dynamo.py -n <namespace> unconfigure` on the helper
-  path, `kubectl delete` of your own config otherwise), and the DGD if the user created it only for this test.
+- Only then remove the profile config, and the DGD if the user created it only for this test. On the helper path,
+  check the current context, then run `python3 nsight_operator_dynamo.py -n <namespace> unconfigure`. On the
+  own-config path, run
+  `kubectl --context <context> -n <namespace> delete nsightoperatorprofileconfig <config name>`.
 
 ### 7. Hand Off Analysis
 
