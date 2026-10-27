@@ -56,8 +56,8 @@ permissions:
 jobs:
   compatibility:
     runs-on: prod-deploy-tester-v1
-    # Eight mixed-version deployments and six whole-runtime upgrade stages.
-    timeout-minutes: 420
+    # Eight mixed-version deployments and twelve processor upgrade stages.
+    timeout-minutes: 600
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -85,7 +85,7 @@ jobs:
       - name: Allow the bounded compatibility suite to finish before namespace expiry
         env:
           HOST_NAMESPACE: gh-id-${{ github.run_id }}-${{ github.run_attempt }}-n2-static-dt
-        run: kubectl label namespace "$HOST_NAMESPACE" nscleanup/ttl=32400 --overwrite
+        run: kubectl label namespace "$HOST_NAMESPACE" nscleanup/ttl=43200 --overwrite
       - name: Connect to vCluster
         id: connect
         uses: $/.github/actions/connect-vcluster
@@ -152,8 +152,8 @@ jobs:
           model_cache_pvc: model-cache
           test_name: n2-compatibility
           test_file: tests/deploy/test_n2_compatibility.py
+          additional_test_file: tests/frontend/test_strict_schema_upgrade.py
           extra_pytest_args: >-
-            tests/frontend/test_strict_schema_upgrade.py
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.frontend_tag }}
             --run-strict-schema-upgrade -m k8s -n 0
           # Each parameter owns its deployments. The outer cleanup also runs

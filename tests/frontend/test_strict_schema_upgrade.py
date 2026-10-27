@@ -108,7 +108,7 @@ def upgrade_images(request):
     return images
 
 
-def _upgrade_spec(image, enabled, name, pvc, mount):
+def _upgrade_spec(image, enabled, name, pvc, mount, processor):
     spec = compatibility_spec(
         ROOT, VersionPair(name, image, image), "chat", name, pvc, mount
     )
@@ -121,12 +121,13 @@ def _upgrade_spec(image, enabled, name, pvc, mount):
         "-m",
         "dynamo.frontend",
     ]
-    for flag, value in (
-        ("--dyn-chat-processor", "sglang"),
-        ("--tool-call-parser", "qwen25"),
-        ("--reasoning-parser", "qwen3"),
-    ):
-        spec.add_arg_to_service("Frontend", flag, value)
+    spec.add_arg_to_service("Frontend", "--dyn-chat-processor", processor)
+    if processor == "sglang":
+        spec.add_arg_to_service("Frontend", "--tool-call-parser", "qwen25")
+        spec.add_arg_to_service("Frontend", "--reasoning-parser", "qwen3")
+    else:
+        spec.add_arg_to_service("decode", "--dyn-tool-call-parser", "qwen25")
+        spec.add_arg_to_service("decode", "--dyn-reasoning-parser", "qwen3")
     spec.set_service_env_var("Frontend", FLAG, "1" if enabled else "0")
     spec.add_arg_to_service("decode", "--max-total-tokens", "2048")
     spec.add_arg_to_service("decode", "--mem-fraction-static", "0.9")
@@ -144,9 +145,11 @@ def _assert_completion(result):
     assert completion.usage.completion_tokens > 0, "No generated tokens"
 
 
-async def _probe(image, enabled, payload, name, namespace, pvc, mount, output):
+async def _probe(
+    image, enabled, payload, name, namespace, pvc, mount, output, processor
+):
     output.mkdir(parents=True)
-    spec = _upgrade_spec(image, enabled, name, pvc, mount)
+    spec = _upgrade_spec(image, enabled, name, pvc, mount, processor)
     spec.save(str(output / "deployment.yaml"))
     managed = ManagedDeployment(
         str(output),
@@ -198,7 +201,8 @@ async def _probe(image, enabled, payload, name, namespace, pvc, mount, output):
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.timeout(4500)
-async def test_strict_schema_upgrade(request, upgrade_images):
+@pytest.mark.parametrize("processor", ["sglang", "dynamo"], ids=["sglang", "rust"])
+async def test_strict_schema_upgrade(request, upgrade_images, processor):
     baseline, target = upgrade_images
     namespace = request.config.getoption("--namespace")
     pvc, mount = _model_cache(request.config)
@@ -232,7 +236,11 @@ async def test_strict_schema_upgrade(request, upgrade_images):
         "temperature": 0,
     }
     (output / "request.json").write_text(json.dumps(payload, indent=2) + "\n")
-    report = {"model_revision": MODELS["chat"][1], "stages": {}}
+    report = {
+        "processor": processor,
+        "model_revision": MODELS["chat"][1],
+        "stages": {},
+    }
     failures = []
     for stage, image, enabled in (
         ("baseline", baseline, False),
@@ -250,6 +258,7 @@ async def test_strict_schema_upgrade(request, upgrade_images):
                 pvc,
                 mount,
                 output / stage,
+                processor,
             )
             probe_finished = True
         finally:
