@@ -148,12 +148,15 @@ func lpuUnitsFromDeploymentV1(deployment deploymentcapnpv1.DeploymentInfo, build
 		partitions[partition.sourcePartitionID] = partition
 	}
 
-	// Decode units in Agent order, which ascends by root partition.
+	// Decode units in Agent order, which ascends by root partition. Only an
+	// LPU-only bundle without CUDA partitions packs chains onto shared hosts.
+	lpuOnly := deployment.CompilationMode() == deploymentcapnpv1.CompilationMode_lpuOnly
+	packing := lpuOnly && !build.hasCUDAPartitions
 	placed := make(map[int]bool, len(build.partitions))
 	units := make([]lpuUnit, 0, rawUnits.Len())
 	for index := range rawUnits.Len() {
 		subject := fmt.Sprintf("%s config.lpuUnits[%d]", gbuildDeploymentV1CapnpFile, index)
-		unit, err := lpuUnitFromDeploymentV1(rawUnits.At(index), subject, build, partitions, placed)
+		unit, err := lpuUnitFromDeploymentV1(rawUnits.At(index), subject, build, partitions, placed, packing)
 		if err != nil {
 			return nil, err
 		}
@@ -164,13 +167,16 @@ func lpuUnitsFromDeploymentV1(deployment deploymentcapnpv1.DeploymentInfo, build
 		units = append(units, unit)
 	}
 
-	// Every deployed LPU partition runs in a unit, except the standalone
-	// token-embedding partition 0 that an LPU-only build runs on the CPU.
-	cpuEmbeddingPartition := deployment.CompilationMode() == deploymentcapnpv1.CompilationMode_lpuOnly &&
-		build.supportsCPUEmbeddings && build.standaloneTokenEmbeddings
+	// Every deployed LPU partition runs in exactly one unit, except the standalone
+	// token-embedding partition 0, which an LPU-only build runs on the CPU instead.
+	cpuTokenEmbeddings := lpuOnly && build.supportsCPUEmbeddings && build.standaloneTokenEmbeddings
 	for _, partition := range build.partitions {
 		id := partition.sourcePartitionID
-		if !placed[id] && (id != 0 || !cpuEmbeddingPartition) {
+		switch {
+		case id == 0 && cpuTokenEmbeddings && placed[id]:
+			return nil, fmt.Errorf("%s config.lpuUnits places LPU partition 0, which an LPU-only build with CPU token embeddings runs on the CPU",
+				gbuildDeploymentV1CapnpFile)
+		case !placed[id] && (id != 0 || !cpuTokenEmbeddings):
 			return nil, fmt.Errorf("%s config.lpuUnits omits LPU partition %d", gbuildDeploymentV1CapnpFile, id)
 		}
 	}
@@ -184,12 +190,15 @@ func lpuUnitsFromDeploymentV1(deployment deploymentcapnpv1.DeploymentInfo, build
 
 // lpuUnitFromDeploymentV1 decodes one unit of the normalized build and records
 // its partitions in placed. partitions indexes the build's LPU partitions by ID.
+// packing reports whether the bundle packs chains whose stages evenly share
+// nodes; it is false for hybrid bundles, which never pack.
 func lpuUnitFromDeploymentV1(
 	raw deploymentcapnpv1.LpuUnit,
 	subject string,
 	build *Build,
 	partitions map[int]buildPartition,
 	placed map[int]bool,
+	packing bool,
 ) (lpuUnit, error) {
 	rawReservations, err := raw.Reservations()
 	if err != nil {
@@ -207,12 +216,13 @@ func lpuUnitFromDeploymentV1(
 			subject, rawConnectors.Len(), rawReservations.Len(), rawReservations.Len()-1)
 	}
 
-	// Place each reservation's consecutive partitions exactly once on enough devices.
+	// Place each reservation's consecutive partitions exactly once.
 	family, devicesPerNode := build.family, build.partitions[0].devicesPerNode
 	unit := lpuUnit{
 		Reservations: make([]lpuReservation, 0, rawReservations.Len()),
 		Connectors:   make([]lpxv1alpha1.PropSyncConnectorRequirement, 0, rawConnectors.Len()),
 	}
+	unitMembers := make([]buildPartition, 0, rawReservations.Len())
 	previousID := -1
 	for index := range rawReservations.Len() {
 		reservationSubject := fmt.Sprintf("%s.reservations[%d]", subject, index)
@@ -220,7 +230,7 @@ func lpuUnitFromDeploymentV1(
 		if err != nil {
 			return lpuUnit{}, err
 		}
-		chips := 0
+		members := make([]buildPartition, 0, len(reservation.PartitionIDs))
 		for _, id := range reservation.PartitionIDs {
 			partition, deployed := partitions[id]
 			if !deployed {
@@ -235,12 +245,40 @@ func lpuUnitFromDeploymentV1(
 			}
 			placed[id] = true
 			previousID = id
-			chips += partition.numChips
+			members = append(members, partition)
 		}
-		if devices := reservation.Hosts * devicesPerNode; chips > devices {
-			return lpuUnit{}, fmt.Errorf("%s reserves %d devices for %d chips", reservationSubject, devices, chips)
+
+		// A packed chain shares one reservation in an LPU-only bundle.
+		ids := formatPropSyncChain(reservation.PartitionIDs)
+		if len(members) > 1 && !packing {
+			return lpuUnit{}, fmt.Errorf("%s packs partitions %s onto shared hosts, which only LPU-only bundles without CUDA partitions do",
+				reservationSubject, ids)
+		}
+		if len(members) > 1 && rawReservations.Len() > 1 {
+			return lpuUnit{}, fmt.Errorf("%s packs partitions %s beside other reservations; a packed chain is its unit's only reservation",
+				reservationSubject, ids)
+		}
+
+		// The size must request exactly the placement the partitions were compiled for.
+		hosts, extent, err := lpuReservationPlacement(members, family)
+		if err != nil {
+			return lpuUnit{}, fmt.Errorf("%s packs partitions %s: %w", reservationSubject, ids, err)
+		}
+		if family == BuildFamilyHX && !slices.Equal(reservation.HXExtent, extent) {
+			return lpuUnit{}, fmt.Errorf("%s.size requests HX extent %v, want %v for partitions %s",
+				reservationSubject, reservation.HXExtent, extent, ids)
+		}
+		if family == BuildFamilyXT && reservation.Hosts != hosts {
+			return lpuUnit{}, fmt.Errorf("%s.size.nodes = %d, want %d for partitions %s", reservationSubject, reservation.Hosts, hosts, ids)
 		}
 		unit.Reservations = append(unit.Reservations, reservation)
+		unitMembers = append(unitMembers, members...)
+	}
+
+	// An LPU-only chain whose stages evenly share nodes packs into one reservation.
+	if packing && len(unit.Reservations) > 1 && len(packPropSyncPartitions(unitMembers)) == 1 {
+		return lpuUnit{}, fmt.Errorf("%s places partitions %s, whose stages evenly share nodes, in separate reservations; an LPU-only chain packs them into one",
+			subject, formatPropSyncChain(unit.partitionIDs()))
 	}
 
 	// Each connector joins adjacent reservations with the family's requirement.
@@ -260,8 +298,36 @@ func lpuUnitFromDeploymentV1(
 	return unit, nil
 }
 
+// lpuReservationPlacement returns the hosts and, on LP30, the scheduler extent
+// that SPEC rules 4 and 5 give members sharing one reservation, which is what the
+// legacy projection requests for them. One partition keeps its compiled geometry;
+// several partitions must form a packed chain of stages that evenly share nodes.
+func lpuReservationPlacement(members []buildPartition, family BuildFamily) (int, []int64, error) {
+	if len(members) == 1 {
+		return members[0].effectiveNodeCount(), slices.Clone(members[0].hxExtent), nil
+	}
+
+	// Packed stages fill whole hosts in order, and LP30 requests the hosts' extent.
+	packed := packPropSyncPartitions(members)
+	if len(packed) != 1 {
+		return 0, nil, fmt.Errorf("stages must have equal chip counts that divide %d devices per node and, on LP20, one topology",
+			members[0].devicesPerNode)
+	}
+	hosts := packed[0].effectiveNodeCount()
+	if family != BuildFamilyHX {
+		return hosts, nil, nil
+	}
+	extent, fits := packedHXExtent(int64(hosts), int64(packed[0].devicesPerNode))
+	if !fits {
+		return 0, nil, fmt.Errorf("%d hosts fit no HX extent", hosts)
+	}
+	return hosts, extent, nil
+}
+
 // lpuReservationFromDeploymentV1 decodes one reservation's partitions and size.
-// The partition IDs are validated by the caller.
+// An LP30 reservation sized in nodes requests the extent of a packed chain on
+// that many hosts. The caller validates the partition IDs and the size against
+// the partitions.
 func lpuReservationFromDeploymentV1(
 	raw deploymentcapnpv1.LpuReservation,
 	subject string,
@@ -290,6 +356,13 @@ func lpuReservationFromDeploymentV1(
 			return lpuReservation{}, fmt.Errorf("%s.size.nodes must be in [1, %d], got %d", subject, math.MaxInt32, nodes)
 		}
 		reservation.Hosts = int(nodes)
+		if family == BuildFamilyHX {
+			extent, fits := packedHXExtent(int64(nodes), int64(devicesPerNode))
+			if !fits {
+				return lpuReservation{}, fmt.Errorf("%s.size.nodes = %d fits no HX extent", subject, nodes)
+			}
+			reservation.HXExtent = extent
+		}
 	case deploymentcapnpv1.LpuReservation_size_Which_hx:
 		if family != BuildFamilyHX {
 			return lpuReservation{}, fmt.Errorf("%s.size.hx sizes an LP30 reservation; LP20 reservations use size.nodes", subject)

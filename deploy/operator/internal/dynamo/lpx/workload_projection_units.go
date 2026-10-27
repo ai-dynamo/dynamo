@@ -24,10 +24,20 @@ func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionIn
 	build := intent.Build
 	hybrid := intent.Pipeline == PipelineHybrid
 
-	// An LPU-only conductor launches one unit for each model.
+	// An LPU-only conductor launches one unit for each model. As in the legacy
+	// projection of a build without a selected chain, LP20 may instead run
+	// several units that each hold one partition.
 	if !hybrid && len(build.lpuUnits) != 1 {
-		return nil, fmt.Errorf("%w: LPU-only workloads require exactly one lpuUnits entry per model, got %d",
-			ErrUnsupportedRuntime, len(build.lpuUnits))
+		if build.family != BuildFamilyXT {
+			return nil, fmt.Errorf("%w: LP30 LPU-only workloads require exactly one lpuUnits entry per model, got %d",
+				ErrUnsupportedRuntime, len(build.lpuUnits))
+		}
+		for _, unit := range build.lpuUnits {
+			if ids := unit.partitionIDs(); len(ids) > 1 {
+				return nil, fmt.Errorf("%w: LP20 LPU-only workloads run several lpuUnits entries only when each holds one partition; partitions %s form one of %d units",
+					ErrUnsupportedRuntime, formatPropSyncChain(ids), len(build.lpuUnits))
+			}
+		}
 	}
 	units, localPartitionIDs, err := selectRemoteUnits(intent.LocalPartitions, intent.Pipeline, build.lpuUnits)
 	if err != nil {
@@ -55,14 +65,6 @@ func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionIn
 		first := len(partitions)
 		unitHosts := 0
 		for _, reservation := range unit.Reservations {
-			if build.family == BuildFamilyHX && reservation.HXExtent == nil {
-				return nil, fmt.Errorf("LP30 lpuUnits reservation %s is sized in nodes, which an HX LPX request cannot express",
-					formatPropSyncChain(reservation.PartitionIDs))
-			}
-			if hybrid && len(reservation.PartitionIDs) > 1 {
-				return nil, fmt.Errorf("%w: hybrid workloads cannot run packed lpuUnits reservation %s",
-					ErrUnsupportedRuntime, formatPropSyncChain(reservation.PartitionIDs))
-			}
 			partition := sourcePartitions[reservation.PartitionIDs[0]]
 			partition.numChips = reservation.Hosts * devicesPerNode
 			partition.hxExtent = slices.Clone(reservation.HXExtent)
@@ -94,8 +96,8 @@ func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionIn
 		agentReplicas += unitHosts
 
 		// Legacy XT hybrid rows run each unit as one runtime partition; every
-		// other runtime reads one row per partition, where packed stages each
-		// count one shared host.
+		// other runtime reads one row per partition, where packed stages, which
+		// decoding guarantees are smaller than a node, each count one shared host.
 		if hybrid && build.family == BuildFamilyXT {
 			row := sourcePartitions[unit.root()]
 			row.runtimeNodeCount = unitHosts

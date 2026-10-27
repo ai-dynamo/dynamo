@@ -247,12 +247,37 @@ func TestUnitProjection(t *testing.T) {
 			wantServers:  servers + "0\n" + servers + "2",
 		},
 		{
-			name: "LPU-only build with several units",
+			name: "LP20 LPU-only partitions without a chain run as independent units",
 			bundle: testUnitBundle{
 				architecture: lp20, devicesPerNode: 8, partitions: testUnitPartitions(8, nil, 1, 2),
 				units: testSingleUnits(testNodesReservation(1, 1), testNodesReservation(1, 2)),
 			},
-			wantErr: "unsupported LPX runtime: LPU-only workloads require exactly one lpuUnits entry per model, got 2",
+			wantPartitions: []lpxv1alpha1.PartitionRequest{
+				{ID: "partition-000", Ordinal: 0, CompilerPartitionID: 1, XtShape: new(lpxv1alpha1.Xt8888PartitionShapeC8)},
+				{ID: "partition-001", Ordinal: 1, CompilerPartitionID: 2, XtShape: new(lpxv1alpha1.Xt8888PartitionShapeC8)},
+			},
+			wantAgents: 2,
+			wantRows:   map[string]string{"nodes_per_partition": "1\n1", "partition_ids": "1\n2", "partition_node_offsets": "0\n1", "partition_paths": "part-1\npart-2"},
+		},
+		{
+			name: "LP20 LPU-only chain beside another unit",
+			bundle: testUnitBundle{
+				architecture: lp20, devicesPerNode: 8, chains: [][]uint32{{1, 2}}, partitions: testUnitPartitions(8, nil, 1, 2, 3),
+				units: []testLPUUnit{
+					{reservations: []testLPUReservation{testNodesReservation(1, 1), testNodesReservation(1, 2)}, connectors: []testLPUConnector{{}}},
+					{reservations: []testLPUReservation{testNodesReservation(1, 3)}},
+				},
+			},
+			wantErr: "unsupported LPX runtime: LP20 LPU-only workloads run several lpuUnits entries only when each holds one partition; " +
+				"partitions [1,2] form one of 2 units",
+		},
+		{
+			name: "LP30 LPU-only partitions without a chain",
+			bundle: testUnitBundle{
+				architecture: lp30, devicesPerNode: 16, partitions: testUnitPartitions(16, []uint32{16, 1, 1, 1}, 1, 2),
+				units: testSingleUnits(testHXReservation(1, 1, 1, 1), testHXReservation(1, 1, 1, 2)),
+			},
+			wantErr: "unsupported LPX runtime: LP30 LPU-only workloads require exactly one lpuUnits entry per model, got 2",
 		},
 		{
 			name: "LPU-only local partitions",
@@ -262,22 +287,6 @@ func TestUnitProjection(t *testing.T) {
 			},
 			selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{1}},
 			wantErr:   "unsupported LPX runtime: localPartitions requires a hybrid build with a Cyborg conductor",
-		},
-		{
-			name: "LP30 reservation sized in nodes",
-			bundle: testUnitBundle{
-				architecture: lp30, devicesPerNode: 16, partitions: testUnitPartitions(8, nil, 1),
-				units: testSingleUnits(testNodesReservation(1, 1)),
-			},
-			wantErr: "LP30 lpuUnits reservation [1] is sized in nodes, which an HX LPX request cannot express",
-		},
-		{
-			name: "hybrid packed reservation",
-			bundle: testUnitBundle{
-				architecture: lp20, devicesPerNode: 8, hybrid: true, chains: [][]uint32{{1, 2}}, partitions: testUnitPartitions(4, nil, 1, 2),
-				units: testSingleUnits(testNodesReservation(1, 1, 2)),
-			},
-			wantErr: "unsupported LPX runtime: hybrid workloads cannot run packed lpuUnits reservation [1,2]",
 		},
 		{
 			name: "LP20 hosts without a registered XT shape",
@@ -500,6 +509,20 @@ func TestUnitProjectionMatchesLegacy(t *testing.T) {
 			},
 		},
 		{
+			name: "LP20 LPU-only partitions without a chain",
+			bundle: testUnitBundle{
+				architecture: lp20, devicesPerNode: 8, partitions: []testUnitPartition{{id: 1, numChips: 16}, {id: 2, numChips: 8}, {id: 3, numChips: 4}},
+				units: testSingleUnits(testNodesReservation(2, 1), testNodesReservation(1, 2), testNodesReservation(1, 3)),
+			},
+		},
+		{
+			name: "LP20 LPU-only partitions without a chain after a CPU embedding partition",
+			bundle: testUnitBundle{
+				architecture: lp20, devicesPerNode: 8, cpuEmbeddings: true, partitions: testUnitPartitions(8, nil, 0, 1, 2),
+				units: testSingleUnits(testNodesReservation(1, 1), testNodesReservation(1, 2)),
+			},
+		},
+		{
 			name: "LP20 four two-chip stages packed on one host",
 			bundle: testUnitBundle{
 				architecture: lp20, devicesPerNode: 8, chains: [][]uint32{{1, 2, 3, 4}}, partitions: testUnitPartitions(2, nil, 1, 2, 3, 4),
@@ -538,6 +561,20 @@ func TestUnitProjectionMatchesLegacy(t *testing.T) {
 			bundle: testUnitBundle{
 				architecture: lp30, devicesPerNode: 16, partitions: testUnitPartitions(8, []uint32{8, 1, 1, 1}, 1),
 				units: testSingleUnits(testHXReservation(1, 1, 1, 1)),
+			},
+		},
+		{
+			name: "LP30 LPU-only one-node partition without topology metadata",
+			bundle: testUnitBundle{
+				architecture: lp30, devicesPerNode: 16, partitions: testUnitPartitions(8, nil, 1),
+				units: testSingleUnits(testNodesReservation(1, 1)),
+			},
+		},
+		{
+			name: "LP30 packed chain without topology metadata",
+			bundle: testUnitBundle{
+				architecture: lp30, devicesPerNode: 16, chains: [][]uint32{{1, 2, 3, 4}}, partitions: testUnitPartitions(8, nil, 1, 2, 3, 4),
+				units: testSingleUnits(testNodesReservation(2, 1, 2, 3, 4)),
 			},
 		},
 		{
@@ -688,12 +725,13 @@ func TestUnitProjectionMatchesPlacementFixtures(t *testing.T) {
 			require.NoError(t, err)
 			build, err := registry.AcquireBuild(t.Context(), dir)
 			require.NoError(t, err)
-			require.Equal(t, map[string]BuildFamily{"lp20": BuildFamilyXT, "lp30": BuildFamilyHX}[expected.Architecture], build.family)
+			family := map[string]BuildFamily{"lp20": BuildFamilyXT, "lp30": BuildFamilyHX}[expected.Architecture]
+			require.Equal(t, family, build.family)
 			require.Equal(t, expected.DevicesPerNode, build.partitions[0].devicesPerNode)
 			require.Equal(t, expected.CompilationMode == "lpx", build.hasCUDAPartitions)
 			wantUnits := make([]lpuUnit, len(expected.Units))
 			for index, unit := range expected.Units {
-				wantUnits[index] = unit.lpuUnit(expected.DevicesPerNode)
+				wantUnits[index] = unit.lpuUnit(family, expected.DevicesPerNode)
 			}
 			require.Equal(t, wantUnits, build.lpuUnits)
 
@@ -757,13 +795,18 @@ func TestUnitProjectionMatchesPlacementFixtures(t *testing.T) {
 	}
 }
 
-// lpuUnit converts the reviewed unit to the decoded form for devicesPerNode.
-func (u expectedPlacementUnit) lpuUnit(devicesPerNode int) lpuUnit {
+// lpuUnit converts the reviewed unit to the decoded form for family and
+// devicesPerNode. An LP30 reservation sized in nodes decodes to the packed-chain
+// extent on that many hosts; the reviewed LPX partitions check that extent.
+func (u expectedPlacementUnit) lpuUnit(family BuildFamily, devicesPerNode int) lpuUnit {
 	unit := lpuUnit{Connectors: []lpxv1alpha1.PropSyncConnectorRequirement{}}
 	for _, reservation := range u.Reservations {
 		decoded := lpuReservation{PartitionIDs: reservation.PartitionIDs}
 		if reservation.Size.Nodes != nil {
 			decoded.Hosts = *reservation.Size.Nodes
+			if family == BuildFamilyHX {
+				decoded.HXExtent, _ = packedHXExtent(int64(decoded.Hosts), int64(devicesPerNode))
+			}
 		}
 		if extent := reservation.Size.HX; extent != nil {
 			decoded.Hosts = int(extent.TraysPerHemisphere * extent.Hemispheres * extent.Racks)

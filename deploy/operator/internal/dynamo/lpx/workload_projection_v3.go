@@ -49,17 +49,11 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		edgePositions = nil
 
 		partition := &partitions[0]
-		nodes, width := int64(partition.effectiveNodeCount()), int64(partition.devicesPerNode)
-		switch {
-		case nodes <= 8:
-			partition.hxExtent = []int64{width, nodes, 1, 1}
-		case nodes <= 16 && nodes%2 == 0:
-			partition.hxExtent = []int64{width, nodes / 2, 2, 1}
-		case nodes == 32:
-			partition.hxExtent = []int64{width, 8, 2, 2}
-		default:
+		extent, fits := packedHXExtent(int64(partition.effectiveNodeCount()), int64(partition.devicesPerNode))
+		if !fits {
 			return nil, fmt.Errorf("packed chain chip count %d does not fit a supported HX extent", partition.numChips)
 		}
+		partition.hxExtent = extent
 	}
 
 	// Keep GPU-local runtime partitions out of every LPU reservation and runtime record.

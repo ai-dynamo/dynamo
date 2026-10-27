@@ -69,6 +69,8 @@ type testUnitPartition struct {
 	numChips uint32
 	// shape is the HX16x8x2 partitionShape; nil omits topologyMetadata.
 	shape []uint32
+	// topology names the compiled topology; empty uses registryTestTopology.
+	topology string
 }
 
 type testLPUUnit struct {
@@ -229,7 +231,11 @@ func encodeTestUnitBundle(t *testing.T, bundle testUnitBundle) []byte {
 		detail, err := partitions.At(index).Detail().NewLpu()
 		require.NoError(t, err)
 		require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", partition.id)))
-		require.NoError(t, detail.SetTopology(registryTestTopology))
+		topology := partition.topology
+		if topology == "" {
+			topology = registryTestTopology
+		}
+		require.NoError(t, detail.SetTopology(topology))
 		detail.SetArchitecture(bundle.architecture)
 		detail.SetNumChips(partition.numChips)
 		detail.SetDevicesPerNode(bundle.devicesPerNode)
@@ -716,6 +722,10 @@ func TestDeploymentContractLPUUnits(t *testing.T) {
 		{reservations: []testLPUReservation{testNodesReservation(1, 1), testNodesReservation(1, 2)}, connectors: []testLPUConnector{{}}},
 		{reservations: []testLPUReservation{testNodesReservation(1, 3)}},
 	}
+	eighteenStages := make([]uint32, 18)
+	for index := range eighteenStages {
+		eighteenStages[index] = uint32(index + 1)
+	}
 	for _, test := range []struct {
 		name    string
 		bundle  testUnitBundle
@@ -789,6 +799,42 @@ func TestDeploymentContractLPUUnits(t *testing.T) {
 			}},
 		},
 		{
+			name: "LP30 one-node partition without topology metadata sized in nodes",
+			bundle: testUnitBundle{
+				architecture: lp30, devicesPerNode: 16, partitions: testUnitPartitions(8, nil, 1),
+				units: testSingleUnits(testNodesReservation(1, 1)),
+			},
+			want: []lpuUnit{{
+				Reservations: []lpuReservation{{PartitionIDs: []int{1}, Hosts: 1, HXExtent: []int64{16, 1, 1, 1}}},
+				Connectors:   []lpxv1alpha1.PropSyncConnectorRequirement{},
+			}},
+		},
+		{
+			name: "LP30 packed chain without topology metadata sized in nodes",
+			bundle: testUnitBundle{
+				architecture: lp30, devicesPerNode: 16, chains: [][]uint32{{1, 2, 3, 4}},
+				partitions: testUnitPartitions(8, nil, 1, 2, 3, 4),
+				units:      testSingleUnits(testNodesReservation(2, 1, 2, 3, 4)),
+			},
+			want: []lpuUnit{{
+				Reservations: []lpuReservation{{PartitionIDs: []int{1, 2, 3, 4}, Hosts: 2, HXExtent: []int64{16, 2, 1, 1}}},
+				Connectors:   []lpxv1alpha1.PropSyncConnectorRequirement{},
+			}},
+		},
+		{
+			name: "hybrid chain of small stages keeps one reservation per stage",
+			bundle: testUnitBundle{
+				architecture: lp20, devicesPerNode: 8, hybrid: true, chains: [][]uint32{{1, 2}}, partitions: testUnitPartitions(4, nil, 1, 2),
+				units: []testLPUUnit{{reservations: []testLPUReservation{testNodesReservation(1, 1), testNodesReservation(1, 2)}, connectors: []testLPUConnector{{}}}},
+			},
+			want: []lpuUnit{{
+				Reservations: []lpuReservation{{PartitionIDs: []int{1}, Hosts: 1}, {PartitionIDs: []int{2}, Hosts: 1}},
+				Connectors: []lpxv1alpha1.PropSyncConnectorRequirement{
+					{Kind: lpxv1alpha1.PropSyncConnectorKindXt8888Gap, MaxInterPartitionOffset: new(int64(0))},
+				},
+			}},
+		},
+		{
 			name: "LPU-only CPU embeddings leave partition 0 out of units",
 			bundle: testUnitBundle{
 				architecture: lp20, devicesPerNode: 8, cpuEmbeddings: true, partitions: testUnitPartitions(8, nil, 0, 1),
@@ -797,15 +843,12 @@ func TestDeploymentContractLPUUnits(t *testing.T) {
 			want: []lpuUnit{{Reservations: []lpuReservation{{PartitionIDs: []int{1}, Hosts: 1}}, Connectors: []lpxv1alpha1.PropSyncConnectorRequirement{}}},
 		},
 		{
-			name: "LPU-only CPU embeddings may still place partition 0",
+			name: "LPU-only CPU embeddings place partition 0",
 			bundle: testUnitBundle{
 				architecture: lp20, devicesPerNode: 8, cpuEmbeddings: true, partitions: testUnitPartitions(8, nil, 0, 1),
 				units: testSingleUnits(testNodesReservation(1, 0), testNodesReservation(1, 1)),
 			},
-			want: []lpuUnit{
-				{Reservations: []lpuReservation{{PartitionIDs: []int{0}, Hosts: 1}}, Connectors: []lpxv1alpha1.PropSyncConnectorRequirement{}},
-				{Reservations: []lpuReservation{{PartitionIDs: []int{1}, Hosts: 1}}, Connectors: []lpxv1alpha1.PropSyncConnectorRequirement{}},
-			},
+			wantErr: "deployment.v1.capnp.bin config.lpuUnits places LPU partition 0, which an LPU-only build with CPU token embeddings runs on the CPU",
 		},
 		{
 			name: "hybrid CPU embeddings still place partition 0",
@@ -931,12 +974,119 @@ func TestDeploymentContractLPUUnits(t *testing.T) {
 			wantErr: "{traysPerHemisphere: 1, hemispheres: 1, racks: 2} is not a supported HX extent",
 		},
 		{
-			name: "reservation smaller than its partition",
+			name: "LP20 reservation smaller than its partition",
 			bundle: testUnitBundle{
 				architecture: lp20, devicesPerNode: 8, partitions: testUnitPartitions(16, nil, 1),
 				units: testSingleUnits(testNodesReservation(1, 1)),
 			},
-			wantErr: "config.lpuUnits[0].reservations[0] reserves 8 devices for 16 chips",
+			wantErr: "config.lpuUnits[0].reservations[0].size.nodes = 1, want 2 for partitions [1]",
+		},
+		{
+			name: "LP20 reservation larger than its partition",
+			bundle: testUnitBundle{
+				architecture: lp20, devicesPerNode: 8, partitions: testUnitPartitions(16, nil, 1),
+				units: testSingleUnits(testNodesReservation(3, 1)),
+			},
+			wantErr: "config.lpuUnits[0].reservations[0].size.nodes = 3, want 2 for partitions [1]",
+		},
+		{
+			name: "LP30 HX extent other than the partition's",
+			bundle: testUnitBundle{
+				architecture: lp30, devicesPerNode: 16, partitions: testUnitPartitions(32, []uint32{16, 1, 2, 1}, 1),
+				units: testSingleUnits(testHXReservation(2, 1, 1, 1)),
+			},
+			wantErr: "config.lpuUnits[0].reservations[0].size requests HX extent [16 2 1 1], want [16 1 2 1] for partitions [1]",
+		},
+		{
+			name: "LP30 partition without topology metadata on two nodes",
+			bundle: testUnitBundle{
+				architecture: lp30, devicesPerNode: 16, partitions: testUnitPartitions(8, nil, 1),
+				units: testSingleUnits(testNodesReservation(2, 1)),
+			},
+			wantErr: "config.lpuUnits[0].reservations[0].size requests HX extent [16 2 1 1], want [16 1 1 1] for partitions [1]",
+		},
+		{
+			name: "LP30 nodes that fit no HX extent",
+			bundle: testUnitBundle{
+				architecture: lp30, devicesPerNode: 16, partitions: testUnitPartitions(8, nil, 1),
+				units: testSingleUnits(testNodesReservation(9, 1)),
+			},
+			wantErr: "config.lpuUnits[0].reservations[0].size.nodes = 9 fits no HX extent",
+		},
+		{
+			name: "LP20 packed stages that fill their nodes",
+			bundle: testUnitBundle{
+				architecture: lp20, devicesPerNode: 8, chains: [][]uint32{{1, 2}}, partitions: testUnitPartitions(16, nil, 1, 2),
+				units: testSingleUnits(testNodesReservation(4, 1, 2)),
+			},
+			wantErr: "config.lpuUnits[0].reservations[0] packs partitions [1,2]: " +
+				"stages must have equal chip counts that divide 8 devices per node and, on LP20, one topology",
+		},
+		{
+			name: "packed stages with different chip counts",
+			bundle: testUnitBundle{
+				architecture: lp20, devicesPerNode: 8, chains: [][]uint32{{1, 2}},
+				partitions: []testUnitPartition{{id: 1, numChips: 4}, {id: 2, numChips: 2}},
+				units:      testSingleUnits(testNodesReservation(1, 1, 2)),
+			},
+			wantErr: "config.lpuUnits[0].reservations[0] packs partitions [1,2]: stages must have equal chip counts",
+		},
+		{
+			name: "LP20 packed stages with different topologies",
+			bundle: testUnitBundle{
+				architecture: lp20, devicesPerNode: 8, chains: [][]uint32{{1, 2}},
+				partitions: []testUnitPartition{{id: 1, numChips: 4}, {id: 2, numChips: 4, topology: "other-topology"}},
+				units:      testSingleUnits(testNodesReservation(1, 1, 2)),
+			},
+			wantErr: "config.lpuUnits[0].reservations[0] packs partitions [1,2]: stages must have equal chip counts",
+		},
+		{
+			name: "packed hosts other than the stages need",
+			bundle: testUnitBundle{
+				architecture: lp20, devicesPerNode: 8, chains: [][]uint32{{1, 2, 3}}, partitions: testUnitPartitions(4, nil, 1, 2, 3),
+				units: testSingleUnits(testNodesReservation(3, 1, 2, 3)),
+			},
+			wantErr: "config.lpuUnits[0].reservations[0].size.nodes = 3, want 2 for partitions [1,2,3]",
+		},
+		{
+			name: "LP30 packed chain with another HX extent",
+			bundle: testUnitBundle{
+				architecture: lp30, devicesPerNode: 16, chains: [][]uint32{{1, 2, 3, 4}}, partitions: testUnitPartitions(8, []uint32{8, 1, 1, 1}, 1, 2, 3, 4),
+				units: testSingleUnits(testHXReservation(1, 2, 1, 1, 2, 3, 4)),
+			},
+			wantErr: "config.lpuUnits[0].reservations[0].size requests HX extent [16 1 2 1], want [16 2 1 1] for partitions [1,2,3,4]",
+		},
+		{
+			name: "LP30 packed hosts that fit no HX extent",
+			bundle: testUnitBundle{
+				architecture: lp30, devicesPerNode: 16, chains: [][]uint32{eighteenStages}, partitions: testUnitPartitions(8, []uint32{8, 1, 1, 1}, eighteenStages...),
+				units: testSingleUnits(testHXReservation(8, 1, 1, eighteenStages...)),
+			},
+			wantErr: "packs partitions [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18]: 9 hosts fit no HX extent",
+		},
+		{
+			name: "hybrid chain packed onto shared hosts",
+			bundle: testUnitBundle{
+				architecture: lp20, devicesPerNode: 8, hybrid: true, chains: [][]uint32{{1, 2}}, partitions: testUnitPartitions(4, nil, 1, 2),
+				units: testSingleUnits(testNodesReservation(1, 1, 2)),
+			},
+			wantErr: "config.lpuUnits[0].reservations[0] packs partitions [1,2] onto shared hosts, which only LPU-only bundles without CUDA partitions do",
+		},
+		{
+			name: "packed reservation beside another reservation",
+			bundle: testUnitBundle{
+				architecture: lp20, devicesPerNode: 8, chains: [][]uint32{{1, 2, 3}}, partitions: testUnitPartitions(4, nil, 1, 2, 3),
+				units: []testLPUUnit{{reservations: []testLPUReservation{testNodesReservation(1, 1, 2), testNodesReservation(1, 3)}, connectors: []testLPUConnector{{}}}},
+			},
+			wantErr: "config.lpuUnits[0].reservations[0] packs partitions [1,2] beside other reservations; a packed chain is its unit's only reservation",
+		},
+		{
+			name: "LPU-only chain of stages that share nodes left unpacked",
+			bundle: testUnitBundle{
+				architecture: lp20, devicesPerNode: 8, chains: [][]uint32{{1, 2}}, partitions: testUnitPartitions(4, nil, 1, 2),
+				units: []testLPUUnit{{reservations: []testLPUReservation{testNodesReservation(1, 1), testNodesReservation(1, 2)}, connectors: []testLPUConnector{{}}}},
+			},
+			wantErr: "config.lpuUnits[0] places partitions [1,2], whose stages evenly share nodes, in separate reservations; an LPU-only chain packs them into one",
 		},
 		{
 			name: "missing connector",

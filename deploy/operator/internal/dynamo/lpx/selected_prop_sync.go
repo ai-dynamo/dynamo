@@ -131,6 +131,23 @@ func packPropSyncPartitions(partitions []buildPartition) []buildPartition {
 	return []buildPartition{root}
 }
 
+// packedHXExtent returns the HX scheduler extent [width, traysPerHemisphere,
+// hemispheres, racks] for a packed chain on a positive number of hosts: one
+// hemisphere up to eight hosts, two hemispheres up to sixteen, or two full racks.
+// It reports false when no extent holds exactly that many hosts.
+func packedHXExtent(hosts, width int64) ([]int64, bool) {
+	switch {
+	case hosts <= 8:
+		return []int64{width, hosts, 1, 1}, true
+	case hosts <= 16 && hosts%2 == 0:
+		return []int64{width, hosts / 2, 2, 1}, true
+	case hosts == 32:
+		return []int64{width, 8, 2, 2}, true
+	default:
+		return nil, false
+	}
+}
+
 func formatPropSyncChain(chain []int) string {
 	ids := make([]string, 0, len(chain))
 	for _, partitionID := range chain {
