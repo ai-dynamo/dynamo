@@ -13,6 +13,7 @@ import sqlite3
 import struct
 import tempfile
 import time
+import uuid
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
@@ -108,7 +109,15 @@ from .engine_generate import (
     adapt_engine_generate_request,
     publish_engine_generate_capability,
 )
+from .engine_group import EngineGroupServing
 from .engine_monitor import VllmEngineMonitor
+from .external_elastic_ep import (
+    native_allows_requests,
+    observe_external_elastic_ep,
+    scale_external_elastic_ep,
+    submit_external_elastic_ep,
+    uses_external_elastic_ep,
+)
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
@@ -1344,6 +1353,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
         self._pause_controller = VllmEnginePauseController(self.engine_client)
         self._pause_lock = asyncio.Lock()
+        self.engine_group_serving: EngineGroupServing | None = None
         # Maps request_id -> _DeferredAbort for in-flight decode-only requests so
         # admin abort_request can route through the deferred-abort path instead
         # of calling engine_client.abort() during the unsafe pre-first-token
@@ -1551,7 +1561,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             try:
                 # Step 1: Unregister endpoint instance before memory transitions.
                 if self.generate_endpoint is not None:
-                    await self.generate_endpoint.unregister_endpoint_instance()
+                    if self.engine_group_serving is not None:
+                        self.engine_group_serving.set_paused(True)
+                        await self.engine_group_serving.withdraw()
+                    else:
+                        await self.generate_endpoint.unregister_endpoint_instance()
                     unregistered = True
                     logger.info(
                         "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
@@ -1575,13 +1589,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 # but discovery still shows us unregistered and wake_up will
                 # early-return. Re-register so the worker rejoins the routing pool.
                 if (
-                    unregistered
+                    (unregistered or self.engine_group_serving is not None)
                     and not self._pause_controller.is_paused
                     and not self._pause_controller.needs_resume_recovery
                     and self.generate_endpoint is not None
                 ):
                     try:
-                        await self.generate_endpoint.register_endpoint_instance()
+                        if self.engine_group_serving is not None:
+                            self.engine_group_serving.set_paused(False)
+                            await self.engine_group_serving.refresh()
+                        else:
+                            await self.generate_endpoint.register_endpoint_instance()
                         logger.info(
                             "[Sleep] Re-registered endpoint after failed sleep rollback"
                         )
@@ -1590,6 +1608,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             f"Failed to re-register endpoint after sleep failure: {reg_err}"
                         )
                 return {"status": "error", "message": str(e)}
+
+    async def submit_elastic_ep(self, body: dict) -> dict:
+        if not uses_external_elastic_ep(self.engine_client):
+            raise ValueError("bounded resize submission requires external Elastic EP")
+        return await submit_external_elastic_ep(self.engine_client, body)
 
     async def scale_elastic_ep(self, body: dict) -> dict:
         """Scale the elastic expert-parallelism data-parallel size live.
@@ -1600,10 +1623,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     {"new_data_parallel_size": 4}
 
+        External ownership delegates directly to vLLM's correlated control API.
         The vLLM Ray DP backend will spin up / tear down DP workers on the GPUs
         already reserved by the pod, then hot-swap the expert routing table.
         No pod restart is needed.
         """
+        if uses_external_elastic_ep(self.engine_client):
+            # Preparation can leave the base topology serving. Native request
+            # admission, not the lifetime of this HTTP call, determines readiness.
+            return await scale_external_elastic_ep(self.engine_client, body)
+
         if body is None:
             body = {}
         elif not isinstance(body, dict):
@@ -1770,6 +1799,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         finally:
             async with self._scale_ep_lock:
                 self._scale_ep_in_progress = False
+
+    async def is_scaling_elastic_ep(self, body: dict) -> dict:
+        """Observe external membership without taking the legacy resize lock."""
+        if not uses_external_elastic_ep(self.engine_client):
+            return {
+                "status": "error",
+                "message": "correlated status requires external Elastic EP ownership",
+            }
+        return await observe_external_elastic_ep(self.engine_client)
 
     async def get_ep_capacity(self, body: dict) -> dict:
         """Read-only elastic-EP capacity: current dp/tp and the idle GPUs to grow into.
@@ -1958,7 +1996,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 # Step 1: Wake engine first - must be ready before accepting requests
                 await self._pause_controller.resume(tags)
                 if self.generate_endpoint is not None:
-                    await self.generate_endpoint.register_endpoint_instance()
+                    if self.engine_group_serving is not None:
+                        self.engine_group_serving.set_paused(False)
+                        await self.engine_group_serving.refresh()
+                    else:
+                        await self.generate_endpoint.register_endpoint_instance()
                     logger.info(
                         "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
                     )
@@ -1971,6 +2013,35 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             except Exception as e:
                 logger.error(f"Failed to wake up engine: {e}")
                 return {"status": "error", "message": str(e)}
+
+    def can_serve_engine_group(self) -> bool:
+        """Follow native request admission, independently of controller state."""
+        # Direct AsyncLLM requests bypass vLLM's HTTP scaling middleware.
+        return (
+            not self._pause_controller.is_paused
+            and self.engine_client.is_running
+            and not self.engine_client.errored
+            and native_allows_requests()
+        )
+
+    async def probe_engine_group(self) -> bool:
+        """Verify locally; the serving lifecycle checks the binding again afterward."""
+        serving = self.engine_group_serving
+        if serving is None or not self.can_serve_engine_group():
+            return False
+        await self.engine_client.check_health()
+        completed = False
+        async with asyncio.timeout(60):
+            async for output in self.engine_client.generate(
+                {"prompt_token_ids": [0]},
+                SamplingParams(max_tokens=1, temperature=0, ignore_eos=True),
+                "engine-group-probe-" + uuid.uuid4().hex,
+                data_parallel_rank=self._to_local_dp_rank(serving.rank),
+            ):
+                completed = output.finished and any(
+                    item.token_ids for item in output.outputs
+                )
+        return completed and self.can_serve_engine_group()
 
     async def start_profile(self, body: dict) -> dict:
         """Start profiling on the engine.
@@ -3802,6 +3873,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if settings is not None and "kind" in settings and self.use_vllm_tokenizer:
             raise InvalidArgument("artifact capture requires token-in/token-out mode")
         # Use context ID for request tracking and correlation
+        if self.engine_group_serving is not None:
+            self.engine_group_serving.ensure_serving()
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
         routing = request.get("routing") or {}

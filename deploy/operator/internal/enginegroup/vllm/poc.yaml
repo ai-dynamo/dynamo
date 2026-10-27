@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Build this image from this branch with vLLM #62082 and #62973; the tag is not published.
+# This is a correctness smoke configuration, not a performance recipe.
+# Select an MoE model/parallel configuration that fits the available GPUs and
+# satisfies the installed vLLM version's expert-placement constraints.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-enginegroup
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    runtimeVersionOverride: "1.7.0"
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: docker.io/jmancuso768/dynamo-vllm-enginegroup:dev
+  - name: Worker
+    type: worker
+    runtimeVersionOverride: "1.7.0"
+    replicas: 1
+    engineGroup:
+      initialSize: 2
+      policy: {minSize: 2, maxSize: 4}
+    podTemplate:
+      spec:
+        restartPolicy: Never
+        readinessGates:
+        - conditionType: dynamo.nvidia.com/retained
+        containers:
+        - name: main
+          image: docker.io/jmancuso768/dynamo-vllm-enginegroup:dev
+          command: [python3, -m, dynamo.vllm]
+          env:
+          - {name: VLLM_ENABLE_V1_MULTIPROCESSING, value: "1"}
+          - {name: VLLM_USE_RUST_FRONTEND, value: "0"}
+          - {name: VLLM_ELASTIC_EP_DRAIN_REQUESTS, value: "1"}
+          - {name: DYNAMO_ENGINE_GROUP, value: "1"}
+          - name: DYNAMO_POD_UID
+            valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+          args:
+          - --model=Qwen/Qwen3-30B-A3B
+          - --tensor-parallel-size=1
+          - --elastic-ep-auto-bootstrap
+          - --elastic-ep-initial-dp-size=2
+          - --data-parallel-rank=$(DYNAMO_RANK)
+          - --data-parallel-address=$(DYNAMO_LEADER_ADDRESS)
+          - --data-parallel-external-lb
+          - --data-parallel-size-local=1
+          - --distributed-executor-backend=mp
+          - --enable-expert-parallel
+          - --enable-eplb
+          - --enable-elastic-ep
+          - --elastic-ep-max-dp-size=4
+          - --gpu-memory-utilization=0.8
+          - --max-model-len=2048
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
