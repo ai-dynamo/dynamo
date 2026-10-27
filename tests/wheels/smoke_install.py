@@ -17,9 +17,7 @@ from urllib.parse import unquote, urlparse
 
 GLIBC_FLOOR = (2, 28)
 MANYLINUX_POLICY = "manylinux_2_28"
-RUNTIME_PY_TAGS = {"cp310", "cp311", "cp312"}
-# First-party optional wheel that must ship with the core wheels.
-REQUIRED_OPTIONAL_DIST = "kvbm"
+RUNTIME_PY_TAGS = {"cp311", "cp312"}
 # Wheels we ship but do not own / do not validate as manylinux: nixl lives under the
 # nixl/ subdir (excluded by considering only top-level wheels); gpu-memory-service is
 # not a shipped artifact and is a non-manylinux wheel.
@@ -162,19 +160,6 @@ def assert_no_bundled_libraries(wheelhouse: Path) -> None:
         )
 
 
-def check_optional_wheels(wheelhouse: Path, target_arch: str | None) -> None:
-    kvbm = require_one_wheel(wheelhouse, REQUIRED_OPTIONAL_DIST)
-    metadata = wheel_metadata(kvbm)
-    print(
-        f"required wheel present: {kvbm.name} "
-        f"({metadata.get('Name')} {metadata.get('Version')})"
-    )
-    assert_arch_tag(kvbm, target_arch)
-
-    for wheel in find_wheels(wheelhouse, "nixl"):
-        print(f"third-party wheel present (not asserted): {wheel.name}")
-
-
 def binary_wheels(wheelhouse: Path) -> list[Path]:
     # Top-level wheels only: the nixl/ subdir is third-party and excluded here.
     ignored = {canonical_name(dist) for dist in IGNORED_BINARY_DISTS}
@@ -264,21 +249,42 @@ def assert_glibc_floor(wheelhouse: Path) -> None:
 
 
 def create_venv(python_spec: str) -> Path:
-    # python_spec is a version ("3.10") or an interpreter path; uv fetches the
+    # python_spec is a version ("3.11") or an interpreter path; uv fetches the
     # interpreter if needed and --seed installs pip into the fresh venv.
     venv_dir = Path(tempfile.mkdtemp(prefix="dynamo-wheel-venv-"))
     run(["uv", "venv", "--seed", "--python", python_spec, str(venv_dir)])
     return venv_dir / "bin" / "python"
 
 
+# Stage the pinned AISimulate wheel directly from NVIDIA's package index.
+AISIMULATE_FIND_LINKS = "https://pypi.nvidia.com/aisimulate/"
+
+
 def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) -> None:
     # --find-links only registers search paths; nixl is pulled from nixl/ only when a
-    # requirement (e.g. kvbm's nixl[cu12]) resolves to it, not installed on its own.
+    # requirement resolves to it, not installed on its own.
     find_links = []
     for path in (wheelhouse, wheelhouse / "nixl"):
         if path.exists():
             find_links.extend(["--find-links", str(path)])
-    run([str(venv_python), "-m", "pip", "install", *find_links, *requirements])
+    # Planner and framework runtime wheelhouses stage their own aisimulate wheel. Offer
+    # NVIDIA's index only when that staged wheel is absent: pip ranks equal candidates
+    # without regard to where they came from, so registering both risks installing the
+    # remote copy in place of the artifact the image actually ships.
+    if not find_wheels(wheelhouse, "aisimulate"):
+        find_links.extend(["--find-links", AISIMULATE_FIND_LINKS])
+    run(
+        [
+            str(venv_python),
+            "-m",
+            "pip",
+            "install",
+            "--only-binary",
+            "aisimulate",
+            *find_links,
+            *requirements,
+        ]
+    )
 
 
 def pip_check(venv_python: Path) -> None:
@@ -382,66 +388,47 @@ assert metadata.version("ai-dynamo") == metadata.version("ai-dynamo-runtime")
     run([str(venv_python), "-c", code])
 
 
-def run_aic_core_import_smoke(venv_python: Path) -> None:
+def run_ais_core_import_smoke(venv_python: Path) -> None:
     code = r"""
 import os
-from pathlib import Path
+from importlib.resources import files
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import msgspec
-import aiconfigurator_core
-from aiconfigurator_core.sdk import RustForwardPassPerfModel
-from aiconfigurator_core.sdk.engine import compile_engine
-from aiconfigurator_core.sdk.memory import estimate_num_gpu_blocks
+import aisimulate_core
+from aisimulate_core.sdk import RustForwardPassPerfModel
+from aisimulate_core.sdk.engine import compile_engine
+from aisimulate_core.sdk.memory import estimate_num_gpu_blocks
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     ScheduledRequestMetrics,
 )
 
-assert aiconfigurator_core and compile_engine and estimate_num_gpu_blocks
+assert aisimulate_core and compile_engine and estimate_num_gpu_blocks
 
-package_root = Path(aiconfigurator_core.__file__).resolve().parent
+package_root = files("aisimulate_core")
 assert (package_root / "model_configs/Qwen--Qwen3-32B_config.json").is_file()
 assert (package_root / "systems/h200_sxm.yaml").is_file()
 parquet_files = list(
-    (package_root / "systems/data/h200_sxm").glob("*/vllm/0.19.0/*.parquet")
+    (package_root / "systems/data/h200_sxm").glob("*/vllm/0.24.0/*.parquet")
 )
 assert parquet_files
 for path in parquet_files:
     with path.open("rb") as handle:
         assert handle.read(4) == b"PAR1"
 
-model = RustForwardPassPerfModel.from_native(
+model = RustForwardPassPerfModel.best_available(
     {
-        "schema_version": 1,
-        "model_name": "Qwen/Qwen3-32B",
-        "system_name": "h200_sxm",
+        "model": "Qwen/Qwen3-32B",
+        "system": "h200_sxm",
         "backend": "vllm",
-        "backend_version": "0.19.0",
-        "kv_block_size": None,
-        "tp_size": 1,
-        "pp_size": 1,
-        "moe_tp_size": None,
-        "moe_ep_size": None,
-        "attention_dp_size": 1,
-        "cp_size": None,
-        "weight_dtype": None,
-        "moe_dtype": None,
-        "activation_dtype": None,
-        "kv_cache_dtype": None,
-        "nextn": None,
-        "extra": {},
-    },
-    {
-        "max_observations": 64,
-        "min_observations": 5,
-        "bucket_count": 16,
-        "max_num_tokens": 4096,
-        "max_batch_size": 128,
-        "max_kv_tokens": 1_000_000,
-    },
+        "worker_type": "aggregated",
+        "backend_version": "current",
+        "estimation_mode": "auto",
+        "fallback_policy": "deny",
+    }
 )
 estimate_ms = model.estimate_forward_pass_time_ms(
     [
@@ -464,51 +451,35 @@ assert diagnostics["last_warning"] is None
     run([str(venv_python), "-c", code])
 
 
-OPTIONAL_IMPORT_NAMES = {"kvbm": "kvbm"}
-
-
-def install_core(
-    wheelhouse: Path, python_spec: str, also: tuple[str, ...] = ()
-) -> None:
+def install_core(wheelhouse: Path, python_spec: str) -> None:
     ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
     runtime = require_one_wheel(wheelhouse, "ai-dynamo-runtime")
-    also_wheels = {dist: require_one_wheel(wheelhouse, dist) for dist in also}
 
     venv_python = create_venv(python_spec)
     try:
-        requirements = [
-            str(runtime),
-            str(ai_dynamo),
-            *(str(w) for w in also_wheels.values()),
-        ]
-        pip_install(venv_python, wheelhouse, requirements)
+        pip_install(venv_python, wheelhouse, [str(runtime), str(ai_dynamo)])
         pip_check(venv_python)
         assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
         run_core_import_smoke(venv_python)
-
-        for dist, wheel in also_wheels.items():
-            assert_local_direct_url(venv_python, dist, wheel, wheelhouse)
-            import_name = OPTIONAL_IMPORT_NAMES.get(dist, dist)
-            run([str(venv_python), "-c", f"import {import_name}; assert {import_name}"])
     finally:
         shutil.rmtree(venv_python.parent.parent, ignore_errors=True)
 
 
-def install_mocker_extra(wheelhouse: Path, python_spec: str) -> None:
+def install_mocker_support(wheelhouse: Path, python_spec: str) -> None:
     ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
     runtime = require_one_wheel(wheelhouse, "ai-dynamo-runtime")
 
     venv_python = create_venv(python_spec)
     try:
-        # The wheelhouse contains Dynamo-produced artifacts. Third-party optional
-        # dependencies such as aiconfigurator-core resolve from their package index.
+        # AISimulate is a direct ai-dynamo dependency on supported Python versions
+        # and provides the canonical estimator used by Mocker.
         pip_install(
             venv_python,
             wheelhouse,
-            [str(runtime), f"{ai_dynamo}[mocker]"],
+            [str(runtime), str(ai_dynamo)],
         )
         pip_check(venv_python)
         assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
-        run_aic_core_import_smoke(venv_python)
+        run_ais_core_import_smoke(venv_python)
     finally:
         shutil.rmtree(venv_python.parent.parent, ignore_errors=True)

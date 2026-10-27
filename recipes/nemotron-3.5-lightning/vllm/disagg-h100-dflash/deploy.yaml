@@ -76,7 +76,7 @@ spec:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-  - name: VllmPrefillWorker
+  - name: prefill
     type: prefill
     replicas: 1
     sharedMemorySize: 40Gi
@@ -128,8 +128,6 @@ spec:
           - --max-num-batched-tokens
           - '32768'
           - --async-scheduling
-          - --quantization
-          - modelopt_fp4
           - --enable-prefix-caching
           - --mamba-cache-mode
           - align
@@ -227,7 +225,7 @@ spec:
             mountPath: /model-cache
           - name: dshm
             mountPath: /dev/shm
-  - name: VllmDecodeWorker
+  - name: decode
     type: decode
     replicas: 1
     sharedMemorySize: 40Gi
@@ -279,8 +277,6 @@ spec:
           - --max-num-batched-tokens
           - '32768'
           - --async-scheduling
-          - --quantization
-          - modelopt_fp4
           - --enable-prefix-caching
           - --mamba-cache-mode
           - align

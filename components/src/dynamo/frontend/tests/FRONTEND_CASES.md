@@ -30,6 +30,7 @@ own architecture under `components/src/dynamo/trtllm/` and is out of scope here.
 - **`FRONTEND.7`** Worker subprocess boundary — preprocessing runs in a subprocess; result picklability, init, error propagation across the boundary.
 - **`FRONTEND.8`** Error surface — `BackendError` / `InternalError` / engine-error handling, malformed responses, stream errors, deprecation warnings.
 - **`FRONTEND.9`** Reasoning ↔ tool-call orchestration — both parsers active on the same response; distinct from `REASONING.batch.2` which is purely on output text.
+- **`FRONTEND.10`** Thinking-control forwarding — the resolved `thinking` / `enable_thinking` / `thinking_mode` / `reasoning_effort` kwargs must reach the template unchanged, and identically on every backend.
 
 ## Annotation convention
 
@@ -145,3 +146,18 @@ must leave tool-call markers intact for downstream); this is the
 frontend assembly view.
 
 Examples: `TestReasoningParsing`.
+
+## `FRONTEND.10` — Thinking-control forwarding
+
+Rust `normalize_reasoning_template_args` resolves `thinking`,
+`reasoning_effort`, and the `chat_template_args` thinking keys at the HTTP
+boundary, before any backend runs. A chat processor forwards that decision;
+it never makes one. A processor that derives a toggle of its own re-decides
+what the frontend already settled, and the two backends then disagree for the
+same request.
+
+`_thinking_parity.py` holds the shared cases. Both backends assert against it,
+so a divergence fails in one place instead of hiding until someone compares
+`--dyn-chat-processor vllm` against `--dyn-chat-processor sglang` by hand.
+
+Examples: `TestThinkingControlParity` (vllm + sglang).

@@ -15,6 +15,8 @@
 
 
 import json
+import subprocess
+import sys
 import threading
 
 import pytest
@@ -205,10 +207,57 @@ def test_radix_tree_thread_safety(
     SelectionService is None,
     reason="SelectionService requires the select-service Cargo feature",
 )
+@pytest.mark.parametrize(
+    "ttl", [-1, 0, 0.5, float("nan"), float("inf"), 31536001, 1e300]
+)
+@pytest.mark.timeout(5)
+def test_selection_service_rejects_invalid_affinity_ttl(ttl):
+    with pytest.raises(ValueError, match="session_affinity_ttl_secs must be between"):
+        SelectionService(session_affinity_ttl_secs=ttl)
+
+
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
+@pytest.mark.parametrize("ttl", ["-1", "NaN", "31536001"])
+@pytest.mark.timeout(60)  # subprocess wait is capped at 15 s per case
+def test_selection_service_cli_rejects_invalid_affinity_ttl(ttl):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dynamo.select_service",
+            f"--session-affinity-ttl-secs={ttl}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode != 0
+    assert "session_affinity_ttl_secs must be between" in result.stderr
+    assert "panicked" not in result.stderr
+
+
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
+@pytest.mark.parametrize("ttl", [1.0, 1.5, 31536000.0])
+@pytest.mark.timeout(5)
+def test_selection_service_accepts_valid_affinity_ttl(ttl):
+    service = SelectionService(indexer_threads=1, session_affinity_ttl_secs=ttl)
+    service.shutdown()
+
+
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
 async def test_selection_service_selects_registered_worker(monkeypatch):
-    monkeypatch.setenv("DYN_USE_KV_EVENTS", "false")
+    monkeypatch.setenv("DYN_ROUTER_USE_KV_EVENTS", "false")
     service = SelectionService(indexer_threads=1)
 
     try:
@@ -238,6 +287,12 @@ async def test_selection_service_selects_registered_worker(monkeypatch):
         assert selected["worker_id"] == 1
         assert selected["dp_rank"] == 0
         assert selected["endpoint"] == "http://worker-1:8000"
+
+        # Sequences other than an exact list take the generic conversion.
+        selected = await service.select(
+            {"model_name": "model", "token_ids": (1, 2, 3, 4)}
+        )
+        assert selected["worker_id"] == 1
     finally:
         await service.shutdown_async()
 
@@ -249,13 +304,26 @@ async def test_selection_service_selects_registered_worker(monkeypatch):
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
 async def test_selection_service_malformed_payload_raises_value_error(monkeypatch):
-    monkeypatch.setenv("DYN_USE_KV_EVENTS", "false")
+    monkeypatch.setenv("DYN_ROUTER_USE_KV_EVENTS", "false")
     service = SelectionService(indexer_threads=1)
 
     try:
         # Malformed input surfaces as a plain ValueError, not a SelectionServiceError.
         with pytest.raises(ValueError):
             await service.upsert_worker({"model_name": "model"})
+        # Prompt booleans are not coerced by truthiness.
+        with pytest.raises(ValueError, match="boolean"):
+            await service.select({"token_ids": [1, 2, 3, 4], "is_eagle": "false"})
+
+        class IteratesNegative(list):
+            def __iter__(self):
+                return iter([-1])
+
+        # Out-of-range or non-int ids keep the conversion's ValueError; a list subclass
+        # is converted through its own iterator.
+        for token_ids in [[1, -1], [1, 2**32], [1, "2"], IteratesNegative([1, 2])]:
+            with pytest.raises(ValueError, match="token_ids"):
+                await service.select({"token_ids": token_ids})
     finally:
         service.shutdown()
 
@@ -267,7 +335,7 @@ async def test_selection_service_malformed_payload_raises_value_error(monkeypatc
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
 async def test_selection_service_not_ready_carries_status(monkeypatch):
-    monkeypatch.setenv("DYN_USE_KV_EVENTS", "false")
+    monkeypatch.setenv("DYN_ROUTER_USE_KV_EVENTS", "false")
     service = SelectionService(indexer_threads=1)
 
     try:

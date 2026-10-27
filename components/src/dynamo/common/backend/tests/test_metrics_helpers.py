@@ -21,9 +21,13 @@ class _StubMetrics:
     def __init__(self, auto_labels: dict[str, str] | None = None) -> None:
         self.auto_labels = dict(auto_labels) if auto_labels is not None else {}
         self.callbacks: list[Callable[[], str]] = []
+        self.typed_callbacks: list[Callable[[], list]] = []
 
     def register_prometheus_expfmt_callback(self, cb: Callable[[], str]) -> None:
         self.callbacks.append(cb)
+
+    def register_prometheus_typed_callback(self, cb: Callable[[], list]) -> None:
+        self.typed_callbacks.append(cb)
 
 
 def test_gather_with_labels_does_not_overwrite_existing_label():

@@ -91,10 +91,24 @@ class frontend_service:
 
     # Environment variable that overrides the default metric prefix
     METRICS_PREFIX_ENV = "DYN_METRICS_PREFIX"
+    # Whether the frontend can route at least one inference request for a model
+    MODEL_READY = "model_ready"
+    # Number of discovered physical workers by router admission state
+    ROUTER_WORKERS = "router_workers"
+    # Current router admission state and reason for a discovered worker
+    ROUTER_WORKER_STATE = "router_worker_state"
     # Total number of LLM requests processed
     REQUESTS_TOTAL = "requests_total"
     # Total number of LLM requests accepted by the frontend handler
     REQUESTS_STARTED_TOTAL = "requests_started_total"
+    # Admitted requests that have not produced an output token.
+    AWAITING_FIRST_TOKEN_REQUESTS = "awaiting_first_token_requests"
+    # Known prompt tokens in inflight requests, labeled by state.
+    INFLIGHT_INPUT_TOKENS = "inflight_input_tokens"
+    # Total known input tokens of admitted requests.
+    INPUT_TOKENS_TOTAL = "input_tokens_total"
+    # Total number of terminal semantic request failures.
+    FAILURES_TOTAL = "failures_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
     QUEUED_REQUESTS = "queued_requests"
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
@@ -113,6 +127,14 @@ class frontend_service:
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "kv_hit_rate"
+    # Raw cached prefix tokens on the best eligible worker at selection (per routing attempt)
+    KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL = (
+        "kv_best_eligible_cached_prefix_tokens_total"
+    )
+    # Raw cached prefix tokens on the selected worker and DP rank at selection
+    KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL = "kv_selected_cached_prefix_tokens_total"
+    # Backend-reported cache-hit tokens
+    KV_WORKER_REUSED_TOKENS_TOTAL = "kv_worker_reused_tokens_total"
     # Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     KV_TRANSFER_ESTIMATED_LATENCY_SECONDS = "kv_transfer_estimated_latency_seconds"
     # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
@@ -179,6 +201,9 @@ class frontend_service:
     # Active prefill tokens per worker
     # Gauge metric tracking current queued prefill tokens for each worker
     WORKER_ACTIVE_PREFILL_TOKENS = "worker_active_prefill_tokens"
+    # Active requests booked per worker, labeled by request phase
+    # Gauge metric split into `prefill` (not yet marked prefill-complete) and `decode`
+    WORKER_ACTIVE_REQUESTS = "worker_active_requests"
     # Last observed time to first token per worker (in seconds)
     # Gauge metric tracking the most recent TTFT for each worker
     WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS = "worker_last_time_to_first_token_seconds"
@@ -384,6 +409,10 @@ class labels:
     MODEL_NAME = "model_name"
     # Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     WORKER_TYPE = "worker_type"
+    # Label for where a booked request is in its lifecycle: "prefill" until it is
+    # marked prefill-complete, "decode" after. Distinct from `phase`, which names
+    # the serving leg ("aggregated", "prefill", "decode").
+    REQUEST_PHASE = "request_phase"
     # Label for router instance (discovery.instance_id() of the frontend)
     ROUTER_ID = "router_id"
 
@@ -418,9 +447,6 @@ class name_prefix:
     TRANSPORT = "dynamo_transport"
     # Prefix for work-handler transport breakdown metrics (backend side)
     WORK_HANDLER = "dynamo_work_handler"
-    # Prefix for request admission/rejection control metrics (e.g.
-    # `dynamo_rejection_request_total`).
-    REJECTION = "dynamo_rejection"
     # Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     TOKIO = "dynamo_tokio"
     # Prefix for per-phase routing overhead latency (hashing, scheduling).
@@ -464,6 +490,16 @@ class router:
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "router_kv_hit_rate"
+    # Raw cached prefix tokens on the best eligible worker (counter, per routing attempt)
+    KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL = (
+        "router_kv_best_eligible_cached_prefix_tokens_total"
+    )
+    # Raw cached prefix tokens on the selected worker and DP rank (counter)
+    KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL = (
+        "router_kv_selected_cached_prefix_tokens_total"
+    )
+    # Backend-reported cache-hit tokens (counter)
+    KV_WORKER_REUSED_TOKENS_TOTAL = "router_kv_worker_reused_tokens_total"
     # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
     SHARED_CACHE_HIT_RATE = "router_shared_cache_hit_rate"
     # Shared cache blocks beyond device overlap for the selected worker
@@ -531,6 +567,7 @@ class tokio_perf:
     WORKER_LOCAL_QUEUE_DEPTH = "worker_local_queue_depth"
     WORKER_STEAL_COUNT_TOTAL = "worker_steal_count_total"
     WORKER_OVERFLOW_COUNT_TOTAL = "worker_overflow_count_total"
+    QUEUE_OVERLOAD_WARNINGS_TOTAL = "queue_overload_warnings_total"
     BLOCKING_THREADS = "blocking_threads"
     BLOCKING_IDLE_THREADS = "blocking_idle_threads"
     BLOCKING_QUEUE_DEPTH = "blocking_queue_depth"
@@ -606,10 +643,8 @@ class work_handler:
     QUEUE_DEPTH = "queue_depth"
     # Configured capacity of the bounded work queue (gauge, static)
     QUEUE_CAPACITY = "queue_capacity"
-    # Total times enqueuing work failed because the dispatcher channel was closed.
-    # A full queue is shed via try_reserve() and counted under
-    # `dynamo_rejection_request_total`. Saturation shows up as rising `QUEUE_DEPTH`
-    # toward `QUEUE_CAPACITY`.
+    # Requests rejected before TCP worker dispatch because the bounded work queue
+    # was full or the dispatcher channel was closed.
     ENQUEUE_REJECTED_TOTAL = "enqueue_rejected_total"
     # Time spent waiting to acquire a worker-pool permit (histogram)
     PERMIT_WAIT_SECONDS = "permit_wait_seconds"

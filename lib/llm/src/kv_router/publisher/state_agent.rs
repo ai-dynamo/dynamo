@@ -31,7 +31,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use arc_swap::ArcSwap;
 use dynamo_kv_router::{
     identity::{CacheOwnerId, CanonicalIdentityMaterial, ExplicitIdentityMap, StableDpSlotId},
     indexer::{
@@ -40,32 +39,34 @@ use dynamo_kv_router::{
     },
     protocols::{
         KvCacheEvent, KvCacheEventData, PlacementEvent, ResidencyDomain, ResidencyOwner,
-        RouterEvent, StorageTier, WorkerWithDpRank,
+        RouterEvent, RouterHintSourceMetadata, StorageTier, WorkerWithDpRank,
     },
-    zmq_wire::{KvEventOwnership, ZmqEventNormalizer},
+    zmq_wire::{KvEventOwnership, ZmqEventFilterReason, ZmqEventNormalizer},
 };
 use dynamo_runtime::{
     component::{Component, Endpoint, StartedEndpoint},
     discovery::{DiscoveryInstance, DiscoverySpec, EventScope},
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::EventPublisher,
+    transports::event_plane::{EventPublisher, SharedZmqPublisherSocket},
 };
 use futures::StreamExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    direct_zmq_sub_pool::{DirectZmqSubPool, DirectZmqSubRegistration, RawZmqFrames},
     discovery::kv_state_agent::{
         KV_STATE_ATTACHMENT_TOPIC_V2, KV_STATE_EVENT_TOPIC_V2, KV_STATE_SOURCE_TOPIC_V2,
         KvStateAttachmentAdvertisement, KvStateIngressProtocol, KvStateSourceAdvertisement,
         attachment_record_id,
     },
     kv_router::{
-        WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint_with_status,
+        WORKER_KV_INDEXER_BUFFER_SIZE,
+        indexer::{KvStateAgentStatusCell, start_worker_kv_query_endpoint_with_status},
         metrics::kv_publisher_metrics,
     },
-    utils::zmq::{SubSocket, connect_sub_socket, multipart_message},
+    utils::zmq::{MultipartMessage, SubSocket, connect_sub_socket, multipart_message},
 };
 
 use super::{
@@ -98,6 +99,7 @@ pub fn resolve_stable_dp_slot_id(explicit_slot: &str) -> Result<StableDpSlotId> 
 pub struct KvStateAgentSlotConfig {
     pub cache_owner_id: CacheOwnerId,
     pub global_dp_rank: u32,
+    pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +107,7 @@ pub struct KvStateAgentVllmSource {
     pub endpoint: String,
     pub topic: String,
     pub image_token_id: Option<u32>,
+    pub video_token_id: Option<u32>,
     pub ingress_protocol: KvStateIngressProtocol,
 }
 
@@ -123,6 +126,18 @@ pub struct KvStateAgentConfig {
     pub slot: KvStateAgentSlotConfig,
     pub kv_block_size: u32,
     pub ingress_protocol: KvStateIngressProtocol,
+    /// Sockets shared with sibling slots; `Default::default()` binds dedicated ones.
+    pub sockets: KvStateAgentSockets,
+}
+
+/// Host-wide sockets a slot can share with its siblings.
+#[derive(Clone, Default)]
+pub struct KvStateAgentSockets {
+    /// Output PUB shared with other slots; `None` binds one for this slot.
+    pub(crate) event_socket: Option<SharedZmqPublisherSocket>,
+    /// Pooled raw-input SUBs; `None`, or a source without a topic, connects a
+    /// dedicated SUB.
+    pub(crate) raw_pool: Option<DirectZmqSubPool>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,7 +150,6 @@ struct Attachment {
     raw_topic: String,
     ingress_protocol: KvStateIngressProtocol,
     ready: bool,
-    cache_readable: bool,
     ready_at_outbound_cursor: u64,
 }
 
@@ -145,7 +159,6 @@ impl Attachment {
             generation: self.generation,
             worker: self.worker,
             ready: self.ready,
-            cache_readable: self.cache_readable,
             ready_at_outbound_cursor: self.ready_at_outbound_cursor,
         }
     }
@@ -219,12 +232,6 @@ enum ControlCommand {
         reason: &'static str,
         response: oneshot::Sender<()>,
     },
-    SetCacheReadable {
-        generation: u64,
-        readable: bool,
-        ready_at_outbound_cursor: Option<u64>,
-        response: oneshot::Sender<Result<Attachment>>,
-    },
     AbortAttach {
         generation: u64,
         response: oneshot::Sender<()>,
@@ -239,7 +246,7 @@ struct Coordinator<P> {
     local_indexer: Arc<LocalKvIndexer>,
     identity: KvStateAgentIdentity,
     slot_dp_rank: u32,
-    status: Arc<ArcSwap<KvStateAgentStatus>>,
+    status: Arc<KvStateAgentStatusCell>,
     withdrawal_tx: mpsc::UnboundedSender<u64>,
     control_rx: mpsc::Receiver<ControlCommand>,
     ingress_rx: mpsc::UnboundedReceiver<IngressBatch>,
@@ -318,17 +325,6 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 let _ = response.send(());
                 false
             }
-            ControlCommand::SetCacheReadable {
-                generation,
-                readable,
-                ready_at_outbound_cursor,
-                response,
-            } => {
-                let result =
-                    self.set_cache_readable(generation, readable, ready_at_outbound_cursor);
-                let _ = response.send(result);
-                false
-            }
             ControlCommand::AbortAttach {
                 generation,
                 response,
@@ -386,10 +382,9 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         attachment.ready_at_outbound_cursor = barrier_cursor;
         self.ingress_generation = Some(attachment.generation);
         attachment.ready = true;
-        // NOTE: Resetting this per-attachment cursor does not prove KVCR continuity.
-        // CacheOwner remains advisory in this foundation. Future authoritative
-        // reattachment must prove at-least-once cross-incarnation delivery before
-        // CacheOwner becomes ready.
+        // Resetting this per-attachment cursor does not prove KVCR continuity.
+        // CacheOwner remains advisory; authoritative cross-incarnation replay is
+        // separate from attachment readiness.
         self.source_cursor = SourceCursorState::default();
         self.attachment = Some(attachment.clone());
         self.publish_status();
@@ -455,31 +450,6 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         self.publish_status();
     }
 
-    fn set_cache_readable(
-        &mut self,
-        generation: u64,
-        readable: bool,
-        ready_at_outbound_cursor: Option<u64>,
-    ) -> Result<Attachment> {
-        let attachment = self
-            .attachment
-            .as_mut()
-            .context("KV state agent is not attached")?;
-        if attachment.generation != generation {
-            anyhow::bail!("stale attachment generation {generation}");
-        }
-        if readable && self.cache_owner_domain_failed {
-            anyhow::bail!("CacheOwner domain is unavailable for this publisher incarnation");
-        }
-        attachment.cache_readable = readable;
-        if let Some(cursor) = ready_at_outbound_cursor {
-            attachment.ready_at_outbound_cursor = cursor;
-        }
-        let attachment = attachment.clone();
-        self.publish_status();
-        Ok(attachment)
-    }
-
     async fn handle_ingress(&mut self, batch: IngressBatch) -> Result<()> {
         let valid_generation = self.ingress_generation == Some(batch.generation)
             && !self.worker_domain_failed
@@ -492,7 +462,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         }
 
         if batch.events.len() > MAX_INGRESS_EVENTS
-            || event_block_count(&batch.events) > MAX_INGRESS_BLOCKS
+            || (batch.events.len() > 1 && event_block_count(&batch.events) > MAX_INGRESS_BLOCKS)
         {
             self.fail_source(batch.generation, "oversized ingress envelope");
             anyhow::bail!("oversized ingress envelope");
@@ -640,6 +610,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 // This state agent creates CacheOwner events only from KVCR ownership.
                 ResidencyDomain::CacheOwner => EventDedupPolicy::SetLike,
             };
+            let session_id = placement_event.session_id;
             let mut event = placement_event.event;
             if event.dp_rank != self.slot_dp_rank {
                 self.fail_source(
@@ -698,7 +669,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             };
             self.next_outbound_id = next_outbound_id;
 
-            let router_event = match domain {
+            let mut router_event = match domain {
                 ResidencyDomain::Worker => RouterEvent::with_residency_domain(
                     event_worker_id,
                     event,
@@ -713,6 +684,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                     self.identity.cache_owner_id,
                 ),
             };
+            router_event.session_id = session_id;
             // NOTE: Stored/Removed intentionally use the legacy lossy contract: queue
             // admission and one best-effort publish, with no completion acknowledgement.
             // Cleared is stronger and completes every affected tier before publication.
@@ -768,7 +740,9 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 return Err(error).context("failed to publish reset barrier");
             }
         }
-        self.publish_status();
+        // Lifecycle changes publish the full snapshot; a chunk only advances
+        // the cursor, still after publish_events.
+        self.status.store_outbound_cursor(self.outbound_cursor());
         if let Some(error) = failed_barrier {
             return Err(error);
         }
@@ -794,10 +768,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             },
         )])
         .await?;
-        Ok(self
-            .next_outbound_id
-            .checked_sub(1)
-            .expect("outbound IDs start at one"))
+        Ok(self.outbound_cursor())
     }
 
     fn fail_domain(&mut self, generation: u64, domain: ResidencyDomain, reason: &'static str) {
@@ -822,15 +793,18 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
     }
 
     fn publish_status(&self) {
-        self.status.store(Arc::new(KvStateAgentStatus {
+        self.status.store(KvStateAgentStatus {
             identity: self.identity.clone(),
             attachment: self.attachment.as_ref().map(Attachment::status),
             cache_owner_ready: !self.cache_owner_domain_failed,
-            outbound_cursor: self
-                .next_outbound_id
-                .checked_sub(1)
-                .expect("next outbound ID is initialized to one"),
-        }));
+            outbound_cursor: self.outbound_cursor(),
+        });
+    }
+
+    fn outbound_cursor(&self) -> u64 {
+        self.next_outbound_id
+            .checked_sub(1)
+            .expect("next outbound ID is initialized to one")
     }
 }
 
@@ -845,7 +819,8 @@ pub struct KvStateAgent {
     identity: KvStateAgentIdentity,
     control_tx: mpsc::Sender<ControlCommand>,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
-    status: Arc<ArcSwap<KvStateAgentStatus>>,
+    raw_pool: Option<DirectZmqSubPool>,
+    status: Arc<KvStateAgentStatusCell>,
     cancel: CancellationToken,
     coordinator: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     withdrawal_supervisor: StdMutex<Option<tokio::task::JoinHandle<()>>>,
@@ -874,12 +849,24 @@ impl KvStateAgent {
         if config.ingress_protocol != KvStateIngressProtocol::VllmResidencyV1 {
             anyhow::bail!("external state-agent slots require vllm_residency_v1 ingress");
         }
-        let event_publisher = EventPublisher::for_endpoint_id(
-            config.endpoint.drt(),
-            &config.kv_state_endpoint,
-            KV_STATE_EVENT_TOPIC_V2,
-        )
-        .await
+        let event_publisher = match &config.sockets.event_socket {
+            Some(socket) => {
+                EventPublisher::for_endpoint_id_on_shared_socket(
+                    config.endpoint.drt(),
+                    &config.kv_state_endpoint,
+                    socket,
+                )
+                .await
+            }
+            None => {
+                EventPublisher::for_endpoint_id(
+                    config.endpoint.drt(),
+                    &config.kv_state_endpoint,
+                    KV_STATE_EVENT_TOPIC_V2,
+                )
+                .await
+            }
+        }
         .context("failed to create state-agent event publisher")?;
         let publisher_id = event_publisher.publisher_id();
         let identity = KvStateAgentIdentity {
@@ -887,7 +874,7 @@ impl KvStateAgent {
             publisher_id,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -917,6 +904,7 @@ impl KvStateAgent {
             protocol_version: identity.protocol_version,
             event_topic: KV_STATE_EVENT_TOPIC_V2.to_string(),
             recovery_control_target: recovery_target.clone(),
+            router_hint_source: config.slot.router_hint_source.clone(),
         };
         let persistent_source = match register_advertisement(
             &component,
@@ -988,6 +976,7 @@ impl KvStateAgent {
             identity,
             control_tx,
             ingress_tx,
+            raw_pool: config.sockets.raw_pool,
             status,
             cancel,
             coordinator: StdMutex::new(Some(coordinator)),
@@ -1008,7 +997,7 @@ impl KvStateAgent {
     }
 
     pub fn status(&self) -> Arc<KvStateAgentStatus> {
-        self.status.load_full()
+        Arc::new(self.status.load())
     }
 
     pub async fn quarantine_vllm(&self, generation: u64, reason: &'static str) -> Result<()> {
@@ -1041,6 +1030,9 @@ impl KvStateAgent {
     /// Attach a new engine incarnation after the prior attachment has fully detached.
     ///
     /// The API accepts a different WorkerId at the stable slot's global rank.
+    /// Publishing the attachment advertisement commits listener readiness: it
+    /// happens only after the raw event listener is established. Projection is
+    /// separately recovery-gated; do not add another readability phase.
     pub async fn attach(
         &self,
         config: KvStateAgentAttachmentConfig,
@@ -1076,7 +1068,6 @@ impl KvStateAgent {
                 raw_topic: vllm_source.topic.clone(),
                 ingress_protocol: vllm_source.ingress_protocol,
                 ready: false,
-                cache_readable: false,
                 ready_at_outbound_cursor: 0,
             },
         )
@@ -1088,6 +1079,8 @@ impl KvStateAgent {
             worker,
             attachment.generation,
             self.kv_block_size,
+            self.raw_pool.as_ref(),
+            self.identity.publisher_id,
             self.ingress_tx.clone(),
             self.control_tx.clone(),
             self.status.clone(),
@@ -1148,77 +1141,6 @@ impl KvStateAgent {
         *self.attachment.lock().await = Some(attachment.clone());
         *self.vllm_listener.lock().await = Some(listener);
         Ok(attachment.status())
-    }
-
-    /// Change CacheOwner projection eligibility for the current attachment.
-    ///
-    /// The false state is committed before discovery withdrawal. A true
-    /// advertisement is registered before the callable status becomes true,
-    /// so every cross-plane observation window fails closed.
-    pub async fn set_cache_readable(&self, generation: u64, readable: bool) -> Result<()> {
-        let _lifecycle = self.lifecycle.lock().await;
-        let current = self
-            .attachment
-            .lock()
-            .await
-            .clone()
-            .context("KV state agent is not attached")?;
-        if current.generation != generation {
-            anyhow::bail!("stale attachment generation {generation}");
-        }
-
-        let mut staged = send_cache_readable(
-            &self.control_tx,
-            generation,
-            false,
-            Some(self.status().outbound_cursor),
-        )
-        .await?;
-        unregister_required(
-            &self.component,
-            &self.attachment_source,
-            "attachment advertisement",
-            &self.cancel,
-        )
-        .await?;
-
-        staged.cache_readable = readable;
-        let advertisement =
-            attachment_advertisement(&self.identity, &self.recovery_target, &staged);
-        let source = match register_advertisement(
-            &self.component,
-            EventScope::Endpoint {
-                endpoint: self.kv_state_endpoint.clone(),
-            },
-            KV_STATE_ATTACHMENT_TOPIC_V2,
-            attachment_record_id(self.identity.publisher_id, generation),
-            &advertisement,
-        )
-        .await
-        {
-            Ok(source) => source,
-            Err(error) => {
-                return Err(error)
-                    .context("failed to replace CacheOwner readability advertisement");
-            }
-        };
-
-        if readable
-            && let Err(error) = send_cache_readable(
-                &self.control_tx,
-                generation,
-                true,
-                Some(staged.ready_at_outbound_cursor),
-            )
-            .await
-        {
-            let _ = self.component.drt().discovery().unregister(source).await;
-            return Err(error).context("failed to commit CacheOwner readability");
-        }
-        *self.attachment_source.lock().await = Some(source);
-        staged.cache_readable = readable;
-        *self.attachment.lock().await = Some(staged);
-        Ok(())
     }
 
     pub async fn detach(&self, generation: u64) -> Result<u64> {
@@ -1442,27 +1364,6 @@ async fn rollback_started_attach(
     Ok(())
 }
 
-async fn send_cache_readable(
-    control_tx: &mpsc::Sender<ControlCommand>,
-    generation: u64,
-    readable: bool,
-    ready_at_outbound_cursor: Option<u64>,
-) -> Result<Attachment> {
-    let (response, received) = oneshot::channel();
-    control_tx
-        .send(ControlCommand::SetCacheReadable {
-            generation,
-            readable,
-            ready_at_outbound_cursor,
-            response,
-        })
-        .await
-        .context("state-agent coordinator is closed")?;
-    received
-        .await
-        .context("state-agent readability update was dropped")?
-}
-
 fn attachment_advertisement(
     identity: &KvStateAgentIdentity,
     recovery_target: &dynamo_runtime::component::Instance,
@@ -1480,7 +1381,6 @@ fn attachment_advertisement(
         ingress_protocol: attachment.ingress_protocol,
         raw_zmq_endpoint: attachment.vllm_zmq_endpoint.clone(),
         raw_topic: attachment.raw_topic.clone(),
-        cache_readable: attachment.cache_readable,
         ready_at_outbound_cursor: attachment.ready_at_outbound_cursor,
     }
 }
@@ -1639,12 +1539,24 @@ async fn start_vllm_listener(
     worker: WorkerWithDpRank,
     generation: u64,
     kv_block_size: u32,
+    raw_pool: Option<&DirectZmqSubPool>,
+    route_id: u64,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
     control_tx: mpsc::Sender<ControlCommand>,
-    status: Arc<ArcSwap<KvStateAgentStatus>>,
+    status: Arc<KvStateAgentStatusCell>,
     cancel: CancellationToken,
 ) -> Result<VllmListener> {
-    let socket = connect_sub_socket(&source.endpoint, Some(&source.topic)).await?;
+    let socket = match raw_pool.filter(|_| !source.topic.is_empty()) {
+        Some(pool) => RawSubscription::Pooled(
+            pool.register_raw(route_id, &source.endpoint, &source.topic, generation)
+                .await?,
+        ),
+        // Without a pool, or for a source without a topic (vLLM workers that
+        // predate per-worker topics), connect a dedicated SUB with its own context.
+        None => RawSubscription::Dedicated(
+            connect_sub_socket(&source.endpoint, Some(&source.topic)).await?,
+        ),
+    };
     let listener_cancel = cancel.child_token();
     let task_cancel = listener_cancel.clone();
     let handle = component.drt().runtime().secondary().spawn(async move {
@@ -1694,9 +1606,35 @@ struct VllmListenerTask<'a> {
     generation: u64,
     kv_block_size: u32,
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
-    socket: SubSocket,
-    status: Arc<ArcSwap<KvStateAgentStatus>>,
+    socket: RawSubscription,
+    status: Arc<KvStateAgentStatusCell>,
     cancel: CancellationToken,
+}
+
+/// One attachment's raw KV stream: its own SUB, or a route on the host's pooled
+/// SUBs keyed by the source's topic.
+enum RawSubscription {
+    Dedicated(SubSocket),
+    Pooled(DirectZmqSubRegistration<RawZmqFrames>),
+}
+
+impl RawSubscription {
+    async fn next(&mut self) -> Option<Result<MultipartMessage>> {
+        match self {
+            Self::Dedicated(socket) => Some(
+                socket
+                    .next()
+                    .await?
+                    .map(multipart_message)
+                    .map_err(Into::into),
+            ),
+            Self::Pooled(route) => tokio::select! {
+                biased;
+                frames = route.receiver.recv() => frames.map(Ok),
+                _ = route.disconnected.cancelled() => None,
+            },
+        }
+    }
 }
 
 async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
@@ -1710,10 +1648,12 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
         status,
         cancel,
     } = task;
-    let mut framework_normalizer =
-        ZmqEventNormalizer::new(kv_block_size).with_image_token_id(source.image_token_id);
-    let mut cache_owner_normalizer =
-        ZmqEventNormalizer::new(kv_block_size).with_image_token_id(source.image_token_id);
+    let mut framework_normalizer = ZmqEventNormalizer::new(kv_block_size)
+        .with_image_token_id(source.image_token_id)
+        .with_video_token_id(source.video_token_id);
+    let mut cache_owner_normalizer = ZmqEventNormalizer::new(kv_block_size)
+        .with_image_token_id(source.image_token_id)
+        .with_video_token_id(source.video_token_id);
     loop {
         if !status
             .load()
@@ -1729,7 +1669,7 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
             frames = socket.next() => frames,
         };
         let frames = match frames {
-            Some(Ok(frames)) => multipart_message(frames),
+            Some(Ok(frames)) => frames,
             Some(Err(error)) => return Err(error).context("ZMQ receive failed"),
             None => anyhow::bail!("ZMQ stream ended"),
         };
@@ -1764,7 +1704,7 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
             &mut cache_owner_normalizer,
         );
 
-        let chunks = bounded_ingress_chunks(events)?;
+        let chunks = bounded_ingress_chunks(events);
         let final_chunk_index = chunks.len().saturating_sub(1);
         for (chunk_index, events) in chunks.into_iter().enumerate() {
             let envelope = IngressBatch {
@@ -1808,10 +1748,8 @@ fn normalize_raw_batch(
     framework_normalizer: &mut ZmqEventNormalizer,
     cache_owner_normalizer: &mut ZmqEventNormalizer,
 ) -> NormalizedRawBatch {
-    // KVCR is the placement authority. vLLM only enriches committed KVCR
-    // transitions with canonical routing metadata and serializes them on this
-    // versioned stream. Any failure on that path quarantines CacheOwner below;
-    // silently omitting a KVCR transition would make retained ownership lie.
+    // Index main-attention prefixes; vLLM still verifies all groups before reuse.
+    // Filter known non-main groups; unknown or incompatible owner events fault.
     let mut events = Vec::with_capacity(raw_events.len().min(MAX_INGRESS_EVENTS));
     let mut source_fault = None;
     let mut cache_owner_fault = None;
@@ -1842,21 +1780,16 @@ fn normalize_raw_batch(
             cache_owner_fault.get_or_insert("KVCR ownership has an unsupported storage medium");
             continue;
         }
-        if ownership == KvEventOwnership::Kvcr
-            && raw_event
-                .block_size()
-                .is_some_and(|size| size != kv_block_size as usize)
-        {
-            cache_owner_fault.get_or_insert("KVCR block size is incompatible");
-            continue;
-        }
-
         let normalizer = match ownership {
             KvEventOwnership::Framework => &mut *framework_normalizer,
             KvEventOwnership::Kvcr => &mut *cache_owner_normalizer,
         };
         let raw_event = match normalizer.preprocess_residency_with_reason(raw_event, worker) {
             Ok(raw_event) => raw_event,
+            Err(
+                ZmqEventFilterReason::NonMainAttentionKind
+                | ZmqEventFilterReason::NonMainAttentionGroup,
+            ) => continue,
             Err(reason) if ownership == KvEventOwnership::Kvcr => {
                 tracing::warn!(?reason, "KVCR event enrichment failed");
                 cache_owner_fault.get_or_insert("KVCR event enrichment failed");
@@ -1864,6 +1797,29 @@ fn normalize_raw_batch(
             }
             Err(_) => continue,
         };
+        if ownership == KvEventOwnership::Kvcr
+            && let dynamo_kv_router::zmq_wire::RawKvEvent::BlockStored {
+                block_size,
+                group_idx,
+                kv_cache_spec_kind,
+                medium,
+                ..
+            } = &raw_event
+            && *block_size != kv_block_size as usize
+        {
+            if cache_owner_fault.is_none() {
+                tracing::warn!(
+                    expected_block_size = kv_block_size,
+                    actual_block_size = *block_size,
+                    ?group_idx,
+                    ?kv_cache_spec_kind,
+                    ?medium,
+                    "Incompatible KVCR block geometry; withdrawing cache owner"
+                );
+            }
+            cache_owner_fault.get_or_insert("KVCR block size is incompatible");
+            continue;
+        }
         let Some(mut event) = normalizer.normalize_preprocessed(raw_event, 0, worker) else {
             if ownership == KvEventOwnership::Kvcr {
                 cache_owner_fault.get_or_insert("KVCR event canonicalization failed");
@@ -1895,18 +1851,17 @@ fn normalize_raw_batch(
     }
 }
 
-fn bounded_ingress_chunks(events: Vec<PlacementEvent>) -> Result<Vec<Vec<PlacementEvent>>> {
+/// Split a raw batch into bounded ingress chunks. An event larger than the block bound is
+/// still interpretable, so it travels alone rather than failing the source.
+fn bounded_ingress_chunks(events: Vec<PlacementEvent>) -> Vec<Vec<PlacementEvent>> {
     if events.is_empty() {
-        return Ok(vec![Vec::new()]);
+        return vec![Vec::new()];
     }
     let mut chunks = Vec::new();
     let mut current = Vec::new();
     let mut current_blocks = 0usize;
     for event in events {
         let blocks = event_block_count(std::slice::from_ref(&event));
-        if blocks > MAX_INGRESS_BLOCKS {
-            anyhow::bail!("one ingress event exceeds the block bound");
-        }
         if !current.is_empty()
             && (current.len() == MAX_INGRESS_EVENTS
                 || current_blocks.saturating_add(blocks) > MAX_INGRESS_BLOCKS)
@@ -1920,7 +1875,7 @@ fn bounded_ingress_chunks(events: Vec<PlacementEvent>) -> Result<Vec<Vec<Placeme
     if !current.is_empty() {
         chunks.push(current);
     }
-    Ok(chunks)
+    chunks
 }
 
 #[cfg(test)]
@@ -2013,7 +1968,6 @@ mod tests {
             raw_topic: "kv-events-v2".to_string(),
             ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
             ready: false,
-            cache_readable: true,
             ready_at_outbound_cursor: 0,
         }
     }
@@ -2047,6 +2001,34 @@ mod tests {
         )
     }
 
+    fn oversized_store(worker: WorkerWithDpRank) -> PlacementEvent {
+        let mut event = store(worker, ResidencyDomain::Worker, None, 1, 1);
+        let KvCacheEventData::Stored(data) = &mut event.event.data else {
+            unreachable!("store builds a Stored event");
+        };
+        let first_block = 1_000_000;
+        data.blocks = (first_block..=first_block + MAX_INGRESS_BLOCKS as u64)
+            .map(|block| KvCacheStoredBlockData {
+                block_hash: ExternalSequenceBlockHash(block),
+                tokens_hash: LocalBlockHash(block),
+                mm_extra_info: None,
+            })
+            .collect();
+        event
+    }
+
+    #[test]
+    fn oversized_event_travels_in_its_own_chunk() {
+        let worker = WorkerWithDpRank::new(17, 3);
+        let small = || store(worker, ResidencyDomain::Worker, None, 1, 1);
+        let chunks = bounded_ingress_chunks(vec![small(), oversized_store(worker), small()]);
+        let blocks: Vec<_> = chunks
+            .iter()
+            .map(|chunk| event_block_count(chunk))
+            .collect();
+        assert_eq!(blocks, [1, MAX_INGRESS_BLOCKS + 1, 1]);
+    }
+
     fn raw_store(medium: Option<&str>, ownership: Option<&str>, block: u64) -> RawKvEvent {
         RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(block)],
@@ -2063,6 +2045,149 @@ mod tests {
             kv_cache_spec_sliding_window: None,
             locality: None,
             ownership: ownership.map(str::to_owned),
+            session_id: None,
+        }
+    }
+
+    #[test]
+    fn hybrid_cache_owner_projection_keeps_full_attention() {
+        let worker = WorkerWithDpRank::new(17, 0);
+        for (medium, kind) in ["CPU", "STORAGE"]
+            .into_iter()
+            .flat_map(|medium| ["mamba", "sliding_window"].map(|kind| (medium, kind)))
+        {
+            let recurrent = serde_json::from_value(serde_json::json!({
+                "type": "BlockStored", "block_hashes": [100], "medium": medium,
+                "token_ids": [], "block_size": 0, "group_idx": 0,
+                "kv_cache_spec_kind": kind, "ownership": "kvcr"
+            }))
+            .unwrap();
+            let full = serde_json::from_value(serde_json::json!({
+                "type": "BlockStored", "block_hashes": [101], "medium": medium,
+                "token_ids": [10, 11, 12, 13], "block_size": 4, "group_idx": 3,
+                "kv_cache_spec_kind": "full_attention", "ownership": "kvcr"
+            }))
+            .unwrap();
+            let learned_removal = serde_json::from_value(serde_json::json!({
+                "type": "BlockRemoved", "block_hashes": [100], "medium": medium,
+                "group_idx": 0, "ownership": "kvcr"
+            }))
+            .unwrap();
+            let normalized = normalize_raw_batch(
+                vec![recurrent, full, learned_removal],
+                worker,
+                4,
+                KvStateIngressProtocol::VllmResidencyV1,
+                &mut ZmqEventNormalizer::new(4),
+                &mut ZmqEventNormalizer::new(4),
+            );
+            assert_eq!(normalized.cache_owner_fault, None);
+            assert_eq!(normalized.events.len(), 1);
+            assert_eq!(
+                normalized.events[0].placement.residency_domain,
+                ResidencyDomain::CacheOwner
+            );
+        }
+    }
+
+    #[test]
+    fn hybrid_removal_before_the_groups_first_store_is_forwarded() {
+        // A normalizer attached after the store knows no group kinds, and the
+        // removal carries none. KVCR residency outlives the attachment, so the
+        // removal must still reach the index ahead of the next store.
+        let worker = WorkerWithDpRank::new(17, 0);
+        for medium in ["CPU", "STORAGE"] {
+            let removal = serde_json::from_value(serde_json::json!({
+                "type": "BlockRemoved", "block_hashes": [100], "medium": medium,
+                "group_idx": 3, "ownership": "kvcr"
+            }))
+            .unwrap();
+            let store = serde_json::from_value(serde_json::json!({
+                "type": "BlockStored", "block_hashes": [101], "medium": medium,
+                "token_ids": [10, 11, 12, 13], "block_size": 4, "group_idx": 3,
+                "kv_cache_spec_kind": "full_attention", "ownership": "kvcr"
+            }))
+            .unwrap();
+            let normalized = normalize_raw_batch(
+                vec![removal, store],
+                worker,
+                4,
+                KvStateIngressProtocol::VllmResidencyV1,
+                &mut ZmqEventNormalizer::new(4),
+                &mut ZmqEventNormalizer::new(4),
+            );
+            assert_eq!(normalized.cache_owner_fault, None);
+            assert_eq!(normalized.events.len(), 2);
+            assert!(
+                normalized.events.iter().all(|event| {
+                    event.placement.residency_domain == ResidencyDomain::CacheOwner
+                })
+            );
+            let KvCacheEventData::Removed(removed) = &normalized.events[0].event.data else {
+                panic!("expected the removal first");
+            };
+            assert_eq!(removed.block_hashes, vec![ExternalSequenceBlockHash(100)]);
+            assert!(matches!(
+                normalized.events[1].event.data,
+                KvCacheEventData::Stored(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn hybrid_projection_still_rejects_bad_owner_events() {
+        for (kind, size, medium, reason) in [
+            // Bad full-attention geometry, on both lower tiers.
+            (
+                Some("full_attention"),
+                0,
+                "CPU",
+                "KVCR block size is incompatible",
+            ),
+            (
+                Some("full_attention"),
+                0,
+                "STORAGE",
+                "KVCR block size is incompatible",
+            ),
+            // An unknown kind, and a store whose group was never learned.
+            (Some("unknown"), 4, "CPU", "KVCR event enrichment failed"),
+            (
+                Some("unknown"),
+                4,
+                "STORAGE",
+                "KVCR event enrichment failed",
+            ),
+            (None, 4, "CPU", "KVCR event enrichment failed"),
+            (None, 4, "STORAGE", "KVCR event enrichment failed"),
+            // The medium gate runs before classification.
+            (
+                Some("mamba"),
+                0,
+                "GPU",
+                "KVCR ownership has an unsupported storage medium",
+            ),
+        ] {
+            let raw = serde_json::from_value(serde_json::json!({
+                "type": "BlockStored", "block_hashes": [100], "medium": medium,
+                "token_ids": [10, 11, 12, 13], "block_size": size, "group_idx": 3,
+                "kv_cache_spec_kind": kind, "ownership": "kvcr"
+            }))
+            .unwrap();
+            let normalized = normalize_raw_batch(
+                vec![raw],
+                WorkerWithDpRank::new(17, 0),
+                4,
+                KvStateIngressProtocol::VllmResidencyV1,
+                &mut ZmqEventNormalizer::new(4),
+                &mut ZmqEventNormalizer::new(4),
+            );
+            assert_eq!(
+                normalized.cache_owner_fault,
+                Some(reason),
+                "{kind:?} {medium}"
+            );
+            assert!(normalized.events.is_empty());
         }
     }
 
@@ -2250,7 +2375,7 @@ mod tests {
             publisher_id: 41,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -2449,7 +2574,7 @@ mod tests {
             publisher_id: 41,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -2606,7 +2731,7 @@ mod tests {
             publisher_id: 41,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -2732,7 +2857,7 @@ mod tests {
             publisher_id: 41,
             protocol_version: KvStateProtocolVersion::V2,
         };
-        let status = Arc::new(ArcSwap::from_pointee(KvStateAgentStatus {
+        let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
             cache_owner_ready: true,
@@ -2769,6 +2894,7 @@ mod tests {
         };
         let mut attachment = test_attachment(worker, "tcp://framework");
         coordinator.attach(&mut attachment).await.unwrap();
+        let attached_snapshot = status.snapshot();
         let stale_event = store(worker, ResidencyDomain::Worker, None, 99, 9);
         assert!(
             coordinator
@@ -2818,6 +2944,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status.load().outbound_cursor, 3);
+        assert!(status.load().attachment.as_ref().unwrap().ready);
+        assert!(
+            Arc::ptr_eq(&attached_snapshot, &status.snapshot()),
+            "ingress chunks advance the cursor without swapping the status snapshot"
+        );
+
+        // A single event above the chunk block bound is interpretable and must not fail closed.
+        coordinator
+            .handle_ingress(IngressBatch {
+                generation: attachment.generation,
+                source_cursor: 4,
+                chunk_index: 0,
+                final_chunk: true,
+                events: vec![oversized_store(worker)],
+                source_fault: None,
+                cache_owner_fault: None,
+            })
+            .await
+            .unwrap();
         assert!(status.load().attachment.as_ref().unwrap().ready);
     }
 }

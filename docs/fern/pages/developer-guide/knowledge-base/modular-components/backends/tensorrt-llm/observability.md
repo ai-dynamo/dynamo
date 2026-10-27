@@ -44,11 +44,30 @@ Launch a frontend and TensorRT-LLM backend to test metrics:
 # Start frontend (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
 $ python -m dynamo.frontend
 
-# Enable system metrics server on port 8081 and enable metrics collection
-$ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model <model_name> --publish-events-and-metrics
+# Enable system metrics server on port 8081 and TRT-LLM metrics collection
+$ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model <model_name> \
+    --publish-metrics
 ```
 
 **Note:** The `backend` must be set to `"pytorch"` for metrics collection (enforced in `components/src/dynamo/trtllm/main.py`). TensorRT-LLM's `MetricsCollector` integration has only been tested/validated with the PyTorch backend.
+
+`--publish-metrics` exposes metrics on this worker's own endpoint. It also
+publishes the per-rank used-block count that the frontend's optional
+`--active-decode-blocks-threshold` reads. The KV router's per-worker scoring
+(`worker_logit`) never reads that sample — it takes overlap from KV events and
+load from its own active-sequence tracking — so enabling `--publish-metrics`
+does not change KV-aware ranking. It is not inert, though: with that threshold
+set, the published count is OR-ed with the router's own decode-block estimate,
+and a worker marked overloaded leaves the candidate set until it recovers.
+
+Because the Planner's forward-pass metrics read the same iteration statistics,
+`--publish-metrics` publishes those too; `--fpm-trace` and
+`DYN_FORWARDPASS_METRIC_PORT`, the opt-in the other backends use, enable them
+without the Prometheus surface. KV-event publication is configured
+independently with `--publish-kv-events`. Use both publishing flags when a
+worker must publish both event and metric telemetry. For backward
+compatibility, the deprecated `--publish-events-and-metrics` flag continues to
+enable both controls for one release.
 
 Wait for the TensorRT-LLM worker to start, then send requests and check metrics:
 
@@ -138,7 +157,7 @@ TensorRT-LLM provides Prometheus metrics through the `MetricsCollector` class (s
 
 ### Additional Operational Metrics
 
-Dynamo adds the following operational metrics for TensorRT-LLM workers. These complement the engine's native metrics above with request-level observability that the engine does not provide. All metrics use the `trtllm_` prefix and are automatically enabled when `--publish-events-and-metrics` is set.
+Dynamo adds the following operational metrics for TensorRT-LLM workers. These complement the engine's native metrics above with request-level observability that the engine does not provide. All metrics use the `trtllm_` prefix. Enable their required iteration statistics with `--publish-metrics`.
 
 Metric name constants are defined in `lib/runtime/src/metrics/prometheus_names.rs` (`trtllm_additional` module).
 
@@ -211,7 +230,9 @@ TensorRT-LLM provides extensive performance data beyond the basic Prometheus met
 
 - **Prometheus Integration**: Uses the `MetricsCollector` class from `tensorrt_llm.metrics` (see [collector.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py))
 - **Dynamo Integration**: Uses `register_engine_metrics_callback()` function with `metric_prefix_filter=["trtllm_"]`
-- **Engine Configuration**: `return_perf_metrics` set to `True` when `--publish-events-and-metrics` is enabled
+- **Engine Configuration**: `LlmArgs.return_perf_metrics` remains `False`. It enables TensorRT-LLM's detailed per-step timing collector, whose `time_breakdown_metrics` payload Dynamo never reads and which costs measurable throughput. `--publish-metrics` and the forward-pass metrics opt-in each enable `enable_iter_perf_stats`: one stats stream feeds the Prometheus gauges, the worker-load publisher and the Planner's forward-pass metrics alike. `--publish-kv-events` alone leaves it off, because KV events do not need iteration statistics and collecting them costs per-iteration throughput.
+- **Per-request Metrics**: `SamplingParams.return_perf_metrics` is a separate switch that follows `--publish-metrics`. Token usage reporting, including `usage.prompt_tokens_details.cached_tokens`, is unaffected either way: it comes from the engine's own cached-token count, not from `request_perf_metrics`.
+- **Request Arrival Timestamp**: When engine-level metrics are off, TensorRT-LLM stamps request arrival during C++ request construction rather than at Python submission, so E2E latency, TTFT, and queue time exclude some submission and IPC time. Other request timing fields keep their existing anchors.
 - **Initialization**: Metrics appear after TensorRT-LLM engine initialization completes
 - **Metadata**: `MetricsCollector` initialized with model metadata (model name, engine type)
 

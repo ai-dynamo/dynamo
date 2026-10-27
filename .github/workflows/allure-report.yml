@@ -25,7 +25,7 @@ on:
 
 jobs:
   resolve-params:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Disabled: gh-pages branch bloated to ~1GB after 72 commits of Allure reports
     if: false
     # if: >-
@@ -62,7 +62,7 @@ jobs:
 
   generate-report:
     needs: resolve-params
-    uses: ./.github/workflows/generate-allure-report.yml
+    uses: $/.github/workflows/generate-allure-report.yml
     with:
       run_id: ${{ needs.resolve-params.outputs.run_id }}
       subdir: ${{ needs.resolve-params.outputs.subdir }}

@@ -5,17 +5,27 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from statistics import mean
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, Literal, cast
 
 from tqdm import tqdm  # type: ignore[import-untyped]
 
+from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.offline.trace_data import (
+    extract_metrics_from_mooncake,
+    extract_metrics_from_trace_paths,
+)
+
 from .presets import throughput_intervals
 
-if TYPE_CHECKING:
-    from dynamo.planner.config.planner_config import PlannerConfig
+logger = logging.getLogger(__name__)
+
+# Exception classes a predictor is allowed to raise from predict_next(); mirrors
+# BuiltinLoadPredict._predict_load, which logs them and yields no forecast.
+_PREDICTOR_ERRORS = (ArithmeticError, IndexError, RuntimeError, TypeError, ValueError)
 
 LOAD_PREDICTOR_PRESETS: dict[str, dict[str, Any]] = {
     "constant_last": {"family": "constant", "log1p": False},
@@ -76,11 +86,14 @@ LOAD_PREDICTOR_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 _DEFAULTS = {
-    "prophet_window_size": 50,
-    "q_level": 1.0,
-    "q_trend": 0.1,
-    "r": 10.0,
-    "min_points": 5,
+    name: PlannerConfig.model_fields[field].default
+    for name, field in {
+        "prophet_window_size": "prophet_window_size",
+        "q_level": "kalman_q_level",
+        "q_trend": "kalman_q_trend",
+        "r": "kalman_r",
+        "min_points": "kalman_min_points",
+    }.items()
 }
 _DEFAULT_PRESET = "constant_last"
 _VALID_FAMILIES = frozenset(
@@ -175,7 +188,9 @@ class LoadPredictorResult:
         }
 
 
-def _internal_preset(entry: str | dict[str, Any]) -> dict[str, Any]:
+def internal_preset(entry: str | dict[str, Any]) -> dict[str, Any]:
+    """Expand one predictor preset into the internal form the scorers take."""
+
     complete = complete_predictor_preset(entry)
     return {
         "family": complete["load_predictor"],
@@ -191,7 +206,7 @@ def _internal_preset(entry: str | dict[str, Any]) -> dict[str, Any]:
 def predictor_fields(entry: str | dict[str, Any]) -> dict[str, Any]:
     """Expand a winner into concrete PlannerConfig predictor fields."""
 
-    preset = _internal_preset(entry)
+    preset = internal_preset(entry)
     family = preset["family"]
     fields: dict[str, Any] = {
         "load_predictor": family,
@@ -212,8 +227,6 @@ def predictor_fields(entry: str | dict[str, Any]) -> dict[str, Any]:
 def build_windows(trace_path: str, interval_s: int) -> list[Window]:
     """Aggregate a Mooncake trace using the Planner's production trace utility."""
 
-    from dynamo.planner.offline.trace_data import extract_metrics_from_mooncake
-
     return [
         Window(
             float(metrics["request_count"]),
@@ -221,6 +234,27 @@ def build_windows(trace_path: str, interval_s: int) -> list[Window]:
             float(metrics["avg_osl"]),
         )
         for metrics in extract_metrics_from_mooncake(trace_path, interval_s)
+    ]
+
+
+def build_windows_from_trace_paths(
+    trace_paths: list[str],
+    trace_format: Literal["mooncake", "dynamo"],
+    interval_s: int,
+) -> list[Window]:
+    """Aggregate one resolved public traffic source into predictor windows."""
+
+    return [
+        Window(
+            float(metrics["request_count"]),
+            float(metrics["avg_isl"]),
+            float(metrics["avg_osl"]),
+        )
+        for metrics in extract_metrics_from_trace_paths(
+            trace_paths,
+            trace_format,
+            interval_s,
+        )
     ]
 
 
@@ -238,6 +272,11 @@ def window_loss(
 ) -> float:
     """Compute the existing weighted one-step-ahead forecast loss."""
 
+    # Clamp forecasts before forming the token products: two negative
+    # forecasts would otherwise multiply into a positive product that the
+    # clamp inside _error() never sees, scoring a doubly-wrong forecast
+    # better than a singly-wrong one.
+    n_hat, i_hat, o_hat = max(n_hat, 0.0), max(i_hat, 0.0), max(o_hat, 0.0)
     return (
         0.4 * _error(n_hat * i_hat, num_req * isl)
         + 0.4 * _error(n_hat * o_hat, num_req * osl)
@@ -275,26 +314,46 @@ def evaluate_preset(
     preset: dict[str, Any],
     interval_s: int,
     warmup: int,
+    *,
+    forecast_warmup: bool = True,
 ) -> float:
-    """Return mean one-step-ahead loss using the production predictor cadence."""
+    """Return mean one-step-ahead loss using the production predictor cadence.
+
+    The first ``warmup`` windows are observed but not scored. With
+    ``forecast_warmup=False`` they are not forecast either, as a predictor
+    swapped in on a warmup is prepared: a candidate then costs three
+    forecasts per scored window, and ARIMA selects its order once on all of
+    the warmup instead of at its fifth point.
+    """
 
     request_predictor, isl_predictor, osl_predictor = _new_predictors(
         preset, interval_s
     )
     losses: list[float] = []
     for index, window in enumerate(windows):
+        if index < warmup and not forecast_warmup:
+            request_predictor.add_data_point(window.num_req)
+            isl_predictor.add_data_point(window.isl)
+            osl_predictor.add_data_point(window.osl)
+            continue
         try:
             n_hat, i_hat, o_hat = (
                 request_predictor.predict_next(),
                 isl_predictor.predict_next(),
                 osl_predictor.predict_next(),
             )
-        except Exception:
-            n_hat, i_hat, o_hat = (
-                request_predictor.get_last_value(),
-                isl_predictor.get_last_value(),
-                osl_predictor.get_last_value(),
+        except _PREDICTOR_ERRORS as exc:
+            # In production this predictor would yield no forecast for the
+            # interval, so it must not be scored as if it had forecast the
+            # last value (ConstantPredictor's behaviour). Disqualify it;
+            # to_state() renders the inf loss as null.
+            logger.warning(
+                "load-predictor preset %s failed at window %d: %r; scoring as inf",
+                preset,
+                index,
+                exc,
             )
+            return math.inf
         if index >= warmup:
             losses.append(
                 window_loss(
@@ -314,7 +373,7 @@ def evaluate_preset(
 
 def _common_warmup(entries: list[str | dict[str, Any]], interval_s: int) -> int:
     minimum_points = [
-        _new_predictors(_internal_preset(entry), interval_s)[0].minimum_data_points
+        _new_predictors(internal_preset(entry), interval_s)[0].minimum_data_points
         for entry in entries
     ]
     return max(minimum_points) if minimum_points else 0
@@ -324,29 +383,72 @@ def _entry_label(entry: str | dict[str, Any], index: int) -> str:
     return entry if isinstance(entry, str) else f"custom_{index}"
 
 
+def distinct_predictor_candidates(
+    entries: list[str | dict[str, Any]],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Label and complete predictor candidates, dropping behavioural duplicates.
+
+    Returns ``(label, mapping)`` pairs: the label is the preset name, or
+    ``custom_<index>`` with the entry's position in ``entries`` (the
+    recommendation pre-sweep labels); the mapping holds every public predictor
+    knob. Two entries are duplicates when they give the same
+    ``predictor_fields``, that is the same planner predictor; the first one is
+    kept.
+    """
+
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    seen: set[tuple[tuple[str, Any], ...]] = set()
+    for index, entry in enumerate(entries):
+        key = tuple(sorted(predictor_fields(entry).items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(
+            (_entry_label(entry, index), complete_predictor_preset(entry))
+        )
+    return candidates
+
+
 def sweep_load_predictor(
     *,
     policies: list[str | dict[str, Any]],
     candidates: list[str | dict[str, Any]],
     trace_path: str | None,
     show_progress: bool,
+    trace_paths: list[str] | None = None,
+    trace_format: str | None = None,
 ) -> LoadPredictorResult:
     """Choose the best candidate independently for each scaling interval."""
 
     intervals = throughput_intervals(policies)
     if not intervals:
         return LoadPredictorResult(reason="no_throughput_scaling_candidate")
-    if trace_path is None:
+    if not candidates:
+        raise ValueError("load-predictor candidates must be nonempty")
+    fallback = candidates[0]
+    resolved_paths = list(
+        trace_paths or ([trace_path] if trace_path is not None else [])
+    )
+    temporal_format = trace_format or "mooncake"
+    if not resolved_paths or temporal_format not in {"mooncake", "dynamo"}:
         return LoadPredictorResult(
-            best_by_interval=dict.fromkeys(intervals, _DEFAULT_PRESET),
-            reason="static_workload_constant",
+            best_by_interval=dict.fromkeys(intervals, fallback),
+            reason="static_workload_configured_fallback",
         )
 
     result = LoadPredictorResult(reason="swept")
     labels = [_entry_label(entry, index) for index, entry in enumerate(candidates)]
     fallback_intervals: list[int] = []
     for interval_s in intervals:
-        windows = build_windows(trace_path, interval_s)
+        windows = (
+            build_windows(resolved_paths[0], interval_s)
+            if temporal_format == "mooncake" and len(resolved_paths) == 1
+            else build_windows_from_trace_paths(
+                resolved_paths,
+                cast(Literal["mooncake", "dynamo"], temporal_format),
+                interval_s,
+            )
+        )
         warmup = _common_warmup(candidates, interval_s)
         losses: dict[str, float] = {}
         best_entry: str | dict[str, Any] | None = None
@@ -362,7 +464,7 @@ def sweep_load_predictor(
             disable=not show_progress,
         )
         for label, entry in progress:
-            loss = evaluate_preset(windows, _internal_preset(entry), interval_s, warmup)
+            loss = evaluate_preset(windows, internal_preset(entry), interval_s, warmup)
             losses[label] = loss
             progress.set_postfix_str(f"{label}={loss:.3f}")
             if loss < best_loss:
@@ -370,11 +472,9 @@ def sweep_load_predictor(
                 best_entry = entry
         result.losses[interval_s] = losses
         if best_entry is None:
-            best_entry = _DEFAULT_PRESET
+            best_entry = fallback
             fallback_intervals.append(interval_s)
         result.best_by_interval[interval_s] = best_entry
     if fallback_intervals:
-        result.reason = (
-            f"swept; no_winner_fallback_{_DEFAULT_PRESET}@{fallback_intervals}"
-        )
+        result.reason = f"swept; no_winner_configured_fallback@{fallback_intervals}"
     return result

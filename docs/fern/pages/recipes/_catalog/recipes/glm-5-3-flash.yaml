@@ -1,0 +1,194 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: glm-5-3-flash
+title: GLM-5.3-Flash
+page: pages/recipes/model-recipes/glm-5-3-flash.mdx
+provider: zai
+model:
+  name: GLM-5.3-Flash
+  hf_id: zai-org/GLM-5.3-Flash
+  precision: FP8 (vLLM) or NVFP4 (SGLang)
+status: experimental
+targets:
+- id: vllm-agg-gb200
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 4
+  runtime:
+    framework: vllm
+    image: vllm/vllm-openai:glm53-flash
+  topology: aggregated
+  techniques:
+  - fp8
+  - bf16-kv-cache
+  - prefix-caching
+  - kv-aware-routing
+  - mnnvl
+  workload:
+    type: agentic
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+  deploy:
+    asset: recipes/glm-5.3-flash/vllm/agg-gb200-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-disagg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
+    framework: vllm
+    image: vllm/vllm-openai:glm53-flash
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - nixl-ucx
+  - fp8
+  - bf16-kv-cache
+  - mnnvl
+  workload:
+    type: agentic
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+  deploy:
+    asset: recipes/glm-5.3-flash/vllm/disagg-gb200-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-agg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 8
+  runtime:
+    framework: vllm
+    image: vllm/vllm-openai:glm53-flash
+  topology: aggregated
+  techniques:
+  - fp8
+  - bf16-kv-cache
+  - mtp-speculative-decode
+  - prefix-caching
+  - deepgemm
+  - flashmla-sparse
+  workload:
+    type: agentic
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+  deploy:
+    asset: recipes/glm-5.3-flash/vllm/agg-h200-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-disagg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 16
+  runtime:
+    framework: vllm
+    image: vllm/vllm-openai:glm53-flash
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - nixl-ucx
+  - fp8
+  - bf16-kv-cache
+  - mtp-speculative-decode
+  - prefix-caching
+  - deepgemm
+  - flashmla-sparse
+  workload:
+    type: agentic
+    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+  deploy:
+    asset: recipes/glm-5.3-flash/vllm/disagg-h200-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: sglang-agg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 4
+  runtime:
+    framework: sglang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
+  model:
+    hf_id: RadixArk/GLM-5.3-Flash-NVFP4
+    revision: f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
+    precision: NVFP4
+  topology: aggregated
+  techniques:
+  - nvfp4
+  - fp8-kv-cache
+  - eagle-speculative-decode
+  - replayssm
+  - hicache
+  workload:
+    type: agentic
+  deploy:
+    asset: recipes/glm-5.3-flash/sglang/agg-b200-agentic/deploy-nscale.yaml
+    kustomization: recipes/glm-5.3-flash/sglang/agg-b200-agentic/kustomize/overlays/nscale/kustomization.yaml
+  expected_performance:
+    available: false
+- id: sglang-agg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 4
+  runtime:
+    framework: sglang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
+  model:
+    hf_id: RadixArk/GLM-5.3-Flash-NVFP4
+    revision: f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
+    precision: NVFP4
+  topology: aggregated
+  techniques:
+  - nvfp4
+  - fp8-kv-cache
+  - eagle-speculative-decode
+  - replayssm
+  - hicache
+  - mnnvl
+  workload:
+    type: agentic
+  deploy:
+    asset: recipes/glm-5.3-flash/sglang/agg-gb200-agentic/deploy-gb200.yaml
+    kustomization: recipes/glm-5.3-flash/sglang/agg-gb200-agentic/kustomize/overlays/gb200/kustomization.yaml
+  expected_performance:
+    available: false
+- id: sglang-disagg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 12
+  runtime:
+    framework: sglang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-glm-5.3-flash-dev.1
+  model:
+    hf_id: RadixArk/GLM-5.3-Flash-NVFP4
+    revision: f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
+    precision: NVFP4
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - nvfp4
+  - fp8-kv-cache
+  - eagle-speculative-decode
+  - replayssm
+  - hicache
+  - mooncake
+  - mnnvl
+  workload:
+    type: agentic
+  deploy:
+    asset: recipes/glm-5.3-flash/sglang/disagg-gb200-agentic/deploy-gb200.yaml
+    kustomization: recipes/glm-5.3-flash/sglang/disagg-gb200-agentic/kustomize/overlays/gb200/kustomization.yaml
+  expected_performance:
+    available: false
+related_benchmarks: []
+maintainer: null
+gaps:
+- Published synthetic-acceptance measurements do not describe the default real-verification configurations.

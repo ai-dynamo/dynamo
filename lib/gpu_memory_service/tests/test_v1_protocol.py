@@ -7,7 +7,6 @@ import os
 import socket
 import struct
 
-import msgspec
 import pytest
 from _deps import HAS_GMS
 
@@ -17,6 +16,7 @@ if not HAS_GMS:
         allow_module_level=True,
     )
 
+import msgspec
 from gpu_memory_service.v1.client.session import _GMSClientSession
 from gpu_memory_service.v1.protocol import (
     Message,

@@ -36,7 +36,8 @@ Steps performed:
   5. syft scan the from_image (in memory; not persisted). Compute
      delta components = from.components - baseline.components by
      (name, version). This is what we'd redistribute on top of the
-     baseline.
+     baseline. Skipped when both refs resolve to the same digest: the
+     delta is empty by construction, so the baseline scan is reused.
   6. Run policy/validate.py against the delta. Any denied or UNKNOWN
      license fails the capture: engineer must add an override / exception,
      or pick a different from_image.
@@ -51,6 +52,11 @@ Flags:
   --skip-layer-prefix-check Escape hatch for vendors who squash layers.
                             Records the override in the manifest entry
                             for auditability. Use only with justification.
+  --prune-superseded        Drop rows for the same image+platform on an
+                            older tag, and delete the SBOM files nothing
+                            references any more. The upsert key includes
+                            from_tag, so without this a tag bump appends
+                            and leaves the previous tag's rows behind.
 
 Dependencies on the runner:
   - docker buildx (registry manifest resolution)
@@ -139,7 +145,7 @@ def resolve_platform_layers(ref: str, platform: str) -> list[str]:
             p = entry.get("platform", {}) or {}
             if p.get("os") == os_part and p.get("architecture") == arch_part:
                 # Fetch this platform's specific manifest.
-                repo = ref.rsplit(":", 1)[0]
+                repo = ref.split("@", 1)[0] if "@" in ref else ref.rsplit(":", 1)[0]
                 platform_ref = f"{repo}@{entry['digest']}"
                 manifest_raw = _imagetools_raw(platform_ref)
                 manifest = json.loads(manifest_raw)
@@ -506,8 +512,12 @@ def validate_delta(delta: list[dict], policy_path: Path) -> tuple[int, list[str]
 
 
 def _short_name(image: str) -> str:
-    """nvcr.io/nvidia/cuda-dl-base -> cuda-dl-base"""
-    return image.rsplit("/", 1)[-1]
+    """nvcr.io/nvidia/cuda-dl-base -> cuda-dl-base
+
+    Digest-pinned refs reach here as "<repo>@sha256" (split_ref keeps the
+    ref round-trippable as f"{image}:{tag}"), so drop that suffix too.
+    """
+    return image.rsplit("/", 1)[-1].split("@", 1)[0]
 
 
 def load_manifest(path: Path) -> dict:
@@ -537,6 +547,62 @@ def upsert_entry(manifest: dict, entry: dict) -> None:
     entries.append(entry)
 
 
+def prune_superseded(
+    manifest: dict, entry: dict, corpus_dir: Path, dry_run: bool = False
+) -> list[str]:
+    """Drop rows for `entry`'s (from_image, platform) that sit on an older tag.
+
+    upsert_entry keys on from_tag, so a tag bump appends instead of replacing and
+    the previous tag's rows survive. check_drift.py re-resolves every row against
+    the registry and counts a lookup failure as drift, so a superseded tag turns
+    the drift check red as soon as the vendor garbage-collects it.
+
+    Returns the SBOM filenames removed from the corpus.
+    """
+    entries = manifest.setdefault("entries", [])
+    key = (entry["from_image"], entry["from_tag"], entry["platform"])
+
+    def _superseded(e: dict) -> bool:
+        return (
+            e.get("from_image") == entry["from_image"]
+            and e.get("platform") == entry["platform"]
+            and e.get("from_tag") != entry["from_tag"]
+        )
+
+    def _fresh(e: dict) -> bool:
+        return (e.get("from_image"), e.get("from_tag"), e.get("platform")) == key
+
+    slots = [i for i, e in enumerate(entries) if _superseded(e)]
+    if not slots:
+        return []
+
+    kept = [e for e in entries if not _superseded(e) and not _fresh(e)]
+    # Reposition the fresh row into the first superseded row's slot so a refresh
+    # reads as an in-place edit instead of a delete plus an append at the end.
+    slot = sum(1 for e in entries[: slots[0]] if not _superseded(e) and not _fresh(e))
+    kept.insert(slot, entry)
+
+    # Only unlink an SBOM no surviving row still points at: one file commonly
+    # backs several rows (the cuda and ubuntu baselines each back multiple).
+    live = {e.get("baseline_sbom") for e in kept}
+    removed: list[str] = []
+    for name in sorted(
+        {e.get("baseline_sbom") for e in entries if _superseded(e)} - live
+    ):
+        if not name:
+            continue
+        path = corpus_dir / name
+        if not path.is_file():
+            continue
+        if not dry_run:
+            path.unlink()
+        removed.append(name)
+
+    if not dry_run:
+        manifest["entries"] = kept
+    return removed
+
+
 # ---- main capture orchestration ----------------------------------------------
 
 
@@ -559,6 +625,7 @@ def capture(
     reuse_cached_sbom: bool = False,
     from_sbom_cache_dir: Path | None = None,
     no_from_sbom_cache: bool = False,
+    prune_superseded_entries: bool = False,
 ) -> int:
     from_image, from_tag = split_ref(from_ref)
     baseline_image, baseline_tag = split_ref(baseline_ref)
@@ -658,7 +725,16 @@ def capture(
     # back-to-back invocations of this script, which is the slow path we
     # care about when iterating on overrides/exceptions.
     from_sbom = None
-    if not no_from_sbom_cache and from_cache_path.is_file():
+    if from_digest == baseline_digest:
+        # Same manifest on both sides (typical when the baseline IS the image
+        # we FROM), so the delta is empty by construction. Reuse the baseline
+        # scan rather than syft-ing the same image a second time.
+        logger.info(
+            "from-image and baseline resolve to the same digest; reusing the "
+            "baseline SBOM instead of re-scanning"
+        )
+        from_sbom = baseline_sbom
+    if from_sbom is None and not no_from_sbom_cache and from_cache_path.is_file():
         try:
             from_sbom = json.loads(from_cache_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -770,11 +846,23 @@ def capture(
     if dry_run:
         logger.info("--dry-run: not writing %s or manifest", sbom_path)
         logger.info("manifest entry would be:\n%s", json.dumps(entry, indent=2))
+        if prune_superseded_entries:
+            planned = prune_superseded(
+                load_manifest(manifest_path), entry, corpus_dir, dry_run=True
+            )
+            logger.info(
+                "--dry-run: would prune %d superseded SBOM(s): %s",
+                len(planned),
+                ", ".join(planned) or "none",
+            )
         return 0
 
     sbom_path.write_bytes(payload_bytes)
     manifest = load_manifest(manifest_path)
     upsert_entry(manifest, entry)
+    if prune_superseded_entries:
+        for name in prune_superseded(manifest, entry, corpus_dir):
+            logger.info("Pruned superseded baseline SBOM %s", name)
     save_manifest(manifest, manifest_path)
     logger.info("Wrote %s and updated %s", sbom_path, manifest_path)
     logger.info(
@@ -858,6 +946,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Disable the from-image SBOM cache entirely (do not read or write).",
     )
+    parser.add_argument(
+        "--prune-superseded",
+        action="store_true",
+        help=(
+            "After upserting, drop manifest rows for the same image+platform on "
+            "an older tag and delete the SBOM files nothing references any more. "
+            "Use on a tag bump, where the upsert key never matches the old row."
+        ),
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -879,6 +976,7 @@ def main(argv: list[str] | None = None) -> int:
             reuse_cached_sbom=args.reuse_cached_sbom,
             from_sbom_cache_dir=args.from_sbom_cache_dir,
             no_from_sbom_cache=args.no_from_sbom_cache,
+            prune_superseded_entries=args.prune_superseded,
         )
     except Exception:  # pragma: no cover
         logger.exception("Unhandled error during capture")

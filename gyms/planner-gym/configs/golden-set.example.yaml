@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Golden workload recipe. This file is intentionally trace-agnostic: provide
+# the base trace path, calibrated reference RPS, and seed to the builder CLI.
+schema_version: 1
+
+selection:
+  replacement: false
+  # Preserve complete sessions when the source exposes session IDs. Requests
+  # without a session ID are independent singletons.
+  session_policy: preserve
+  missing_session: singleton
+  max_count_error_fraction: 0.02
+  filters:
+    min_input_length: 1
+    min_output_length: 1
+    max_input_length: null
+    max_output_length: null
+    max_total_length: null
+
+arrival_process:
+  # Poisson retains realistic count variance. Use deterministic when isolating
+  # controller behavior from arrival-process noise.
+  type: poisson
+
+pools:
+  # Quantile boundaries can overlap when many requests tie. The builder rejects
+  # a composition workload if its named pools collapse to identical groups;
+  # inspect manifest phase medians to judge partial overlap and separation.
+  all:
+    type: all
+  input-heavy:
+    type: quantile
+    field: input_to_output_ratio
+    lower_quantile: 0.75
+  output-heavy:
+    type: quantile
+    field: output_to_input_ratio
+    lower_quantile: 0.75
+
+workloads:
+  - name: steady-near-capacity
+    description: Steady load below calibrated capacity; exposes oscillation and excess headroom.
+    phases:
+      - duration_s: 1800
+        load_factor: 0.85
+        pool: all
+
+  - name: step-and-recovery
+    description: Abrupt rise toward capacity followed by recovery; measures scale-up lag and scale-down discipline.
+    phases:
+      - duration_s: 900
+        load_factor: 0.40
+        pool: all
+      - duration_s: 1200
+        load_factor: 0.95
+        pool: all
+      - duration_s: 900
+        load_factor: 0.40
+        pool: all
+
+  - name: gradual-ramp
+    description: Slow ramp up, high plateau, and slow ramp down; tests forecasting and hysteresis.
+    phases:
+      - duration_s: 600
+        load_factor: 0.30
+        pool: all
+      - duration_s: 900
+        load_factor: [0.30, 0.95]
+        interpolation: linear
+        pool: all
+      - duration_s: 600
+        load_factor: 0.95
+        pool: all
+      - duration_s: 900
+        load_factor: [0.95, 0.30]
+        interpolation: linear
+        pool: all
+
+  - name: repeated-cycles
+    description: Repeated low/high cycles; reveals thrashing, stabilization-window effects, and repeatability.
+    repeat: 3
+    phases:
+      - duration_s: 600
+        load_factor: 0.35
+        pool: all
+      - duration_s: 600
+        load_factor: 0.90
+        pool: all
+
+  - name: composition-shift
+    # Quantiles are portable proxies for prefill/decode mix. They do not imply
+    # equal GPU demand; engine-specific cost normalization belongs in analysis.
+    description: Fixed arrival intensity while request composition shifts between input-dominant and output-dominant requests.
+    phases:
+      - duration_s: 1200
+        load_factor: 0.70
+        pool: input-heavy
+      - duration_s: 1200
+        load_factor: 0.70
+        pool: output-heavy
+      - duration_s: 1200
+        load_factor: 0.70
+        pool: input-heavy
+
+  - name: random-bursts
+    description: Seeded, irregular bursts over a low baseline; tests robustness away from hand-aligned transitions.
+    duration_s: 3600
+    baseline_load_factor: 0.35
+    pool: all
+    burst_overlay:
+      count: 8
+      width_s: [20, 90]
+      load_factor: [0.90, 1.20]
+      minimum_gap_s: 120

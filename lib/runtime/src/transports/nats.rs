@@ -19,19 +19,21 @@
 //!
 //! ## TLS
 //!
-//! A custom TLS config is applied when `NATS_TLS_CA_CERT_PATH` is set or
-//! `NATS_TLS_INSECURE` is truthy. When only the `tls://` URL scheme is used
-//! without explicit TLS env vars, async-nats handles TLS natively with system
-//! roots.
+//! A custom TLS config is applied when `NATS_TLS_CA_CERT_PATH` is set,
+//! `NATS_TLS_INSECURE` is truthy, or a client certificate is configured. When
+//! only the `tls://` URL scheme is used without explicit TLS env vars,
+//! async-nats handles TLS natively with system roots.
 //!
 //! - `NATS_TLS_CA_CERT_PATH`: path to the CA cert PEM used to verify the server
+//! - `NATS_TLS_CLIENT_CERT_PATH`: client cert PEM for mutual TLS (optional)
+//! - `NATS_TLS_CLIENT_KEY_PATH`: client key PEM for mutual TLS (optional)
 //! - `NATS_TLS_INSECURE`: set to a truthy value to skip certificate verification (dev only)
 use crate::metrics::MetricsHierarchy;
 use crate::protocols::EndpointId;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_nats::connection::State;
-use async_nats::{Subscriber, client, jetstream};
+use async_nats::{ConnectError, ConnectErrorKind, ConnectOptions, Subscriber, client, jetstream};
 use async_trait::async_trait;
 use bytes::Bytes;
 use derive_builder::Builder;
@@ -41,9 +43,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncRead;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 use validator::{Validate, ValidationError};
 
@@ -291,10 +295,22 @@ pub struct ClientOptions {
     #[builder(default)]
     auth: NatsAuth,
 
+    #[builder(default = "default_startup_connect_timeout()")]
+    startup_connect_timeout: Duration,
+
     /// Path to PEM CA certificate for TLS. When set, TLS is required and
     /// `NATS_SERVER` must use the `tls://` scheme.
     #[builder(default = "default_nats_tls_ca_cert_path()")]
     tls_ca_cert_path: Option<PathBuf>,
+
+    /// Path to PEM client certificate presented to the NATS server for mutual
+    /// TLS (mTLS). Must be set together with `tls_client_key_path`.
+    #[builder(default = "default_nats_tls_client_cert_path()")]
+    tls_client_cert_path: Option<PathBuf>,
+
+    /// Path to PEM client private key for mutual TLS (mTLS).
+    #[builder(default = "default_nats_tls_client_key_path()")]
+    tls_client_key_path: Option<PathBuf>,
 
     /// Skip TLS certificate verification. For development only.
     #[builder(default = "default_nats_tls_insecure()")]
@@ -325,6 +341,18 @@ fn default_nats_tls_ca_cert_path() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn default_nats_tls_client_cert_path() -> Option<PathBuf> {
+    std::env::var(env_nats::tls::NATS_TLS_CLIENT_CERT_PATH)
+        .ok()
+        .map(PathBuf::from)
+}
+
+fn default_nats_tls_client_key_path() -> Option<PathBuf> {
+    std::env::var(env_nats::tls::NATS_TLS_CLIENT_KEY_PATH)
+        .ok()
+        .map(PathBuf::from)
+}
+
 fn default_nats_tls_insecure() -> bool {
     crate::config::env_is_truthy(env_nats::tls::NATS_TLS_INSECURE)
 }
@@ -332,17 +360,176 @@ fn default_nats_tls_insecure() -> bool {
 // TODO(jthomson04): We really shouldn't be hardcoding this.
 const NATS_WORKER_THREADS: usize = 4;
 
+const DEFAULT_STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+const STARTUP_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(5);
+const STARTUP_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn startup_connect_timeout_from_value(value: Option<&str>) -> Duration {
+    match value {
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
+            Ok(_) => {
+                tracing::warn!(
+                    "{} must be >= 1; got 0. Falling back to {}.",
+                    env_nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
+                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
+                );
+                DEFAULT_STARTUP_CONNECT_TIMEOUT
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "Invalid {}='{}' ({error}). Falling back to {}.",
+                    env_nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
+                    raw,
+                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
+                );
+                DEFAULT_STARTUP_CONNECT_TIMEOUT
+            }
+        },
+        None => DEFAULT_STARTUP_CONNECT_TIMEOUT,
+    }
+}
+
+fn default_startup_connect_timeout() -> Duration {
+    startup_connect_timeout_from_value(
+        std::env::var(env_nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn is_retryable_connect_error(kind: ConnectErrorKind) -> bool {
+    matches!(
+        kind,
+        ConnectErrorKind::Dns | ConnectErrorKind::Io | ConnectErrorKind::TimedOut
+    )
+}
+
+async fn connect_with_startup_retry(
+    options: ConnectOptions,
+    server: String,
+    timeout: Duration,
+    token: CancellationToken,
+) -> Result<async_nats::Client> {
+    let deadline = time::Instant::now()
+        .checked_add(timeout)
+        .context("NATS startup connection timeout exceeds the supported duration")?;
+    let mut backoff = STARTUP_CONNECT_INITIAL_BACKOFF;
+    let mut attempts = 0;
+    let mut last_error: Option<anyhow::Error> = None;
+
+    loop {
+        if token.is_cancelled() {
+            anyhow::bail!("NATS startup connection cancelled");
+        }
+        let remaining = deadline.saturating_duration_since(time::Instant::now());
+        if remaining.is_zero() {
+            let message = format!(
+                "NATS startup connection timed out after {} seconds ({attempts} attempts)",
+                timeout.as_secs_f64()
+            );
+            return Err(match last_error {
+                Some(error) => error.context(message),
+                None => anyhow::anyhow!(message),
+            });
+        }
+
+        attempts += 1;
+        let attempt = tokio::select! {
+            biased;
+
+            _ = token.cancelled() => {
+                anyhow::bail!("NATS startup connection cancelled");
+            }
+            result = time::timeout(
+                remaining.min(STARTUP_CONNECT_ATTEMPT_TIMEOUT),
+                options.clone().connect(server.as_str()),
+            ) => match result {
+                Ok(result) => result,
+                Err(error) => Err(ConnectError::with_source(ConnectErrorKind::TimedOut, error)),
+            },
+        };
+
+        let error = match attempt {
+            Ok(client) => {
+                if attempts > 1 {
+                    tracing::info!(attempts, "NATS startup connection established after retry");
+                }
+                return Ok(client);
+            }
+            Err(error) => error,
+        };
+        let kind = error.kind();
+        if !is_retryable_connect_error(kind) {
+            return Err(anyhow::Error::new(error).context("Failed to connect to NATS"));
+        }
+        last_error = Some(anyhow::Error::new(error));
+        let remaining = deadline.saturating_duration_since(time::Instant::now());
+        let delay = backoff.min(remaining);
+        tracing::warn!(
+            attempt = attempts,
+            error_kind = ?kind,
+            remaining = ?remaining,
+            retry_in = ?delay,
+            "NATS not reachable yet; retrying startup connection"
+        );
+
+        tokio::select! {
+            biased;
+
+            _ = token.cancelled() => {
+                anyhow::bail!("NATS startup connection cancelled");
+            }
+            _ = time::sleep(delay) => {}
+        }
+        backoff = backoff.saturating_mul(2).min(STARTUP_CONNECT_MAX_BACKOFF);
+    }
+}
+
 impl ClientOptions {
     /// Create a new [`ClientOptionsBuilder`]
     pub fn builder() -> ClientOptionsBuilder {
         ClientOptionsBuilder::default()
     }
 
-    /// Validate the config and attempt to connection to the NATS server
+    /// Validate the config and connect to NATS within the startup timeout.
     pub async fn connect(self) -> Result<Client> {
+        self.connect_with_cancellation(CancellationToken::new())
+            .await
+    }
+
+    /// Connect to NATS within the startup timeout, stopping when the token is cancelled.
+    pub async fn connect_with_cancellation(self, token: CancellationToken) -> Result<Client> {
         self.validate()?;
 
-        let custom_tls = self.tls_ca_cert_path.is_some() || self.tls_insecure;
+        // Client cert and key must be set together to present a client identity.
+        if self.tls_client_cert_path.is_some() != self.tls_client_key_path.is_some() {
+            anyhow::bail!(
+                "Both {} and {} must be set together to enable NATS mTLS",
+                env_nats::tls::NATS_TLS_CLIENT_CERT_PATH,
+                env_nats::tls::NATS_TLS_CLIENT_KEY_PATH,
+            );
+        }
+
+        // A client identity requires a CA (or insecure) so the server can still
+        // be verified; otherwise the root store would be empty and verification
+        // would fail with an opaque error.
+        if self.tls_client_cert_path.is_some()
+            && self.tls_ca_cert_path.is_none()
+            && !self.tls_insecure
+        {
+            anyhow::bail!(
+                "{} requires {} (or {}) to also be set",
+                env_nats::tls::NATS_TLS_CLIENT_CERT_PATH,
+                env_nats::tls::NATS_TLS_CA_CERT_PATH,
+                env_nats::tls::NATS_TLS_INSECURE,
+            );
+        }
+
+        let custom_tls = self.tls_ca_cert_path.is_some()
+            || self.tls_insecure
+            || self.tls_client_cert_path.is_some();
         let tls_url = self.server.starts_with("tls://");
 
         // Custom TLS settings imply an encrypted connection, so the server URL
@@ -350,8 +537,8 @@ impl ClientOptions {
         // error instead of silently forcing TLS onto a nats:// URL.
         if custom_tls && !tls_url {
             anyhow::bail!(
-                "NATS TLS is configured (NATS_TLS_CA_CERT_PATH or NATS_TLS_INSECURE) but \
-                 NATS_SERVER does not use the 'tls://' scheme: {}",
+                "NATS TLS is configured (NATS_TLS_CA_CERT_PATH, NATS_TLS_INSECURE, or a client \
+                 certificate) but NATS_SERVER does not use the 'tls://' scheme: {}",
                 self.server
             );
         }
@@ -387,6 +574,8 @@ impl ClientOptions {
             let tls_config = crate::tls_utils::client_tls_config(
                 self.tls_ca_cert_path.as_deref(),
                 self.tls_insecure,
+                self.tls_client_cert_path.as_deref(),
+                self.tls_client_key_path.as_deref(),
             )?;
             options = options.tls_client_config(tls_config).require_tls(true);
         } else if tls_url {
@@ -406,13 +595,10 @@ impl ClientOptions {
             None => options,
         };
 
+        // async-nats retains this timeout for steady-state reconnect attempts too.
+        let options = options.connection_timeout(STARTUP_CONNECT_ATTEMPT_TIMEOUT);
         let (client, _) = build_in_runtime(
-            async move {
-                options
-                    .connect(self.server)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible."))
-            },
+            connect_with_startup_retry(options, self.server, self.startup_connect_timeout, token),
             NATS_WORKER_THREADS,
         )
         .await?;
@@ -428,7 +614,10 @@ impl Default for ClientOptions {
         ClientOptions {
             server: default_server(),
             auth: NatsAuth::default(),
+            startup_connect_timeout: default_startup_connect_timeout(),
             tls_ca_cert_path: default_nats_tls_ca_cert_path(),
+            tls_client_cert_path: default_nats_tls_client_cert_path(),
+            tls_client_key_path: default_nats_tls_client_key_path(),
             tls_insecure: default_nats_tls_insecure(),
         }
     }
@@ -967,6 +1156,185 @@ mod tests {
     use figment::Jail;
     use serde::{Deserialize, Serialize};
 
+    #[test]
+    fn parses_startup_connect_timeout() {
+        for (value, expected) in [
+            (None, DEFAULT_STARTUP_CONNECT_TIMEOUT),
+            (Some("45"), Duration::from_secs(45)),
+            (Some("0"), DEFAULT_STARTUP_CONNECT_TIMEOUT),
+            (Some("invalid"), DEFAULT_STARTUP_CONNECT_TIMEOUT),
+        ] {
+            assert_eq!(startup_connect_timeout_from_value(value), expected);
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::connection_refused(false, 1200, ConnectErrorKind::Io)]
+    #[case::stalled_handshake(true, 6500, ConnectErrorKind::TimedOut)]
+    #[tokio::test]
+    async fn startup_connection_waits_for_deadline(
+        #[case] stalled_handshake: bool,
+        #[case] timeout_ms: u64,
+        #[case] expected_kind: ConnectErrorKind,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = format!("nats://{}", listener.local_addr().unwrap());
+        let (accepted, mut connections) = tokio::sync::mpsc::unbounded_channel();
+        let accept_task = if stalled_handshake {
+            Some(tokio::spawn(async move {
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    if accepted.send(stream).is_err() {
+                        break;
+                    }
+                }
+            }))
+        } else {
+            drop(listener);
+            None
+        };
+
+        let timeout = Duration::from_millis(timeout_ms);
+        let started = time::Instant::now();
+        let error = time::timeout(
+            timeout + Duration::from_secs(2),
+            connect_with_startup_retry(
+                ConnectOptions::new().connection_timeout(Duration::from_secs(60)),
+                server,
+                timeout,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("startup exceeded its deadline")
+        .unwrap_err();
+        if let Some(task) = accept_task {
+            task.abort();
+            assert!(connections.try_recv().is_ok());
+            assert!(connections.try_recv().is_ok());
+            assert!(connections.try_recv().is_err());
+        }
+        assert!(
+            error.to_string().contains(&format!(
+                "timed out after {} seconds (2 attempts)",
+                timeout.as_secs_f64()
+            )),
+            "{error:#}"
+        );
+        assert!(started.elapsed() >= timeout);
+        assert_eq!(
+            error.downcast_ref::<ConnectError>().unwrap().kind(),
+            expected_kind
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::attempt(true)]
+    #[case::backoff(false)]
+    #[tokio::test]
+    async fn cancellation_interrupts_startup(#[case] during_attempt: bool) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let options = ClientOptions::builder()
+            .server(format!("nats://{}", listener.local_addr().unwrap()))
+            .build()
+            .unwrap();
+        let listener = during_attempt.then_some(listener);
+        let token = CancellationToken::new();
+        let connection = tokio::spawn(options.connect_with_cancellation(token.clone()));
+        if let Some(listener) = listener {
+            let (_stream, _) = time::timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            token.cancel();
+        } else {
+            time::sleep(Duration::from_millis(100)).await;
+            assert!(!connection.is_finished());
+            token.cancel();
+        }
+        let result = time::timeout(Duration::from_millis(500), connection)
+            .await
+            .unwrap()
+            .unwrap();
+        match result {
+            Err(error) => assert_eq!(error.to_string(), "NATS startup connection cancelled"),
+            Ok(_) => panic!("cancelled connection unexpectedly succeeded"),
+        }
+    }
+
+    #[tokio::test]
+    async fn authorization_failure_does_not_retry() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = format!("nats://{}", listener.local_addr().unwrap());
+        let accept_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"INFO {}\r\n").await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            assert!(line.starts_with("CONNECT "));
+            stream
+                .get_mut()
+                .write_all(b"-ERR 'Authorization Violation'\r\n")
+                .await
+                .unwrap();
+        });
+        let error = time::timeout(
+            Duration::from_millis(500),
+            connect_with_startup_retry(
+                ConnectOptions::new(),
+                server,
+                DEFAULT_STARTUP_CONNECT_TIMEOUT,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        accept_task.await.unwrap();
+        assert_eq!(
+            error.downcast_ref::<ConnectError>().unwrap().kind(),
+            ConnectErrorKind::AuthorizationViolation
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_connection_recovers_after_failed_handshake() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let options = ClientOptions::builder()
+            .server(format!("nats://{}", listener.local_addr().unwrap()))
+            .startup_connect_timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            drop(first);
+
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"INFO {}\r\n").await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            assert!(line.starts_with("CONNECT "));
+            line.clear();
+            stream.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "PING\r\n");
+            stream.get_mut().write_all(b"PONG\r\n").await.unwrap();
+            stream
+        });
+
+        let client = time::timeout(Duration::from_secs(4), options.connect())
+            .await
+            .expect("startup did not recover")
+            .expect("startup connection failed");
+        let _stream = server.await.unwrap();
+        assert_eq!(client.client.connection_state(), State::Connected);
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     struct TestData {
         id: u32,
@@ -1106,6 +1474,69 @@ mod tests {
             .build()
             .unwrap();
         assert_scheme_error(opts.connect().await, "nats:// + insecure");
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn test_nats_mtls_client_cert_from_env() {
+        Jail::expect_with(|jail| {
+            jail.set_env(env_nats::NATS_SERVER, "tls://localhost:4222");
+            jail.set_env(env_nats::tls::NATS_TLS_CA_CERT_PATH, "/etc/certs/ca.pem");
+            jail.set_env(
+                env_nats::tls::NATS_TLS_CLIENT_CERT_PATH,
+                "/etc/certs/client.pem",
+            );
+            jail.set_env(
+                env_nats::tls::NATS_TLS_CLIENT_KEY_PATH,
+                "/etc/certs/client-key.pem",
+            );
+            let opts = ClientOptions::builder().build().unwrap();
+            assert_eq!(
+                opts.tls_client_cert_path,
+                Some(PathBuf::from("/etc/certs/client.pem"))
+            );
+            assert_eq!(
+                opts.tls_client_key_path,
+                Some(PathBuf::from("/etc/certs/client-key.pem"))
+            );
+            Ok(())
+        });
+    }
+
+    #[tokio::test]
+    async fn test_nats_mtls_client_cert_requires_ca() {
+        // Client cert/key set, tls:// URL, but no CA and not insecure → rejected.
+        let opts = ClientOptions::builder()
+            .server("tls://localhost:4222".to_string())
+            .tls_client_cert_path(Some(PathBuf::from("/tmp/client.pem")))
+            .tls_client_key_path(Some(PathBuf::from("/tmp/client-key.pem")))
+            .build()
+            .unwrap();
+        match opts.connect().await {
+            Err(e) => assert!(
+                e.to_string().contains("requires"),
+                "expected CA-requirement error, got: {e}"
+            ),
+            Ok(_) => panic!("expected error when client cert set without CA"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_nats_mtls_partial_client_identity_errors() {
+        // Client cert without key → rejected before connecting.
+        let opts = ClientOptions::builder()
+            .server("tls://localhost:4222".to_string())
+            .tls_ca_cert_path(Some(PathBuf::from("/tmp/ca.pem")))
+            .tls_client_cert_path(Some(PathBuf::from("/tmp/client.pem")))
+            .build()
+            .unwrap();
+        match opts.connect().await {
+            Err(e) => assert!(
+                e.to_string().contains("must be set together"),
+                "expected both-or-neither error, got: {e}"
+            ),
+            Ok(_) => panic!("expected error when client cert set without key"),
+        }
     }
 
     // Integration test for object store data operations using bincode

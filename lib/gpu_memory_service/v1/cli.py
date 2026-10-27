@@ -10,7 +10,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import ExitStack
 from threading import Event
 
-from gpu_memory_service.common.vmm import get_vmm
+from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.v1 import device as device_identity
 from gpu_memory_service.v1.checkpoint import GMSCheckpointLifecycle
 from gpu_memory_service.v1.device import get_socket_path
@@ -48,12 +48,13 @@ def run_servers(
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="GMS V1 rank-local sidecar",
+        description="GMS V1 single-device server",
         allow_abbrev=False,
     )
     parser.add_argument("--device", type=int, default=0)
     args = parser.parse_args(argv)
 
+    init_vmm(VMMDeviceType.CUDA)
     vmm = get_vmm()
     gpu_uuid = device_identity.get_device_uuid(args.device)
     with ExitStack() as stack:

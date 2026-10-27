@@ -10,7 +10,6 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
@@ -35,10 +34,9 @@ func GenerateInferencePool(
 	dgd *v1beta1.DynamoGraphDeployment,
 	componentName string,
 	eppServiceName string,
-	eppConfig *v1beta1.EPPConfig,
 ) (*gaiev1.InferencePool, error) {
-	poolName := GetPoolName(dgd.Name, eppConfig)
-	poolNamespace := GetPoolNamespace(dgd.Namespace, eppConfig)
+	poolName := GetPoolName(dgd.Name)
+	poolNamespace := GetPoolNamespace(dgd.Namespace)
 	component := dgd.GetComponentByName(componentName)
 	if component == nil {
 		return nil, fmt.Errorf("component %q not found", componentName)
@@ -51,14 +49,12 @@ func GenerateInferencePool(
 
 	// Build InferencePool using typed API
 	pool := &gaiev1.InferencePool{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      poolName,
-			Namespace: poolNamespace,
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-				consts.KubeLabelDynamoComponent:           componentName,
-				consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
-			},
+		Name:      poolName,
+		Namespace: poolNamespace,
+		Labels: map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+			consts.KubeLabelDynamoComponent:           componentName,
+			consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
 		},
 		Spec: gaiev1.InferencePoolSpec{
 			TargetPorts: []gaiev1.Port{
@@ -81,11 +77,11 @@ func GenerateInferencePool(
 }
 
 // GetPoolName returns the InferencePool name for a given DGD
-func GetPoolName(dgdName string, eppConfig *v1beta1.EPPConfig) string {
+func GetPoolName(dgdName string) string {
 	return fmt.Sprintf("%s-pool", dgdName)
 }
 
 // GetPoolNamespace returns the InferencePool namespace for a given DGD
-func GetPoolNamespace(dgdNamespace string, eppConfig *v1beta1.EPPConfig) string {
+func GetPoolNamespace(dgdNamespace string) string {
 	return dgdNamespace
 }

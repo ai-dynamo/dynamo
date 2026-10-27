@@ -44,6 +44,7 @@ Usage:
 
 Exits 1 with the failing page/selector pairs listed.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -68,11 +69,9 @@ CHECKS: list[tuple[str, str, str]] = [
     ("community", ".dynamo-community-page", "LandingStyles"),
     ("digest", ".dynamo-blog-art__grid", "BlogStyles"),
     ("reference/compatibility", ".dynref-panel", "ReferenceStyles"),
-    (
-        "recipes/feature-benchmarks/llama-3-3-70b-topology",
-        ".dynamo-benchmark-grid",
-        "RecipeStyles",
-    ),
+    # The Feature Benchmarks section landing (nav slug `benchmarks`, served
+    # from browse-all-benchmarks.mdx), not a detail page that can be retired.
+    ("recipes/benchmarks", ".dynamo-benchmark-grid", "RecipeStyles"),
 ]
 
 # Minified CSS keeps only mandatory whitespace, so match `.foo{` and `.foo,`
@@ -103,7 +102,7 @@ def url_from_base(base: str, path: str) -> str:
     origin = f"{parsed.scheme}://{parsed.netloc}"
     if origin not in ALLOWED_ORIGINS:
         raise SystemExit(
-            f"{origin} is not an allowed docs origin: " f"{sorted(ALLOWED_ORIGINS)}"
+            f"{origin} is not an allowed docs origin: {sorted(ALLOWED_ORIGINS)}"
         )
     return url
 

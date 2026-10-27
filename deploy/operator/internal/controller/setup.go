@@ -9,12 +9,12 @@ import (
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	lpxcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/lpx"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/scale"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -31,14 +31,11 @@ type DynamoComponentDeploymentSetupOptions struct {
 type DynamoGraphDeploymentSetupOptions struct {
 	SetupOptions
 	DockerSecretRetriever DockerSecretRetriever
-	ScaleClient           scale.ScalesGetter
-	RBACManager           RBACManager
 	SSHKeyManager         *secret.SSHKeyManager
 }
 
 type DynamoGraphDeploymentRequestSetupOptions struct {
 	SetupOptions
-	RBACManager             RBACManager
 	GPUDiscoveryCache       *gpu.GPUDiscoveryCache
 	GPUDiscovery            *gpu.GPUDiscovery
 	OperatorImage           string
@@ -85,6 +82,9 @@ func SetupDynamoComponentDeployment(mgr ctrl.Manager, opts DynamoComponentDeploy
 }
 
 func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetupOptions) error {
+	if err := lpxcontroller.Setup(mgr, opts.Config, opts.RuntimeConfig, opts.DockerSecretRetriever); err != nil {
+		return err
+	}
 	if err := (&DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorder("dynamographdeployment"),
@@ -92,9 +92,7 @@ func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetu
 		RuntimeConfig:         opts.RuntimeConfig,
 		RestConfig:            mgr.GetConfig(),
 		DockerSecretRetriever: opts.DockerSecretRetriever,
-		ScaleClient:           opts.ScaleClient,
 		SSHKeyManager:         opts.SSHKeyManager,
-		RBACManager:           opts.RBACManager,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeployment controller: %w", err)
 	}
@@ -125,7 +123,6 @@ func SetupDynamoGraphDeploymentRequest(mgr ctrl.Manager, opts DynamoGraphDeploym
 		GPUDiscovery:            opts.gpuDiscovery(),
 		OperatorImage:           opts.OperatorImage,
 		OperatorImagePullPolicy: opts.OperatorImagePullPolicy,
-		RBACManager:             opts.RBACManager,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest controller: %w", err)
 	}
@@ -141,21 +138,6 @@ func SetupDynamoModel(mgr ctrl.Manager, opts DynamoModelSetupOptions) error {
 		RuntimeConfig:  opts.RuntimeConfig,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoModel controller: %w", err)
-	}
-	return nil
-}
-
-// SetupDynamoCheckpoint always registers the reconciler so existing checkpoint finalizers can
-// converge when Checkpoint is disabled. CheckpointReconciler.SetupWithManager omits the external
-// PodSnapshot watch unless the resolved Checkpoint gate is enabled.
-func SetupDynamoCheckpoint(mgr ctrl.Manager, opts SetupOptions) error {
-	if err := (&CheckpointReconciler{
-		Client:        mgr.GetClient(),
-		Config:        opts.Config,
-		RuntimeConfig: opts.RuntimeConfig,
-		Recorder:      mgr.GetEventRecorder("checkpoint"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
 	}
 	return nil
 }

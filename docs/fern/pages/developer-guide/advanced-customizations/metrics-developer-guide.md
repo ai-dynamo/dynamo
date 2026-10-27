@@ -133,4 +133,4 @@ let counter = endpoint.metrics().create_counter(
 
 - [Metrics and Dashboards](../../cli/operations/observability.mdx)
 - [Metrics Catalog](../../reference/observability/metrics-catalog.mdx)
-- [Distributed Runtime Architecture](../knowledge-base/concepts/system-architecture/distributed-runtime.md)
+- [Distributed Runtime Architecture](../knowledge-base/concepts/system-architecture/architecture.md#distributed-runtime)

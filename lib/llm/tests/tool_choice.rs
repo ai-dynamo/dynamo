@@ -43,7 +43,9 @@ fn drive_moved_jail(
             a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                 inner,
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
+                tool_call_completion: Vec::new(),
             })
         })
 }
@@ -70,6 +72,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -140,6 +143,7 @@ fn build_backend_output(text: &str) -> BackendOutput {
         worker_trace_link: None,
         engine_data: None,
         routing_data: None,
+        jailed_text: None,
     }
 }
 
@@ -250,6 +254,7 @@ async fn test_required_tool_choice_parses_json_array() {
             .as_deref(),
         Some(r#"{"topic":"memory"}"#)
     );
+    assert_responses_preserves_forced_calls(response).await;
 }
 
 #[tokio::test]
@@ -312,6 +317,7 @@ async fn test_streaming_named_tool_buffers_until_finish() {
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         };
 
         let response = generator
@@ -383,6 +389,7 @@ async fn test_streaming_required_tool_parallel() {
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         };
 
         let response = generator
@@ -456,6 +463,7 @@ fn test_no_tool_choice_outputs_normal_text() {
         worker_trace_link: None,
         engine_data: None,
         routing_data: None,
+        jailed_text: None,
     };
 
     let response = generator
@@ -514,7 +522,9 @@ fn make_text_chunk(
             service_tier: None,
         },
         nvext: None,
+        prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 
@@ -589,39 +599,18 @@ async fn test_named_tool_with_parser_wrong_tool_is_filtered() {
 
     let responses = apply_jail_named_with_parser(chunks, "hermes", "get_weather").await;
 
-    // No response should contain a tool call for the wrong tool
-    for r in &responses {
-        if let Some(choice) = r.inner.choices.first()
-            && let Some(tool_calls) = &choice.delta.tool_calls
-        {
-            for tc in tool_calls {
-                let name = tc
-                    .function
-                    .as_ref()
-                    .and_then(|f| f.name.as_deref())
-                    .unwrap_or("");
-                assert_ne!(
-                    name, "search",
-                    "wrong tool 'search' should have been filtered by named_tool_filter"
-                );
-            }
-        }
-    }
+    assert!(
+        collect_tool_calls(&responses).is_empty(),
+        "the named-tool filter must drop every call when the model selects a different tool"
+    );
 }
 
 // ---------------------------------------------------------------------------
 // TOOLCALLING.11 — tool_choice × parser-name parametrisation (cross-parser tool_choice parametrisation work-item (tracked separately))
 //
 // The hermes tests above exercise TOOLCALLING.11 only for the hermes parser. These
-// tests exercise the same auto / required / named-correct / named-wrong axis
-// against `kimi_k2` and `deepseek_v4` so the chart cells move from `~`/`—`
-// to ✓ at the integration layer.
-//
-// Goal: hit the code path with a real parser-format payload regardless of
-// whether the resulting behavior is "correct" — and pin whatever comes out.
-// Where the jail today routes a parser+immediate-mode combo through a path
-// that drops the parser payload, the assertion records that fact rather
-// than expecting a specific outcome.
+// tests cover auto and named choices across the model-specific parser formats.
+// Kimi's native structural tags also provide a supported required-choice contract.
 // ---------------------------------------------------------------------------
 
 /// Helper: send a single text payload through the jail with both a parser
@@ -678,7 +667,9 @@ async fn apply_structural_tag_jail_with_parser_and_choice(
         a.data.map(|inner| NvCreateChatCompletionStreamResponse {
             inner,
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
         })
     })
     .collect()
@@ -803,13 +794,10 @@ async fn test_kimi_k2_tool_choice_named_wrong_tool_filtered() {
         apply_jail_with_parser_and_choice(KIMI_K2_SEARCH, "kimi_k2", named_choice("get_weather"))
             .await;
     let calls = collect_tool_calls(&responses);
-    for (name, _) in &calls {
-        assert_ne!(
-            name, "search",
-            "wrong tool must be filtered by named_tool_filter; got {:?}",
-            calls
-        );
-    }
+    assert!(
+        calls.is_empty(),
+        "wrong tool must be filtered by named_tool_filter; got {calls:?}"
+    );
 }
 
 // --- DSv4 × tool_choice variants ---
@@ -829,28 +817,6 @@ async fn test_deepseek_v4_tool_choice_auto() {
     assert_eq!(calls[0].0, "get_weather");
     let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
     assert_eq!(args["location"], "Paris");
-}
-
-/// `TOOLCALLING.11` — DSv4 + tool_choice=required. Same parser-vs-immediate
-/// conflict as Kimi above. Pin current behavior.
-///
-/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart. Flip when cross-parser tool_choice parametrisation work-item (tracked separately)
-/// reconciles parser path with immediate-jail mode.
-#[tokio::test]
-async fn test_deepseek_v4_tool_choice_required_pins_current_behavior() {
-    let responses = apply_jail_with_parser_and_choice(
-        DSV4_GET_WEATHER,
-        "deepseek_v4",
-        Some(ChatCompletionToolChoiceOption::Required),
-    )
-    .await;
-    let calls = collect_tool_calls(&responses);
-    assert!(
-        calls.len() <= 1,
-        "required + parser path should produce at most one call until the \
-         immediate-vs-parser conflict is resolved; got {:?}",
-        calls
-    );
 }
 
 /// `TOOLCALLING.11` — DSv4 + tool_choice=named with the **correct** tool name.
@@ -879,13 +845,10 @@ async fn test_deepseek_v4_tool_choice_named_wrong_tool_filtered() {
         apply_jail_with_parser_and_choice(DSV4_SEARCH, "deepseek_v4", named_choice("get_weather"))
             .await;
     let calls = collect_tool_calls(&responses);
-    for (name, _) in &calls {
-        assert_ne!(
-            name, "search",
-            "wrong tool must be filtered by named_tool_filter; got {:?}",
-            calls
-        );
-    }
+    assert!(
+        calls.is_empty(),
+        "wrong tool must be filtered by named_tool_filter; got {calls:?}"
+    );
 }
 
 // --- glm47 × tool_choice variants ---
@@ -912,28 +875,6 @@ async fn test_glm47_tool_choice_auto() {
     assert_eq!(args["location"], "Paris");
 }
 
-/// `TOOLCALLING.11` — glm47 + tool_choice=required. Same parser-vs-immediate
-/// conflict as the kimi_k2 / deepseek_v4 counterparts. Pin current behavior.
-///
-/// TODO(TOOLCALLING.11) — required + parser path is ill-defined; reconciled by
-/// the cross-parser tool_choice parametrisation work-item. Flip when fixed.
-#[tokio::test]
-async fn test_glm47_tool_choice_required_pins_current_behavior() {
-    let responses = apply_jail_with_parser_and_choice(
-        GLM47_GET_WEATHER,
-        "glm47",
-        Some(ChatCompletionToolChoiceOption::Required),
-    )
-    .await;
-    let calls = collect_tool_calls(&responses);
-    assert!(
-        calls.len() <= 1,
-        "required + parser path should produce at most one call until the \
-         immediate-vs-parser conflict is resolved; got {:?}",
-        calls
-    );
-}
-
 /// `TOOLCALLING.11` — glm47 + tool_choice=named with the **correct** tool name.
 #[tokio::test]
 async fn test_glm47_tool_choice_named_correct_tool_passes() {
@@ -956,13 +897,10 @@ async fn test_glm47_tool_choice_named_wrong_tool_filtered() {
     let responses =
         apply_jail_with_parser_and_choice(GLM47_SEARCH, "glm47", named_choice("get_weather")).await;
     let calls = collect_tool_calls(&responses);
-    for (name, _) in &calls {
-        assert_ne!(
-            name, "search",
-            "wrong tool must be filtered by named_tool_filter; got {:?}",
-            calls
-        );
-    }
+    assert!(
+        calls.is_empty(),
+        "wrong tool must be filtered by named_tool_filter; got {calls:?}"
+    );
 }
 
 // --- minimax_m2 × tool_choice variants ---
@@ -984,24 +922,6 @@ async fn test_minimax_m2_tool_choice_auto() {
     assert_eq!(calls[0].0, "get_weather");
     let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
     assert_eq!(args["location"], "Paris");
-}
-
-/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart. Flip when cross-parser
-/// tool_choice parametrisation work-item reconciles paths.
-#[tokio::test]
-async fn test_minimax_m2_tool_choice_required_pins_current_behavior() {
-    let responses = apply_jail_with_parser_and_choice(
-        MINIMAX_M2_GET_WEATHER,
-        "minimax_m2",
-        Some(ChatCompletionToolChoiceOption::Required),
-    )
-    .await;
-    let calls = collect_tool_calls(&responses);
-    assert!(
-        calls.len() <= 1,
-        "required + parser path should produce at most one call; got {:?}",
-        calls
-    );
 }
 
 #[tokio::test]
@@ -1031,13 +951,10 @@ async fn test_minimax_m2_tool_choice_named_wrong_tool_filtered() {
     )
     .await;
     let calls = collect_tool_calls(&responses);
-    for (name, _) in &calls {
-        assert_ne!(
-            name, "search",
-            "wrong tool must be filtered; got {:?}",
-            calls
-        );
-    }
+    assert!(
+        calls.is_empty(),
+        "wrong tool must be filtered; got {calls:?}"
+    );
 }
 
 // --- qwen3_coder × tool_choice variants ---
@@ -1060,23 +977,6 @@ async fn test_qwen3_coder_tool_choice_auto() {
     assert_eq!(args["location"], "Paris");
 }
 
-/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart.
-#[tokio::test]
-async fn test_qwen3_coder_tool_choice_required_pins_current_behavior() {
-    let responses = apply_jail_with_parser_and_choice(
-        QWEN3_GET_WEATHER,
-        "qwen3_coder",
-        Some(ChatCompletionToolChoiceOption::Required),
-    )
-    .await;
-    let calls = collect_tool_calls(&responses);
-    assert!(
-        calls.len() <= 1,
-        "required + parser path should produce at most one call; got {:?}",
-        calls
-    );
-}
-
 #[tokio::test]
 async fn test_qwen3_coder_tool_choice_named_correct_tool_passes() {
     let responses = apply_jail_with_parser_and_choice(
@@ -1095,19 +995,36 @@ async fn test_qwen3_coder_tool_choice_named_correct_tool_passes() {
     assert_eq!(calls[0].0, "get_weather");
 }
 
+const QWEN3_DOTTED: &str = "<tool_call>\n<function=my-tool.v2>\n<parameter=location>\nParis\n</parameter>\n</function>\n</tool_call>";
+
+#[tokio::test]
+async fn test_qwen3_coder_tool_choice_auto_dotted_name() {
+    let responses = apply_jail_with_parser_and_choice(QWEN3_DOTTED, "qwen3_coder", None).await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
+}
+
+#[tokio::test]
+async fn test_qwen3_coder_tool_choice_named_dotted_name_passes() {
+    let responses =
+        apply_jail_with_parser_and_choice(QWEN3_DOTTED, "qwen3_coder", named_choice("my-tool.v2"))
+            .await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
+}
+
 #[tokio::test]
 async fn test_qwen3_coder_tool_choice_named_wrong_tool_filtered() {
     let responses =
         apply_jail_with_parser_and_choice(QWEN3_SEARCH, "qwen3_coder", named_choice("get_weather"))
             .await;
     let calls = collect_tool_calls(&responses);
-    for (name, _) in &calls {
-        assert_ne!(
-            name, "search",
-            "wrong tool must be filtered; got {:?}",
-            calls
-        );
-    }
+    assert!(
+        calls.is_empty(),
+        "wrong tool must be filtered; got {calls:?}"
+    );
 }
 
 // --- nemotron_deci × tool_choice variants ---
@@ -1131,23 +1048,6 @@ async fn test_nemotron_deci_tool_choice_auto() {
     assert_eq!(calls[0].0, "get_weather");
     let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
     assert_eq!(args["location"], "Paris");
-}
-
-/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart.
-#[tokio::test]
-async fn test_nemotron_deci_tool_choice_required_pins_current_behavior() {
-    let responses = apply_jail_with_parser_and_choice(
-        NEMOTRON_DECI_GET_WEATHER,
-        "nemotron_deci",
-        Some(ChatCompletionToolChoiceOption::Required),
-    )
-    .await;
-    let calls = collect_tool_calls(&responses);
-    assert!(
-        calls.len() <= 1,
-        "required + parser path should produce at most one call; got {:?}",
-        calls
-    );
 }
 
 #[tokio::test]
@@ -1177,19 +1077,17 @@ async fn test_nemotron_deci_tool_choice_named_wrong_tool_filtered() {
     )
     .await;
     let calls = collect_tool_calls(&responses);
-    for (name, _) in &calls {
-        assert_ne!(
-            name, "search",
-            "wrong tool must be filtered; got {:?}",
-            calls
-        );
-    }
+    assert!(
+        calls.is_empty(),
+        "wrong tool must be filtered; got {calls:?}"
+    );
 }
 
 // --- harmony (gpt-oss) × tool_choice variants ---
 
 const HARMONY_GET_WEATHER: &str = "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{\"location\":\"Paris\"}<|call|>";
 const HARMONY_SEARCH: &str = "<|channel|>commentary to=functions.search <|constrain|>json<|message|>{\"query\":\"Paris weather\"}<|call|>";
+const HARMONY_DOTTED: &str = "<|channel|>commentary to=functions.my-tool.v2 <|constrain|>json<|message|>{\"location\":\"Paris\"}<|call|>";
 
 #[tokio::test]
 async fn test_harmony_tool_choice_auto() {
@@ -1206,21 +1104,22 @@ async fn test_harmony_tool_choice_auto() {
     assert_eq!(args["location"], "Paris");
 }
 
-/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart.
 #[tokio::test]
-async fn test_harmony_tool_choice_required_pins_current_behavior() {
-    let responses = apply_jail_with_parser_and_choice(
-        HARMONY_GET_WEATHER,
-        "harmony",
-        Some(ChatCompletionToolChoiceOption::Required),
-    )
-    .await;
+async fn test_harmony_tool_choice_auto_dotted_name() {
+    let responses = apply_jail_with_parser_and_choice(HARMONY_DOTTED, "harmony", None).await;
     let calls = collect_tool_calls(&responses);
-    assert!(
-        calls.len() <= 1,
-        "required + parser path should produce at most one call; got {:?}",
-        calls
-    );
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
+}
+
+#[tokio::test]
+async fn test_harmony_tool_choice_named_dotted_name_passes() {
+    let responses =
+        apply_jail_with_parser_and_choice(HARMONY_DOTTED, "harmony", named_choice("my-tool.v2"))
+            .await;
+    let calls = collect_tool_calls(&responses);
+    assert_eq!(calls.len(), 1, "got {calls:?}");
+    assert_eq!(calls[0].0, "my-tool.v2");
 }
 
 #[tokio::test]
@@ -1247,11 +1146,41 @@ async fn test_harmony_tool_choice_named_wrong_tool_filtered() {
         apply_jail_with_parser_and_choice(HARMONY_SEARCH, "harmony", named_choice("get_weather"))
             .await;
     let calls = collect_tool_calls(&responses);
-    for (name, _) in &calls {
-        assert_ne!(
-            name, "search",
-            "wrong tool must be filtered; got {:?}",
-            calls
-        );
+    assert!(
+        calls.is_empty(),
+        "wrong tool must be filtered; got {calls:?}"
+    );
+}
+
+async fn assert_responses_preserves_forced_calls(response: NvCreateChatCompletionStreamResponse) {
+    use dynamo_llm::protocols::{
+        Annotated,
+        openai::{
+            ParsingOptions,
+            chat_completions::{
+                NvCreateChatCompletionResponse, aggregator::ChatCompletionAggregator,
+            },
+            responses::{ResponseParams, chat_completion_to_response},
+        },
+    };
+    use dynamo_protocols::types::responses::OutputItem;
+
+    let expected = response.inner.choices[0].delta.tool_calls.clone().unwrap();
+    let chat = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([Annotated::from_data(response)]),
+        ParsingOptions::default(),
+    )
+    .await
+    .unwrap();
+    let response = chat_completion_to_response(chat, &ResponseParams::default(), None).unwrap();
+    assert_eq!(response.inner.output.len(), expected.len());
+    for (item, expected) in response.inner.output.iter().zip(expected) {
+        let OutputItem::FunctionCall(call) = item else {
+            panic!("expected a guided tool call without a model parser");
+        };
+        assert_eq!(Some(&call.call_id), expected.id.as_ref());
+        let function = expected.function.unwrap();
+        assert_eq!(Some(call.name.as_str()), function.name.as_deref());
+        assert_eq!(Some(call.arguments.as_str()), function.arguments.as_deref());
     }
 }

@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
+    Component,
     Config,
     append_argument,
     break_arguments,
@@ -18,6 +19,7 @@ from dynamo.profiler.utils.config import (
     get_worker_component_from_config,
     remove_valued_arguments,
     set_argument_value,
+    set_unique_argument_value,
     setup_worker_component_resources,
     update_image,
     validate_and_get_worker_args,
@@ -63,10 +65,30 @@ def _has_arg(args: list[str], key: str) -> bool:
     return any(arg == key or arg.startswith(f"{key}=") for arg in args)
 
 
+# SGLang 0.5.21 removed these aliases, which argparse now rejects as ambiguous;
+# generator templates still emit them, so map each to the -decode form it meant.
+_LEGACY_CUDA_GRAPH_ARGS = {
+    "--cuda-graph-bs": "--cuda-graph-bs-decode",
+    "--cuda-graph-max-bs": "--cuda-graph-max-bs-decode",
+}
+
+
+def _rename_legacy_cuda_graph_args(args: list[str]) -> list[str]:
+    renamed: list[str] = []
+    for arg in break_arguments(args):
+        name, sep, value = arg.partition("=")
+        new_name = _LEGACY_CUDA_GRAPH_ARGS.get(name)
+        if new_name is not None:
+            logger.info("Renaming removed SGLang arg %s to %s", name, new_name)
+            arg = f"{new_name}{sep}{value}"
+        renamed.append(arg)
+    return renamed
+
+
 def _ensure_safe_prefill_cuda_graph_bs(args: list[str]) -> list[str]:
     args = list(args)
     parsed_args = break_arguments(args)
-    if _has_arg(parsed_args, "--cuda-graph-bs") or _has_arg(
+    if _has_arg(parsed_args, "--cuda-graph-bs-decode") or _has_arg(
         parsed_args, "--disable-cuda-graph"
     ):
         return args
@@ -84,8 +106,72 @@ def _ensure_safe_prefill_cuda_graph_bs(args: list[str]) -> list[str]:
             default=1,
         )
         safe_bs = max(1, dp_size)
-        args = append_argument(args, ["--cuda-graph-bs", str(safe_bs)])
+        args = append_argument(args, ["--cuda-graph-bs-decode", str(safe_bs)])
     return args
+
+
+def _normalize_prefill_dp_limits(args: list[str]) -> list[str]:
+    """Keep SGLang's per-rank request limit positive under DP attention."""
+    args = _ensure_safe_prefill_cuda_graph_bs(args)
+    parsed_args = break_arguments(args)
+    if not _has_arg(parsed_args, "--enable-dp-attention"):
+        return args
+
+    dp_size_value = _arg_value_any(
+        parsed_args,
+        ("--data-parallel-size", "--dp-size", "--dp"),
+    )
+    if dp_size_value is None:
+        if any(
+            _has_arg(parsed_args, key)
+            for key in ("--data-parallel-size", "--dp-size", "--dp")
+        ):
+            raise ValueError("SGLang data parallel size must have an integer value")
+        dp_size = 1
+    else:
+        try:
+            dp_size = int(dp_size_value)
+        except ValueError as exc:
+            raise ValueError(
+                "SGLang data parallel size must be an integer, "
+                f"got {dp_size_value!r}"
+            ) from exc
+        if dp_size <= 0:
+            raise ValueError(
+                f"SGLang data parallel size must be greater than zero, got {dp_size}"
+            )
+
+    max_running_requests = _arg_value(parsed_args, "--max-running-requests")
+    if max_running_requests is None:
+        if _has_arg(parsed_args, "--max-running-requests"):
+            raise ValueError("SGLang --max-running-requests must have an integer value")
+        return args
+
+    try:
+        max_running_requests_int = int(max_running_requests)
+    except ValueError as exc:
+        raise ValueError(
+            "SGLang --max-running-requests must be an integer, "
+            f"got {max_running_requests!r}"
+        ) from exc
+    if max_running_requests_int <= 0:
+        raise ValueError(
+            "SGLang --max-running-requests must be greater than zero, "
+            f"got {max_running_requests_int}"
+        )
+
+    if max_running_requests_int >= dp_size:
+        return args
+
+    logger.warning(
+        "Clamping SGLang prefill --max-running-requests from %d to attention "
+        "DP size %d so every DP rank can admit a request.",
+        max_running_requests_int,
+        dp_size,
+    )
+    return set_unique_argument_value(
+        parsed_args, "--max-running-requests", str(dp_size)
+    )
 
 
 class SGLangConfigModifier(BaseConfigModifier):
@@ -112,7 +198,10 @@ class SGLangConfigModifier(BaseConfigModifier):
         decode_gpus: int,
         num_gpus_per_node: int | None = None,
     ) -> None:
-        prefill_cli_args = _ensure_safe_prefill_cuda_graph_bs(prefill_cli_args)
+        # Rename before the prefill safety check so it sees generated values.
+        prefill_cli_args = _normalize_prefill_dp_limits(
+            _rename_legacy_cuda_graph_args(prefill_cli_args)
+        )
         super()._apply_disagg_workers(
             cfg,
             prefill_cli_args=prefill_cli_args,
@@ -121,6 +210,23 @@ class SGLangConfigModifier(BaseConfigModifier):
             decode_cli_args=decode_cli_args,
             decode_replicas=decode_replicas,
             decode_gpus=decode_gpus,
+            num_gpus_per_node=num_gpus_per_node,
+        )
+
+    @classmethod
+    def _apply_worker_config(
+        cls,
+        component: Component,
+        cli_args: list[str],
+        replicas: int,
+        gpus: int,
+        num_gpus_per_node: int | None = None,
+    ) -> None:
+        super()._apply_worker_config(
+            component,
+            _rename_legacy_cuda_graph_args(cli_args),
+            replicas,
+            gpus,
             num_gpus_per_node=num_gpus_per_node,
         )
 
@@ -251,6 +357,8 @@ class SGLangConfigModifier(BaseConfigModifier):
         config: dict,
         tp_size: int,
         component_type: SubComponentType = SubComponentType.DECODE,
+        *,
+        num_gpus_per_node: int | None = None,
     ) -> dict:
         cfg = Config.model_validate(config)
         worker_service = get_worker_component_from_config(
@@ -258,7 +366,7 @@ class SGLangConfigModifier(BaseConfigModifier):
         )
 
         # Set up resources
-        setup_worker_component_resources(worker_service, tp_size)
+        setup_worker_component_resources(worker_service, tp_size, num_gpus_per_node)
 
         # Get and validate args
         args = validate_and_get_worker_args(worker_service, backend="sglang")
@@ -447,12 +555,80 @@ class SGLangConfigModifier(BaseConfigModifier):
 
         # Set max concurrency to control effective batch size
         args = set_argument_value(args, "--max-running-requests", str(max_batch_size))
-        args = _ensure_safe_prefill_cuda_graph_bs(args)
+        args = _normalize_prefill_dp_limits(args)
 
         # Cap total tokens processed in a batch to avoid chunked prefill
         args = set_argument_value(args, "--chunked-prefill-size", str(max_num_tokens))
 
         args = append_argument(args, "--enable-dp-lm-head")
+
+        get_main_container(worker_service).args = args
+        return cfg.model_dump()
+
+    @classmethod
+    def set_config_kv_cache(
+        cls,
+        config: dict,
+        block_size: int,
+        memory_fraction: float | None,
+        prefix_caching: bool,
+        num_gpu_blocks: int | None = None,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply KV-cache block size, memory budget, and prefix-caching policy.
+
+        SGLang naming/polarity differs from vLLM, confirmed against the real
+        base template (--page-size) and real deploy examples/launch scripts
+        (--mem-fraction-static, present at examples/backends/sglang/deploy and
+        launch/_test_agg.sh). Prefix caching (SGLang: radix cache) defaults ON
+        and is a single-flag toggle, not a paired enable/disable flag like
+        vLLM -- presence of --disable-radix-cache means OFF, its absence means
+        the (default) ON state. Do not copy vLLM's flag names or polarity here.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_component_from_config(
+            cfg, backend="sglang", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="sglang")
+        args = break_arguments(args)
+
+        if memory_fraction is None:
+            raise ValueError(
+                "SGLang direct rendering does not support fixed KV-cache blocks"
+            )
+        args = set_argument_value(args, "--page-size", str(block_size))
+        args = set_argument_value(args, "--mem-fraction-static", str(memory_fraction))
+
+        if "--disable-radix-cache" in args:
+            args.remove("--disable-radix-cache")
+        if not prefix_caching:
+            args = append_argument(args, "--disable-radix-cache")
+
+        get_main_container(worker_service).args = args
+        return cfg.model_dump()
+
+    @classmethod
+    def set_config_model(
+        cls,
+        config: dict,
+        model_name: str,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply the evaluated Candidate's model to the worker's CLI args.
+
+        See VllmV1ConfigModifier.set_config_model for why this call exists:
+        without it, the base template's placeholder model name survives
+        untouched into the materialized DGD.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_component_from_config(
+            cfg, backend="sglang", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="sglang")
+        args = break_arguments(args)
+
+        args = set_argument_value(args, cls.WORKER_MODEL_PATH_ARG, model_name)
+        args = set_argument_value(args, cls.WORKER_SERVED_MODEL_NAME_ARG, model_name)
 
         get_main_container(worker_service).args = args
         return cfg.model_dump()

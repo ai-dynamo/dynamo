@@ -10,6 +10,15 @@ model:
   hf_id: nvidia/DeepSeek-V4-Pro-NVFP4
   precision: NVFP4 (B200) / FP8 (H200)
 status: validated
+artifacts:
+  recipe_specific_images:
+  - nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0-deepseek-v4-dev.1
+  recipe_specific_image_periods:
+  - image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0-deepseek-v4-dev.1
+    source_revision: 154e76c85233c027565ed3aca220669be1577b6f
+    source_kind: github-release
+    release_tag: v1.3.0-deepseek-v4-dev.1
+    release_state: prerelease
 targets:
 - id: disagg-b200-agentic
   recommended: true

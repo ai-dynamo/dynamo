@@ -19,7 +19,7 @@ impl WorkerFilter for MinimumDeviceOverlapFilter {
     fn keep(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
+        candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         let cache = candidate
             .cache()

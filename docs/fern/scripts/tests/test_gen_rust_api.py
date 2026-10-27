@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import gen_rust_api
@@ -266,16 +265,12 @@ def test_rust_page_is_registered_and_linked_from_the_landing() -> None:
     assert 'href="rust/README.mdx"' in landing
 
 
-def test_shipped_rust_outputs_are_fresh(
+def test_rendering_is_deterministic(
     reference: rust_api_discovery.RustReference,
-    tmp_path: Path,
 ) -> None:
-    generated = tmp_path / "generated"
-    generated.mkdir()
-    shutil.copytree(
-        FERN_ROOT / "pages" / "reference" / "api",
-        generated / "pages" / "reference" / "api",
+    """The page is a publish-time artifact, so there is no shipped copy to
+    diff against; what must hold instead is that two renders of the same
+    discovery agree byte-for-byte, or every publish would churn."""
+    assert rust_api_rendering.render_page(reference) == rust_api_rendering.render_page(
+        reference
     )
-    assert rust_api_rendering.render_page(reference) == (
-        generated / "pages" / "reference" / "api" / "rust" / "README.mdx"
-    ).read_text(encoding="utf-8")

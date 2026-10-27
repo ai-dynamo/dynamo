@@ -35,7 +35,7 @@
 packages:
   # --- EFA (Elastic Fabric Adapter) components ---
   - name: libfabric
-    version: 2.4.0amzn5.0
+    version: 2.6.0amzn1.0
     license: BSD-2-Clause
     source: https://github.com/aws/libfabric
     images:
@@ -44,7 +44,7 @@ packages:
       - sglang-runtime-efa
 
   - name: aws-ofi-nccl
-    version: 1.20.0
+    version: 1.21.1
     license: Apache-2.0
     source: https://github.com/aws/aws-ofi-nccl
     images:
@@ -64,7 +64,7 @@ packages:
   # no H.264 capability, then copied into the vLLM, SGLang, and TensorRT-LLM
   # runtimes for the VP9 video-encode path.
   - name: ffmpeg
-    version: "8.1.2"
+    version: "9.0.1"
     license: LGPL-2.1-or-later
     source: https://ffmpeg.org/
     images:
@@ -115,10 +115,10 @@ packages:
       - trtllm-runtime
       - trtllm-runtime-efa
 
-  # etcd — coordination store, downloaded as a release binary in dynamo_base and
-  # placed at /usr/local/bin (no apt metadata).
+  # etcd and nats-server are built from their release tags with patched Go.
+  # The copied binaries have no apt metadata.
   - name: etcd
-    version: v3.5.33
+    version: v3.5.35
     license: Apache-2.0
     source: https://github.com/etcd-io/etcd
     images:
@@ -130,10 +130,9 @@ packages:
       - trtllm-runtime-efa
       - dynamo-planner
 
-  # nats-server — messaging server, downloaded as a .deb in dynamo_base (dpkg -i
-  # may not survive into the final runtime layer attribution reliably).
+  # nats-server — messaging server rebuilt in dynamo_base.
   - name: nats-server
-    version: v2.12.14
+    version: v2.14.8
     license: Apache-2.0
     source: https://github.com/nats-io/nats-server
     images:

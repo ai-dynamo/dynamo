@@ -11,11 +11,14 @@ based on the previous tick's ``ScheduledTick`` requirements.
 
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union, get_args
 
 if TYPE_CHECKING:
     from dynamo.common.forward_pass_metrics import ForwardPassMetrics
+    from dynamo.planner.config.planner_config import RetuneEngineSpec
 
 
 @dataclass
@@ -69,6 +72,15 @@ class WorkerCounts:
     expected_num_decode: Optional[int] = None
     prefill_scaling_in_progress: bool = False
     decode_scaling_in_progress: bool = False
+    # Positive only when the connector has verified a scale-up with no drain,
+    # rollout, or unobserved spec update anywhere in the deployment.
+    pending_num_prefill: int = 0
+    pending_num_decode: int = 0
+
+    @property
+    def startup_in_progress(self) -> bool:
+        """True when verified startup-only inventory includes pending workers."""
+        return self.pending_num_prefill > 0 or self.pending_num_decode > 0
 
 
 @dataclass
@@ -77,6 +89,341 @@ class FpmObservations:
 
     prefill: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None
     decode: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None
+    unavailable_reasons: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class BatchJobDemand:
+    """Batch job demand observed for one inference pool.
+
+    ``observed_at_s`` and ``deadline_at_s`` are absolute wall-clock
+    timestamps. ``deadline_at_s=None`` means the job has no SLA deadline.
+    ``work_class`` is an opaque request/workload class understood by the
+    capacity model; it is deliberately not tied to a Batch Gateway enum.
+
+    The raw counters and status are retained for auditability.
+    ``remaining_requests`` is derived so contradictory observations cannot
+    enter the planner contract.
+    """
+
+    observed_at_s: float
+    pool_id: str
+    job_id: str
+    status: str
+    total_requests: int
+    completed_requests: int
+    failed_requests: int
+    deadline_at_s: Optional[float]
+    work_class: str
+
+    def __post_init__(self) -> None:
+        _require_finite_non_negative("observed_at_s", self.observed_at_s)
+        _require_non_empty_string("pool_id", self.pool_id)
+        _require_non_empty_string("job_id", self.job_id)
+        _require_non_empty_string("status", self.status)
+        _require_non_empty_string("work_class", self.work_class)
+        counters = (
+            self.total_requests,
+            self.completed_requests,
+            self.failed_requests,
+        )
+        if any(
+            isinstance(count, bool) or not isinstance(count, int) or count < 0
+            for count in counters
+        ):
+            raise ValueError("batch request counters must be non-negative integers")
+        if self.completed_requests + self.failed_requests > self.total_requests:
+            raise ValueError(
+                "completed_requests + failed_requests must not exceed total_requests"
+            )
+        if self.deadline_at_s is not None:
+            _require_finite_non_negative("deadline_at_s", self.deadline_at_s)
+
+    @property
+    def remaining_requests(self) -> int:
+        """Requests not yet reported completed or failed."""
+
+        return self.total_requests - self.completed_requests - self.failed_requests
+
+
+@dataclass
+class PoolTrafficDemand:
+    """Online (non-batch) offered load for one inference pool.
+
+    This is intentionally separate from Batch Gateway state. The Planner
+    derives safe capacity from its existing worker and capability inputs.
+    ``observed_at_s`` is an absolute wall-clock timestamp.
+    """
+
+    observed_at_s: float
+    pool_id: str
+    online_offered_rps: float
+    # Current frontend concurrency for the selected pool. ``None`` preserves
+    # compatibility with observation producers that only report offered load;
+    # ``0`` is an explicit, observed idle frontend.
+    frontend_active_requests: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        _require_finite_non_negative("observed_at_s", self.observed_at_s)
+        _require_non_empty_string("pool_id", self.pool_id)
+        _require_finite_non_negative("online_offered_rps", self.online_offered_rps)
+        if self.frontend_active_requests is not None and (
+            isinstance(self.frontend_active_requests, bool)
+            or not isinstance(self.frontend_active_requests, int)
+            or self.frontend_active_requests < 0
+        ):
+            raise ValueError(
+                "frontend_active_requests must be a non-negative integer or None"
+            )
+
+
+@dataclass
+class BatchDispatcherFeedback:
+    """Observed dispatcher state for one inference pool.
+
+    ``actual_dispatch_rps`` is the achieved batch admission rate over
+    ``observation_window_s``. ``applied_max_admission_rps=None`` means the
+    dispatcher did not report an applied Planner cap; ``0.0`` means an
+    explicit pause. ``observed_at_s`` is an absolute wall-clock timestamp.
+    """
+
+    observed_at_s: float
+    pool_id: str
+    observation_window_s: float
+    queued_requests: int
+    inflight_requests: int
+    actual_dispatch_rps: float
+    applied_max_admission_rps: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        _require_finite_non_negative("observed_at_s", self.observed_at_s)
+        _require_non_empty_string("pool_id", self.pool_id)
+        _require_positive_finite("observation_window_s", self.observation_window_s)
+        if any(
+            isinstance(count, bool) or not isinstance(count, int) or count < 0
+            for count in (self.queued_requests, self.inflight_requests)
+        ):
+            raise ValueError("dispatcher request counts must be non-negative integers")
+        _require_finite_non_negative("actual_dispatch_rps", self.actual_dispatch_rps)
+        if self.applied_max_admission_rps is not None:
+            _require_finite_non_negative(
+                "applied_max_admission_rps", self.applied_max_admission_rps
+            )
+
+
+@dataclass
+class BatchSchedulingObservation:
+    """Batch scheduling inputs sampled independently by their adapters.
+
+    The durable job source is authoritative: a present observation means its
+    ``job_demands`` snapshot succeeded, including the valid empty-list case.
+    Traffic and dispatcher entries are independently optional per pool. An
+    absent pool entry means that source is unknown or unusable for this tick;
+    it must never be interpreted as a numeric zero. A known idle pool is
+    represented explicitly by ``PoolTrafficDemand.online_offered_rps == 0``;
+    frontend concurrency is independently unknown when
+    ``frontend_active_requests is None`` and explicitly idle when it is zero.
+    """
+
+    job_demands: list[BatchJobDemand] = field(default_factory=list)
+    pool_traffic: list[PoolTrafficDemand] = field(default_factory=list)
+    dispatcher_feedback: list[BatchDispatcherFeedback] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RetuneInputs:
+    """Static retune inputs the engine cannot derive from ``PlannerConfig``.
+
+    Provided once when constructing the engine. ``trace_paths`` are
+    ``dynamo.request.trace.v1`` files, globs or directories. A planner-clock
+    time ``s`` maps to trace milliseconds as
+    ``trace_origin_ms + s * 1000 * arrival_speedup_ratio``: live uses
+    ``(0.0, 1.0)`` (epoch time), replay uses the trace's first arrival and the
+    outer speedup. ``history_paths`` hold history before the first window
+    (replay: the planner's warmup trace when it scales on throughput; live:
+    empty, since ``trace_paths`` already hold history); they share the trace's
+    absolute time axis and end at or before its first arrival.
+    """
+
+    engine: RetuneEngineSpec
+    trace_paths: tuple[str, ...]
+    trace_origin_ms: float = 0.0
+    arrival_speedup_ratio: float = 1.0
+    history_paths: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        trace_paths = tuple(self.trace_paths)
+        history_paths = tuple(self.history_paths)
+        if not trace_paths:
+            raise ValueError("trace_paths must name at least one trace source")
+        for path in (*trace_paths, *history_paths):
+            _require_non_empty_string("trace path", path)
+        if isinstance(self.trace_origin_ms, bool) or not isinstance(
+            self.trace_origin_ms, (int, float)
+        ):
+            raise ValueError("trace_origin_ms must be numeric")
+        if not math.isfinite(self.trace_origin_ms):
+            raise ValueError("trace_origin_ms must be finite")
+        _require_positive_finite("arrival_speedup_ratio", self.arrival_speedup_ratio)
+        object.__setattr__(self, "trace_paths", trace_paths)
+        object.__setattr__(self, "history_paths", history_paths)
+
+
+RetunePlannerValue = Union[int, float, str, bool]
+
+
+@dataclass(frozen=True, eq=False)
+class RetuneParams:
+    """One point in the retune search space, in live wire names.
+
+    ``router`` keys are PATCH ``/router_policy`` parameter names; ``planner``
+    keys are runtime-changeable ``PlannerConfig`` fields. Only searched keys
+    are present. Equality and hashing follow ``key()``.
+    """
+
+    router: dict[str, float] = field(default_factory=dict)
+    planner: dict[str, RetunePlannerValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        router: dict[str, float] = {}
+        for name, value in self.router.items():
+            _require_non_empty_string("router parameter name", name)
+            router[name] = _require_finite_non_negative(f"router.{name}", value)
+        planner: dict[str, RetunePlannerValue] = {}
+        for name, choice in self.planner.items():
+            _require_non_empty_string("planner field name", name)
+            if not isinstance(choice, (int, float, str)):
+                raise ValueError(f"planner.{name} must be a bool, number or string")
+            if isinstance(choice, float) and not math.isfinite(choice):
+                raise ValueError(f"planner.{name} must be finite")
+            planner[name] = choice
+        object.__setattr__(self, "router", router)
+        object.__setattr__(self, "planner", planner)
+
+    def key(self) -> str:
+        """Canonical sorted JSON; the identity for ordering, dedup and ties."""
+
+        return json.dumps(
+            {"planner": self.planner, "router": self.router},
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
+    def to_dict(self) -> dict[str, dict[str, Any]]:
+        return {"router": dict(self.router), "planner": dict(self.planner)}
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, RetuneParams):
+            return NotImplemented
+        return self.key() == other.key()
+
+    def __hash__(self) -> int:
+        return hash(self.key())
+
+
+# Append-only: a live host will export the values as a Prometheus Enum.
+RetuneOutcome = Literal[
+    "applied",
+    "kept",
+    "advisory",
+    "busy",
+    "stale",
+    "timeout",
+    "failed",
+]
+RETUNE_OUTCOMES: tuple[str, ...] = get_args(RetuneOutcome)
+
+
+@dataclass(frozen=True)
+class RetuneDecision:
+    """Audit record of one retune decision.
+
+    ``decision_id`` is ``retune-<s0>-w<k>`` and is the live reconfiguration
+    ``request_id``. Times are planner-clock seconds: epoch seconds live,
+    virtual seconds in replay. ``as_of_s`` is the censoring cutoff (the
+    scheduled launch time). ``chosen`` equals ``previous`` unless the outcome
+    is ``applied`` or ``advisory``. Hosts apply ``planner_changes`` only when
+    the outcome is ``applied``; an ``advisory`` decision (planner advisory
+    mode) carries the changes it recommends and applies nothing. On an
+    ``applied`` decision ``predictor_warmup`` is set iff ``planner_changes``
+    replaces the load predictor, and hosts warm the new predictor with it;
+    it is ``None`` on every other outcome. ``top`` holds up to five
+    ``(params.key(), score)`` pairs, best first. ``sweep_wall_s`` is the
+    sweep's wall-clock time and ``decision_latency_s`` the delay the decision
+    waited for after launch (at least one tick; ``decided_at_s`` is the tick
+    that observed it).
+    """
+
+    decision_id: str
+    outcome: RetuneOutcome
+    window_index: int
+    window_start_s: float
+    window_end_s: float
+    as_of_s: float
+    launched_at_s: Optional[float]
+    decided_at_s: float
+    num_requests: int
+    num_candidates: int
+    previous: RetuneParams
+    chosen: RetuneParams
+    baseline_score: Optional[float]
+    best_score: Optional[float]
+    planner_changes: dict[str, RetunePlannerValue] = field(default_factory=dict)
+    predictor_presweep: Optional[dict[str, Any]] = None
+    predictor_warmup: Optional[tuple[TrafficObservation, ...]] = None
+    sweep_wall_s: Optional[float] = None
+    decision_latency_s: Optional[float] = None
+    top: list[tuple[str, float]] = field(default_factory=list)
+    reason: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        _require_non_empty_string("decision_id", self.decision_id)
+        if self.outcome not in RETUNE_OUTCOMES:
+            raise ValueError(f"outcome must be one of {list(RETUNE_OUTCOMES)}")
+        for name in ("window_index", "num_requests", "num_candidates"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if not isinstance(self.previous, RetuneParams) or not isinstance(
+            self.chosen, RetuneParams
+        ):
+            raise ValueError("previous and chosen must be RetuneParams")
+        if self.predictor_warmup is not None:
+            object.__setattr__(self, "predictor_warmup", tuple(self.predictor_warmup))
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-shaped record; ``predictor_warmup`` becomes its length."""
+
+        return {
+            "decision_id": self.decision_id,
+            "outcome": self.outcome,
+            "window_index": self.window_index,
+            "window_start_s": self.window_start_s,
+            "window_end_s": self.window_end_s,
+            "as_of_s": self.as_of_s,
+            "launched_at_s": self.launched_at_s,
+            "decided_at_s": self.decided_at_s,
+            "num_requests": self.num_requests,
+            "num_candidates": self.num_candidates,
+            "previous": self.previous.to_dict(),
+            "chosen": self.chosen.to_dict(),
+            "baseline_score": self.baseline_score,
+            "best_score": self.best_score,
+            "planner_changes": dict(self.planner_changes),
+            "predictor_presweep": (
+                None
+                if self.predictor_presweep is None
+                else json.loads(json.dumps(self.predictor_presweep))
+            ),
+            "predictor_warmup": (
+                None if self.predictor_warmup is None else len(self.predictor_warmup)
+            ),
+            "sweep_wall_s": self.sweep_wall_s,
+            "decision_latency_s": self.decision_latency_s,
+            "top": [[key, score] for key, score in self.top],
+            "reason": self.reason,
+        }
 
 
 @dataclass
@@ -91,6 +438,7 @@ class TickInput:
     traffic: Optional[TrafficObservation] = None
     worker_counts: Optional[WorkerCounts] = None
     fpm_observations: Optional[FpmObservations] = None
+    batch: Optional[BatchSchedulingObservation] = None
 
 
 @dataclass
@@ -101,6 +449,49 @@ class ScalingDecision:
 
     num_prefill: Optional[int] = None
     num_decode: Optional[int] = None
+
+
+@dataclass
+class BatchDrainLimitDecision:
+    """Leased batch admission limit for one inference pool.
+
+    ``max_admission_rps`` is the maximum rate at which new batch requests
+    may be admitted; ``0.0`` explicitly pauses admission. ``valid_until_s``
+    is an absolute wall-clock lease expiry. The dispatcher must stop using
+    the limit after expiry. ``decision_id`` identifies the decision for
+    idempotent application and audit correlation.
+    """
+
+    pool_id: str
+    max_admission_rps: float
+    valid_until_s: float
+    decision_id: str
+
+    def __post_init__(self) -> None:
+        _require_non_empty_string("pool_id", self.pool_id)
+        _require_non_empty_string("decision_id", self.decision_id)
+        _require_finite_non_negative("max_admission_rps", self.max_admission_rps)
+        _require_finite_non_negative("valid_until_s", self.valid_until_s)
+
+
+def _require_non_empty_string(name: str, value: object) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a non-empty string")
+
+
+def _require_finite_non_negative(name: str, value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be numeric")
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized < 0:
+        raise ValueError(f"{name} must be finite and non-negative")
+    return normalized
+
+
+def _require_positive_finite(name: str, value: object) -> None:
+    normalized = _require_finite_non_negative(name, value)
+    if normalized <= 0:
+        raise ValueError(f"{name} must be positive and finite")
 
 
 @dataclass
@@ -139,6 +530,11 @@ class TickDiagnostics:
     load_decision_reason_decode: Optional[str] = None
     throughput_decision_reason_prefill: Optional[str] = None
     throughput_decision_reason_decode: Optional[str] = None
+
+    # Metadata checks actually performed by each scaling path this tick.
+    # An absent component was not evaluated (e.g. idle or missing FPM).
+    load_metadata_available: dict[str, bool] = field(default_factory=dict)
+    throughput_metadata_available: dict[str, bool] = field(default_factory=dict)
 
     # Plugin-pipeline fields below. Legacy callers that bypass the pipeline
     # may leave them empty. Downstream readers must treat "empty" as
@@ -192,6 +588,13 @@ class PlannerEffects:
     scale_to: Optional[ScalingDecision] = None
     next_tick: Optional[ScheduledTick] = None
     diagnostics: TickDiagnostics = field(default_factory=TickDiagnostics)
+    batch_drain_limits: list[BatchDrainLimitDecision] = field(default_factory=list)
+    # Desired router policy parameters keyed by worker type ("aggregated",
+    # "prefill", "decode"); each value is the complete resolved PATCH
+    # /router_policy parameters map. Level-triggered: hosts apply the diff.
+    # None when retune does not search router parameters.
+    router_parameters: Optional[dict[str, dict[str, float]]] = None
+    retune_decisions: list[RetuneDecision] = field(default_factory=list)
 
 
 @dataclass
@@ -199,6 +602,7 @@ class EngineCapabilities:
     """Static capabilities for a single engine stage (prefill or decode)."""
 
     num_gpu: Optional[int] = None
+    gpu_cost_per_replica: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: Optional[int] = None
     context_length: Optional[int] = None
@@ -209,6 +613,14 @@ class EngineCapabilities:
     # cap × the replica-wide GPU total. None when power awareness is off or the
     # cap has not been resolved. The final budget clamp reads this.
     power_watts_per_replica: Optional[int] = None
+
+    @property
+    def resolved_gpu_cost_per_replica(self) -> Optional[int]:
+        """GPU budget cost, falling back to the legacy engine width."""
+
+        if self.gpu_cost_per_replica is not None:
+            return self.gpu_cost_per_replica
+        return self.num_gpu
 
 
 @dataclass

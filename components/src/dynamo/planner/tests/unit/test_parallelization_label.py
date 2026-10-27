@@ -6,7 +6,7 @@ The legacy 3-bucket label (``dep{moe_ep}`` / ``tep{moe_tp}`` / ``tp{tp}``)
 collapsed distinct 5-tuples to the same string — notably
 ``(tp=2, moe_ep=2)`` and ``(tp=1, dp=2, moe_ep=2)`` both mapped to
 ``"dep2"``. That broke ``thorough.py`` work_dir naming and
-``aiconfigurator.sdk.picking`` ``groupby("parallel")`` dedup. These tests
+``aisimulate.sdk.picking`` ``groupby("parallel")`` dedup. These tests
 pin the post-fix unique encoding.
 """
 from __future__ import annotations
@@ -105,7 +105,7 @@ def test_label_format_pin(
     tp: int, pp: int, dp: int, moe_tp: int, moe_ep: int, expected: str
 ) -> None:
     """Pin the exact label string — downstream consumers (``thorough.py``
-    work_dir, ``aiconfigurator.sdk.picking``) depend on the format, so a
+    work_dir, ``aisimulate.sdk.picking``) depend on the format, so a
     separator / prefix change must be a deliberate, test-breaking edit."""
     cfg = PickedParallelConfig(tp=tp, pp=pp, dp=dp, moe_tp=moe_tp, moe_ep=moe_ep)
     assert cfg.label() == expected

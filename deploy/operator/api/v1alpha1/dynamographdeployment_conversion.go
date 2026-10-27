@@ -40,7 +40,6 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -111,6 +110,12 @@ func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v
 	dst.Labels = src.Labels
 	dst.PriorityClassName = src.PriorityClassName
 	dst.BackendFramework = src.BackendFramework
+
+	// Convert the root provider context without interpreting its opaque value.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &v1beta1.ProviderOverride{}
+		ConvertFromProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
 
 	if src.Restart != nil {
 		dst.Restart = &v1beta1.Restart{}
@@ -419,6 +424,12 @@ func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, 
 	dst.PriorityClassName = src.PriorityClassName
 	dst.BackendFramework = src.BackendFramework
 
+	// Convert the root provider context without interpreting its opaque value.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &ProviderOverride{}
+		ConvertToProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+
 	if src.Restart != nil {
 		dst.Restart = &Restart{}
 		ConvertToRestart(src.Restart, dst.Restart)
@@ -599,7 +610,7 @@ func ConvertFromKvTransferPolicy(src *KvTransferPolicy, dst *v1beta1.KvTransferP
 		Enforcement:         v1beta1.KvTransferEnforcement(src.Enforcement),
 	}
 	if src.PreferredWeight != nil {
-		dst.PreferredWeight = ptr.To(*src.PreferredWeight)
+		dst.PreferredWeight = new(*src.PreferredWeight)
 	}
 }
 
@@ -613,7 +624,7 @@ func ConvertToKvTransferPolicy(src *v1beta1.KvTransferPolicy, dst *KvTransferPol
 		Enforcement:         KvTransferEnforcement(src.Enforcement),
 	}
 	if src.PreferredWeight != nil {
-		dst.PreferredWeight = ptr.To(*src.PreferredWeight)
+		dst.PreferredWeight = new(*src.PreferredWeight)
 	}
 }
 
@@ -645,7 +656,7 @@ func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, ds
 			State: v1beta1.PlacementScoreState(src.Placement.State),
 		}
 		if src.Placement.Score != nil {
-			dst.Placement.Score = ptr.To(*src.Placement.Score)
+			dst.Placement.Score = new(*src.Placement.Score)
 		}
 	} else {
 		dst.Placement = nil
@@ -692,7 +703,7 @@ func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStat
 			State: PlacementScoreState(src.Placement.State),
 		}
 		if src.Placement.Score != nil {
-			dst.Placement.Score = ptr.To(*src.Placement.Score)
+			dst.Placement.Score = new(*src.Placement.Score)
 		}
 	} else {
 		dst.Placement = nil
@@ -795,20 +806,31 @@ func ConvertToRollingUpdateStatus(src *v1beta1.RollingUpdateStatus, dst *Rolling
 // v1beta1.
 func ConvertFromServiceReplicaStatus(src *ServiceReplicaStatus, dst *v1beta1.ComponentReplicaStatus) {
 	*dst = v1beta1.ComponentReplicaStatus{
-		ComponentKind:    v1beta1.ComponentKind(src.ComponentKind),
-		ComponentNames:   componentNamesToHub(src),
-		RuntimeNamespace: src.RuntimeNamespace,
-		Replicas:         src.Replicas,
-		UpdatedReplicas:  src.UpdatedReplicas,
+		ComponentKind:        v1beta1.ComponentKind(src.ComponentKind),
+		ComponentNames:       componentNamesToHub(src),
+		RuntimeNamespace:     src.RuntimeNamespace,
+		ServedModelName:      src.ServedModelName,
+		RuntimeComponentName: src.RuntimeComponentName,
+		Replicas:             src.Replicas,
+		UpdatedReplicas:      src.UpdatedReplicas,
+	}
+	if src.GPUPowerLimitWatts != nil {
+		dst.GPUPowerLimitWatts = new(*src.GPUPowerLimitWatts)
+	}
+	if src.GPUsPerEngine != nil {
+		dst.GPUsPerEngine = new(*src.GPUsPerEngine)
+	}
+	if src.GPUsPerReplica != nil {
+		dst.GPUsPerReplica = new(*src.GPUsPerReplica)
 	}
 	if src.ReadyReplicas != nil {
-		dst.ReadyReplicas = ptr.To(*src.ReadyReplicas)
+		dst.ReadyReplicas = new(*src.ReadyReplicas)
 	}
 	if src.AvailableReplicas != nil {
-		dst.AvailableReplicas = ptr.To(*src.AvailableReplicas)
+		dst.AvailableReplicas = new(*src.AvailableReplicas)
 	}
 	if src.ScheduledReplicas != nil {
-		dst.ScheduledReplicas = ptr.To(*src.ScheduledReplicas)
+		dst.ScheduledReplicas = new(*src.ScheduledReplicas)
 	}
 }
 
@@ -818,22 +840,33 @@ func ConvertToServiceReplicaStatus(src *v1beta1.ComponentReplicaStatus, dst *Ser
 	componentNames := slices.Clone(src.ComponentNames)
 
 	*dst = ServiceReplicaStatus{
-		ComponentKind:    ComponentKind(src.ComponentKind),
-		ComponentNames:   componentNames,
-		RuntimeNamespace: src.RuntimeNamespace,
-		Replicas:         src.Replicas,
-		UpdatedReplicas:  src.UpdatedReplicas,
+		ComponentKind:        ComponentKind(src.ComponentKind),
+		ComponentNames:       componentNames,
+		RuntimeNamespace:     src.RuntimeNamespace,
+		ServedModelName:      src.ServedModelName,
+		RuntimeComponentName: src.RuntimeComponentName,
+		Replicas:             src.Replicas,
+		UpdatedReplicas:      src.UpdatedReplicas,
+	}
+	if src.GPUPowerLimitWatts != nil {
+		dst.GPUPowerLimitWatts = new(*src.GPUPowerLimitWatts)
+	}
+	if src.GPUsPerEngine != nil {
+		dst.GPUsPerEngine = new(*src.GPUsPerEngine)
+	}
+	if src.GPUsPerReplica != nil {
+		dst.GPUsPerReplica = new(*src.GPUsPerReplica)
 	}
 	if len(componentNames) > 0 {
 		dst.ComponentName = componentNames[len(componentNames)-1]
 	}
 	if src.ReadyReplicas != nil {
-		dst.ReadyReplicas = ptr.To(*src.ReadyReplicas)
+		dst.ReadyReplicas = new(*src.ReadyReplicas)
 	}
 	if src.AvailableReplicas != nil {
-		dst.AvailableReplicas = ptr.To(*src.AvailableReplicas)
+		dst.AvailableReplicas = new(*src.AvailableReplicas)
 	}
 	if src.ScheduledReplicas != nil {
-		dst.ScheduledReplicas = ptr.To(*src.ScheduledReplicas)
+		dst.ScheduledReplicas = new(*src.ScheduledReplicas)
 	}
 }

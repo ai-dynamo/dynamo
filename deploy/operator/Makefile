@@ -4,14 +4,19 @@ IMG ?= controller:latest
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.30.0
-ENVTEST_PACKAGES ?= ./internal/controller ./internal/webhook/validation
+ENVTEST_PACKAGES ?= ./internal/controller/... ./internal/webhook/defaulting ./internal/webhook/validation ./cmd/crd-apply
 ENVTEST_ASSETS_CMD = $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path
 
-CLUSTERTEST_PACKAGES ?= ./internal/testing/clusterenv ./internal/controller
+CLUSTERTEST_PACKAGES ?= ./internal/testing/clusterenv ./internal/controller/...
 CLUSTERTEST_TIMEOUT ?= 30m
 CLUSTERTEST_KIND_NAME ?= dynamo-clustertest-v136
 CLUSTERTEST_CONTEXT = kind-$(CLUSTERTEST_KIND_NAME)
-CLUSTERTEST_KUBECONFIG = $(LOCALBIN)/clustertest.kubeconfig
+CLUSTERTEST_REUSE ?= true
+UPGRADE_RELEASE_TAG ?=
+UPGRADE_CANDIDATE_SHA ?=
+UPGRADE_CANDIDATE_OUTPUT ?=
+CLUSTERTEST_OWNERSHIP_FILE ?=
+CLUSTERTEST_KUBECONFIG ?= $(LOCALBIN)/clustertest.kubeconfig
 CLUSTERTEST_NODE_IMAGE ?= kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
 CLUSTERTEST_PROFILER_IMAGE ?= $(DYNAMO_CLUSTERTEST_PROFILER_IMAGE)
 CLUSTERTEST_OPERATOR_IMAGE ?= $(DYNAMO_CLUSTERTEST_OPERATOR_IMAGE)
@@ -232,13 +237,13 @@ tilt-up: kubectl helm ## Start Tilt for local operator development.
 	tilt up
 
 
-HELM_MANAGER_RBAC_ROLE := ../helm/charts/platform/components/operator/files/manager-role.yaml
+HELM_MANAGER_RBAC_DIR := ../helm/charts/platform/components/operator/files
 
 .PHONY: manifests
 manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	# Use a large maxDescLen to ensure all field comments are included as OpenAPI descriptions
-	# allowDangerousTypes=true is needed for the EndpointPickerConfig from gateway-api-inference-extension which contains float fields
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=100000,allowDangerousTypes=true,generateEmbeddedObjectMeta=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	# allowDangerousTypes=true is needed for float fields in the API (e.g. kvTransferPolicy.preferredWeight)
+	$(CONTROLLER_GEN) rbac:roleName=manager-role,headerFile=hack/boilerplate.yaml.txt crd:maxDescLen=100000,allowDangerousTypes=true,generateEmbeddedObjectMeta=true webhook paths="./..." output:rbac:artifacts:config=$(HELM_MANAGER_RBAC_DIR) output:crd:artifacts:config=config/crd/bases
 	echo "Removing name from mainContainer required fields"
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("mainContainer")) | .mainContainer.required) |= (. - ["name"])' -i --indent 2 $$file || exit 1; \
@@ -249,12 +254,24 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	done
 	echo "Removing name from standalone v1beta1 DynamoComponentDeployment required fields"
 	$(YQ) eval '(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.required) |= (. - ["name"])' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
+	echo "Removing DGD-only provider overrides from standalone DynamoComponentDeployment schemas"
+	$(YQ) eval '(.spec.versions[].schema.openAPIV3Schema.properties.spec.properties) |= del(.providerOverride) | (.spec.versions[].schema.openAPIV3Schema.properties.spec.properties.roles.items.properties) |= del(.providerOverride)' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
+	echo "Removing DGD-only LPX fields and validation rules from standalone DynamoComponentDeployment schemas"
+	$(YQ) eval '(.spec.versions[].schema.openAPIV3Schema.properties.spec) |= (del(.properties.lpx) | (select(has("x-kubernetes-validations"))."x-kubernetes-validations") |= map(select(.rule | test("\\b(self|oldSelf)\\.lpx\\b") | not)))' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	# PodTemplateSpec is an external Kubernetes type, so its item-level markers cannot be declared on the API field.
 	# Item-scoped rules avoid unbounded list comprehensions without imposing maxItems on the public API.
 	# The annotation value bound matches Kubernetes' total annotation size limit.
 	echo "Adding nested v1beta1 pod template CEL validation"
 	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations."x-kubernetes-validations" = [{"rule": "!(\"nvidia.com/vllm-distributed-executor-backend\" in self) || self[\"nvidia.com/vllm-distributed-executor-backend\"].lowerAscii() in [\"mp\", \"ray\"]", "message": "podTemplate backend annotation must be mp or ray, case-insensitively"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
+	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.roles.items.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations."x-kubernetes-validations" = [{"rule": "!(\"nvidia.com/vllm-distributed-executor-backend\" in self) || self[\"nvidia.com/vllm-distributed-executor-backend\"].lowerAscii() in [\"mp\", \"ray\"]", "message": "podTemplate backend annotation must be mp or ray, case-insensitively"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.components.items.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations."x-kubernetes-validations" = [{"rule": "!(\"nvidia.com/vllm-distributed-executor-backend\" in self) || self[\"nvidia.com/vllm-distributed-executor-backend\"].lowerAscii() in [\"mp\", \"ray\"]", "message": "podTemplate backend annotation must be mp or ray, case-insensitively"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamographdeployments.yaml
+	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.components.items.properties.roles.items.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations."x-kubernetes-validations" = [{"rule": "!(\"nvidia.com/vllm-distributed-executor-backend\" in self) || self[\"nvidia.com/vllm-distributed-executor-backend\"].lowerAscii() in [\"mp\", \"ray\"]", "message": "podTemplate backend annotation must be mp or ray, case-insensitively"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamographdeployments.yaml
+	echo "Adding probe handler validation to DGD and DCD schemas"
+	for file in config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml config/crd/bases/nvidia.com_dynamographdeployments.yaml; do \
+		for probe in startupProbe livenessProbe readinessProbe; do \
+			PROBE=$$probe $(YQ) eval 'strenv(PROBE) as $$probe | (.. | select(has("properties")) | select(.properties | has($$probe)))."x-kubernetes-validations" += [{"rule": "!has(self." + $$probe + ") || (has(self." + $$probe + ".exec) ? 1 : 0) + (has(self." + $$probe + ".httpGet) ? 1 : 0) + (has(self." + $$probe + ".tcpSocket) ? 1 : 0) + (has(self." + $$probe + ".grpc) ? 1 : 0) == 1", "message": $$probe + " must define exactly one handler", "fieldPath": "." + $$probe}]' -i --indent 2 $$file || exit 1; \
+		done; \
+	done
 	echo "Fixing PluginSpec parameters field: json.RawMessage needs x-kubernetes-preserve-unknown-fields instead of type: string"
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
@@ -280,21 +297,6 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 			$(YQ) eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
-	echo "Adding NVIDIA header to RBAC files"
-	for file in config/rbac/*.yaml; do \
-		if [ -f "$$file" ] && ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
-			{ printf '%s\n' \
-				'# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.' \
-				'# SPDX-License-Identifier: Apache-2.0' \
-				''; \
-			  cat "$$file"; \
-			} > "$$file.tmp" && mv "$$file.tmp" "$$file"; \
-		fi; \
-	done
-	echo "Copying generated manager RBAC role to the operator Helm chart"
-	mkdir -p $(dir $(HELM_MANAGER_RBAC_ROLE))
-	cp config/rbac/role.yaml $(HELM_MANAGER_RBAC_ROLE)
-
 .PHONY: generate
 generate: controller-gen generate-pydantic ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt_" paths="./..."
@@ -317,14 +319,38 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $$(go list ./... | grep -vE '/(e2e|test|cmd)($$|/)') -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $$(go list ./... | grep -vE '/cmd($$|/)') ./cmd/crd-apply -coverprofile cover.out
 
 .PHONY: envtest
 envtest: setup-envtest ## Run envtest-backed operator tests.
 	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $(ENVTEST_PACKAGES)
 
-.PHONY: setup-clustertest
-setup-clustertest: kubectl kind ## Create or reuse the clustertest Kind cluster and install its prerequisites.
+.PHONY: setup-clustertest-kind
+setup-clustertest-kind: kubectl kind ## Create or explicitly reuse the pinned Kind cluster.
+	@clusters="$$($(KIND) get clusters)"; \
+	if echo "$$clusters" | grep -Fxq '$(CLUSTERTEST_KIND_NAME)'; then \
+		test '$(CLUSTERTEST_REUSE)' = true || { echo "Error: fresh Kind cluster already exists"; exit 1; }; \
+		echo "Reusing Kind cluster $(CLUSTERTEST_KIND_NAME)"; \
+		$(KIND) export kubeconfig --name '$(CLUSTERTEST_KIND_NAME)' --kubeconfig '$(CLUSTERTEST_KUBECONFIG)'; \
+	else \
+		if [[ -n '$(CLUSTERTEST_OWNERSHIP_FILE)' ]]; then touch '$(CLUSTERTEST_OWNERSHIP_FILE)'; fi; \
+		$(KIND) create cluster --name '$(CLUSTERTEST_KIND_NAME)' --image '$(CLUSTERTEST_NODE_IMAGE)' --kubeconfig '$(CLUSTERTEST_KUBECONFIG)'; \
+	fi
+
+.PHONY: setup-clustertest-crds-in-cluster
+setup-clustertest-crds-in-cluster: kubectl ## Install shared CRDs into the explicitly selected context.
+	@test -n "$${DYNAMO_CLUSTERTEST_CONTEXT:-}" || { echo "DYNAMO_CLUSTERTEST_CONTEXT is required"; exit 1; }
+	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f config/crd/bases
+	go mod download sigs.k8s.io/lws@$(CLUSTERTEST_LWS_VERSION)
+	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f '$(CLUSTERTEST_LWS_CRD_DIR)'
+	go mod download github.com/ai-dynamo/grove/operator/api@$(CLUSTERTEST_GROVE_VERSION)
+	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f '$(CLUSTERTEST_GROVE_CRD_DIR)'
+	curl --fail --location --silent --show-error --max-time 60 --retry 3 '$(CLUSTERTEST_VOLCANO_PODGROUP_CRD_URL)' | \
+		$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f -
+	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" wait --for=condition=Established crd --all --timeout=2m
+
+.PHONY: setup-clustertest-images
+setup-clustertest-images: kind ## Prepare and load the production images for ordinary clustertests.
 	@test -n '$(CLUSTERTEST_PROFILER_IMAGE)' || { echo "Error: DYNAMO_CLUSTERTEST_PROFILER_IMAGE must name a locally available production planner image"; exit 1; }
 	@$(CONTAINER_TOOL) image inspect '$(CLUSTERTEST_PROFILER_IMAGE)' >/dev/null 2>&1 || { echo "Error: planner image $(CLUSTERTEST_PROFILER_IMAGE) is not available locally"; exit 1; }
 	@test -n '$(CLUSTERTEST_OPERATOR_IMAGE)' || { echo "Error: DYNAMO_CLUSTERTEST_OPERATOR_IMAGE must name a locally available production operator image"; exit 1; }
@@ -332,22 +358,14 @@ setup-clustertest: kubectl kind ## Create or reuse the clustertest Kind cluster 
 	@for image in '$(CLUSTERTEST_PROFILER_IMAGE)' '$(CLUSTERTEST_OPERATOR_IMAGE)'; do \
 		printf 'FROM %s\n' "$$image" | $(CONTAINER_TOOL) build --platform '$(CLUSTERTEST_PLATFORM)' --provenance=false --tag "$$image" --file - .; \
 	done
-	@if $(KIND) get clusters | grep -Fxq '$(CLUSTERTEST_KIND_NAME)'; then \
-		echo "Reusing Kind cluster $(CLUSTERTEST_KIND_NAME)"; \
-		$(KIND) export kubeconfig --name '$(CLUSTERTEST_KIND_NAME)' --kubeconfig '$(CLUSTERTEST_KUBECONFIG)'; \
-	else \
-		$(KIND) create cluster --name '$(CLUSTERTEST_KIND_NAME)' --image '$(CLUSTERTEST_NODE_IMAGE)' --kubeconfig '$(CLUSTERTEST_KUBECONFIG)'; \
-	fi
-	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' apply --server-side -f config/crd/bases
-	go mod download sigs.k8s.io/lws@$(CLUSTERTEST_LWS_VERSION)
-	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' apply --server-side -f '$(CLUSTERTEST_LWS_CRD_DIR)'
-	go mod download github.com/ai-dynamo/grove/operator/api@$(CLUSTERTEST_GROVE_VERSION)
-	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' apply --server-side -f '$(CLUSTERTEST_GROVE_CRD_DIR)'
-	curl --fail --location --silent --show-error '$(CLUSTERTEST_VOLCANO_PODGROUP_CRD_URL)' | \
-		$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' apply --server-side -f -
-	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context '$(CLUSTERTEST_CONTEXT)' wait --for=condition=Established crd --all --timeout=2m
 	$(KIND) load docker-image --name '$(CLUSTERTEST_KIND_NAME)' '$(CLUSTERTEST_PROFILER_IMAGE)'
 	$(KIND) load docker-image --name '$(CLUSTERTEST_KIND_NAME)' '$(CLUSTERTEST_OPERATOR_IMAGE)'
+
+.PHONY: setup-clustertest
+setup-clustertest: ## Create or reuse the ordinary clustertest cluster, CRDs and images.
+	$(MAKE) setup-clustertest-kind
+	DYNAMO_CLUSTERTEST_CONTEXT='$(CLUSTERTEST_CONTEXT)' $(MAKE) setup-clustertest-crds-in-cluster
+	$(MAKE) setup-clustertest-images
 
 .PHONY: clustertest
 clustertest: ## Run Pod- and Job-backed controller tests against the explicitly unlocked cluster.
@@ -365,11 +383,6 @@ integration: envtest setup-clustertest ## Run envtests and clustertests, creatin
 		DYNAMO_CLUSTERTEST_OPERATOR_IMAGE='$(CLUSTERTEST_OPERATOR_IMAGE)' \
 		$(MAKE) clustertest
 
-# Deprecated manual smoke test for the legacy Kustomize install path.
-.PHONY: test-e2e
-test-e2e:
-	go test ./test/e2e/ -v -ginkgo.v
-
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter & yamllint
 	$(GOLANGCI_LINT) run
@@ -381,7 +394,7 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet helmify-chart ## Build manager binary.
+build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
 .PHONY: run
@@ -416,38 +429,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx rm project-v3-builder
 	rm Dockerfile.cross
 
-.PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
-	mkdir -p dist
-	@if [ -d "config/crd" ]; then \
-		$(KUSTOMIZE) build config/crd > dist/install.yaml; \
-	fi
-	echo "---" >> dist/install.yaml  # Add a document separator before appending
-	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
-	$(KUSTOMIZE) build config/default >> dist/install.yaml
-
 ##@ Deployment
-
-ifndef ignore-not-found
-  ignore-not-found = false
-endif
-
-.PHONY: install
-install: manifests kustomize kubectl ## Install CRDs into the K8s cluster specified in ~/.kube/config.
-	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply -f -
-
-.PHONY: uninstall
-uninstall: manifests kustomize kubectl ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
-	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
-
-.PHONY: deploy
-deploy: manifests kustomize kubectl ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
-	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
-
-.PHONY: undeploy
-undeploy: kustomize kubectl ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
-	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
 GPU_OPERATOR_NAMESPACE ?= gpu-operator
 GPU_OPERATOR_EXTRA_HELM_ARGS ?=
@@ -593,17 +575,15 @@ KUBECTL_VERSION ?= v1.36.1
 KIND_VERSION ?= v0.32.0
 HELM_VERSION ?= v3.17.3
 YQ_VERSION ?= v4.45.4
-KUSTOMIZE_VERSION ?= v5.5.0
 CONTROLLER_TOOLS_VERSION ?= v0.17.3
 ENVTEST_VERSION ?= release-0.19
-GOLANGCI_LINT_VERSION ?= v1.64.8
+GOLANGCI_LINT_VERSION ?= v2.15.0
 
 ## Tool Binaries
 KUBECTL ?= $(LOCALBIN)/kubectl-$(KUBECTL_VERSION)
 KIND ?= $(LOCALBIN)/kind-$(KIND_VERSION)
 HELM ?= $(LOCALBIN)/helm-$(HELM_VERSION)
 YQ ?= $(LOCALBIN)/yq-$(YQ_VERSION)
-KUSTOMIZE ?= $(LOCALBIN)/kustomize-$(KUSTOMIZE_VERSION)
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen-$(CONTROLLER_TOOLS_VERSION)
 ENVTEST ?= $(LOCALBIN)/setup-envtest-$(ENVTEST_VERSION)
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
@@ -654,11 +634,6 @@ $(YQ):
 	ln -sf $(YQ) $(LOCALBIN)/yq
 	chmod +x $(YQ) $(LOCALBIN)/yq
 
-.PHONY: kustomize
-kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
-$(KUSTOMIZE): $(LOCALBIN)
-	$(call go-install-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v5,$(KUSTOMIZE_VERSION))
-
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
 $(CONTROLLER_GEN): $(LOCALBIN)
@@ -673,7 +648,7 @@ $(ENVTEST): $(LOCALBIN)
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/cmd/golangci-lint,${GOLANGCI_LINT_VERSION})
+	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,${GOLANGCI_LINT_VERSION})
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary (ideally with version)
@@ -688,17 +663,6 @@ GOBIN=$(LOCALBIN) go install $${package} ;\
 mv "$$(echo "$(1)" | sed "s/-$(3)$$//")" $(1) ;\
 }
 endef
-
-######################### Helmify
-HELMIFY ?= $(LOCALBIN)/helmify
-
-.PHONY: helmify
-helmify: $(HELMIFY) ## Download helmify locally if necessary.
-$(HELMIFY): $(LOCALBIN)
-	test -s $(LOCALBIN)/helmify || GOBIN=$(LOCALBIN) go install github.com/arttor/helmify/cmd/helmify@v0.4.16
-
-helmify-chart: manifests kustomize helmify
-	$(KUSTOMIZE) build config/default | $(HELMIFY) -image-pull-secrets charts/dynamo-kubernetes-operator
 
 ######################### CRD Reference Docs
 CRD_REF_DOCS_VERSION ?= v0.3.0
@@ -725,9 +689,9 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 	cat docs/header.md ./docs/api_reference.md docs/footer.md > ../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
 	rm ./docs/api_reference.md
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
-	# Fix duplicate anchors: crd-ref-docs generates identical anchors for same-named types
-	# across API versions; prepend "v1beta1 " to affected v1beta1 headings and links.
+	# Post-process duplicate anchors and fields pruned from standalone DCD CRDs.
 	python3 docs/fix-api-anchors.py ../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
+	python3 ../../docs/fern/scripts/gen_kubernetes_api.py
 
 HELM_CHART_DIR := ../helm/charts/platform
 
@@ -738,3 +702,22 @@ generate-helm-docs: ## Generate Helm chart README from values.yaml and template
 .PHONY: coverage
 coverage: test
 	go tool cover -func=cover.out
+
+.PHONY: clustertest-upgrade-contract clustertest-upgrade-contract-in-cluster
+clustertest-upgrade-contract: kind kubectl ## Replay in a fresh exclusive Kind cluster; clean up on exit.
+	KIND_BIN='$(KIND)' bash hack/run_upgrade_clustertest.sh clustertest-upgrade-contract-in-cluster
+
+clustertest-upgrade-contract-in-cluster: ## Replay in an explicitly selected, exclusively owned cluster.
+	@test -n "$${DYNAMO_CLUSTERTEST_CONTEXT:-}" || { echo "DYNAMO_CLUSTERTEST_CONTEXT is required"; exit 1; }
+	python3 hack/generate_upgrade_fixtures.py --check
+	go test -tags=clustertest ./internal/testing/clusterenv -run '^TestCluster(HistoryStorage|ComponentHistoryBlocksWorkloads)$$' -count=1 -v -timeout=3m
+	go test -tags='clustertest upgradecontract' ./internal/controller -run '^TestClusterOperatorUpgrade$$' -count=1 -v -timeout=15m
+
+.PHONY: clustertest-upgrade-fixtures-regen clustertest-upgrade-fixtures-regen-in-cluster
+clustertest-upgrade-fixtures-regen: kind kubectl ## Capture a pinned release tree in a fresh exclusive Kind cluster.
+	python3 hack/generate_upgrade_fixtures.py --check-release-matrix
+	KIND_BIN='$(KIND)' bash hack/run_upgrade_clustertest.sh clustertest-upgrade-fixtures-regen-in-cluster
+
+clustertest-upgrade-fixtures-regen-in-cluster: ## Capture the selected released tag, or save provisional candidate evidence.
+	@test -n "$${DYNAMO_CLUSTERTEST_CONTEXT:-}" || { echo "DYNAMO_CLUSTERTEST_CONTEXT is required"; exit 1; }
+	python3 hack/generate_upgrade_fixtures.py --regenerate $(if $(UPGRADE_RELEASE_TAG),--release-tag "$(UPGRADE_RELEASE_TAG)") $(if $(UPGRADE_CANDIDATE_SHA),--candidate-sha "$(UPGRADE_CANDIDATE_SHA)") $(if $(UPGRADE_CANDIDATE_OUTPUT),--candidate-output "$(UPGRADE_CANDIDATE_OUTPUT)")

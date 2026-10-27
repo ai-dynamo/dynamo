@@ -8,9 +8,9 @@ from typing import Any, Dict, Optional
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.arg_group import ArgGroup
-from dynamo.common.configuration.groups.aic_perf_args import (
-    AicPerfArgGroup,
-    AicPerfConfigBase,
+from dynamo.common.configuration.groups.ais_perf_args import (
+    AisPerfArgGroup,
+    AisPerfConfigBase,
 )
 from dynamo.common.configuration.groups.kv_router_args import (
     CONDITIONAL_DISAGG_POLICY_CHOICES,
@@ -34,6 +34,123 @@ _U32_MAX = 2**32 - 1
 _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
 
 
+def _mountinfo_path(value: str) -> str:
+    for escape, character in (
+        (r"\040", " "),
+        (r"\011", "\t"),
+        (r"\012", "\n"),
+        (r"\134", "\\"),
+    ):
+        value = value.replace(escape, character)
+    return value
+
+
+def _cpu_quota_count() -> Optional[int]:
+    memberships: dict[str, pathlib.PurePosixPath] = {}
+    try:
+        for line in pathlib.Path("/proc/self/cgroup").read_text().splitlines():
+            parts = line.split(":", 2)
+            if len(parts) != 3 or not parts[2].startswith("/"):
+                continue
+            if parts[0] == "0" and not parts[1]:
+                memberships["v2"] = pathlib.PurePosixPath(parts[2])
+            elif "cpu" in parts[1].split(","):
+                memberships["v1"] = pathlib.PurePosixPath(parts[2])
+
+        mount_lines = pathlib.Path("/proc/self/mountinfo").read_text().splitlines()
+    except OSError:
+        mount_lines = []
+
+    ambiguous_mount = False
+    for line in mount_lines:
+        if " - " not in line:
+            continue
+        mount, filesystem = line.split(" - ", 1)
+        fields = mount.split()
+        fs_fields = filesystem.split()
+        if len(fields) < 5 or len(fs_fields) < 3:
+            continue
+        if fs_fields[0] == "cgroup2":
+            version = "v2"
+        elif fs_fields[0] == "cgroup" and "cpu" in fs_fields[2].split(","):
+            version = "v1"
+        else:
+            continue
+        membership = memberships.get(version)
+        if membership is None:
+            continue
+
+        mount_root = pathlib.PurePosixPath(_mountinfo_path(fields[3]))
+        if (
+            ".." in mount_root.parts
+            or ".." in membership.parts
+            or not membership.is_relative_to(mount_root)
+        ):
+            # An inherited mount may not expose the process's cgroup.
+            ambiguous_mount = True
+            continue
+        relative = membership.relative_to(mount_root)
+        root = pathlib.Path(_mountinfo_path(fields[4]))
+        found, quota_count = _quota_in_cgroup_hierarchy(root / relative, root, version)
+        if found:
+            return quota_count
+
+    if ambiguous_mount:
+        return 1  # Unknown effective quota: keep automatic workers disabled.
+
+    for root, version in (
+        (pathlib.Path("/sys/fs/cgroup"), "v2"),
+        (pathlib.Path("/sys/fs/cgroup/cpu"), "v1"),
+        (pathlib.Path("/sys/fs/cgroup/cpu,cpuacct"), "v1"),
+    ):
+        found, quota_count = _quota_in_cgroup_hierarchy(root, root, version)
+        if found:
+            return quota_count
+    return None
+
+
+def _quota_in_cgroup_hierarchy(
+    current: pathlib.Path, root: pathlib.Path, version: str
+) -> tuple[bool, Optional[int]]:
+    found = False
+    limit: Optional[int] = None
+    while current.is_relative_to(root):
+        try:
+            if version == "v2":
+                quota_text, period_text = (current / "cpu.max").read_text().split()
+                found = True
+                if quota_text == "max":
+                    quota = -1
+                else:
+                    quota = int(quota_text)
+                period = int(period_text)
+            else:
+                quota = int((current / "cpu.cfs_quota_us").read_text())
+                period = int((current / "cpu.cfs_period_us").read_text())
+                found = True
+            if quota > 0 and period > 0:
+                count = max(1, quota // period)
+                limit = count if limit is None else min(limit, count)
+        except (OSError, ValueError, ZeroDivisionError):
+            pass
+        if current == root:
+            break
+        current = current.parent
+    return found, limit
+
+
+def _default_sglang_preprocess_workers() -> int:
+    try:
+        cpu_count = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cpu_count = os.cpu_count() or 1
+
+    quota_count = _cpu_quota_count()
+    if quota_count is not None:
+        cpu_count = min(cpu_count, quota_count)
+    return min(2, max(0, cpu_count - 1))
+
+
 def validate_model_name(value: str) -> str:
     """Validate that model-name is a non-empty string."""
     if not value or not isinstance(value, str) or len(value.strip()) == 0:
@@ -52,20 +169,27 @@ def validate_model_path(value: str) -> str:
     return value
 
 
-class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
+class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     """Configuration for the Dynamo frontend."""
 
     interactive: bool
     kv_cache_block_size: Optional[int]
     http_host: str
     http_port: int
+    batch_gateway_url: Optional[str] = None
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
+    tls_client_ca_cert_path: Optional[pathlib.Path]
     tcp_tls_cert_path: Optional[str] = None
     tcp_tls_key_path: Optional[str] = None
     tcp_tls_ca_cert_path: Optional[str] = None
+    tcp_tls_client_cert_path: Optional[str] = None
+    tcp_tls_client_key_path: Optional[str] = None
+    tcp_tls_client_ca_cert_path: Optional[str] = None
     nats_tls_ca_cert_path: Optional[str] = None
     nats_tls_insecure: bool = False
+    nats_tls_client_cert_path: Optional[str] = None
+    nats_tls_client_key_path: Optional[str] = None
 
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
@@ -82,6 +206,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
 
     discovery_backend: str
     request_plane: str
+    response_plane: str = "tcp"
     event_plane: Optional[str] = None
     chat_processor: str
     enable_anthropic_api: bool
@@ -91,7 +216,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     enable_streaming_reasoning_dispatch: bool
     reasoning_field_name: str
     exclude_tools_when_tool_choice_none: bool
-    preprocess_workers: int
+    preprocess_workers: Optional[int]
     tokenizer_backend: str
     tokenizer_fallback: bool
     trust_remote_code: bool
@@ -100,14 +225,44 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
     def validate(self) -> None:
+        if self.preprocess_workers is None:
+            self.preprocess_workers = (
+                _default_sglang_preprocess_workers()
+                if self.chat_processor == "sglang"
+                else 0
+            )
+        elif self.preprocess_workers < 0:
+            raise ValueError("--dyn-preprocess-workers must be >= 0")
+
         if self.load_aware:
             self.router_mode = "kv"
-        self.apply_load_aware_preset()
-        self.apply_conditional_disagg_config()
+        self.apply_router_config()
 
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
                 "--tls-cert-path and --tls-key-path must be provided together"
+            )
+        if self.tls_client_ca_cert_path and not (
+            self.tls_cert_path and self.tls_key_path
+        ):
+            raise ValueError(
+                "--tls-client-ca-cert-path requires --tls-cert-path and --tls-key-path"
+            )
+        if self.frontend_route_extensions and (
+            self.interactive or self.kserve_grpc_server
+        ):
+            mode_flag = "--interactive" if self.interactive else "--kserve-grpc-server"
+            raise ValueError(
+                "--frontend-route-extension is only supported by the HTTP frontend, "
+                f"so it cannot be combined with {mode_flag}"
+            )
+        if self.batch_gateway_url is not None and (
+            self.interactive or self.kserve_grpc_server
+        ):
+            mode_flag = "--interactive" if self.interactive else "--kserve-grpc-server"
+            raise ValueError(
+                "--batch-gateway-url is only supported by the HTTP frontend, "
+                f"so it cannot be combined with {mode_flag}"
             )
         if self.migration_limit < 0 or self.migration_limit > _U32_MAX:
             raise ValueError(
@@ -133,32 +288,24 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
-        if self.router_prefill_load_model == "aic":
+        if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
+            raise ValueError(
+                "--ais-perf-config requires --router-prefill-load-model=ais"
+            )
+        if self.router_prefill_load_model == "ais":
             if self.router_mode != "kv":
                 raise ValueError(
-                    "--router-prefill-load-model=aic requires --router-mode=kv"
+                    "--router-prefill-load-model=ais requires --router-mode=kv"
                 )
             if self.chat_processor != "dynamo":
                 raise ValueError(
-                    "--router-prefill-load-model=aic currently requires "
+                    "--router-prefill-load-model=ais currently requires "
                     "--dyn-chat-processor=dynamo"
                 )
-            missing = [
-                flag
-                for flag, value in (
-                    ("--aic-backend", self.aic_backend),
-                    ("--aic-system", self.aic_system),
-                    ("--aic-model-path", self.aic_model_path),
-                )
-                if not value
-            ]
-            if missing:
-                raise ValueError(
-                    "--router-prefill-load-model=aic requires " + ", ".join(missing)
-                )
+            self.ais_perf_kwargs()
             if not self.router_track_prefill_tokens:
                 raise ValueError(
-                    "--router-prefill-load-model=aic requires "
+                    "--router-prefill-load-model=ais requires "
                     "--router-track-prefill-tokens"
                 )
         if self.serve_indexer:
@@ -266,6 +413,13 @@ class FrontendArgGroup(ArgGroup):
             help="HTTP port for the engine (u16).",
             arg_type=int,
         )
+        add_argument(
+            g,
+            flag_name="--batch-gateway-url",
+            env_var="DYN_BATCH_GATEWAY_URL",
+            default=None,
+            help="Internal Batch Gateway URL for proxying /v1/files and /v1/batches.",
+        )
         add_negatable_bool_argument(
             g,
             flag_name="--serve-indexer",
@@ -288,6 +442,14 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_TLS_KEY_PATH",
             default=None,
             help="TLS certificate key path, PEM format.",
+            arg_type=pathlib.Path,
+        )
+        add_argument(
+            g,
+            flag_name="--tls-client-ca-cert-path",
+            env_var="DYN_TLS_CLIENT_CA_CERT_PATH",
+            default=None,
+            help="Client CA certificate path for mutual TLS, PEM format.",
             arg_type=pathlib.Path,
         )
 
@@ -317,6 +479,31 @@ class FrontendArgGroup(ArgGroup):
 
         add_argument(
             g,
+            flag_name="--tcp-tls-client-cert-path",
+            env_var="DYN_TCP_TLS_CLIENT_CERT_PATH",
+            default=None,
+            help="Path to PEM client certificate presented to the TCP server for mTLS.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-key-path",
+            env_var="DYN_TCP_TLS_CLIENT_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the TCP client certificate (mTLS).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-ca-cert-path",
+            env_var="DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate the TCP server uses to verify client "
+            "certificates. When set, clients must present a trusted certificate (mTLS enforced).",
+        )
+
+        add_argument(
+            g,
             flag_name="--nats-tls-ca-cert-path",
             env_var="NATS_TLS_CA_CERT_PATH",
             default=None,
@@ -331,6 +518,22 @@ class FrontendArgGroup(ArgGroup):
             help="Disable NATS TLS certificate verification. For local development only.",
         )
 
+        add_argument(
+            g,
+            flag_name="--nats-tls-client-cert-path",
+            env_var="NATS_TLS_CLIENT_CERT_PATH",
+            default=None,
+            help="Path to PEM client certificate presented to the NATS server for mTLS.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-client-key-path",
+            env_var="NATS_TLS_CLIENT_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the NATS client certificate (mTLS).",
+        )
+
         # Router options (shared with dynamo.router)
         RouterArgGroup(
             default_router_mode="round-robin", include_frontend_only=True
@@ -338,7 +541,7 @@ class FrontendArgGroup(ArgGroup):
 
         # KV router options (shared with dynamo.router)
         KvRouterArgGroup().add_arguments(parser)
-        AicPerfArgGroup().add_arguments(parser)
+        AisPerfArgGroup().add_arguments(parser)
 
         add_argument(
             g,
@@ -472,6 +675,14 @@ class FrontendArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--response-plane",
+            env_var="DYN_RESPONSE_PLANE",
+            default="tcp",
+            help="Select the response transport. Frontend and workers must match.",
+            choices=["tcp", "quic"],
+        )
+        add_argument(
+            g,
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
             default=None,
@@ -494,7 +705,7 @@ class FrontendArgGroup(ArgGroup):
             g,
             flag_name="--strip-anthropic-preamble",
             env_var="DYN_STRIP_ANTHROPIC_PREAMBLE",
-            default=False,
+            default=True,
             help=(
                 "Strip the Claude Code billing preamble (x-anthropic-billing-header) "
                 "from the system prompt. Saves tokens and improves prompt caching."
@@ -578,20 +789,20 @@ class FrontendArgGroup(ArgGroup):
             ),
         )
 
-        add_argument(
-            g,
-            flag_name="--dyn-preprocess-workers",
-            env_var="DYN_PREPROCESS_WORKERS",
-            default=0,
+        g.add_argument(
+            "--dyn-preprocess-workers",
             dest="preprocess_workers",
+            type=int,
+            default=env_or_default("DYN_PREPROCESS_WORKERS", None, value_type=int),
             help=(
-                "[EXPERIMENTAL] Number of worker processes for preprocessing and output processing. "
-                "When > 0, offloads CPU-bound work (tokenization, template rendering, "
-                "detokenization) to a ProcessPoolExecutor with N workers, each with its "
-                "own GIL. 0 (default) keeps all processing on the main event loop. "
-                "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
+                "[EXPERIMENTAL] SGLang preprocessing worker processes per model. "
+                "When unset, selects up to 2 workers per model from visible CPU capacity, "
+                "leaving one CPU out of the per-model calculation. "
+                "Multiple models each create a pool. "
+                "0 runs preprocessing on the main event loop. "
+                "Nonzero values are supported only with '--dyn-chat-processor sglang'.\n"
+                "env var: DYN_PREPROCESS_WORKERS | default: auto for SGLang, 0 otherwise"
             ),
-            arg_type=int,
         )
 
         add_argument(

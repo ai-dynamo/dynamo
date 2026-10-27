@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Document order in prometheus.yaml: 0 dynamo-frontend, 1 dynamo-worker,
+# 2 dynamo-planner, 3 dynamo-epp, 4 dynamo-router.
+# Two endpoints scrape a frontend HTTP service and follow frontendPath:
+# frontend[0] and worker[3] (the GAIE/EPP direct-routing sidecar on port http).
+# Every other endpoint hits the system status server, which serves /metrics
+# from a hardcoded route, so it must stay on /metrics.
+suite: PodMonitor frontend metrics path
+templates:
+  - charts/dynamo-operator/templates/prometheus.yaml
+
+tests:
+  - it: defaults the frontend endpoints to /metrics
+    set:
+      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
+    asserts:
+      - equal:
+          path: spec.podMetricsEndpoints[0].path
+          value: /metrics
+        documentIndex: 0
+      - equal:
+          path: spec.podMetricsEndpoints[3].path
+          value: /metrics
+        documentIndex: 1
+
+  - it: moves both frontend endpoints when frontendPath is set
+    set:
+      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
+      dynamo-operator.dynamo.metrics.podMonitors.frontendPath: /v1/metrics
+    asserts:
+      - equal:
+          path: spec.podMetricsEndpoints[0].path
+          value: /v1/metrics
+        documentIndex: 0
+      - equal:
+          path: spec.podMetricsEndpoints[3].path
+          value: /v1/metrics
+        documentIndex: 1
+
+  - it: keeps system-port endpoints on /metrics when frontendPath is set
+    set:
+      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
+      dynamo-operator.dynamo.metrics.podMonitors.frontendPath: /v1/metrics
+    asserts:
+      - equal:
+          path: spec.podMetricsEndpoints[0].path
+          value: /metrics
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[1].path
+          value: /metrics
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[2].path
+          value: /metrics
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[0].path
+          value: /metrics
+        documentIndex: 2
+      - equal:
+          path: spec.podMetricsEndpoints[0].path
+          value: /metrics
+        documentIndex: 3
+      - equal:
+          path: spec.podMetricsEndpoints[0].path
+          value: /metrics
+        documentIndex: 4
+
+  - it: falls back to /metrics when frontendPath is empty
+    set:
+      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
+      dynamo-operator.dynamo.metrics.podMonitors.frontendPath: ""
+    asserts:
+      - equal:
+          path: spec.podMetricsEndpoints[0].path
+          value: /metrics
+        documentIndex: 0
+      - equal:
+          path: spec.podMetricsEndpoints[3].path
+          value: /metrics
+        documentIndex: 1

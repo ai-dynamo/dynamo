@@ -14,6 +14,7 @@ export DYN_REQUEST_PLANE=tcp
 # Default values
 MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 SINGLE_GPU=false
+FRONTEND_DECODING=false
 
 # Parse command line arguments
 # All extra arguments are passed through to the PD worker's dynamo.vllm
@@ -29,15 +30,24 @@ while [[ $# -gt 0 ]]; do
             SINGLE_GPU=true
             shift
             ;;
+        --frontend-decoding)
+            FRONTEND_DECODING=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS] [EXTRA_ARGS...]"
             echo ""
             echo "Disaggregated multimodal serving with separate Encode and aggregated PD worker"
             echo ""
+            echo "Single-GPU mode uses the first CUDA_VISIBLE_DEVICES entry; missing or empty is an error."
+            echo "Explicit DYN_ENCODE_WORKER_GPU and DYN_PD_WORKER_GPU values override it."
+            echo "Set CUDA_VISIBLE_DEVICES unless every worker has an explicit GPU override."
+            echo ""
             echo "Options:"
             echo "  --model <model_name>          Specify the VLM model to use (default: $MODEL_NAME)"
             echo "                                LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates"
             echo "  --single-gpu                  Run encode and PD workers on the same GPU (for small models, e.g. 2B)"
+            echo "  --frontend-decoding           Decode images in the Rust frontend and transfer pixels to the encode worker via NIXL"
             echo "  -h, --help                    Show this help message"
             echo ""
             echo "All additional arguments are passed through to the PD worker's dynamo.vllm."
@@ -49,7 +59,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --model microsoft/Phi-3.5-vision-instruct"
             echo "  $0 --model Qwen/Qwen2.5-VL-7B-Instruct"
             echo "  $0 --no-enable-prefix-caching --multimodal-embedding-cache-capacity-gb 2"
-            echo "  $0 --model Qwen/Qwen2-VL-2B-Instruct --single-gpu"
+            echo "  CUDA_VISIBLE_DEVICES=0 $0 --model Qwen/Qwen2-VL-2B-Instruct --single-gpu"
             echo ""
             exit 0
             ;;
@@ -83,11 +93,19 @@ unset DYN_SYSTEM_PORT
 EXTRA_ARGS=""
 PD_GPU_MEM_ARGS=""
 
+# --frontend-decoding must reach BOTH workers: the PD worker's model card
+# advertises the media decoder (so the frontend decodes), and the encode
+# worker needs the flag to read decoded pixels via NIXL.
+FD_ARGS=""
+if [[ "$FRONTEND_DECODING" == "true" ]]; then
+    FD_ARGS="--frontend-decoding"
+fi
+
 # GPU assignments (override via environment variables)
-# In single-GPU mode both workers share the same GPU.
+# In single-GPU mode both workers share the inherited GPU (see inherited_gpu_id).
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
-    DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-0}
+    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-$(inherited_gpu_id)}
+    DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-$(inherited_gpu_id)}
     DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.1}
     DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.7}
     EXTRA_ARGS="--enforce-eager --max-model-len $PD_MAX_MODEL_LEN"
@@ -143,6 +161,7 @@ python -m dynamo.vllm \
   --disaggregation-mode encode \
   --model "$MODEL_NAME" \
   --gpu-memory-utilization "$DYN_ENCODE_GPU_MEM" \
+  $FD_ARGS \
   $EXTRA_ARGS &
 
 # Start PD worker (aggregated prefill+decode, routes to encoder for embeddings)
@@ -156,6 +175,7 @@ python -m dynamo.vllm \
   --enable-mm-embeds \
   --model "$MODEL_NAME" \
   $PD_GPU_MEM_ARGS \
+  $FD_ARGS \
   $EXTRA_ARGS \
   "${EXTRA_PD_ARGS[@]}" &
 

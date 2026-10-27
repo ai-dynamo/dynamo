@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Kimi-K2.5 NVFP4 Recipes: Agentic Coding Workload
 
 Deployment recipes for **Kimi-K2.5-NVFP4** on an agentic coding workload.
@@ -93,11 +98,14 @@ kubectl wait --for=condition=ready pod \
   -l nvidia.com/dynamo-graph-deployment-name=kimi-k25-disagg-kv-eagle \
   -n ${NAMESPACE} --timeout=1800s
 
-# Run benchmark (one perf.yaml per deploy.yaml), 1 hour duration.
+# Run benchmark (one perf.yaml per deploy.yaml), 30-minute duration.
 kubectl apply -f trtllm/disagg-eagle-kv-router/perf.yaml -n ${NAMESPACE}
 ```
 
 ## Expected metrics
+
+The approximate values below come from the earlier one-hour qualification. The current manifests cap each measured run
+at 30 minutes and require requalification before these values can be treated as expected 30-minute results.
 
 | Variant | tok/s/user (avg) | tok/s/GPU |
 |---|---|---|

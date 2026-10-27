@@ -21,12 +21,14 @@ Build each entrypoint with `--no-default-features` and its matching feature:
 | Entrypoint | Feature |
 |---|---|
 | `claude_trace_export` | `claude-trace-export` |
+| `codex_trace_export` | `codex-trace-export` |
 | `request_trace_to_mooncake` | `request-trace-to-mooncake` |
 | `request_trace_to_satf` | `satf` |
 | `multiturn_bench` | `multiturn` |
 | `offline_replay_bench` | `offline-replay` |
 | `mooncake_bench` | `mooncake` |
 | `active_sequences_bench` | `active-sequences` |
+| `approximate_lru_bench` | `approximate-lru` |
 | `dc_ckf_consumer_bench` | `dc-ckf-consumer` |
 | `dc_ckf_relay_bench` | `dc-ckf-relay` |
 
@@ -162,4 +164,4 @@ cargo bench --package dynamo-bench --bench offline_replay_bench \
 
 See [kv_router/INDEXER_BENCH.md](kv_router/INDEXER_BENCH.md) for trace
 acquisition, benchmark commands, and results for the `mooncake_bench` suite:
-`concurrent-radix-tree-compressed` and `branch-sharded-crtc`.
+`concurrent-radix-tree-compressed` and `nested-map`.

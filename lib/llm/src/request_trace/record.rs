@@ -13,8 +13,11 @@ use crate::request_trace::RequestTracePayload;
 use super::RequestTraceEventType;
 use super::RequestTraceMetrics;
 use super::RequestTraceRecord;
+use super::RequestTraceRouterSelection;
 use super::RequestTraceSchema;
+use super::RequestTraceWorkerInfo;
 use super::publish;
+use dynamo_kv_router::protocols::SelectionTrace;
 
 fn unix_time_ms() -> u64 {
     SystemTime::now()
@@ -54,33 +57,42 @@ pub(crate) fn emit_request_end(
     tracker: &RequestTracker,
     replay: RequestReplayMetrics,
 ) {
-    let request_received_ms = tracker.request_received_epoch_ms();
-    let event_time_unix_ms = tracker
-        .total_time_ms()
-        .map_or_else(unix_time_ms, |elapsed| {
-            request_received_ms.saturating_add(elapsed.max(0.0).round() as u64)
+    let timing = tracker.get_timing_info();
+    let event_time_unix_ms = timing.total_time_ms.map_or_else(unix_time_ms, |elapsed| {
+        timing
+            .request_received_ms
+            .saturating_add(elapsed.max(0.0).round() as u64)
+    });
+    let worker = tracker
+        .get_worker_info()
+        .map(|worker| RequestTraceWorkerInfo {
+            prefill_worker_id: worker.prefill_worker_id,
+            prefill_dp_rank: worker.prefill_dp_rank,
+            decode_worker_id: worker.decode_worker_id,
+            decode_dp_rank: worker.decode_dp_rank,
         });
 
-    let request = RequestTraceMetrics {
+    let mut request = RequestTraceMetrics {
         request_id,
         x_request_id: None,
         model: None,
-        input_tokens: None,
+        input_tokens: tracker.isl_tokens().map(|v| v as u64),
         output_tokens: Some(tracker.osl_tokens()),
-        cached_tokens: None,
-        request_received_ms: Some(request_received_ms),
-        prefill_wait_time_ms: None,
-        prefill_time_ms: None,
-        ttft_ms: None,
-        total_time_ms: None,
-        avg_itl_ms: None,
-        kv_hit_rate: None,
-        kv_transfer_estimated_latency_ms: None,
-        queue_depth: None,
-        worker: None,
+        cached_tokens: tracker.cached_tokens().map(|v| v as u64),
+        request_received_ms: Some(timing.request_received_ms),
+        prefill_wait_time_ms: timing.prefill_wait_time_ms,
+        prefill_time_ms: timing.prefill_time_ms,
+        ttft_ms: timing.ttft_ms,
+        total_time_ms: timing.total_time_ms,
+        avg_itl_ms: tracker.avg_itl_ms(),
+        kv_hit_rate: timing.kv_hit_rate,
+        kv_transfer_estimated_latency_ms: timing.kv_transfer_estimated_latency_ms,
+        queue_depth: timing.router_queue_depth.map(|v| v as u64),
+        worker,
         replay: Some(replay),
         finish_reason_metadata: None,
     };
+    sanitize_request(&mut request);
 
     publish(RequestTraceRecord {
         schema: RequestTraceSchema::V1,
@@ -90,6 +102,7 @@ pub(crate) fn emit_request_end(
         agent_context: None,
         request: Some(request),
         tool: None,
+        selection: None,
         payload: None,
     });
 }
@@ -107,6 +120,7 @@ pub(crate) fn emit_agent_request_end(
         agent_context: Some(agent_context),
         request: Some(request),
         tool: None,
+        selection: None,
         payload: None,
     });
 }
@@ -120,7 +134,45 @@ pub(crate) fn emit_request_payload(payload: RequestTracePayload, event_time_unix
         agent_context: None,
         request: None,
         tool: None,
+        selection: None,
         payload: Some(payload),
+    });
+}
+
+/// Publish one `router_selection` row. Runs on the routing task, never on the
+/// scheduler actor; building the candidate list is O(retained rows).
+pub(crate) fn emit_router_selection(
+    request_id: &str,
+    worker_type: &'static str,
+    trace: SelectionTrace,
+) {
+    let SelectionTrace {
+        candidate_count,
+        pinned,
+        mut rows,
+    } = trace;
+    // Sort on the routing task; the scheduler actor hands the rows over unordered.
+    rows.sort_unstable_by(|a, b| a.cost.total_cmp(&b.cost));
+    let candidates = rows
+        .into_iter()
+        .map(|row| (row.worker.worker_id, row.worker.dp_rank, row.cost))
+        .collect();
+    publish(RequestTraceRecord {
+        schema: RequestTraceSchema::V1,
+        event_type: RequestTraceEventType::RouterSelection,
+        event_time_unix_ms: unix_time_ms(),
+        event_source: Some(RequestTraceEventSource::Dynamo),
+        agent_context: None,
+        request: None,
+        tool: None,
+        payload: None,
+        selection: Some(RequestTraceRouterSelection {
+            request_id: request_id.to_string(),
+            worker_type: worker_type.to_string(),
+            pinned,
+            candidate_count: candidate_count as u64,
+            candidates,
+        }),
     });
 }
 
@@ -183,6 +235,8 @@ mod tests {
         BUS.init(16);
         let mut rx = BUS.subscribe();
         let tracker = RequestTracker::new();
+        tracker.record_isl(8, Some(4));
+        tracker.record_kv_hit(2.0, 4);
         tracker.record_osl(7);
         tracker.record_finish();
 
@@ -208,7 +262,10 @@ mod tests {
         };
         let request = record.request.as_ref().expect("request payload");
         assert_eq!(request.request_id, "req-1");
+        assert_eq!(request.input_tokens, Some(8));
         assert_eq!(request.output_tokens, Some(7));
+        assert_eq!(request.cached_tokens, Some(4));
+        assert_eq!(request.kv_hit_rate, Some(0.5));
         assert_eq!(
             request.request_received_ms,
             Some(tracker.request_received_epoch_ms())
@@ -240,8 +297,7 @@ mod tests {
                 session_id: "root".to_string(),
                 parent_session_id: None,
                 session_final: None,
-                compaction: None,
-                kv_hints: None,
+                agent_headers: Default::default(),
                 input_trigger: None,
             }),
             request: None,
@@ -258,6 +314,7 @@ mod tests {
                 error_type: None,
             }),
             payload: None,
+            selection: None,
         };
 
         let err = validate_tool_record(&record).expect_err("NaN duration should fail validation");

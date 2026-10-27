@@ -5,6 +5,8 @@
 
 """Golden parity tests for the Planner adapter's load-predictor pre-sweep."""
 
+import json
+import logging
 import math
 
 import pytest
@@ -16,11 +18,14 @@ pytest.importorskip(
 
 import dynamo.planner.simulation.load_predictor as load_predictor
 from dynamo.planner.simulation.load_predictor import (
+    LOAD_PREDICTOR_PRESETS,
     Window,
     _entry_label,
-    _internal_preset,
+    build_windows_from_trace_paths,
     complete_predictor_preset,
+    distinct_predictor_candidates,
     evaluate_preset,
+    internal_preset,
     predictor_fields,
     sweep_load_predictor,
     window_loss,
@@ -61,7 +66,7 @@ def test_static_and_disabled_trigger_paths() -> None:
         trace_path=None,
         show_progress=False,
     )
-    assert static.reason == "static_workload_constant"
+    assert static.reason == "static_workload_configured_fallback"
     assert static.best_by_interval == {
         180: "constant_last",
         600: "constant_last",
@@ -69,7 +74,7 @@ def test_static_and_disabled_trigger_paths() -> None:
 
 
 def test_predictor_search_values_decode_with_family_defaults() -> None:
-    assert _internal_preset("prophet_w20_log1p") == {
+    assert internal_preset("prophet_w20_log1p") == {
         "family": "prophet",
         "log1p": True,
         "prophet_window_size": 20,
@@ -78,7 +83,7 @@ def test_predictor_search_values_decode_with_family_defaults() -> None:
         "r": 10.0,
         "min_points": 5,
     }
-    internal = _internal_preset(
+    internal = internal_preset(
         {
             "load_predictor": "kalman",
             "load_predictor_log1p": True,
@@ -91,7 +96,7 @@ def test_predictor_search_values_decode_with_family_defaults() -> None:
     assert internal["min_points"] == 5
 
     with pytest.raises(ValueError, match="load_predictor must be one of"):
-        _internal_preset({"load_predictor": "bogus"})
+        internal_preset({"load_predictor": "bogus"})
 
 
 def test_every_named_predictor_preset_covers_every_knob() -> None:
@@ -119,6 +124,23 @@ def test_predictor_fields_emit_only_selected_family() -> None:
     }
     assert _entry_label("prophet_w20_raw", 0) == "prophet_w20_raw"
     assert _entry_label({"load_predictor": "kalman"}, 3) == "custom_3"
+
+
+def test_distinct_predictor_candidates_label_complete_and_deduplicate() -> None:
+    defaults = distinct_predictor_candidates(list(LOAD_PREDICTOR_PRESETS))
+    assert [label for label, _ in defaults] == list(LOAD_PREDICTOR_PRESETS)
+    assert all(
+        mapping == complete_predictor_preset(label) for label, mapping in defaults
+    )
+
+    # The Kalman knobs of an ARIMA entry do not change the predictor, so the
+    # mapping repeats ``arima_raw`` and is dropped; the first label is kept.
+    arima = dict(complete_predictor_preset("arima_raw"), kalman_r=1.0)
+    kalman = {"load_predictor": "kalman", "kalman_r": 2.0}
+    candidates = distinct_predictor_candidates(["arima_raw", arima, kalman, kalman])
+    assert [label for label, _ in candidates] == ["arima_raw", "custom_2"]
+    assert candidates[1][1] == complete_predictor_preset(kalman)
+    assert internal_preset(candidates[1][1]) == internal_preset(kalman)
 
 
 class _LastValuePredictor:
@@ -169,6 +191,82 @@ def test_evaluate_preset_preserves_one_step_ahead_cadence(monkeypatch) -> None:
     )
 
 
+class _RaisingPredictor(_LastValuePredictor):
+    def __init__(self, exc: Exception) -> None:
+        super().__init__()
+        self._exc = exc
+
+    def predict_next(self) -> float:
+        raise self._exc
+
+
+def _raising_predictors(exc: Exception):
+    return lambda _preset, _interval: (
+        _RaisingPredictor(exc),
+        _LastValuePredictor(),
+        _LastValuePredictor(),
+    )
+
+
+def test_evaluate_preset_disqualifies_a_predictor_that_raises(
+    monkeypatch, caplog
+) -> None:
+    monkeypatch.setattr(
+        load_predictor, "_new_predictors", _raising_predictors(ValueError("unfit"))
+    )
+    windows = [Window(2, 100, 10), Window(2, 100, 10), Window(4, 200, 20)]
+    with caplog.at_level(logging.WARNING, logger=load_predictor.__name__):
+        loss = evaluate_preset(
+            windows, {"family": "kalman", "log1p": False}, interval_s=180, warmup=1
+        )
+    assert loss == math.inf
+    assert "scoring as inf" in caplog.text
+
+
+def test_evaluate_preset_propagates_unexpected_errors(monkeypatch) -> None:
+    monkeypatch.setattr(
+        load_predictor, "_new_predictors", _raising_predictors(KeyError("bug"))
+    )
+    with pytest.raises(KeyError):
+        evaluate_preset(
+            [Window(2, 100, 10)],
+            {"family": "kalman", "log1p": False},
+            interval_s=180,
+            warmup=0,
+        )
+
+
+def test_sweep_never_selects_a_preset_that_raises(monkeypatch) -> None:
+    def new_predictors(preset, _interval):
+        if preset["family"] == "kalman":
+            return tuple(_RaisingPredictor(ValueError("unfit")) for _ in range(3))
+        return tuple(_LastValuePredictor() for _ in range(3))
+
+    monkeypatch.setattr(load_predictor, "_new_predictors", new_predictors)
+    monkeypatch.setattr(
+        load_predictor, "build_windows", lambda _path, _iv: [Window(2, 100, 10)] * 4
+    )
+
+    result = sweep_load_predictor(
+        policies=["throughput_180_5"],
+        candidates=["kalman_default_raw", "constant_last"],
+        trace_path="trace.jsonl",
+        show_progress=False,
+    )
+
+    assert result.best_by_interval == {180: "constant_last"}
+    assert math.isinf(result.losses[180]["kalman_default_raw"])
+    assert result.losses[180]["constant_last"] == 0.0
+    assert result.reason == "swept"
+
+
+def test_window_loss_clamps_negative_forecasts_before_products() -> None:
+    # A negative forecast scores as a forecast of zero, and two negative
+    # forecasts must not multiply into a plausible positive token product.
+    assert window_loss(-5, -400, -20, 5, 400, 20) == window_loss(0, 0, 0, 5, 400, 20)
+    assert window_loss(-5, -400, 20, 5, 400, 20) > window_loss(-5, 400, 20, 5, 400, 20)
+
+
 def test_short_trace_falls_back_to_constant_last(monkeypatch) -> None:
     monkeypatch.setattr(load_predictor, "build_windows", lambda _path, _iv: [])
     monkeypatch.setattr(load_predictor, "_common_warmup", lambda _values, _iv: 0)
@@ -184,5 +282,41 @@ def test_short_trace_falls_back_to_constant_last(monkeypatch) -> None:
     )
 
     assert result.best_by_interval == {180: "constant_last"}
-    assert "no_winner_fallback_constant_last" in result.reason
+    assert "no_winner_configured_fallback" in result.reason
     assert all(math.isinf(value) for value in result.losses[180].values())
+
+
+def test_dynamo_multi_file_trace_builds_one_global_window_series(tmp_path) -> None:
+    def request(request_id: str, timestamp_ms: int, isl: int, osl: int) -> str:
+        return json.dumps(
+            {
+                "schema": "dynamo.request.trace.v1",
+                "event_type": "request_end",
+                "event_time_unix_ms": timestamp_ms + 10,
+                "request": {
+                    "request_id": request_id,
+                    "request_received_ms": timestamp_ms,
+                    "output_tokens": osl,
+                    "replay": {
+                        "trace_block_size": 64,
+                        "input_length": isl,
+                        "input_sequence_hashes": [1],
+                    },
+                },
+            }
+        )
+
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    first.write_text(
+        json.dumps({"event_type": "request_payload", "request_id": "first"})
+        + "\n"
+        + request("first", 1_000_000, 100, 10)
+        + "\n"
+    )
+    second.write_text(request("second", 1_180_000, 200, 20) + "\n")
+
+    assert build_windows_from_trace_paths([str(first), str(second)], "dynamo", 180) == [
+        Window(1.0, 100.0, 10.0),
+        Window(1.0, 200.0, 20.0),
+    ]

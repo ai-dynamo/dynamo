@@ -1,5 +1,6 @@
 {
   "add_bos_token": true,
+  "chat_template": "{% for message in messages %}{{ '<|' + message['role'] + '|>\n' + message['content'] + '<|end|>\n' }}{% endfor %}",
   "add_eos_token": false,
   "bos_token": {
     "__type": "AddedToken",

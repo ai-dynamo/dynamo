@@ -3,6 +3,9 @@
 
 use std::process::Command;
 
+use dynamo_data_gen::mooncake::{
+    AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticMooncakeHeader,
+};
 use tempfile::tempdir;
 
 const FAILING_TRACE: &str = concat!(
@@ -57,7 +60,12 @@ fn agentic_trace_requires_agentic_flag() {
     assert!(!output.exists());
 
     assert!(convert(&input, &output, true).status.success());
-    assert_eq!(std::fs::read_to_string(output).unwrap().lines().count(), 17);
+    let contents = std::fs::read_to_string(output).unwrap();
+    let mut lines = contents.lines();
+    let header: AgenticMooncakeHeader = serde_json::from_str(lines.next().unwrap()).unwrap();
+    assert_eq!(header.schema, AGENTIC_MOONCAKE_SCHEMA);
+    assert_eq!(header.version, AGENTIC_MOONCAKE_VERSION);
+    assert_eq!(lines.count(), 17);
 }
 
 #[cfg(unix)]

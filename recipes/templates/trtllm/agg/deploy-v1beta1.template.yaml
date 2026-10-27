@@ -1,0 +1,180 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# This recipe runs offline against the pre-populated shared-model-cache PVC.
+# Contract:
+# - Keep the ConfigMap before the native nvidia.com/v1beta1 DGD; each component
+#   podTemplate contains a runtime container named main.
+# - Keep backendFramework trtllm aligned with the runtime image and
+#   python3 -m dynamo.trtllm command.
+# - Keep components ordered as Frontend (frontend), then Worker (worker).
+# - Keep MODEL_NAME and SERVED_MODEL_NAME synchronized with their command
+#   arguments; keep the ConfigMap name, volume, mount, and
+#   --extra-engine-args path as one coordinated bundle.
+# - shared-model-cache is the canonical PVC, volume, and mount name. Mount it at
+#   /shared-model-cache. The namespace-local PVC must exist; change all coupled
+#   cache references together.
+# Derived from: recipes/nemotron-3.5-lightning/trtllm/agg-b200-bf16/deploy.yaml.
+# Validation status: static catalog validation only; verify admission,
+# readiness, and runtime behavior on the target cluster.
+# Optional TensorRT-LLM ConfigMap: when removed, also remove the Worker's trtllm-config
+# volume, matching /config volume mount, configMap.name reference, and --extra-engine-args flag.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemotron-lightning-trtllm-aggregate-config
+data:
+  agg.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 1
+    max_batch_size: 512
+    max_num_tokens: 32768
+    enable_chunked_prefill: true
+    trust_remote_code: true
+    stream_interval: 10
+    kv_cache_config:
+      dtype: fp8
+      enable_block_reuse: true
+      use_kv_cache_manager_v2: true
+      mamba_state_config:
+        periodic_snapshot_interval: 0
+        additional_snapshot_offsets_from_start: [57600]
+    moe_config:
+      backend: CUTLASS
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: nemotron-lightning-trtllm-aggregate
+spec:
+  backendFramework: trtllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
+              imagePullPolicy: IfNotPresent
+              command: [python3]
+              args: [-m, dynamo.frontend, --router-mode, round-robin, --http-port, "8000"]
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: DYN_HTTP_BODY_LIMIT_MB
+                  value: "200"
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+
+    - name: Worker
+      type: worker
+      replicas: 1
+      sharedMemorySize: 40Gi
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-nemotron-3.5-lightning-dev.1
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace/
+              command: [python3]
+              args:
+                - -m
+                - dynamo.trtllm
+                - --model
+                - $(MODEL_NAME)
+                - --served-model-name
+                - $(SERVED_MODEL_NAME)
+                - --tensor-parallel-size
+                - "1"
+                - --max-num-tokens
+                - "32768"
+                - --max-batch-size
+                - "512"
+                - --extra-engine-args
+                - /config/agg.yaml
+                - --disaggregation-mode
+                - agg
+                - --dyn-tool-call-parser
+                - nemotron_nano
+                - --dyn-reasoning-parser
+                - nemotron_nano
+              env:
+                - name: MODEL_NAME
+                  value: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+                - name: SERVED_MODEL_NAME
+                  value: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /shared-model-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+                - name: NCCL_IB_DISABLE
+                  value: "1"
+                - name: PYTHONHASHSEED
+                  value: "0"
+                - name: TLLM_LOG_LEVEL
+                  value: INFO
+                - name: TLLM_BATCHED_GEMM_LOG_REJECTION
+                  value: "1"
+                - name: TRTLLM_ENABLE_PDL
+                  value: "1"
+                - name: TRTLLM_SERVER_DISABLE_GC
+                  value: "1"
+                - name: TRTLLM_WORKER_DISABLE_GC
+                  value: "1"
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              resources:
+                requests:
+                  memory: 128Gi
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+                  readOnly: true
+                - name: trtllm-config
+                  mountPath: /config
+                  readOnly: true
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+            - name: trtllm-config
+              configMap:
+                name: nemotron-lightning-trtllm-aggregate-config
+    # Optional components (type: planner, type: epp) go below this line, after the canonical components above.

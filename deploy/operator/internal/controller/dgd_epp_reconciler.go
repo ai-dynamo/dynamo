@@ -29,6 +29,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -69,7 +70,10 @@ func (r *dgdEPPReconciler) Reconcile(
 	}
 
 	logger.Info("Reconciling EPP resources", "componentName", componentName)
-	if eppService.EPPConfig == nil || eppService.EPPConfig.ConfigMapRef == nil {
+
+	// Legacy Go EPP: reconcile the ConfigMap when eppConfig is set and not a
+	// user-managed ConfigMapRef. Native Rust EPP needs no ConfigMap.
+	if epp.IsLegacyGoEPP(eppService.EPPConfig) && eppService.EPPConfig.ConfigMapRef == nil {
 		configMap, err := epp.GenerateConfigMap(ctx, dgd, componentName, eppService.EPPConfig)
 		if err != nil {
 			logger.Error(err, "Failed to generate EPP ConfigMap")
@@ -83,10 +87,28 @@ func (r *dgdEPPReconciler) Reconcile(
 				return fmt.Errorf("failed to sync EPP ConfigMap: %w", err)
 			}
 		}
+	} else if !epp.IsLegacyGoEPP(eppService.EPPConfig) {
+		// Native Rust EPP: reconcile away any ConfigMap the operator
+		// generated for a prior Go EPP configuration (in-place migration)
+		// rather than leaving stale Go EPP config/labels behind until the DGD
+		// itself is deleted. A ConfigMapRef-backed ConfigMap is never touched
+		// here: it stays in the IsLegacyGoEPP branch above regardless of
+		// whether this else-if runs, since IsLegacyGoEPP only depends on
+		// eppConfig being non-nil.
+		//
+		// A legacy DGD's eppConfig.configMapRef can name a user-managed
+		// ConfigMap that happens to collide with this deterministic name, so
+		// deleteOwnedLegacyEPPConfigMap only deletes a ConfigMap this DGD
+		// actually owns (see its doc comment) instead of deleting by name
+		// alone.
+		if err := r.deleteOwnedLegacyEPPConfigMap(ctx, dgd); err != nil {
+			logger.Error(err, "Failed to delete legacy EPP ConfigMap")
+			return fmt.Errorf("failed to delete legacy EPP ConfigMap: %w", err)
+		}
 	}
 
 	eppServiceName := dynamo.GetDCDResourceName(dgd, componentName, "")
-	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, eppServiceName, eppService.EPPConfig)
+	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, eppServiceName)
 	if err != nil {
 		logger.Error(err, "Failed to generate EPP InferencePool")
 		return fmt.Errorf("failed to generate EPP InferencePool: %w", err)
@@ -123,4 +145,25 @@ func (r *dgdEPPReconciler) Reconcile(
 
 	logger.Info("Successfully reconciled EPP resources", "poolName", inferencePool.GetName())
 	return nil
+}
+
+// deleteOwnedLegacyEPPConfigMap deletes the ConfigMap at the operator's
+// deterministic legacy-EPP name (<dgd>-epp-config) only if this DGD is its
+// controller owner.
+//
+// eppConfig.configMapRef lets a user point a legacy DGD at a ConfigMap they
+// manage themselves, and that name is an arbitrary user choice — nothing
+// stops it from being the same <dgd>-epp-config name the operator would have
+// generated. Deleting by name alone (as the generic commoncontroller.SyncResource
+// helper does) would delete that foreign, user-owned ConfigMap the moment
+// such a DGD migrates off Go EPP by clearing eppConfig. Checking
+// metav1.IsControlledBy first ensures only a ConfigMap this operator actually
+// generated for this DGD is ever removed; a same-named but foreign ConfigMap
+// is left untouched.
+func (r *dgdEPPReconciler) deleteOwnedLegacyEPPConfigMap(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) error {
+	key := types.NamespacedName{Name: epp.GetConfigMapName(dgd.Name), Namespace: dgd.Namespace}
+	return r.deleteIfControlledBy(ctx, dgd, key, &corev1.ConfigMap{}, "ConfigMap")
 }

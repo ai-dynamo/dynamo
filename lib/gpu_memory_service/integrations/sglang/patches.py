@@ -15,7 +15,6 @@ from contextlib import contextmanager
 from typing import Optional
 
 import gpu_memory_service.integrations.sglang as gms_sglang
-import torch
 from gpu_memory_service.integrations.sglang.memory_saver import (
     GMSMemorySaverImpl,
     get_gms_memory_saver_impl,
@@ -64,8 +63,10 @@ def patch_torch_memory_saver() -> None:
             # In GMS mode we install only the strict GMS implementation:
             # weights + kv_cache go through GMS, generic unsupported tags stay
             # no-ops/warnings, and cuda_graph remains unsupported.
-            # Get device from torch.cuda.current_device() (already set by SGLang)
-            device_index = torch.cuda.current_device()
+            # Get device from the active VMM device module (already set by SGLang)
+            from gpu_memory_service.integrations.common.utils import torch_device
+
+            device_index = torch_device().current_device()
 
             # Read lock mode set by setup_gms() (defaults to RW_OR_RO)
             gms_impl = GMSMemorySaverImpl(
@@ -213,7 +214,7 @@ def patch_static_state_for_gms() -> None:
         return
 
     try:
-        from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
+        from sglang.srt.managers.scheduler_components import weight_updater
 
         def _export_noop(model):
             """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
@@ -223,8 +224,8 @@ def patch_static_state_for_gms() -> None:
             """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
             pass
 
-        _mixin._export_static_state = _export_noop
-        _mixin._import_static_state = _import_noop
+        weight_updater._export_static_state = _export_noop
+        weight_updater._import_static_state = _import_noop
         _static_state_patched = True
         logger.info(
             "[GMS] Patched _export/_import_static_state -> no-op (pid=%d)",
@@ -232,6 +233,6 @@ def patch_static_state_for_gms() -> None:
         )
     except Exception:
         logger.warning(
-            "[GMS] Could not patch scheduler_update_weights_mixin: ",
+            "[GMS] Could not patch SGLang weight_updater static state: ",
             exc_info=True,
         )

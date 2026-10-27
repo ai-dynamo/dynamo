@@ -10,6 +10,8 @@ use dynamo_kv_router::indexer::cuckoo::ProducerIdentity;
 use dynamo_runtime::protocols::EndpointId;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::worker_type::WorkerType;
+
 fn validate_identity_text<E>(
     value: impl Into<String>,
     empty: E,
@@ -180,11 +182,137 @@ impl ModelTarget {
     }
 }
 
+/// Complete token-to-sequence-hash pipeline used to query one Relay pool.
+///
+/// A format version covers token windowing, multimodal bytes, request-wide cache namespace and
+/// LoRA salt, local block hashing, and rolling sequence hashing as one atomic contract. Consumers
+/// must reject formats they do not implement rather than combining independently versioned steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KvQueryHashFormat {
+    /// Dynamo's canonical block-size windows and rolling sequence hashes.
+    DynamoStandardV1,
+    /// Dynamo's Eagle windows (`kv_block_size + 1` tokens, striding by `kv_block_size`) and
+    /// rolling sequence hashes.
+    DynamoEagleV1,
+}
+
+impl KvQueryHashFormat {
+    pub const fn from_enable_eagle(enable_eagle: bool) -> Self {
+        if enable_eagle {
+            Self::DynamoEagleV1
+        } else {
+            Self::DynamoStandardV1
+        }
+    }
+
+    /// Version mixed into Dynamo's cache-semantics identity derivation.
+    pub const fn identity_version(self) -> u16 {
+        match self {
+            Self::DynamoStandardV1 => 1,
+            Self::DynamoEagleV1 => 2,
+        }
+    }
+
+    pub const fn is_eagle(self) -> bool {
+        matches!(self, Self::DynamoEagleV1)
+    }
+}
+
+/// Query inputs required to reproduce the sequence hashes stored in a pool's CKF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct KvQuerySemantics {
+    kv_block_size: u32,
+    hash_format: KvQueryHashFormat,
+}
+
+impl KvQuerySemantics {
+    pub const fn new(
+        kv_block_size: u32,
+        hash_format: KvQueryHashFormat,
+    ) -> Result<Self, KvQuerySemanticsError> {
+        if kv_block_size == 0 {
+            return Err(KvQuerySemanticsError::ZeroBlockSize);
+        }
+        Ok(Self {
+            kv_block_size,
+            hash_format,
+        })
+    }
+
+    pub const fn kv_block_size(self) -> u32 {
+        self.kv_block_size
+    }
+
+    pub const fn hash_format(self) -> KvQueryHashFormat {
+        self.hash_format
+    }
+}
+
+impl<'de> Deserialize<'de> for KvQuerySemantics {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            kv_block_size: u32,
+            hash_format: KvQueryHashFormat,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(wire.kv_block_size, wire.hash_format).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum KvQuerySemanticsError {
+    #[error("KV query block size must be nonzero")]
+    ZeroBlockSize,
+}
+
+/// Worker role declared by a model deployment card for one serving endpoint.
+///
+/// `Legacy` represents a card without `worker_type`; it is distinct from a malformed or
+/// unspecified wire value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerRole {
+    Prefill,
+    Decode,
+    Encode,
+    Aggregated,
+    Legacy,
+}
+
+impl WorkerRole {
+    pub const fn from_worker_type(worker_type: Option<WorkerType>) -> Self {
+        match worker_type {
+            Some(WorkerType::Prefill) => Self::Prefill,
+            Some(WorkerType::Decode) => Self::Decode,
+            Some(WorkerType::Encode) => Self::Encode,
+            Some(WorkerType::Aggregated) => Self::Aggregated,
+            None => Self::Legacy,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prefill => "prefill",
+            Self::Decode => "decode",
+            Self::Encode => "encode",
+            Self::Aggregated => "aggregated",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DcPoolDescriptor {
     producer: ProducerIdentity,
     serving_endpoint: EndpointId,
     registrations: Arc<[CanonicalModelRegistration]>,
+    query_semantics: KvQuerySemantics,
+    pool_roles: Arc<[WorkerRole]>,
 }
 
 impl DcPoolDescriptor {
@@ -192,11 +320,15 @@ impl DcPoolDescriptor {
         producer: ProducerIdentity,
         serving_endpoint: EndpointId,
         registrations: Arc<[CanonicalModelRegistration]>,
+        query_semantics: KvQuerySemantics,
+        pool_roles: Arc<[WorkerRole]>,
     ) -> Self {
         Self {
             producer,
             serving_endpoint,
             registrations,
+            query_semantics,
+            pool_roles,
         }
     }
 
@@ -214,6 +346,14 @@ impl DcPoolDescriptor {
 
     pub fn registrations(&self) -> &[CanonicalModelRegistration] {
         &self.registrations
+    }
+
+    pub const fn query_semantics(&self) -> KvQuerySemantics {
+        self.query_semantics
+    }
+
+    pub fn pool_roles(&self) -> &[WorkerRole] {
+        &self.pool_roles
     }
 }
 
@@ -401,6 +541,10 @@ impl PoolIdentitySources {
         self.routing_scope
     }
 
+    pub const fn relies_on_defaults(self) -> bool {
+        self.is_derived()
+    }
+
     pub const fn is_derived(self) -> bool {
         matches!(self.cache_semantics, IdentitySource::DefaultDerived)
             || matches!(self.routing_scope, IdentitySource::DefaultDerived)
@@ -449,6 +593,23 @@ mod tests {
     }
 
     #[test]
+    fn query_semantics_reject_zero_block_size_and_select_hash_pipeline() {
+        assert_eq!(
+            KvQuerySemantics::new(0, KvQueryHashFormat::DynamoStandardV1),
+            Err(KvQuerySemanticsError::ZeroBlockSize)
+        );
+
+        let standard = KvQueryHashFormat::from_enable_eagle(false);
+        let eagle = KvQueryHashFormat::from_enable_eagle(true);
+        assert_eq!(standard, KvQueryHashFormat::DynamoStandardV1);
+        assert_eq!(eagle, KvQueryHashFormat::DynamoEagleV1);
+        assert_eq!(standard.identity_version(), 1);
+        assert_eq!(eagle.identity_version(), 2);
+        assert!(!standard.is_eagle());
+        assert!(eagle.is_eagle());
+    }
+
+    #[test]
     fn pool_identity_sources_report_derived_components() {
         let explicit = PoolIdentitySources::from_pool(pool(
             IdentitySource::Explicit,
@@ -457,6 +618,7 @@ mod tests {
         assert_eq!(explicit.cache_semantics(), IdentitySource::Explicit);
         assert_eq!(explicit.routing_scope(), IdentitySource::Explicit);
         assert!(!explicit.is_derived());
+        assert!(!explicit.relies_on_defaults());
 
         let derived = PoolIdentitySources::from_pool(pool(
             IdentitySource::Explicit,
@@ -465,5 +627,6 @@ mod tests {
         assert_eq!(derived.cache_semantics(), IdentitySource::Explicit);
         assert_eq!(derived.routing_scope(), IdentitySource::DefaultDerived);
         assert!(derived.is_derived());
+        assert!(derived.relies_on_defaults());
     }
 }

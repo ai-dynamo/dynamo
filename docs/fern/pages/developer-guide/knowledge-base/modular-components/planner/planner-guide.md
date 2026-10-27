@@ -7,6 +7,8 @@ subtitle: Configures Planner optimization targets, scaling modes, and PlannerCon
 
 The Dynamo Planner is an autoscaling controller that adjusts prefill and decode engine replica counts at runtime to meet latency SLAs. It reads traffic signals (Prometheus metrics or load predictor output) and engine performance models to decide when to scale up or down.
 
+Forward Pass Metrics (FPM) are per-iteration scheduler records from inference workers. They describe batch composition, queue depth, token counts, and forward-pass duration. The Planner uses these records to tune its performance model from live traffic or to build a regression model when a native AISimulate estimate is unavailable.
+
 For a quick overview, see the [Planner overview](overview.md). For architecture internals, see [Planner Design](planner-design.md).
 
 ## Scaling Modes
@@ -16,14 +18,14 @@ The planner supports four optimization targets that determine how scaling decisi
 - **`throughput`** (default): Uses static thresholds on queue depth and KV cache utilization. No SLA targets or profiling needed. Works out of the box.
 - **`latency`**: Same approach as `throughput` but with more aggressive thresholds — scales up earlier and tolerates less queuing. Ideal for latency-sensitive workloads.
 - **`load`**: Uses user-defined prefill queue token thresholds and decode KV utilization thresholds for reactive load-based scaling.
-- **`sla`**: Uses the Planner engine-query layer with forward-pass estimates from the `aiconfigurator-core` Python wheel, plus online FPM tuning or FPM regression fallback, to target specific TTFT/ITL values. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
+- **`sla`**: Uses the Planner engine-query layer with forward-pass estimates from the AIConfigurator compatibility API in the `aisimulate` wheel, plus online FPM tuning or FPM regression fallback, to target specific TTFT/ITL values. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
 
 **When to use which:**
 
 - Start with **`throughput`** (the default) — it works immediately with no configuration.
 - Switch to **`latency`** if your workload has strict latency requirements and you prefer to over-provision rather than queue.
 - Use **`load`** when you want direct control through prefill queue and decode KV utilization thresholds.
-- Use **`sla`** when you want to target specific TTFT/ITL values with native AIC estimates, optional bootstrap profiling data, or live FPM warmup.
+- Use **`sla`** when you want to target specific TTFT/ITL values with native AISimulate estimates, optional bootstrap profiling data, or live FPM warmup.
 
 ## PlannerConfig Reference
 
@@ -67,13 +69,13 @@ spec:
       advisory: true
 ```
 
-Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment.
+Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment. Planner-in-the-loop replay honors it too: the replay keeps the simulated deployment fixed, reports the recommendations, and records [retune](#periodic-retune-experimental) decisions, which run only in simulation, without applying them; see [Replay in Advisory Mode](aisimulate-planner-replay.mdx#replay-in-advisory-mode).
 
 ### Optimization Target
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `load`: user-defined prefill queue and decode KV utilization thresholds. `sla`: AIC core performance modeling with `ttft_ms`/`itl_ms` targets. |
+| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `load`: user-defined prefill queue and decode KV utilization thresholds. `sla`: AISimulate performance modeling with `ttft_ms`/`itl_ms` targets. |
 
 When `optimization_target` is `throughput`, `latency`, or `load`, load-based scaling is automatically enabled and throughput-based scaling is disabled. The `ttft_ms`/`itl_ms` fields are ignored.
 
@@ -92,23 +94,62 @@ At least one scaling mode must be enabled when using `optimization_target: sla`.
 |-------|------|---------|-------------|
 | `pre_deployment_sweeping_mode` | string | `rapid` | How to generate optional bootstrap performance data: `rapid` (AIC simulation, ~30s), `thorough` (real GPUs, 2-4h), or `none` (skip). |
 
-SLA mode uses a Planner-owned engine-query layer. If `aic_perf_model` is present, the Planner passes the native AIC model identity and engine limits directly to `aiconfigurator_core.sdk.RustForwardPassPerfModel`. Unsupported native AIC configs automatically fall back to the wheel's observed-FPM regression model. If `aic_perf_model` is absent, the wheel starts an FPM regression model and becomes ready after enough self-benchmark or live FPM observations.
+SLA mode constructs each role's model through
+`aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)`. Set
+`ais_perf_model.roles` to the complete AISimulate configuration for each deployed
+role: `prefill` and `decode` for disaggregated deployments, or `aggregated` for an
+aggregated deployment. Each role key must match its `worker_type`.
 
-At startup, the planner always tries to fetch self-benchmark results from the `get_perf_metrics` Dynamo endpoint. If unavailable, it falls back to rapid-mode AIC interpolation data or profiler-generated data (npz or JSON) at `profile_results_dir` when configured. These sources are converted to ForwardPassMetrics and used to tune or bootstrap the perf model. With `pre_deployment_sweeping_mode: none`, the planner can still start; throughput decisions report `model_not_ready` until native AIC is available or enough live FPMs have warmed the regression fallback.
+New configurations default to `estimation_mode: auto` and `fallback_policy: deny`.
+Auto searches `op_level`, `fpm_interpolation`, then `fpm_regression`; `deny` prevents
+fallback only when you explicitly select a mode. Without `ais_perf_model`, the
+Planner creates a cold `fpm_regression` model and trains it from self-benchmark
+or live forward-pass metrics (FPM).
 
-Manual native AIC perf-model config:
+Each role accepts the complete upstream schema, including ordered `systems_paths`,
+`database_mode`, `transfer_policy`, quantization and speculation settings, and
+nested `estimator_config` controls. Explicit estimator controls override the
+Planner's sampling defaults. `fpm_sample_bucket_size: 16` corresponds to a
+`[4, 4]` grid; regression and correction may use separate grids. Unknown fields
+and conflicting worker identities are rejected.
+
+Configure model identity and estimator controls through `ais_perf_model.roles`.
+The retired `aic_perf_model` field and `hf_id` / parallel-pick shape are rejected.
+
+At startup, the planner always tries to fetch self-benchmark results from the `get_perf_metrics` Dynamo endpoint. If unavailable, it falls back to rapid-mode AIC interpolation data or profiler-generated data (npz or JSON) at `profile_results_dir` when configured. These sources are converted to ForwardPassMetrics and used to tune or bootstrap the perf model. With `pre_deployment_sweeping_mode: none`, the planner can still start; throughput decisions report `model_not_ready` until native AIS estimates are available or enough live FPMs have warmed the regression fallback.
+
+Configure the role models in a DynamoGraphDeploymentRequest:
 
 ```yaml
 spec:
   features:
     planner:
       optimization_target: sla
-      aic_perf_model:
-        hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
-        system: h200_sxm
-        backend: vllm
-        prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
-        decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+      mode: disagg
+      ais_perf_model:
+        roles:
+          prefill:
+            model: Qwen/Qwen3-32B
+            system: h200_sxm
+            backend: vllm
+            worker_type: prefill
+            estimation_mode: auto
+            fallback_policy: deny
+            tp: 1
+          decode:
+            model: Qwen/Qwen3-32B
+            system: h200_sxm
+            backend: vllm
+            worker_type: decode
+            estimation_mode: auto
+            fallback_policy: deny
+            tp: 1
+            estimator_config:
+              fpm_regression:
+                sampling:
+                  bins_per_axis: [4, 4]
+                  max_observations: 64
+                min_observations: 5
 ```
 
 ### Throughput-Based Scaling Settings
@@ -116,6 +157,7 @@ spec:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `throughput_adjustment_interval_seconds` | int | `180` | Seconds between throughput-based scaling decisions. |
+| `max_throughput_scaling_replicas` | int | `8` | Maximum replica-count change per component from one throughput observation. The capped target persists until the next throughput observation. GPU and power budgets may reduce it further; endpoint and out-of-band budget recovery take precedence. |
 | `throughput_metrics_source` | string | `frontend` | Prometheus traffic source for throughput scaling: `frontend` reads `dynamo_frontend_*` metrics from the public Frontend; `router` reads `dynamo_component_router_*` metrics from a LocalRouter. Use `router` for pool-local Planner in GlobalPlanner deployments. |
 | `min_endpoint` | int | `1` | Minimum endpoints for `agg` mode. In `disagg` mode, applies the same minimum to prefill and decode. In `prefill` or `decode` mode, supplies the active role when its role-specific field is `null`. May be `0` for scale-to-zero compatibility. |
 | `prefill_min_endpoint` | int or `null` | `null` | Minimum prefill endpoints for `disagg` and `prefill` modes. When set, replaces the prefill value from `min_endpoint`. Must be at least `1`. |
@@ -142,7 +184,7 @@ spec:
 | `backend` | string | `vllm` | Backend: `vllm`, `sglang`, `trtllm`, or `mocker`. |
 | `environment` | string | `kubernetes` | Runtime environment: `kubernetes`, `virtual`, or `global-planner`. |
 | `namespace` | string | env `DYN_NAMESPACE` | Dynamo logical/runtime namespace for the deployment. |
-| `advisory` | bool | `false` | Suggestion-only mode. Compute, log, export, and report recommended replica counts without executing scaling actions or changing the deployment. |
+| `advisory` | bool | `false` | Suggestion-only mode. Compute, log, export, and report recommended replica counts without executing scaling actions or changing the deployment. Planner-in-the-loop replay honors it too and records retune decisions without applying them. |
 
 ### Traffic Prediction Settings
 
@@ -171,27 +213,74 @@ KV hit rate and speculative decode accept length are runtime engine/router signa
 | `report_interval_hours` | float or `null` | `24.0` | Generate an HTML diagnostics report every N hours (simulated time). Set to `null` to disable periodic report generation. |
 | `report_output_dir` | string | `./planner_reports` | Directory for HTML diagnostics reports. |
 | `live_dashboard_port` | int | `8080` | Port for the live diagnostics dashboard HTTP server. Set to `0` to disable. When enabled, visit `http://host:port/` to view a real-time Plotly report of accumulated snapshots. |
-| `control_api_port` | int | `9086` | Port for the loopback-only runtime minimum-endpoint API. Set to `0` to disable. |
+| `control_api_port` | int | `9086` | Port for the loopback-only runtime endpoint and GPU budget API. Set to `0` to disable. |
 
 ### Runtime Minimum Endpoint API
 
-The Planner listens on `127.0.0.1:<control_api_port>` and supports `GET` and partial `PATCH` requests at `/v1/min-endpoints`. The API has no authentication and is not exposed by a Kubernetes Service. It uses `prefill_min_endpoint` and `decode_min_endpoint` in disaggregated mode, the active component's field in single-component mode, and `min_endpoint` in aggregated mode. Updates are process-local, are not written back to the Planner ConfigMap, and apply to the next planner tick.
+The Planner listens on `127.0.0.1:<control_api_port>` and supports `GET` and partial `PATCH` requests at `/v1/min-endpoints`. The API has no authentication and is not exposed by a Kubernetes Service. It uses `prefill_min_endpoint` and `decode_min_endpoint` in disaggregated mode, the active component's field in single-component mode, and `min_endpoint` in aggregated mode. Every mode also accepts `min_gpu_budget` and `max_gpu_budget`. A response includes the active endpoint fields and both GPU budgets. Updates are process-local, are not written back to the Planner ConfigMap, and apply to the next planner tick.
 
-In Kubernetes, port-forward to the Planner pod and patch the active mode's field:
+In Kubernetes, port-forward to the Planner pod and patch the active mode's field. The following example updates a Planner in `disagg` mode:
 
 ```bash
 kubectl port-forward pod/<planner-pod> 9086:9086
 curl http://127.0.0.1:9086/v1/min-endpoints
 curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
   --header 'Content-Type: application/json' \
-  --data '{"decode_min_endpoint": 3}'
+  --data '{"prefill_min_endpoint": 8, "decode_min_endpoint": 8, "min_gpu_budget": 16, "max_gpu_budget": 64}'
 ```
 
-The update is atomic. The Planner rejects malformed values, fields that are inactive for the current mode, and minimum footprints that exceed `max_gpu_budget` or the configured power budget. The same footprint checks run at startup, so an infeasible minimum configuration fails before the Planner enters its tick loop. Scale-up has no per-component maximum endpoint setting; the existing GPU, power, Global Planner, and cluster-capacity limits remain the upper bounds.
+The update is atomic. Use `-1` to disable either GPU budget. The Planner rejects malformed values, fields that are inactive for the current mode, a `min_gpu_budget` greater than `max_gpu_budget` when both are enabled, and minimum footprints that exceed `max_gpu_budget` or the configured power budget. The same checks run at startup, so an infeasible minimum configuration fails before the Planner enters its tick loop. Scale-up has no per-component maximum endpoint setting; the existing GPU, power, Global Planner, and cluster-capacity limits remain the upper bounds.
+
+> [!WARNING]
+> If a scaling submission loses its acknowledgement after the Planner stops waiting for it, a later submission error leaves the outcome unknown. The Planner then stops automatic effect submission to avoid duplicating an action that the remote service might have applied. Runtime `GET` and `PATCH` remain available. Verify the deployment's desired and Ready replica counts, then restart the Planner to resume automatic submission.
 
 The same diagnostic signals surfaced in these reports are also exported as Prometheus metrics under the `dynamo_planner_*` prefix—for example estimated TTFT/ITL (`dynamo_planner_estimated_ttft_ms`, `dynamo_planner_estimated_itl_ms`), recommended replica counts (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), per-engine capacity and FPM queue depths, and load/throughput scaling decision enums.
 
 The Replica Counts plot overlays actual prefill/decode replicas with discrete recommendation markers for the Planner's recommended prefill/decode replicas. When `advisory: true`, these recommended counts are suggestions only; the Planner records what it would do without applying the change.
+
+### Unavailable Scaling Inputs
+
+`dynamo_planner_signal_unavailable{component,signal}` reports missing inputs on
+their most recent scheduled observation. After the consecutive-observation
+threshold defined by `SIGNAL_DEGRADATION_OBSERVATIONS` in
+[planner_metrics.py](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/monitoring/planner_metrics.py)
+is reached, the Planner logs `Planner degraded signal` and increments
+`dynamo_planner_degraded_signals_total{component,signal}` once for that episode.
+A successful observation clears the gauge and allows a later outage to produce
+a new alert. Ticks that do not request a signal do not count as missing samples.
+
+The signals distinguish missing FPM, stale FPM, worker discovery join failures,
+missing speculative accept length, and unavailable traffic observations.
+`load_inputs` and `throughput_inputs` report `missing_engine_metadata` from the
+scaling paths' own metadata checks, such as missing KV capacity or batching
+limits. Normal performance-model warmup (`insufficient_data` or
+`model_not_ready`) remains visible in decision diagnostics and does not trigger
+a degraded-input alert. For a pool with ready workers, metadata health changes
+only when a scaling path actually evaluates that metadata; skipped, idle, or
+zero-demand decisions do not clear an existing metadata alarm. An explicitly
+empty pool clears its metadata alarm.
+Runtime FPM samples expire after three load-adjustment
+intervals measured from local receipt. Idle heartbeats refresh that receipt
+time. Samples from workers absent from discovery are excluded and logged with
+their worker IDs.
+Each discovered worker must provide a fresh sample for every DP rank declared
+in its model card. A worker or rank that has never published is unavailable;
+the Planner does not use a partial component snapshot to infer idle capacity.
+A snapshot is also unavailable if any rank's payload is malformed or uses an
+unsupported FPM schema version.
+
+Missing, non-finite, or failed router request-counter queries produce unavailable
+demand, matching the frontend collection behavior. An explicit counter value of
+zero remains a valid idle observation.
+
+Fresh idle FPM can reduce an SLA pool without waiting for a cold performance
+model. A valid zero-demand throughput prediction can also reduce a pool without
+a capacity estimate. Missing observations do not count as idle. Replica floors,
+GPU budgets, pending rollout checks, and downstream actuation constraints still
+apply. A restarted Planner uses observed deployment counts to resume decisions.
+These model-independent idle paths retain at least one worker per active role,
+even when `min_endpoint: 0`: without a publisher or a ready capacity model, they
+cannot independently wake a fully stopped pool.
 
 ### Scheduling / plugin pipeline
 
@@ -203,8 +292,8 @@ plugin registration, transport, and auth settings live under
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `scheduling.scale_interval_seconds` | float | gcd of enabled builtin intervals | Base pipeline cadence. The pipeline wakes once per interval; each plugin's `execution_interval_seconds` decides whether that plugin fires on the tick. By default, the cadence is the gcd of `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`, preserving existing config fire times. |
-| `scheduling.tick_max_duration_seconds` | float | `30.0` | Outer deadline wrapping the full plugin pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. |
-| `plugin_registration.transport.request_timeout_seconds` | float | `5.0` | Per-plugin RPC timeout. Plugins exceeding this raise `PluginTimeoutError`; the stage continues with the remaining plugins. |
+| `scheduling.tick_max_duration_seconds` | float | `30.0` | Outer wall-clock deadline wrapping the full plugin pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. Replay does not apply it. |
+| `plugin_registration.transport.request_timeout_seconds` | float | `5.0` | Per-plugin RPC timeout. Plugins exceeding this raise `PluginTimeoutError`; the stage continues with the remaining plugins. Replay does not apply it to in-process plugins. |
 
 Existing planner fields still drive the builtin plugins:
 
@@ -236,6 +325,75 @@ spec:
           request_timeout_seconds: 5.0
 ```
 
+## Periodic Retune (Experimental)
+
+> [!WARNING]
+> **Experimental.** In this release, retune runs only in offline simulation:
+> `aisimulate predict --stack dynamo` and `dynamo.replay.run_trace_replay`. A live Planner rejects a
+> configuration that sets `retune` at startup.
+
+Retune lets the Planner tune its own runtime parameters from the traffic it served. Every
+`retune.interval_seconds`, it takes the window of the request trace that just ended and replays it
+once per candidate parameter point, on the deployment's engine configuration and from the replica
+counts at the window start. It scores each candidate by SLA goodput per GPU: SLA-good output tokens
+per second of the window, divided by the GPUs provisioned. When the best candidate beats the current
+point on the same window by more than `min_improvement_percentage`, the Planner switches to it.
+
+Retune searches parameters a running deployment can change without a restart:
+
+- **Router parameters** of the KV router, in `retune.router`: `overlap_score_credit`,
+  `prefill_load_scale`, `temperature`, and four more `/router_policy` parameters.
+- **Planner runtime fields**, in `retune.planner`: load-scaling sensitivity, the load predictor,
+  minimum worker counts, GPU budgets, `max_throughput_scaling_replicas`, and the thresholds of
+  `optimization_target: load`.
+
+The engine, the topology, the router mode, and Planner settings fixed at startup, such as the
+scaling intervals and `ttft_ms` / `itl_ms`, stay as configured.
+
+Retune supports two scenarios:
+
+| Scenario | Planner | Searched | Each candidate replay |
+|---|---|---|---|
+| Fixed replicas | Retune-only mode: `retune` set with both `enable_load_scaling: false` and `enable_throughput_scaling: false`. The Planner never scales | Router parameters | Keeps the replica counts fixed |
+| Autoscaling | Load-based or throughput-based scaling, or both | Router parameters, Planner fields, or both | Runs the current Planner with the candidate's fields |
+
+With `advisory: true`, the Planner still runs every sweep but only records the decision it would
+apply, with outcome `advisory`; the router and Planner parameters keep their starting values.
+
+A sweep takes time, so the decision lands at least one Planner tick after the sweep launches, and
+later when `decision_latency_seconds` models the sweep's duration. The old parameters serve traffic
+until then. Each candidate is replayed once, and all candidates of a window share one random seed,
+so a candidate that changes no routing or scaling decision ties the current point and is kept (with
+the pinned AISimulate release, an inner Planner with `optimization_target: sla` is not guaranteed to
+be bitwise reproducible; see
+[Candidates and the Sweep](planner-design.md#candidates-and-the-sweep)).
+A candidate that changes decisions is judged on one replay of one window, so
+`min_improvement_percentage` sets the margin it must clear; see
+[Measure the Gain](aisimulate-planner-replay.mdx#measure-the-gain).
+
+This minimal fixed-replica configuration searches the 108-point default router domain every six
+hours. It is a `PlannerConfig` for the `planner_config` argument of `dynamo.replay.run_trace_replay`
+(see [Run Retune from Python](aisimulate-planner-replay.mdx#run-retune-from-python)), not a DGDR
+`spec.features.planner` fragment: a live Planner rejects it. In `aisimulate predict`, the `planner`
+section takes `retune` and the two scaling flags, and `mode` comes from `engine.mode`; see
+[Scenario 1](aisimulate-planner-replay.mdx#scenario-1-fixed-replicas-router-only).
+
+```yaml
+mode: disagg
+enable_load_scaling: false
+enable_throughput_scaling: false
+retune:
+  interval_seconds: 21600
+  router: default
+```
+
+To run retune and read its decisions, see
+[Simulate Retune](aisimulate-planner-replay.mdx#simulate-retune-experimental). For windows,
+candidates, scoring, and decision timing, see
+[Planner Design](planner-design.md#retune-experimental-simulation-only). For every field and the
+search-domain syntax, see the
+[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only).
+
 ## Integration with Profiler
 
 When the profiler runs with planner enabled, it:
@@ -264,6 +422,7 @@ In the current workflow, run profiling independently for each intended pool, the
 - [Planner overview](overview.md) — Why LLM inference needs a different autoscaler
 - [Planner Design](planner-design.md) — Architecture and algorithm internals
 - [Planner Examples](planner-examples.md) — Planner-specific configuration examples
+- [Simulate Planner Decisions with AISimulate](aisimulate-planner-replay.mdx) — Replay a trace through the Planner offline, including retune
 - [DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx) — DGDR YAML examples, sample configurations, advanced patterns
 - [Global Planner Guide](global-planner-guide.md) — Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments
 - [Profiler Guide](../profiler/profiler-guide.md) — How profiling data is generated

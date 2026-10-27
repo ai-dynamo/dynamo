@@ -12,7 +12,6 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"k8s.io/client-go/rest"
-	"k8s.io/utils/ptr"
 )
 
 func TestWebhookInstallOptionsSelectsValidatingConfiguration(t *testing.T) {
@@ -39,6 +38,38 @@ func TestWebhookSetupIsRequired(t *testing.T) {
 	}
 }
 
+func TestDefaultSnapshotCRDs(t *testing.T) {
+	t.Log("Verify checkpoint-disabled environments do not install Snapshot CRDs")
+	disabled, err := defaultSnapshotCRDs(Options{}, &configv1alpha1.OperatorConfiguration{})
+	if err != nil {
+		t.Fatalf("load disabled Snapshot CRDs: %v", err)
+	}
+	if len(disabled) != 0 {
+		t.Fatalf("disabled Snapshot CRDs = %d, want 0", len(disabled))
+	}
+
+	config := &configv1alpha1.OperatorConfiguration{
+		Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true},
+	}
+	t.Log("Verify checkpoint-enabled environments install the embedded Snapshot CRDs")
+	crds, err := defaultSnapshotCRDs(Options{}, config)
+	if err != nil {
+		t.Fatalf("load default Snapshot CRDs: %v", err)
+	}
+	if len(crds) != 3 {
+		t.Fatalf("Snapshot CRDs = %d, want 3", len(crds))
+	}
+
+	t.Log("Verify explicit CRD directory configuration remains authoritative")
+	overridden, err := defaultSnapshotCRDs(Options{CRDDirectoryPaths: []string{"testdata"}}, config)
+	if err != nil {
+		t.Fatalf("load Snapshot CRDs with directory override: %v", err)
+	}
+	if len(overridden) != 0 {
+		t.Fatalf("Snapshot CRDs with directory override = %d, want 0", len(overridden))
+	}
+}
+
 func TestRESTConfigReturnsCopy(t *testing.T) {
 	env := &TestEnv{rt: &runtimeEnv{config: &rest.Config{Host: "https://original.example"}}}
 
@@ -53,7 +84,7 @@ func TestRESTConfigReturnsCopy(t *testing.T) {
 func TestDefaultOperatorConfigPreservesExplicitGPUDiscovery(t *testing.T) {
 	config := &configv1alpha1.OperatorConfiguration{
 		GPU: configv1alpha1.GPUConfiguration{
-			DiscoveryEnabled: ptr.To(true),
+			DiscoveryEnabled: new(true),
 		},
 	}
 
@@ -66,7 +97,7 @@ func TestDefaultOperatorConfigPreservesExplicitGPUDiscovery(t *testing.T) {
 
 func TestDefaultRuntimeConfigDerivesStaticFeatureGates(t *testing.T) {
 	clusterWide := &configv1alpha1.OperatorConfiguration{
-		GPU: configv1alpha1.GPUConfiguration{DiscoveryEnabled: ptr.To(false)},
+		GPU: configv1alpha1.GPUConfiguration{DiscoveryEnabled: new(false)},
 	}
 	clusterWideRuntime := defaultRuntimeConfig(clusterWide)
 

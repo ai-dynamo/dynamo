@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Optional-dependency preflight must run before replay CLI imports.
 # ruff: noqa: E402
+# Optional-dependency preflight must run before replay CLI imports.
 
 """Regression tests for planner replay warmup wiring."""
 
@@ -15,7 +15,9 @@ pytest.importorskip(
 )
 
 import dynamo.planner.offline.replay_adapter as replay_adapter_module
-import dynamo.replay.main as replay_main
+import dynamo.replay.planner as replay_planner
+from dynamo.mocker.config import normalize_mocker_config
+from dynamo.planner.core.types import TrafficObservation
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -73,28 +75,36 @@ def test_planner_replay_passes_configured_dynamo_warmup_observations(
         fake_create_replay_planner_adapter,
     )
 
-    result = replay_main._prepare_planner_replay(
-        extra_engine_args=replay_main.MockEngineArgs(
-            block_size=64, speedup_ratio=1000.0
-        ),
-        prefill_engine_args=None,
-        decode_engine_args=None,
-        planner_config_arg=json.dumps(
-            {
-                "mode": "agg",
-                "optimization_target": "throughput",
-                "load_predictor_warmup_trace": str(warmup_path),
-                "throughput_adjustment_interval_seconds": 10,
-                "report_interval_hours": None,
-                "live_dashboard_port": 0,
-            }
-        ),
-    )
+    def prepare(**kwargs):
+        return replay_planner.prepare_planner_replay(
+            extra_engine_args=normalize_mocker_config(
+                {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
+            ),
+            prefill_engine_args=None,
+            decode_engine_args=None,
+            planner_config_arg=json.dumps(
+                {
+                    "mode": "agg",
+                    "optimization_target": "throughput",
+                    "load_predictor_warmup_trace": str(warmup_path),
+                    "throughput_adjustment_interval_seconds": 10,
+                    "report_interval_hours": None,
+                    "live_dashboard_port": 0,
+                }
+            ),
+            **kwargs,
+        )
 
-    assert result is adapter
+    assert prepare() is adapter
     observations = captured["warmup_observations"]
     assert [(item.num_req, item.isl, item.osl) for item in observations] == [
         (1.0, 64.0, 4.0),
         (1.0, 128.0, 5.0),
     ]
     assert captured["bootstrap_metadata"] == {"status": "not_required"}
+
+    # Observations passed in (a retune sweep's bucketed history) replace the
+    # warmup trace.
+    given = [TrafficObservation(duration_s=10.0, num_req=3.0, isl=32.0, osl=2.0)]
+    prepare(warmup_observations=given)
+    assert captured["warmup_observations"] == given

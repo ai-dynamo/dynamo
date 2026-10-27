@@ -126,6 +126,9 @@ pub enum RawKvEvent {
         locality: Option<Locality>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ownership: Option<String>,
+        /// Session that triggered this store or reuse report.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,

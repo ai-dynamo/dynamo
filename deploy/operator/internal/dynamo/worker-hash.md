@@ -34,7 +34,7 @@ interchangeable string loses this distinction.
 
 | DGD annotations | Rollout comparison | Active DCD suffix |
 | --- | --- | --- |
-| v1 only | Legacy migration state; record v2 without rolling workers | v1 |
+| v1 only | Legacy migration state; record v2 without rolling workers when no rollout is active | v1, or desired v2 while an active rollout converges |
 | v1 and v2 | v2 only | v1 until the next worker rollout completes |
 | v2 only | v2 only | v2 |
 
@@ -52,8 +52,10 @@ runs at the beginning of reconciliation, before steady-state rollout decisions:
 
 1. Keep the stored v1 value unchanged.
 2. Compute v2 from the current DGD spec.
-3. Store v2 without rolling workers or changing the active DCD suffix.
-4. Continue reconciliation using only v2 for change detection.
+3. If no rollout is active, store v2 without rolling workers or changing the active DCD suffix.
+4. If a rollout is `Pending` or `InProgress`, defer storing v2 and converge the rollout on DCDs with
+   the desired v2 suffix. This may reroll a partially created v1 target generation.
+5. Continue reconciliation using only v2 for change detection.
 
 The migration deliberately avoids an operator-upgrade-induced rollout. If an operator upgrade and a
 v2-relevant DGD edit happen together, recording v2 from the DGD can absorb that edit without a
@@ -61,10 +63,10 @@ rollout. Dynamo 1.4 accepted this narrow compatibility tradeoff. A normally reco
 or later already has a v2 annotation, so this migration is relevant only to pre-v2 or incomplete
 annotation state.
 
-The semantic model does not require v1 to be recalculated. The 1.4 implementation still computes the
-legacy v1 hash only while recognizing such v1-only state. It never computes v1 after a v2 annotation
-exists. This compatibility check is not needed for normal upgrades from 1.2 or later and is isolated
-migration machinery, not part of the steady-state rollout contract.
+The semantic model does not require v1 to be recalculated. Stored v1 values are opaque generation
+suffixes and remain constant until the first v2 rollout completes. The controller computes only v2;
+v1-only compatibility is isolated migration machinery, not part of the steady-state rollout
+contract.
 
 ## Steady-State Rollout Semantics
 
@@ -95,9 +97,13 @@ recomputable state and introduce a second state machine without improving recove
 
 ## Hash Function Contract
 
-The v2 hash summarizes rendered worker DCD inputs that require a new worker generation. Scaling-only
-inputs such as replica count do not participate because the controller applies them to the active
-generation without a worker rollout.
+The v2 hash identifies a serving cohort. It includes rendered ordinary worker DCD inputs and, when
+present, LPX component inputs. LPX reuses this hash in `LPXInputRevision` and its runtime namespace so
+cooperating workers share the same serving revision. DGDs without LPX retain their existing v2 hash.
+
+Scaling-only inputs do not participate because the controller applies them to the active generation
+without a worker rollout. For LPX, `lpx.scheduling` and conductor/engine replica counts are excluded.
+Agent-only replica count remains included because it changes the speculative-model layout.
 
 Hash-function changes must be conservative. Changing the value for an existing DGD causes a rollout,
 even when the rendered worker workload is unchanged. Any new hash input must therefore preserve
@@ -112,9 +118,9 @@ stored v1 values are opaque generation suffixes.
 | 1.2 | [#9210](https://github.com/ai-dynamo/dynamo/pull/9210) preserved v1 across the v1beta1 conversion. [#9235](https://github.com/ai-dynamo/dynamo/pull/9235), including the hash compatibility work in [#9385](https://github.com/ai-dynamo/dynamo/pull/9385), introduced v2. The controller computed and stored both versions, but continued to select v1 for changes visible to v1. A v2-only change could already trigger a v2-named rollout and remove v1. |
 | 1.3 | The 1.2 dual-hash algorithm remained unchanged: both hashes were computed, ordinary rollouts remained v1-named, and v2 detected changes outside the v1 input. |
 | 1.4 | [#11529](https://github.com/ai-dynamo/dynamo/pull/11529) made v2 authoritative in the steady state. New DGDs start v2-only. Existing dual-annotation DGDs keep their constant v1 suffix until the next real rollout, then become v2-only. v1 computation remains only in the incomplete v1-only compatibility path. |
-| 1.5 | [#12633](https://github.com/ai-dynamo/dynamo/pull/12633) added the canonical resolved runtime version to v2 for runtimes at or above 1.5.0. Older and unresolved runtime versions keep their previous v2 value. The annotation lifecycle remains unchanged. |
+| 1.5 | [#12633](https://github.com/ai-dynamo/dynamo/pull/12633) added the canonical resolved runtime version to v2 for runtimes at or above 1.5.0. Older and unresolved runtime versions keep their previous v2 value. [#13450](https://github.com/ai-dynamo/dynamo/pull/13450) removed the remaining v1 calculation; stored v1 values are now always opaque. |
+| 1.6 | [#15607](https://github.com/ai-dynamo/dynamo/pull/15607) extended v2 to include LPX component inputs and reused it in LPX input revisions and runtime namespaces. DGDs without LPX retain their existing v2 hash. |
 
 The v2 annotation therefore first shipped in 1.2, participated in change detection in 1.2 and 1.3,
 and became the sole steady-state rollout comparison in 1.4. The controller stopped computing v1 for
-normal reconciliations in 1.4; the remaining legacy computation applies only to pre-v2 or incomplete
-v1-only annotation state, not to normal 1.3-to-1.5 or 1.4-to-1.5 upgrades.
+normal reconciliations in 1.4 and removed the remaining v1-only compatibility calculation in 1.5.

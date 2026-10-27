@@ -8,6 +8,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	dynamotesting "github.com/ai-dynamo/dynamo/deploy/operator/internal/testing"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/clusterenv"
@@ -32,32 +34,47 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 var clusterTestEnv *clusterenv.Env
 
-func TestMain(m *testing.M) {
-	logf.SetLogger(logr.Discard())
+func runClusterTests(m *testing.M, prepare func(context.Context, client.Client) (func(context.Context) error, error)) int {
+	if prepare != nil {
+		logf.SetLogger(zap.New(zap.UseDevMode(true)))
+	} else {
+		logf.SetLogger(logr.Discard())
+	}
 	operatorVersion, err := clusterTestOperatorVersion()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "derive cluster-test operator version: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	operatorConfig := &configv1alpha1.OperatorConfiguration{}
 	configv1alpha1.SetDefaultsOperatorConfiguration(operatorConfig)
 	operatorConfig.GPU.DiscoveryEnabled = ptr.To(false)
-	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}
+	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true, DisaggregatedSet: true}}
 	additionalAdmission := lwsmock.Configurations()
 	groveAdmission := grovemock.Configurations()
 	additionalAdmission.Mutating = append(additionalAdmission.Mutating, groveAdmission.Mutating...)
 	additionalAdmission.Validating = append(additionalAdmission.Validating, groveAdmission.Validating...)
 
+	var managerIdentity *rest.ImpersonationConfig
+	if prepare != nil {
+		managerIdentity = &rest.ImpersonationConfig{
+			UserName: "system:serviceaccount:dynamo-system:dynamo-operator",
+			Groups:   []string{"system:masters"},
+		}
+	}
 	clusterTestEnv = clusterenv.New(clusterenv.Options{
 		Scheme:                 newClusterTestScheme(),
+		BeforeWebhooks:         prepare,
+		ManagerImpersonation:   managerIdentity,
 		AdditionalAdmission:    additionalAdmission,
 		WebhookProxyImage:      os.Getenv("DYNAMO_CLUSTERTEST_WEBHOOK_PROXY_IMAGE"),
 		EventuallyTimeout:      2 * time.Minute,
@@ -77,7 +94,7 @@ func TestMain(m *testing.M) {
 			return grovemock.Setup(mgr)
 		},
 	})
-	os.Exit(clusterTestEnv.RunM(m))
+	return clusterTestEnv.RunM(m)
 }
 
 func TestClusterDynamoComponentDeploymentManifests(t *testing.T) {
@@ -145,8 +162,15 @@ func TestClusterDynamoGraphDeploymentManifests(t *testing.T) {
 				return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
 			})
 
-			t.Log("Wait for the complete generated manifest contract")
-			golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
+			liveDGD := getOnlyClusterDGD(t, t.Context(), env.Client(), env.Namespace())
+			t.Log("Wait for the complete generated manifest contract with the live worker hash")
+			golden.EventuallyMatchManifestsWithVariables(
+				t,
+				env.Client(),
+				env.Namespace(),
+				filepath.Join(scenarioDir, "output.yaml"),
+				workerHashGoldenVariables(t, liveDGD),
+			)
 		})
 	}
 }
@@ -210,13 +234,9 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 				t.Fatalf("select profiler image: %v", err)
 			}
 
-			t.Log("Create the scale client and start the production DGDR-to-terminal-workload controller chain")
+			t.Log("Start the production DGDR-to-terminal-workload controller chain")
 			operatorConfig := clusterTestRestrictedConfig(env.Namespace())
 			runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}
-			scaleClient, err := env.ScaleClient()
-			if err != nil {
-				t.Fatalf("create scale client: %v", err)
-			}
 			env.StartManager(func(mgr ctrl.Manager) error {
 				setupOptions := SetupOptions{Config: operatorConfig, RuntimeConfig: runtimeConfig}
 				if err := SetupDynamoGraphDeploymentRequest(mgr, DynamoGraphDeploymentRequestSetupOptions{
@@ -228,7 +248,6 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 				}
 				if err := SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{
 					SetupOptions: setupOptions,
-					ScaleClient:  scaleClient,
 				}); err != nil {
 					return err
 				}
@@ -285,8 +304,33 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 				t.Fatal("DGDR has no selected profiling configuration")
 			}
 
-			t.Log("Wait for the generated DGD and its terminal workload manifests")
-			golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
+			var liveDGD nvidiacomv1beta1.DynamoGraphDeployment
+			require.NoError(t, env.Client().Get(ctx, client.ObjectKeyFromObject(&dgd), &liveDGD))
+			t.Log("Wait for the generated DGD and terminal workload manifests with the live worker hash")
+			golden.EventuallyMatchManifestsWithVariables(
+				t,
+				env.Client(),
+				env.Namespace(),
+				filepath.Join(scenarioDir, "output.yaml"),
+				workerHashGoldenVariables(t, &liveDGD),
+			)
 		})
 	}
+}
+
+func getOnlyClusterDGD(t *testing.T, ctx context.Context, c client.Client, namespace string) *nvidiacomv1beta1.DynamoGraphDeployment {
+	t.Helper()
+
+	var dgds nvidiacomv1beta1.DynamoGraphDeploymentList
+	require.NoError(t, c.List(ctx, &dgds, client.InNamespace(namespace)))
+	require.Len(t, dgds.Items, 1)
+	return &dgds.Items[0]
+}
+
+func workerHashGoldenVariables(t *testing.T, dgd *nvidiacomv1beta1.DynamoGraphDeployment) golden.Variables {
+	t.Helper()
+
+	workerHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	return golden.Variables{"worker-hash": workerHash}
 }

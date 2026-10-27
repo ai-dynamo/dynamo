@@ -8,11 +8,14 @@
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
+# Resolved relative to this script, not via $DYNAMO_HOME: some runtime images
+# (e.g. vllm_runtime.Dockerfile) bake DYNAMO_HOME to a minimal install path
+# with no examples/ directory, which would silently override this and break
+# sourcing. Matches examples/backends/sglang/launch/agg.sh's own approach.
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/gpu_utils.sh"   # build_sglang_gpu_mem_args
+source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"   # build_sglang_gpu_mem_args
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
+source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
@@ -34,6 +37,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to the SGLang engine."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                   Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  SGLANG_PYTHON           Python with SGLang installed (default: python3)"
             echo "  CUDA_VISIBLE_DEVICES    GPU assignment (default: 0)"
@@ -52,12 +56,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+resolve_sidecar sglang SIDECAR_CMD
+
 trap dynamo_exit_trap EXIT
 
 SGLANG_PYTHON="${SGLANG_PYTHON:-python3}"
 SGLANG_HOST="127.0.0.1"
-SGLANG_HTTP_PORT="${SGLANG_HTTP_PORT:-30000}"
-SGLANG_GRPC_PORT="${SGLANG_GRPC_PORT:-30001}"
+SGLANG_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${SGLANG_HTTP_PORT:-30000}")
+SGLANG_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${SGLANG_GRPC_PORT:-30001}")
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -79,13 +85,14 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_HTTP_PORT" \
     --grpc-port "$SGLANG_GRPC_PORT" \
+    --incremental-streaming-output \
     --context-length "$MAX_MODEL_LEN" \
     --max-running-requests "$MAX_CONCURRENT_SEQS" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
-    dynamo-sglang-sidecar \
-    --sglang-endpoint "${SGLANG_HOST}:${SGLANG_GRPC_PORT}" &
+    "${SIDECAR_CMD[@]}" \
+    --grpc-endpoint "${SGLANG_HOST}:${SGLANG_GRPC_PORT}" &
 
 wait_any_exit

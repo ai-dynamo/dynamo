@@ -12,6 +12,9 @@ use super::single::ActiveSequences;
 use super::single::DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
 use crate::protocols::{DpRank, WorkerId, WorkerWithDpRank};
 
+/// Resource-safety bound for rank ranges advertised by one worker.
+pub const MAX_DATA_PARALLEL_RANKS_PER_WORKER: u32 = 4096;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerDpRange {
     pub worker_id: WorkerId,
@@ -34,6 +37,12 @@ impl WorkerDpRange {
                 worker_id: self.worker_id,
             });
         }
+        if self.dp_size > MAX_DATA_PARALLEL_RANKS_PER_WORKER {
+            return Err(WorkerTopologyError::DpSizeTooLarge {
+                worker_id: self.worker_id,
+                dp_size: self.dp_size,
+            });
+        }
         if self.dp_start.checked_add(self.dp_size).is_none() {
             return Err(WorkerTopologyError::InvalidDpRange {
                 worker_id: self.worker_id,
@@ -49,6 +58,11 @@ impl WorkerDpRange {
 pub enum WorkerTopologyError {
     #[error("dp_size must be greater than 0 for worker {worker_id}")]
     InvalidDpSize { worker_id: WorkerId },
+
+    #[error(
+        "dp_size {dp_size} exceeds the maximum {MAX_DATA_PARALLEL_RANKS_PER_WORKER} for worker {worker_id}"
+    )]
+    DpSizeTooLarge { worker_id: WorkerId, dp_size: u32 },
 
     #[error("dp range overflows u32 for worker {worker_id}: start={dp_start} size={dp_size}")]
     InvalidDpRange {
@@ -91,10 +105,7 @@ pub(super) struct WorkerSlot {
 impl WorkerSlot {
     /// Creates a worker slot with the table's expiry policy.
     fn new(worker: WorkerWithDpRank, block_size: usize, expiry_duration: Option<Duration>) -> Self {
-        let sequences = match expiry_duration {
-            Some(duration) => ActiveSequences::new_with_expiry_duration(block_size, duration),
-            None => ActiveSequences::new_without_expiry(block_size),
-        };
+        let sequences = ActiveSequences::new_with_expiry(block_size, expiry_duration);
         Self {
             worker,
             sequences: RwLock::new(sequences),
@@ -113,28 +124,15 @@ impl WorkerTable {
     /// Creates test worker slots with the default stale-request expiry duration.
     #[cfg(test)]
     pub(super) fn new(block_size: usize, dp_range: &HashMap<u64, (u32, u32)>) -> Self {
-        Self::new_with_expiry_duration(block_size, dp_range, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION)
-    }
-
-    /// Creates worker slots with an explicit stale-request expiry duration.
-    pub(super) fn new_with_expiry_duration(
-        block_size: usize,
-        dp_range: &HashMap<u64, (u32, u32)>,
-        expiry_duration: Duration,
-    ) -> Self {
-        Self::new_with_expiry(block_size, dp_range, Some(expiry_duration))
-    }
-
-    /// Creates worker slots that rely only on explicit request lifecycle events.
-    pub(super) fn new_without_expiry(
-        block_size: usize,
-        dp_range: &HashMap<u64, (u32, u32)>,
-    ) -> Self {
-        Self::new_with_expiry(block_size, dp_range, None)
+        Self::new_with_expiry(
+            block_size,
+            dp_range,
+            Some(DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION),
+        )
     }
 
     /// Builds worker slots from an optional stale-request expiry policy.
-    fn new_with_expiry(
+    pub(super) fn new_with_expiry(
         block_size: usize,
         dp_range: &HashMap<u64, (u32, u32)>,
         expiry_duration: Option<Duration>,
@@ -437,6 +435,21 @@ mod tests {
                 dp_size: 1,
             })
         ));
+        assert!(matches!(
+            table.register_worker(
+                4,
+                WorkerDpRange::new(1, 0, MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1)
+            ),
+            Err(WorkerTopologyError::DpSizeTooLarge { worker_id: 1, .. })
+        ));
+        assert!(
+            table
+                .register_worker(
+                    4,
+                    WorkerDpRange::new(1, 0, MAX_DATA_PARALLEL_RANKS_PER_WORKER)
+                )
+                .is_ok()
+        );
     }
 
     #[test]

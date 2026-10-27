@@ -27,24 +27,37 @@ Usage:
     python -m dynamo.common.recv_forward_pass_metrics \\
         --namespace dynamo --component backend --endpoint generate \\
         --save-plot metrics.png
+
+    # Buffered capture without per-message logging (existing files are refused)
+    python -m dynamo.common.recv_forward_pass_metrics \\
+        --namespace dynamo --output fpm.jsonl --flush-interval 1
+
+Output is compact JSONL: {"received_at_ns": <Unix nanoseconds>, "metrics": <FPM>}.
+The timestamp is taken by the receiver, not the engine. --log-metrics also prints
+each message when recording. Flush writes Python buffers, not fsync; SIGKILL or
+machine failure can lose buffered data. Counter gaps are diagnostics, not proof
+of lossless delivery (publisher-side drops before sequence assignment are invisible).
 """
 
 import argparse
 import asyncio
 import json
 import logging
+import math
 import os
+import signal
 import time
+from contextlib import aclosing, nullcontext
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import BinaryIO
 
-import matplotlib
-import matplotlib.pyplot as plt
 import msgspec
 
 from dynamo.common.forward_pass_metrics import ForwardPassMetrics, decode
+from dynamo.llm import FpmEventSubscriber
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
-
-matplotlib.use("Agg")
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -55,6 +68,13 @@ def _save_plot(path: str, history: list[tuple[float, ForwardPassMetrics]]) -> No
     if not history:
         logger.warning("No data collected, skipping plot.")
         return
+
+    # Plotting is optional: runtime images used for capture need not contain
+    # matplotlib or its dependencies. Load them only for --save-plot.
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
     ts = [t for t, _ in history]
     num_prefill = [m.scheduled_requests.num_prefill_requests for _, m in history]
@@ -86,7 +106,14 @@ def _save_plot(path: str, history: list[tuple[float, ForwardPassMetrics]]) -> No
     logger.info("Plot saved to %s (%d data points)", path, len(history))
 
 
-def main() -> None:
+def _positive_seconds(value: str) -> float:
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("must be finite and greater than zero")
+    return seconds
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Receive ForwardPassMetrics from the Dynamo event plane"
     )
@@ -128,14 +155,51 @@ def main() -> None:
         default=None,
         help="Save a time-series plot to the given PNG path on exit (recv mode only)",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Write compact JSONL to a new file (recv mode only); disables "
+        "per-message logging unless --log-metrics is set",
+    )
+    parser.add_argument(
+        "--flush-interval",
+        type=_positive_seconds,
+        default=1.0,
+        help="Flush the output buffer every N seconds, including while idle (default: 1)",
+    )
+    parser.add_argument(
+        "--log-metrics",
+        action="store_true",
+        help="Also log individual messages when --output is set",
+    )
+    args = parser.parse_args(argv)
+    if args.output is not None and args.mode != "recv":
+        parser.error("--output requires --mode recv; tracking only samples snapshots")
+    return args
 
-    asyncio.run(run(args))
+
+def main() -> None:
+    args = _parse_args()
+    try:
+        asyncio.run(_run_with_signals(args))
+    except KeyboardInterrupt:
+        logger.info("Stopped.")
+
+
+async def _run_with_signals(args: argparse.Namespace) -> None:
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    assert task is not None  # This coroutine is always executed inside a Task.
+    loop.add_signal_handler(signal.SIGTERM, task.cancel)
+    try:
+        await run(args)
+    except asyncio.CancelledError:
+        logger.info("Stopped.")
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
 
 
 async def run(args: argparse.Namespace) -> None:
-    from dynamo.llm import FpmEventSubscriber
-
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(loop, args.discovery_backend, args.request_plane)
     endpoint = runtime.endpoint(f"{args.namespace}.{args.component}.{args.endpoint}")
@@ -166,35 +230,113 @@ async def _run_recv(subscriber, args: argparse.Namespace) -> None:
     json_encoder = msgspec.json.Encoder()
     history: list[tuple[float, ForwardPassMetrics]] = []
     start_time: float | None = None
+    stats = _RecordingStats()
+    output_context = (
+        args.output.open("xb", buffering=1024 * 1024)
+        if args.output is not None
+        else nullcontext(None)
+    )
 
     try:
-        while True:
-            data = await asyncio.to_thread(subscriber.recv)
-            if data is None:
-                logger.info("Stream closed.")
-                break
-            metrics = decode(data)
-            if metrics is None:
-                continue
+        with output_context as output:
+            async with aclosing(
+                _receive(subscriber, output, args.flush_interval)
+            ) as stream:
+                async for data, received_at_ns in stream:
+                    metrics = decode(data)
+                    if metrics is None:
+                        stats.rejected += 1
+                        continue
+                    stats.observe(metrics)
+                    if output is not None:
+                        output.write(
+                            json_encoder.encode(
+                                {
+                                    "received_at_ns": received_at_ns,
+                                    "metrics": metrics,
+                                }
+                            )
+                            + b"\n"
+                        )
 
-            now = time.monotonic()
-            if start_time is None:
-                start_time = now
+                    if args.save_plot:
+                        now = time.monotonic()
+                        if start_time is None:
+                            start_time = now
+                        history.append((now - start_time, metrics))
 
-            if args.save_plot:
-                history.append((now - start_time, metrics))
-
-            pretty = json.loads(json_encoder.encode(metrics))
-            logger.info(
-                "[worker=%s dp=%d counter=%d] %s",
-                metrics.worker_id,
-                metrics.dp_rank,
-                metrics.counter_id,
-                json.dumps(pretty, indent=2),
-            )
+                    if output is None or args.log_metrics:
+                        pretty = json.loads(json_encoder.encode(metrics))
+                        logger.info(
+                            "[worker=%s dp=%d counter=%d] %s",
+                            metrics.worker_id,
+                            metrics.dp_rank,
+                            metrics.counter_id,
+                            json.dumps(pretty, indent=2),
+                        )
     finally:
+        logger.info(
+            "FPM capture: messages=%d rejected=%d streams=%d counter_gaps=%d "
+            "non_increasing_counters=%d (not a lossless-delivery guarantee)",
+            stats.messages,
+            stats.rejected,
+            len(stats.last_counter),
+            stats.counter_gaps,
+            stats.non_increasing_counters,
+        )
         if args.save_plot and history:
             _save_plot(args.save_plot, history)
+
+
+@dataclass
+class _RecordingStats:
+    messages: int = 0
+    rejected: int = 0
+    counter_gaps: int = 0
+    non_increasing_counters: int = 0
+    last_counter: dict[tuple[str, int], int] = field(default_factory=dict)
+
+    def observe(self, metrics: ForwardPassMetrics) -> None:
+        self.messages += 1
+        key = (metrics.worker_id, metrics.dp_rank)
+        previous = self.last_counter.get(key)
+        if previous is not None:
+            if metrics.counter_id > previous + 1:
+                self.counter_gaps += metrics.counter_id - previous - 1
+            elif metrics.counter_id <= previous:
+                # Could be a duplicate, reordering or producer restart. Keep
+                # the high-water mark: a restart cannot be distinguished here,
+                # and rebasing would turn delayed messages into artificial gaps.
+                self.non_increasing_counters += 1
+                return
+        self.last_counter[key] = metrics.counter_id
+
+
+async def _receive(subscriber, output: BinaryIO | None, flush_interval: float):
+    """Keep one blocking receive in flight; flush even if no publisher is active."""
+    pending = None
+    next_flush = time.monotonic() + flush_interval
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.create_task(asyncio.to_thread(subscriber.recv))
+            timeout = max(0.0, next_flush - time.monotonic()) if output else None
+            done, _ = await asyncio.wait({pending}, timeout=timeout)
+            if output is not None and time.monotonic() >= next_flush:
+                output.flush()
+                next_flush = time.monotonic() + flush_interval
+            if done:
+                data = pending.result()
+                pending = None
+                if data is None:
+                    break
+                yield data, time.time_ns()
+    finally:
+        # Cancelling to_thread alone does not stop its blocking Rust receive.
+        # Unblock it before asyncio.run() joins the executor on process shutdown.
+        subscriber.shutdown()
+        if pending is not None:
+            await pending
 
 
 async def _run_tracking(subscriber, args: argparse.Namespace) -> None:

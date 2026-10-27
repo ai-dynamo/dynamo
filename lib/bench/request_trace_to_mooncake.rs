@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use clap::Parser;
 use dynamo_data_gen::{
-    MooncakeJsonlWriter,
+    AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticHashIdScope, AgenticMooncakeHeader,
+    AgenticSourceProvenance, MooncakeJsonlWriter,
     request_trace::{
         agentic::lower_agentic_mooncake_rows,
         load::{RequestTraceMode, load_request_trace_records},
@@ -76,10 +77,30 @@ fn main() -> Result<()> {
         std::fs::set_permissions(temporary_output.as_ref(), metadata.permissions())?;
     }
     let (kind, trace_block_size) = match (loaded.mode()?, args.agentic) {
-        (RequestTraceMode::Agentic, true) => (
-            "Agentic Mooncake",
-            lower_agentic_mooncake_rows(loaded, |_, row| writer.write_agentic_row(&row))?,
-        ),
+        (RequestTraceMode::Agentic, true) => {
+            let mut rows = Vec::new();
+            let trace_block_size = lower_agentic_mooncake_rows(loaded, |_, row| {
+                rows.push(row);
+                Ok(())
+            })?;
+            let digest = blake3::hash(&serde_json::to_vec(&rows)?)
+                .to_hex()
+                .to_string();
+            writer.write_agentic_header(&AgenticMooncakeHeader {
+                schema: AGENTIC_MOONCAKE_SCHEMA.to_string(),
+                version: AGENTIC_MOONCAKE_VERSION,
+                block_size: trace_block_size,
+                hash_id_scope: AgenticHashIdScope::Local,
+                source: AgenticSourceProvenance {
+                    format: "dynamo_request_trace".to_string(),
+                    digest,
+                },
+            })?;
+            for row in rows {
+                writer.write_agentic_row(&row)?;
+            }
+            ("Agentic Mooncake", trace_block_size)
+        }
         (RequestTraceMode::Standard, false) => (
             "Mooncake",
             lower_mooncake_rows(loaded.requests, |_, row| writer.write_row(&row))?,

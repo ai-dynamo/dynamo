@@ -3,62 +3,106 @@
 
 //! Tool-choice guided decoding policy for OpenAI chat requests.
 
+use std::borrow::Cow;
+
+use crate::preprocessor::structural_tag::{
+    SelectedStructuralTagBuilder, requires_native_tool_call_format,
+};
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
-use crate::protocols::openai::tools::get_json_schema_from_tools;
+use crate::protocols::openai::tools::{
+    ToolChoiceGuidance, get_tool_choice_guidance_from_tools, validate_openai_tool_choice,
+};
+use crate::protocols::openai::{GuidedToolConstraint, validate};
 
 use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
-use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolChoiceOption, ResponseFormat};
+use dynamo_protocols::types::{
+    ChatCompletionTool, ChatCompletionToolChoiceOption, CreateChatCompletionRequest, ResponseFormat,
+};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
-fn invalid_argument(message: impl Into<String>) -> DynamoError {
-    DynamoError::builder()
+fn invalid_argument(message: impl Into<String>, public_message: Option<&str>) -> DynamoError {
+    let mut error = DynamoError::builder()
         .error_type(ErrorType::InvalidArgument)
-        .message(message)
-        .build()
+        .message(message);
+    if let Some(public_message) = public_message {
+        error = error.public_message(public_message);
+    }
+    error.build()
 }
 
 impl OpenAIPreprocessor {
+    /// Whether this request permits model output to be interpreted as tool calls.
+    ///
+    /// A configured parser describes the model's wire format; it does not grant
+    /// every request permission to return tool calls. Permission depends only on
+    /// whether the request supplies effective tools and whether `tool_choice`
+    /// forbids them. Effective tools include both the OpenAI top-level list and
+    /// Kimi-style dynamic declarations carried by system messages.
+    /// Assistant-output constraints apply to assistant content and do not revoke
+    /// an `auto` request's ability to choose a tool call.
+    pub(crate) fn tool_call_parsing_enabled(request: &NvCreateChatCompletionRequest) -> bool {
+        if !request.inner.has_effective_tools() {
+            return false;
+        }
+
+        match request
+            .inner
+            .tool_choice
+            .as_ref()
+            .unwrap_or(&ChatCompletionToolChoiceOption::Auto)
+        {
+            ChatCompletionToolChoiceOption::None => false,
+            ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_) => {
+                true
+            }
+            ChatCompletionToolChoiceOption::Auto => true,
+        }
+    }
+
     /// Apply guided decoding for OpenAI tool-choice requests.
     ///
     /// Structural tags are preferred when enabled and supported by the configured
-    /// tool-call parser. Supported K2 forced requests and named K3 requests
-    /// intrinsically use their native structural tags because generic JSON cannot
-    /// represent their tool calls. Other forced choices fall back to the legacy
-    /// JSON-schema constraint when structural tags are not applied, except K3
-    /// required requests, which stay on the prompt-level XTML path.
+    /// tool-call parser. When disabled or unavailable, ordinary forced choices
+    /// retain the legacy JSON-schema fallback. Kimi's marker-delimited forced
+    /// formats cannot be represented by that fallback and remain on their
+    /// prompt/parser best-effort path instead.
     pub(super) fn apply_tool_choice_guided_decoding(
         &self,
         request: &NvCreateChatCompletionRequest,
         common_request: &mut PreprocessedRequest,
         prompt_injected_reasoning: bool,
-    ) -> Result<bool, DynamoError> {
+    ) -> Result<GuidedToolConstraint, DynamoError> {
         let tool_choice = request
             .inner
             .tool_choice
             .as_ref()
             .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
-        let tools = request.inner.tools.as_deref().unwrap_or(&[]);
+        let tools = effective_tools(&request.inner)?;
         let is_forced_tool_choice = matches!(
             tool_choice,
             ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
         );
         let has_explicit_guided_decoding = has_explicit_guided_decoding(request);
         let has_response_format_constraint = has_response_format_constraint(request);
+        let parser_tool_choice = convert_tool_choice(tool_choice);
+
+        self.validate_structured_output_composition(request, tool_choice, tools.as_ref())?;
 
         if is_forced_tool_choice && has_explicit_guided_decoding {
-            return Err(invalid_argument(concat!(
-                "guided decoding cannot be used in the same request as ",
-                "tool_choice=\"required\" or a named tool_choice.",
-            )));
+            return Err(invalid_argument(
+                concat!(
+                    "guided decoding cannot be used in the same request as ",
+                    "tool_choice=\"required\" or a named tool_choice.",
+                ),
+                None,
+            ));
         }
 
-        // For non-forced tool choice, explicit guided decoding and response_format
-        // constrain assistant content, so tool-choice guided decoding stays inactive.
-        let has_assistant_constraint =
-            has_explicit_guided_decoding || has_response_format_constraint;
-        if !is_forced_tool_choice && has_assistant_constraint {
-            return Ok(false);
+        // Explicit guided decoding constrains assistant content and cannot be
+        // composed with structural-tag tool calls.
+        if !is_forced_tool_choice && has_explicit_guided_decoding {
+            return Ok(GuidedToolConstraint::None);
         }
 
         if is_forced_tool_choice
@@ -70,59 +114,156 @@ impl OpenAIPreprocessor {
         }
 
         if self.apply_tool_choice_structural_tag(
-            &convert_tool_choice(tool_choice),
-            &convert_tools(tools),
+            &parser_tool_choice,
+            &convert_tools(tools.as_ref()),
             request.inner.parallel_tool_calls,
             prompt_injected_reasoning,
+            request.inner.response_format.as_ref(),
             common_request,
         )? {
-            return Ok(true);
+            return Ok(GuidedToolConstraint::StructuralTag);
         }
 
-        let uses_kimi_k3_parser = self
-            .tool_call_parser
-            .as_deref()
-            .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"))
-            || self
-                .runtime_config
-                .reasoning_parser
-                .as_deref()
-                .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"));
-        if is_forced_tool_choice && uses_kimi_k3_parser {
-            if matches!(tool_choice, ChatCompletionToolChoiceOption::Named(_)) {
-                return Err(invalid_argument(
-                    "named tool choice for Kimi K3 requires --dyn-tool-call-parser kimi_k3 \
-                     with XTML structural-tag support",
-                ));
+        // If the structural-tag layer did not compose this response format with
+        // auto tool calls, it remains the sole assistant-output constraint.
+        if !is_forced_tool_choice && has_response_format_constraint {
+            if let Some((parser_name @ "gpt_oss", builder)) =
+                SelectedStructuralTagBuilder::for_unified_parser(
+                    self.tool_call_parser.as_deref(),
+                    self.runtime_config.reasoning_parser.as_deref(),
+                )
+            {
+                let schema = match request.inner.response_format.as_ref() {
+                    Some(ResponseFormat::JsonSchema { json_schema }) => {
+                        Cow::Borrowed(&json_schema.schema)
+                    }
+                    Some(ResponseFormat::JsonObject) => {
+                        Cow::Owned(serde_json::json!({"type": "object"}))
+                    }
+                    Some(ResponseFormat::Text) | None => return Ok(GuidedToolConstraint::None),
+                };
+                // GPT-OSS's engine reasoner does not defer a bare JSON grammar.
+                // The Harmony envelope owns reasoning even without tool-call tags.
+                if self.apply_structured_output_tag(
+                    parser_name,
+                    builder,
+                    &schema,
+                    prompt_injected_reasoning,
+                    common_request,
+                )? {
+                    return Ok(GuidedToolConstraint::StructuralTag);
+                }
             }
-
-            // K3's prompt-level required instruction produces an XTML `tools`
-            // channel. Generic JSON guided decoding would constrain the wrong
-            // wire format and prevent the Rust K3 parser from seeing it.
-            return Ok(false);
+            return Ok(GuidedToolConstraint::None);
         }
 
-        match get_json_schema_from_tools(Some(tool_choice), Some(tools)) {
-            Ok(Some(schema)) => {
+        let requires_native_format =
+            requires_native_tool_call_format(self.tool_call_parser.as_deref(), &parser_tool_choice)
+                || requires_native_tool_call_format(
+                    self.runtime_config.reasoning_parser.as_deref(),
+                    &parser_tool_choice,
+                );
+        if is_forced_tool_choice && requires_native_format {
+            tracing::debug!(
+                tool_choice = ?parser_tool_choice,
+                "Structural tag was not applied and the parser uses a native tool-call format; using prompt/parser compatibility fallback"
+            );
+            return Ok(GuidedToolConstraint::None);
+        }
+
+        match get_tool_choice_guidance_from_tools(
+            Some(tool_choice),
+            Some(tools.as_ref()),
+            request.inner.parallel_tool_calls,
+        ) {
+            Ok(Some(guidance)) => {
+                if let ToolChoiceGuidance::Json(schema) = &guidance
+                    && self.runtime_config.structural_tag.is_some()
+                    && super::structural_tag::uses_gpt_oss_required_array(
+                        (
+                            self.tool_call_parser.as_deref(),
+                            self.runtime_config.reasoning_parser.as_deref(),
+                        ),
+                        &parser_tool_choice,
+                        request.inner.parallel_tool_calls,
+                    )
+                    && let Some((parser_name, builder)) =
+                        SelectedStructuralTagBuilder::for_unified_parser(
+                            self.tool_call_parser.as_deref(),
+                            self.runtime_config.reasoning_parser.as_deref(),
+                        )
+                    && self.apply_structured_output_tag(
+                        parser_name,
+                        builder,
+                        schema,
+                        prompt_injected_reasoning,
+                        common_request,
+                    )?
+                {
+                    // TODO: Consider GPT-OSS renderer guidance for required parallel calls.
+                    // Example system prompt: "After reasoning, emit all requested independent calls as one JSON array of {name, parameters} objects."
+                    // The envelope uses structural guidance, but its payload is
+                    // the required-call JSON array rather than native Harmony calls.
+                    return Ok(GuidedToolConstraint::GuidedJsonRequired);
+                }
                 let gd = common_request
                     .sampling_options
                     .guided_decoding
                     .get_or_insert_default();
-                gd.json = Some(schema);
+                match guidance {
+                    ToolChoiceGuidance::Json(schema) => gd.json = Some(schema),
+                    ToolChoiceGuidance::Regex(regex) => gd.regex = Some(regex),
+                }
+
+                // Report the parser constraint implied by the installed grammar,
+                // not merely the tool_choice that requested it. Both JSON and
+                // regex guidance still use the guided-JSON tool-output parser.
+                return Ok(installed_json_constraint(tool_choice));
             }
             Ok(None) => {}
             Err(err) => {
-                return Err(invalid_argument(err.to_string()));
+                return Err(invalid_argument(err.to_string(), None));
             }
         }
 
         // Auto/None requests can reach here when neither structural tags nor a
         // tool-choice JSON fallback were needed.
-        Ok(false)
+        Ok(GuidedToolConstraint::None)
+    }
+
+    fn validate_structured_output_composition(
+        &self,
+        request: &NvCreateChatCompletionRequest,
+        tool_choice: &ChatCompletionToolChoiceOption,
+        tools: &[ChatCompletionTool],
+    ) -> Result<(), DynamoError> {
+        let allow_tool_calls_with_structured_output = self
+            .runtime_config
+            .structural_tag
+            .as_ref()
+            .is_some_and(|config| config.allow_tool_calls_with_structured_output);
+
+        if matches!(tool_choice, ChatCompletionToolChoiceOption::Auto)
+            && !tools.is_empty()
+            && allow_tool_calls_with_structured_output
+        {
+            validate::validate_response_format_conflicts(
+                &request.inner.response_format,
+                &request.common,
+            )
+            .map_err(|error| {
+                let message = error.to_string();
+                invalid_argument(&message, Some(&message))
+            })?;
+        }
+
+        Ok(())
     }
 }
 
-fn has_explicit_guided_decoding(request: &NvCreateChatCompletionRequest) -> bool {
+/// Whether top-level `guided_*` fields install a grammar; mirrors
+/// `GuidedDecodingOptions::from_optional`.
+pub(super) fn has_explicit_guided_decoding(request: &NvCreateChatCompletionRequest) -> bool {
     request.common.guided_json.is_some()
         || request.common.guided_regex.is_some()
         || request
@@ -141,7 +282,7 @@ fn has_response_format_constraint(request: &NvCreateChatCompletionRequest) -> bo
         .is_some_and(|format| !matches!(format, ResponseFormat::Text))
 }
 
-fn convert_tool_choice(tool_choice: &ChatCompletionToolChoiceOption) -> ToolChoice {
+pub(crate) fn convert_tool_choice(tool_choice: &ChatCompletionToolChoiceOption) -> ToolChoice {
     match tool_choice {
         ChatCompletionToolChoiceOption::None => ToolChoice::None,
         ChatCompletionToolChoiceOption::Auto => ToolChoice::Auto,
@@ -152,7 +293,7 @@ fn convert_tool_choice(tool_choice: &ChatCompletionToolChoiceOption) -> ToolChoi
     }
 }
 
-fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition> {
+pub(crate) fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition> {
     tools
         .iter()
         .map(|tool| ToolDefinition {
@@ -161,4 +302,837 @@ fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition> {
             strict: tool.function.strict,
         })
         .collect()
+}
+
+/// Normalize and validate all tools visible to the model without rewriting the request.
+///
+/// Top-level OpenAI tools remain first. Kimi-style tools declared on system
+/// messages follow in message order and may use either the wrapped OpenAI form
+/// or Kimi's bare function-schema form. This view is used only by validation,
+/// parser, and guided-decoding policy; dynamic declarations stay at their
+/// original message positions for prompt rendering and KV-cache correctness.
+pub(crate) fn effective_tools(
+    request: &CreateChatCompletionRequest,
+) -> Result<Cow<'_, [ChatCompletionTool]>, DynamoError> {
+    validate::validated_effective_tools(request)
+        .map_err(|error| invalid_argument(error.to_string(), None))
+}
+
+pub(crate) fn effective_tool_definitions(
+    request: &CreateChatCompletionRequest,
+) -> Result<Vec<ToolDefinition>, DynamoError> {
+    effective_tools(request).map(|tools| convert_tools(tools.as_ref()))
+}
+
+/// The guided-tool constraint a request implies, given what the structural-tag stage
+/// already decided.
+///
+/// Direct postprocessor callers and remote frontends use this compatibility helper
+/// when they did not run request preprocessing. The worker streaming path carries the
+/// enum returned by `apply_tool_choice_guided_decoding`; topology-B aggregation may
+/// reconstruct a structural-tag request as guided JSON, so its complete-output parser
+/// also checks the generated wire shape.
+pub(crate) fn guided_tool_constraint(
+    request: &NvCreateChatCompletionRequest,
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    uses_structural_tag: bool,
+) -> Result<GuidedToolConstraint, DynamoError> {
+    if uses_structural_tag {
+        return Ok(GuidedToolConstraint::StructuralTag);
+    }
+    let tools = effective_tools(&request.inner)?;
+    guided_tool_constraint_with_effective_tools(
+        request,
+        tool_call_parser,
+        reasoning_parser,
+        false,
+        tools.as_ref(),
+    )
+}
+
+/// Derive the guided-tool constraint from an effective tool set the caller has
+/// already normalized and validated through [`effective_tools`].
+pub(crate) fn guided_tool_constraint_with_effective_tools(
+    request: &NvCreateChatCompletionRequest,
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    uses_structural_tag: bool,
+    tools: &[ChatCompletionTool],
+) -> Result<GuidedToolConstraint, DynamoError> {
+    if uses_structural_tag {
+        return Ok(GuidedToolConstraint::StructuralTag);
+    }
+    let tool_choice = request
+        .inner
+        .tool_choice
+        .as_ref()
+        .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
+    validate_openai_tool_choice(Some(tool_choice), Some(tools))
+        .map_err(|error| invalid_argument(error.to_string(), None))?;
+    let is_forced_tool_choice = matches!(
+        tool_choice,
+        ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
+    );
+    // Only a forced choice installs a tool-level JSON schema. Auto/None leave any
+    // JSON constraint to `response_format`, which governs assistant CONTENT.
+    if !is_forced_tool_choice {
+        return Ok(GuidedToolConstraint::None);
+    }
+    // Forced + explicit guided decoding is rejected at request time, so reaching here
+    // with both means the request never ran.
+    if has_explicit_guided_decoding(request) {
+        return Ok(GuidedToolConstraint::None);
+    }
+    let parser_tool_choice = convert_tool_choice(tool_choice);
+    // Kimi forced requests use marker-delimited native formats that generic JSON
+    // guidance cannot represent. Keep this compatibility path aligned with
+    // request preprocessing for either configured parser slot.
+    if requires_native_tool_call_format(tool_call_parser, &parser_tool_choice)
+        || requires_native_tool_call_format(reasoning_parser, &parser_tool_choice)
+    {
+        return Ok(GuidedToolConstraint::None);
+    }
+    // Validate the forced choice against the actual tools the same way
+    // `apply_tool_choice_guided_decoding` does, instead of blindly installing a
+    // constraint for a `tool_choice` that names a tool absent from `tools` (or an
+    // empty `tools` list under `tool_choice: "required"`).
+    match get_tool_choice_guidance_from_tools(
+        Some(tool_choice),
+        Some(tools),
+        request.inner.parallel_tool_calls,
+    ) {
+        Ok(Some(_)) => Ok(installed_json_constraint(tool_choice)),
+        Ok(None) => Ok(GuidedToolConstraint::None),
+        Err(e) => Err(invalid_argument(e.to_string(), None)),
+    }
+}
+
+/// Map a forced `tool_choice` onto the guided-JSON parser constraint for its grammar.
+///
+/// Only reachable once `get_tool_choice_guidance_from_tools` produced either JSON or
+/// regex guidance. It returns `None` for `Auto`/`None`, so those arms are unreachable
+/// in practice and report [`GuidedToolConstraint::None`] rather than guessing.
+fn installed_json_constraint(tool_choice: &ChatCompletionToolChoiceOption) -> GuidedToolConstraint {
+    match tool_choice {
+        ChatCompletionToolChoiceOption::Named(named) => GuidedToolConstraint::GuidedJsonNamed {
+            tool_name: named.function.name.clone(),
+        },
+        ChatCompletionToolChoiceOption::Required => GuidedToolConstraint::GuidedJsonRequired,
+        ChatCompletionToolChoiceOption::Auto | ChatCompletionToolChoiceOption::None => {
+            GuidedToolConstraint::None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{path::PathBuf, sync::Arc};
+
+    use super::*;
+    use crate::local_model::runtime_config::StructuralTagMode;
+    use crate::model_card::ModelDeploymentCard;
+    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_protocols::types::{ChatCompletionNamedToolChoice, FunctionName};
+    use serde_json::{Value, json};
+
+    fn request(extra: Value) -> NvCreateChatCompletionRequest {
+        let mut value = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "test"}]
+        });
+        value
+            .as_object_mut()
+            .expect("base request is an object")
+            .extend(extra.as_object().expect("extra is an object").clone());
+        serde_json::from_value(value).expect("request must deserialize")
+    }
+
+    fn tools() -> Value {
+        json!([{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"]
+                }
+            }
+        }])
+    }
+
+    fn preprocessor(parser: &str, mode: StructuralTagMode) -> Arc<OpenAIPreprocessor> {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.structural_tag = (mode == StructuralTagMode::On)
+            .then(crate::local_model::runtime_config::StructuralTagConfig::default);
+        mdc.runtime_config.tool_call_parser = Some(parser.to_string());
+        OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    fn preprocessed_request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(Vec::new())
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn gpt_oss_response_format_keeps_reasoning_without_tool_call_tags() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_response_format_keeps_reasoning_without_tool_call_tags"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for format in [
+            json!({"type":"json_object"}),
+            json!({"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"]}}}),
+        ] {
+            for (parser, mode, choice) in [
+                ("harmony", StructuralTagMode::Off, "auto"),
+                ("harmony", StructuralTagMode::On, "auto"),
+                ("gpt_oss", StructuralTagMode::Off, "none"),
+                ("qwen3", StructuralTagMode::On, "auto"),
+            ] {
+                let preprocessor = preprocessor(parser, mode);
+                let request = request(json!({"response_format":format,"tool_choice":choice}));
+                let mut common = preprocessed_request();
+                let schema = format
+                    .pointer("/json_schema/schema")
+                    .cloned()
+                    .unwrap_or(json!({"type":"object"}));
+                common
+                    .sampling_options
+                    .guided_decoding
+                    .get_or_insert_default()
+                    .json = Some(schema.clone());
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, false)
+                    .unwrap();
+                let guided = common.sampling_options.guided_decoding.unwrap();
+                if parser == "qwen3" {
+                    assert_eq!(constraint, GuidedToolConstraint::None);
+                    assert_eq!(guided.json, Some(schema));
+                    assert!(guided.structural_tag.is_none());
+                } else {
+                    assert_eq!(constraint, GuidedToolConstraint::StructuralTag);
+                    assert!(guided.json.is_none());
+                    let tag = guided.structural_tag.unwrap();
+                    let encoded = tag.to_string();
+                    assert!(encoded.contains("analysis"));
+                    assert!(encoded.contains("final"));
+                    assert!(encoded.contains(&serde_json::to_string(&schema).unwrap()));
+                }
+            }
+        }
+        let mut preprocessor = preprocessor("harmony", StructuralTagMode::Off);
+        let inner = Arc::get_mut(&mut preprocessor).unwrap();
+        inner.tool_call_parser = None;
+        inner.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        let mut common = preprocessed_request();
+        assert_eq!(
+            preprocessor
+                .apply_tool_choice_guided_decoding(
+                    &request(json!({"response_format":{"type":"json_object"}})),
+                    &mut common,
+                    false,
+                )
+                .unwrap(),
+            GuidedToolConstraint::StructuralTag
+        );
+    }
+
+    #[test]
+    fn gpt_oss_v2_rejects_unsupported_reasoning_effort() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_v2_rejects_unsupported_reasoning_effort"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        let preprocessor = preprocessor("harmony", StructuralTagMode::Off);
+        for effort in ["none", "low", "medium", "high"] {
+            let mut request = request(json!({"reasoning_effort": effort}));
+            request.normalize_reasoning_template_args().unwrap();
+            let result = preprocessor.builder(&request);
+            if effort == "none" {
+                let error = result.err().expect("unsupported effort must be rejected");
+                let error = error.downcast_ref::<DynamoError>().unwrap();
+                assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+                assert!(error.to_string().contains("GPT-OSS does not support"));
+            } else {
+                assert!(result.is_ok(), "{effort}: {:?}", result.err());
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_oss_required_guidance_matches_the_selected_format() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_required_guidance_matches_the_selected_format"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for (parser, mode, parallel) in [
+            ("harmony", StructuralTagMode::Off, true),
+            ("harmony", StructuralTagMode::Off, false),
+            ("harmony", StructuralTagMode::On, true),
+            ("gpt_oss", StructuralTagMode::On, true),
+            ("harmony", StructuralTagMode::On, false),
+        ] {
+            let preprocessor = preprocessor(parser, mode);
+            let request = request(
+                json!({"tools":tools(),"tool_choice":"required","parallel_tool_calls":parallel}),
+            );
+            let mut common = preprocessed_request();
+            let constraint = preprocessor
+                .apply_tool_choice_guided_decoding(&request, &mut common, false)
+                .unwrap();
+            let guided = common.sampling_options.guided_decoding.unwrap();
+            if mode == StructuralTagMode::On {
+                assert_eq!(
+                    constraint,
+                    if parallel {
+                        GuidedToolConstraint::GuidedJsonRequired
+                    } else {
+                        GuidedToolConstraint::StructuralTag
+                    }
+                );
+                assert!(guided.structural_tag.is_some());
+                assert!(guided.json.is_none());
+                if parallel {
+                    let encoded = guided.structural_tag.unwrap().to_string();
+                    assert!(encoded.contains("analysis"));
+                    assert!(encoded.contains("final"));
+                    assert!(encoded.contains("parameters"));
+                    assert_eq!(
+                        guided_tool_constraint(&request, Some(parser), None, false,).unwrap(),
+                        constraint
+                    );
+                }
+            } else {
+                assert_eq!(constraint, GuidedToolConstraint::GuidedJsonRequired);
+                assert!(guided.json.is_some() || guided.regex.is_some());
+                assert!(guided.structural_tag.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn tool_call_parsing_requires_tools() {
+        assert!(!OpenAIPreprocessor::tool_call_parsing_enabled(&request(
+            json!({})
+        )));
+        assert!(!OpenAIPreprocessor::tool_call_parsing_enabled(&request(
+            json!({"tool_choice": "required"})
+        )));
+    }
+
+    #[test]
+    fn tool_call_parsing_honors_each_tool_choice() {
+        for (tool_choice, expected) in [
+            (json!(null), true),
+            (json!("none"), false),
+            (json!("auto"), true),
+            (json!("required"), true),
+            (
+                json!({"type": "function", "function": {"name": "get_weather"}}),
+                true,
+            ),
+        ] {
+            let mut extra = json!({"tools": tools()});
+            if !tool_choice.is_null() {
+                extra["tool_choice"] = tool_choice;
+            }
+            assert_eq!(
+                OpenAIPreprocessor::tool_call_parsing_enabled(&request(extra)),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn effective_tools_borrows_top_level_tools_without_dynamic_declarations() {
+        let request = request(json!({"tools": tools()}));
+        let top_level = request.inner.tools.as_deref().unwrap();
+
+        let effective = effective_tools(&request.inner).expect("top-level tools must validate");
+
+        assert!(matches!(&effective, Cow::Borrowed(_)));
+        assert!(std::ptr::eq(effective.as_ptr(), top_level.as_ptr()));
+    }
+
+    #[test]
+    fn dynamic_system_tools_enable_parsing_and_honor_tool_choice_none() {
+        for (tool_choice, expected) in [(None, true), (Some(json!("none")), false)] {
+            let mut extra = json!({
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "",
+                        "tools": [{"name": "lookup", "parameters": {"type": "object"}}]
+                    },
+                    {"role": "user", "content": "look it up"}
+                ]
+            });
+            if let Some(tool_choice) = tool_choice {
+                extra["tool_choice"] = tool_choice;
+            }
+            assert_eq!(
+                OpenAIPreprocessor::tool_call_parsing_enabled(&request(extra)),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn effective_tools_preserve_order_and_normalize_wrapped_and_bare_shapes() {
+        let request = request(json!({
+            "tools": [{
+                "type": "function",
+                "function": {"name": "static_tool", "parameters": {"type": "object"}}
+            }],
+            "messages": [
+                {"role": "user", "content": "start"},
+                {
+                    "role": "system",
+                    "content": "",
+                    "tools": [{
+                        "type": "function",
+                        "function": {
+                            "name": "wrapped_dynamic",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"x": {"type": "integer"}},
+                                "required": ["x"],
+                                "additionalProperties": false
+                            },
+                            "strict": true
+                        }
+                    }]
+                },
+                {
+                    "role": "system",
+                    "content": "",
+                    "tools": [{
+                        "name": "bare_dynamic",
+                        "description": "bare form",
+                        "parameters": {"type": "object", "properties": {}},
+                        "strict": false,
+                        "vendor_hint": "kept only in the original message"
+                    }]
+                },
+                {"role": "user", "content": "continue"}
+            ]
+        }));
+
+        let normalized = effective_tools(&request.inner).expect("dynamic tools must normalize");
+        assert!(matches!(&normalized, Cow::Owned(_)));
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|tool| tool.function.name.as_str())
+                .collect::<Vec<_>>(),
+            ["static_tool", "wrapped_dynamic", "bare_dynamic"]
+        );
+        assert_eq!(normalized[1].function.strict, Some(true));
+        assert_eq!(normalized[2].function.strict, Some(false));
+        assert_eq!(
+            normalized[2].function.description.as_deref(),
+            Some("bare form")
+        );
+        let original = serde_json::to_value(&request.inner.messages).unwrap();
+        assert_eq!(
+            original[2]["tools"][0]["vendor_hint"], "kept only in the original message",
+            "normalization must not rewrite dynamic message declarations"
+        );
+    }
+
+    #[test]
+    fn effective_tools_reject_invalid_dynamic_metadata() {
+        for (field, value) in [
+            ("strict", json!("yes")),
+            ("parameters", json!([])),
+            ("description", json!(7)),
+        ] {
+            let mut tool = json!({"name": "lookup"});
+            tool[field] = value;
+            let request = request(json!({
+                "messages": [
+                    {"role": "system", "content": "", "tools": [tool]},
+                    {"role": "user", "content": "go"}
+                ]
+            }));
+            let error = effective_tools(&request.inner).expect_err("invalid field must fail");
+            assert!(error.to_string().contains(field), "{field}: {error}");
+        }
+
+        let request = request(json!({
+            "messages": [
+                {"role": "system", "content": "", "tools": [{"name": "bad name"}]},
+                {"role": "user", "content": "go"}
+            ]
+        }));
+        let error = effective_tools(&request.inner).expect_err("invalid name must fail");
+        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+        assert!(error.to_string().contains("has an invalid name"));
+    }
+
+    #[test]
+    fn assistant_constraints_do_not_revoke_auto_tool_permission() {
+        let constraints = [
+            json!({"response_format": {"type": "json_object"}}),
+            json!({
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "event",
+                        "schema": {"type": "object"}
+                    }
+                }
+            }),
+            json!({"guided_json": {"type": "object"}}),
+            json!({"guided_regex": "[a-z]+"}),
+            json!({"guided_choice": ["a", "b"]}),
+            json!({"guided_grammar": "root ::= 'a'"}),
+        ];
+
+        for constraint in constraints {
+            let mut auto = json!({"tools": tools(), "tool_choice": "auto"});
+            auto.as_object_mut()
+                .unwrap()
+                .extend(constraint.as_object().unwrap().clone());
+            assert!(OpenAIPreprocessor::tool_call_parsing_enabled(&request(
+                auto
+            )));
+
+            let mut required = json!({"tools": tools(), "tool_choice": "required"});
+            required
+                .as_object_mut()
+                .unwrap()
+                .extend(constraint.as_object().unwrap().clone());
+            assert!(OpenAIPreprocessor::tool_call_parsing_enabled(&request(
+                required
+            )));
+        }
+    }
+
+    #[test]
+    fn text_response_format_does_not_disable_auto_tool_parsing() {
+        assert!(OpenAIPreprocessor::tool_call_parsing_enabled(&request(
+            json!({
+                "tools": tools(),
+                "tool_choice": "auto",
+                "response_format": {"type": "text"}
+            })
+        )));
+    }
+
+    fn named(name: &str) -> ChatCompletionToolChoiceOption {
+        ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
+            r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+            function: FunctionName {
+                name: name.to_string(),
+            },
+        })
+    }
+
+    #[test]
+    fn only_structural_tag_reports_a_structural_tag() {
+        assert!(GuidedToolConstraint::StructuralTag.uses_structural_tag());
+        assert!(!GuidedToolConstraint::None.uses_structural_tag());
+        assert!(!GuidedToolConstraint::GuidedJsonRequired.uses_structural_tag());
+        assert!(
+            !GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_weather".to_string(),
+            }
+            .uses_structural_tag()
+        );
+    }
+
+    #[test]
+    fn required_reports_the_array_shape() {
+        assert_eq!(
+            installed_json_constraint(&ChatCompletionToolChoiceOption::Required),
+            GuidedToolConstraint::GuidedJsonRequired
+        );
+    }
+
+    #[test]
+    fn named_carries_the_tool_name_from_the_request() {
+        assert_eq!(
+            installed_json_constraint(&named("get_weather")),
+            GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_weather".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn named_closed_zero_arg_tool_keeps_the_named_parser_constraint() {
+        let request = request(json!({
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_server_time",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }
+                }
+            }],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_server_time"}
+            }
+        }));
+
+        assert_eq!(
+            guided_tool_constraint(&request, None, None, false).expect("constraint is valid"),
+            GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_server_time".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn unforced_choices_install_no_tool_constraint() {
+        assert_eq!(
+            installed_json_constraint(&ChatCompletionToolChoiceOption::Auto),
+            GuidedToolConstraint::None
+        );
+        assert_eq!(
+            installed_json_constraint(&ChatCompletionToolChoiceOption::None),
+            GuidedToolConstraint::None
+        );
+    }
+
+    #[test]
+    fn native_format_forced_choices_install_no_compatibility_json_constraint() {
+        let requests = [
+            request(json!({
+                "tools": tools(),
+                "tool_choice": "required"
+            })),
+            request(json!({
+                "tools": tools(),
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"}
+                }
+            })),
+        ];
+
+        for request in &requests {
+            for (tool_call_parser, reasoning_parser) in [
+                (Some("kimi_k2"), None),
+                (None, Some("kimi_k2")),
+                (Some("kimi_k3"), None),
+                (None, Some("kimi-k3")),
+            ] {
+                assert_eq!(
+                    guided_tool_constraint(request, tool_call_parser, reasoning_parser, false,)
+                        .expect("native-format choice is valid"),
+                    GuidedToolConstraint::None,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kimi_k3_required_without_tools_is_rejected_before_the_xtml_return() {
+        for extra in [
+            json!({"tool_choice": "required"}),
+            json!({"tool_choice": "required", "tools": []}),
+        ] {
+            let request = request(extra);
+            let result = guided_tool_constraint(&request, Some("kimi_k3"), None, false);
+            assert!(
+                result.is_err(),
+                "Kimi K3 required must reject both missing and empty tools"
+            );
+        }
+    }
+
+    #[test]
+    fn structural_tag_off_preserves_kimi_k2_required_native_tag() {
+        let request = request(json!({
+            "tools": tools(),
+            "tool_choice": "required"
+        }));
+        let preprocessor = preprocessor("kimi_k2", StructuralTagMode::Off);
+        let mut common_request = preprocessed_request();
+
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
+            .unwrap();
+
+        assert_eq!(applied, GuidedToolConstraint::StructuralTag);
+        assert!(
+            common_request
+                .sampling_options
+                .guided_decoding
+                .as_ref()
+                .and_then(|guided| guided.structural_tag.as_ref())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn structural_tag_off_preserves_kimi_k3_named_native_tag() {
+        let request = request(json!({
+            "tools": tools(),
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"}
+            }
+        }));
+        let preprocessor = preprocessor("kimi_k3", StructuralTagMode::Off);
+        let mut common_request = preprocessed_request();
+
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
+            .unwrap();
+
+        assert_eq!(applied, GuidedToolConstraint::StructuralTag);
+        assert!(
+            common_request
+                .sampling_options
+                .guided_decoding
+                .as_ref()
+                .and_then(|guided| guided.structural_tag.as_ref())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn structural_tag_off_preserves_generic_forced_tool_fallback() {
+        let request = request(json!({
+            "tools": tools(),
+            "tool_choice": "required"
+        }));
+        let preprocessor = preprocessor("hermes", StructuralTagMode::Off);
+        let mut common_request = preprocessed_request();
+
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
+            .unwrap();
+
+        assert_eq!(applied, GuidedToolConstraint::GuidedJsonRequired);
+        assert!(
+            common_request
+                .sampling_options
+                .guided_decoding
+                .as_ref()
+                .and_then(|guided| guided.json.as_ref())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn kimi_k3_builder_error_uses_native_fallback() {
+        let request = request(json!({
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "value": {
+                                "type": "string",
+                                "$id": "urn:example:scoped",
+                                "$defs": {
+                                    "allowed": {"type": "string", "enum": ["safe"]}
+                                },
+                                "allOf": [{"$ref": "#/$defs/allowed"}]
+                            }
+                        },
+                        "required": ["value"]
+                    }
+                }
+            }],
+            "tool_choice": "auto"
+        }));
+        let preprocessor = preprocessor("kimi_k3", StructuralTagMode::On);
+        let tools = convert_tools(request.inner.tools.as_deref().unwrap());
+        let ctx = dynamo_parsers::tool_calling::ToolCallFormatBuildContext {
+            tool_choice: &ToolChoice::Auto,
+            tools: &tools,
+            parallel_tool_calls: request.inner.parallel_tool_calls,
+            schema_mode: preprocessor.runtime_config.structural_tag_schema,
+            starts_in_reasoning: false,
+        };
+        // A scoped string reference cannot be safely rendered as raw XTML.
+        // Verify an actual builder error, rather than a policy skip or Ok(None).
+        let error = dynamo_parsers::tool_calling::StructuralTagBuilder::KimiK3
+            .build_tool_call_format(&ctx)
+            .expect_err("scoped string reference must reach the builder-error fallback");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("value") && message.contains("string"),
+            "{message}"
+        );
+
+        let mut common_request = preprocessed_request();
+        let applied = preprocessor
+            .apply_tool_choice_guided_decoding(&request, &mut common_request, false)
+            .expect("builder errors must allow the request to continue without a structural tag");
+
+        assert_eq!(applied, GuidedToolConstraint::None);
+        assert!(common_request.sampling_options.guided_decoding.is_none());
+    }
+
+    #[test]
+    fn kimi_k3_forced_choices_accept_dynamic_system_tools() {
+        for tool_choice in [
+            json!("required"),
+            json!({"type": "function", "function": {"name": "lookup"}}),
+        ] {
+            let request = request(json!({
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "",
+                        "tools": [{"name": "lookup", "parameters": {"type": "object"}}]
+                    },
+                    {"role": "user", "content": "go"}
+                ],
+                "tool_choice": tool_choice
+            }));
+            assert_eq!(
+                guided_tool_constraint(&request, Some("kimi_k3"), None, false)
+                    .expect("dynamic forced choice must validate"),
+                GuidedToolConstraint::None,
+                "K3 forced choices use native XTML rather than guided JSON"
+            );
+        }
+    }
 }

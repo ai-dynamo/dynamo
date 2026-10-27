@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use dynamo_kv_router::LocalBlockHash;
@@ -8,20 +9,21 @@ use dynamo_kv_router::indexer::pruning::PruneConfig;
 use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
 use dynamo_kv_router::{
-    BranchShardedIndexer, ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer,
-    ThreadPoolIndexer,
+    BranchShardedIndexer, ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
 };
+use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_bench::kv_router_common::replay::WorkerReplayArtifacts;
 use dynamo_bench::kv_router_common::trace_gen::WorkerTimelines;
+
+use super::mooncake_lower_tier::derive_kvcr_layer;
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MooncakeIndexerKind {
     RadixTree,
     NestedMap,
-    ConcurrentRadixTree,
     ConcurrentRadixTreeCompressed,
     BranchShardedCrtc,
 }
@@ -58,14 +60,6 @@ impl MooncakeIndexerConfig {
         }
     }
 
-    pub fn concurrent_radix_tree(num_event_workers: usize) -> Self {
-        Self {
-            kind: MooncakeIndexerKind::ConcurrentRadixTree,
-            num_event_workers,
-            ..Self::radix_tree()
-        }
-    }
-
     pub fn concurrent_radix_tree_compressed(num_event_workers: usize) -> Self {
         Self {
             kind: MooncakeIndexerKind::ConcurrentRadixTreeCompressed,
@@ -92,7 +86,6 @@ impl MooncakeIndexerConfig {
         match self.kind {
             MooncakeIndexerKind::RadixTree => "radix-tree",
             MooncakeIndexerKind::NestedMap => "nested-map",
-            MooncakeIndexerKind::ConcurrentRadixTree => "concurrent-radix-tree",
             MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
                 "concurrent-radix-tree-compressed"
             }
@@ -104,13 +97,12 @@ impl MooncakeIndexerConfig {
         let config = match name {
             "radix-tree" => Self::radix_tree(),
             "nested-map" => Self::nested_map(8, num_event_workers),
-            "concurrent-radix-tree" => Self::concurrent_radix_tree(num_event_workers),
             "concurrent-radix-tree-compressed" => {
                 Self::concurrent_radix_tree_compressed(num_event_workers)
             }
             "branch-sharded-crtc" => Self::branch_sharded_crtc(2, num_event_workers, 2),
             _ => anyhow::bail!(
-                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, branch-sharded-crtc",
+                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree-compressed, branch-sharded-crtc",
                 name
             ),
         };
@@ -134,14 +126,6 @@ impl MooncakeIndexerConfig {
                 block_size,
                 Some(metrics),
             )),
-            MooncakeIndexerKind::ConcurrentRadixTree => {
-                Arc::new(ThreadPoolIndexer::new_with_metrics(
-                    ConcurrentRadixTree::new(),
-                    self.num_event_workers,
-                    block_size,
-                    Some(metrics),
-                ))
-            }
             MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
                 Arc::new(ThreadPoolIndexer::new_with_metrics(
                     ConcurrentRadixTreeCompressed::new(),
@@ -161,7 +145,7 @@ impl MooncakeIndexerConfig {
                         )
                     })
                     .collect();
-                Arc::new(BranchShardedIndexer::new_with_options(
+                Arc::new(BranchShardedIndexer::new(
                     shards,
                     self.prefix_depth,
                     block_size,
@@ -187,15 +171,6 @@ impl MooncakeIndexerConfig {
             MooncakeIndexerKind::NestedMap => {
                 Arc::new(ThreadPoolIndexer::new_with_metrics_and_pruning(
                     PositionalIndexer::new(self.jump_size),
-                    self.num_event_workers,
-                    block_size,
-                    Some(metrics),
-                    Some(prune_config),
-                ))
-            }
-            MooncakeIndexerKind::ConcurrentRadixTree => {
-                Arc::new(ThreadPoolIndexer::new_with_metrics_and_pruning(
-                    ConcurrentRadixTree::new(),
                     self.num_event_workers,
                     block_size,
                     Some(metrics),
@@ -232,6 +207,8 @@ pub(crate) enum WorkerTraceEntry {
     Event {
         event: KvCacheEvent,
         storage_tier: StorageTier,
+        /// Published by the worker's KVCR cache owner rather than the worker itself.
+        cache_owner: bool,
     },
 }
 
@@ -248,6 +225,30 @@ pub(crate) struct MergedMooncakeBenchmark {
     block_size: u32,
 }
 
+/// One host-tier stream's events, and the (block, owner) memberships live at its end.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct HostTierTotals {
+    pub stored_events: usize,
+    pub removed_events: usize,
+    pub stored_blocks: usize,
+    pub removed_blocks: usize,
+    pub live_memberships: usize,
+}
+
+impl HostTierTotals {
+    fn expanded(self, factor: usize) -> Self {
+        Self {
+            stored_events: self.stored_events * factor,
+            removed_events: self.removed_events * factor,
+            stored_blocks: self.stored_blocks * factor,
+            removed_blocks: self.removed_blocks * factor,
+            live_memberships: self.live_memberships * factor,
+        }
+    }
+}
+
+/// Request and device-tier totals; the host tiers are counted apart, so the device totals and the
+/// throughputs built on them mean the same with or without them.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct MooncakeTraceTotals {
     pub(crate) requests: usize,
@@ -257,6 +258,10 @@ pub(crate) struct MooncakeTraceTotals {
     pub(crate) request_blocks: usize,
     pub(crate) stored_blocks: usize,
     pub(crate) removed_blocks: usize,
+    /// vLLM's CPU offload tier, owned by the worker.
+    pub(crate) cpu_tier: HostTierTotals,
+    /// KVCR's DRAM tier, owned by the worker's KVCR cache owner.
+    pub(crate) kvcr: HostTierTotals,
 }
 
 impl MooncakeTraceTotals {
@@ -285,7 +290,16 @@ impl MooncakeTraceTotals {
             request_blocks: self.request_blocks * factor,
             stored_blocks: self.stored_blocks * factor,
             removed_blocks: self.removed_blocks * factor,
+            cpu_tier: self.cpu_tier.expanded(factor),
+            kvcr: self.kvcr.expanded(factor),
         }
+    }
+
+    pub(crate) fn host_events(self) -> usize {
+        self.cpu_tier.stored_events
+            + self.cpu_tier.removed_events
+            + self.kvcr.stored_events
+            + self.kvcr.removed_events
     }
 }
 
@@ -343,6 +357,7 @@ fn merge_event_worker_trace(
                 entry: WorkerTraceEntry::Event {
                     event: event.event,
                     storage_tier: event.storage_tier,
+                    cache_owner: false,
                 },
             });
         }
@@ -390,6 +405,21 @@ pub(crate) fn merge_worker_traces(
     })
 }
 
+impl MergedMooncakeBenchmark {
+    pub(crate) fn with_kvcr_layer(self, capacity: usize) -> anyhow::Result<Self> {
+        let worker_traces = self
+            .worker_traces
+            .into_inner()
+            .into_iter()
+            .map(|timeline| derive_kvcr_layer(timeline, capacity))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(Self {
+            worker_traces: WorkerTimelines::new(worker_traces),
+            block_size: self.block_size,
+        })
+    }
+}
+
 pub(crate) fn prepare_scaled_benchmark(
     merged: MergedMooncakeBenchmark,
     benchmark_duration_ms: u64,
@@ -405,24 +435,56 @@ pub(crate) fn prepare_scaled_benchmark(
 
     let mut totals = MooncakeTraceTotals::default();
 
-    for entry in worker_traces.iter().flatten() {
-        match &entry.entry {
-            WorkerTraceEntry::Request(hashes) => {
-                totals.requests += 1;
-                totals.request_blocks += hashes.len();
+    for timeline in worker_traces.iter() {
+        let mut cpu_tier_live = HashSet::new();
+        let mut kvcr_live = HashSet::new();
+        for entry in timeline {
+            match &entry.entry {
+                WorkerTraceEntry::Request(hashes) => {
+                    totals.requests += 1;
+                    totals.request_blocks += hashes.len();
+                }
+                WorkerTraceEntry::Event {
+                    event,
+                    storage_tier,
+                    cache_owner,
+                } if !storage_tier.is_gpu() => {
+                    let (host, live) = if *cache_owner {
+                        (&mut totals.kvcr, &mut kvcr_live)
+                    } else {
+                        (&mut totals.cpu_tier, &mut cpu_tier_live)
+                    };
+                    match &event.data {
+                        KvCacheEventData::Stored(store) => {
+                            host.stored_events += 1;
+                            host.stored_blocks += store.blocks.len();
+                            live.extend(store.blocks.iter().map(|block| block.block_hash.0));
+                        }
+                        KvCacheEventData::Removed(remove) => {
+                            host.removed_events += 1;
+                            host.removed_blocks += remove.block_hashes.len();
+                            for hash in &remove.block_hashes {
+                                live.remove(&hash.0);
+                            }
+                        }
+                        KvCacheEventData::Cleared => live.clear(),
+                    }
+                }
+                WorkerTraceEntry::Event { event, .. } => match &event.data {
+                    KvCacheEventData::Stored(store) => {
+                        totals.stored_events += 1;
+                        totals.stored_blocks += store.blocks.len();
+                    }
+                    KvCacheEventData::Removed(remove) => {
+                        totals.removed_events += 1;
+                        totals.removed_blocks += remove.block_hashes.len();
+                    }
+                    KvCacheEventData::Cleared => totals.cleared_events += 1,
+                },
             }
-            WorkerTraceEntry::Event { event, .. } => match &event.data {
-                KvCacheEventData::Stored(store) => {
-                    totals.stored_events += 1;
-                    totals.stored_blocks += store.blocks.len();
-                }
-                KvCacheEventData::Removed(remove) => {
-                    totals.removed_events += 1;
-                    totals.removed_blocks += remove.block_hashes.len();
-                }
-                KvCacheEventData::Cleared => totals.cleared_events += 1,
-            },
         }
+        totals.cpu_tier.live_memberships += cpu_tier_live.len();
+        totals.kvcr.live_memberships += kvcr_live.len();
     }
 
     PreparedMooncakeBenchmark {

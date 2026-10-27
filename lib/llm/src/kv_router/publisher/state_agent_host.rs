@@ -22,28 +22,104 @@ use dynamo_runtime::{
     },
     stream,
     traits::DistributedRuntimeProvider,
+    transports::event_plane::{SharedZmqPublisherSocket, uses_direct_zmq},
 };
 use futures::StreamExt;
 use prometheus::{IntCounter, IntGaugeVec};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use crate::direct_zmq_sub_pool::{DirectZmqSubPool, KV_ZMQ_RCVHWM};
 use crate::discovery::kv_state_agent::{
-    KV_STATE_ATTACHMENT_INTENT_TOPIC_V2, KV_STATE_HOST_TOPIC_V2, KvStateAttachmentIntent,
-    KvStateHostAdvertisement, KvStateHostControlRequest, KvStateHostStatus, KvStateIngressProtocol,
+    KV_STATE_ATTACHMENT_INTENT_TOPIC_V2, KV_STATE_EVENT_TOPIC_V2, KV_STATE_HOST_TOPIC_V2,
+    KvStateAttachmentIntent, KvStateHostAdvertisement, KvStateHostControlRequest,
+    KvStateHostStatus, KvStateIngressProtocol,
 };
 
 use super::state_agent::{
     KvStateAgent, KvStateAgentAttachmentConfig, KvStateAgentConfig, KvStateAgentSlotConfig,
-    KvStateAgentVllmSource,
+    KvStateAgentSockets, KvStateAgentVllmSource,
 };
 
 pub const DEFAULT_KV_STATE_AGENT_MAX_SLOTS: usize = 8;
+pub const DEFAULT_KV_STATE_AGENT_SLOTS_PER_SOCKET: usize = 1;
 
 #[derive(Clone)]
 pub struct KvStateAgentHostConfig {
     pub endpoint: Endpoint,
     pub max_slots: usize,
+    /// Slots that share one output PUB socket and one raw-input SUB socket.
+    ///
+    /// Above one, routers older than shared-endpoint support open one connection
+    /// per slot to each shared PUB and receive every co-located slot's traffic.
+    pub slots_per_socket: usize,
+}
+
+/// Sockets the host's slots share, `slots_per_socket` to each.
+struct HostSockets {
+    slots_per_socket: usize,
+    /// Brokered and NATS transports have no per-publisher socket to share.
+    share_publishers: bool,
+    publishers: Vec<(SharedZmqPublisherSocket, usize)>,
+    raw_pool: Option<DirectZmqSubPool>,
+}
+
+impl HostSockets {
+    fn new(
+        component: &Component,
+        slots_per_socket: usize,
+        cancel: CancellationToken,
+    ) -> Result<Self> {
+        let pooled = slots_per_socket > 1;
+        Ok(Self {
+            slots_per_socket,
+            share_publishers: pooled
+                && uses_direct_zmq(component.drt().default_event_transport_kind()),
+            publishers: Vec::new(),
+            raw_pool: pooled
+                .then(|| DirectZmqSubPool::new_raw(slots_per_socket, KV_ZMQ_RCVHWM, cancel))
+                .transpose()?,
+        })
+    }
+
+    fn for_new_slot(&mut self) -> Result<KvStateAgentSockets> {
+        let event_socket = if self.share_publishers {
+            let index = match self
+                .publishers
+                .iter()
+                .position(|(_, slots)| *slots < self.slots_per_socket)
+            {
+                Some(index) => index,
+                None => {
+                    let socket = SharedZmqPublisherSocket::bind(KV_STATE_EVENT_TOPIC_V2)
+                        .context("failed to bind a shared state-agent event socket")?;
+                    self.publishers.push((socket, 0));
+                    self.publishers.len() - 1
+                }
+            };
+            let (socket, slots) = &mut self.publishers[index];
+            *slots += 1;
+            Some(socket.clone())
+        } else {
+            None
+        };
+        Ok(KvStateAgentSockets {
+            event_socket,
+            raw_pool: self.raw_pool.clone(),
+        })
+    }
+
+    /// Returns the share of a slot that failed to start.
+    fn release(&mut self, sockets: &KvStateAgentSockets) {
+        if let Some(socket) = &sockets.event_socket
+            && let Some((_, slots)) = self
+                .publishers
+                .iter_mut()
+                .find(|(shared, _)| shared.endpoint() == socket.endpoint())
+        {
+            *slots -= 1;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +198,6 @@ impl HostMetrics {
 
 struct HostControlEngine {
     status: Arc<ArcSwap<KvStateHostStatus>>,
-    slots: Arc<Mutex<HashMap<CacheOwnerId, HostedSlot>>>,
 }
 
 #[async_trait]
@@ -136,47 +211,6 @@ impl AsyncEngine<SingleIn<KvStateHostControlRequest>, ManyOut<KvStateHostStatus>
         let (request, context) = request.into_parts();
         match request {
             KvStateHostControlRequest::Status => {}
-            KvStateHostControlRequest::SetCacheReadable {
-                cache_owner_id,
-                producer_instance,
-                intent_incarnation,
-                readable,
-            } => {
-                // NOTE: The Dynamo namespace/DRT control plane is a trusted
-                // component boundary. These identities fence the current
-                // attachment; they are not authentication secrets. A future
-                // untrusted control plane requires transport authentication,
-                // not a capability copied through discovery.
-                let (agent, generation) = {
-                    let slots = self.slots.lock().await;
-                    let slot = slots
-                        .get(&cache_owner_id)
-                        .context("KV state-agent slot is not present")?;
-                    if slot.lifecycle != SlotLifecycle::Active
-                        || slot.intent_incarnation != Some(intent_incarnation)
-                        || slot.producer_instance.as_ref() != Some(producer_instance.as_ref())
-                    {
-                        anyhow::bail!(
-                            "readability update does not match the active attachment intent"
-                        );
-                    }
-                    let agent = slot
-                        .agent
-                        .clone()
-                        .context("active slot has no state agent")?;
-                    let generation = agent
-                        .status()
-                        .attachment
-                        .as_ref()
-                        .context("active slot has no engine attachment")?
-                        .generation;
-                    (agent, generation)
-                };
-                agent
-                    .set_cache_readable(generation, readable)
-                    .await
-                    .context("failed to update CacheOwner readability")?;
-            }
         }
         Ok(ResponseStream::new(
             Box::pin(stream::iter(vec![(*self.status.load_full()).clone()])),
@@ -201,6 +235,9 @@ impl KvStateAgentHost {
         if config.max_slots == 0 {
             anyhow::bail!("max_slots must be greater than zero");
         }
+        if config.slots_per_socket == 0 {
+            anyhow::bail!("slots_per_socket must be greater than zero");
+        }
 
         let component = config.endpoint.component().clone();
         let slots = Arc::new(Mutex::new(HashMap::new()));
@@ -213,7 +250,6 @@ impl KvStateAgentHost {
             .endpoint_builder()
             .handler(Ingress::for_engine(Arc::new(HostControlEngine {
                 status: status.clone(),
-                slots: slots.clone(),
             }))?)
             .graceful_shutdown(true)
             .start_with_registration()
@@ -285,6 +321,7 @@ impl KvStateAgentHost {
         };
         let host_advertisement = Arc::new(Mutex::new(Some(host_advertisement)));
         let cancel = CancellationToken::new();
+        let sockets = HostSockets::new(&component, config.slots_per_socket, cancel.child_token())?;
         let terminated = CancellationToken::new();
         let supervisor_cancel = cancel.clone();
         let supervisor_component = component.clone();
@@ -297,6 +334,7 @@ impl KvStateAgentHost {
                 supervisor_component,
                 control_target,
                 config.max_slots,
+                sockets,
                 stream,
                 supervisor_slots,
                 supervisor_status,
@@ -364,6 +402,7 @@ async fn run_host_supervisor(
     component: Component,
     host_instance: dynamo_runtime::component::Instance,
     max_slots: usize,
+    mut sockets: HostSockets,
     mut stream: dynamo_runtime::discovery::DiscoveryStream,
     slots: Arc<Mutex<HashMap<CacheOwnerId, HostedSlot>>>,
     status: Arc<ArcSwap<KvStateHostStatus>>,
@@ -405,6 +444,7 @@ async fn run_host_supervisor(
             &intents,
             &mut slots_guard,
             max_slots,
+            &mut sockets,
             &mut capacity_rejected_total,
             &metrics,
         )
@@ -431,6 +471,9 @@ async fn run_host_supervisor(
         }
     }
     drop(slots);
+    if let Some(raw_pool) = &sockets.raw_pool {
+        raw_pool.shutdown().await;
+    }
     if watch_ended {
         let current = host_advertisement.lock().await.clone();
         if let Some(current) = current {
@@ -490,7 +533,8 @@ fn reconcile_intent_event(
         }
         DiscoveryEvent::Added(_)
         | DiscoveryEvent::Removed(_)
-        | DiscoveryEvent::ModelTaintsUpdated(_) => return Ok(None),
+        | DiscoveryEvent::ModelTaintsUpdated(_)
+        | DiscoveryEvent::Resync(_) => return Ok(None),
     };
     if scope
         != (EventScope::Component {
@@ -569,6 +613,7 @@ async fn reconcile_owner(
     intents: &HashMap<CacheOwnerId, HashMap<u64, KvStateAttachmentIntent>>,
     slots: &mut HashMap<CacheOwnerId, HostedSlot>,
     max_slots: usize,
+    sockets: &mut HostSockets,
     capacity_rejected_total: &mut u64,
     metrics: &HostMetrics,
 ) -> Result<()> {
@@ -620,15 +665,18 @@ async fn reconcile_owner(
             ingress_protocol: intent.ingress_protocol,
         };
         slots.insert(owner, slot_shape);
+        let slot_sockets = sockets.for_new_slot()?;
         let agent = match KvStateAgent::start(KvStateAgentConfig {
             endpoint: component.endpoint(slot_endpoint_name(owner)),
             kv_state_endpoint: intent.kv_state_endpoint.clone(),
             slot: KvStateAgentSlotConfig {
                 cache_owner_id: owner,
                 global_dp_rank: intent.worker.dp_rank,
+                router_hint_source: intent.router_hint_source.clone(),
             },
             kv_block_size: intent.kv_block_size,
             ingress_protocol: intent.ingress_protocol,
+            sockets: slot_sockets.clone(),
         })
         .await
         {
@@ -636,7 +684,9 @@ async fn reconcile_owner(
             Err(error) => {
                 // Keep the failed reservation until this exact intent disappears.
                 // It remains capacity-accounted and avoids implicit construction
-                // retries under an unchanged lease-owned request.
+                // retries under an unchanged lease-owned request. Its socket share
+                // is returned now; the slot never published on it.
+                sockets.release(&slot_sockets);
                 return Err(error).context("failed to construct stable state-agent slot");
             }
         };
@@ -667,6 +717,7 @@ async fn reconcile_owner(
                 endpoint: intent.raw_zmq_endpoint.clone(),
                 topic: intent.raw_topic.clone(),
                 image_token_id: intent.image_token_id,
+                video_token_id: intent.video_token_id,
                 ingress_protocol: intent.ingress_protocol,
             },
         })
@@ -747,12 +798,28 @@ mod tests {
         CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
-    use dynamo_kv_router::protocols::WorkerWithDpRank;
+    use dynamo_kv_router::protocols::{RouterHintSourceMetadata, WorkerWithDpRank};
     use dynamo_runtime::component::{Instance, TransportType};
     use dynamo_runtime::discovery::DiscoveryInstanceId;
     use dynamo_runtime::protocols::EndpointId;
 
     use super::*;
+
+    #[tokio::test]
+    async fn failed_slot_returns_its_shared_socket_share() {
+        let mut sockets = HostSockets {
+            slots_per_socket: 2,
+            share_publishers: true,
+            publishers: Vec::new(),
+            raw_pool: None,
+        };
+        sockets.for_new_slot().unwrap();
+        let failed = sockets.for_new_slot().unwrap();
+        sockets.release(&failed);
+        sockets.for_new_slot().unwrap();
+
+        assert_eq!(sockets.publishers.len(), 1);
+    }
 
     fn instance(component: &str, instance_id: u64) -> Instance {
         Instance {
@@ -799,7 +866,42 @@ mod tests {
             raw_zmq_endpoint: format!("tcp://127.0.0.1:{}", 20_000 + worker.dp_rank),
             raw_topic: "kv-events-residency-v1".to_string(),
             image_token_id: None,
+            video_token_id: None,
+            router_hint_source: None,
         }
+    }
+
+    #[test]
+    fn router_hint_metadata_does_not_change_stable_slot_identity() {
+        let host = instance("kv_state_agent", 1);
+        let owner = owner(4);
+        let original = intent(
+            &host,
+            instance("producer", 2),
+            owner,
+            WorkerWithDpRank::new(17, 3),
+            71,
+        );
+        let slot = HostedSlot {
+            intent_incarnation: None,
+            producer_instance: None,
+            lifecycle: SlotLifecycle::Detached,
+            agent: None,
+            global_dp_rank: original.worker.dp_rank,
+            kv_state_endpoint: original.kv_state_endpoint.clone(),
+            indexer_domain_id: original.indexer_domain_id,
+            kv_block_size: original.kv_block_size,
+            ingress_protocol: original.ingress_protocol,
+        };
+        let mut upgraded = original.clone();
+        upgraded.router_hint_source = Some(RouterHintSourceMetadata {
+            source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
+            worker_type: "prefill".to_string(),
+            topology_domains: Default::default(),
+        });
+
+        assert!(slot.matches(&original));
+        assert!(slot.matches(&upgraded));
     }
 
     fn added(

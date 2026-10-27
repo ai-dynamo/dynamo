@@ -12,6 +12,16 @@ from dynamo.common.token_budget import TokenBudget, publish_token_budget
 logger = logging.getLogger(__name__)
 
 
+def has_vllm_output_clamping() -> bool:
+    """vLLM 0.32 caps oversized output budgets instead of rejecting them.
+
+    Remove when the CPU and XPU images reach vLLM 0.32.
+    """
+    from vllm.version import __version_tuple__
+
+    return __version_tuple__[:2] >= (0, 32)
+
+
 def publish_vllm_token_budget(runtime_config: Any, max_model_len: int | None) -> None:
     """Publish vLLM's request-overflow contract to the Dynamo frontend."""
     if max_model_len is None:
@@ -21,7 +31,7 @@ def publish_vllm_token_budget(runtime_config: Any, max_model_len: int | None) ->
         TokenBudget(
             combined_limit=max_model_len,
             reject_prompt_overflow=True,
-            reject_total_overflow=True,
+            reject_total_overflow=not has_vllm_output_clamping(),
         ),
     )
 
@@ -29,6 +39,12 @@ def publish_vllm_token_budget(runtime_config: Any, max_model_len: int | None) ->
 def per_rank_kv_blocks(
     total_kv_blocks: int | None, data_parallel_size: int
 ) -> int | None:
+    """Estimate rank capacity from vLLM's process-wide DP aggregate.
+
+    The arithmetic mean assumes homogeneous ranks; exact division does not prove equality.
+    TODO(rank-aware-kv-capacity): consume a per-rank Control response when vLLM exposes one,
+    then publish the rank vector atomically instead of upgrading this quotient to exact data.
+    """
     if total_kv_blocks is None:
         return None
 
