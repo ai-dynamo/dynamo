@@ -134,6 +134,27 @@ own value; rename that variable before upgrading.
 **Existing deployments:** Reconciliation rolls each LPX workload once without an
 authored manifest change.
 
+##### LPX Agent RDMA port and addresses
+
+**Change:** For hybrid LPX builds, the operator sets `LPX_RDMA_PORT=19877` in every
+regular and init container of the Agent and Cyborg roles. It also sets
+`LPX_LPU_RDMA_ADDRS` in the Cyborg containers: a comma-separated list of
+`host:port` Agent RDMA addresses, one per remote runtime partition, built from
+Grove's `$(GROVE_PCSG_NAME)`, `$(GROVE_PCSG_INDEX)`, and `$(GROVE_HEADLESS_SERVICE)`
+variables. The list is empty when every partition is local. The operator's values
+replace any values authored under these names. The Cyborg `lpu_servers` ConfigMap
+key is unchanged.
+
+**Affected:** Every DGD with a hybrid LPX component.
+
+**Action:** Plan for a one-time rollout of hybrid LPX workloads when upgrading to
+v1.7.0. No manifest change is needed unless a container sets one of these variables
+to its own value; rename that variable before upgrading. Agents must serve RDMA on
+`LPX_RDMA_PORT`.
+
+**Existing deployments:** Reconciliation rolls each hybrid LPX workload once without
+an authored manifest change.
+
 #### New behavior
 
 ##### LWS no longer requires Volcano

@@ -6,6 +6,7 @@
 package lpx
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -112,7 +113,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	decode.Spec.PodSpec.Containers[0].Command = []string{"/custom-cyborg", "--wrapper-option"}
 	decode.Spec.PodSpec.Containers[0].Args = []string{"argument with spaces", "literal $HOME", ""}
 	authoredEnv := []corev1.EnvVar{
-		{Name: "RDMA_PORT", Value: "12345"},
+		{Name: "LPX_RDMA_PORT", Value: "12345"},
 		{Name: "CYBORG_BATCH_SIZE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
 			FieldPath: "metadata.labels['runtime-batch']",
 		}}},
@@ -128,19 +129,29 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ReadOnly = true
 	decode.Spec.PodSpec.Containers[0].VolumeMounts[1].SubPath = "cyborg"
 	decode.Spec.PodSpec.Containers[0].VolumeMounts[1].ReadOnly = true
+	agentSpec := renderTestPodSpec()
+	agentSpec.Containers[0].Env = []corev1.EnvVar{{Name: "LPX_RDMA_PORT", Value: "12345"}}
 	input := RenderInput{
-		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
+		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: agentSpec}},
 	}
 	rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, input)
 	require.NoError(t, err)
 	cyborg := namedClique(t, rendered, "cond")
 
-	t.Log("Keep runtime environment opaque while supplying its manifest before authored references")
+	t.Log("Keep runtime environment opaque while supplying its manifest and Agent addresses before authored references")
 	modelEnv := []corev1.EnvVar{
 		{Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin"},
 		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
+		{Name: "LPX_RDMA_PORT", Value: "19877"},
+		{Name: "LPX_LPU_RDMA_ADDRS", Value: "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-0.$(GROVE_HEADLESS_SERVICE):19877"},
 	}
-	require.Equal(t, append(modelEnv, authoredEnv...), cyborg.Spec.PodSpec.Containers[0].Env)
+	require.Equal(t, append(slices.Clone(modelEnv), authoredEnv[1:]...), cyborg.Spec.PodSpec.Containers[0].Env)
+
+	t.Log("Replace the Agent's authored RDMA port with the operator-owned port")
+	require.Equal(t, []corev1.EnvVar{
+		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
+		{Name: "LPX_RDMA_PORT", Value: "19877"},
+	}, namedClique(t, rendered, "agt").Spec.PodSpec.Containers[0].Env)
 	require.Equal(t, &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "cyborg-models", ReadOnly: true}, cyborg.Spec.PodSpec.Volumes[0].PersistentVolumeClaim)
 	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
 		Name: "model-storage", MountPath: "/models", SubPath: "cyborg", ReadOnly: true,

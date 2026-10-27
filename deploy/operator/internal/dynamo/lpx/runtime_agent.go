@@ -58,18 +58,25 @@ func applyModelPaths(containerLists [][]corev1.Container, projections []*ModelPr
 	}
 
 	// Regular and init containers receive authoritative paths ahead of authored references.
+	prependOwnedEnv(containerLists, paths)
+	return nil
+}
+
+// prependOwnedEnv rewrites each container's Env in place so that owned comes
+// first and replaces any authored variable of the same name. Kubernetes expands
+// references in list order, so authored values may derive from owned ones.
+func prependOwnedEnv(containerLists [][]corev1.Container, owned []corev1.EnvVar) {
 	for _, containers := range containerLists {
 		for i := range containers {
 			container := &containers[i]
-			env := make([]corev1.EnvVar, 0, len(paths)+len(container.Env))
-			env = append(env, paths...)
+			env := make([]corev1.EnvVar, 0, len(owned)+len(container.Env))
+			env = append(env, owned...)
 			for _, variable := range container.Env {
-				if !slices.ContainsFunc(paths, func(path corev1.EnvVar) bool { return path.Name == variable.Name }) {
+				if !slices.ContainsFunc(owned, func(o corev1.EnvVar) bool { return o.Name == variable.Name }) {
 					env = append(env, variable)
 				}
 			}
 			container.Env = env
 		}
 	}
-	return nil
 }

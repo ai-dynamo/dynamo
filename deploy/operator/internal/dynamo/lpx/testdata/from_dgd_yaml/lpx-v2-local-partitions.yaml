@@ -185,6 +185,8 @@ spec:
             env:
             - name: LPX_MODEL_PATH
               value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
+            - name: LPX_RDMA_PORT
+              value: "19877"
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -366,6 +368,10 @@ spec:
               value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/manifest.v2.capnp.bin
             - name: LPX_MODEL_PATH
               value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
+            - name: LPX_RDMA_PORT
+              value: "19877"
+            - name: LPX_LPU_RDMA_ADDRS
+              value: $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-0.$(GROVE_HEADLESS_SERVICE):19877,$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-1.$(GROVE_HEADLESS_SERVICE):19877,$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-2.$(GROVE_HEADLESS_SERVICE):19877,$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-3.$(GROVE_HEADLESS_SERVICE):19877,$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-4.$(GROVE_HEADLESS_SERVICE):19877,$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-5.$(GROVE_HEADLESS_SERVICE):19877,$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-6.$(GROVE_HEADLESS_SERVICE):19877,$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-7.$(GROVE_HEADLESS_SERVICE):19877,$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-8.$(GROVE_HEADLESS_SERVICE):19877,$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-9.$(GROVE_HEADLESS_SERVICE):19877,$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-10.$(GROVE_HEADLESS_SERVICE):19877,$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-11.$(GROVE_HEADLESS_SERVICE):19877,$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-12.$(GROVE_HEADLESS_SERVICE):19877,$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-13.$(GROVE_HEADLESS_SERVICE):19877
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
               valueFrom:
                 fieldRef:

@@ -66,6 +66,8 @@ spec:
             env:
             - name: LPX_MODEL_PATH
               value: /nfs/gpt-oss-20b-lp30-hx-lpx
+            - name: LPX_RDMA_PORT
+              value: "19877"
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -227,6 +229,10 @@ spec:
               value: /nfs/gpt-oss-20b-lp30-hx-lpx/manifest.v2.capnp.bin
             - name: LPX_MODEL_PATH
               value: /nfs/gpt-oss-20b-lp30-hx-lpx
+            - name: LPX_RDMA_PORT
+              value: "19877"
+            - name: LPX_LPU_RDMA_ADDRS
+              value: $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-agt-0.$(GROVE_HEADLESS_SERVICE):19877
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
               valueFrom:
                 fieldRef:
