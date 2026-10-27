@@ -215,9 +215,14 @@ async fn watch_slices<I: SliceIndex>(
     cache: Arc<SliceCache<I>>,
     stop: CancellationToken,
 ) {
-    // Lists come from the API server's cache rather than a quorum read from
-    // etcd: the watch catches up from there, and discovery needs no more.
-    let config = watcher::Config::default().labels(&selector).any_semantic();
+    // Lists come from the API server's watch cache (`resourceVersion=0`), as
+    // client-go's reflector does, rather than paged quorum reads from etcd:
+    // the watch catches up from there, and discovery needs no more. kube sends
+    // `resourceVersion=0` only without a page size, so paging is off.
+    let config = watcher::Config {
+        page_size: None,
+        ..watcher::Config::default().labels(&selector).any_semantic()
+    };
     let mut events = std::pin::pin!(watcher(slices, config).default_backoff());
     loop {
         let event = tokio::select! {
