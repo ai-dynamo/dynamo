@@ -577,3 +577,108 @@ def test_snapshot_does_not_treat_expert_count_as_lora_rank(tmp_path):
     )
 
     assert validate_snapshot(snapshot, tmp_path, 16384, 64, ("base",)) == snapshot
+
+
+@pytest.mark.parametrize("rank", [16, 32])
+@pytest.mark.parametrize("experts", [2, 4])
+def test_snapshot_bounds_packed_moe_rank_per_expert(tmp_path, rank, experts):
+    snapshot = _snapshot(tmp_path, r=16, target_modules=["experts"])
+    header = {}
+    offset = 0
+    for module, output in [("experts", 2), ("experts.base_layer", 4)]:
+        for suffix, shape in [
+            ("A", [experts * rank, 2]),
+            ("B", [output, experts * rank]),
+        ]:
+            size = prod(shape) * 4
+            header[f"base_model.model.layers.0.mlp.{module}.lora_{suffix}.weight"] = {
+                "dtype": "F32",
+                "shape": shape,
+                "data_offsets": [offset, offset + size],
+            }
+            offset += size
+    (snapshot / "adapter_model.safetensors").write_bytes(
+        _safetensors_blob(header, bytes(offset))
+    )
+
+    if rank == 16:
+        assert (
+            validate_snapshot(
+                snapshot, tmp_path, 16384, 16, ("base",), num_experts=experts
+            )
+            == snapshot
+        )
+    else:
+        with pytest.raises(HttpError) as error:
+            validate_snapshot(
+                snapshot, tmp_path, 16384, 16, ("base",), num_experts=experts
+            )
+        assert error.value.code == 422
+        assert error.value.message == "invalid_lora_adapter"
+
+
+@pytest.mark.parametrize(
+    "module,shape,experts",
+    [
+        ("experts", [33, 2], 2),
+        ("experts", [32, 2], None),
+        ("q_proj", [32, 2], 2),
+        ("experts.q_proj", [32, 2], 2),
+        ("experts", [2, 32, 2], 2),
+        ("experts.base_layer", [33, 2], 2),
+    ],
+)
+def test_snapshot_does_not_infer_packed_rank_from_untrusted_config(
+    tmp_path, module, shape, experts
+):
+    snapshot = _snapshot(tmp_path, r=16, target_modules=[module])
+    size = prod(shape) * 4
+    header = {
+        f"base_model.model.layers.0.mlp.{module}.lora_A.weight": {
+            "dtype": "F32",
+            "shape": shape,
+            "data_offsets": [0, size],
+        }
+    }
+    (snapshot / "adapter_model.safetensors").write_bytes(
+        _safetensors_blob(header, bytes(size))
+    )
+
+    with pytest.raises(HttpError) as error:
+        validate_snapshot(snapshot, tmp_path, 16384, 16, ("base",), num_experts=experts)
+    assert error.value.code == 422
+    assert error.value.message == "invalid_lora_adapter"
+
+
+@pytest.mark.parametrize("experts", [True, 0, -1, 2.0, "2"])
+def test_snapshot_rejects_invalid_trusted_expert_count(tmp_path, experts):
+    snapshot = _snapshot(tmp_path)
+
+    with pytest.raises(HttpError) as error:
+        validate_snapshot(snapshot, tmp_path, 1024, 64, ("base",), num_experts=experts)
+    assert error.value.code == 422
+    assert error.value.message == "invalid_lora_adapter"
+
+
+@pytest.mark.parametrize(
+    "rank_pattern",
+    [
+        {"q_proj": 65},
+        {"q_proj": True},
+        {"q_proj": 0},
+        {"q_proj": "8"},
+        {"": 8},
+        [],
+    ],
+)
+def test_snapshot_rejects_invalid_config_rank_pattern(tmp_path, rank_pattern):
+    snapshot = _snapshot(tmp_path, rank_pattern=rank_pattern)
+
+    _assert_invalid(snapshot, tmp_path)
+
+
+@pytest.mark.parametrize("rank_pattern", [None, {}, {"q_proj": 16}])
+def test_snapshot_accepts_supported_config_rank_pattern(tmp_path, rank_pattern):
+    snapshot = _snapshot(tmp_path, rank_pattern=rank_pattern)
+
+    assert validate_snapshot(snapshot, tmp_path, 1024, 64, ("base",)) == snapshot
