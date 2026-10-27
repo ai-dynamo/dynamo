@@ -2420,6 +2420,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name: "oversized ignored alpha namespace does not reject DGD services",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["worker"].DynamoNamespace = k8sptr.To(strings.Repeat("a", 64))
+			}),
+			wantWarnings: []string{`spec.services[worker].dynamoNamespace is deprecated and ignored. Value "` + strings.Repeat("a", 64) + `" will be replaced with "default-test-graph". Remove this field from your configuration`},
+		},
+
+		{
 			name: "GMS accepts GPU from alpha dedicated resources",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				service := dgd.Spec.Services["worker"]
