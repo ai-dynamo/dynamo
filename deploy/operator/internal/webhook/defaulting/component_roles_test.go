@@ -40,20 +40,20 @@ func TestDefaultMultinodeRoleReplicas(t *testing.T) {
 					{Name: nvidiacomv1beta1.ComponentRoleWorker},
 				},
 			},
-			wantLeader: ptr.To(int32(1)),
-			wantWorker: ptr.To(int32(3)),
+			wantLeader: new(int32(1)),
+			wantWorker: new(int32(3)),
 		},
 		{
 			name: "preserves explicit replicas",
 			component: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4},
 				Roles: []nvidiacomv1beta1.ComponentRoleSpec{
-					{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: ptr.To(int32(2))},
-					{Name: nvidiacomv1beta1.ComponentRoleWorker, Replicas: ptr.To(int32(2))},
+					{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: new(int32(2))},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker, Replicas: new(int32(2))},
 				},
 			},
-			wantLeader: ptr.To(int32(2)),
-			wantWorker: ptr.To(int32(2)),
+			wantLeader: new(int32(2)),
+			wantWorker: new(int32(2)),
 		},
 	}
 

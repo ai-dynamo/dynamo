@@ -122,23 +122,31 @@ def minor(version):
     return tuple(map(int, match.groups()))
 
 
+# One-time exception: main moved to 1.7 before history/1.6.0 was captured (#16650).
+# Delete this entry once history/1.6.0 lands; every other minor keeps the one-minor rule.
+HISTORY_EXCEPTIONS = {(1, 7): (1, 5)}
+
+
 def validate_versions(current, reconciled, previous=None):
     major, number = minor(current)
     old_major, old_number = minor(reconciled)
-    if major != old_major or number - old_number not in (0, 1):
+    exception = HISTORY_EXCEPTIONS.get(minor(current))
+    if minor(reconciled) != exception and (
+        major != old_major or number - old_number not in (0, 1)
+    ):
         raise ValueError(
-            "Revert the premature appVersion bump, run clustertest-upgrade-fixtures-regen UPGRADE_RELEASE_TAG=vN.x.y in the selected released operator tree, commit the history, then reapply the bump"
+            f"Operator {current} cannot replay history reconciled by {reconciled}; history must be the same minor or the minor immediately before it. Revert the premature appVersion bump, run clustertest-upgrade-fixtures-regen UPGRADE_RELEASE_TAG=vN.x.y in the selected released operator tree, commit the history, then reapply the bump"
         )
     if (
         previous
         and minor(previous) != minor(current)
         and (
             minor(current) != (minor(previous)[0], minor(previous)[1] + 1)
-            or minor(reconciled) != minor(previous)
+            or minor(reconciled) not in (minor(previous), exception)
         )
     ):
         raise ValueError(
-            "A minor bump requires history captured by the immediately previous operator; revert the bump and capture the published predecessor tag with clustertest-upgrade-fixtures-regen first. Skipped-minor and major bumps are unsupported"
+            f"The bump from {previous} to {current} must advance exactly one minor and needs history captured by the published {previous} operator; revert the bump and capture that tag with clustertest-upgrade-fixtures-regen first. Skipped-minor and major bumps are unsupported"
         )
 
 
@@ -176,8 +184,6 @@ def check(base=None):
             )
         )
     validate_versions(current, reconciled, previous)
-    if previous and minor(previous) != minor(current):
-        require_complete_matrix()
     lock = json.loads((FIXTURES / "history.lock.json").read_text())
     # The original bootstrap predates sourceKind; only its exact pinned inventory is exempt.
     if "sourceKind" not in lock:
@@ -226,8 +232,21 @@ def check(base=None):
 
 
 def golden_objects(objects, latest=False):
-    """Only server-assigned metadata, allocated Service IPs and condition times vary."""
+    """Keep lowering intent exact while excluding server bookkeeping and runtime status."""
     objects = json.loads(json.dumps(objects))
+    component_latest = latest and any(
+        obj["kind"] == "DynamoComponentDeployment" for obj in objects
+    )
+    worker_hash = next(
+        (
+            obj["metadata"]
+            .get("annotations", {})
+            .get("nvidia.com/current-worker-hash-v2")
+            for obj in objects
+            if obj["kind"] == "DynamoGraphDeployment"
+        ),
+        None,
+    )
     for obj in objects:
         metadata = obj["metadata"]
         if latest:
@@ -236,6 +255,46 @@ def golden_objects(objects, latest=False):
                 metadata["annotations"][
                     "nvidia.com/last-applied-hash"
                 ] = "$var:pcs-spec-hash"
+        if component_latest:
+            if obj["kind"] in (
+                "Deployment",
+                "LeaderWorkerSet",
+                "DynamoComponentDeployment",
+                "Service",
+            ):
+                # Desired-spec hashes predate API defaulting; the complete defaulted spec is compared below.
+                annotations = metadata.get("annotations", {})
+                if "nvidia.com/last-applied-hash" in annotations:
+                    annotations["nvidia.com/last-applied-hash"] = "$ignore"
+            if obj["kind"] in ("Deployment", "LeaderWorkerSet"):
+                # Workload-controller availability is outside the operator lowering boundary.
+                obj["status"] = {"$ignore": True}
+            if obj["kind"] in ("DynamoComponentDeployment", "DynamoGraphDeployment"):
+                status = obj.get("status", {})
+                components = (
+                    [status["component"]]
+                    if obj["kind"] == "DynamoComponentDeployment"
+                    else status.get("components", {}).values()
+                )
+                for component in components:
+                    # GPU/replica observations can change after the workload graph converges.
+                    for field in (
+                        "gpusPerEngine",
+                        "gpusPerReplica",
+                        "availableReplicas",
+                        "readyReplicas",
+                        "replicas",
+                        "updatedReplicas",
+                    ):
+                        component.pop(field, None)
+                    component["$strict"] = False
+                for condition in status.get("conditions", []):
+                    if condition["type"] == "Available":
+                        # A subsequent status conflict can replace the availability diagnostic.
+                        condition["message"] = "$ignore"
+                        condition["reason"] = "$ignore"
+            if worker_hash:
+                bind_worker_strings(obj, worker_hash)
         metadata.pop("managedFields", None)
         for field in ("uid", "resourceVersion", "generation", "creationTimestamp"):
             if field in metadata:
@@ -249,6 +308,25 @@ def golden_objects(objects, latest=False):
             obj["spec"]["clusterIP"] = "$ignore"
             obj["spec"]["clusterIPs"] = ["$ignore" for _ in obj["spec"]["clusterIPs"]]
     return objects
+
+
+def bind_worker_strings(value, worker_hash):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if isinstance(child, str) and worker_hash in child:
+                value[key] = "$var:worker-string:" + child.replace(
+                    worker_hash, "{{worker-hash}}"
+                )
+            else:
+                bind_worker_strings(child, worker_hash)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            if isinstance(child, str) and worker_hash in child:
+                value[index] = "$var:worker-string:" + child.replace(
+                    worker_hash, "{{worker-hash}}"
+                )
+            else:
+                bind_worker_strings(child, worker_hash)
 
 
 def bind_latest_variables(value):
@@ -283,11 +361,15 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
     import yaml
 
     current, reconciled = check()
-    require_complete_matrix()
     if minor(current) == minor(reconciled):
         raise ValueError(
             "History is already reconciled by this minor; do not advance it twice"
         )
+    if minor(current) != (minor(reconciled)[0], minor(reconciled)[1] + 1):
+        raise ValueError(
+            f"Capturing {current} over history reconciled by {reconciled} skips a minor; capture each missing minor from its own released operator tree first"
+        )
+    require_complete_matrix()
     source = capture_source(current, release_tag, candidate_sha)
     if candidate_sha:
         if (

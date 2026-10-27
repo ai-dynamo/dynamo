@@ -251,8 +251,7 @@ func appendV1Beta1ConversionFieldPaths(paths []string, prefix string, typ reflec
 
 	stack = append(stack, typ)
 	before := len(paths)
-	for i := 0; i < typ.NumField(); i++ {
-		field := typ.Field(i)
+	for field := range typ.Fields() {
 		if field.PkgPath != "" {
 			continue
 		}

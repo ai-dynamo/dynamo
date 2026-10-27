@@ -114,6 +114,158 @@ fn get_text(content: &ChatCompletionMessageContent) -> &str {
     }
 }
 
+// Parser conformance cannot configure Dynamo's reasoning-only deployment route.
+// Replay the recorded Hermes stream through the serving and unary boundaries.
+#[tokio::test]
+async fn reasoning_only_qwen3_preserves_recorded_hermes_content() {
+    const CHILD: &str = "DYNAMO_REASONING_ONLY_QWEN3_CHILD";
+    let Ok(selection) = std::env::var(CHILD) else {
+        for selection in ["unset", "auto", "deprecated_false", "1", "2"] {
+            let mut command = test_utils::isolated_command(
+                "reasoning_only_qwen3_preserves_recorded_hermes_content",
+            );
+            command.env(CHILD, selection);
+            match selection {
+                "unset" => {}
+                "deprecated_false" => {
+                    command.env(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, "false");
+                }
+                value => {
+                    command.env(env_llm::DYN_PARSER_VERSION, value);
+                }
+            }
+            test_utils::assert_isolated_success(&command.output().unwrap());
+        }
+        return;
+    };
+    let fixture: Value = serde_json::from_str(include_str!(
+        "data/vllm/qwen3-0.6B/chat_completion_stream_8f33c28b-tool.json"
+    ))
+    .unwrap();
+    let recorded: Vec<_> = fixture["input_stream"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|chunk| {
+            let choices = chunk["data"]["choices"].as_array().unwrap();
+            assert_eq!(choices.len(), 1);
+            kimi_native_chunk(
+                choices[0]["delta"]["content"].as_str().unwrap_or_default(),
+                choices[0]["finish_reason"].as_str(),
+            )
+        })
+        .collect();
+    let raw: String = recorded
+        .iter()
+        .filter_map(|chunk| chunk.data.as_ref())
+        .flat_map(|response| &response.inner.choices)
+        .filter_map(|choice| choice.delta.content.as_ref())
+        .map(get_text)
+        .collect();
+    let literal_content = raw.split_once("</think>").unwrap().1;
+    assert!(literal_content.contains("<tool_call>"));
+    let expected_reasoning = fixture["expected_output"]["reasoning_content"]
+        .as_str()
+        .unwrap();
+    let preprocessor = build_preprocessor(Some("qwen3"), None);
+    for request_mode in ["tools_auto", "tools_none", "no_tools"] {
+        let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+        match request_mode {
+            "tools_none" => request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::None),
+            "no_tools" => {
+                request.inner.tools = None;
+                request.inner.tool_choice = None;
+            }
+            _ => {}
+        }
+        // Cover the capture's original cadence and every valid UTF-8 split.
+        let schedules = std::iter::once(recorded.clone()).chain(
+            raw.char_indices()
+                .map(|(offset, _)| offset)
+                .chain(std::iter::once(raw.len()))
+                .map(|split| {
+                    vec![
+                        kimi_native_chunk(&raw[..split], None),
+                        kimi_native_chunk(&raw[split..], Some("stop")),
+                    ]
+                }),
+        );
+        for (schedule, chunks) in schedules.enumerate() {
+            // Preserve V1's chunk-sensitive reasoning ownership without using
+            // the selector under test to compute its own expected output.
+            let legacy = OpenAIPreprocessor::parse_reasoning_content_from_stream(
+                stream::iter(chunks.clone()),
+                "qwen3".into(),
+                false,
+            )
+            .collect::<Vec<_>>()
+            .await;
+            let legacy = demux_by_choice(&legacy).remove(&0).unwrap();
+            if schedule == 0 {
+                assert_eq!(legacy.content, literal_content);
+                assert_eq!(legacy.reasoning, expected_reasoning);
+            }
+            let output = preprocessor
+                .postprocessor_parsing_stream(stream::iter(chunks), &request, false, false)
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            let streamed = demux_by_choice(&output).remove(&0).unwrap();
+            let expected_content = if selection == "2" {
+                fixture["expected_output"]["normal_content"]
+                    .as_str()
+                    .unwrap()
+            } else {
+                &legacy.content
+            };
+            let expected_reasoning = if selection == "2" {
+                expected_reasoning
+            } else {
+                &legacy.reasoning
+            };
+            assert_eq!(
+                streamed.content, expected_content,
+                "{selection}/{request_mode}"
+            );
+            assert_eq!(streamed.reasoning, expected_reasoning);
+            assert!(streamed.tool_calls.is_empty());
+            let batch = NvCreateChatCompletionResponse::from_annotated_stream(
+                stream::iter(output),
+                ParsingOptions::new(None, Some("qwen3".into())),
+            )
+            .await
+            .unwrap();
+            let choice = &batch.inner.choices[0];
+            assert_eq!(
+                choice
+                    .message
+                    .content
+                    .as_ref()
+                    .map(get_text)
+                    .unwrap_or_default(),
+                expected_content
+            );
+            assert_eq!(
+                choice
+                    .message
+                    .reasoning_content
+                    .as_deref()
+                    .unwrap_or_default(),
+                expected_reasoning
+            );
+            assert!(
+                choice
+                    .message
+                    .tool_calls
+                    .as_deref()
+                    .unwrap_or_default()
+                    .is_empty()
+            );
+            assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
+        }
+    }
+}
+
 /// Accumulates streamed tool call deltas into complete tool calls for assertion.
 #[derive(Default, Clone, Debug)]
 struct MergedToolCall {
@@ -1461,23 +1613,17 @@ async fn postprocessor_parsing_stream_disabled_reasoning_orders_eof_flush_by_cho
         .expect("postprocessor_parsing_stream should build");
     let output_chunks: Vec<_> = output_stream.collect().await;
 
-    let recovered = output_chunks
+    let indices: Vec<_> = output_chunks
         .iter()
         .filter_map(|output| output.data.as_ref())
-        .find(|data| {
-            data.inner.choices.iter().any(|choice| {
-                choice
-                    .delta
-                    .content
-                    .as_ref()
-                    .is_some_and(|content| get_text(content) == "<thi")
-            })
+        .flat_map(|data| &data.inner.choices)
+        .filter(|choice| {
+            choice
+                .delta
+                .content
+                .as_ref()
+                .is_some_and(|content| get_text(content) == "<thi")
         })
-        .expect("synthetic recovery chunk");
-    let indices: Vec<_> = recovered
-        .inner
-        .choices
-        .iter()
         .map(|choice| choice.index)
         .collect();
     assert_eq!(indices, vec![0, 1, 2]);
@@ -3984,6 +4130,74 @@ async fn tool_choice_minimax_m2_required_thinking_disabled_keeps_tool_xml() {
 }
 
 #[tokio::test]
+async fn minimax_m2_disabled_named_json_returns_tool_call() {
+    let preprocessor = build_preprocessor(Some("minimax_m2"), Some("minimax_m2"));
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "MiniMaxAI/MiniMax-M2.7",
+        "messages": [{"role": "user", "content": "Use the calculator tool for 937 * 18 + 42."}],
+        "stream": true,
+        "chat_template_kwargs": {"thinking": false},
+        "tool_choice": {"type": "function", "function": {"name": "calculate"}},
+        "tools": [{"type": "function", "function": {
+            "name": "calculate",
+            "description": "Evaluate a mathematical expression.",
+            "parameters": {"type": "object", "properties": {
+                "expression": {"type": "string"}
+            }, "required": ["expression"]}
+        }}]
+    }))
+    .unwrap();
+
+    for fragmented in [false, true] {
+        let pieces = if fragmented {
+            vec!["{\n  \"expression\":", " \"937 * 18 + 42\"\n}"]
+        } else {
+            vec!["{\n  \"expression\": \"937 * 18 + 42\"\n}"]
+        };
+        let chunks = pieces
+            .into_iter()
+            .map(mock_content_chunk)
+            .chain(std::iter::once(mock_final_chunk()))
+            .map(Annotated::from_data);
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(stream::iter(chunks), &request, false, false)
+            .unwrap()
+            .inspect(|item| assert!(item.error.is_none(), "{item:?}"));
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            finish_reasons,
+        } = drain_stream(output_stream).await;
+
+        assert!(
+            content.is_empty(),
+            "fragmented={fragmented}: content leaked: {content}"
+        );
+        assert!(
+            reasoning.is_empty(),
+            "fragmented={fragmented}: reasoning leaked: {reasoning}"
+        );
+        assert_eq!(tool_calls.len(), 1, "fragmented={fragmented}");
+        assert_eq!(
+            tool_calls[0].name.as_deref(),
+            Some("calculate"),
+            "fragmented={fragmented}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&tool_calls[0].arguments).unwrap(),
+            serde_json::json!({"expression": "937 * 18 + 42"}),
+            "fragmented={fragmented}"
+        );
+        assert_eq!(
+            finish_reasons,
+            vec![FinishReason::ToolCalls],
+            "fragmented={fragmented}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn tool_calls_qwen3_coder_auto_preserves_tool_output_and_finish_reason() {
     let xml = "<tool_call>\n<function=get_weather>\n<parameter=location>\nSan Francisco\n</parameter>\n</function>\n</tool_call>";
     let preprocessor = build_preprocessor(None, Some("qwen3_coder"));
@@ -4625,20 +4839,17 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flush_drops_llm
     assert_eq!(recovered, "<thi", "the recovery itself must still happen");
 }
 
-/// A backend that keeps streaming after a choice's `finish_reason` is out of
-/// protocol, but those bytes still reach the parser, so they still need a
-/// destination. The terminal drain marks the choice drained; a later content
-/// chunk reopens it, so `r2` is emitted rather than stranded.
-///
-/// What is NOT recovered is whatever the parser is still buffering internally at
-/// that point — here the dangling `</th`. Recovering it would mean calling
-/// `finish_reasoning_stream` a second time on the same parser, and the trait does
-/// not promise that is idempotent, so a parser that re-emits on a second
-/// finalize would duplicate text. Losing it is the better trade twice over: the
-/// stream is already out of protocol, and the bytes in question are a truncated
-/// marker fragment, which should never reach `content` anyway.
 #[tokio::test]
-async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_content_after_finish_survives() {
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_post_finish_behavior() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::postprocessor_parsing_stream_nemotron_v3_force_nonempty_post_finish_behavior"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "2")],
+    ) {
+        return;
+    }
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
 
     let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
@@ -4675,11 +4886,7 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_content_after_f
     }
 
     assert_eq!(content, "A", "the answer is unchanged by the stray chunk");
-    assert_eq!(
-        reasoning, "r1r2",
-        "post-finish content is emitted, but the parser's dangling marker fragment is not \
-         re-finalized into the stream"
-    );
+    assert_eq!(reasoning, "r1");
 }
 
 /// Streaming and non-streaming must agree on a turn whose only answer text is
@@ -5983,7 +6190,7 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
         (
             "kimi_k2",
             "kimi_k25",
-            "reasoning</think>",
+            "<think>reasoning</think>",
             "<|tool_calls_section_begin|><|tool_call_begin|>functions.write_file:0<|tool_call_argument_begin|>{\"count\":7,\"content\":\"",
             "\"}",
             "<|tool_call_end|>",
@@ -6046,8 +6253,12 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
                         futures::pin_mut!(output);
                         let warmup = if thinking == "disabled" {
                             ""
-                        } else if thinking == "prefill" && tool != "kimi_k2" {
-                            "reasoning<|close|>think<|sep|>"
+                        } else if thinking == "prefill" {
+                            if tool == "kimi_k2" {
+                                "reasoning</think>"
+                            } else {
+                                "reasoning<|close|>think<|sep|>"
+                            }
                         } else {
                             warmup
                         };
