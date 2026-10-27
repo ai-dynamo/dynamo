@@ -253,11 +253,7 @@ func (p *groveProgram) Reconcile(
 	if err != nil {
 		return programResult, fmt.Errorf("find crash-looping Grove Pods: %w", err)
 	}
-	diagnoses := make(map[string]string, len(crashLoops))
-	for component, crashLoop := range crashLoops {
-		diagnoses[component] = crashLoop.String()
-	}
-	result = failCrashLoopingComponents(result, diagnoses)
+	result = failCrashLoopingComponents(result, crashLoops)
 
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 

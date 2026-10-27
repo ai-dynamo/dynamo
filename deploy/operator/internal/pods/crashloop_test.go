@@ -155,6 +155,7 @@ func TestCrashLoopString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Verify the status message of the case's crash loop")
 			assert.Equal(t, tt.want, tt.crashLoop.String())
 		})
 	}
@@ -251,6 +252,7 @@ func TestCrashLoopChanged(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Compare the diagnoses of the two Pod states")
 			assert.Equal(t, tt.want, CrashLoopChanged(&tt.oldPod, &tt.newPod))
 		})
 	}

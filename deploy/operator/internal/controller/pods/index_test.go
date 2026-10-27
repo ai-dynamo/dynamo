@@ -75,6 +75,7 @@ func TestComponentIndexValues(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Verify the index value of the case's object")
 			assert.Equal(t, tt.want, ComponentIndexValues(tt.obj))
 		})
 	}
@@ -93,6 +94,7 @@ func TestSelectorIndexValues(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Verify the index value of the case's object")
 			assert.Equal(t, tt.want, SelectorIndexValues(tt.obj))
 		})
 	}
@@ -121,6 +123,7 @@ func TestListComponentPods(t *testing.T) {
 }
 
 func TestListComponentPodsReturnsListErrors(t *testing.T) {
+	t.Log("Fail every list through the cache")
 	reader := fake.NewClientBuilder().
 		WithScheme(scheme.Scheme).
 		WithIndex(&corev1.Pod{}, ComponentIndex, ComponentIndexValues).
@@ -131,8 +134,8 @@ func TestListComponentPodsReturnsListErrors(t *testing.T) {
 		}).
 		Build()
 
+	t.Log("List the component's Pods and verify the error is returned")
 	_, err := ListComponentPods(t.Context(), reader, "inference", "graph", "decode")
-
 	require.ErrorContains(t, err, "cache unavailable")
 }
 
@@ -216,6 +219,7 @@ func TestFindDeploymentCrashLoop(t *testing.T) {
 }
 
 func TestFindDeploymentCrashLoopRequiresTheSelectorLabel(t *testing.T) {
+	t.Log("Describe a Deployment that selects without the Dynamo selector label")
 	reader := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithIndex(&corev1.Pod{}, SelectorIndex, SelectorIndexValues).Build()
 	deployment := &appsv1.Deployment{
 		Name:      "graph-frontend",
@@ -223,7 +227,7 @@ func TestFindDeploymentCrashLoopRequiresTheSelectorLabel(t *testing.T) {
 		Spec:      appsv1.DeploymentSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "frontend"}}},
 	}
 
+	t.Log("Look up its crash loop and verify the missing label is reported")
 	_, _, err := FindDeploymentCrashLoop(t.Context(), reader, deployment)
-
 	require.ErrorContains(t, err, commonconsts.KubeLabelDynamoSelector)
 }
