@@ -532,7 +532,8 @@ impl AnthropicStreamConverter {
                 && !reasoning.is_empty()
             {
                 // Emit content_block_start on first thinking token
-                if !self.thinking_block_started {
+                let first_thinking_delta = !self.thinking_block_started;
+                if first_thinking_delta {
                     self.thinking_block_started = true;
                     self.thinking_block_index = self.next_block_index;
                     self.next_block_index += 1;
@@ -547,22 +548,25 @@ impl AnthropicStreamConverter {
                     events.push(make_sse_event("content_block_start", &block_start));
                 }
 
-                // Emit thinking delta
-                let block_delta = AnthropicStreamEvent::ContentBlockDelta {
-                    index: self.thinking_block_index,
-                    delta: AnthropicDelta::ThinkingDelta {
-                        thinking: if self
-                            .api_context
-                            .as_ref()
-                            .is_some_and(|ctx| ctx.omit_thinking())
-                        {
-                            String::new()
-                        } else {
-                            reasoning.clone()
+                // Omitted display has one empty delta per block, independent of
+                // backend chunking. Usage is still updated from every chunk.
+                let omitted = self
+                    .api_context
+                    .as_ref()
+                    .is_some_and(|ctx| ctx.omit_thinking());
+                if !omitted || first_thinking_delta {
+                    let block_delta = AnthropicStreamEvent::ContentBlockDelta {
+                        index: self.thinking_block_index,
+                        delta: AnthropicDelta::ThinkingDelta {
+                            thinking: if omitted {
+                                String::new()
+                            } else {
+                                reasoning.clone()
+                            },
                         },
-                    },
-                };
-                events.push(self.serialize_event("content_block_delta", &block_delta));
+                    };
+                    events.push(self.serialize_event("content_block_delta", &block_delta));
+                }
             }
 
             // Handle text content deltas

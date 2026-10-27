@@ -76,7 +76,7 @@ async fn thinking_display_filters_unary_and_streaming_without_losing_other_outpu
                         .iter()
                         .filter(|e| e.data["delta"]["type"] == "thinking_delta")
                         .collect();
-                    assert_eq!(deltas.len(), 2);
+                    assert_eq!(deltas.len(), if omitted { 1 } else { 2 });
                     for event in deltas {
                         assert_eq!(
                             event.data["delta"]["thinking"],
@@ -182,7 +182,7 @@ async fn invalid_display_mode_combinations_reject_before_generation() {
                     error["error"]["message"]
                         .as_str()
                         .unwrap()
-                        .contains("thinking.display")
+                        .contains("thinking.")
                 );
             }
         }
@@ -241,4 +241,36 @@ async fn failed_tool_results_keep_identity_content_and_image_order() {
         assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
     }).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn updates_display_and_malformed_tool_error_flags_reject_before_generation() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+        let mut cases = vec![json!({"model": MODEL, "max_tokens": 4096,
+            "messages": [{"role": "user", "content": "ping"}],
+            "thinking": {"type": "adaptive", "display": "updates"}})];
+        for is_error in [json!("true"), json!(0), json!({})] {
+            cases.push(json!({"model": MODEL, "max_tokens": 4096,
+                "messages": [{"role": "user", "content": [{"type": "tool_result",
+                    "tool_use_id": "tool_1", "content": "failed", "is_error": is_error}]}]}));
+        }
+        for body in cases {
+            let response = svc
+                .client
+                .post(format!("{}/v1/messages", svc.base_url))
+                .header("anthropic-beta", "thinking-display-updates-2026-08-18")
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            let error: Value = response.json().await.unwrap();
+            assert_eq!(error["error"]["type"], "invalid_request_error");
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
 }

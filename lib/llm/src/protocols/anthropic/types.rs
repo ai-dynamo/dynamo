@@ -67,6 +67,13 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
         {
             anyhow::bail!("thinking.display requires thinking.type enabled or adaptive");
         }
+        if req.thinking.as_ref().and_then(|thinking| thinking.display)
+            == Some(ThinkingDisplay::Updates)
+        {
+            anyhow::bail!(
+                "thinking.display updates is not supported by Dynamo: backend output does not distinguish progress updates from reasoning; use omitted or summarized"
+            );
+        }
         let mut messages = Vec::new();
 
         // Prepend system message if present
