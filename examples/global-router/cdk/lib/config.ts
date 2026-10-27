@@ -57,6 +57,9 @@ export interface VpcConfig {
   readonly availabilityZones: readonly [string, string];
   readonly name: string;
   readonly cidrBlock: string;
+  /** Optional CPU lab egress without consuming Elastic IP quota. */
+  readonly natInstanceType?: string;
+  readonly natInstanceAmiId?: string;
 }
 
 export interface BastionConfig {
