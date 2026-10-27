@@ -156,9 +156,15 @@ Only pods created after the config exists are profiled.
 - Reports appear only after the delay, the window, report generation, and the upload. Set a polling deadline of the
   delay plus the window plus 10 minutes, unless the user gives another one, and tell the user the deadline.
 - Poll `python3 nsight_operator.py --tag <tag> ls` until every expected pod has a report or the deadline passes.
-- Run `download -o <dir>` before `session-end`, because `ls` and `download` use the tag's active session unless
-  `--session <UUID>` is passed. Or read the reports from the bucket with the user's credentials. Then run
-  `session-end`, also when the deadline passed.
+- Download while the session is still active, because `ls` and `download` use the tag's active session unless
+  `--session <UUID>` is passed. Then end the session, also when the deadline passed:
+
+  ```bash
+  python3 nsight_operator.py --tag <tag> download -o <dir>
+  python3 nsight_operator.py --tag <tag> session-end
+  ```
+
+  Instead of `download`, you can read the reports from the bucket with the user's credentials.
 - Check completeness: every expected pod has a report, and every GPU worker report contains kernel rows
   (`nsys stats --report cuda_gpu_kern_sum <file>`). Report a missing pod or a GPU report without kernels as an
   incomplete capture; do not present partial results as complete.
