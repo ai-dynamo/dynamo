@@ -15,11 +15,14 @@ import (
 	"testing"
 	"time"
 
+	semver "github.com/Masterminds/semver/v3"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	dynamotesting "github.com/ai-dynamo/dynamo/deploy/operator/internal/testing"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/clusterenv"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/golden"
@@ -34,6 +37,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -314,6 +318,119 @@ func TestClusterDynamoGraphDeploymentRequestProfilesAndCreatesWorkloadManifests(
 				filepath.Join(scenarioDir, "output.yaml"),
 				workerHashGoldenVariables(t, &liveDGD),
 			)
+		})
+	}
+}
+
+func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing.T) {
+	inputs, err := filepath.Glob(filepath.Join("testdata/dgdr-v1beta2", "*", "input.yaml"))
+	if err != nil {
+		t.Fatalf("find v1beta2 DGDR cluster-test scenarios: %v", err)
+	}
+	if len(inputs) == 0 {
+		t.Fatal("no v1beta2 DGDR cluster-test scenarios found")
+	}
+	plannerImage := clusterenv.RequireEnv(t, "DYNAMO_CLUSTERTEST_PROFILER_IMAGE")
+	operatorImage := clusterenv.RequireEnv(t, "DYNAMO_CLUSTERTEST_OPERATOR_IMAGE")
+	operatorVersion, err := clusterTestOperatorVersion()
+	require.NoError(t, err)
+	parsedOperatorVersion, err := semver.NewVersion(operatorVersion)
+	require.NoError(t, err)
+	dynamoVersion := fmt.Sprintf("%d.%d.%d", parsedOperatorVersion.Major(), parsedOperatorVersion.Minor(), parsedOperatorVersion.Patch())
+	for _, input := range inputs {
+		scenarioDir := filepath.Dir(input)
+		t.Run(filepath.Base(scenarioDir), func(t *testing.T) {
+			ctx := t.Context()
+
+			t.Log("Create an isolated namespace in the explicitly unlocked cluster")
+			env := clusterTestEnv.RunT(t)
+
+			t.Log("Allow the AISimulate Job Pod to run while preventing unrelated ReplicaSet workloads")
+			env.BlockReplicaSets()
+
+			t.Log("Apply the native v1beta2 Request through production admission")
+			objects := golden.ApplyManifests(t, filepath.Join(scenarioDir, "input.yaml"), env.Client(), env.Namespace())
+			if len(objects) != 1 || objects[0].GetKind() != "DynamoGraphDeploymentRequest" {
+				t.Fatalf("scenario input contains %d objects, want one DynamoGraphDeploymentRequest", len(objects))
+			}
+			request := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
+			if err := env.Client().Get(ctx, client.ObjectKeyFromObject(&objects[0]), request); err != nil {
+				t.Fatalf("get admitted v1beta2 DGDR: %v", err)
+			}
+
+			t.Log("Watch every Run transition before starting the production controllers")
+			watchClient, err := client.NewWithWatch(env.RESTConfig(), client.Options{Scheme: newClusterTestScheme()})
+			require.NoError(t, err)
+			runWatch, err := watchClient.Watch(ctx, &nvidiacomv1beta2.DynamoGraphDeploymentRunList{}, client.InNamespace(env.Namespace()))
+			require.NoError(t, err)
+			defer runWatch.Stop()
+
+			t.Log("Provide the Run controller the discovered node shape represented by the explicit Request hardware")
+			hardwareCache := gpu.NewGPUDiscoveryCache()
+			hardwareCache.Set(nvidiacomv1beta1.GPUSKUTypeH200SXM, &gpu.GPUInfo{
+				System:        nvidiacomv1beta1.GPUSKUTypeH200SXM,
+				GPUsPerNode:   8,
+				NodesWithGPUs: 1,
+				TotalGPUs:     8,
+			}, time.Hour)
+
+			t.Log("Start the production Request, Run, AISimulate Job, and publisher chain")
+			operatorConfig := clusterTestRestrictedConfig(env.Namespace())
+			runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{}}
+			env.StartManager(func(mgr ctrl.Manager) error {
+				setupOptions := SetupOptions{Config: operatorConfig, RuntimeConfig: runtimeConfig}
+				if err := SetupDynamoGraphDeploymentRequestV1beta2(mgr, setupOptions); err != nil {
+					return err
+				}
+				return SetupDynamoGraphDeploymentRunV1beta2(mgr, DynamoGraphDeploymentRunSetupOptions{
+					SetupOptions:            setupOptions,
+					GPUDiscoveryCache:       hardwareCache,
+					PlannerImage:            plannerImage,
+					DynamoVersion:           dynamoVersion,
+					OperatorImage:           operatorImage,
+					OperatorImagePullPolicy: corev1.PullIfNotPresent,
+				})
+			})
+
+			t.Log("Observe the Run until the real AISimulate and publisher containers finish")
+			var completedRun nvidiacomv1beta2.DynamoGraphDeploymentRun
+			deadline := time.NewTimer(10 * time.Minute)
+			defer deadline.Stop()
+			for completedRun.Status.Phase != nvidiacomv1beta2.DGDRRunPhaseSucceeded {
+				select {
+				case event, ok := <-runWatch.ResultChan():
+					require.True(t, ok, "Run watch closed before the execution completed")
+					if event.Type == watch.Error {
+						t.Fatalf("Run watch failed: %v", apierrors.FromObject(event.Object))
+					}
+					run, ok := event.Object.(*nvidiacomv1beta2.DynamoGraphDeploymentRun)
+					require.Truef(t, ok, "Run watch returned %T", event.Object)
+					if !metav1.IsControlledBy(run, request) {
+						continue
+					}
+					require.NotEqual(t, nvidiacomv1beta2.DGDRRunPhaseFailed, run.Status.Phase,
+						"Run failed: %v", run.Status.Conditions)
+					completedRun = *run.DeepCopy()
+				case <-deadline.C:
+					t.Fatal("v1beta2 DGDR did not complete with a candidate")
+				}
+			}
+			require.NotNil(t, completedRun.Status.Progress, "completed Run has no progress")
+			require.NotNil(t, completedRun.Status.Progress.Candidates, "completed Run has no candidate progress")
+			require.Equal(t, int32(1), completedRun.Status.Progress.Candidates.Published)
+			require.Len(t, completedRun.Status.CandidateRefs, 1)
+
+			t.Log("Verify the Candidate is a real API object controlled by the immutable Run")
+			require.True(t, metav1.IsControlledBy(&completedRun, request), "Run is not controlled by its Request")
+			var candidates nvidiacomv1beta2.DynamoGraphDeploymentCandidateList
+			require.NoError(t, env.Client().List(ctx, &candidates, client.InNamespace(env.Namespace())))
+			require.Len(t, candidates.Items, 1)
+			require.True(t, metav1.IsControlledBy(&candidates.Items[0], &completedRun), "Candidate is not controlled by its Run")
+			require.Equal(t, completedRun.Status.CandidateRefs[0].Name, candidates.Items[0].Name)
+			require.NotEmpty(t, candidates.Items[0].Spec.Components, "Candidate has no materialized DGD components")
+
+			t.Log("Match the published Candidate API contract against the reviewed golden")
+			golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
 		})
 	}
 }
