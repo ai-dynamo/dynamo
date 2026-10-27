@@ -82,7 +82,8 @@ sequenceDiagram
     H->>G: hand over the booking
     H->>W: dispatch
     W-->>G: response stream
-    G->>L: first tokens mark prefill complete; progress keeps the lease alive
+    G->>L: first tokens mark prefill complete
+    G->>L: output progress keeps the lease alive
     G->>L: stream end, error, or drop releases the lease
     L->>K: enqueue the scheduler release
 ```
