@@ -36,7 +36,10 @@ type ScaleState struct {
 	PendingEPSize        *int32   `json:"pending_ep_size"`
 	InitialEPSize        int32    `json:"initial_ep_size"`
 	AllocationWidth      int32    `json:"allocation_width"`
+	MaxCommittedEPSize   int32    `json:"max_committed_ep_size"`
 	JoiningAllocationIDs []string `json:"joining_allocation_ids"`
+	RetireeLifecycle     string   `json:"retiree_lifecycle"`
+	SafeToTerminateRanks []int32  `json:"safe_to_terminate_ranks"`
 	Scaling              bool     `json:"is_scaling_elastic_ep"`
 	EffectiveEPSize      int32    `json:"effective_ep_size"`
 	Phase                string   `json:"scale_phase"`
@@ -52,7 +55,7 @@ type ScaleRequest struct {
 	NewEPSize                    int32    `json:"new_ep_size"`
 	OperationID                  string   `json:"operation_id"`
 	ExpectedInstanceID           string   `json:"expected_instance_id"`
-	ExpectedJoiningAllocationIDs []string `json:"expected_joining_allocation_ids"`
+	ExpectedJoiningAllocationIDs []string `json:"expected_joining_allocation_ids,omitempty"`
 }
 
 // ScaleResponse is the synchronous response to one SGLang scale request. A
@@ -127,8 +130,11 @@ func (c *Client) Observe(ctx context.Context) (ScaleState, error) {
 // Scale requests one absolute EP size. Callers must observe the engine after
 // every return, including transport errors, because acceptance can be ambiguous.
 func (c *Client) Scale(ctx context.Context, target ScaleRequest) (ScaleResponse, error) {
-	if target.NewEPSize <= 0 || target.OperationID == "" || target.ExpectedInstanceID == "" || len(target.ExpectedJoiningAllocationIDs) != 1 || target.ExpectedJoiningAllocationIDs[0] == "" {
-		return ScaleResponse{}, fmt.Errorf("SGLang scale requires a positive target, operation ID, runtime ID, and one joining allocation ID")
+	if target.NewEPSize <= 0 || target.OperationID == "" || target.ExpectedInstanceID == "" {
+		return ScaleResponse{}, fmt.Errorf("SGLang scale requires a positive target, operation ID and runtime ID")
+	}
+	if len(target.ExpectedJoiningAllocationIDs) > 1 || (len(target.ExpectedJoiningAllocationIDs) == 1 && target.ExpectedJoiningAllocationIDs[0] == "") {
+		return ScaleResponse{}, fmt.Errorf("SGLang growth requires one non-empty joining allocation ID; retirement has none")
 	}
 	// Bound synchronous native dispatch without weakening the caller's deadline.
 	ctx, cancel := context.WithTimeout(ctx, c.ScaleTimeout)
