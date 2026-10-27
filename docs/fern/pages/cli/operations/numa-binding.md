@@ -11,10 +11,35 @@ Grace-based systems. The right NUMA node depends on the server's CPU and PCIe la
 
 Add these settings to a working deployment, keeping its model, discovery, and KV-transfer options.
 
+## Check the Tools in Your Image
+
+Run the examples in a Linux environment with `numactl` and `libnuma` installed. The frontend
+needs these too if you use the CPU-and-memory wrapper. The current CUDA image definitions differ:
+
+| Dynamo image | Includes `numactl` |
+|---|---|
+| `vllm-runtime` | Yes |
+| `tensorrtllm-runtime` | Yes |
+| `sglang-runtime` | No; includes `libnuma` for SGLang's legacy binding path |
+| `dynamo-frontend` | No |
+
+Check your actual image with `command -v numactl`; packages can change between tags and platforms.
+For a derived Ubuntu image, install the binding and diagnostic tools during the image build:
+
+```bash
+apt-get update
+apt-get install -y --no-install-recommends numactl libnuma1 iproute2 util-linux procps
+rm -rf /var/lib/apt/lists/*
+```
+
+`ip` comes from `iproute2`, `lscpu` and `taskset` from `util-linux`, `ps` from `procps`, and
+`numastat` from `numactl`. Minimal runtime images may omit them. UCX libraries alone do not
+provide `ucx_info`; use that diagnostic only if your UCX installation includes it.
+
 ## Inspect the Topology
 
-Install `numactl` and `libnuma`, then check the Linux host's topology from the container or
-scheduler allocation where the workers will run:
+Check the Linux host's topology from the container or scheduler allocation where the workers
+will run:
 
 ```bash
 numactl --hardware
@@ -74,22 +99,23 @@ numactl --cpunodebind=0 --preferred=0 \
 
 Use `--membind=0` for strict local memory. To give the frontend only part of the node's CPUs,
 replace `--cpunodebind=0` with `--physcpubind` and the CPU IDs you chose from the topology output.
+For CPU affinity alone, `taskset -c CPU_LIST python3 -m dynamo.frontend` works without
+`numactl`, but sets no memory policy. Replace `CPU_LIST` with your allowed CPU IDs.
 
 At startup, Dynamo warns if the frontend's allowed CPUs span several NUMA nodes. You'll still
 need to apply binding yourself. See the
 [frontend affinity check](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/cpu_affinity.py).
 
-### Select a NUMA-Local Listen Address
+### Optionally Select a NUMA-Local Listen Address
 
-> [!NOTE]
-> If your platform picks the host address from a primary NIC on NUMA node `0`, that address is
-> local to node `0`. Check your server's layout before relying on this. Dynamo's default is
-> `--http-host 0.0.0.0`, which listens on all local IPv4 addresses. To use a node-1-local address,
-> set it explicitly.
+Dynamo defaults to `--http-host 0.0.0.0`, listening on all local IPv4 addresses, including
+localhost. You can keep that default with the node-0 CPU binding above. On many servers, the
+primary network address belongs to a NIC on NUMA node `0`; check the topology, since Dynamo
+doesn't select an address by NUMA node.
 
-Choose a NIC on the same NUMA node as the frontend and pass its IP address to `--http-host`.
-Interface names vary, so run this in the frontend's network namespace to find directly attached
-NICs and their IPv4 addresses on node `1`:
+To move both the frontend and its incoming HTTP traffic to node `1`, choose a reachable IP on
+a NIC local to that node and pass it to `--http-host`. Interface names vary, so run this in the
+frontend's network namespace to find directly attached NICs and their IPv4 addresses:
 
 ```bash
 FRONTEND_NUMA_NODE=1
@@ -111,6 +137,9 @@ numactl --cpunodebind="${FRONTEND_NUMA_NODE}" --preferred="${FRONTEND_NUMA_NODE}
   python3 -m dynamo.frontend --http-host "${FRONTEND_IP}"
 ```
 
+With a specific listen IP, `http://localhost:8000` no longer reaches the frontend. Point clients,
+benchmarks, and HTTP health checks at `http://${FRONTEND_IP}:8000` instead.
+
 Bonds, VLANs, and virtual interfaces may have no direct PCI NUMA mapping. A missing `numa_node`
 file or a value of `-1` means the locality is unknown. Use `ip -br address` to list their addresses,
 trace the underlying physical NIC, and choose the logical interface's IP. If several addresses
@@ -124,8 +153,9 @@ See
 
 ## Bind vLLM Workers
 
-Dynamo accepts vLLM's native engine arguments. Add `--numa-bind` to discover each GPU's local
-NUMA node and bind its execution subprocesses:
+Dynamo accepts vLLM's native engine arguments. `--numa-bind` binds EngineCore and multiprocessing
+GPU workers. Automatic topology discovery requires at least two NUMA nodes, unrestricted CPU
+affinity, and permission to query memory policy with `get_mempolicy`:
 
 ```bash
 python3 -m dynamo.vllm \
@@ -134,8 +164,8 @@ python3 -m dynamo.vllm \
   --numa-bind
 ```
 
-If GPUs `0` and `1` are on NUMA node `0`, and GPUs `2` and `3` are on node `1`, you can give
-vLLM that mapping explicitly:
+For a restricted CPU allocation, including Slurm tasks or Docker `--cpuset-cpus`, pass the mapping
+explicitly. If GPUs `0` and `1` are on NUMA node `0`, and GPUs `2` and `3` are on node `1`:
 
 ```bash
 python3 -m dynamo.vllm \
@@ -145,17 +175,27 @@ python3 -m dynamo.vllm \
   --numa-bind-nodes 0 0 1 1
 ```
 
-Use `--numa-bind-cpus` to assign CPU sets, with one list per visible GPU. For example,
-`--numa-bind-cpus 0-3 4-7 48-51 52-55` works if those CPUs belong to the matching NUMA nodes
-and are available in your allocation.
+Use `--numa-bind-cpus` to assign multiprocessing workers CPU sets, with one list per visible GPU.
+For example, `--numa-bind-cpus 0-3 4-7 48-51 52-55` works if those CPUs belong to the matching
+NUMA nodes and are available in your allocation. EngineCore ignores these per-worker lists.
+For a single-GPU worker using the default `uni` executor, the model runs inside EngineCore without
+worker subprocesses, so this option does not narrow its CPU affinity.
 
-vLLM normally uses `--cpunodebind=N --membind=N`, switching to `--physcpubind` for explicit CPU
-lists. EngineCore binds to the NUMA domains used by its GPU shard. Each multiprocessing worker
-binds to its GPU's domain. The frontend and data-parallel coordinator need separate placement.
+Normally, each multiprocessing worker uses `--cpunodebind=N --membind=N`, or `--physcpubind` for
+an explicit CPU list. EngineCore binds to the domains used by its GPU shard. On detected
+Priority Core Turbo (PCT) Xeons, such as the 6776P in DGX B300, vLLM instead uses `--physcpubind`
+to select priority cores for workers and EngineCore when no CPU lists are supplied. Those cores
+must fit the allowed CPU set; rejected CPU binding can leave the process without NUMA binding.
+
+The `dynamo.vllm` parent hosting AsyncLLM, the separate Dynamo frontend, and the data-parallel
+coordinator are not bound by `--numa-bind`. If you bind the parent with `numactl` or `taskset`, also
+pass `--numa-bind-nodes`: its restricted affinity disables automatic discovery. Keep the parent
+allocation wide enough for every GPU rank's target CPUs and memory nodes.
 
 Binding is off by default. Dynamo already uses the required `spawn` multiprocessing method.
-If existing CPU restrictions prevent automatic discovery, pass the node mapping explicitly.
-vLLM probes the requested policy and may fall back to CPU-only binding or no binding if it fails.
+When discovery fails and no explicit nodes are supplied, `--numa-bind` aborts startup with
+"could not detect the GPU-to-NUMA topology automatically". Only after node IDs are known does
+vLLM probe the binding policy and possibly fall back to CPU-only binding or no binding.
 Check the logs and process placement after startup.
 
 These options are available in vLLM `0.31.0` and `0.32.0`. See the
@@ -167,7 +207,14 @@ the `numactl` launcher.
 ## Bind SGLang Workers
 
 Dynamo accepts SGLang's native `ServerArgs`. SGLang `0.5.21` and `0.5.22` enable automatic NUMA
-discovery and the subprocess wrapper by default. To set them explicitly:
+discovery and the V2 subprocess wrapper by default, but V2 needs the `numactl` executable in the
+worker image. The pinned CUDA runtime Dockerfiles install `libnuma` without `numactl`; verify
+`command -v numactl` inside the container and add the package to a derived image before enabling V2.
+Without it, automatic V2 binding is skipped with only a DEBUG-level message. By default, explicit
+node lists warn and skip binding after failed probes. Keep `SGLANG_NUMA_BIND_V2=0` to
+use the legacy `libnuma` path if `numactl` is unavailable.
+
+With `numactl` installed, set V2 explicitly:
 
 ```bash
 SGLANG_AUTO_NUMA_BIND=1 \
@@ -191,7 +238,7 @@ The switches have different jobs:
 
 | Control | Behavior |
 |---|---|
-| `SGLANG_NUMA_BIND_V2=1` | Apply binding before the scheduler interpreter starts. |
+| `SGLANG_NUMA_BIND_V2=1` | Apply binding through `numactl` before the scheduler interpreter starts, when the executable is available. |
 | `SGLANG_NUMA_BIND_V2=0` | Select the legacy in-process CPU-affinity and preferred-memory path. |
 | `SGLANG_AUTO_NUMA_BIND=0` | Disable automatic discovery; an explicit `--numa-node` still takes effect. |
 | `SGLANG_SET_CPU_AFFINITY=1` | Apply a separate CPU partitioning scheme without setting memory policy. |
@@ -211,12 +258,17 @@ and [legacy scheduler path](https://github.com/sgl-project/sglang/blob/v0.5.21/p
 ## Bind TensorRT-LLM Workers
 
 Wrap the worker with `numactl` and set `TLLM_NUMA_AWARE_WORKER_AFFINITY=0` so TensorRT-LLM keeps
-the CPU mask it inherits. This example assumes GPU `0` is local to CPU NUMA node `0` and the
-model fits on one GPU:
+the CPU mask it inherits. Also disable Open MPI rebinding: otherwise MPI initialization or
+worker spawning can replace that mask before TensorRT-LLM sees it. Dynamo's TensorRT-LLM runtime
+image sets Open MPI's binding policy to `none`; the explicit settings below also cover other
+environments. This example assumes GPU `0` is local to CPU NUMA node `0` and the model fits on
+one GPU:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
 TLLM_NUMA_AWARE_WORKER_AFFINITY=0 \
+OMPI_MCA_hwloc_base_binding_policy=none \
+OMPI_MCA_rmaps_base_inherit=1 \
 numactl --cpunodebind=0 --preferred=0 \
   python3 -m dynamo.trtllm \
   --model Qwen/Qwen3-8B \
@@ -225,6 +277,8 @@ numactl --cpunodebind=0 --preferred=0 \
 
 Use `--membind=0` for strict local memory, or omit the memory option for CPU binding alone.
 You can use one wrapper for several GPUs if they all belong to the chosen CPU NUMA domain.
+Check the spawned workers' CPU masks after MPI initialization. See TensorRT-LLM's
+[Open MPI affinity settings](https://github.com/NVIDIA/TensorRT-LLM/blob/cc63e66daf52644f1441e117bb7ba67d20566016/docs/source/deployment-guide/configuring-cpu-affinity.md#openmpi).
 
 TensorRT-LLM's own CPU-affinity setting behaves as follows:
 
@@ -241,50 +295,125 @@ wrapper. Set host-memory policy separately.
 
 ### Bind Each TensorRT-LLM Rank
 
-For TP or pipeline parallelism across NUMA domains, apply binding as each GPU worker rank starts:
+The default `python3 -m dynamo.trtllm --tensor-parallel-size N` launch constructs TensorRT-LLM
+in the Dynamo process. TensorRT-LLM then spawns its MPI workers internally, with a shared launch
+environment and inherited memory policy. That path has no hook for a separate `numactl` command
+per rank. Use native CPU affinity with `TLLM_NUMA_AWARE_WORKER_AFFINITY=1` for per-worker CPU
+placement, or choose the external launch below when you need per-rank memory policies too.
 
-1. Find the rank's physical GPU from the launcher mapping and `CUDA_VISIBLE_DEVICES`. Local rank
-   IDs can restart at zero for each worker group sharing a host.
-2. Query the GPU's PCI bus ID and normalize it to Linux PCI address format, for example
-   `00000000:19:00.0` to `0000:19:00.0`, before reading
-   `/sys/bus/pci/devices/<PCI_BUS_ID>/numa_node`. Check that the node has CPUs and is included in
-   the rank's allowed CPU and memory sets.
-3. Set `TLLM_NUMA_AWARE_WORKER_AFFINITY=0` and start the rank under
-   `numactl --cpunodebind=N`, adding `--membind=N` for strict memory placement or `--preferred=N`
-   for local memory with fallback.
-4. Check that the engine ranks inherit the policy and environment settings.
+For external MPI ranks, put the NUMA wrapper **before** `trtllm-llmapi-launch`. That launcher starts
+the engine workers on the externally launched ranks and runs the Dynamo application from rank 0.
+Calling `mpirun` directly on `python3 -m dynamo.trtllm` does not select this launch mode. See the
+[TensorRT-LLM launcher](https://github.com/NVIDIA/TensorRT-LLM/blob/cc63e66daf52644f1441e117bb7ba67d20566016/tensorrt_llm/llmapi/trtllm-llmapi-launch)
+and [MPI session selection](https://github.com/NVIDIA/TensorRT-LLM/blob/cc63e66daf52644f1441e117bb7ba67d20566016/tensorrt_llm/llmapi/llm.py#L459).
 
-Use a launcher that supports per-rank placement, and check the mapping on each host. A wrapper
-around the Dynamo parent gives all its children the same initial policy.
+The following example is for one host with four allocated GPUs. Set `CUDA_VISIBLE_DEVICES` to
+those four **GPU UUIDs**, in the same order for every rank; UUIDs avoid ambiguity between CUDA
+and NVML device ordinals. Save this wrapper as `trtllm-numa-rank.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${OMPI_COMM_WORLD_RANK:?Run this wrapper under mpirun}"
+: "${CUDA_VISIBLE_DEVICES:?Set the allocated GPU UUID list}"
+IFS=',' read -r -a devices <<< "${CUDA_VISIBLE_DEVICES}"
+[[ "${#devices[@]}" -eq 4 ]] || {
+    echo "This example requires four allocated GPU UUIDs" >&2
+    exit 2
+}
+
+gpu_index=$((OMPI_COMM_WORLD_RANK % ${#devices[@]}))
+gpu="${devices[gpu_index]}"
+pci_bus_id="$(nvidia-smi -i "${gpu}" --query-gpu=pci.bus_id --format=csv,noheader)"
+pci_bus_id="${pci_bus_id,,}"
+printf -v pci_bus_id '%04x:%s' "0x${pci_bus_id%%:*}" "${pci_bus_id#*:}"
+numa_node="$(cat "/sys/bus/pci/devices/${pci_bus_id}/numa_node")"
+[[ "${numa_node}" =~ ^[0-9]+$ ]] &&
+    [[ -n "$(cat "/sys/devices/system/node/node${numa_node}/cpulist")" ]] || {
+        echo "GPU ${gpu} has no usable CPU NUMA node" >&2
+        exit 2
+    }
+
+export TLLM_NUMA_AWARE_WORKER_AFFINITY=0
+exec numactl --cpunodebind="${numa_node}" --preferred="${numa_node}" "$@"
+```
+
+TensorRT-LLM's [worker device selection](https://github.com/NVIDIA/TensorRT-LLM/blob/cc63e66daf52644f1441e117bb7ba67d20566016/tensorrt_llm/executor/base_worker.py#L149)
+uses `global_rank % visible_device_count`, so the wrapper uses the **global** MPI rank, not a
+local-rank-to-socket table. It normalizes both the PCI domain width and hex case:
+`00000000:9D:00.0` becomes `0000:9d:00.0`. Unknown or CPU-less NUMA nodes stop the launch;
+use an explicit, inspected CPU-node mapping on systems whose PCI affinity is insufficient.
+
+With the four-GPU UUID mask exported, launch four ranks:
+
+```bash
+export OMPI_MCA_hwloc_base_binding_policy=none
+export OMPI_MCA_rmaps_base_inherit=1
+
+mpirun -n 4 --bind-to none \
+  -x CUDA_VISIBLE_DEVICES \
+  -x OMPI_MCA_hwloc_base_binding_policy \
+  -x OMPI_MCA_rmaps_base_inherit \
+  bash ./trtllm-numa-rank.sh \
+  trtllm-llmapi-launch \
+  python3 -m dynamo.trtllm \
+  --model Qwen/Qwen3-8B \
+  --tensor-parallel-size 4
+```
+
+Replace `--preferred` in the wrapper with `--membind` for strict per-rank host memory. Verify that
+the selected CPU and memory nodes are permitted by the allocation and that every rank keeps its
+policy after initialization. For multiple hosts, validate the global-rank modulo mapping on each
+host, along with its visible-device list; rank ordering must assign each local GPU correctly.
+An internally spawned TP group cannot obtain distinct rank memory policies from a wrapper around
+the Dynamo parent alone.
 
 ## Select Local NICs for RDMA KV Transfer
 
 For disaggregated KV transfer over remote direct memory access (RDMA), choose network interface
-cards (NICs) close to each worker's GPU and NUMA domain. Set the NIC choice separately from CPU
-and memory binding. The GPU-to-NIC PCIe path also affects GPUDirect RDMA performance; see the
+cards (NICs) close to each worker's GPU and NUMA domain. The GPU-to-NIC PCIe path also affects
+GPUDirect RDMA performance; see the
 [UCX GPU RDMA guidance](https://github.com/openucx/ucx/blob/v1.21.0/docs/source/faq.md#does-ucx-support-zero-copy-for-gpu-memory-over-rdma).
 
-Check the devices and their locality:
+Unified Communication X (UCX) already selects devices using bandwidth, latency, PCI bandwidth,
+and NUMA locality. Keep a working recipe's automatic or injected device selection. Restrict
+`UCX_NET_DEVICES` when transfer logs show the wrong device or measurements justify a narrower
+set; a static list can otherwise hide usable devices or break backend initialization. For
+examples of deployment-specific requirements, see the
+[Solar Open2 networking notes](../../recipes/model-recipes/solar-open2-250b.mdx#configuration-notes) and
+[DeepSeek-V4.1 Flash device allocation](../../recipes/model-recipes/deepseek-v4-1-flash.mdx).
+
+Check GPU/NIC locality and map RDMA devices to their Linux network interfaces through sysfs:
 
 ```bash
 nvidia-smi topo -m
-ibdev2netdev
+for hca in /sys/class/infiniband/*; do
+    [[ -d "${hca}" ]] || continue
+    printf '%s: ' "${hca##*/}"
+    ls "${hca}/device/net/"
+done
 cat /sys/class/infiniband/mlx5_0/device/numa_node
 cat /sys/class/infiniband/mlx5_0/device/local_cpulist
-ucx_info -d
 ```
 
-For a KV-transfer backend using Unified Communication X (UCX), select local RDMA host channel
-adapter (HCA) ports before UCX initializes. Include a reachable Ethernet interface if the
-deployment needs TCP. With `numa_node` already set for the worker, for example:
+If the UCX tools are installed, `ucx_info -d` lists the devices and transports that UCX can use.
+Enable `UCX_LOG_LEVEL=info` for a diagnostic run to check the devices actually selected. Confirm
+which ports belong to the compute fabric with the cluster administrator; NUMA proximity alone
+does not distinguish compute, storage, and management networks.
+
+For a worker confined to one domain, a rank-aware launcher can restrict RDMA host channel adapter
+(HCA) ports before UCX initializes. The following is an illustrative compute-NIC split, not a
+mapping for every H100, H200, B200, or B300 server. Use it only if the inspected topology and
+fabric roles match. With `numa_node` already resolved for the worker:
 
 ```bash
 case "${numa_node}" in
     0)
-        export UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_5:1,eth0
+        export UCX_NET_DEVICES=mlx5_0:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,eth0
         ;;
     1)
-        export UCX_NET_DEVICES=mlx5_6:1,mlx5_7:1,mlx5_8:1,mlx5_11:1,eth0
+        export UCX_NET_DEVICES=mlx5_6:1,mlx5_9:1,mlx5_10:1,mlx5_11:1,eth0
         ;;
     *)
         echo "No NIC mapping for NUMA node ${numa_node}" >&2
@@ -293,9 +422,16 @@ case "${numa_node}" in
 esac
 ```
 
-Replace the names with devices from your server. `mlx5_*:1` selects RDMA devices and ports;
-`eth0` keeps a TCP interface available in both domains. All listed devices must be visible to
-the worker, and peers must be able to reach the TCP interface.
+Replace every name with a device available to that worker, excluding storage and management HCAs.
+`mlx5_*:1` selects RDMA devices and ports; `eth0` illustrates a reachable TCP interface shared by
+both lists. Do not overwrite a device list supplied by the recipe or device allocator.
+
+Listing four HCAs makes them eligible; it does not create four-rail transfers. UCX `1.21` allows
+up to two rendezvous rails by default, controlled by `UCX_MAX_RNDV_RAILS`. NIXL's UCX backend uses RMA
+operations, whose rail limit is `UCX_MAX_RMA_RAILS`; NIXL `1.4.1` sets that limit to two unless
+overridden. Tune the relevant limit for the actual transfer path and measure the result. See
+[UCX multi-rail selection](https://github.com/openucx/ucx/blob/v1.21.0/docs/source/faq.md#multi-rail)
+and [NIXL's UCX defaults](https://github.com/ai-dynamo/nixl/blob/v1.4.1/src/plugins/ucx/ucx_utils.cpp#L428).
 
 To use reliable-connected (RC) RDMA with CUDA IPC and copy, host shared memory, loopback, and TCP:
 
@@ -306,6 +442,8 @@ export UCX_TLS=rc,cuda_ipc,cuda_copy,sm,self,tcp
 TCP needs both the `tcp` transport and an interface in `UCX_NET_DEVICES`. Some deployments use
 it for control, active-message (AM), or fallback traffic. AM can also run over RDMA. Since this
 configuration also permits payload traffic over TCP, check that KV transfers use RC/RDMA as intended.
+Preserve recipes that deliberately omit `tcp` to fail when RDMA is unavailable instead of falling
+back; the transport list above is an optional choice for deployments that need TCP.
 
 `rc` includes the required bootstrap transports; `cuda_ipc` and `cuda_copy` enable CUDA IPC and
 copy paths, `sm` enables host shared memory, and `self` enables same-process communication.
@@ -318,6 +456,30 @@ Set NIC selection on both prefill and decode workers. Every rank inherits a cont
 `UCX_NET_DEVICES` value. For a group spanning domains, set it per rank, use separate groups within
 each domain, or give UCX a list such as `mlx5_0:1,mlx5_4:1`. Forcing all ranks through one NIC
 can lose locality and multi-rail bandwidth.
+
+vLLM `0.31.0` and `0.32.0` can set the NIC for each worker themselves. Set
+`VLLM_GPU_NIC_PCIE_MAPPING` to comma-separated `GPU_BDF=NIC_BDF` pairs and set
+`VLLM_NIC_SELECTION_VARS=UCX_NET_DEVICES:1` alongside it. For example, for two GPUs whose inspected
+PCI addresses map to the following NICs:
+
+```bash
+unset UCX_NET_DEVICES
+export VLLM_GPU_NIC_PCIE_MAPPING="0000:18:00.0=0000:19:00.0,0000:3b:00.0=0000:3c:00.0"
+export VLLM_NIC_SELECTION_VARS=UCX_NET_DEVICES:1
+```
+
+Replace the PCI addresses and cover every GPU assigned to the workers on that host. Set both
+variables together on prefill and decode; setting only one fails initialization. The NICs must
+be visible to the worker. See the
+[DeepSeek-V4 per-rank mapping procedure](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/README.md#per-rank-nic-mapping-b200--h200-disaggregated).
+
+Do not combine this with the whole-domain HCA list above. vLLM prepends each rank's selected NIC
+to an existing `UCX_NET_DEVICES` value, and UCX ignores list order: the other HCAs remain eligible.
+Start with the variable unset for one-HCA-per-rank selection. If TCP is also required, retaining
+only the intended TCP interface, such as `eth0`, does not add other HCAs; inspect the final
+per-rank list in the logs. See the
+[vLLM mapping implementation](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/v1/executor/vllm_net_devices.py#L174)
+and [UCX device-list semantics](https://github.com/openucx/ucx/blob/v1.21.0/src/ucp/core/ucp_context.c#L621).
 
 A NIXL UCX backend `device_list` can override `UCX_NET_DEVICES`, so check the connector's config.
 `NCCL_IB_HCA` and `NCCL_SOCKET_IFNAME` only configure NCCL. For a libfabric or other non-UCX
@@ -354,6 +516,12 @@ policies and page placement under load, after the engine has finished initializi
 temporarily set `UCX_LOG_LEVEL=info` and check the HCA, TCP interface, and KV-payload transport.
 
 Compare latency, throughput, memory placement, and KV-transfer performance with the same workload
-before and after binding. If you use Dynamo KV Block Manager (KVBM), check its
-[`DYN_KVBM_ENABLE_NUMA` host-cache setting](../../reference/components/kvbm-configuration.mdx#mla-and-nccl)
-as well; it controls host-cache allocation separately from process placement.
+before and after binding.
+
+KVBM attempts NUMA-local pinned host-cache allocation by default, using a worker thread pinned
+to the GPU's NUMA node to allocate and touch pages. It doesn't set a memory policy, so an inherited
+`--membind` or `--preferred` policy still affects placement. The thread also needs CPUs on that
+node in the allocation's allowed set; otherwise pinning fails and logs an error. Check actual
+page placement under load. Set `DYN_MEMORY_DISABLE_NUMA=1` to disable this allocation path;
+`DYN_KVBM_ENABLE_NUMA` is deprecated and has no effect. See
+[KVBM NUMA host memory](../../reference/components/kvbm-configuration.mdx#numa-host-memory).
