@@ -297,6 +297,10 @@ fn create_grouped_scheduler_from_components(
             .is_none_or(|host| host.scope != G2Scope::ClusterShared),
         "cluster_shared native_host_offload is supported only in offline replay"
     );
+    ensure!(
+        !components.rank.sglang.host_loop,
+        "sglang.host_loop is supported only in offline replay"
+    );
     let factory = engine_factory(components.rank, components.timing)?;
     // Existing live schedulers seed every process-local worker from DP rank.
     // A logical worker therefore retains worker_id=0 at this compatibility
@@ -690,7 +694,7 @@ fn translate_command(
 ) -> Result<TranslatedCommand> {
     let (command, on_success, on_suppressed_output, on_error) = match command {
         SchedulerCommand::Submit(request) => {
-            let request = compatibility.native_request(request);
+            let request = compatibility.native_request(request)?;
             let request_id = request.request_id;
             (
                 Command::Submit(request),
@@ -712,8 +716,8 @@ fn translate_command(
             handoff_id,
             request,
         } => {
+            let request = compatibility.native_request(request)?;
             let engine_handoff = compatibility.engine_handoff(handoff_id)?;
-            let request = compatibility.native_request(request);
             let request_id = request.request_id;
             compatibility.mark_source(handoff_id, request_id);
             (
@@ -749,8 +753,8 @@ fn translate_command(
             handoff_id,
             request,
         } => {
+            let request = compatibility.native_request(request)?;
             let engine_handoff = compatibility.engine_handoff(handoff_id)?;
-            let request = compatibility.native_request(request);
             let request_id = request.request_id;
             compatibility.mark_destination(handoff_id, request_id);
             (

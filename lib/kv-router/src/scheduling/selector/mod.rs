@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{cell::Cell, collections::HashMap};
+use std::{
+    cell::{Cell, OnceCell},
+    collections::HashMap,
+};
 
 mod policy;
 #[cfg(any(test, feature = "bench"))]
@@ -19,8 +22,11 @@ pub use crate::plugins::worker_selection::{
 #[cfg(any(test, feature = "bench"))]
 use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
+use crate::kv_hints::{
+    KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
+};
 use crate::plugins::worker_selection::{
-    CacheSnapshot, CandidateData, WorkerCacheData, WorkerInputRows,
+    CacheSnapshot, CandidateData, WorkerCacheData, WorkerInputRows, WorkerTransferInput,
 };
 use crate::plugins::worker_selection::{
     RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
@@ -167,6 +173,9 @@ struct MaterializedSelectionInput<'a> {
     // Track the maximum over the eligible ranks row() already visits; no second scan.
     max_raw_cached_tokens: Cell<Option<usize>>,
     cache_snapshot: CacheSnapshot<'a>,
+    // Built at most once and shared by every row's fetch credit and the
+    // selected worker's fetch source, so the two cannot disagree.
+    kv_transfer_sources: OnceCell<KvTransferSourceSummary>,
 }
 
 impl<'a> MaterializedSelectionInput<'a> {
@@ -186,7 +195,61 @@ impl<'a> MaterializedSelectionInput<'a> {
                     .and_then(|config| config.router_temperature),
             },
             max_raw_cached_tokens: Cell::new(request.mode.is_tracked().then_some(0)),
+            kv_transfer_sources: OnceCell::new(),
         }
+    }
+
+    /// The request's fetch sources for the targets in `scope`, built on the
+    /// first call.
+    fn kv_transfer_sources<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        scope: impl FnOnce() -> KvTransferScope,
+    ) -> Option<&KvTransferSourceSummary> {
+        let candidates = self.request.kv_transfer_candidates.as_ref()?;
+        Some(
+            self.kv_transfer_sources
+                .get_or_init(|| KvTransferSourceSummary::new(candidates, workers, scope())),
+        )
+    }
+
+    /// Fill every row's fetch input once all rows are built, so the sources
+    /// skip anything shorter than the shortest local prefix. `targets` is
+    /// index-aligned with `rows`: each hint-capable row's target and local prefix.
+    fn fill_kv_transfer_sources<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        rows: &mut [CandidateData],
+        targets: &[Option<(KvTransferTarget, usize)>],
+    ) {
+        debug_assert_eq!(rows.len(), targets.len());
+        let scope = || KvTransferScope::of(targets.iter().flatten().copied());
+        let Some(sources) = self.kv_transfer_sources(workers, scope) else {
+            return;
+        };
+        for (row, &target) in rows.iter_mut().zip(targets) {
+            row.transfer = Some(WorkerTransferInput {
+                source_prefix_blocks: target
+                    .and_then(|(target, local)| sources.source_for(row.worker, target, local))
+                    .map(source_prefix_blocks),
+            });
+        }
+    }
+
+    fn selected_kv_transfer_source<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        worker: WorkerWithDpRank,
+    ) -> Option<KvTransferSourceChoice> {
+        self.request.kv_transfer_candidates.as_ref()?;
+        let target = workers
+            .get(&worker.worker_id)?
+            .kv_transfer_keys()
+            .target()?;
+        let local_prefix_blocks = self.request.transfer_local_prefix_blocks_for(worker);
+        let scope = || KvTransferScope::of([(target, local_prefix_blocks)]);
+        self.kv_transfer_sources(workers, scope)?
+            .source_for(worker, target, local_prefix_blocks)
     }
 
     fn max_raw_cached_tokens(&self) -> Option<usize> {
@@ -320,6 +383,7 @@ fn worker_input_row(
         inputs,
         cache,
         load,
+        transfer: None,
         preferred_taint_multiplier,
     }
 }
@@ -354,11 +418,16 @@ pub(crate) fn worker_input_rows<C: WorkerConfigLike>(
     WorkerInputRows::new(inputs, rows, cache_snapshot(request))
 }
 
+fn source_prefix_blocks(source: KvTransferSourceChoice) -> u32 {
+    u32::try_from(source.prefix_blocks).unwrap_or(u32::MAX)
+}
+
 fn selection_result(
     request: &SchedulingRequest,
     worker: WorkerWithDpRank,
     block_size: u32,
     max_raw_cached_tokens: Option<usize>,
+    kv_transfer_source: Option<KvTransferSourceChoice>,
 ) -> WorkerSelectionResult {
     WorkerSelectionResult {
         worker,
@@ -370,6 +439,7 @@ fn selection_result(
             .map(|_| request.raw_cached_tokens_for(worker, block_size)),
         potential_decode_blocks: request
             .potential_decode_blocks_after_admission(worker, block_size),
+        kv_transfer_source,
     }
 }
 
@@ -622,7 +692,14 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let result = selection_result(request, worker, block_size, input.max_raw_cached_tokens());
+    let kv_transfer_source = input.selected_kv_transfer_source(workers, worker);
+    let result = selection_result(
+        request,
+        worker,
+        block_size,
+        input.max_raw_cached_tokens(),
+        kv_transfer_source,
+    );
     log_selection(
         workers,
         request,
@@ -811,7 +888,7 @@ mod cache_reuse_tests {
         input.track_kept_candidate(second);
 
         assert_eq!(input.max_raw_cached_tokens(), Some(96));
-        let result = selection_result(&request, first, 16, input.max_raw_cached_tokens());
+        let result = selection_result(&request, first, 16, input.max_raw_cached_tokens(), None);
         assert_eq!(result.max_raw_cached_tokens, Some(96));
         assert_eq!(result.selected_raw_cached_tokens, Some(48));
         assert_eq!(result.cached_tokens, 120);
@@ -828,7 +905,7 @@ mod cache_reuse_tests {
         input.track_kept_candidate(worker);
 
         assert_eq!(input.max_raw_cached_tokens(), None);
-        let result = selection_result(&request, worker, 16, input.max_raw_cached_tokens());
+        let result = selection_result(&request, worker, 16, input.max_raw_cached_tokens(), None);
         assert_eq!(result.max_raw_cached_tokens, None);
         assert_eq!(result.selected_raw_cached_tokens, None);
     }
@@ -857,7 +934,7 @@ mod cache_reuse_tests {
         request.overlap.effective_cached_tokens.insert(selected, 3);
         assert_eq!(request.raw_cached_tokens_for(selected, 16), 64);
         assert_eq!(request.raw_cached_tokens_for(other_rank, 16), 112);
-        let result = selection_result(&request, selected, 16, Some(112));
+        let result = selection_result(&request, selected, 16, Some(112), None);
         assert_eq!(result.selected_raw_cached_tokens, Some(64));
     }
 
