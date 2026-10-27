@@ -170,6 +170,36 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             })
             .transpose()?;
 
+        let reasoning_effort = req
+            .output_config
+            .as_ref()
+            .and_then(|config| config.get("effort"))
+            .filter(|effort| !effort.is_null())
+            .map(|effort| {
+                if !matches!(
+                    effort.as_str(),
+                    Some("low" | "medium" | "high" | "xhigh" | "max")
+                ) {
+                    anyhow::bail!("output_config.effort: must be low, medium, high, xhigh, or max");
+                }
+                serde_json::from_value(effort.clone()).map_err(anyhow::Error::from)
+            })
+            .transpose()?;
+        let thinking_token_budget = req
+            .thinking
+            .as_ref()
+            .and_then(|thinking| thinking.budget_tokens);
+        let thinking = req
+            .thinking
+            .as_ref()
+            .filter(|thinking| {
+                matches!(
+                    thinking.thinking_type.as_str(),
+                    "enabled" | "disabled" | "adaptive"
+                )
+            })
+            .map(|thinking| serde_json::json!({"type": thinking.thinking_type}));
+
         Ok(NvCreateChatCompletionRequest {
             inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 messages,
@@ -182,6 +212,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 tool_choice,
                 parallel_tool_calls,
                 response_format,
+                reasoning_effort,
                 stream: Some(true), // Always stream internally
                 // Request cumulative usage on every chunk (not just the final
                 // one) so the Anthropic stream converter can stamp an
@@ -196,7 +227,11 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 ..Default::default()
             },
             common: CommonExt {
-                top_k: req.top_k.map(|k| k as i32),
+                top_k: req
+                    .top_k
+                    .map(i32::try_from)
+                    .transpose()
+                    .map_err(|_| anyhow::anyhow!("top_k: must be at most 2147483647"))?,
                 ..Default::default()
             },
             nvext: crate::protocols::common::extensions::parse_nvext(req.nvext)?,
@@ -218,8 +253,8 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 );
                 Some(args)
             }),
-            thinking: None,
-            thinking_token_budget: None,
+            thinking,
+            thinking_token_budget,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),

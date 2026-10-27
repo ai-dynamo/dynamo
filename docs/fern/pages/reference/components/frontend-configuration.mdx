@@ -880,22 +880,23 @@ Before conversion, the frontend validates these
 - `top_k` must fit the backend's signed 32-bit field (at most 2,147,483,647).
 
 For `system`, `metadata`, `tool_choice`, and `thinking`, `null` is treated as omission.
-These checks validate admission; thinking-budget enforcement by the backend is not implemented.
+These checks validate admission. Backend forwarding and enforcement are described below.
 
 #### Reasoning Controls
 
-The admission policy in this section requires a build containing the fix for
-[#17375](https://github.com/ai-dynamo/dynamo/issues/17375).
+Builds containing [#17375](https://github.com/ai-dynamo/dynamo/issues/17375) forward
+`output_config.effort` (`low`, `medium`, `high`, `xhigh`, or `max`) as the existing
+`reasoning_effort` field. Enabled-thinking `budget_tokens` becomes
+`thinking_token_budget`, which feeds the existing thinking stop condition. Explicit
+`adaptive` mode continues to let the model decide whether to think, including when an
+API client such as Claude Code also sends effort `high`.
 
-`POST /v1/messages` returns HTTP 400 with an Anthropic `invalid_request_error` before
-generation when a request supplies `output_config.effort` or a non-null
-`thinking.budget_tokens`. These controls are not supported on this endpoint: accepting a
-value would not guarantee that the selected backend and model enforce it. Remove
-`output_config.effort`; for thinking, use `type: "adaptive"` or `type: "disabled"`
-without a budget. Omitting reasoning controls preserves the existing model behavior.
-
-This restriction applies to generation. Token counting does not enforce generation controls.
-Backend-specific budget support on other endpoints does not establish Messages support.
+Forwarding does not guarantee identical behavior across models. Effort needs a model
+and chat template that understand the selected grade. Budget enforcement needs backend
+support: vLLM uses its thinking-budget sampling field when available; SGLang requires
+its strict-thinking configuration and reasoning parser. Other backend configurations
+may ignore the budget. This endpoint does not implement Anthropic's hosted reasoning
+or interleaved-turn execution lifecycle. Omitting controls preserves the model defaults.
 
 ### Infrastructure
 
