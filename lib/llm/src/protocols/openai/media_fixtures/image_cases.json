@@ -1,5 +1,5 @@
 {
-  "description": "Bodies that the Rust type and the generated Python model must both accept or both reject. A request is accepted when it parses and passes the frontend's validation. A case marked `frontend_only` is rejected by the frontend alone and accepted by the generated model: an unknown value of a request enum, which a worker must accept from a newer frontend, or an image entry with neither url nor b64_json, which the schema cannot state. Not a case here: an integer above a Rust width with no schema maximum, such as `nvext.num_inference_steps: 256`, which the frontend rejects and the schema cannot state.",
+  "description": "Bodies that the Rust type and the generated Python model must both accept or both reject. A request is accepted when it parses and passes the frontend's validation. A case marked `frontend_only` is rejected by the frontend alone and accepted by the generated model: an unknown value of a request enum the worker does not read, which it must accept from a newer frontend, or an image entry with neither url nor b64_json, which the schema cannot state. Not a case here: an integer above a Rust width with no schema maximum, such as `nvext.num_inference_steps: 256`, which the frontend rejects and the schema cannot state.",
   "cases": [
     {"name": "minimal", "type": "request", "valid": true, "body": {"prompt": "a cat"}},
     {"name": "n-lower-bound", "type": "request", "valid": true, "body": {"prompt": "a cat", "n": 1}},
@@ -22,7 +22,7 @@
     {"name": "output-compression-above-range", "type": "request", "valid": false, "body": {"prompt": "a cat", "output_compression": 101}},
     {"name": "partial-images-above-range", "type": "request", "valid": false, "body": {"prompt": "a cat", "partial_images": 4}},
     {"name": "quality-unknown", "type": "request", "valid": false, "frontend_only": true, "body": {"prompt": "a cat", "quality": "ultra"}},
-    {"name": "response-format-unknown", "type": "request", "valid": false, "frontend_only": true, "body": {"prompt": "a cat", "response_format": "file"}},
+    {"name": "response-format-unknown", "type": "request", "valid": false, "body": {"prompt": "a cat", "response_format": "file"}},
     {"name": "output-format-unknown", "type": "request", "valid": false, "frontend_only": true, "body": {"prompt": "a cat", "output_format": "gif"}},
     {"name": "background-unknown", "type": "request", "valid": false, "frontend_only": true, "body": {"prompt": "a cat", "background": "blue"}},
     {"name": "moderation-unknown", "type": "request", "valid": false, "frontend_only": true, "body": {"prompt": "a cat", "moderation": "high"}},

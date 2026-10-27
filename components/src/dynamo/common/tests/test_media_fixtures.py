@@ -12,10 +12,10 @@ hold the Rust types to the same files.
   both sides must reject: a wrong type, a value outside a bound, a missing
   required field, an unknown value of a response enum. A case marked
   `frontend_only` is rejected by the frontend alone and accepted here: an
-  unknown value of a request enum, which a worker must accept from a newer
-  frontend, or a rule the schema cannot state. This is the test of the claim
-  that a worker rejects what the frontend rejects, for everything the
-  generated model mirrors.
+  unknown value of a request enum the worker does not read, which it must
+  accept from a newer frontend, or a rule the schema cannot state. This is
+  the test of the claim that a worker rejects what the frontend rejects, for
+  everything the generated model mirrors.
 """
 
 import json

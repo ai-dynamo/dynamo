@@ -148,7 +148,7 @@ class NvCreateImageRequest(BaseModel):
     sees one and needs no range check of its own.
     """
     quality: StrictStr | None = None
-    response_format: StrictStr | None = None
+    response_format: Literal['url', 'b64_json'] | None = None
     output_format: StrictStr | None = None
     output_compression: Annotated[StrictInt | None, Field(ge=0, le=100)] = None
     """

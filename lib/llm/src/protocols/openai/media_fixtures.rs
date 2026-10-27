@@ -14,10 +14,11 @@
 //!   missing required field, an unknown value of a response enum. A request
 //!   is accepted when it parses and passes the frontend's validation, as at
 //!   the HTTP boundary. A case marked `frontend_only` is rejected here and
-//!   accepted by the generated model: an unknown value of a request enum,
-//!   which a worker must accept from a newer frontend, or a rule the schema
-//!   cannot state. This is the test of the claim that a worker rejects what
-//!   the frontend rejects, for everything the generated model mirrors.
+//!   accepted by the generated model: an unknown value of a request enum
+//!   the worker does not read, which it must accept from a newer frontend,
+//!   or a rule the schema cannot state. This is the test of the claim that
+//!   a worker rejects what the frontend rejects, for everything the
+//!   generated model mirrors.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

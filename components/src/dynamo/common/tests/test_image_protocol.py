@@ -99,6 +99,13 @@ def test_image_request_accepts_a_value_outside_the_enum():
     assert NvCreateImageRequest(prompt="a cat", quality="ultra").quality == "ultra"
 
 
+def test_image_request_rejects_an_unknown_delivery_mode():
+    # The worker reads response_format to build its response, so the request
+    # model keeps the enum and an unknown mode fails before generation.
+    with pytest.raises(ValidationError):
+        NvCreateImageRequest(prompt="a cat", response_format="file")
+
+
 def test_image_response_rejects_a_value_outside_the_enum():
     # A worker builds the response, so the response model keeps the enum.
     with pytest.raises(ValidationError):

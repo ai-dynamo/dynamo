@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt, StrictStr
 
@@ -113,7 +113,7 @@ class NvCreateVideoRequest(BaseModel):
     """
     Optional user identifier
     """
-    response_format: StrictStr | None = None
+    response_format: Literal['url', 'b64_json'] | None = None
     output_format: StrictStr | None = None
     """
     Output container format: "mp4", "webm", "gif", etc.

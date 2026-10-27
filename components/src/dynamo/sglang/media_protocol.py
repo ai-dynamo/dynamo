@@ -16,7 +16,7 @@ An override repeats the constraint of the base field. The tests in
 the same values.
 """
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, StrictFloat, StrictStr
 
@@ -33,7 +33,7 @@ class SGLangCreateImageRequest(NvCreateImageRequest):
     """An absent ``n`` means one image, as the OpenAI API documents."""
 
     n: Annotated[int, Field(ge=1, le=10, strict=True)] = 1
-    response_format: StrictStr = "url"
+    response_format: Literal["url", "b64_json"] = "url"
     nvext: SGLangImageNvExt = Field(default_factory=SGLangImageNvExt)
 
 
@@ -48,5 +48,5 @@ class SGLangCreateVideoRequest(NvCreateVideoRequest):
 
     seconds: Annotated[int, Field(ge=1, strict=True)] = 4
     size: StrictStr = "832x480"
-    response_format: StrictStr = "url"
+    response_format: Literal["url", "b64_json"] = "url"
     nvext: SGLangVideoNvExt = Field(default_factory=SGLangVideoNvExt)

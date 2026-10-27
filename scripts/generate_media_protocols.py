@@ -17,15 +17,19 @@ stale.
 The models carry the constraints of the Rust types: a numeric bound becomes
 a field constraint, a scalar is strict, so a string is not read as a number
 or a bool, and an enum in a response becomes a ``Literal`` of its values.
-An enum in a request becomes a plain ``str``. The frontend checks the value
-before it forwards the request, and a rolling upgrade runs the frontend and
-a worker at different versions: a worker must accept what a newer frontend
-forwards for a field it does not read. A worker builds a response, so its
-response model keeps the enum, and the worker fails where it sets a value
-the frontend rejects. For a type, a bound, a default, and a response enum,
-a generated model accepts and rejects the same JSON as the Rust type; the
-shared cases in lib/llm/src/protocols/openai/media_fixtures/ hold both sides
-to that, and mark what the frontend alone rejects. A Rust rule the schema
+An enum in a request becomes a plain ``str``, unless a worker reads it. The
+frontend checks the value before it forwards the request, and a rolling
+upgrade runs the frontend and a worker at different versions: a worker must
+accept what a newer frontend forwards for a field it does not read. Every
+worker reads the delivery mode (``response_format``, or ``data_source`` for
+audio) to build its response, so that enum stays a ``Literal`` in a request
+and an unknown mode fails before generation: see READ_BY_WORKERS. A worker
+builds a response, so its response model keeps the enum, and the worker
+fails where it sets a value the frontend rejects. For a type, a bound, a
+default, a response enum, and a delivery mode, a generated model accepts
+and rejects the same JSON as the Rust type; the shared cases in
+lib/llm/src/protocols/openai/media_fixtures/ hold both sides to that, and
+mark what the frontend alone rejects. A Rust rule the schema
 cannot state, such as a validator with no ``#[schema]`` bound or an integer
 width, is not mirrored: the frontend checks it before a request reaches a
 worker.
@@ -42,6 +46,13 @@ REPO = Path(__file__).resolve().parent.parent
 SCHEMAS = REPO / "lib/llm/src/protocols/openai/media_schemas"
 MODELS = REPO / "components/src/dynamo/common/protocols"
 MODULES = ("audio", "image", "video")
+
+# The enums a request keeps as a Literal, by schema name. A worker reads the
+# delivery mode to build its response, so an unknown mode fails before
+# generation. Every other request enum becomes a plain string: the module
+# docstring says why. The shared cases hold the generated model to this, so
+# a rename in Rust that misses this set fails them.
+READ_BY_WORKERS = frozenset({"MediaDelivery"})
 
 # The copyright check compares the last year in this range with the year the
 # file last changed. Extend the range when a regeneration lands in a new year.
@@ -138,12 +149,14 @@ def _reachable(schemas: dict, root: str) -> set[str]:
 def loosen_request_enums(document: dict) -> None:
     """Make every enum a request schema refers to a plain string, in place.
 
-    The module docstring says why. A response schema keeps its enums, so a
-    component both sides refer to is an error: loosening it would loosen
-    the response too.
+    The module docstring says why, and READ_BY_WORKERS names the enums left
+    as they are. A response schema keeps its enums, so a component both
+    sides refer to is an error: loosening it would loosen the response too.
     """
     schemas = document["components"]["schemas"]
-    enums = {name for name, schema in schemas.items() if "enum" in schema}
+    enums = {
+        name for name, schema in schemas.items() if "enum" in schema
+    } - READ_BY_WORKERS
     request = set()
     response = set()
     for name in schemas:
