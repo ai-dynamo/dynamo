@@ -1570,6 +1570,70 @@ fn test_lower_tier_events_do_not_pollute_cache_namespace_state() {
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
 }
 
+/// Framework events in an ignored tier are dropped; KVCR events in that tier,
+/// framework events in other tiers, and clears still pass.
+#[test]
+fn test_preprocess_drops_ignored_framework_tiers() {
+    let worker = WorkerWithDpRank::new(3, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2)
+        .with_ignored_framework_tiers(Arc::from([StorageTier::HostPinned]));
+
+    for event_kind in [TestEventKind::BlockStored, TestEventKind::BlockRemoved] {
+        for medium in ["CPU", "CPU_PINNED"] {
+            let raw = raw_placement_event(event_kind, Some(medium), None);
+            assert_eq!(
+                normalizer.preprocess_with_reason(raw, worker).unwrap_err(),
+                ZmqEventFilterReason::IgnoredTier,
+                "{event_kind:?} medium={medium}"
+            );
+        }
+    }
+    for medium in [None, Some("GPU"), Some("STORAGE")] {
+        let raw = raw_placement_event(TestEventKind::BlockStored, medium, None);
+        assert!(
+            normalizer.preprocess_with_reason(raw, worker).is_ok(),
+            "medium={medium:?}"
+        );
+    }
+
+    let mut kvcr = raw_placement_event(TestEventKind::BlockStored, Some("CPU"), None);
+    if let RawKvEvent::BlockStored { ownership, .. } = &mut kvcr {
+        *ownership = Some("kvcr".to_string());
+    }
+    assert!(
+        normalizer
+            .preprocess_residency_with_reason(kvcr, worker)
+            .is_ok()
+    );
+    let clear = RawKvEvent::AllBlocksCleared { ownership: None };
+    assert!(normalizer.preprocess_with_reason(clear, worker).is_ok());
+}
+
+/// An ignored host event still records its namespace, so a device child that
+/// names it as parent normalizes exactly as it would without the filter.
+#[test]
+fn test_ignored_framework_tier_keeps_cache_namespace_state() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2)
+        .with_ignored_framework_tiers(Arc::from([StorageTier::HostPinned]));
+
+    let salted_host = namespaced_block_stored(1, None, Some("tenant-a"), "CPU");
+    assert_eq!(
+        normalizer
+            .preprocess_with_reason(salted_host, worker)
+            .unwrap_err(),
+        ZmqEventFilterReason::IgnoredTier
+    );
+    let gpu_child = namespaced_block_stored(2, Some(1), None, "GPU");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = normalizer.preprocess(gpu_child, worker).unwrap()
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
 /// Unrecognized media (e.g. vLLM 0.26.0 `FS` / `OBJ`, or any future string) must
 /// be dropped in conversion, never silently indexed on the device (G1) primary
 /// tree — for both store and remove, and regardless of locality.

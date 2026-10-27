@@ -8,7 +8,7 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use dynamo_kv_router::identity::CacheOwnerId;
+use dynamo_kv_router::{identity::CacheOwnerId, protocols::StorageTier};
 use dynamo_runtime::{
     component::{Component, Endpoint, StartedEndpoint},
     discovery::{
@@ -238,6 +238,7 @@ impl KvStateAgentHost {
         if config.slots_per_socket == 0 {
             anyhow::bail!("slots_per_socket must be greater than zero");
         }
+        let ignored_framework_tiers = super::ignored_framework_tiers_from_env()?;
 
         let component = config.endpoint.component().clone();
         let slots = Arc::new(Mutex::new(HashMap::new()));
@@ -341,6 +342,7 @@ impl KvStateAgentHost {
                 metrics,
                 supervisor_cancel,
                 supervisor_host_advertisement,
+                ignored_framework_tiers,
             )
             .await;
             watch_cancel.cancel();
@@ -409,6 +411,7 @@ async fn run_host_supervisor(
     metrics: HostMetrics,
     cancel: CancellationToken,
     host_advertisement: Arc<Mutex<Option<DiscoveryInstance>>>,
+    ignored_framework_tiers: Arc<[StorageTier]>,
 ) {
     let mut intents: HashMap<CacheOwnerId, HashMap<u64, KvStateAttachmentIntent>> = HashMap::new();
     let mut intent_owners: HashMap<u64, CacheOwnerId> = HashMap::new();
@@ -447,6 +450,7 @@ async fn run_host_supervisor(
             &mut sockets,
             &mut capacity_rejected_total,
             &metrics,
+            &ignored_framework_tiers,
         )
         .await
         {
@@ -616,6 +620,7 @@ async fn reconcile_owner(
     sockets: &mut HostSockets,
     capacity_rejected_total: &mut u64,
     metrics: &HostMetrics,
+    ignored_framework_tiers: &Arc<[StorageTier]>,
 ) -> Result<()> {
     let matching = intents.get(&owner);
     let intent = match matching.map(HashMap::len).unwrap_or(0) {
@@ -719,6 +724,7 @@ async fn reconcile_owner(
                 image_token_id: intent.image_token_id,
                 video_token_id: intent.video_token_id,
                 ingress_protocol: intent.ingress_protocol,
+                ignored_framework_tiers: ignored_framework_tiers.clone(),
             },
         })
         .await
