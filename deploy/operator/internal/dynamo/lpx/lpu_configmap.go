@@ -17,7 +17,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 const lpuConfigVolumeName = "config"
@@ -25,7 +24,7 @@ const lpuConfigVolumeName = "config"
 func renderRuntimeConfigMap(namePrefix string, data map[string]string) (*corev1.ConfigMap, string, error) {
 	// Name immutable configuration from the content hash used by Pod templates.
 	configMap := &corev1.ConfigMap{
-		Immutable: ptr.To(true),
+		Immutable: new(true),
 		Data:      data,
 	}
 	configHash := LPUConfigMapHash(configMap)
@@ -126,8 +125,8 @@ func ensureLPUConfigVolume(spec *corev1.PodSpec, configMapName string) {
 
 	spec.Volumes = append(spec.Volumes, corev1.Volume{
 		Name: lpuConfigVolumeName,
-		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-			LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
-		}},
+		ConfigMap: &corev1.ConfigMapVolumeSource{
+			Name: configMapName,
+		},
 	})
 }

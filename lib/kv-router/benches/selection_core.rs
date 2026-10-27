@@ -35,11 +35,24 @@ fn core_with_workers(
     workers: u64,
     hints: bool,
 ) -> SelectionCore {
-    let config = KvRouterConfig {
-        use_kv_events: true,
-        router_queue_threshold: None,
-        ..Default::default()
-    };
+    core_with_config(
+        runtime,
+        workers,
+        hints,
+        KvRouterConfig {
+            use_kv_events: true,
+            router_queue_threshold: None,
+            ..Default::default()
+        },
+    )
+}
+
+fn core_with_config(
+    runtime: &tokio::runtime::Runtime,
+    workers: u64,
+    hints: bool,
+    config: KvRouterConfig,
+) -> SelectionCore {
     let core = SelectionCore::try_new_local(
         config,
         1,
@@ -77,7 +90,17 @@ fn core_with_workers(
     core
 }
 
-async fn seed_prefix_on_worker_one(core: &SelectionCore) {
+/// A runtime for one core. Dropping it drops the core's per-worker ZMQ
+/// listener tasks, which otherwise outlive the core and exhaust file
+/// descriptors at thousands of workers.
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+}
+
+async fn seed_prefix(core: &SelectionCore, worker_id: u64, blocks: usize) {
     let key = RoutingPartitionId::new("default", "default");
     let local_hashes =
         compute_block_hash_for_seq(&prompt_tokens(), BLOCK_SIZE, BlockHashOptions::default());
@@ -85,6 +108,7 @@ async fn seed_prefix_on_worker_one(core: &SelectionCore) {
     let blocks = local_hashes
         .iter()
         .zip(sequence_hashes.iter())
+        .take(blocks)
         .map(|(&tokens_hash, &sequence_hash)| KvCacheStoredBlockData {
             block_hash: ExternalSequenceBlockHash(sequence_hash),
             tokens_hash,
@@ -94,7 +118,7 @@ async fn seed_prefix_on_worker_one(core: &SelectionCore) {
     let indexer = core.partition(&key).expect("partition").indexer().clone();
     indexer
         .apply_event_routed(RouterEvent::with_storage_tier(
-            1,
+            worker_id,
             KvCacheEvent {
                 event_id: 1,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
@@ -111,6 +135,10 @@ async fn seed_prefix_on_worker_one(core: &SelectionCore) {
     if let Indexer::Single { primary, .. } = &indexer {
         primary.flush().await;
     }
+}
+
+async fn seed_prefix_on_worker_one(core: &SelectionCore) {
+    seed_prefix(core, 1, usize::MAX).await;
     let mut request = reserve_request("seed".to_string());
     request.pinned_worker = Some(WorkerWithDpRank::new(2, 0));
     let response = core.select_and_reserve(request).await.expect("reserve");
@@ -141,15 +169,12 @@ fn reserve_request(selection_id: String) -> SelectAndReserveRequest {
 }
 
 fn bench_select_and_reserve(c: &mut Criterion) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
     let mut group = c.benchmark_group("selection_core/select_and_reserve_then_free");
     group.measurement_time(Duration::from_secs(5));
     group.throughput(Throughput::Elements(1));
     for &workers in &[8u64, 64, 512] {
         for hints in [false, true] {
+            let runtime = runtime();
             let core = core_with_workers(&runtime, workers, hints);
             let mut sequence = 0u64;
             group.bench_with_input(
@@ -177,5 +202,47 @@ fn bench_select_and_reserve(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_select_and_reserve);
+/// Every worker holds a different-length prefix of the prompt, so every
+/// worker is a fetch source and every unpinned booking chooses one.
+/// `credit` scores fetchable blocks (`shared_cache_multiplier: 0.5`).
+fn bench_fetch_sources(c: &mut Criterion) {
+    let mut group = c.benchmark_group("selection_core/fetch_sources");
+    group.measurement_time(Duration::from_secs(5));
+    group.throughput(Throughput::Elements(1));
+    let prompt_blocks = prompt_tokens().len() / BLOCK_SIZE as usize;
+    for &workers in &[256u64, 1024, 4096] {
+        for (name, multiplier) in [("credit0", 0.0), ("credit0.5", 0.5)] {
+            let config = KvRouterConfig {
+                use_kv_events: true,
+                router_queue_threshold: None,
+                shared_cache_multiplier: Some(multiplier),
+                ..Default::default()
+            };
+            let runtime = runtime();
+            let core = core_with_config(&runtime, workers, true, config);
+            runtime.block_on(async {
+                for worker_id in 1..=workers {
+                    let blocks = worker_id as usize % prompt_blocks + 1;
+                    seed_prefix(&core, worker_id, blocks).await;
+                }
+            });
+            let mut sequence = 0u64;
+            group.bench_with_input(BenchmarkId::new(name, workers), &core, |b, core| {
+                b.iter(|| {
+                    sequence += 1;
+                    let id = format!("bench-{sequence}");
+                    runtime.block_on(async {
+                        core.select_and_reserve(reserve_request(id.clone()))
+                            .await
+                            .expect("reserve");
+                        core.free_reservation(&id).await.expect("free");
+                    });
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_select_and_reserve, bench_fetch_sources);
 criterion_main!(benches);

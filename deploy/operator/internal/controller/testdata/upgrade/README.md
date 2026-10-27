@@ -33,6 +33,29 @@ PodSpec changes remain protected. The independent detector test rejects a new
 generation even if the output is identical. An intentional worker env edit must
 still reach a new workload generation after takeover.
 
+## Multinode Component and DisaggregatedSet coverage
+
+The canonical suite includes aggregated and disaggregated multinode Component
+scenarios for vLLM, SGLang, and TensorRT-LLM, plus one disaggregated multinode
+DisaggregatedSet scenario per engine. Component scenarios stop at DCD-owned
+LeaderWorkerSets; DisaggregatedSet scenarios stop at the DisaggregatedSet itself
+and the frontend's auxiliary DCD/Deployment. The LWS/DS controllers and serving
+Pods do not run. Dependency CRDs and production admission handlers come from the
+pinned LWS module already used by the shared clustertest setup.
+
+Independent checks enforce the selected provider, component/role inventory and
+multinode shape. Historical safety also protects the complete DisaggregatedSet
+spec, identity and generation. Intentional worker edits must reach every edited
+component and both leader/worker templates, including embedded DS role templates.
+The populated graph replay controls cover Deployment, LWS and DS graphs without
+claiming that these freshly captured test graphs came from an older release.
+Formal released history still advances only through the pinned-release workflow.
+
+These cases complete 22 of the 27 canonical matrix entries. The five remaining
+single-node Component cases and the missing-origin historical case remain in
+[#16650](https://github.com/ai-dynamo/dynamo/issues/16650); the incomplete
+release-matrix gate stays enforced.
+
 ## Storage and production lifecycle
 
 Run this suite only against a dedicated cluster with no installed controllers or
@@ -125,7 +148,12 @@ graph after 1.5 has persisted it. Normal CI does not fetch or compile old operat
 `history/N` must come from an actual published stable upstream tag for operator N,
 not from `main` merely because its chart still reports N. `main` may already contain
 post-cut changes that no N user runs. The next-minor bump on `main` remains blocked
-until the released predecessor history has been captured and committed.
+until the released predecessor history has been captured and committed. One
+exception exists: `main` moved to 1.7 while history was still reconciled by 1.5, so
+`HISTORY_EXCEPTIONS` in `hack/generate_upgrade_fixtures.py` lets 1.7 replay 1.5
+history. Capture `history/1.6.0` from the `v1.6.0` tag before the 1.8 bump, then
+delete the exception. Regeneration always advances exactly one minor, so 1.6 must
+be captured from its own release tree before 1.7.
 
 Use a dedicated checkout of the selected release tag. Fetch the tag from upstream,
 and carry only the reviewed test harness and fixture inventory into that checkout;
@@ -142,11 +170,11 @@ git -C "$release_tree" restore --source="$harness" -- \
   deploy/operator/internal/controller/clusterenv_helpers_test.go \
   deploy/operator/internal/controller/clusterenv_test.go \
   deploy/operator/internal/controller/clusterenv_main_test.go \
-  deploy/operator/internal/controller/upgrade_clustertest_test.go \
-  deploy/operator/internal/controller/upgrade_contract_test.go \
+  ':(glob)deploy/operator/internal/controller/upgrade_*_test.go' \
   deploy/operator/internal/controller/testdata/upgrade \
   deploy/operator/internal/testing/clusterenv \
-  deploy/operator/internal/testing/golden
+  deploy/operator/internal/testing/golden \
+  deploy/operator/internal/testing/mocks
 make -C "$release_tree/deploy/operator" clustertest-upgrade-fixtures-regen \
   UPGRADE_RELEASE_TAG=v1.6.0
 ```
@@ -191,14 +219,16 @@ Ordinary checks discover every available scenario recursively. The required
 release matrix is declared in `required-matrix.json`: 24 component/Grove cases
 (three engines × four deployment shapes × two programs), plus three supported
 multi-node disaggregated DisaggregatedSet cases. Additional scenarios are valid.
-Both regeneration and a minor `appVersion` bump relative to `--base` reject a
-missing required scenario. The initial three cases can therefore land before
+Regeneration rejects a missing required scenario. A minor `appVersion` bump
+relative to `--base` requires predecessor history, which only a complete-matrix
+regeneration produces. The initial three cases can therefore land before
 broader coverage, but cannot advance the release boundary alone. Keep #16650
 open for the complete matrix, missing-origin history and rollout safety across
 all workload programs.
 
 After the released-source capture commit is brought back to `main`, bump the operator subchart's **appVersion** to N+1. The check
-rejects premature, skipped-minor and major bumps. CI checks the PR/merge-group base
+rejects premature, skipped-minor and major bumps, apart from the one 1.7 exception
+above. CI checks the PR/merge-group base
 version as well as current consistency; pre-commit runs the inexpensive local
 consistency check. Patch/prerelease changes do not add history generations.
 Promotion derives a namespace from `history/<version>/<complete-scenario-path>`
@@ -209,9 +239,9 @@ across releases; namespace collisions across all roles are rejected. Long
 namespace names include a digest to remain within Kubernetes' length limit.
 
 Latest origin annotations use `$var:operator-version`, bound exactly to the
-operator chart's `appVersion` by the golden matcher. Worker hashes and the PCS
-spec digest also depend on origin: their exact bindings are computed from the
-reviewed golden DGD/PCS specifications with that version, never from candidate
+operator chart's `appVersion` by the golden matcher. Worker hashes, the PCS
+spec digest and the DS role revision also depend on origin: their exact bindings
+are computed from the reviewed golden DGD/PCS/DS specifications with that version, never from candidate
 output. The independent CREATE origin assertion remains active. All other
 lowering fields remain exact, and historical origins and hashes remain concrete. Accepting a golden never bypasses rollout
 safety assertions.
