@@ -1,0 +1,169 @@
+{
+  "fixtures": [
+    {
+      "name": "f1-lp20-lpu-chain",
+      "kind": "compiled",
+      "buildId": "dev/lpx-units_p1-gbuild/llama3_2-1b-ursa-2p-topk-1-c2c-invoke-prop-sync-lp20/20261027075515",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "a52d0f812191ed610747dbec813754bf70aacaf8a05854bf349257082cbc60ce",
+        "execution.v1.capnp.bin": "ed1ccc96f77b62f124f9e3aa0d869295ca0c6bf9dc9545077bd41cfb15f79b2b",
+        "expected-placement.json": "dfe843ebd244aff74edd4e7f1fe6098361b48b6f021b668a67ca506b8fd2c6bc"
+      }
+    },
+    {
+      "name": "f2-lp20-lpx-singles",
+      "kind": "compiled",
+      "buildId": "dev/lpx-units_p1-gbuild/llama3_2-1b-lpx-lp20/20261027082021",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "420cf8998f09d40900fa7481e138b2f0d1d017efdd2bdf033295078a362b3721",
+        "execution.v1.capnp.bin": "434577bf34361a5f394e4a06554397833a816f7ecb256765f3256cd5fbac5637",
+        "expected-placement.json": "589c3e5979b094b87e364fecce0560687ba5667034d60356a36d6f49269ca285"
+      }
+    },
+    {
+      "name": "f3-lp20-lpx-chain",
+      "kind": "compiled",
+      "buildId": "dev/lpx-units_p1-gbuild/gpt-oss-20b-lpx-lp20/20261027081251",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "1fe2a408e760428b5dd50bcb1eb4f0996ed122cbd4c59f6852e35400a23582e1",
+        "execution.v1.capnp.bin": "ce1a6fa5cea1483c0fc37a30b89ff9d8620728277bf13769cc4098336914e2f3",
+        "expected-placement.json": "ccfc393f88fae8b472ae20f40cf5359efcc0f91dd8260c6486eb20eab12fb2e1"
+      }
+    },
+    {
+      "name": "f4-lp20-lpu-single",
+      "kind": "compiled",
+      "buildId": "dev/lpx-units_p1-gbuild/llama3_2-1b-ursa-topk-20-c2c-invoke-lp20/20261027075515",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "8a659616120395ee1188e18a62addecdf432b541b42a91f7e050071eb0a5d74a",
+        "execution.v1.capnp.bin": "db19fdcb83cdf3ef0e8cb010280c5930c8fda611f826e2054883addc5ef1d98c",
+        "expected-placement.json": "7cde51fff35da86a2de754b1e70742a5487c3741b2237d8fdbaaf7f2bd92ef8b"
+      }
+    },
+    {
+      "name": "f5-lp20-lpu-nochain",
+      "kind": "compiled",
+      "buildId": "dev/lpx-units_p1-gbuild/llama3_2-1b-ursa-topk-1-c2c-invoke-lp20/20261027075515",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "7678a077b2c2232b800cbd596f8a98db91a5244042599b3721d2bc036cd78a26",
+        "execution.v1.capnp.bin": "c4fb10ab7ae91361fafdd417eb7e5240a8b529446c5a85372989b0fb655c0189",
+        "expected-placement.json": "51d4d22a80d7573508f3d5505fcd43c311f37563b5e71a8b2025dac20cec408d"
+      }
+    },
+    {
+      "name": "f5b-lp20-lpu-chain-16c-8c",
+      "kind": "compiled",
+      "buildId": "dev/lpx-units_p1-gbuild/llama3_2-1b-ursa-16c-8c-topk-1-c2c-invoke-prop-sync-lp20/20261027075515",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "5f0c75d3ffec5a2dd5e15d4bfd229979a4f07e830c87809dfad4e23d9a087564",
+        "execution.v1.capnp.bin": "011a7dcafbe047a6b294556684a08515da455ab69b99f5b4b1ddda1e586848af",
+        "expected-placement.json": "67b2540a217fe431719bc1827c99b1c7875cfb97c251f6f3d0b190420e0f75ea"
+      }
+    },
+    {
+      "name": "f5c-lp20-lpu-nochain-2p",
+      "kind": "builder",
+      "generator": "//Groq/GBuild/test/unit:export_lpx_placement_fixtures generate",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "3f3b9a8929d593d95fb63cb9a9db326d173c916be1adf1d5c1f2c59f02e15902",
+        "execution.v1.capnp.bin": "d986cfd029494cadddf13c2e7289a5ca4f13481834ec7df408d3d833005490f9",
+        "expected-placement.json": "4966204da9774bfad0070d90078b64628d1a79c1aad1a8fc4d96d1544062d776"
+      }
+    },
+    {
+      "name": "f6-lp20-packed-4x2c",
+      "kind": "compiled",
+      "buildId": "dev/lpx-units_p1-gbuild/llama3_2-1b-4k-quasar-4x2c-4u-lp20/20261027080357",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "2beb5641e52bb44530c7e922a035b7f136f52e2e5d6583054075888d93fa07c8",
+        "execution.v1.capnp.bin": "6eb643a2b986237c137e168a0d3da830af678545a1668cb3f9544af64921734a",
+        "expected-placement.json": "4b50b2938918a7ebd19f339c01810c2cdc793d4b07530ecbc54b113f7a8d3e53"
+      }
+    },
+    {
+      "name": "f6b-lp20-packed-6x4c",
+      "kind": "compiled",
+      "buildId": "dev/lpx-units_p1-gbuild/llama3_2-1b-4k-quasar-6x4c-1u-lp20/20261027080519",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "0b8ac087d37d65d254e5aaa93f311e356784fcda7e16149e5d659416afec6674",
+        "execution.v1.capnp.bin": "8fe2037428be95042febc271c56fd1e1c17eb4998e3966d049680357fa9c6eb8",
+        "expected-placement.json": "7928998bb02e7c931a4799d5f65cabd35324db471b9c006a7a3c4574f1826523"
+      }
+    },
+    {
+      "name": "f7-lp30-lpu-single-16c",
+      "kind": "compiled",
+      "buildId": "dev/lpx-units_p1-gbuild/llama3_2-1b-16c-lp30/20261027080835",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "fb7d51dae80ab559c2020b8ecb0a0961aeb435619616a4699d03ebed371c7ad4",
+        "execution.v1.capnp.bin": "0464173017c6d1b5530d4b2fd0591a1155411082ec54ccd0a25ab0b4e39d55c5",
+        "expected-placement.json": "20dc0cfa236c1ee38c7db43301d2790591740586b3fb9f32e6c8a1eb65e4141a"
+      }
+    },
+    {
+      "name": "f8-lp30-packed-6x8c",
+      "kind": "compiled",
+      "buildId": "dev/lpx-units_p1-gbuild/llama3_2-1b-4k-quasar-6x8c-1u-lp30/20261027082941",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "225f3c64df3cc1dd8186d22c71c25c6e774b7c7139784d13ba477d0fc2337724",
+        "execution.v1.capnp.bin": "f30f7bf07922cf80d8a6a591d7ea95122882829c5bce2b815555a1e905335572",
+        "expected-placement.json": "1fa378a4308f7494e0737e5a89675f6a11f234649c92db5b70395cecfc9efc82"
+      }
+    },
+    {
+      "name": "f8b-lp30-packed-2x8c",
+      "kind": "compiled",
+      "buildId": "dev/lpx-units_p1-gbuild/llama3_2-1b-4k-quasar-2x8c-2u-lp30/20261027083434",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "5e539b84982331db9bc6165533c599ac68b946b37b08d46768d83fc01b2d1101",
+        "execution.v1.capnp.bin": "7fae1467571c3179718c5f6f8293ed2b2dd0f21e15cc429a3b3a9e8952434a93",
+        "expected-placement.json": "e81fbf5a2837eabe06d0a6ff675f9d58f78c0ea44a16317850bc991dd3967ae7"
+      }
+    },
+    {
+      "name": "f9-lp30-lpu-chain",
+      "kind": "builder",
+      "generator": "//Groq/GBuild/test/unit:export_lpx_placement_fixtures generate",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "5686f6fb79deef2b8e218d5e63ed86223561fb264a72012b8efef9ad290d8f92",
+        "execution.v1.capnp.bin": "af4309eae0915108ad6f85d87c5ecdd67fcb3454c6e6c4164faec9b12db2e70e",
+        "expected-placement.json": "e0cb71079942e079dfab06559a675b37271bf2b23f84ec9a12960c71a4567b79"
+      }
+    },
+    {
+      "name": "f9b-lp30-lpu-chain-32c",
+      "kind": "builder",
+      "generator": "//Groq/GBuild/test/unit:export_lpx_placement_fixtures generate",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "80da148f9d040c1f86d89ca852606def5151c557ef1f4d3f5b9a0fe47431b3b2",
+        "execution.v1.capnp.bin": "a752687e93c57a21e65056317b97514334d8b20fcb01f272da0e2530d813a234",
+        "expected-placement.json": "6ab61adfb25bd1c7fa79c500e912aac1e143350eace2902238ba430f0dd905de"
+      }
+    },
+    {
+      "name": "f10-lp30-lpx-16c",
+      "kind": "compiled",
+      "buildId": "dev/lpx-units_p1-gbuild/llama3_2-1b-lpx-16c-lp30/20261027081229",
+      "gbuildCommit": "46e8b53aedd5dfa921c7cbcefd67c9f6f4f2c59d",
+      "files": {
+        "deployment.v1.capnp.bin": "6fd80d8a403a7fb3fd98c77058bf12577bd43756e875bb4f23c3e2744222fbd5",
+        "execution.v1.capnp.bin": "23bde43e40e3a984d6588ae996765fe9dc52c176c9fb3783242fa7792360debd",
+        "expected-placement.json": "c30bcf7df996e666ffa203c64b3f3174f3965ccbdb4658714e19508fb15e2e3f"
+      }
+    }
+  ]
+}

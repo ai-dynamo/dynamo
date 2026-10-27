@@ -1,0 +1,38 @@
+{
+  "fixture": "f8b-lp30-packed-2x8c",
+  "description": "LP30 LPU-only packed chain on one host (llama3.2-1b-4k-quasar-2x8c-2u-lp30). Partitions 1 and 2 have 8 chips each (extent [8, 1, 1, 1]) on 16-device nodes, so the chain [1, 2] packs into one reservation of ceil(2 * 8 / 16) = 1 host: hx {1, 1, 1} and LPX partition extent [16, 1, 1, 1]. Both stages share host 0. Legacy /configs rows stay per stage (offsets 0 and 1) although only one Agent exists.",
+  "architecture": "lp30",
+  "compilationMode": "lpuOnly",
+  "devicesPerNode": 16,
+  "localPartitions": null,
+  "units": [
+    {"reservations": [{"partitionIds": [1, 2], "size": {"hx": {"traysPerHemisphere": 1, "hemispheres": 1, "racks": 1}}}], "connectors": []}
+  ],
+  "localPartitionIds": [],
+  "lpr": {
+    "partitions": [
+      {"id": "partition-000", "ordinal": 0, "compilerPartitionId": 1, "extent": [16, 1, 1, 1]}
+    ],
+    "propSyncConnectors": []
+  },
+  "agentCount": 1,
+  "agentPods": [
+    {"podIndex": 0, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 0, "groupSize": 1, "leaderPodIndex": 0}
+  ],
+  "novaStages": [
+    {"partitionId": 1, "nodeCount": 1, "podIndices": [0]},
+    {"partitionId": 2, "nodeCount": 1, "podIndices": [0]}
+  ],
+  "legacy": {
+    "lpr": {
+      "partitions": [
+        {"id": "partition-000", "ordinal": 0, "compilerPartitionId": 1, "extent": [16, 1, 1, 1]}
+      ],
+      "propSyncConnectors": [],
+      "allocationMetadata": {"arch": "lp30", "metadata_version": 1, "partition_info": {"1": {"allocation": [16, 1, 1, 1], "device": "lpu"}, "num_partitions": 1}, "prop_sync_info": {"prop_sync_pairs": [], "version": 1}, "topology": "lyra"}
+    },
+    "agentCount": 1,
+    "configMap": {"nodes_per_partition": "1\n1", "partition_ids": "1\n2", "partition_node_offsets": "0\n1", "partition_paths": "part-1\npart-2"},
+    "lpuServers": null
+  }
+}

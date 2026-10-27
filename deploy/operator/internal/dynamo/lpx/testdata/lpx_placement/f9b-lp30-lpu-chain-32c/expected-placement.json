@@ -1,0 +1,105 @@
+{
+  "fixture": "f9b-lp30-lpu-chain-32c",
+  "description": "Builder-generated LP30 LPU-only prop-sync chain of two two-tray partitions (1 and 2, 32 chips each, LYRA_LP30__HX16x8x2__32C, extent [16, 2, 1, 1]). The chain [1, 2] is one unit with two hx {2, 1, 1} reservations (4 hosts). Within a hemisphere every chip c of every tray links to chip c of every other tray, so the compiled default-dimension (INTRA_HALF_RACK) load set joins chip c of each source tray s to chip c of each target tray t: 64 pairs (16s + c -> 16t + c), sorted by source then target device. The legacy operator convention (srcHosts - 1) * 16 + i -> i keeps only the 16 pairs 16 + i -> i, so the LPR connector differs from legacy: an expected difference.",
+  "architecture": "lp30",
+  "compilationMode": "lpuOnly",
+  "devicesPerNode": 16,
+  "localPartitions": null,
+  "units": [
+    {
+      "reservations": [
+        {"partitionIds": [1], "size": {"hx": {"traysPerHemisphere": 2, "hemispheres": 1, "racks": 1}}},
+        {"partitionIds": [2], "size": {"hx": {"traysPerHemisphere": 2, "hemispheres": 1, "racks": 1}}}
+      ],
+      "connectors": [
+        {"hxPropSyncV1": {
+          "connections": [
+            {"fromDevice": 0, "toDevice": 0}, {"fromDevice": 0, "toDevice": 16}, {"fromDevice": 1, "toDevice": 1}, {"fromDevice": 1, "toDevice": 17},
+            {"fromDevice": 2, "toDevice": 2}, {"fromDevice": 2, "toDevice": 18}, {"fromDevice": 3, "toDevice": 3}, {"fromDevice": 3, "toDevice": 19},
+            {"fromDevice": 4, "toDevice": 4}, {"fromDevice": 4, "toDevice": 20}, {"fromDevice": 5, "toDevice": 5}, {"fromDevice": 5, "toDevice": 21},
+            {"fromDevice": 6, "toDevice": 6}, {"fromDevice": 6, "toDevice": 22}, {"fromDevice": 7, "toDevice": 7}, {"fromDevice": 7, "toDevice": 23},
+            {"fromDevice": 8, "toDevice": 8}, {"fromDevice": 8, "toDevice": 24}, {"fromDevice": 9, "toDevice": 9}, {"fromDevice": 9, "toDevice": 25},
+            {"fromDevice": 10, "toDevice": 10}, {"fromDevice": 10, "toDevice": 26}, {"fromDevice": 11, "toDevice": 11}, {"fromDevice": 11, "toDevice": 27},
+            {"fromDevice": 12, "toDevice": 12}, {"fromDevice": 12, "toDevice": 28}, {"fromDevice": 13, "toDevice": 13}, {"fromDevice": 13, "toDevice": 29},
+            {"fromDevice": 14, "toDevice": 14}, {"fromDevice": 14, "toDevice": 30}, {"fromDevice": 15, "toDevice": 15}, {"fromDevice": 15, "toDevice": 31},
+            {"fromDevice": 16, "toDevice": 0}, {"fromDevice": 16, "toDevice": 16}, {"fromDevice": 17, "toDevice": 1}, {"fromDevice": 17, "toDevice": 17},
+            {"fromDevice": 18, "toDevice": 2}, {"fromDevice": 18, "toDevice": 18}, {"fromDevice": 19, "toDevice": 3}, {"fromDevice": 19, "toDevice": 19},
+            {"fromDevice": 20, "toDevice": 4}, {"fromDevice": 20, "toDevice": 20}, {"fromDevice": 21, "toDevice": 5}, {"fromDevice": 21, "toDevice": 21},
+            {"fromDevice": 22, "toDevice": 6}, {"fromDevice": 22, "toDevice": 22}, {"fromDevice": 23, "toDevice": 7}, {"fromDevice": 23, "toDevice": 23},
+            {"fromDevice": 24, "toDevice": 8}, {"fromDevice": 24, "toDevice": 24}, {"fromDevice": 25, "toDevice": 9}, {"fromDevice": 25, "toDevice": 25},
+            {"fromDevice": 26, "toDevice": 10}, {"fromDevice": 26, "toDevice": 26}, {"fromDevice": 27, "toDevice": 11}, {"fromDevice": 27, "toDevice": 27},
+            {"fromDevice": 28, "toDevice": 12}, {"fromDevice": 28, "toDevice": 28}, {"fromDevice": 29, "toDevice": 13}, {"fromDevice": 29, "toDevice": 29},
+            {"fromDevice": 30, "toDevice": 14}, {"fromDevice": 30, "toDevice": 30}, {"fromDevice": 31, "toDevice": 15}, {"fromDevice": 31, "toDevice": 31}
+          ],
+          "acceptableLaneMultiplicities": [4, 2, 1]
+        }}
+      ]
+    }
+  ],
+  "localPartitionIds": [],
+  "lpr": {
+    "partitions": [
+      {"id": "partition-000", "ordinal": 0, "compilerPartitionId": 1, "extent": [16, 2, 1, 1]},
+      {"id": "partition-001", "ordinal": 1, "compilerPartitionId": 2, "extent": [16, 2, 1, 1]}
+    ],
+    "propSyncConnectors": [
+      {"fromPartitionId": "partition-000", "toPartitionId": "partition-001", "requirement": {
+        "kind": "hxPropSyncV1",
+        "connections": [
+          {"fromLogicalDevice": 0, "toLogicalDevice": 0}, {"fromLogicalDevice": 0, "toLogicalDevice": 16}, {"fromLogicalDevice": 1, "toLogicalDevice": 1}, {"fromLogicalDevice": 1, "toLogicalDevice": 17},
+          {"fromLogicalDevice": 2, "toLogicalDevice": 2}, {"fromLogicalDevice": 2, "toLogicalDevice": 18}, {"fromLogicalDevice": 3, "toLogicalDevice": 3}, {"fromLogicalDevice": 3, "toLogicalDevice": 19},
+          {"fromLogicalDevice": 4, "toLogicalDevice": 4}, {"fromLogicalDevice": 4, "toLogicalDevice": 20}, {"fromLogicalDevice": 5, "toLogicalDevice": 5}, {"fromLogicalDevice": 5, "toLogicalDevice": 21},
+          {"fromLogicalDevice": 6, "toLogicalDevice": 6}, {"fromLogicalDevice": 6, "toLogicalDevice": 22}, {"fromLogicalDevice": 7, "toLogicalDevice": 7}, {"fromLogicalDevice": 7, "toLogicalDevice": 23},
+          {"fromLogicalDevice": 8, "toLogicalDevice": 8}, {"fromLogicalDevice": 8, "toLogicalDevice": 24}, {"fromLogicalDevice": 9, "toLogicalDevice": 9}, {"fromLogicalDevice": 9, "toLogicalDevice": 25},
+          {"fromLogicalDevice": 10, "toLogicalDevice": 10}, {"fromLogicalDevice": 10, "toLogicalDevice": 26}, {"fromLogicalDevice": 11, "toLogicalDevice": 11}, {"fromLogicalDevice": 11, "toLogicalDevice": 27},
+          {"fromLogicalDevice": 12, "toLogicalDevice": 12}, {"fromLogicalDevice": 12, "toLogicalDevice": 28}, {"fromLogicalDevice": 13, "toLogicalDevice": 13}, {"fromLogicalDevice": 13, "toLogicalDevice": 29},
+          {"fromLogicalDevice": 14, "toLogicalDevice": 14}, {"fromLogicalDevice": 14, "toLogicalDevice": 30}, {"fromLogicalDevice": 15, "toLogicalDevice": 15}, {"fromLogicalDevice": 15, "toLogicalDevice": 31},
+          {"fromLogicalDevice": 16, "toLogicalDevice": 0}, {"fromLogicalDevice": 16, "toLogicalDevice": 16}, {"fromLogicalDevice": 17, "toLogicalDevice": 1}, {"fromLogicalDevice": 17, "toLogicalDevice": 17},
+          {"fromLogicalDevice": 18, "toLogicalDevice": 2}, {"fromLogicalDevice": 18, "toLogicalDevice": 18}, {"fromLogicalDevice": 19, "toLogicalDevice": 3}, {"fromLogicalDevice": 19, "toLogicalDevice": 19},
+          {"fromLogicalDevice": 20, "toLogicalDevice": 4}, {"fromLogicalDevice": 20, "toLogicalDevice": 20}, {"fromLogicalDevice": 21, "toLogicalDevice": 5}, {"fromLogicalDevice": 21, "toLogicalDevice": 21},
+          {"fromLogicalDevice": 22, "toLogicalDevice": 6}, {"fromLogicalDevice": 22, "toLogicalDevice": 22}, {"fromLogicalDevice": 23, "toLogicalDevice": 7}, {"fromLogicalDevice": 23, "toLogicalDevice": 23},
+          {"fromLogicalDevice": 24, "toLogicalDevice": 8}, {"fromLogicalDevice": 24, "toLogicalDevice": 24}, {"fromLogicalDevice": 25, "toLogicalDevice": 9}, {"fromLogicalDevice": 25, "toLogicalDevice": 25},
+          {"fromLogicalDevice": 26, "toLogicalDevice": 10}, {"fromLogicalDevice": 26, "toLogicalDevice": 26}, {"fromLogicalDevice": 27, "toLogicalDevice": 11}, {"fromLogicalDevice": 27, "toLogicalDevice": 27},
+          {"fromLogicalDevice": 28, "toLogicalDevice": 12}, {"fromLogicalDevice": 28, "toLogicalDevice": 28}, {"fromLogicalDevice": 29, "toLogicalDevice": 13}, {"fromLogicalDevice": 29, "toLogicalDevice": 29},
+          {"fromLogicalDevice": 30, "toLogicalDevice": 14}, {"fromLogicalDevice": 30, "toLogicalDevice": 30}, {"fromLogicalDevice": 31, "toLogicalDevice": 15}, {"fromLogicalDevice": 31, "toLogicalDevice": 31}
+        ],
+        "acceptableLaneMultiplicities": [4, 2, 1]
+      }}
+    ]
+  },
+  "agentCount": 4,
+  "agentPods": [
+    {"podIndex": 0, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 0, "groupSize": 4, "leaderPodIndex": 0},
+    {"podIndex": 1, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 1, "groupSize": 4, "leaderPodIndex": 0},
+    {"podIndex": 2, "unitRoot": 1, "lprPartitionId": "partition-001", "rank": 2, "groupSize": 4, "leaderPodIndex": 0},
+    {"podIndex": 3, "unitRoot": 1, "lprPartitionId": "partition-001", "rank": 3, "groupSize": 4, "leaderPodIndex": 0}
+  ],
+  "novaStages": [
+    {"partitionId": 1, "nodeCount": 2, "podIndices": [0, 1]},
+    {"partitionId": 2, "nodeCount": 2, "podIndices": [2, 3]}
+  ],
+  "legacy": {
+    "lpr": {
+      "partitions": [
+        {"id": "partition-000", "ordinal": 0, "compilerPartitionId": 1, "extent": [16, 2, 1, 1]},
+        {"id": "partition-001", "ordinal": 1, "compilerPartitionId": 2, "extent": [16, 2, 1, 1]}
+      ],
+      "propSyncConnectors": [
+        {"fromPartitionId": "partition-000", "toPartitionId": "partition-001", "requirement": {
+          "kind": "hxPropSyncV1",
+          "connections": [
+            {"fromLogicalDevice": 16, "toLogicalDevice": 0}, {"fromLogicalDevice": 17, "toLogicalDevice": 1}, {"fromLogicalDevice": 18, "toLogicalDevice": 2}, {"fromLogicalDevice": 19, "toLogicalDevice": 3},
+            {"fromLogicalDevice": 20, "toLogicalDevice": 4}, {"fromLogicalDevice": 21, "toLogicalDevice": 5}, {"fromLogicalDevice": 22, "toLogicalDevice": 6}, {"fromLogicalDevice": 23, "toLogicalDevice": 7},
+            {"fromLogicalDevice": 24, "toLogicalDevice": 8}, {"fromLogicalDevice": 25, "toLogicalDevice": 9}, {"fromLogicalDevice": 26, "toLogicalDevice": 10}, {"fromLogicalDevice": 27, "toLogicalDevice": 11},
+            {"fromLogicalDevice": 28, "toLogicalDevice": 12}, {"fromLogicalDevice": 29, "toLogicalDevice": 13}, {"fromLogicalDevice": 30, "toLogicalDevice": 14}, {"fromLogicalDevice": 31, "toLogicalDevice": 15}
+          ],
+          "acceptableLaneMultiplicities": [4, 2, 1]
+        }}
+      ],
+      "allocationMetadata": {"arch": "lp30", "metadata_version": 1, "partition_info": {"1": {"allocation": [16, 2, 1, 1], "device": "lpu"}, "2": {"allocation": [16, 2, 1, 1], "device": "lpu"}, "num_partitions": 2}, "prop_sync_info": {"prop_sync_pairs": [{"connections": [[16, 0], [17, 1], [18, 2], [19, 3], [20, 4], [21, 5], [22, 6], [23, 7], [24, 8], [25, 9], [26, 10], [27, 11], [28, 12], [29, 13], [30, 14], [31, 15]], "dest_partition": 2, "num_supported_lanes": [4, 2, 1], "source_partition": 1}], "version": 1}, "topology": "lyra"}
+    },
+    "agentCount": 4,
+    "configMap": {"nodes_per_partition": "2\n2", "partition_ids": "1\n2", "partition_node_offsets": "0\n2", "partition_paths": "part-1\npart-2"},
+    "lpuServers": null
+  }
+}
