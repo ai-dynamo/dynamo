@@ -1402,43 +1402,25 @@ mod unit_tests {
         );
     }
 
-    #[rstest::rstest]
-    #[case::attempt(true)]
-    #[case::backoff(false)]
-    #[tokio::test]
-    async fn cancellation_interrupts_startup(#[case] during_attempt: bool) {
-        use futures::FutureExt;
+    #[test]
+    fn startup_connection_respects_cancellation_during_attempt() {
         use tokio::io::AsyncReadExt;
 
-        let runtime = Runtime::from_current().unwrap();
+        let runtime = Runtime::single_threaded().unwrap();
+        let runtime_for_connect = runtime.clone();
         let token = runtime.primary_token();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = if during_attempt {
-            format!("http://{}", listener.local_addr().unwrap())
-        } else {
-            // An invalid URI fails synchronously, so polling startup once
-            // reaches the retry backoff without a timing-dependent sleep.
-            "invalid uri".to_string()
-        };
-        let options = Client::builder()
-            .etcd_url(vec![endpoint])
-            .startup_connect_timeout(Duration::from_secs(30))
-            .build()
-            .unwrap();
-        if !during_attempt {
-            assert!(
-                Client::connect_startup_attempt(&options, &runtime)
-                    .now_or_never()
-                    .expect("invalid URI must fail without waiting")
-                    .is_err()
-            );
-        }
-        let connection = Client::connect_with_startup_retry(&options, runtime);
-        tokio::pin!(connection);
+        runtime.primary().block_on(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let options = Client::builder()
+                .etcd_url(vec![format!("http://{}", listener.local_addr().unwrap())])
+                .startup_connect_timeout(Duration::from_secs(30))
+                .build()
+                .unwrap();
+            let connection = Client::connect_with_startup_retry(&options, runtime_for_connect);
+            tokio::pin!(connection);
 
-        // Keep the unresponsive peer alive until after cancellation: a
-        // disconnect must not be what wakes the pending connection attempt.
-        let _peer = if during_attempt {
+            // Keep the unresponsive peer alive until after cancellation: a
+            // disconnect must not be what wakes the pending connection attempt.
             let (mut stream, _) = tokio::select! {
                 _ = &mut connection => panic!("startup completed before cancellation"),
                 accepted = listener.accept() => accepted.unwrap(),
@@ -1450,20 +1432,52 @@ mod unit_tests {
                 received = stream.read(&mut bytes) => assert!(received.unwrap() > 0),
                 _ = tokio::time::sleep(Duration::from_secs(5)) => panic!("startup sent no protocol bytes"),
             }
-            Some(stream)
-        } else {
-            assert!(futures::poll!(&mut connection).is_pending());
-            None
-        };
 
-        token.cancel();
-        let result = tokio::time::timeout(Duration::from_millis(500), &mut connection)
-            .await
-            .expect("cancellation must interrupt startup before its deadline or retry backoff");
-        match result {
-            Err(error) => assert_eq!(error.to_string(), "etcd startup connection cancelled"),
-            Ok(_) => panic!("cancelled startup unexpectedly succeeded"),
-        }
+            token.cancel();
+            let result = tokio::time::timeout(Duration::from_millis(500), &mut connection)
+                .await
+                .expect("cancellation must interrupt the pending startup attempt before its deadline");
+            match result {
+                Err(error) => assert_eq!(error.to_string(), "etcd startup connection cancelled"),
+                Ok(_) => panic!("cancelled startup unexpectedly succeeded"),
+            }
+        });
+    }
+
+    #[test]
+    fn startup_connection_respects_cancellation_during_backoff() {
+        use futures::FutureExt;
+
+        let runtime = Runtime::single_threaded().unwrap();
+        let runtime_for_connect = runtime.clone();
+        let token = runtime.primary_token();
+        runtime.primary().block_on(async move {
+            // An invalid URI fails synchronously, so polling startup once
+            // reaches the retry backoff without a timing-dependent sleep.
+            let options = Client::builder()
+                .etcd_url(vec!["invalid uri".to_string()])
+                .startup_connect_timeout(Duration::from_secs(30))
+                .build()
+                .unwrap();
+            assert!(
+                Client::connect_startup_attempt(&options, &runtime_for_connect)
+                    .now_or_never()
+                    .expect("invalid URI must fail without waiting")
+                    .is_err()
+            );
+            let connection = Client::connect_with_startup_retry(&options, runtime_for_connect);
+            tokio::pin!(connection);
+            assert!(futures::poll!(&mut connection).is_pending());
+
+            token.cancel();
+            let result = tokio::time::timeout(Duration::from_millis(500), &mut connection)
+                .await
+                .expect("cancellation must interrupt startup before the retry backoff completes");
+            match result {
+                Err(error) => assert_eq!(error.to_string(), "etcd startup connection cancelled"),
+                Ok(_) => panic!("cancelled startup unexpectedly succeeded"),
+            }
+        });
     }
 
     #[test]
