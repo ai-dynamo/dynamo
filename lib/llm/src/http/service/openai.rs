@@ -1178,6 +1178,19 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     }
 }
 
+fn request_id_annotation<T>(
+    annotations: Option<Vec<String>>,
+    request_id: &str,
+) -> Option<Annotated<T>> {
+    if !annotations?
+        .iter()
+        .any(|annotation| annotation == ANNOTATION_REQUEST_ID)
+    {
+        return None;
+    }
+    Annotated::from_annotation(ANNOTATION_REQUEST_ID, &request_id).ok()
+}
+
 fn runtime_lora_error_response(error: RuntimeLoraError) -> ErrorResponse {
     match error {
         RuntimeLoraError::InvalidModelId => ErrorMessage::from_http_error(
@@ -1485,22 +1498,7 @@ async fn completions_single(
         response
     });
 
-    let annotations = annotations.map_or(Vec::new(), |annotations| {
-        annotations
-            .iter()
-            .filter_map(|annotation| {
-                if annotation == ANNOTATION_REQUEST_ID {
-                    Annotated::<NvCreateCompletionResponse>::from_annotation(
-                        ANNOTATION_REQUEST_ID,
-                        &request_id,
-                    )
-                    .ok()
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-    });
+    let annotations = request_id_annotation(annotations, &request_id);
 
     // apply any annotations to the front of the stream
     let stream = stream::iter(annotations).chain(stream);
@@ -1875,25 +1873,10 @@ async fn completions_batch(
     // monitor kills, so the monitor below observes the same stop signal.
     let ctx = parent_ctx;
 
-    let annotations_vec = annotations.map_or(Vec::new(), |annotations| {
-        annotations
-            .iter()
-            .filter_map(|annotation| {
-                if annotation == ANNOTATION_REQUEST_ID {
-                    Annotated::<NvCreateCompletionResponse>::from_annotation(
-                        ANNOTATION_REQUEST_ID,
-                        &request_id,
-                    )
-                    .ok()
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-    });
+    let annotations = request_id_annotation(annotations, &request_id);
 
     // apply any annotations to the front of the stream
-    let merged_stream = stream::iter(annotations_vec).chain(merged_stream);
+    let merged_stream = stream::iter(annotations).chain(merged_stream);
 
     if streaming {
         // For streaming, we'll drop the http_queue_guard on the first token
@@ -3835,18 +3818,7 @@ async fn chat_completions(
     });
 
     // prepare any requested annotations
-    let annotations = annotations.map_or(Vec::new(), |annotations| {
-        annotations
-            .iter()
-            .filter_map(|annotation| {
-                if annotation == ANNOTATION_REQUEST_ID {
-                    Annotated::from_annotation(ANNOTATION_REQUEST_ID, &request_id).ok()
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-    });
+    let annotations = request_id_annotation(annotations, &request_id);
 
     // apply any annotations to the front of the stream
     let stream = stream::iter(annotations).chain(stream);
@@ -9839,6 +9811,38 @@ mod tests {
             assert_eq!(error_response.1.message, "Bad Request");
             assert!(!error_response.1.message.contains("bad input from client"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_request_id_annotations_do_not_hide_backend_error() {
+        use futures::stream;
+
+        let annotations = request_id_annotation::<serde_json::Value>(
+            Some(vec![ANNOTATION_REQUEST_ID.to_string(); 32]),
+            "req-123",
+        )
+        .into_iter()
+        .collect::<Vec<_>>();
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations[0].event.as_deref(), Some(ANNOTATION_REQUEST_ID));
+        assert_eq!(
+            annotations[0].comment,
+            Some(vec![r#""req-123""#.to_string()])
+        );
+        let error = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec![r#"{"message":"private","code":400}"#.to_string()]),
+            error: None,
+        };
+        let events = stream::iter(annotations).chain(stream::once(async { error }));
+        let response =
+            match check_for_backend_error(events, BackendErrorCheck::UntilFirstEvent).await {
+                Err(response) => response,
+                Ok(_) => panic!("duplicate annotations must not hide the backend error"),
+            };
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
