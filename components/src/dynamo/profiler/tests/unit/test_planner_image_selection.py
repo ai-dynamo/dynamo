@@ -86,18 +86,14 @@ def _main_container(component: dict) -> dict:
             "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3",
         ),
         (
-            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:deadbeef",
-            "nvcr.io/nvidia/ai-dynamo/dynamo-planner@sha256:deadbeef",
-        ),
-        (
             "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3@sha256:deadbeef",
-            "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3@sha256:deadbeef",
+            "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3",
         ),
     ],
 )
-def test_derive_planner_image_preserves_registry_tag_and_digest(
+def test_derive_planner_image_uses_the_shared_release_tag(
     image: str, expected: str
-):
+) -> None:
     assert derive_planner_image(image) == expected
 
 
@@ -110,21 +106,31 @@ def test_derive_planner_image_preserves_registry_tag_and_digest(
             "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
         ),
         (
-            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:deadbeef",
-            "sglang",
-            "nvcr.io/nvidia/ai-dynamo/sglang-runtime@sha256:deadbeef",
-        ),
-        (
             "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3@sha256:deadbeef",
             "trtllm",
-            "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.3@sha256:deadbeef",
+            "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.3",
         ),
     ],
 )
-def test_derive_backend_image_preserves_registry_tag_and_digest(
+def test_derive_backend_image_uses_the_shared_release_tag(
     image: str, backend: str, expected: str
-):
+) -> None:
     assert derive_backend_image(image, backend) == expected
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["planner", "backend"],
+)
+def test_sibling_image_derivation_rejects_digest_only_references(
+    target: str,
+) -> None:
+    image = "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:deadbeef"
+    with pytest.raises(ValueError, match="shared release tag"):
+        if target == "planner":
+            derive_planner_image(image)
+        else:
+            derive_backend_image(image, "vllm")
 
 
 def test_add_planner_to_config_uses_dynamo_planner_image():
