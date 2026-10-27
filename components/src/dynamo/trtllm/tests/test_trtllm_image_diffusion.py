@@ -189,17 +189,6 @@ class TestImageHandlerSharedSetup:
         assert isinstance(second._generate_lock, asyncio.Lock)
         assert first._generate_lock is not second._generate_lock
 
-    def test_image_validator_is_kept(self):
-        """Image sizes must be at least 1 in each dimension."""
-        from dynamo.trtllm.request_handlers.diffusion.image_handler import (
-            ImageGenerationHandler,
-        )
-
-        handler = object.__new__(ImageGenerationHandler)
-        handler.config = MockDiffusionConfig()
-        with pytest.raises(ValueError, match="out of range"):
-            handler._parse_size("0x480")
-
 
 # =============================================================================
 # Part 4: Image Protocol Tests

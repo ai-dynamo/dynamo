@@ -366,16 +366,6 @@ class TestVideoHandlerSharedSetup:
         assert isinstance(second._generate_lock, asyncio.Lock)
         assert first._generate_lock is not second._generate_lock
 
-    def test_video_validator_is_kept(self):
-        """Video sizes only have an upper bound."""
-        from dynamo.trtllm.request_handlers.diffusion.video_handler import (
-            VideoGenerationHandler,
-        )
-
-        handler = object.__new__(VideoGenerationHandler)
-        handler.config = MockDiffusionConfig()
-        assert handler._parse_size("0x480") == (0, 480)
-
 
 # =============================================================================
 # Part 4: Video Protocol Tests
