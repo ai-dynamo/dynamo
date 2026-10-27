@@ -1,5 +1,17 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Load the BFL NVFP4 single-file checkpoint into a diffusers Flux2Transformer2DModel.
 
 diffusers 0.39's from_single_file converter is written for the BF16 checkpoint and
@@ -24,6 +36,7 @@ scales.
 import json
 
 import torch
+from safetensors import safe_open
 from safetensors.torch import load_file
 
 BLOCK = 16
@@ -41,10 +54,7 @@ def load_nvfp4_state(ckpt_path, verbose=True):
     """Return (base_sd, quant) where quant maps diffusers module path -> dict of parts."""
     raw = load_file(ckpt_path)
 
-    # Which layers are quantized, per the checkpoint's own metadata.
-    import safetensors
-
-    with safetensors.safe_open(ckpt_path, framework="pt") as f:
+    with safe_open(ckpt_path, framework="pt") as f:
         meta = f.metadata() or {}
     qmeta = json.loads(meta.get("_quantization_metadata", '{"layers":{}}'))["layers"]
     qlayers = {k for k, v in qmeta.items() if v.get("format") == "nvfp4"}
@@ -142,20 +152,13 @@ def build_nvfp4_transformer(
     model = model.to_empty(device=device)
     model = model.to(torch.bfloat16)
 
-    # 1) load the unquantized (bf16) parameters
     missing, unexpected = model.load_state_dict(base_sd, strict=False, assign=True)
-    missing = [m for m in missing if m.rsplit(".", 1)[0] not in quant]
-    if verbose:
-        print(
-            f"[nvfp4] base load: {len(missing)} missing (non-quant), "
-            f"{len(unexpected)} unexpected"
+    missing = sorted(set(missing) - {f"{path}.weight" for path in quant})
+    if missing or unexpected:
+        raise ValueError(
+            f"Checkpoint/config mismatch: missing={missing}, unexpected={unexpected}"
         )
-        if missing[:5]:
-            print("        missing sample:", missing[:5])
-        if unexpected[:5]:
-            print("        unexpected sample:", unexpected[:5])
 
-    # 2) install NVFP4 weights
     mods = dict(model.named_modules())
     installed = 0
     for path, parts in quant.items():
@@ -163,6 +166,14 @@ def build_nvfp4_transformer(
         if m is None:
             raise KeyError(f"module {path} not found in diffusers model")
         out_f, in_f_packed = parts["qdata"].shape
+        if getattr(m, "bias", None) is not None:
+            raise RuntimeError(f"{path} unexpectedly has a bias")
+        if m.in_features != in_f_packed * 2:
+            raise ValueError(
+                f"{path}: in_features {m.in_features} != {in_f_packed * 2}"
+            )
+        if m.out_features != out_f:
+            raise ValueError(f"{path}: out_features {m.out_features} != {out_f}")
         # The activation global scale is carried on the tensor itself
         # (act_per_tensor_scale); the kwargs object only holds layout flags.
         # ModelOpt's `input_scale` is amax/(FP4_MAX*E4M3_MAX), the same
@@ -191,14 +202,6 @@ def build_nvfp4_transformer(
             use_triton_kernel=False,
             act_quant_kwargs=act_kw,
         )
-        if getattr(m, "bias", None) is not None:
-            raise RuntimeError(f"{path} unexpectedly has a bias")
-        assert (
-            m.in_features == in_f_packed * 2
-        ), f"{path}: in_features {m.in_features} != {in_f_packed*2}"
-        assert (
-            m.out_features == out_f
-        ), f"{path}: out_features {m.out_features} != {out_f}"
         _set_module(model, path, NVFP4Linear(t, m.in_features, m.out_features))
         installed += 1
 

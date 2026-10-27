@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """FLUX.2-klein diffusers example worker for Dynamo's /v1/images endpoints.
 
 Serves text-to-image and image-to-image (reference-image editing) from a single
@@ -17,16 +29,19 @@ policy variables apply. The reference is resized to the requested output size so
 that ``torch.compile`` sees one shape per mode.
 
 One request is processed at a time because the diffusers pipeline is not
-re-entrant.
+re-entrant. Excess requests are rejected before reference images are loaded.
 """
 
 import argparse
 import asyncio
 import base64
+import inspect
 import io
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any
 
 import torch
@@ -47,7 +62,7 @@ from dynamo.llm import (  # type: ignore[attr-defined]
     WorkerType,
     register_model,
 )
-from dynamo.llm.exceptions import InvalidArgument
+from dynamo.llm.exceptions import InvalidArgument, WorkerOverloaded
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)
@@ -86,14 +101,25 @@ class FluxImageBackend:
         self.pipe: Any = None
         self.supports_edit = False
         self._image_loader = ImageLoader()
-        self._generate_lock = asyncio.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._request_task: asyncio.Task[dict[str, Any]] | None = None
 
     async def initialize_model(self) -> None:
         loop = asyncio.get_running_loop()
-        self.pipe = await loop.run_in_executor(None, self._load)
+        self.pipe = await loop.run_in_executor(self._executor, self._load)
         if self.args.warmup > 0:
-            await loop.run_in_executor(None, self._warmup)
+            await loop.run_in_executor(self._executor, self._warmup)
         logger.info("Pipeline ready (%s)", self.model_name)
+
+    async def close(self) -> None:
+        if self._request_task is not None:
+            await asyncio.gather(self._request_task, return_exceptions=True)
+        await asyncio.to_thread(self._executor.shutdown, wait=True)
+
+    def _request_finished(self, task: asyncio.Task[dict[str, Any]]) -> None:
+        self._request_task = None
+        if not task.cancelled():
+            task.exception()
 
     def _load(self) -> Any:
         from diffusers import Flux2KleinPipeline
@@ -136,8 +162,6 @@ class FluxImageBackend:
 
         # Fail at startup, not on the first edit request, if this diffusers
         # build's pipeline does not accept a reference image.
-        import inspect
-
         self.supports_edit = "image" in inspect.signature(pipe.__call__).parameters
         if not self.supports_edit:
             logger.warning(
@@ -200,7 +224,6 @@ class FluxImageBackend:
         steps: int,
         guidance_scale: float,
         seed: int | None,
-        negative_prompt: str | None = None,
     ) -> Image.Image:
         kwargs: dict[str, Any] = dict(
             prompt=prompt,
@@ -212,8 +235,6 @@ class FluxImageBackend:
         )
         if image is not None:
             kwargs["image"] = image
-        if negative_prompt is not None:
-            kwargs["negative_prompt"] = negative_prompt
         if seed is not None:
             kwargs["generator"] = torch.Generator(device="cuda").manual_seed(seed)
         return self.pipe(**kwargs).images[0]
@@ -224,16 +245,29 @@ class FluxImageBackend:
         image.save(buf, format=SUPPORTED_OUTPUT_FORMATS[output_format])
         return buf.getvalue()
 
-    # ── Dynamo endpoint ───────────────────────────────────────────────────────
-
     @dynamo_endpoint(NvCreateImageRequest, NvImagesResponse)
     async def create_image(self, request: NvCreateImageRequest):
         """Generate one image (t2i, or i2i when ``input_reference`` is set)."""
         if self.pipe is None:
             raise RuntimeError("Pipeline is not initialized")
+        if self._request_task is not None:
+            raise WorkerOverloaded(
+                "Image worker is busy; retry after the current request"
+            )
 
+        # Cancellation of the caller must not release admission while work continues.
+        task = asyncio.create_task(self._create_image(request))
+        self._request_task = task
+        task.add_done_callback(self._request_finished)
+        yield await asyncio.shield(task)
+
+    async def _create_image(self, request: NvCreateImageRequest) -> dict[str, Any]:
         # Validation failures are the client's fault -> InvalidArgument (HTTP 400).
         nvext = request.nvext
+        if nvext and nvext.negative_prompt is not None:
+            raise InvalidArgument("negative_prompt is not supported by this example")
+        if request.background is not None:
+            raise InvalidArgument("background is not supported by this example")
         try:
             width, height = self._parse_size(request.size)
         except ValueError as exc:
@@ -266,7 +300,6 @@ class FluxImageBackend:
             else self.args.default_guidance_scale
         )
         seed = nvext.seed if nvext and nvext.seed is not None else None
-        negative_prompt = nvext.negative_prompt if nvext else None
 
         reference: Image.Image | None = None
         if request.input_reference is not None:
@@ -279,7 +312,9 @@ class FluxImageBackend:
             except (ValueError, Image.DecompressionBombError) as exc:
                 # Keep URLs and inline image data out of the client error.
                 raise InvalidArgument("Failed to load input_reference") from exc
-            reference = reference.resize((width, height), Image.LANCZOS)
+            reference = await asyncio.to_thread(
+                reference.resize, (width, height), Image.LANCZOS
+            )
 
         kind = "i2i" if reference is not None else "t2i"
         logger.info(
@@ -291,9 +326,10 @@ class FluxImageBackend:
             request.prompt[:60],
         )
 
-        async with self._generate_lock:
-            started = time.perf_counter()
-            image = await asyncio.to_thread(
+        started = time.perf_counter()
+        image = await asyncio.get_running_loop().run_in_executor(
+            self._executor,
+            partial(
                 self._run,
                 prompt=request.prompt,
                 image=reference,
@@ -302,13 +338,13 @@ class FluxImageBackend:
                 steps=steps,
                 guidance_scale=guidance_scale,
                 seed=seed,
-                negative_prompt=negative_prompt,
-            )
-            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            ),
+        )
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
         logger.info("create_image(%s) done in %.1f ms", kind, elapsed_ms)
 
         payload = await asyncio.to_thread(self._encode, image, output_format)
-        yield NvImagesResponse(
+        return NvImagesResponse(
             created=int(time.time()),
             data=[ImageData(b64_json=base64.b64encode(payload).decode())],
             size=f"{width}x{height}",
@@ -321,9 +357,6 @@ class FluxImageBackend:
                 )
             ),
         ).model_dump(exclude_none=True)
-
-
-# ── Dynamo wiring ─────────────────────────────────────────────────────────────
 
 
 async def _register_model(endpoint, model_name: str) -> None:
@@ -348,12 +381,14 @@ async def backend_worker(runtime: DistributedRuntime, args: argparse.Namespace) 
     logger.info("Serving endpoint %s/backend/generate", namespace_name)
 
     backend = FluxImageBackend(args)
-    await backend.initialize_model()
-
-    await asyncio.gather(
-        endpoint.serve_endpoint(backend.create_image),  # type: ignore[arg-type]
-        _register_model(endpoint, backend.model_name),
-    )
+    try:
+        await backend.initialize_model()
+        await asyncio.gather(
+            endpoint.serve_endpoint(backend.create_image),  # type: ignore[arg-type]
+            _register_model(endpoint, backend.model_name),
+        )
+    finally:
+        await backend.close()
 
 
 def _parse_args() -> argparse.Namespace:
@@ -424,6 +459,10 @@ def _parse_args() -> argparse.Namespace:
             parser.error(f"--{name.replace('_', '-')} must be > 0")
     if args.warmup < 0:
         parser.error("--warmup must be >= 0")
+    if args.default_num_inference_steps > args.max_num_inference_steps:
+        parser.error(
+            "--default-num-inference-steps must not exceed --max-num-inference-steps"
+        )
     return args
 
 
