@@ -212,10 +212,8 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 	return nil
 }
 
-// ReconcileUnlessWaitingForCheckpoint reconciles scaling adapters after a
-// workload program has applied checkpoint startup readiness. It skips them
-// only while the graph is pending on a checkpoint, so other pending reasons
-// and failures still reconcile adapters.
+// ReconcileUnlessWaitingForCheckpoint runs after checkpoint readiness is applied and skips
+// adapters only while pending on a checkpoint; other pending reasons and failures reconcile.
 func (r *dgdScalingAdaptersReconciler) ReconcileUnlessWaitingForCheckpoint(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
