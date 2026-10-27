@@ -517,11 +517,3 @@ temporarily set `UCX_LOG_LEVEL=info` and check the HCA, TCP interface, and KV-pa
 
 Compare latency, throughput, memory placement, and KV-transfer performance with the same workload
 before and after binding.
-
-KVBM attempts NUMA-local pinned host-cache allocation by default, using a worker thread pinned
-to the GPU's NUMA node to allocate and touch pages. It doesn't set a memory policy, so an inherited
-`--membind` or `--preferred` policy still affects placement. The thread also needs CPUs on that
-node in the allocation's allowed set; otherwise pinning fails and logs an error. Check actual
-page placement under load. Set `DYN_MEMORY_DISABLE_NUMA=1` to disable this allocation path;
-`DYN_KVBM_ENABLE_NUMA` is deprecated and has no effect. See
-[KVBM NUMA host memory](../../reference/components/kvbm-configuration.mdx#numa-host-memory).
