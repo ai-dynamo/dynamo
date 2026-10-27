@@ -255,8 +255,12 @@ async def test_runtime_snapshot_rejects_invalid_root(monkeypatch, tmp_path, kind
 async def test_runtime_snapshot_returns_canonical_path(monkeypatch, tmp_path):
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
+    nested = snapshot / "nested"
+    nested.mkdir()
+    noncanonical = nested / ".."
+    assert noncanonical != snapshot
 
-    result = await _resolve_snapshot(monkeypatch, tmp_path, snapshot / ".")
+    result = await _resolve_snapshot(monkeypatch, tmp_path, noncanonical)
 
     assert result.local_path == snapshot.resolve()
 
