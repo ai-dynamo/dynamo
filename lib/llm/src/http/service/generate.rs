@@ -159,11 +159,12 @@ fn dynamo_routing_priority(vllm_priority: i32) -> i32 {
     vllm_priority.saturating_neg()
 }
 
-fn generate_dispatch_span(request_id: &str, model: &str) -> tracing::Span {
+fn generate_dispatch_span(request_id: &str, public_request_id: &str, model: &str) -> tracing::Span {
     tracing::info_span!(
         target: "request_span",
         "generate",
         request_id = %request_id,
+        x_request_id = %public_request_id,
         model = %model,
         input_tokens = tracing::field::Empty,
         output_tokens = tracing::field::Empty,
@@ -900,7 +901,11 @@ async fn handler_generate(
         .to_string();
     let tracker = Arc::new(RequestTracker::new());
     tracker.record_isl(request.token_ids.len(), None);
-    let dispatch_span = generate_dispatch_span(&request_context.request_id, &metric_model);
+    let dispatch_span = generate_dispatch_span(
+        &request_context.request_id,
+        &request_context.public_request_id,
+        &metric_model,
+    );
     let mut metric_lifecycle = dispatch_span.in_scope(|| {
         GenerateMetricLifecycle::new(
             state.as_ref(),
@@ -1588,7 +1593,7 @@ pub(crate) mod tests {
     }
 
     #[derive(Clone)]
-    struct RequestIdCaptureLayer(Arc<Mutex<Option<String>>>);
+    struct RequestIdCaptureLayer(Arc<Mutex<RequestIdVisitor>>);
 
     impl<S: Subscriber> Layer<S> for RequestIdCaptureLayer {
         fn on_new_span(
@@ -1600,7 +1605,7 @@ pub(crate) mod tests {
             let mut visitor = RequestIdVisitor::default();
             attrs.record(&mut visitor);
             if visitor.request_id.is_some() {
-                *self.0.lock().unwrap() = visitor.request_id;
+                *self.0.lock().unwrap() = visitor;
             }
         }
     }
@@ -1608,18 +1613,23 @@ pub(crate) mod tests {
     #[derive(Default)]
     struct RequestIdVisitor {
         request_id: Option<String>,
+        x_request_id: Option<String>,
     }
 
     impl Visit for RequestIdVisitor {
         fn record_str(&mut self, field: &Field, value: &str) {
             if field.name() == "request_id" {
                 self.request_id = Some(value.to_string());
+            } else if field.name() == "x_request_id" {
+                self.x_request_id = Some(value.to_string());
             }
         }
 
         fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
             if field.name() == "request_id" {
                 self.request_id = Some(format!("{value:?}"));
+            } else if field.name() == "x_request_id" {
+                self.x_request_id = Some(format!("{value:?}"));
             }
         }
     }
@@ -2664,16 +2674,25 @@ pub(crate) mod tests {
 
     #[test]
     fn generate_dispatch_span_uses_resolved_request_id() {
-        let captured_request_id = Arc::new(Mutex::new(None));
+        let captured_request_id = Arc::new(Mutex::new(RequestIdVisitor::default()));
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(RequestIdCaptureLayer(captured_request_id.clone())),
         );
 
-        let dispatch_span = generate_dispatch_span("header-request", "test-model");
+        let context = resolve_generate_request_context(&HeaderMap::new(), Some("body-request"));
+        let dispatch_span = generate_dispatch_span(
+            &context.request_id,
+            &context.public_request_id,
+            "test-model",
+        );
 
         assert_eq!(
-            captured_request_id.lock().unwrap().as_deref(),
-            Some("header-request")
+            captured_request_id.lock().unwrap().request_id.as_deref(),
+            Some(context.request_id.as_str())
+        );
+        assert_eq!(
+            captured_request_id.lock().unwrap().x_request_id.as_deref(),
+            Some("body-request")
         );
         let fields = dispatch_span
             .metadata()
@@ -2681,6 +2700,7 @@ pub(crate) mod tests {
             .fields();
         for field in [
             "request_id",
+            "x_request_id",
             "model",
             "input_tokens",
             "output_tokens",

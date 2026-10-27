@@ -367,7 +367,11 @@ async fn handler(
     let dispatch_span = tracing::info_span!(
         target: "request_span",
         "generate",
-        request_id = %request_id
+        request_id = %request_id,
+        x_request_id = headers
+            .get(X_REQUEST_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or(&request_context.public_request_id),
     );
     let response = match tokio::spawn(
         dispatch(
