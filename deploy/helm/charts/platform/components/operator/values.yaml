@@ -36,7 +36,9 @@ dgdrV1Beta2:
   # Candidate objects are persisted in etcd; incompatible schema changes may make
   # them unreadable or block future CRD upgrades. When false, the CRD init container
   # installs the legacy Request schemas without v1beta2 conversion envelopes and
-  # omits Run and Candidate. The operator does not reconcile v1beta2 requests.
+  # omits Run and Candidate. When true, the operator also reconciles v1beta2
+  # Requests into Runs; the controller that executes a Run is not part of the
+  # operator yet.
   enabled: false
 
 # Environment variables to pass to operator Deployment.
@@ -115,6 +117,14 @@ controllerManager:
     # derives dynamo-planner:<chart appVersion>, which only exists for GA
     # releases.
     dgdrDefaultImage: ""
+    # AISimulate runner image put into v1beta2 DGDR spec.aisimulate.image when unset.
+    # Empty derives nvcr.io/nvidia/ai-dynamo/dynamo-planner:<operator-version>.
+    dgdrAISimulateDefaultImage: ""
+    # Compatibility version of dgdrAISimulateDefaultImage, put into v1beta2 DGDR
+    # spec.aisimulate.versionOverride together with that image. Required when the image tag
+    # is not a semantic version (for example nightly); the operator refuses to start without
+    # it. A Request that names its own image never receives it.
+    dgdrAISimulateDefaultVersionOverride: ""
     resources:
       limits:
         cpu: 1024m
