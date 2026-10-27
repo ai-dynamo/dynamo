@@ -317,9 +317,11 @@ intermediate minor release for larger changes. For example, upgrade `1.2.x` to `
 When `dynamo-operator.enabled=true`, the Helm chart checks this path in a read-only
 `pre-install,pre-upgrade` Job before it changes the operator Deployment. A first installation has
 no existing Deployment and passes. Helm and Flux run the hook directly; Argo CD maps it to a
-PreSync hook. Raw `kubectl apply`, Argo CD selective sync, or disabled hooks do not enforce the
-check. When the operator subchart is disabled, the hook is omitted because the separately managed
-operator release owns its upgrade policy.
+PreSync hook. Flux requires helm-controller v1.7.0 or later; Flux v2.10.0 is the first Flux release
+that includes a compatible controller. Earlier helm-controller versions panic on the hook's
+`helm.sh/hook-output-log-policy` annotation. Raw `kubectl apply`, Argo CD selective sync, or
+disabled hooks do not enforce the check. When the operator subchart is disabled, the hook is omitted
+because the separately managed operator release owns its upgrade policy.
 
 If you have separately validated an unsupported forward upgrade, set
 `unsupportedUpgradeOverride` to the currently installed minor version:
@@ -351,7 +353,8 @@ image from an internal registry. These are shared Job defaults. Override an indi
 setting. Unspecified fields inherit the shared value; compound fields replace that value rather
 than merging recursively. A failed Job is retained so you can inspect its logs. The supporting
 ServiceAccount, Role, and RoleBinding remain until the next attempt and require manual removal when
-retiring the release.
+retiring the release. With Flux, inspect the retained Job Pod logs directly because helm-controller
+does not forward hook output to its controller logs or events.
 
 ## Alternative: Install with AICR
 

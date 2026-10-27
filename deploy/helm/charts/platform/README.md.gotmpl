@@ -47,10 +47,12 @@ intermediate minor release; skipping a minor release is unsupported.
 
 When `dynamo-operator.enabled=true`, the chart runs a read-only `pre-install,pre-upgrade` Job before
 changing the operator Deployment. A first installation passes because no existing Deployment is
-present. Helm and Flux execute the hook directly; Argo CD maps it to PreSync. Raw `kubectl apply`,
-Argo CD selective sync, or disabled hooks do not enforce the check. When the operator subchart is
-disabled, the hook is omitted because the separately managed operator release owns its upgrade
-policy.
+present. Helm and Flux execute the hook directly; Argo CD maps it to PreSync. Flux requires
+helm-controller v1.7.0 or later; Flux v2.10.0 is the first Flux release that includes a compatible
+controller. Earlier helm-controller versions panic on the hook's
+`helm.sh/hook-output-log-policy` annotation. Raw `kubectl apply`, Argo CD selective sync, or
+disabled hooks do not enforce the check. When the operator subchart is disabled, the hook is
+omitted because the separately managed operator release owns its upgrade policy.
 
 The Job reads the installed operator version and rejects larger minor jumps and major-version
 changes. After separately validating an unsupported transition, authorize only that source minor
@@ -87,6 +89,22 @@ categories without migration notes recorded here are omitted. For supported Grov
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
 ### v1.7.0
+
+#### Deployment Tool Compatibility
+
+##### Flux Requires helm-controller v1.7.0 or Later
+
+**Change:** Upgrade preflight Jobs use the `helm.sh/hook-output-log-policy: hook-failed`
+annotation. Flux support requires helm-controller v1.7.0 or later, which includes the fix for
+[fluxcd/helm-controller#1604](https://github.com/fluxcd/helm-controller/pull/1604). Flux v2.10.0
+is the first Flux release that includes a compatible controller.
+
+**Affected:** Flux installations using helm-controller v1.6.5 or earlier. Those versions panic
+when they process a hook with this annotation.
+
+**Action:** Upgrade to Flux v2.10.0 or later, or helm-controller v1.7.0 or later, before upgrading
+Dynamo. If a preflight Job fails, inspect the retained Job Pod logs. The helm-controller fix
+prevents the panic but does not forward hook output to controller logs or events.
 
 #### Runtime Compatibility
 
