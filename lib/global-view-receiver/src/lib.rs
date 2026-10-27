@@ -39,12 +39,12 @@ struct RelayStream<P> {
 ///
 /// `R` identifies one source, `P` identifies a key, and `V` is its value. A key is visible while
 /// at least one current source advertises it.
-pub struct RelayPoolViews<R, P, V> {
+pub struct PoolRelayViews<R, P, V> {
     relays: HashMap<R, RelayStream<P>>,
     pools: HashMap<P, HashMap<R, V>>,
 }
 
-impl<R, P, V> Default for RelayPoolViews<R, P, V> {
+impl<R, P, V> Default for PoolRelayViews<R, P, V> {
     fn default() -> Self {
         Self {
             relays: HashMap::new(),
@@ -53,7 +53,7 @@ impl<R, P, V> Default for RelayPoolViews<R, P, V> {
     }
 }
 
-impl<R: Clone + Eq + Hash, P: Clone + Eq + Hash, V> RelayPoolViews<R, P, V> {
+impl<R: Clone + Eq + Hash, P: Clone + Eq + Hash, V> PoolRelayViews<R, P, V> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn one_relay_loss_does_not_brown_out_a_pool_seen_by_another() {
-        let mut receiver = RelayPoolViews::<&str, String, u64>::new();
+        let mut receiver = PoolRelayViews::<&str, String, u64>::new();
         let a = receiver.open("relay-a");
         let b = receiver.open("relay-b");
         let pool = "blue-dgd".to_owned();
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn removing_one_source_view_keeps_the_other() {
-        let mut receiver = RelayPoolViews::<&str, String, u64>::new();
+        let mut receiver = PoolRelayViews::<&str, String, u64>::new();
         let a = receiver.open("relay-a");
         let b = receiver.open("relay-b");
         let pool = String::from("blue-dgd");
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn reconnect_requires_fresh_snapshot_and_fences_the_old_stream() {
-        let mut receiver = RelayPoolViews::<&str, u64, u64>::new();
+        let mut receiver = PoolRelayViews::<&str, u64, u64>::new();
         let old = receiver.open("relay-a");
         let pool = 1;
         receiver.replace_snapshot(&old, [(pool, 10)]).unwrap();
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn reconnect_after_disconnect_rejects_the_old_token() {
-        let mut receiver = RelayPoolViews::<&str, u64, u64>::new();
+        let mut receiver = PoolRelayViews::<&str, u64, u64>::new();
         let old = receiver.open("relay-a");
         receiver.disconnect(&old).unwrap();
 
@@ -292,10 +292,10 @@ mod tests {
 
     #[test]
     fn token_from_another_receiver_is_stale() {
-        let mut first = RelayPoolViews::<&str, u64, u64>::new();
+        let mut first = PoolRelayViews::<&str, u64, u64>::new();
         let old = first.open("relay-a");
 
-        let mut second = RelayPoolViews::<&str, u64, u64>::new();
+        let mut second = PoolRelayViews::<&str, u64, u64>::new();
         let current = second.open("relay-a");
         assert_ne!(old.generation, current.generation);
         assert_eq!(second.disconnect(&old), Err(ApplyError::StaleStream));
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn invalid_snapshot_does_not_replace_the_current_view() {
-        let mut receiver = RelayPoolViews::<&str, u64, u64>::new();
+        let mut receiver = PoolRelayViews::<&str, u64, u64>::new();
         let stream = receiver.open("relay-a");
         let pool = 1;
         receiver.replace_snapshot(&stream, [(pool, 10)]).unwrap();
