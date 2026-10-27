@@ -69,28 +69,7 @@ func checkUpgradeWorkloadMatrix(t *testing.T, relative string, dgd *api.DynamoGr
 			continue
 		}
 		require.True(t, metav1.IsControlledBy(&object, dgd))
-		roles, found, err := unstructured.NestedSlice(object.Object, "spec", "roles")
-		require.NoError(t, err)
-		require.True(t, found)
-		require.Len(t, roles, len(workers))
-		seen := map[string]bool{}
-		for _, value := range roles {
-			role := value.(map[string]any)
-			name := role["name"].(string)
-			require.Contains(t, workers, name)
-			require.False(t, seen[name], "duplicate DS role %s", name)
-			seen[name] = true
-			size, found, err := unstructured.NestedInt64(role, "spec", "leaderWorkerTemplate", "size")
-			require.NoError(t, err)
-			require.True(t, found)
-			require.EqualValues(t, 2, size)
-			for _, template := range []string{"leaderTemplate", "workerTemplate"} {
-				containers, found, err := unstructured.NestedSlice(role, "spec", "leaderWorkerTemplate", template, "spec", "containers")
-				require.NoError(t, err)
-				require.True(t, found)
-				require.NotEmpty(t, containers)
-			}
-		}
+		require.NoError(t, upgradeDSRolesError(dgd, object))
 	}
 	require.Zero(t, counts["PodCliqueSet"])
 	if parts[4] == "disaggregatedset" {

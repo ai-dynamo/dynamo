@@ -96,3 +96,142 @@ func TestUpgradeLWSSize(t *testing.T) {
 		})
 	}
 }
+
+// Compare every DS role's rendered size and templates against its DGD intent, not its golden.
+func upgradeDSRolesError(dgd *api.DynamoGraphDeployment, object unstructured.Unstructured) error {
+	roles, found, err := unstructured.NestedSlice(object.Object, "spec", "roles")
+	if err != nil {
+		return fmt.Errorf("DisaggregatedSet %s has invalid roles: %w", object.GetName(), err)
+	}
+	if !found {
+		return fmt.Errorf("DisaggregatedSet %s has no roles", object.GetName())
+	}
+
+	// Derive the expected role inventory and each size from the authored components.
+	want := map[string]int64{}
+	for _, component := range dgd.Spec.Components {
+		if component.IsMultinode() {
+			want[component.ComponentName] = int64(component.Multinode.NodeCount)
+		}
+	}
+	seen := map[string]bool{}
+	for i, value := range roles {
+		role, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("DisaggregatedSet %s role %d is not an object", object.GetName(), i)
+		}
+		name, ok := role["name"].(string)
+		if !ok {
+			return fmt.Errorf("DisaggregatedSet %s role %d has no string name", object.GetName(), i)
+		}
+		nodes, ok := want[name]
+		if !ok {
+			return fmt.Errorf("DisaggregatedSet %s has unexpected role %s", object.GetName(), name)
+		}
+		if seen[name] {
+			return fmt.Errorf("DisaggregatedSet %s has duplicate role %s", object.GetName(), name)
+		}
+		seen[name] = true
+
+		// Check size and both immediate pod templates before accepting this role.
+		size, found, err := unstructured.NestedInt64(role, "spec", "leaderWorkerTemplate", "size")
+		if err != nil {
+			return fmt.Errorf("DisaggregatedSet %s role %s has invalid size: %w", object.GetName(), name, err)
+		}
+		if !found {
+			return fmt.Errorf("DisaggregatedSet %s role %s has no leaderWorkerTemplate.size", object.GetName(), name)
+		}
+		if size != nodes {
+			return fmt.Errorf("DisaggregatedSet %s role %s has size %d, want %d", object.GetName(), name, size, nodes)
+		}
+		for _, template := range []string{"leaderTemplate", "workerTemplate"} {
+			containers, _, err := unstructured.NestedSlice(role, "spec", "leaderWorkerTemplate", template, "spec", "containers")
+			if err != nil || len(containers) == 0 {
+				return fmt.Errorf("DisaggregatedSet %s role %s has no %s containers", object.GetName(), name, template)
+			}
+		}
+	}
+
+	// Every authored multinode component must have a distinct rendered role.
+	for _, component := range dgd.Spec.Components {
+		if component.IsMultinode() && !seen[component.ComponentName] {
+			return fmt.Errorf("DisaggregatedSet %s has no role %s", object.GetName(), component.ComponentName)
+		}
+	}
+	return nil
+}
+
+// upgradeDSRole constructs an independent role fixture with both pod templates.
+func upgradeDSRole(name string, size any) map[string]any {
+	template := map[string]any{}
+	for _, role := range []string{"leaderTemplate", "workerTemplate"} {
+		template[role] = map[string]any{"spec": map[string]any{
+			"containers": []any{map[string]any{"name": "main"}},
+		}}
+	}
+	if size != nil {
+		template["size"] = size
+	}
+	return map[string]any{"name": name, "spec": map[string]any{"leaderWorkerTemplate": template}}
+}
+
+func TestUpgradeDSRoles(t *testing.T) {
+	t.Log("Build separate fixtures for missing and empty leader and worker templates")
+	noLeader, noWorker := upgradeDSRole("decode", int64(3)), upgradeDSRole("decode", int64(3))
+	unstructured.RemoveNestedField(noLeader, "spec", "leaderWorkerTemplate", "leaderTemplate")
+	unstructured.RemoveNestedField(noWorker, "spec", "leaderWorkerTemplate", "workerTemplate")
+	emptyLeader, emptyWorker := upgradeDSRole("decode", int64(3)), upgradeDSRole("decode", int64(3))
+	require.NoError(t, unstructured.SetNestedSlice(emptyLeader, []any{}, "spec", "leaderWorkerTemplate", "leaderTemplate", "spec", "containers"))
+	require.NoError(t, unstructured.SetNestedSlice(emptyWorker, []any{}, "spec", "leaderWorkerTemplate", "workerTemplate", "spec", "containers"))
+
+	for _, test := range []struct {
+		name  string
+		roles any
+		want  string
+	}{
+		{name: "correct", roles: []any{upgradeDSRole("prefill", int64(2)), upgradeDSRole("decode", int64(3))}},
+		{name: "reordered", roles: []any{upgradeDSRole("decode", int64(3)), upgradeDSRole("prefill", int64(2))}},
+		{name: "lowered-to-single-node", roles: []any{upgradeDSRole("prefill", int64(1)), upgradeDSRole("decode", int64(3))}, want: "role prefill has size 1, want 2"},
+		{name: "per-component-size", roles: []any{upgradeDSRole("prefill", int64(2)), upgradeDSRole("decode", int64(2))}, want: "role decode has size 2, want 3"},
+		{name: "missing-size", roles: []any{upgradeDSRole("prefill", int64(2)), upgradeDSRole("decode", nil)}, want: "role decode has no leaderWorkerTemplate.size"},
+		{name: "invalid-size", roles: []any{upgradeDSRole("prefill", int64(2)), upgradeDSRole("decode", "3")}, want: "role decode has invalid size"},
+		{name: "missing-role", roles: []any{upgradeDSRole("prefill", int64(2))}, want: "has no role decode"},
+		{name: "duplicate-role", roles: []any{upgradeDSRole("prefill", int64(2)), upgradeDSRole("prefill", int64(2))}, want: "duplicate role prefill"},
+		{name: "unexpected-role", roles: []any{upgradeDSRole("prefill", int64(2)), upgradeDSRole("frontend", int64(3))}, want: "unexpected role frontend"},
+		{name: "missing-leader-template", roles: []any{upgradeDSRole("prefill", int64(2)), noLeader}, want: "role decode has no leaderTemplate containers"},
+		{name: "missing-worker-template", roles: []any{upgradeDSRole("prefill", int64(2)), noWorker}, want: "role decode has no workerTemplate containers"},
+		{name: "empty-leader-containers", roles: []any{upgradeDSRole("prefill", int64(2)), emptyLeader}, want: "role decode has no leaderTemplate containers"},
+		{name: "empty-worker-containers", roles: []any{upgradeDSRole("prefill", int64(2)), emptyWorker}, want: "role decode has no workerTemplate containers"},
+		{name: "not-an-object", roles: []any{"invalid"}, want: "role 0 is not an object"},
+		{name: "missing-name", roles: []any{map[string]any{}}, want: "role 0 has no string name"},
+		{name: "invalid-name", roles: []any{map[string]any{"name": int64(3)}}, want: "role 0 has no string name"},
+		{name: "missing-roles", want: "has no roles"},
+		{name: "invalid-roles", roles: "invalid", want: "has invalid roles"},
+		{name: "empty-roles", roles: []any{}, want: "has no role prefill"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Require one correctly sized DS role for each multinode component independently of goldens")
+			dgd := &api.DynamoGraphDeployment{Spec: api.DynamoGraphDeploymentSpec{
+				Components: []api.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "frontend", ComponentType: api.ComponentTypeFrontend},
+					{ComponentName: "prefill", ComponentType: api.ComponentTypePrefill, Multinode: &api.MultinodeSpec{NodeCount: 2}},
+					{ComponentName: "decode", ComponentType: api.ComponentTypeDecode, Multinode: &api.MultinodeSpec{NodeCount: 3}},
+				},
+			}}
+			object := unstructured.Unstructured{Object: map[string]any{
+				"kind": "DisaggregatedSet", "metadata": map[string]any{"name": "workers"}, "spec": map[string]any{},
+			}}
+			if test.roles != nil {
+				require.NoError(t, unstructured.SetNestedField(object.Object, test.roles, "spec", "roles"))
+			}
+
+			t.Log("Reject an invalid role graph even when its output could be accepted as a golden")
+			err := upgradeDSRolesError(dgd, object)
+			if test.want == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, test.want)
+			}
+		})
+	}
+}
