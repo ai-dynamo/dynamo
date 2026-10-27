@@ -811,15 +811,16 @@ class SelectionService:
         """Await service shutdown without blocking the Python event loop."""
         ...
 
-    def session_binding_updates(self) -> AsyncIterator[JsonLike]:
+    def session_binding_updates(self) -> AsyncIterator[List[JsonLike]]:
         """Stream session bindings this service commits or refreshes, for the
         host to broadcast to its peers.
 
+        Each item is every binding queued since the last one (at least one).
         Requires session_replication_writer_id. Ends on shutdown.
         """
         ...
 
-    async def apply_session_binding(self, update: JsonLike) -> None:
+    def apply_session_binding(self, update: JsonLike) -> None:
         """Merge a versioned peer binding without echoing it.
 
         A binding this replica cannot place yet is dropped; the owner's next

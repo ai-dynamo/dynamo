@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import inspect
 import json
 import subprocess
 import sys
@@ -347,11 +348,11 @@ async def test_selection_service_session_binding_stream(session_binding_services
         }
     )
     assert "session_binding" not in selected
-    binding = json.loads(json.dumps(await anext(stream)))
+    (binding,) = json.loads(json.dumps(await anext(stream)))
     assert binding["writer_id"] == 11
-    await peer.apply_session_binding(binding)
+    peer.apply_session_binding(binding)
     await source.free_reservation("origin")
-    assert await anext(stream) == binding  # A repeated version refreshes TTL.
+    assert await anext(stream) == [binding]  # A repeated version refreshes TTL.
     selected = await peer.select_and_reserve(
         {
             **partition,
@@ -361,9 +362,9 @@ async def test_selection_service_session_binding_stream(session_binding_services
         }
     )
     assert selected["worker_id"] == 1
-    assert (
-        await anext(peer_stream) == binding
-    )  # Local commits preserve imported versions.
+    assert await anext(peer_stream) == [
+        binding
+    ]  # Local commits preserve imported versions.
     # The default hard mode rejects an excluded binding; soft mode rebinds.
     request = {
         **partition,
@@ -375,12 +376,38 @@ async def test_selection_service_session_binding_stream(session_binding_services
     with pytest.raises(ValueError, match="session s is bound to worker 1, not 2"):
         await source.select_and_reserve(request)
     assert (await peer.select_and_reserve(request))["worker_id"] == 2
-    assert (await anext(peer_stream))["worker_id"] == 2
+    assert (await anext(peer_stream))[0]["worker_id"] == 2
     await source.shutdown_async()
     with pytest.raises(StopAsyncIteration):
         await anext(stream)
     with pytest.raises(SelectionServiceError):
-        await source.apply_session_binding(binding)
+        source.apply_session_binding(binding)
+
+
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_selection_service_session_binding_stream_drains_queue(
+    session_binding_services,
+):
+    source, _ = session_binding_services
+    stream = source.session_binding_updates()
+    for session_id in ("a", "b", "c"):
+        await source.select_and_reserve(
+            {
+                "model_name": "model",
+                "routing_group": "host",
+                "token_ids": [1, 2, 3, 4],
+                "selection_id": session_id,
+                "session_id": session_id,
+            }
+        )
+    # Bindings queued while the consumer was away arrive as one item.
+    batch = await anext(stream)
+    assert [binding["session_id"] for binding in batch] == ["a", "b", "c"]
 
 
 @pytest.mark.skipif(
@@ -409,7 +436,9 @@ async def test_selection_service_malformed_payload_raises_value_error(
     try:
         # Malformed input surfaces as a plain ValueError, not a SelectionServiceError.
         with pytest.raises(ValueError):
-            await getattr(service, method)(payload)
+            result = getattr(service, method)(payload)
+            if inspect.isawaitable(result):
+                await result
         # Prompt booleans are not coerced by truthiness.
         with pytest.raises(ValueError, match="boolean"):
             await service.select({"token_ids": [1, 2, 3, 4], "is_eagle": "false"})

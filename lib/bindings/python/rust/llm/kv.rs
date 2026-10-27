@@ -702,10 +702,10 @@ impl SessionBindingStream {
     fn __anext__<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let updates = self.updates.clone();
         crate::future_into_py(py, async move {
-            let event = updates.recv().await.ok_or_else(|| {
+            let events = updates.recv_many().await.ok_or_else(|| {
                 pyo3::exceptions::PyStopAsyncIteration::new_err("selection service shut down")
             })?;
-            Python::with_gil(|py| pythonize(py, &event).map(|o| o.unbind()).map_err(to_pyerr))
+            Python::with_gil(|py| pythonize(py, &events).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
 }
@@ -791,19 +791,12 @@ impl SelectionService {
         })
     }
 
-    fn apply_session_binding<'p>(
-        &self,
-        py: Python<'p>,
-        update: PyObject,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let event: selection::AffinityBindingEvent =
+    fn apply_session_binding(&self, py: Python<'_>, update: PyObject) -> PyResult<()> {
+        let event =
             depythonize(update.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let service = self.inner.clone();
-        crate::future_into_py(py, async move {
-            service
-                .apply_session_binding(event)
-                .map_err(selection_to_pyerr)
-        })
+        self.inner
+            .apply_session_binding(event)
+            .map_err(selection_to_pyerr)
     }
 
     /// Await service shutdown without blocking the Python event loop.

@@ -356,12 +356,14 @@ pub struct SessionBindingUpdates {
 }
 
 impl SessionBindingUpdates {
-    pub async fn recv(&self) -> Option<AffinityBindingEvent> {
+    pub async fn recv_many(&self) -> Option<Vec<AffinityBindingEvent>> {
         let mut rx = self.rx.lock().await;
+        let limit = rx.max_capacity();
+        let mut events = Vec::new();
         tokio::select! {
             biased;
             _ = self.cancel_token.cancelled() => None,
-            event = rx.recv() => event,
+            received = rx.recv_many(&mut events, limit) => (received > 0).then_some(events),
         }
     }
 }

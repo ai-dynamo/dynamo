@@ -65,8 +65,23 @@ impl AffinityBindingEvent {
 /// Publishes bindings from a [`super::super::selection::affinity::SessionAffinity`]
 /// into a transport channel. Best effort: a full channel drops the update.
 pub(crate) struct AffinityMeshSink {
-    pub(crate) partition: RoutingPartitionId,
-    pub(crate) tx: mpsc::Sender<AffinityBindingEvent>,
+    partition: RoutingPartitionId,
+    tx: mpsc::Sender<AffinityBindingEvent>,
+    full_drops: parking_lot::Mutex<RateLimitedFailureLog>,
+}
+
+#[cfg(feature = "standalone-selection")]
+impl AffinityMeshSink {
+    pub(crate) fn new(
+        partition: RoutingPartitionId,
+        tx: mpsc::Sender<AffinityBindingEvent>,
+    ) -> Self {
+        Self {
+            partition,
+            tx,
+            full_drops: parking_lot::Mutex::default(),
+        }
+    }
 }
 
 #[cfg(feature = "standalone-selection")]
@@ -80,8 +95,22 @@ impl AffinityReplicaSink for AffinityMeshSink {
             sequence: version.sequence,
             writer_id: version.writer_id,
         };
-        if let Err(error) = self.tx.try_send(update) {
-            tracing::trace!(%error, "dropping best-effort session affinity replica update");
+        match self.tx.try_send(update) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let Some(dropped_bindings) = self.full_drops.lock().record(Instant::now()) else {
+                    return;
+                };
+                tracing::warn!(
+                    partition = %self.partition,
+                    capacity = self.tx.max_capacity(),
+                    dropped_bindings_since_last_log = dropped_bindings,
+                    "Session affinity replication channel full; dropping binding"
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::trace!("dropping session affinity replica update; channel closed");
+            }
         }
     }
 }
@@ -183,10 +212,7 @@ impl ReplicaSyncConfig {
         partition: &RoutingPartitionId,
     ) -> Option<Arc<dyn AffinityReplicaSink>> {
         self.affinity_tx.clone().map(|tx| {
-            Arc::new(AffinityMeshSink {
-                tx,
-                partition: partition.clone(),
-            }) as Arc<dyn AffinityReplicaSink>
+            Arc::new(AffinityMeshSink::new(partition.clone(), tx)) as Arc<dyn AffinityReplicaSink>
         })
     }
 

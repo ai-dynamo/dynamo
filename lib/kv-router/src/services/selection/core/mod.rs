@@ -430,10 +430,7 @@ impl SelectionCore {
         partition: &RoutingPartitionId,
     ) -> Option<(u64, Arc<dyn super::affinity::AffinityReplicaSink>)> {
         self.session_binding_tx.as_ref().map(|(writer_id, tx)| {
-            let sink = AffinityMeshSink {
-                partition: partition.clone(),
-                tx: tx.clone(),
-            };
+            let sink = AffinityMeshSink::new(partition.clone(), tx.clone());
             (
                 *writer_id,
                 Arc::new(sink) as Arc<dyn super::affinity::AffinityReplicaSink>,
