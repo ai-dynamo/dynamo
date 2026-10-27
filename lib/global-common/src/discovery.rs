@@ -51,10 +51,11 @@ pub struct Capacity {
 /// lease passes with no successful registration, the pool drops out of
 /// `GET /pools`.
 ///
-/// Both are whole seconds, the interval is above zero and below the lease,
-/// and the lease is at most [`Lease::MAX_DURATION_S`]. A reply that breaks
-/// this does not parse, so it cannot make a PoolRelay register in a tight
-/// loop, and every `Lease` can be written as JSON and read back.
+/// Both are whole seconds, and the interval is above zero and below the
+/// lease. A reply that breaks this does not parse, so it cannot make a
+/// PoolRelay register in a tight loop, and every `Lease` can be written as
+/// JSON and read back. There is no upper bound: a service bounds the lease it
+/// grants, and a client follows any lease it is given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "LeaseFields")]
 pub struct Lease {
@@ -63,14 +64,8 @@ pub struct Lease {
 }
 
 impl Lease {
-    /// One day.
-    pub const MAX_DURATION_S: u64 = 86_400;
-
     pub fn new(heartbeat_interval_s: u64, lease_duration_s: u64) -> Result<Self, LeaseError> {
-        if heartbeat_interval_s == 0
-            || heartbeat_interval_s >= lease_duration_s
-            || lease_duration_s > Self::MAX_DURATION_S
-        {
+        if heartbeat_interval_s == 0 || heartbeat_interval_s >= lease_duration_s {
             return Err(LeaseError {
                 heartbeat_interval_s,
                 lease_duration_s,
@@ -91,11 +86,10 @@ impl Lease {
     }
 }
 
-/// A lease that [`Lease::new`] refuses.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error(
     "heartbeat interval {heartbeat_interval_s}s must be above zero and below the \
-     {lease_duration_s}s lease, which may be at most a day"
+     {lease_duration_s}s lease"
 )]
 pub struct LeaseError {
     pub heartbeat_interval_s: u64,
@@ -219,12 +213,17 @@ mod tests {
     }
 
     #[test]
-    fn a_lease_that_would_spin_or_overflow_does_not_parse() {
+    fn a_lease_parses_unless_it_would_make_a_relay_spin() {
         let lease = round_trip::<Lease>(json!({"heartbeat_interval_s": 5, "lease_duration_s": 15}));
         assert_eq!(lease, Lease::new(5, 15).unwrap());
         assert_eq!(lease.heartbeat_interval(), Duration::from_secs(5));
-        let too_long = Lease::MAX_DURATION_S + 1;
-        for (interval, lease) in [(0, 15), (15, 15), (20, 15), (5, too_long)] {
+        // 48 hours, and the longest a client could be given.
+        for (interval, lease) in [(60, 172_800), (1, u64::MAX)] {
+            round_trip::<Lease>(
+                json!({"heartbeat_interval_s": interval, "lease_duration_s": lease}),
+            );
+        }
+        for (interval, lease) in [(0, 15), (15, 15), (20, 15)] {
             let body = json!({"heartbeat_interval_s": interval, "lease_duration_s": lease});
             assert!(
                 serde_json::from_value::<Lease>(body).is_err(),
