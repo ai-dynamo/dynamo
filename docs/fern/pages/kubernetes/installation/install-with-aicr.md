@@ -32,7 +32,8 @@ If no row matches your cluster, use the manual steps in [Install Dynamo](install
 - A Kubernetes 1.34 or later cluster, which the Dynamo recipes need for Dynamic Resource Allocation (DRA), with GPU nodes that match the recipe. For this guide, that means EKS GPU node groups running Ubuntu. The [Amazon EKS](managed-kubernetes/eks/eks-setup.mdx) guide creates an EKS Auto Mode cluster, which does not use Ubuntu nodes and does not match this recipe.
 - `kubectl` and Helm access with cluster-admin permissions.
 - Image pull access from the GPU nodes to the registries the bundle and your Dynamo runtime images use.
-- A cluster without existing installs of components the recipe manages. Run `helm list -A` and remove or plan around an existing GPU Operator, cert-manager, kube-prometheus-stack, or `dynamo-platform` release, because the bundle installs its own. On EKS, if the Amazon EBS CSI driver is installed as an EKS add-on, add `--set awsebscsidriver:enabled=false` to `aicr bundle`.
+- On EKS, EBS CSI driver permissions through EKS Pod Identity or IRSA. The bundle installs the driver but not its AWS credentials, and without them the Prometheus volume claim stays `Pending`. See [EBS CSI Driver Credentials](https://github.com/NVIDIA/aicr/blob/v1.1.2/docs/user/component-catalog.md#ebs-csi-driver-credentials).
+- A cluster without existing installs of components the recipe manages. Run `helm list -A` and remove or plan around an existing GPU Operator, cert-manager, kube-prometheus-stack, or `dynamo-platform` release, because the bundle installs its own. On EKS, if the Amazon EBS CSI driver is installed as an EKS add-on, add `--set awsebscsidriver:enabled=false` to `aicr bundle`. This also drops the default StorageClass that the bundle's driver creates, so confirm that `kubectl get storageclass` shows a `(default)` class.
 
 <Steps toc={true} tocDepth={2}>
 
