@@ -537,7 +537,7 @@ fn media_maps_to_sglang_fields_in_request_order() {
             )],
         ),
     ]));
-    // Empty uuid slots carry no cache identity, and the sidecar does not forward mm_hashes yet.
+    // Empty uuid slots carry no cache identity, and the sidecar ignores mm_hashes in extra_args.
     request.multi_modal_uuids = Some(HashMap::from([("image_url".to_string(), vec![None, None])]));
     request.extra_args = Some(json!({"mm_hashes": ["00112233aabbccdd", "ffeeddcc44332211"]}));
 
@@ -548,7 +548,6 @@ fn media_maps_to_sglang_fields_in_request_order() {
     );
     assert_eq!(mapped.video_data, ["http://example.com/v.mp4"]);
     assert_eq!(mapped.audio_data, ["data:audio/wav;base64,UklGRg=="]);
-    assert!(mapped.mm_hashes.is_empty());
 }
 
 #[test]
