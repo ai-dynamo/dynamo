@@ -62,7 +62,7 @@ func TestResolveHardwareCompletesTheTypedHardwareOrRejects(t *testing.T) {
 		{"an explicit budget above the cluster size is kept", hardwareOfV1beta2(nil, num(64)), h200x8, nil, "h200_sxm", 0, 1, "", ""},
 		{"an explicit budget above the cap is kept", hardwareOfV1beta2(str("h200_sxm"), num(64)), h200x8, nil, "", 0, 1, "h200_sxm", ""},
 		{"a SKU and a budget verify the SKU", hardwareOfV1beta2(str("h100_sxm"), num(4)),
-			gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 1},
+			gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8},
 			nil, "", 0, 1, "h100_sxm", ""},
 		{"complete hardware rejects failed verification", hardwareOfV1beta2(str("h100_sxm"), num(4)),
 			gpu.GPUInfo{}, errors.New("down"), "", 0, 1, "h100_sxm",

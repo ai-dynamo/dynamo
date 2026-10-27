@@ -65,7 +65,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 		}
 	})
 	t.Run("complete hardware verifies its SKU against the cluster", func(t *testing.T) {
-		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "b200_sxm", GPUsPerNode: 4, NodesWithGPUs: 1}}
+		d := &fakeDiscoverer{found: gpu.GPUInfo{System: "b200_sxm", GPUsPerNode: 4, NodesWithGPUs: 1, TotalGPUs: 4}}
 		got, err := DGDRV1beta2Options{Hardware: d}.resolveHardware(context.Background(), admissionv1.Create, nil, spec(v1beta2Ptr("b200_sxm"), v1beta2Ptr(int32(2))))
 		if err != nil {
 			t.Fatal(err)

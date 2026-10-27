@@ -889,7 +889,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm", "budget": int64(4)}}
 			}, nil),
 			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 1},
+			discovered:   gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8},
 			check: func(t *testing.T, result *unstructured.Unstructured) {
 				expectV1beta2GPUValues(t, result, "h100_sxm", 4)
 			},

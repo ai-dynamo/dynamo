@@ -125,7 +125,7 @@ func (f *fakeHardwareDiscoverer) Discover(context.Context, nvidiacomv1beta1.GPUS
 
 func setAdmissionH100Topology() {
 	admissionHardware.set(gpu.GPUInfo{
-		System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 1,
+		System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8,
 	}, nil)
 }
 
