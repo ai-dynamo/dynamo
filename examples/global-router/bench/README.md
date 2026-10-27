@@ -54,7 +54,7 @@ Write an operator-local JSON file outside Git with:
   ingress holds every open request's prompt, so a backed-up fleet with AgentX
   prompts needs several GiB.
 - Optionally `ingressArgs`: extra Global Ingress flags, appended after
-  `--router-policy`, for example `["--load-measure", "wait"]`.
+  `--router-policy`, for example `["--load-measure", "latency"]`.
 - `nodelayShim`: the path of the built `libnodelay.so`.
 - `regions`: `region`, `site` (the Karmada member name), `short`,
   `clusterName`, `kubectlProviderServiceToken`, `kubectlProviderHandlerArn`,
