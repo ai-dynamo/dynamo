@@ -1028,9 +1028,12 @@ async def test_admin_unload_discovery_error_restores_publication(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_stage", ["prefix-reset", "add-applied-error"])
+@pytest.mark.parametrize(
+    "failure_stage", ["prefix-reset", "add-applied-error", "remove-twice"]
+)
+@pytest.mark.parametrize("unregister_ok", [True, False])
 async def test_hot_swap_failed_candidate_remove_keeps_engine_id_quarantined(
-    monkeypatch, failure_stage, caplog
+    monkeypatch, failure_stage, unregister_ok, caplog
 ):
     handler = _make_prefill_handler()
     old_info = LoRAInfo(id=123, path="/cache/old")
@@ -1038,12 +1041,13 @@ async def test_hot_swap_failed_candidate_remove_keeps_engine_id_quarantined(
     handler._engine_loaded_loras.add("adapterA")
     handler._resolve_lora_source_path = AsyncMock(return_value=(True, "/cache/new"))
     engine_paths = {123: old_info.path}
+    published = {"adapterA"}
     remove_calls = 0
 
     async def remove_lora(lora_id):
         nonlocal remove_calls
         remove_calls += 1
-        if remove_calls > 1:
+        if remove_calls > 1 or failure_stage == "remove-twice":
             raise RuntimeError("candidate removal response lost")
         engine_paths.pop(lora_id, None)
         return True
@@ -1057,6 +1061,17 @@ async def test_hot_swap_failed_candidate_remove_keeps_engine_id_quarantined(
     handler.engine_client.remove_lora.side_effect = remove_lora
     handler.engine_client.add_lora.side_effect = add_lora
     handler.engine_client.reset_prefix_cache.return_value = False
+
+    async def unregister(lora_name):
+        if not unregister_ok:
+            raise RuntimeError("discovery withdrawal response lost")
+        published.discard(lora_name)
+
+    async def register(lora_name, _lora_id):
+        published.add(lora_name)
+
+    handler._unregister_lora_discovery = unregister
+    handler._register_lora_discovery = register
     monkeypatch.setenv("DYN_LORA_HOTSWAP_ENABLED", "true")
 
     results = [
@@ -1067,13 +1082,87 @@ async def test_hot_swap_failed_candidate_remove_keeps_engine_id_quarantined(
     ]
 
     assert results[-1]["status"] == "error"
-    assert engine_paths == {123: "/cache/new"}
+    assert engine_paths == {
+        123: "/cache/old" if failure_stage == "remove-twice" else "/cache/new"
+    }
     assert "adapterA" not in handler._lora_state.loaded_loras
     assert "adapterA" not in handler._engine_loaded_loras
     assert 123 in handler._lora_state.uncertain_engine_lora_ids
     assert 123 in handler._lora_state.rollback_reserved_ids
-    handler.engine_client.add_lora.assert_awaited_once()
+    assert "reload" in results[-1]["message"]
+    if unregister_ok:
+        assert not published
+        assert "adapterA" not in handler._lora_state.discovery_uncertain_loras
+    else:
+        assert "adapterA" in handler._lora_state.discovery_uncertain_loras
+    if failure_stage == "remove-twice":
+        handler.engine_client.add_lora.assert_not_awaited()
+    else:
+        handler.engine_client.add_lora.assert_awaited_once()
     assert "Quarantining LoRA engine ID 123" in caplog.text
+
+    unregister_ok = True
+    handler._lora_capacity = 2
+    handler.engine_client.reset_prefix_cache.return_value = True
+    handler.engine_client.add_lora.side_effect = None
+    handler.engine_client.add_lora.return_value = True
+    reloaded = [
+        result
+        async for result in handler.load_lora(
+            {"lora_name": "adapterA", "source": {"uri": "file:///new"}}
+        )
+    ]
+    assert reloaded[-1]["status"] == "success"
+    assert handler._lora_state.loaded_loras["adapterA"].id != 123
+    assert published == {"adapterA"}
+    assert "adapterA" not in handler._lora_state.discovery_uncertain_loras
+
+
+@pytest.mark.asyncio
+async def test_failed_hot_swap_finishes_discovery_withdrawal_when_cancelled(
+    monkeypatch,
+):
+    handler = _make_prefill_handler()
+    handler._lora_state.loaded_loras["adapterA"] = LoRAInfo(id=123, path="/cache/old")
+    handler._engine_loaded_loras.add("adapterA")
+    handler._resolve_lora_source_path = AsyncMock(return_value=(True, "/cache/new"))
+    handler.engine_client.remove_lora.side_effect = [
+        True,
+        RuntimeError("candidate removal response lost"),
+    ]
+    handler.engine_client.reset_prefix_cache.return_value = False
+    published = {"adapterA"}
+    withdrawal_started = asyncio.Event()
+    finish_withdrawal = asyncio.Event()
+
+    async def unregister(lora_name):
+        withdrawal_started.set()
+        await finish_withdrawal.wait()
+        published.discard(lora_name)
+
+    handler._unregister_lora_discovery = unregister
+    monkeypatch.setenv("DYN_LORA_HOTSWAP_ENABLED", "true")
+
+    async def load():
+        return [
+            result
+            async for result in handler.load_lora(
+                {"lora_name": "adapterA", "source": {"uri": "file:///new"}}
+            )
+        ]
+
+    task = asyncio.create_task(load())
+    await withdrawal_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    finish_withdrawal.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not published
+    assert "adapterA" not in handler._lora_state.loaded_loras
+    assert "adapterA" not in handler._lora_state.discovery_uncertain_loras
 
 
 @pytest.mark.asyncio

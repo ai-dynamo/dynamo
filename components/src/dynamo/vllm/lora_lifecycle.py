@@ -137,6 +137,12 @@ class AdminLoRALoadTransaction:
         include_id: bool = False,
         hot_swap: bool | None = None,
     ) -> AdminLoRALoadResult:
+        if (
+            status == "error"
+            and self.is_hot_swap
+            and self.lora_name not in self.owner._lora_state.loaded_loras
+        ):
+            message += "; adapter is no longer loaded on this worker, reload it"
         return AdminLoRALoadResult(
             status=status,
             message=message,
@@ -216,7 +222,28 @@ class AdminLoRALoadTransaction:
             logger.exception("Failed to load LoRA adapter: %s", error)
             return self._result("error", str(error), include_name=False)
         finally:
-            self._release_reservation()
+            try:
+                if await self._withdraw_untracked_adapter():
+                    raise asyncio.CancelledError
+            finally:
+                self._release_reservation()
+
+    async def _withdraw_untracked_adapter(self) -> bool:
+        if (
+            not self.is_hot_swap
+            or self.lora_name in self.owner._lora_state.loaded_loras
+        ):
+            return False
+        uncertain = self.owner._lora_state.discovery_uncertain_loras
+        uncertain.add(self.lora_name)
+        cancelled, _result, error = await run_lora_mutation(
+            self.owner._unregister_lora_discovery(self.lora_name)
+        )
+        if error is None:
+            uncertain.discard(self.lora_name)
+        else:
+            logger.error("Failed to withdraw quarantined LoRA %s", self.lora_name)
+        return cancelled
 
     async def _reconcile_discovery(self) -> AdminLoRALoadResult | None:
         cancelled, error = await self.owner._reconcile_uncertain_lora_discovery(
