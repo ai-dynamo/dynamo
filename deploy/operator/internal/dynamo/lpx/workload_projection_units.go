@@ -17,11 +17,7 @@ const unitsProjectionVersion = "lpu-units-node-local/v1"
 
 // appendUnitModelProjections projects a build whose compiler recorded lpuUnits.
 // The units supply reservations, sizes and connectors, so chains, packing and
-// extents are not derived here. The runtime rows in configuredBuild and
-// propSyncEdges follow the units' compiler sizes and connectors. For the sizes
-// GBuild writes they equal what the legacy projection renders for the same
-// bundle, which the units parity tests and the LPU-only units golden check, so
-// runtimes that read /configs keep working. intent.Build has units.
+// extents are not derived here. intent.Build has units.
 func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
 	build := intent.Build
 	hybrid := intent.Pipeline == PipelineHybrid
@@ -38,7 +34,7 @@ func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionIn
 		return nil, err
 	}
 
-	// Index the source partitions that reservations and runtime rows name.
+	// Index the source partitions that reservations name.
 	sourcePartitions := make(map[int]buildPartition, len(build.partitions))
 	for _, partition := range build.partitions {
 		sourcePartitions[partition.sourcePartitionID] = partition
@@ -50,13 +46,10 @@ func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionIn
 	var (
 		partitions    = make([]buildPartition, 0, len(units))
 		connectors    = make([]lpxv1alpha1.PropSyncConnectorRequest, 0)
-		rows          = make([]buildPartition, 0, len(units))
-		propSyncEdges = make([]int, 0)
 		agentReplicas = 0
 	)
 	for _, unit := range units {
 		first := len(partitions)
-		unitHosts := 0
 		for _, reservation := range unit.Reservations {
 			partition := sourcePartitions[reservation.PartitionIDs[0]]
 			partition.numChips = reservation.Hosts * devicesPerNode
@@ -72,7 +65,7 @@ func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionIn
 				}
 			}
 			partitions = append(partitions, partition)
-			unitHosts += reservation.Hosts
+			agentReplicas += reservation.Hosts
 		}
 		for index, requirement := range unit.Connectors {
 			connector := lpxv1alpha1.PropSyncConnectorRequest{
@@ -81,35 +74,8 @@ func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionIn
 			}
 			requirement.DeepCopyInto(&connector.Requirement)
 			connectors = append(connectors, connector)
-			if build.family == BuildFamilyHX {
-				propSyncEdges = append(propSyncEdges, first+index)
-			}
-		}
-		agentReplicas += unitHosts
-
-		// Legacy XT hybrid rows run each unit as one runtime partition; every
-		// other runtime reads one row per partition, and each stage of a packed
-		// reservation counts one shared host, as the legacy rows do.
-		if hybrid && build.family == BuildFamilyXT {
-			row := sourcePartitions[unit.root()]
-			row.runtimeNodeCount = unitHosts
-			rows = append(rows, row)
-			continue
-		}
-		for _, reservation := range unit.Reservations {
-			for _, id := range reservation.PartitionIDs {
-				row := sourcePartitions[id]
-				row.runtimeNodeCount = reservation.Hosts
-				if len(reservation.PartitionIDs) > 1 {
-					row.runtimeNodeCount = 1
-				}
-				rows = append(rows, row)
-			}
 		}
 	}
-	runtimeBuild := *build
-	runtimeBuild.partitions = rows
-	runtimeBuild.selectedPropSyncChains = nil
 
 	// The scheduler reads placement from partitions and connectors alone.
 	allocationMetadata := json.RawMessage(`{}`)
@@ -134,11 +100,10 @@ func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionIn
 			runtimeBuildRef:        intent.RuntimeBuildRef,
 			model:                  intent.Models[index],
 			pipeline:               intent.Pipeline,
-			configuredBuild:        runtimeBuild,
+			configuredBuild:        *build,
 			allocationMetadata:     allocationMetadata,
 			partitions:             partitions,
 			connectors:             connectors,
-			propSyncEdges:          propSyncEdges,
 			agentReplicas:          agentReplicas,
 			localPartitionIDs:      localPartitionIDs,
 		})

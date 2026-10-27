@@ -131,7 +131,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	input := RenderInput{
 		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 	}
-	rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, input)
+	rendered, _, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, input)
 	require.NoError(t, err)
 	cyborg := namedClique(t, rendered, "cond")
 
@@ -158,7 +158,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 
 	t.Log("Leave the image ENTRYPOINT selected when command is omitted")
 	input.Stages = map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}
-	_, err = renderSelectedForTest(imageEntrypointPCS, []*ModelProjection{projection}, input)
+	_, _, err = renderSelectedForTest(imageEntrypointPCS, []*ModelProjection{projection}, input)
 	require.NoError(t, err)
 	require.Nil(t, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Command)
 	require.Equal(t, []string{"serve"}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args)
@@ -185,7 +185,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 			cyborg.Spec.MinAvailable = new(test.replicas)
 			cyborg.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
 			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = test.mountPath
-			_, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
+			_, _, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
 				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 			})
 			require.ErrorContains(t, err, test.wantError)

@@ -27,27 +27,12 @@ func projectTestUnits(build *Build, selection *dynamov1beta1.LPXLocalPartitions)
 	})
 }
 
-// renderTestLPUServers renders the hybrid Cyborg Agent addresses for one replica.
-func renderTestLPUServers(t *testing.T, projections []*ModelProjection) string {
-	t.Helper()
-	workload := &Workload{modelProjections: projections, scalingGroupReplicas: 1}
-	serving := &dynamov1beta1.DynamoComponentDeploymentSharedSpec{
-		Roles: []dynamov1beta1.ComponentRoleSpec{{Name: dynamov1beta1.ComponentRoleLPXConductor}},
-	}
-	plan, err := workload.PlanNodeLocalMaterialization("test-pcs", serving)
-	require.NoError(t, err)
-	configMap, _, err := workload.renderCyborgConfigMap(plan)
-	require.NoError(t, err)
-	return configMap.Data["lpu_servers"]
-}
-
 func TestUnitProjection(t *testing.T) {
 	t.Parallel()
 	const (
 		lp20 = deploymentcapnpv1.LpuArchitecture_lp20
 		lp30 = deploymentcapnpv1.LpuArchitecture_lp30
 	)
-	servers := lpxScalingGroupTemplateName + "-${GROVE_PCSG_INDEX}-" + testAgentTemplateName + "-"
 	lp20Hybrid := testUnitBundle{
 		architecture: lp20, devicesPerNode: 8, hybrid: true, chains: [][]uint32{{1, 2}},
 		partitions: testUnitPartitions(16, nil, 0, 1, 2, 3),
@@ -67,8 +52,9 @@ func TestUnitProjection(t *testing.T) {
 		wantConnectors []lpxv1alpha1.PropSyncConnectorRequest
 		wantAgents     int
 		wantLocalIDs   []int
-		wantRows       map[string]string
-		wantServers    string
+		// wantRows lists the /configs rows of an LPU-only projection, which a
+		// speculative workload renders when its other build lacks units.
+		wantRows map[string]string
 	}{
 		{
 			name: "LP20 chain joined by an xt8888Gap connector",
@@ -171,7 +157,7 @@ func TestUnitProjection(t *testing.T) {
 			wantRows:   map[string]string{"nodes_per_partition": "2\n1", "partition_ids": "1\n2", "partition_node_offsets": "0\n2", "partition_paths": "part-1\npart-2"},
 		},
 		{
-			name:      "LP20 hybrid keeps remote units and runs each as one row",
+			name:      "LP20 hybrid keeps remote units",
 			bundle:    lp20Hybrid,
 			selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{0}},
 			wantPartitions: []lpxv1alpha1.PartitionRequest{
@@ -182,8 +168,6 @@ func TestUnitProjection(t *testing.T) {
 			wantConnectors: []lpxv1alpha1.PropSyncConnectorRequest{{FromPartitionID: "partition-000", ToPartitionID: "partition-001", Requirement: xtGap}},
 			wantAgents:     6,
 			wantLocalIDs:   []int{0},
-			wantRows:       map[string]string{"nodes_per_partition": "4\n2", "partition_ids": "1\n3", "partition_node_offsets": "0\n4", "partition_paths": "part-1\npart-3"},
-			wantServers:    servers + "0\n" + servers + "4",
 		},
 		{
 			name:      "LP20 hybrid runs a selected chain root on the GPU",
@@ -196,8 +180,6 @@ func TestUnitProjection(t *testing.T) {
 			wantConnectors: []lpxv1alpha1.PropSyncConnectorRequest{},
 			wantAgents:     4,
 			wantLocalIDs:   []int{1},
-			wantRows:       map[string]string{"nodes_per_partition": "2\n2", "partition_ids": "0\n3", "partition_node_offsets": "0\n2", "partition_paths": "part-0\npart-3"},
-			wantServers:    servers + "0\n" + servers + "2",
 		},
 		{
 			name:         "every unit on the GPU leaves no Agents",
@@ -205,7 +187,6 @@ func TestUnitProjection(t *testing.T) {
 			selection:    &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
 			wantAgents:   0,
 			wantLocalIDs: []int{0, 1, 3},
-			wantRows:     map[string]string{"nodes_per_partition": "", "partition_ids": "", "partition_node_offsets": "", "partition_paths": ""},
 		},
 		{
 			name:      "chain member is not a unit root",
@@ -220,7 +201,7 @@ func TestUnitProjection(t *testing.T) {
 			wantErr:   "localPartitions references partition 4, which the build does not contain",
 		},
 		{
-			name: "LP30 hybrid keeps one row per chain member",
+			name: "LP30 hybrid keeps one reservation per chain member",
 			bundle: testUnitBundle{
 				architecture: lp30, devicesPerNode: 16, hybrid: true, chains: [][]uint32{{2, 3}},
 				partitions: testUnitPartitions(16, []uint32{16, 1, 1, 1}, 1, 2, 3, 4),
@@ -249,8 +230,6 @@ func TestUnitProjection(t *testing.T) {
 			}},
 			wantAgents:   3,
 			wantLocalIDs: []int{1},
-			wantRows:     map[string]string{"nodes_per_partition": "1\n1\n1", "partition_ids": "2\n3\n4", "partition_node_offsets": "0\n1\n2", "partition_paths": "part-2\npart-3\npart-4"},
-			wantServers:  servers + "0\n" + servers + "2",
 		},
 		{
 			name: "LP20 LPU-only partitions without a chain",
@@ -314,10 +293,9 @@ func TestUnitProjection(t *testing.T) {
 			require.Equal(t, test.wantAgents, projection.AgentReplicas())
 			require.Equal(t, test.wantLocalIDs, projection.localPartitionIDs)
 
-			t.Log("Render the legacy runtime rows and Cyborg Agent addresses from the units")
-			require.Equal(t, test.wantRows, resolvedPartitionData(projections))
-			if test.bundle.hybrid {
-				require.Equal(t, test.wantServers, renderTestLPUServers(t, projections))
+			t.Log("Render legacy /configs rows from LPU-only units for a workload that still reads them")
+			if !test.bundle.hybrid {
+				require.Equal(t, test.wantRows, resolvedPartitionData(projections))
 			}
 		})
 	}
@@ -419,8 +397,10 @@ func TestUnitProjectionDigest(t *testing.T) {
 
 // requireLegacyParity projects build through its units and through the legacy
 // derivation with the units ignored. Both must request the same LPX partitions
-// and connectors, size the same Agents, and render the same /configs rows and
-// Cyborg Agent addresses. Only HX allocation metadata differs: units send none.
+// and connectors, size the same Agents, and select the same GPU-local partitions.
+// LPU-only projections must also render the same /configs rows, which a
+// speculative workload still reads when its other build lacks units. Only HX
+// allocation metadata differs: units send none.
 func requireLegacyParity(t *testing.T, build *Build, selection *dynamov1beta1.LPXLocalPartitions) {
 	t.Helper()
 	require.NotNil(t, build.lpuUnits)
@@ -442,9 +422,8 @@ func requireLegacyParity(t *testing.T, build *Build, selection *dynamov1beta1.LP
 	require.Equal(t, legacySpec, unitSpec)
 	require.Equal(t, legacy.AgentReplicas(), unit.AgentReplicas())
 	require.Equal(t, legacy.localPartitionIDs, unit.localPartitionIDs)
-	require.Equal(t, resolvedPartitionData(legacyProjections), resolvedPartitionData(unitProjections))
-	if build.hasCUDAPartitions {
-		require.Equal(t, renderTestLPUServers(t, legacyProjections), renderTestLPUServers(t, unitProjections))
+	if !build.hasCUDAPartitions {
+		require.Equal(t, resolvedPartitionData(legacyProjections), resolvedPartitionData(unitProjections))
 	}
 }
 

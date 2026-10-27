@@ -86,6 +86,34 @@ and Volcano PodGroups created by Dynamo v1.1.x and earlier.
 **Existing deployments:** Unmigrated legacy resources remain after
 upgrading, and excess LWS objects can continue consuming cluster resources.
 
+##### LPX runtime ConfigMaps removed for builds with placement units
+
+**Change:** For an LPX workload whose builds all record compiler placement units
+(`lpuUnits`), the operator no longer renders the runtime ConfigMaps
+(`<prefix>-lpu-<hash>` partition rows and `<prefix>-decode-<hash>` `lpu_servers`),
+no longer adds the `config` volume to its conductor, Agent, and Cyborg Pods, and no
+longer sets their `nvidia.com/extra-resources-hash` annotation. Its runtimes read
+placement from the units and from the environment variables that the operator sets.
+The operator rejects such a workload when a role template mounts `config` without
+declaring that volume. Workloads with a build that lacks `lpuUnits`, including a
+speculative workload that pairs one with a unit build, keep the ConfigMaps unchanged.
+
+**Affected:** LPX DGDs that deploy builds with `lpuUnits` and whose role templates
+mount `config` at `/configs`, or launch runtimes that read it: Nova
+`NOVA_RESOLVED_PARTITIONS_DIR` and its draft and target variants, Quasar
+`--partition-metadata`, the Hydra `/configs` path, and Cyborg
+`cyborg-entrypoint --expand-hosts` with `--lpu-rdma-addr-file`.
+
+**Action:** For workloads that deploy builds with `lpuUnits`, use runtime images that
+read placement from the units, and remove those mounts, variables, and flags from the
+role templates.
+
+**Existing deployments:** Workloads on builds without `lpuUnits` do not change. A
+workload on builds with `lpuUnits` rolls once, and the operator deletes its obsolete
+runtime ConfigMaps after the workload is Ready. If a role template still mounts
+`config`, the operator reports the rendering error and keeps the published
+PodCliqueSet.
+
 ##### Native sidecar backend inference
 
 **Change:** Backend inference recognizes a direct `vllm-rs` engine command in `main`,

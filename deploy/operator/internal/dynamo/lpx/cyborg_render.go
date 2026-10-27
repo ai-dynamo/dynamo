@@ -21,8 +21,8 @@ import (
 // whose conductor resources were validated during workload selection.
 // agentTemplateName names the workload's Agent template, which Cyborg addresses
 // even when no Agent replicas remain; agentTemplateNames lists the templates with
-// replicas. cyborgConfigMap is the nonnil Agent-address ConfigMap rendered for
-// that workload.
+// replicas. cyborgConfigMap is the Agent-address ConfigMap rendered for that
+// workload, or nil when Cyborg derives the addresses from the build's LPU units.
 func configureHybridCyborg(
 	cyborg *grovev1alpha1.PodCliqueTemplateSpec,
 	projection *ModelProjection,
@@ -61,8 +61,10 @@ func configureHybridCyborg(
 		lpxv1alpha1.PodRoleCyborgWorker,
 		workloadDigest,
 	)
-	ensureLPUConfigVolume(&cyborg.Spec.PodSpec, cyborgConfigMap.Name)
-	cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash] = cyborgConfigHash
+	if cyborgConfigMap != nil {
+		ensureLPUConfigVolume(&cyborg.Spec.PodSpec, cyborgConfigMap.Name)
+		cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash] = cyborgConfigHash
+	}
 	cyborg.Spec.StartsAfter = slices.Clone(agentTemplateNames)
 	return nil
 }
