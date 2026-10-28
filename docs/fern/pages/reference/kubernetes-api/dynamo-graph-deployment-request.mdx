@@ -9,8 +9,7 @@ A `DynamoGraphDeploymentRequest` (DGDR) is Dynamo's deploy-by-intent generator f
 
 For the task-oriented walkthrough — authoring a request step by step — see [Auto Deploy with DGDR](../../kubernetes/auto-deployment/auto-deploy-with-dgdr.md). For ready-to-copy manifests, see [DGDR Templates](../../recipes/kubernetes-templates/dgdr.mdx).
 
-The spec and status reference below documents the `nvidia.com/v1beta1` storage API.
-The following validation contract applies separately to native `v1beta2` requests.
+This page documents the `nvidia.com/v1beta1` API — the storage version.
 
 ## Conversion views
 
@@ -62,8 +61,8 @@ spec:
 
 To leave the complete hardware input to AISimulate and `inputOverrides`, use the
 empty-object opt-out and supply both the upstream hardware selector and candidate
-GPU budget yourself. The operator does not validate this opaque input against the
-AISimulate schema yet; invalid or incomplete overrides fail during the Run.
+GPU budget yourself. Admission validates the merged input against the bundled
+AISimulate input schema.
 
 ```yaml
 spec:
@@ -76,44 +75,6 @@ spec:
         constraints:
           max_candidate_gpus: 8
 ```
-
-## v1beta2 AISimulate Input Validation
-
-**Experimental.** For native `v1beta2` requests, admission applies the typed API
-defaults, lowers the typed fields to AISimulate input, and applies
-`spec.aisimulate.inputOverrides` last as an RFC 7386 JSON Merge Patch. Override
-values take precedence; `null` deletes a lowered field. Admission validates the
-result against JSON Schema generated from the AISimulate version bundled with the
-operator. It does not apply the schema's defaults.
-
-For example, this request is rejected because the merged input contains a
-non-positive search budget:
-
-```yaml
-apiVersion: nvidia.com/v1beta2
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: invalid-search-budget
-spec:
-  model:
-    name: Qwen/Qwen3-0.6B
-  aisimulate:
-    inputOverrides:
-      optimizer:
-        max_trials: -1 # Invalid in the generated AISimulate input.
-```
-
-After an operator upgrade changes the schema, metadata updates remain permitted
-when the complete `spec` is unchanged. Any spec change must make the entire
-generated input valid, including changes outside the input such as
-`recommendation.maxCandidates`. This rule applies even when an invalid input field
-is unchanged by the edit. Native API validation and operator-owned execution-field
-restrictions continue to apply on every update.
-
-The generated schema covers the public core input. Registered adapter sections
-are checked as objects; Python adapters validate their contents at runtime.
-Python validation rules not represented by Pydantic's JSON Schema also remain
-runtime checks.
 
 ## Spec reference
 

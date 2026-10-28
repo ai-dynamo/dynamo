@@ -85,10 +85,11 @@ spec:
                         parent object; the Run controller does not restore it. The typed
                         PersistentVolumeClaim source alone decides the Run Job's trace mount and its
                         claim dependency, so overriding a native path adds no volume mount.
-                        AISimulate validates the resulting input when the Run's Job starts; admission
-                        does not validate it against the AISimulate schema yet. The operator runs
-                        the AISimulate version from its configured planner image; Requests and Runs
-                        cannot select a different image or version.
+                        The operator runs the AISimulate version from its
+                        configured planner image; Requests and Runs cannot select a different image
+                        or version.
+                        For Requests, the merged input is validated against the bundled AISimulate input
+                        schema on create and every spec change; unchanged specs remain metadata-updatable.
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                   type: object
