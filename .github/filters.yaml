@@ -80,6 +80,7 @@ api_docs:
   - '**/Cargo.toml'
 
 examples:
+  - '.github/workflows/pre-merge.yml'
   - 'recipes/**'
   - 'recipes/**/.kustomize-matrix.yaml'
   - 'examples/**'
