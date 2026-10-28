@@ -417,8 +417,9 @@ type HardwareSpec struct {
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
 
 	// VRAMMB is the VRAM per GPU in MiB.
-	// When omitted, auto-detected from cluster GPU nodes. When this value differs
-	// from the auto-selected shape and totalGpus is omitted, the request is rejected.
+	// When omitted, auto-detected from cluster GPU nodes. Nominal values within 10%
+	// of the measured value identify the same shape. When this value differs by more
+	// than 10% from the auto-selected shape and totalGpus is omitted, the request is rejected.
 	// +optional
 	VRAMMB *float64 `json:"vramMb,omitempty"`
 

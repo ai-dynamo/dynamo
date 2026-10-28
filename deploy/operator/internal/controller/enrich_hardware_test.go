@@ -199,6 +199,14 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 			wantGPUSKU:    "b200_sxm", wantVRAM: 141312, wantGPUsNode: 8, wantTotalGPUs: 8, wantChanged: true,
 		},
 		{
+			name: "nominal vramMb near measured VRAM derives totalGpus",
+			hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU: "h100_sxm", VRAMMB: new(81920.0), NumGPUsPerNode: new(int32(8)),
+			},
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, TotalGPUs: 8, SelectedShapeGPUs: 8, Model: "NVIDIA H100 80GB HBM3", VRAMPerGPU: 81079},
+			wantGPUSKU:    "h100_sxm", wantVRAM: 81920, wantGPUsNode: 8, wantTotalGPUs: 8, wantChanged: true,
+		},
+		{
 			name: "only gpuSku missing, discovery fills it",
 			hardware: &nvidiacomv1beta1.HardwareSpec{
 				VRAMMB: new(81920.0), NumGPUsPerNode: new(int32(8)), TotalGPUs: new(int32(16)),

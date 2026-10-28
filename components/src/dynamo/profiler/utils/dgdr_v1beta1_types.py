@@ -233,7 +233,7 @@ class HardwareSpec(BaseModel):
     )
     vramMb: Optional[float] = Field(
         default=None,
-        description="VRAMMB is the VRAM per GPU in MiB. When omitted, auto-detected from cluster GPU nodes. When this value differs from the auto-selected shape and totalGpus is omitted, the request is rejected.",
+        description="VRAMMB is the VRAM per GPU in MiB. When omitted, auto-detected from cluster GPU nodes. Nominal values within 10% of the measured value identify the same shape. When this value differs by more than 10% from the auto-selected shape and totalGpus is omitted, the request is rejected.",
     )
     totalGpus: Optional[int] = Field(
         default=None,

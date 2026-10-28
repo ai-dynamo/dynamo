@@ -1975,10 +1975,16 @@ func validateAutomaticGPUShape(hw *nvidiacomv1beta1.HardwareSpec, gpuInfo *gpu.G
 	if hw.NumGPUsPerNode != nil && int(*hw.NumGPUsPerNode) != gpuInfo.GPUsPerNode {
 		return fmt.Errorf("cannot auto-detect hardware.totalGpus: hardware.numGpusPerNode=%d does not match the selected discovered shape with %d GPUs per node; set hardware.totalGpus explicitly", *hw.NumGPUsPerNode, gpuInfo.GPUsPerNode)
 	}
-	if hw.VRAMMB != nil && *hw.VRAMMB != float64(gpuInfo.VRAMPerGPU) {
+	if hw.VRAMMB != nil && !sameVRAMShape(*hw.VRAMMB, gpuInfo.VRAMPerGPU) {
 		return fmt.Errorf("cannot auto-detect hardware.totalGpus: hardware.vramMb=%g does not match the selected discovered shape with %d MiB per GPU; set hardware.totalGpus explicitly", *hw.VRAMMB, gpuInfo.VRAMPerGPU)
 	}
 	return nil
+}
+
+// sameVRAMShape accepts nominal memory sizes while rejecting a materially different GPU variant.
+func sameVRAMShape(requestedMiB float64, discoveredMiB int) bool {
+	discovered := float64(discoveredMiB)
+	return max(requestedMiB-discovered, discovered-requestedMiB) <= discovered/10
 }
 
 func (r *DynamoGraphDeploymentRequestReconciler) discoverHardwareForEnrichment(ctx context.Context, hw *nvidiacomv1beta1.HardwareSpec, discoveryRequired bool) (*gpu.GPUInfo, error) {
