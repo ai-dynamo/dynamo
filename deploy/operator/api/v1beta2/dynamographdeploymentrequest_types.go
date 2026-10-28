@@ -242,6 +242,8 @@ type AISimulateSpec struct {
 	// immutable snapshot. The operator runs the AISimulate version from its
 	// configured planner image; Requests and Runs cannot select a different image
 	// or version.
+	// For Requests, the merged input is validated against the bundled AISimulate input
+	// schema on create and every spec change; unchanged specs remain metadata-updatable.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
