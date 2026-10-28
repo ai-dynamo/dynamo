@@ -11,7 +11,6 @@ import (
 
 	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
 const (
@@ -135,10 +134,6 @@ func (p *ModelProjection) RequestSpec(
 		}
 	}
 	spec := lpxv1alpha1.LPUPipelineRequestSpec{
-		// LPX reads placement from partitions and connectors alone. Until the
-		// vendored type drops this field, send the CRD default rather than null so
-		// the stored spec matches whether LPX requires the field or defaults it.
-		AllocationMetadata: runtime.RawExtension{Raw: []byte(`{}`)},
 		MaterializationTarget: lpxv1alpha1.MaterializationTarget{
 			PodCliqueSetReplicaIndex: 0,
 			PodCliqueScalingGroupRef: &lpxv1alpha1.PodCliqueScalingGroupReference{

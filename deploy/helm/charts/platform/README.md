@@ -97,17 +97,20 @@ the operator sets, so the operator no longer renders the runtime ConfigMaps
 (`<prefix>-lpu-<hash>` partition rows and `<prefix>-decode-<hash>` `lpu_servers`),
 no longer adds the `config` volume to conductor, Agent, and Cyborg Pods, and no
 longer sets their `nvidia.com/extra-resources-hash` annotation. It rejects a
-workload whose role template mounts `config` without declaring that volume.
+workload whose role template mounts `config` without declaring that volume. LPU
+pipeline requests no longer carry `allocationMetadata`, so this operator requires
+an lpx-scheduler whose `LPUPipelineRequest` CRD no longer requires that field.
 
-**Affected:** LPX DGDs whose `buildId` names a build without `lpuUnits`, and role
+**Affected:** LPX DGDs whose `buildId` names a build without `lpuUnits`; role
 templates that mount `config` at `/configs` or launch runtimes that read it (Nova
 `NOVA_RESOLVED_PARTITIONS_DIR` and its draft and target variants, Quasar
 `--partition-metadata`, the Hydra `/configs` path, and Cyborg
-`cyborg-entrypoint --expand-hosts` with `--lpu-rdma-addr-file`).
+`cyborg-entrypoint --expand-hosts` with `--lpu-rdma-addr-file`); and clusters
+running an lpx-scheduler whose CRD still requires `allocationMetadata`.
 
-**Action:** Recompile or convert every LPX build that lacks `lpuUnits`, use
-runtime images that read placement from the units, and remove those mounts,
-variables, and flags from the role templates.
+**Action:** Upgrade lpx-scheduler first. Recompile or convert every LPX build that
+lacks `lpuUnits`, use runtime images that read placement from the units, and
+remove those mounts, variables, and flags from the role templates.
 
 **Existing deployments:** A workload on a build without `lpuUnits` reports a build
 validation error and keeps its published PodCliqueSet; so does a workload whose

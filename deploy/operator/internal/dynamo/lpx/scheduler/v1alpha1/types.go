@@ -618,7 +618,6 @@ func (in *LPUPartitionPlacement) DeepCopy() *LPUPartitionPlacement {
 }
 
 type LPUPipelineRequestSpec struct {
-	AllocationMetadata    runtime.RawExtension       `json:"allocationMetadata"`
 	CyborgPodCliqueRef    *PodCliqueReference        `json:"cyborgPodCliqueRef,omitempty"`
 	ExecutionBackend      ExecutionBackend           `json:"executionBackend"`
 	MaterializationTarget MaterializationTarget      `json:"materializationTarget"`
@@ -633,7 +632,6 @@ type LPUPipelineRequestSpec struct {
 
 func (in *LPUPipelineRequestSpec) DeepCopyInto(out *LPUPipelineRequestSpec) {
 	*out = *in
-	in.AllocationMetadata.DeepCopyInto(&out.AllocationMetadata)
 	if in.CyborgPodCliqueRef != nil {
 		out.CyborgPodCliqueRef = in.CyborgPodCliqueRef.DeepCopy()
 	}
@@ -965,7 +963,6 @@ func (in *NodeLocalPartitionSelection) DeepCopy() *NodeLocalPartitionSelection {
 
 type NodeLocalPlacement struct {
 	AgentPodCliqueRef              PodCliqueReference            `json:"agentPodCliqueRef"`
-	CompilerMetadataDigest         string                        `json:"compilerMetadataDigest"`
 	ConnectorEvidence              []NodeLocalConnectorEvidence  `json:"connectorEvidence,omitempty"`
 	EffectiveNodeRequests          map[string]int64              `json:"effectiveNodeRequests"`
 	InventoryRevision              string                        `json:"inventoryRevision"`
@@ -1556,16 +1553,15 @@ func (in *RemoteDraExecution) DeepCopy() *RemoteDraExecution {
 }
 
 type RemoteDraPlacement struct {
-	ActiveFabricIDs        *[]string                      `json:"activeFabricIds,omitempty"`
-	CompilerMetadataDigest string                         `json:"compilerMetadataDigest"`
-	ConnectorAssignments   []ConnectorAssignment          `json:"connectorAssignments,omitempty"`
-	ConsumerSlots          []ConsumerSlot                 `json:"consumerSlots"`
-	DerivedStages          []DerivedStageAssignment       `json:"derivedStages"`
-	InventoryRevision      string                         `json:"inventoryRevision"`
-	Objective              PlanObjective                  `json:"objective"`
-	PartitionConductors    []PartitionConductorAssignment `json:"partitionConductors"`
-	PartitionPlacements    []LPUPartitionPlacement        `json:"partitionPlacements"`
-	WorkloadMode           WorkloadMode                   `json:"workloadMode"`
+	ActiveFabricIDs      *[]string                      `json:"activeFabricIds,omitempty"`
+	ConnectorAssignments []ConnectorAssignment          `json:"connectorAssignments,omitempty"`
+	ConsumerSlots        []ConsumerSlot                 `json:"consumerSlots"`
+	DerivedStages        []DerivedStageAssignment       `json:"derivedStages"`
+	InventoryRevision    string                         `json:"inventoryRevision"`
+	Objective            PlanObjective                  `json:"objective"`
+	PartitionConductors  []PartitionConductorAssignment `json:"partitionConductors"`
+	PartitionPlacements  []LPUPartitionPlacement        `json:"partitionPlacements"`
+	WorkloadMode         WorkloadMode                   `json:"workloadMode"`
 }
 
 func (in *RemoteDraPlacement) DeepCopyInto(out *RemoteDraPlacement) {

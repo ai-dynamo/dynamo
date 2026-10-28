@@ -266,7 +266,7 @@ func TestUnitProjection(t *testing.T) {
 			require.NoError(t, err)
 			projection := projections[0]
 
-			t.Log("Request one LPX partition per kept reservation with the units' connectors and no compiler envelope")
+			t.Log("Request one LPX partition per kept reservation with the units' connectors")
 			spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
 			if test.wantPartitions == nil {
 				test.wantPartitions = []lpxv1alpha1.PartitionRequest{}
@@ -276,7 +276,6 @@ func TestUnitProjection(t *testing.T) {
 			}
 			require.Equal(t, test.wantPartitions, spec.Partitions)
 			require.Equal(t, test.wantConnectors, spec.PropSyncConnectors)
-			require.JSONEq(t, `{}`, string(spec.AllocationMetadata.Raw))
 			require.Equal(t, test.wantAgents, projection.AgentReplicas())
 			require.Equal(t, test.wantLocalIDs, projection.localPartitionIDs)
 		})
