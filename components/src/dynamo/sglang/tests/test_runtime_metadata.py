@@ -298,48 +298,6 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     assert "Failed to get runtime config" not in caplog.text
 
 
-def test_runtime_config_publishes_default_chat_template_kwargs(register, monkeypatch):
-    server_args = SimpleNamespace(
-        allow_auto_truncate=False,
-        context_length=4096,
-        default_chat_template_kwargs={"clear_thinking": False},
-        disaggregation_mode="null",
-        max_prefill_tokens=None,
-        page_size=16,
-        reasoning_parser=None,
-        skip_tokenizer_init=False,
-        speculative_algorithm="NONE",
-        speculative_num_steps=None,
-    )
-    dynamo_args = register.DynamoConfig()
-    dynamo_args.enable_local_indexer = False
-    dynamo_args.enable_multimodal = False
-
-    monkeypatch.setattr(register, "model_card_dp_rank_bounds", lambda _: (0, 1))
-    monkeypatch.setattr(register, "get_sglang_worker_group_id", lambda _: None)
-    monkeypatch.setattr(register, "apply_topology_config", lambda _: None)
-    monkeypatch.setattr(
-        register, "_get_bootstrap_info_for_config", lambda _: (None, None)
-    )
-    monkeypatch.setattr(register, "get_spec_decode_runtime_data", lambda _: None)
-    monkeypatch.setattr(register, "_get_mooncake_runtime_data", lambda _: None)
-    monkeypatch.setattr(
-        register,
-        "runtime_capacity",
-        lambda *_: SimpleNamespace(
-            max_num_seqs=None, max_num_batched_tokens=None, total_kv_blocks=None
-        ),
-    )
-
-    runtime_config = asyncio.run(
-        register.get_runtime_config(None, server_args, dynamo_args)
-    )
-
-    assert json.loads(runtime_config.runtime_data["default_chat_template_kwargs"]) == {
-        "clear_thinking": False
-    }
-
-
 def test_hicache_publishes_native_offloading_capacity():
     server_args = SimpleNamespace(hicache_write_policy="write_back")
     assert get_hicache_native_offloading_capacity(

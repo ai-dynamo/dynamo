@@ -624,6 +624,8 @@ async fn anthropic_messages(
         args.entry("truncate_history_thinking".to_string())
             .or_insert(serde_json::Value::Bool(false));
     }
+    // After the thinking decision above, so the defaults' thinking keys yield to it.
+    state.serving_policy().apply_to_request(&mut chat_request);
 
     let mut request = context.map(|_req| chat_request);
 

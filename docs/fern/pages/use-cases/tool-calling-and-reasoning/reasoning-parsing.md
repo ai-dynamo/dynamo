@@ -135,15 +135,18 @@ DYN_DEFAULT_THINKING_MODE=disabled \
 Use the same setting on every worker that serves the model. When the option is
 unset, Dynamo preserves the model or chat template's native default.
 
-On SGLang workers, use this option instead of thinking keys in SGLang's
-`--default-chat-template-kwargs`. The worker rejects `thinking`,
-`enable_thinking`, `thinking_mode`, and `reasoning_effort` in that flag.
+The frontend's `--default-chat-template-kwargs` can also set a thinking default,
+for example `'{"enable_thinking": false}'`. It applies to every model that the
+frontend serves, including models behind a sidecar. On `/v1/messages` with a
+reasoning parser, the Anthropic `thinking` parameter decides instead, because
+that endpoint turns thinking on unless the request disables it.
 
 Thinking controls use this precedence order:
 
 1. An explicit request control
-2. `--dyn-default-thinking-mode` or `DYN_DEFAULT_THINKING_MODE`
-3. The model or chat template's native default
+2. Thinking keys in the frontend's `--default-chat-template-kwargs`
+3. `--dyn-default-thinking-mode` or `DYN_DEFAULT_THINKING_MODE`
+4. The model or chat template's native default
 
 Explicit request controls include root-level `thinking`, top-level
 `reasoning_effort`, and the `thinking`, `enable_thinking`, `thinking_mode`, or

@@ -1697,7 +1697,7 @@ class EngineFactory:
                 reasoning_parser_name,
                 reasoning_parser_class,
                 tokenizer,
-                getattr(self.flags, "default_chat_template_kwargs", None) or {},
+                self.config.default_chat_template_kwargs or {},
                 model_config,
             )
         else:
@@ -1744,9 +1744,8 @@ class EngineFactory:
             routed_engine,
             block_size=block_size,
             enable_auto_tool_choice=enable_auto_tool_choice,
-            default_chat_template_kwargs=getattr(
-                self.flags, "default_chat_template_kwargs", None
-            ),
+            # The HTTP handlers already merged the frontend's
+            # --default-chat-template-kwargs into each request.
             default_thinking_mode=default_thinking_mode,
             structural_tag_mode=structural_tag_mode,
             structural_tag_scope=structural_tag_scope,

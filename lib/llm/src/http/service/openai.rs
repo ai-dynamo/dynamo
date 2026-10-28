@@ -3547,6 +3547,7 @@ async fn chat_completions(
         &request_id,
     );
 
+    state.serving_policy().apply_to_request(&mut request);
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -4270,6 +4271,7 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
+    state.serving_policy().apply_to_request(&mut chat_request);
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);

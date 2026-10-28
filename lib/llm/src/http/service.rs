@@ -143,6 +143,27 @@ mod tests {
     }
 
     #[test]
+    fn frontend_thinking_default_reaches_reasoning_policy() {
+        // Kimi K2.5 reasons by default; the HTTP handlers merge the frontend
+        // default before they normalize thinking and decide the reasoning policy.
+        let options = ParsingOptions::new(None, Some("kimi_k25".to_string()));
+        let reasoning_disabled = |policy: &crate::frontend_config::ServingPolicy| {
+            let mut req = request(json!("auto"));
+            policy.apply_to_request(&mut req);
+            req.normalize_reasoning_template_args().unwrap();
+            apply_request_tool_call_parsing_options(options.clone(), &req)
+                .unwrap()
+                .reasoning_disabled
+        };
+        let mut policy = crate::frontend_config::ServingPolicy::default();
+        assert!(!reasoning_disabled(&policy));
+        policy.set_default_chat_template_kwargs(
+            json!({"enable_thinking": false}).as_object().cloned(),
+        );
+        assert!(reasoning_disabled(&policy));
+    }
+
+    #[test]
     fn muse_auto_batch_reasoning_policy_honors_disabled_request() {
         if crate::test_utils::run_isolated(
             concat!(

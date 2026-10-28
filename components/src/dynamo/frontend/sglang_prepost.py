@@ -479,18 +479,11 @@ def _flatten_message_content(content: Any) -> Any:
 def _with_thinking_template_kwargs(
     request: dict[str, Any],
     default_thinking_mode: str | None = None,
-    default_chat_template_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     request = copy.copy(request)
-    # Request keys win, matching SGLang's --default-chat-template-kwargs.
-    chat_template_kwargs = {
-        **(default_chat_template_kwargs or {}),
-        **(
-            request.get("chat_template_kwargs")
-            or request.get("chat_template_args")
-            or {}
-        ),
-    }
+    chat_template_kwargs = dict(
+        request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
+    )
 
     # Rust normalization already resolved every thinking control into these
     # kwargs, so nothing here decides one; the deployment default below only
@@ -881,7 +874,6 @@ def preprocess_chat_request(
     exclude_tools_when_tool_choice_none: bool = True,
     template_force_reasoning: bool = False,
     default_thinking_mode: str | None = None,
-    default_chat_template_kwargs: dict[str, Any] | None = None,
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
@@ -895,9 +887,7 @@ def preprocess_chat_request(
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
-    request = _with_thinking_template_kwargs(
-        request, default_thinking_mode, default_chat_template_kwargs
-    )
+    request = _with_thinking_template_kwargs(request, default_thinking_mode)
     legacy_guidance = legacy_guided_decoding(request)
     messages = _materialize_messages(request.get("messages", []))
 

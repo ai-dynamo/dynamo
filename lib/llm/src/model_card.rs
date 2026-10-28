@@ -52,9 +52,9 @@ fn append_runtime_contract_checksum(
     canonicalize_json_object_keys(&mut value);
     let value = serde_json::to_vec(&value).expect("serializing serde_json::Value cannot fail");
 
-    // These contracts change the model-visible prompt. Workers with different
-    // contracts must not share a cohort whose preprocessor is built from one
-    // representative card.
+    // This contract controls model-visible media prompt expansion. Workers
+    // with different contracts must not share a cohort whose preprocessor is
+    // built from one representative card.
     bytes.extend_from_slice(b"\0dynamo/model-card/runtime-contract/v1\0");
     bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
     bytes.extend_from_slice(key.as_bytes());
@@ -1383,13 +1383,6 @@ impl ModelDeploymentCard {
                     &mut bytes_to_hash,
                     &self.runtime_config,
                     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-                );
-                // Template defaults change the rendered prompt, so a rolling
-                // change to them must start a new WorkerSet.
-                append_runtime_contract_checksum(
-                    &mut bytes_to_hash,
-                    &self.runtime_config,
-                    crate::preprocessor::DEFAULT_CHAT_TEMPLATE_KWARGS_RUNTIME_KEY,
                 );
 
                 // TODO: Do we want any other user_data or runtime_config?
@@ -3709,31 +3702,6 @@ mod ownership_tests {
             .runtime_data
             .insert("some_unrelated_runtime_key".to_string(), true.into());
         assert_eq!(bare.mdcsum(), unrelated.mdcsum());
-    }
-
-    #[test]
-    fn default_chat_template_kwargs_isolate_worker_sets() {
-        use crate::preprocessor::DEFAULT_CHAT_TEMPLATE_KWARGS_RUNTIME_KEY;
-
-        fn card_with_defaults(defaults: serde_json::Value) -> ModelDeploymentCard {
-            let mut card = ModelDeploymentCard::with_name_only("model");
-            card.runtime_config.runtime_data.insert(
-                DEFAULT_CHAT_TEMPLATE_KWARGS_RUNTIME_KEY.to_string(),
-                defaults,
-            );
-            card
-        }
-
-        let missing = ModelDeploymentCard::with_name_only("model");
-        let old = card_with_defaults(serde_json::json!({"clear_thinking": true}));
-        let new = card_with_defaults(serde_json::json!({"clear_thinking": false}));
-
-        assert_ne!(missing.mdcsum(), old.mdcsum());
-        assert_ne!(old.mdcsum(), new.mdcsum());
-        assert_eq!(
-            card_with_defaults(serde_json::json!({"a": 1, "b": 2})).mdcsum(),
-            card_with_defaults(serde_json::json!({"b": 2, "a": 1})).mdcsum()
-        );
     }
 
     #[test]

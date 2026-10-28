@@ -48,7 +48,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 use crate::frontend_config::{
-    DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig, MetricsConfig,
+    DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig, MetricsConfig, ServingPolicy,
 };
 use crate::local_model::runtime_config::{
     SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
@@ -736,6 +736,11 @@ impl State {
     /// Response field used for emitted OpenAI-compatible reasoning content.
     pub fn reasoning_field(&self) -> ReasoningField {
         self.frontend_api_config.reasoning_field()
+    }
+
+    /// Serving policy that the chat handlers apply to each request.
+    pub fn serving_policy(&self) -> &ServingPolicy {
+        self.frontend_api_config.serving_policy()
     }
 }
 

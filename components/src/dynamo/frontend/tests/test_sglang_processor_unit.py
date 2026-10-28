@@ -73,7 +73,6 @@ from dynamo.frontend.sglang_processor import (
     _normalize_eos_token_ids,
     _preprocess_worker,
     _runtime_config_parser_name,
-    _runtime_default_chat_template_kwargs,
     _tokenizer_eos_token_ids,
 )
 from dynamo.frontend.utils import (
@@ -2914,28 +2913,6 @@ class TestRuntimeConfigParserName:  # FRONTEND.2 — parser name resolution from
         assert _runtime_config_parser_name(FakeMdc(), "tool_call_parser") == "hermes"
 
 
-class TestRuntimeDefaultChatTemplateKwargs:  # FRONTEND.1
-    @pytest.mark.parametrize(
-        "runtime_config, expected",
-        [
-            (None, None),
-            ({}, None),
-            ({"runtime_data": {}}, None),
-            ({"runtime_data": {"default_chat_template_kwargs": {}}}, None),
-            (
-                {"runtime_data": {"default_chat_template_kwargs": {"x": 1}}},
-                {"x": 1},
-            ),
-        ],
-    )
-    def test_reads_runtime_data(self, runtime_config, expected):
-        class FakeMdc:
-            def runtime_config(self):
-                return runtime_config
-
-        assert _runtime_default_chat_template_kwargs(FakeMdc()) == expected
-
-
 # ---------------------------------------------------------------------------
 # preprocess_chat_request
 # ---------------------------------------------------------------------------
@@ -3616,10 +3593,6 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             "get_tokenizer",
             lambda model_path, trust_remote_code=False: FakeTokenizer(),
         )
-        # Restore after the test so later pool-path tests see no defaults.
-        monkeypatch.setattr(
-            sglang_processor_module, "_w_default_chat_template_kwargs", None
-        )
 
         _init_worker(
             MODEL,
@@ -3631,13 +3604,9 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             structural_tag_mode="on",
             structural_tag_scope="always",
             structural_tag_schema="strict",
-            default_chat_template_kwargs={"clear_thinking": False},
         )
         assert sglang_processor_module._w_tokenizer.chat_template == "custom template"
         assert sglang_processor_module._w_default_thinking_mode == "disabled"
-        assert sglang_processor_module._w_default_chat_template_kwargs == {
-            "clear_thinking": False
-        }
         assert sglang_processor_module._w_structural_tag_mode == "on"
         assert sglang_processor_module._w_structural_tag_scope == "always"
         assert sglang_processor_module._w_structural_tag_schema == "strict"
@@ -4101,37 +4070,6 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert "thinking" not in captured["kwargs"]
         assert "enable_thinking" not in captured["kwargs"]
         assert "thinking_mode" not in captured["kwargs"]
-
-    def test_default_chat_template_kwargs_layer_under_request_kwargs(self):
-        captured = {}
-
-        class CapturingTokenizer:
-            chat_template = "template"
-
-            def apply_chat_template(self, messages, **kwargs):
-                captured["kwargs"] = kwargs
-                return [1, 2, 3]
-
-        request = {
-            "model": "generic-model",
-            "messages": [{"role": "user", "content": "Hello"}],
-            "chat_template_args": {"preserve_thinking": False},
-        }
-
-        preprocess_chat_request(
-            request,
-            tokenizer=CapturingTokenizer(),
-            tool_call_parser_name=None,
-            reasoning_parser_name=None,
-            default_chat_template_kwargs={
-                "clear_thinking": False,
-                "preserve_thinking": True,
-            },
-        )
-
-        assert captured["kwargs"]["clear_thinking"] is False
-        assert captured["kwargs"]["preserve_thinking"] is False
-        assert request["chat_template_args"] == {"preserve_thinking": False}
 
     def test_deepseek_v4_named_tool_choice_filters_encoder_tools(self, monkeypatch):
         captured = {}
