@@ -185,7 +185,7 @@ Not all parsers support structural tags. Parsers without a structural-tag
 builder fall back to their existing best-effort tool-calling behavior without
 rejecting the request.
 
-The selected builder is resolved from the compatible Unified route first, then the V1 registry. Current builder availability (backend compilation and request-schema support are separate):
+For the current registered configurations, a Unified route uses its available V2 builder, and a V1 route uses the V1 registry. Explicit V2 does not select a V1 parser or supply missing native structural-tag support. Current builder availability (backend compilation and request-schema support are separate):
 
 - `qwen3_coder`, `nemotron_nano`
 - `hermes`, `qwen25`

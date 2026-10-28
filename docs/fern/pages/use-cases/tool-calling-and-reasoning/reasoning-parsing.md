@@ -144,6 +144,8 @@ Thinking controls use this precedence order:
 2. `--dyn-default-thinking-mode` or `DYN_DEFAULT_THINKING_MODE`
 3. The model or chat template's native default
 
+Kimi K3 named-tool choice is an exception to this thinking precedence: configuring `--dyn-tool-call-parser kimi_k3` or `kimi-k3` forces thinking off for a named call even when the request enables it. Selecting K3 only through the reasoning selector does not apply that override.
+
 Explicit request controls include root-level `thinking`, top-level
 `reasoning_effort`, and the `thinking`, `enable_thinking`, `thinking_mode`, or
 `reasoning_effort` fields in `chat_template_args` or
@@ -186,7 +188,7 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
       <Accordion title="Kimi K3">
         **Parser:** `kimi_k3` (Unified alias `kimi-k3`)
 
-        **Notes:** XTML thinking and response channels, including prompt-prefilled reasoning. Named K3 tool choice disables thinking before rendering; see [Tool Call Parsing](tool-call-parsing.mdx).
+        **Notes:** XTML thinking and response channels, including prompt-prefilled reasoning. The named-tool thinking override requires `--dyn-tool-call-parser kimi_k3` or `kimi-k3`; the reasoning selector alone does not enable it. See [Tool Call Parsing](tool-call-parsing.mdx).
       </Accordion>
 
       <Accordion title="Kimi K2.5 / Kimi K2.6 format-compatible thinking models">
@@ -194,9 +196,9 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
 
         **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
 
-        **Force-reasoning:** <Badge intent="success" minimal>Yes</Badge>
+        **Force-reasoning:** <Badge intent="success" minimal>Yes (V1)</Badge>
 
-        **Notes:** `<think>...</think>` with force-reasoning
+        **Notes:** V1 forces reasoning from the start. The default Unified Kimi K2 route begins as visible text unless an opening marker or supported prompt-prefilled reasoning state selects reasoning.
       </Accordion>
 
       <Accordion title="Kimi K2 Instruct / Thinking with Unicode delimiters">
@@ -301,7 +303,7 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
 
         **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
 
-        **Notes:** Alias for `nemotron_deci`. `<think>...</think>`
+        **Notes:** V1 aliases `nemotron_deci` for `<think>...</think>`. Auto/V2 resolves `glm45` to the Unified `glm47` family.
       </Accordion>
     </AccordionGroup>
   </Accordion>
