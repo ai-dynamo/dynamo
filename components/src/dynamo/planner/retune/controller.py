@@ -636,12 +636,8 @@ class RetuneController:
                 "stale", reason="searched parameters changed during the sweep"
             )
         baseline_score = result.scores.get(baseline.key())
-        if baseline_score is None or not math.isfinite(baseline_score):
-            error = (
-                result.metrics.get(baseline.key(), {}).get("error")
-                if baseline_score is None
-                else f"non-finite score {baseline_score!r}"
-            )
+        if baseline_score is None:
+            error = result.metrics.get(baseline.key(), {}).get("error")
             return record("failed", reason=f"baseline replay failed: {error}")
 
         order = {
@@ -653,7 +649,6 @@ class RetuneController:
                 (score, candidate)
                 for candidate in request.candidates
                 if (score := result.scores.get(candidate.key())) is not None
-                and math.isfinite(score)
             ),
             # Best score first (lowest for a minimized objective); ties go to
             # the baseline, then canonical order.
@@ -740,16 +735,11 @@ class RetuneController:
         return decision
 
     def _improves(self, score: float, baseline_score: float) -> bool:
-        """Whether ``score`` beats the baseline by the required margin.
-
-        The gain is the increase for a maximized objective and the decrease
-        for a minimized one; it must exceed ``min_improvement_percentage`` of
-        ``|baseline_score|``. Any strict gain clears a zero baseline, and a
-        latency cannot fall below zero, so a zero-latency baseline is kept.
-        """
+        """Gain in the objective's direction must exceed
+        ``min_improvement_percentage`` of ``baseline_score``."""
 
         gain = score - baseline_score if self._maximize else baseline_score - score
-        margin = abs(baseline_score) * self._retune.min_improvement_percentage / 100.0
+        margin = baseline_score * self._retune.min_improvement_percentage / 100.0
         return gain > margin
 
     def _skipped(

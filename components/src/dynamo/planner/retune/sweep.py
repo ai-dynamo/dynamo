@@ -278,7 +278,7 @@ def with_predictor_fields(
 def score_summary(
     summary: Mapping[str, Any],
     window_s: float,
-    objective: RetuneObjective = "GoodputPerGPU",
+    objective: RetuneObjective,
 ) -> tuple[float, dict[str, Any]]:
     """Score a replay summary on ``objective``, in the objective's own units.
 
@@ -353,7 +353,7 @@ def evaluate_candidate(
     sla_ttft_ms: float,
     sla_itl_ms: float,
     window_s: float,
-    objective: RetuneObjective = "GoodputPerGPU",
+    objective: RetuneObjective,
 ) -> tuple[float, dict[str, Any]]:
     """Replay the window once with ``params`` and score its summary on ``objective``.
 

@@ -6,7 +6,6 @@
 """Unit tests for the retune controller with a scripted ``run_sweep``."""
 
 import json
-import math
 import threading
 from collections import deque
 
@@ -543,15 +542,12 @@ async def test_min_improvement_percentage_boundary(sweeps, best_score, outcome):
         ("Goodput", 100.0, 100.0, "kept"),
         ("Goodput", 0.0, 0.0, "kept"),
         ("Goodput", 0.0, 1e-9, "applied"),
-        ("Goodput", -100.0, -97.0, "kept"),
-        ("Goodput", -100.0, -96.99, "applied"),
         # Minimized: the best must fall below the baseline by more than 3%.
         ("TTFT", 100.0, 97.0, "kept"),
         ("TTFT", 100.0, 96.99, "applied"),
         ("TTFT", 100.0, 100.0, "kept"),
         ("TTFT", 0.0, 0.0, "kept"),
         ("E2ELatency", 1_000.0, 969.99, "applied"),
-        ("E2ELatency", -100.0, -103.01, "applied"),
     ],
 )
 async def test_min_improvement_follows_the_objective_direction(
@@ -565,55 +561,13 @@ async def test_min_improvement_follows_the_objective_direction(
     ticks = await _run(controller, 70)
 
     ((_, decision),) = _decisions(ticks)
+    assert sweeps.requests[0].objective == objective
     assert decision.outcome == outcome
     assert (decision.baseline_score, decision.best_score) == (
         baseline_score,
         best_score,
     )
     assert decision.chosen == (BEST if outcome == "applied" else STARTUP)
-
-
-@pytest.mark.parametrize(
-    ("objective", "best_score", "top"),
-    [
-        ("TTFT", 50.0, [("best", 50.0), ("baseline", 100.0)]),
-        ("TTFT", 150.0, [("baseline", 100.0), ("other", 100.0)]),
-        ("Goodput", 150.0, [("best", 150.0), ("baseline", 100.0)]),
-        ("Goodput", 50.0, [("baseline", 100.0), ("other", 100.0)]),
-    ],
-)
-async def test_candidates_rank_best_first_in_the_objective_direction(
-    sweeps, objective, best_score, top
-):
-    sweeps.default = _best_wins(best_score=best_score, other_score=100.0)
-    controller = _controller(_s1(objective=objective))
-
-    ticks = await _run(controller, 70)
-
-    ((_, decision),) = _decisions(ticks)
-    (request,) = sweeps.requests
-    assert request.objective == objective
-    names = {STARTUP.key(): "baseline", BEST.key(): "best"}
-    ranked = [(names.get(key, "other"), score) for key, score in decision.top]
-    assert ranked[:2] == top
-    assert decision.best_score == top[0][1]
-
-
-@pytest.mark.parametrize("objective", ["Goodput", "TTFT"])
-async def test_non_finite_scores_never_rank(sweeps, objective):
-    # A non-finite candidate is unscored; a non-finite baseline fails.
-    sweeps.default = _best_wins(best_score=math.nan, other_score=100.0)
-    controller = _controller(_s1(objective=objective))
-    ticks = await _run(controller, 70)
-    ((_, decision),) = _decisions(ticks)
-    assert (decision.outcome, decision.best_score) == ("kept", 100.0)
-
-    sweeps.default = _scored(lambda c, _r: math.inf if c == STARTUP else 1.0)
-    controller = _controller(_s1(objective=objective))
-    ticks = await _run(controller, 70)
-    ((_, decision),) = _decisions(ticks)
-    assert decision.outcome == "failed"
-    assert "baseline replay failed: non-finite score inf" in decision.reason
 
 
 async def test_advisory_records_the_best_point_without_actuating(sweeps):

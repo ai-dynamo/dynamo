@@ -460,7 +460,7 @@ is paired on the same window file and the same random numbers.
 Candidates rank best first, highest score for a maximized objective and lowest for `TTFT` and
 `E2ELatency`, with ties going to the current point and then to the canonical order. The best
 candidate is applied only when it beats the current score by more than `min_improvement_percentage`
-/ 100 × |current score| (above it for a maximized objective, below it for a minimized one) and it
+/ 100 × the current score (above it for a maximized objective, below it for a minimized one) and it
 changes a router parameter or a Planner field. A zero current score therefore needs any strict
 gain, and a zero latency is never beaten. Each decision has one outcome:
 
