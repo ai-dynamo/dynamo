@@ -1200,7 +1200,11 @@ async fn handler_completions(
 ) -> Result<Response, ErrorResponse> {
     let body = read_json_request_body(&headers, body).await?;
     let mut request: NvCreateCompletionRequest = parse_json_request("completions", &body)?;
-    if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
+    // SDKs may send streaming options on unary requests. Ignore those hints
+    // before validation; the preprocessor enables unary usage independently.
+    if request.inner.stream != Some(true) {
+        request.inner.stream_options = None;
+    } else if *FORCE_INCLUDE_USAGE {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
 
@@ -1276,9 +1280,6 @@ async fn completions(
 
     // return a 503 if the service is not ready
     check_ready(&state)?;
-
-    // Validate stream_options is only used when streaming (NVBug 5662680)
-    validate_completion_stream_options(&request)?;
 
     validate_completion_fields_generic(&request)?;
 
@@ -2483,6 +2484,9 @@ async fn pooling(
     Ok(response)
 }
 
+/// Clear client streaming hints before validation so unary SDK requests remain valid.
+/// Unary token usage is enabled independently by the preprocessor; clearing these
+/// hints must not disable usage reporting.
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
@@ -2512,7 +2516,9 @@ async fn handler_chat_completions(
                 return Err(error);
             }
         };
-    if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
+    if request.inner.stream != Some(true) {
+        request.inner.stream_options = None;
+    } else if *FORCE_INCLUDE_USAGE {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
 
@@ -3567,12 +3573,6 @@ async fn chat_completions(
         return Err(err_response);
     }
 
-    // Validate stream_options is only used when streaming (NVBug 5662680)
-    if let Err(err_response) = validate_chat_completion_stream_options(&request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-        return Err(err_response);
-    }
-
     // Handle Rest of Validation Errors
     if let Err(err_response) = validate_chat_completion_fields_generic(&request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -3970,25 +3970,6 @@ pub fn validate_chat_completion_required_fields(
     Ok(())
 }
 
-/// Validates that stream_options is only used when stream=true for chat completions (NVBug 5662680)
-pub fn validate_chat_completion_stream_options(
-    request: &NvCreateChatCompletionRequest,
-) -> Result<(), ErrorResponse> {
-    let inner = &request.inner;
-    let streaming = inner.stream.unwrap_or(false);
-    if !streaming && inner.stream_options.is_some() {
-        return Err(ErrorMessage::from_http_error(
-            ErrorClass::InvalidRequest,
-            HttpError {
-                code: 400,
-                message: VALIDATION_PREFIX.to_string()
-                    + "The 'stream_options' field is only allowed when 'stream' is set to true.",
-            },
-        ));
-    }
-    Ok(())
-}
-
 /// Validates a request and maps a failure to an OpenAI-compatible error response.
 ///
 /// `request_kind` names the request kind in the message of a backend
@@ -4017,25 +3998,6 @@ pub fn validate_chat_completion_fields_generic(
     request: &NvCreateChatCompletionRequest,
 ) -> Result<(), ErrorResponse> {
     validate_request_fields_generic(request, "chat completion")
-}
-
-/// Validates that stream_options is only used when stream=true for completions (NVBug 5662680)
-pub fn validate_completion_stream_options(
-    request: &NvCreateCompletionRequest,
-) -> Result<(), ErrorResponse> {
-    let inner = &request.inner;
-    let streaming = inner.stream.unwrap_or(false);
-    if !streaming && inner.stream_options.is_some() {
-        return Err(ErrorMessage::from_http_error(
-            ErrorClass::InvalidRequest,
-            HttpError {
-                code: 400,
-                message: VALIDATION_PREFIX.to_string()
-                    + "The 'stream_options' field is only allowed when 'stream' is set to true.",
-            },
-        ));
-    }
-    Ok(())
 }
 
 /// Validates a completion request and returns an error response if validation fails.
