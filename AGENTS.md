@@ -47,6 +47,7 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-clone-hotpath-audit` — audit Rust hot-path `.clone()` calls
 - `dynamo-docs` — Fern docs-site content per the style guide
 - `dynamo-frontend-benchmark` — benchmark/profile the frontend against mock workers
+- `dynamo-perf-best-practices` — check hot-path changes in a PR against Dynamo's performance practices; pr-checklist runs it
 - `fern-components` — Fern MDX component library and usage guidance
 - `fern-navigation` — Fern navigation and site-structure configuration guidance
 - `dynamo-kv-replay-parity` — validate offline KV replay parity and performance
