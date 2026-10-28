@@ -95,8 +95,6 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 	ctx context.Context,
 	req ctrl.Request,
 ) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
 	request := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
 	if err := r.Get(ctx, req.NamespacedName, request); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -106,7 +104,6 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 		return ctrl.Result{}, nil
 	}
 	original := request.DeepCopy()
-	result := ctrl.Result{}
 
 	runs, err := r.ownedRuns(ctx, request)
 	if err != nil {
@@ -135,55 +132,11 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 	condition := dgdrV1beta2Condition(request, metav1.ConditionTrue, dgdrReasonRunCreated,
 		fmt.Sprintf("Run %q exists for generation %d", runName, request.Generation))
 	if current == nil {
-		if active != nil {
-			if active.DeletionTimestamp.IsZero() {
-				if err := r.requestRunCancellation(ctx, active, request.Generation); err != nil {
-					return ctrl.Result{}, err
-				}
-			}
-			condition = dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonCancelingStaleRun,
-				fmt.Sprintf("Waiting for superseded Run %q to stop before generation %d starts", active.Name, request.Generation))
-			request.Status.ActiveRunRef = &corev1.LocalObjectReference{Name: active.Name}
-			meta.SetStatusCondition(&request.Status.Conditions, condition)
-			if err := r.patchStatus(ctx, request, original); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{}, nil
-		} else if run, buildErr := r.buildRun(request); buildErr != nil {
-			logger.Info("Request cannot be turned into a Run", "reason", buildErr.Error())
-			condition = dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonInvalidSpec, buildErr.Error())
-		} else {
-			marker := meta.FindStatusCondition(request.Status.Conditions, nvidiacomv1beta2.DGDRRequestConditionAccepted)
-			markerMatches := request.Status.ActiveRunRef != nil && request.Status.ActiveRunRef.Name == wantName &&
-				marker != nil && marker.ObservedGeneration == request.Generation
-
-			switch {
-			case markerMatches && (marker.Reason == dgdrReasonRunCreating || marker.Reason == dgdrReasonRunCreated):
-				return r.createReservedRun(ctx, request, run, original)
-			case request.Status.ActiveRunRef != nil && marker != nil && marker.Reason == dgdrReasonRunCreating:
-				// The Request informer has observed a newer spec before the Run informer observed
-				// the reserved create. Resolve its unknown outcome directly: an owned Run waits for
-				// the cache before cancellation, while authoritative absence releases the stale
-				// reservation. This is the only uncached read in the Request transaction.
-				pending, err := r.reservedRunPending(ctx, request, marker.ObservedGeneration)
-				if err != nil {
-					return ctrl.Result{}, err
-				}
-				if pending {
-					return ctrl.Result{RequeueAfter: dgdrV1beta2ConflictRetry}, nil
-				}
-				fallthrough
-			default:
-				condition = dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonRunCreating,
-					fmt.Sprintf("Creating Run %q for generation %d", wantName, request.Generation))
-				request.Status.ActiveRunRef = &corev1.LocalObjectReference{Name: wantName}
-				meta.SetStatusCondition(&request.Status.Conditions, condition)
-				if err := r.patchStatus(ctx, request, original); err != nil {
-					return ctrl.Result{}, err
-				}
-				return r.createReservedRun(ctx, request, run, request.DeepCopy())
-			}
+		invalidCondition, result, err := r.reconcileMissingRun(ctx, request, active, original, wantName)
+		if err != nil || invalidCondition == nil {
+			return result, err
 		}
+		condition = *invalidCondition
 	}
 
 	entries, err = dgdrV1beta2RunEntries(runs)
@@ -220,7 +173,70 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 			return ctrl.Result{}, fmt.Errorf("delete retired Run %q: %w", retired[i].Name, err)
 		}
 	}
-	return result, nil
+	return ctrl.Result{}, nil
+}
+
+// reconcileMissingRun serializes Run creation behind the previous active Run and a durable
+// RunCreating reservation. A non-nil condition is the only non-terminal return: buildRun rejected
+// the accepted Request snapshot, so the caller still has to publish InvalidSpec and retained history.
+func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) reconcileMissingRun(
+	ctx context.Context,
+	request *nvidiacomv1beta2.DynamoGraphDeploymentRequest,
+	active *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	original *nvidiacomv1beta2.DynamoGraphDeploymentRequest,
+	wantName string,
+) (*metav1.Condition, ctrl.Result, error) {
+	if active != nil {
+		if active.DeletionTimestamp.IsZero() {
+			if err := r.requestRunCancellation(ctx, active, request.Generation); err != nil {
+				return nil, ctrl.Result{}, err
+			}
+		}
+		condition := dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonCancelingStaleRun,
+			fmt.Sprintf("Waiting for superseded Run %q to stop before generation %d starts", active.Name, request.Generation))
+		request.Status.ActiveRunRef = &corev1.LocalObjectReference{Name: active.Name}
+		meta.SetStatusCondition(&request.Status.Conditions, condition)
+		return nil, ctrl.Result{}, r.patchStatus(ctx, request, original)
+	}
+
+	run, err := r.buildRun(request)
+	if err != nil {
+		log.FromContext(ctx).Info("Request cannot be turned into a Run", "reason", err.Error())
+		condition := dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonInvalidSpec, err.Error())
+		return &condition, ctrl.Result{}, nil
+	}
+
+	marker := meta.FindStatusCondition(request.Status.Conditions, nvidiacomv1beta2.DGDRRequestConditionAccepted)
+	markerMatches := request.Status.ActiveRunRef != nil && request.Status.ActiveRunRef.Name == wantName &&
+		marker != nil && marker.ObservedGeneration == request.Generation
+	if markerMatches && (marker.Reason == dgdrReasonRunCreating || marker.Reason == dgdrReasonRunCreated) {
+		result, err := r.createReservedRun(ctx, request, run, original)
+		return nil, result, err
+	}
+
+	if request.Status.ActiveRunRef != nil && marker != nil && marker.Reason == dgdrReasonRunCreating {
+		// The Request informer has observed a newer spec before the Run informer observed
+		// the reserved create. Resolve its unknown outcome directly: an owned Run waits for
+		// the cache before cancellation, while authoritative absence releases the stale
+		// reservation. This is the only uncached read in the Request transaction.
+		pending, err := r.reservedRunPending(ctx, request, marker.ObservedGeneration)
+		if err != nil {
+			return nil, ctrl.Result{}, err
+		}
+		if pending {
+			return nil, ctrl.Result{RequeueAfter: dgdrV1beta2ConflictRetry}, nil
+		}
+	}
+
+	condition := dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonRunCreating,
+		fmt.Sprintf("Creating Run %q for generation %d", wantName, request.Generation))
+	request.Status.ActiveRunRef = &corev1.LocalObjectReference{Name: wantName}
+	meta.SetStatusCondition(&request.Status.Conditions, condition)
+	if err := r.patchStatus(ctx, request, original); err != nil {
+		return nil, ctrl.Result{}, err
+	}
+	result, err := r.createReservedRun(ctx, request, run, request.DeepCopy())
+	return nil, result, err
 }
 
 func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) requestRunCancellation(
