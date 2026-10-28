@@ -261,23 +261,34 @@ kubectl exec -n $NS $POD -c main -- cat /tmp/tmpkro1yevt/<report>.nsys-rep > ./r
 
 ## Tested Configurations
 
-Tested with Nsight Operator 26.2.1 and its 26.2 field names, pods created by the Dynamo 1.5.0 operator, and Dynamo 1.6.0
-pre-release runtime images:
+Each result below is one coordinator window per selector, with Qwen3-0.6B on one H100 GPU per worker, published Dynamo
+1.6.0 runtime and planner images, and streaming requests during the window. A selector passed when every selected pod
+uploaded one report, no other pod uploaded one, every GPU worker report contained kernels and CUDA API calls, no pod
+restarted, and no request failed.
 
-- Selection by `nvidia.com/dynamo-component-type` with lowercase values profiled the selected frontend and worker pods.
-  Capitalized values matched no pod and left the pods unchanged. Selection by a custom pod label also worked.
-- A literal tag limited a coordinator window to the pods with that tag, and one window produced one report per pod.
-- A 30-second capture of a non-root vLLM worker on one H100 GPU recorded about 2.3 million kernels and 0.58 million CUDA
-  API calls. That window was started with `kubectl exec`, as in
-  [Profile One Pod with kubectl exec](#profile-one-pod-with-kubectl-exec), rather than by the coordinator.
+| Nsight Operator | Profile config | Engine | DGD mode | Selectors that passed | Selectors that failed |
+|---|---|---|---|---|---|
+| 26.2.1 | 26.2 field names, with `planner` added to the CPU process pattern | vLLM, SGLang, TensorRT-LLM | Aggregated | frontend, planner, worker, all | None |
+| 26.2.1 | Same | vLLM, SGLang, TensorRT-LLM | Disaggregated | frontend, planner, prefill, decode, prefill and decode together, all | None |
+| 26.3.2 | The config above, as written | vLLM, SGLang, TensorRT-LLM | Aggregated | frontend, worker | planner, and all (no planner report) |
+| 26.3.2 | The config above, as written | vLLM, SGLang, TensorRT-LLM | Disaggregated | frontend, prefill, decode, prefill and decode together | planner, and all (no planner report) |
+
+The planner failed on 26.3.2 for two reasons. The config above has no process pattern for `dynamo.planner`. With one
+added, the planner was recorded, but the `nsys` that Nsight Operator 26.3.2 injects could not write the report in the
+`dynamo-planner` 1.6.0 image, because the image does not include `libcap.so.2`.
+
+Earlier tests on Nsight Operator 26.2.1, with pods created by the Dynamo 1.5.0 operator, also showed:
+
+- Capitalized `nvidia.com/dynamo-component-type` values matched no pod. Selection by a custom pod label also worked.
+- A 30-second window on a non-root vLLM worker, started with `kubectl exec` as in
+  [Profile One Pod with kubectl exec](#profile-one-pod-with-kubectl-exec), recorded about 2.3 million kernels and 0.58
+  million CUDA API calls.
 - `DYN_ENABLE_RUST_NVTX=1` added per-request ranges on the frontend, and `VLLM_NVTX_SCOPES_FOR_PROFILING=1` added
   scheduler ranges on a vLLM worker.
 
 Not yet tested:
 
-- The profile config above on Nsight Operator 26.3; its field names were checked against the 26.3 schema only.
-- Upload to external S3, and a coordinator window on a GPU worker.
-- Workers with more than one GPU, and SGLang and TensorRT-LLM workers.
-- Prefill and decode selection in a disaggregated DGD, and a standalone router.
+- Upload to external S3.
+- Workers with more than one GPU, and a standalone router.
 - Dynamo sidecar mode.
-- Namespaces that enforce Pod Security `restricted`, and `opentelemetryTrace: false`.
+- Namespaces that enforce Pod Security `restricted`.
