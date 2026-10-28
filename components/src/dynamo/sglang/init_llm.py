@@ -236,6 +236,7 @@ async def init_decode(
                 needs=decode_needs,
                 # Decode workers serve the LoRA load endpoints, so they may advertise capacity.
                 serves_lora_load=True,
+                forwards_kv_hints=True,
             ),
         ]
         await asyncio.gather(*gather_tasks)
@@ -396,6 +397,7 @@ async def init_prefill(
                 # Prefill workers also serve the LoRA load endpoints (init_prefill), so they may
                 # advertise capacity.
                 serves_lora_load=True,
+                forwards_kv_hints=True,
             ),
         )
     except Exception as e:

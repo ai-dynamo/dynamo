@@ -3649,6 +3649,7 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(Captured::default()));
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
 
         let context_id = uuid::Uuid::new_v4().to_string();
