@@ -30,9 +30,12 @@ import (
 var hardwareSKUsText string
 
 var hardwareSKUs = func() map[string]struct{} {
-	values := strings.Fields(hardwareSKUsText)
-	result := make(map[string]struct{}, len(values))
-	for _, value := range values {
+	result := map[string]struct{}{}
+	for _, line := range strings.Split(hardwareSKUsText, "\n") {
+		value := strings.TrimSpace(line)
+		if value == "" || strings.HasPrefix(value, "#") {
+			continue
+		}
 		result[value] = struct{}{}
 	}
 	return result
