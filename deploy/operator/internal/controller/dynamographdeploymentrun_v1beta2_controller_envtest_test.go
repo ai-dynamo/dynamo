@@ -46,14 +46,15 @@ func TestDGDRRunPublisherRoleDoesNotEscalateManagerPermissions(t *testing.T) {
 		}
 		managerRules = append(managerRules, rule)
 	}
-	managerRole := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: managerName, Namespace: run.Namespace}, Rules: managerRules}
+	managerRole := &rbacv1.Role{Name: managerName, Namespace: run.Namespace, Rules: managerRules}
 	if err := admin.Create(ctx, managerRole); err != nil {
 		t.Fatalf("create manager Role: %v", err)
 	}
 	managerBinding := &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: managerName, Namespace: run.Namespace},
-		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: managerRole.Name},
-		Subjects:   []rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: rbacv1.UserKind, Name: managerName}},
+		Name:      managerName,
+		Namespace: run.Namespace,
+		RoleRef:   rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: managerRole.Name},
+		Subjects:  []rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: rbacv1.UserKind, Name: managerName}},
 	}
 	if err := admin.Create(ctx, managerBinding); err != nil {
 		t.Fatalf("create manager RoleBinding: %v", err)
