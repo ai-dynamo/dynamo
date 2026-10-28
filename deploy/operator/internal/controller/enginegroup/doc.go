@@ -11,8 +11,7 @@
 // The private, versioned checkpoint owns coordinator recovery state. Public status
 // projects operations and observed membership; it is never decoded into effect authority.
 // New desired levels are checkpointed before a later reconcile may apply them.
-// The unpublished status.reconciliation schema is not automatically migrated:
-// an initialized world without valid recovery authority remains fail-closed.
+// An initialized world without a valid checkpoint remains fail-closed.
 //
 // DGD deletion requests child deletion and retains native capacity until the
 // child finishes retirement. Only the child installs its effect-owning finalizer.

@@ -38,6 +38,26 @@ func TestEngineGroupCheckpointStateRoundTrip(t *testing.T) {
 	assert.Equal(t, status, restored)
 }
 
+func TestProfileMinimumIsEnforcedBeforeScalePlanner(t *testing.T) {
+	t.Log("declare a packed profile whose initial world contains two four-member allocations")
+	group := &nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentEngineGroupSpec{Replicas: 1},
+	}
+	runtime := Runtime{
+		Profile: nvidiacomv1beta1.EngineGroupProfileStatus{MinSupportedReplicas: 2, MaxSupportedReplicas: 8, NativeMembersPerReplica: 4},
+		Planner: &engineGroupControllerTestPlanResolver{err: errors.New("planner must not run for an invalid target")},
+	}
+
+	t.Log("reject the physical allocation target before invoking any backend-specific planner")
+	plan, validation, err := (&Reconciler{}).resolveDesiredEngineGroupPlan(t.Context(), group, runtime, engineGroupTestStatus())
+	require.NoError(t, err)
+	assert.Nil(t, plan)
+	require.NotNil(t, validation)
+	assert.Equal(t, "OutsideProfileBounds", validation.Reason)
+	assert.Equal(t, int32(1), validation.RequestedReplicas)
+	assert.Equal(t, int32(2), validation.MinReplicas)
+}
+
 func TestEngineGroupCheckpointPlanRoundTrip(t *testing.T) {
 	tests := []struct {
 		name   string
