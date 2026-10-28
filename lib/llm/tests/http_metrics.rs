@@ -286,6 +286,72 @@ impl
     }
 }
 
+/// Completions engine whose first chunk renders as nothing, as multi-byte token
+/// assembly produces, but still carries the metrics of the token it generated.
+/// The next chunk waits until the test opens `gate`.
+struct MockEmptyChunkCompletionsEngine {
+    gate: Arc<tokio::sync::Semaphore>,
+}
+
+fn with_completion_metrics(
+    response: NvCreateCompletionResponse,
+    output_tokens: usize,
+) -> Annotated<NvCreateCompletionResponse> {
+    let metrics = LLMMetricAnnotation {
+        input_tokens: 5,
+        output_tokens,
+        chunk_tokens: 1,
+        ..Default::default()
+    }
+    .to_annotation::<NvCreateCompletionResponse>()
+    .expect("metrics serialize");
+    let mut annotated = Annotated::from_data(response);
+    annotated.event = metrics.event;
+    annotated.comment = metrics.comment;
+    annotated
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for MockEmptyChunkCompletionsEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let generator = request.response_generator(ctx.id().to_string());
+        let gate = Arc::clone(&self.gate);
+
+        let stream = stream! {
+            yield with_completion_metrics(
+                generator.create_choice(0, Some(String::new()), None, None),
+                1,
+            );
+
+            // The permit goes back on drop, so one permit releases every prompt.
+            drop(gate.acquire().await.expect("gate is never closed"));
+
+            yield with_completion_metrics(
+                generator.create_choice(
+                    0,
+                    Some("gated".to_string()),
+                    Some(dynamo_protocols::types::CompletionFinishReason::Stop),
+                    None,
+                ),
+                2,
+            );
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
 #[tokio::test]
 async fn test_metrics_prefix_default() {
     // Test default prefix when no env var is set
@@ -929,6 +995,145 @@ async fn test_responses_non_streaming_observes_metrics_before_backend_error_pref
         }),
     )
     .await;
+}
+
+/// Poll `/metrics` until it contains every needle.
+async fn wait_for_metric_lines(
+    client: &reqwest::Client,
+    url: &str,
+    needles: &[&str],
+    context: &str,
+) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let body = client.get(url).send().await.unwrap().text().await.unwrap();
+        if needles.iter().all(|needle| body.contains(needle)) {
+            return body;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{context}: expected {needles:?} in metrics; got:\n{body}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Streaming `/v1/completions` drops empty chunks from multi-byte token
+/// assembly. It must observe their metrics first, as the chat handler does,
+/// because the engine generated those tokens. Each prompt starts with an empty
+/// chunk and holds its next chunk behind a gate: TTFT must be exposed while the
+/// gate is closed, the output-token counter must count every chunk, and the
+/// client must still receive only the non-empty chunks.
+async fn assert_streaming_completions_observe_empty_chunk_metrics(
+    prompt: serde_json::Value,
+    prompts: usize,
+) {
+    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_cmpl_endpoints(true)
+            .build()
+            .unwrap();
+
+        let state = service.state_clone();
+        let manager = state.manager();
+
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        let task =
+            tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let card = ModelDeploymentCard::with_name_only("emptychunkmodel");
+        manager
+            .add_completions_model(
+                "emptychunkmodel",
+                card.mdcsum(),
+                Arc::new(MockEmptyChunkCompletionsEngine {
+                    gate: Arc::clone(&gate),
+                }),
+            )
+            .unwrap();
+
+        wait_for_metrics_ready(port).await;
+
+        let client = reqwest::Client::new();
+        let metrics_url = format!("http://localhost:{port}/metrics");
+        let request_task = {
+            let client = client.clone();
+            let url = format!("http://localhost:{port}/v1/completions");
+            let request = serde_json::json!({
+                "model": "emptychunkmodel",
+                "stream": true,
+                "max_tokens": 8,
+                "prompt": prompt,
+            });
+            tokio::spawn(async move { client.post(url).json(&request).send().await?.text().await })
+        };
+
+        // While the gate is closed, the handler has received only empty chunks.
+        let ttft_line =
+            "dynamo_frontend_time_to_first_token_seconds_count{model=\"emptychunkmodel\"} 1\n";
+        wait_for_metric_lines(
+            &client,
+            &metrics_url,
+            &[ttft_line],
+            "TTFT must be observed on the first generated chunk, even when it is empty",
+        )
+        .await;
+
+        gate.add_permits(1);
+        let body = request_task.await.unwrap().unwrap();
+        let texts: Vec<String> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|data| *data != "[DONE]")
+            .flat_map(|data| {
+                let chunk: serde_json::Value = serde_json::from_str(data).unwrap();
+                chunk["choices"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|choice| choice["text"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["gated"; prompts],
+            "empty chunks must not reach the client; body:\n{body}"
+        );
+
+        let output_tokens_line = format!(
+            "dynamo_frontend_output_tokens_total{{model=\"emptychunkmodel\"}} {}\n",
+            2 * prompts
+        );
+        wait_for_metric_lines(
+            &client,
+            &metrics_url,
+            &[ttft_line, &output_tokens_line],
+            "tokens on empty chunks must be counted",
+        )
+        .await;
+
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
+    })
+    .await;
+}
+
+/// Streaming `/v1/completions` with one prompt (`completions_single`).
+#[tokio::test]
+async fn test_streaming_completions_observes_empty_chunk_metrics() {
+    assert_streaming_completions_observe_empty_chunk_metrics(serde_json::json!("hi"), 1).await;
+}
+
+/// Streaming `/v1/completions` with a prompt batch (`completions_batch`).
+#[tokio::test]
+async fn test_streaming_completions_batch_observes_empty_chunk_metrics() {
+    assert_streaming_completions_observe_empty_chunk_metrics(serde_json::json!(["hi", "hi"]), 2)
+        .await;
 }
 
 // Integration tests that require distributed runtime with etcd
