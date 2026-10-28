@@ -156,14 +156,17 @@ def _normalize_sglang_parser_name(parser_name: str | None) -> str | None:
 _MARKER_CACHE_ATTR = "_dynamo_tool_call_marker_cache"
 
 
-@lru_cache(maxsize=None)
 def tool_call_marker_strings(
-    tool_call_parser_name: str | None,
+    tool_call_parser_name: str | None, tokenizer: Any = None
 ) -> tuple[str, str] | None:
     """``(opening, closing)`` delimiter of the named SGLang detector.
 
-    Surrounding whitespace is dropped (``qwen25`` declares ``<tool_call>\\n``);
-    detectors with an empty delimiter on either side return ``None``.
+    The detector is built the way ``FunctionCallParser`` builds the active one,
+    with *tokenizer* when its constructor accepts it: Hunyuan resolves suffixed
+    delimiters (``<tool_calls:opensource>``) from the vocabulary, and a bare
+    construction would name delimiters the model never emits. Surrounding
+    whitespace is dropped (``qwen25`` declares ``<tool_call>\\n``); detectors
+    with an empty delimiter on either side return ``None``.
     """
     name = _normalize_sglang_parser_name(tool_call_parser_name)
     if not name:
@@ -171,8 +174,12 @@ def tool_call_marker_strings(
     detector_cls = FunctionCallParser.ToolCallParserEnum.get(name)
     if detector_cls is None:
         return None
+    cache = _tokenizer_marker_cache(tokenizer) if tokenizer is not None else None
+    key = f"strings:{name}"
+    if cache is not None and key in cache:
+        return cache[key]
     try:
-        detector = detector_cls()
+        detector = detector_cls(**_parser_tokenizer_kwargs(detector_cls, tokenizer))
     except Exception:  # pragma: no cover - detector-specific constructor
         # Falling back to text-only parsing here would silently drop the
         # delimiter-id gate, so surface the failure instead.
@@ -180,12 +187,14 @@ def tool_call_marker_strings(
         raise
     opening = getattr(detector, "bot_token", "")
     closing = getattr(detector, "eot_token", "")
-    if not isinstance(opening, str) or not isinstance(closing, str):
-        return None
-    opening, closing = opening.strip(), closing.strip()
-    if not opening or not closing or opening == closing:
-        return None
-    return opening, closing
+    strings: tuple[str, str] | None = None
+    if isinstance(opening, str) and isinstance(closing, str):
+        opening, closing = opening.strip(), closing.strip()
+        if opening and closing and opening != closing:
+            strings = (opening, closing)
+    if cache is not None:
+        cache[key] = strings
+    return strings
 
 
 def _tokenizer_marker_cache(tokenizer: Any) -> dict[str, Any] | None:
@@ -205,9 +214,11 @@ def tool_call_marker_token_ids(
     """Map delimiter token id -> delimiter string for the active parser.
 
     Both delimiters must encode to exactly one token; otherwise the result is
-    ``{}`` and the frontend keeps the text-only parser behaviour.
+    ``{}``, the frontend keeps the text-only parser behaviour, and
+    ``encode_chat_prompt_isolating_markers`` rejects requests instead of
+    encoding them unprotected.
     """
-    strings = tool_call_marker_strings(tool_call_parser_name)
+    strings = tool_call_marker_strings(tool_call_parser_name, tokenizer)
     if strings is None:
         return {}
     cache = _tokenizer_marker_cache(tokenizer)
@@ -229,6 +240,13 @@ def tool_call_marker_token_ids(
         if len(encoded) == 1 and isinstance(encoded[0], int):
             ids[encoded[0]] = marker
     if len(ids) != 2:
+        logger.warning(
+            "Tool-call delimiters %r of parser %s are not single tokens for this "
+            "tokenizer; the delimiter-id gate is off and "
+            "--isolate-tool-call-markers cannot be honoured",
+            strings,
+            tool_call_parser_name,
+        )
         ids = {}
     if cache is not None:
         cache[key] = ids
@@ -389,12 +407,22 @@ def encode_chat_prompt_isolating_markers(
     ids. Prompts whose content has no delimiter tokenize exactly as
     ``apply_chat_template(tokenize=True)`` does.
 
-    Fails closed: when the spans cannot be aligned with the rendered prompt,
-    or the tokenizer cannot be copied, the request is rejected rather than
+    Fails closed: when the parser's delimiters are not single tokens for this
+    tokenizer, when the spans cannot be aligned with the rendered prompt, or
+    when the tokenizer cannot be copied, the request is rejected rather than
     encoded with the delimiter ids.
     """
-    strings = tool_call_marker_strings(tool_call_parser_name)
+    strings = tool_call_marker_strings(tool_call_parser_name, tokenizer)
     marker_ids = tool_call_marker_token_ids(tokenizer, tool_call_parser_name)
+    if strings and not marker_ids:
+        # The parser has delimiters but this tokenizer does not give them
+        # single ids, so neither the output gate nor isolation can tell a
+        # genuine delimiter from a spelled one. Reject rather than pretend.
+        raise PreprocessError(
+            "--isolate-tool-call-markers is enabled but the tool-call delimiters "
+            f"{strings!r} of parser {tool_call_parser_name!r} are not single "
+            "tokens for this tokenizer"
+        )
     markers: tuple[str, ...] = strings if strings and marker_ids else ()
     substituted, spans = (
         _isolate_marker_spans(template_messages, markers) if markers else ([], [])
@@ -1612,12 +1640,19 @@ class SglangStreamingPostProcessor:
             if isinstance(self.tool_call_parser, FunctionCallParser)
             else {}
         )
-        self._closing_marker: str | None = None
+        self._marker_strings: tuple[str, str] | None = None
         if self._marker_by_id:
-            self._closing_marker = (
-                tool_call_marker_strings(tool_call_parser_name) or ("", None)
-            )[1]
+            self._marker_strings = tool_call_marker_strings(
+                tool_call_parser_name, tokenizer
+            )
         self._in_tool_call = False
+        # Text since the genuine opening id, as ``(text, delimiters whose id
+        # it carries)``. Released to the parser at the genuine closing id (or
+        # finish) only if no delimiter inside was spelled from sub-words;
+        # otherwise the whole call is content. Tool calls are only emitted at
+        # finish, so holding the body changes nothing the client sees.
+        self._call_pieces: list[tuple[str, list[str]]] = []
+        self._released_whole_call = False
 
     def _strip_matched_stop_token_ids(
         self, token_ids: list[int], stop_reason: Any
@@ -2116,7 +2151,7 @@ class SglangStreamingPostProcessor:
         return acc
 
     def _gate_tool_parser_text(
-        self, normal_text: str, markers: list[str]
+        self, normal_text: str, markers: list[str], finish_reason: str | None
     ) -> tuple[str, str]:
         """Return ``(text for the parser, text that bypasses it)``.
 
@@ -2124,15 +2159,58 @@ class SglangStreamingPostProcessor:
         order; it is empty for ordinary text. The reasoning parser runs first,
         so a delimiter it kept as reasoning does not reach here as normal text
         and does not flip the gate.
+
+        A call is held from its genuine opening id to its genuine closing id
+        and released whole, so a delimiter the model spells out of sub-words
+        inside the call cannot end it early or start another: such a call is
+        returned as content instead of being parsed.
         """
+        assert self._marker_strings is not None
+        closing = self._marker_strings[1]
         present = [m for m in markers if m in normal_text]
         if present:
-            # The closing delimiter is fed to the parser before the gate shuts.
-            self._in_tool_call = present[-1] != self._closing_marker
-            return normal_text, ""
+            self._call_pieces.append((normal_text, present))
+            self._in_tool_call = present[-1] != closing
+            if self._in_tool_call and not finish_reason:
+                return "", ""
+            return self._release_tool_call()
         if self._in_tool_call:
-            return normal_text, ""
+            if normal_text:
+                self._call_pieces.append((normal_text, []))
+            if finish_reason:
+                return self._release_tool_call()
+            return "", ""
         return "", normal_text
+
+    def _release_tool_call(self) -> tuple[str, str]:
+        """Hand the held call to the parser, or to content if any delimiter
+        inside it was spelled from sub-words rather than emitted as its id."""
+        assert self._marker_strings is not None
+        pieces, self._call_pieces = self._call_pieces, []
+        self._in_tool_call = False
+        text = "".join(piece for piece, _ in pieces)
+        spelled = False
+        run = ""
+        for piece, markers in pieces:
+            if not markers:
+                run += piece
+                continue
+            spelled = spelled or any(m in run for m in self._marker_strings)
+            run = ""
+            # A delimiter string may occur inside the other one; count what
+            # the genuine delimiters themselves contribute.
+            for m in self._marker_strings:
+                if piece.count(m) != sum(g.count(m) for g in markers):
+                    spelled = True
+        spelled = spelled or any(m in run for m in self._marker_strings)
+        if spelled:
+            logger.warning(
+                "Tool call contains a delimiter spelled from sub-words; "
+                "returning it as content"
+            )
+            return "", text
+        self._released_whole_call = True
+        return text, ""
 
     def _process_segment(
         self,
@@ -2245,7 +2323,7 @@ class SglangStreamingPostProcessor:
         parser_text = normal_text
         if self.tool_call_parser and self._marker_by_id:
             parser_text, content_text = self._gate_tool_parser_text(
-                normal_text, markers
+                normal_text, markers, finish_reason
             )
 
         if self.tool_call_parser and parser_text:
@@ -2340,7 +2418,10 @@ class SglangStreamingPostProcessor:
             )
             should_reparse = False
             full_text = ""
-            if missing_names or missing_args:
+            # A call released whole by the delimiter gate reaches the
+            # streaming parser in one chunk, and that parser reports one
+            # event per chunk, so the full text is authoritative.
+            if missing_names or missing_args or self._released_whole_call:
                 full_text = "".join(self._tool_text_parts)
                 # Skip the re-parse when the accumulated text has no
                 # tool-call markers.  Avoids wasted `parse_non_stream`
