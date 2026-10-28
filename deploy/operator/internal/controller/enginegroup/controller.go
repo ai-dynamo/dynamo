@@ -53,13 +53,14 @@ const (
 	engineGroupReconcileBudget      = 45 * time.Second
 	engineGroupConcurrentReconciles = 4
 
-	engineGroupConditionAvailable     = "Available"
-	engineGroupConditionProgressing   = "Progressing"
-	engineGroupConditionDegraded      = "Degraded"
-	engineGroupConditionTargetReached = "TargetReached"
-	engineGroupConditionTargetValid   = "TargetValid"
-	engineGroupConditionTopologyKnown = "TopologyKnown"
-	engineGroupConditionRuntimeReady  = "RuntimeReady"
+	engineGroupConditionAvailable             = "Available"
+	engineGroupConditionProgressing           = "Progressing"
+	engineGroupConditionDegraded              = "Degraded"
+	engineGroupConditionTargetReached         = "TargetReached"
+	engineGroupConditionTargetValid           = "TargetValid"
+	engineGroupConditionTopologyKnown         = "TopologyKnown"
+	engineGroupConditionRuntimeReady          = "RuntimeReady"
+	engineGroupConditionExactReleaseSupported = "ExactReleaseSupported"
 )
 
 // ErrRuntimeUnavailable means no production control-plane adapter can own this group.
@@ -92,8 +93,6 @@ type Runtime struct {
 	Traffic    domain.TrafficAdapter
 	Verifier   domain.ServingVerifier
 	Planner    ScalePlanResolver
-	// ReadinessSteeredRelease is an experimental ordering mechanism, not exact-UID release authority.
-	ReadinessSteeredRelease bool
 }
 
 // RuntimeProvider resolves the production control plane for one Engine Group resource.
@@ -164,10 +163,14 @@ func (r *Reconciler) Reconcile(
 		invalidateEngineGroupHealth(group, "WorldRestartPending", "Physical world teardown or restart has not yet established fresh membership")
 		setEngineGroupCondition(group, engineGroupConditionRuntimeReady, metav1.ConditionFalse, "WorldRestartPending",
 			"Normal membership effects are paused until the physical world binding is fenced")
+		projectEngineGroupRecovery(group, bindingErr)
 		if updateErr := r.updateEngineGroupStatus(ctx, group, before); updateErr != nil {
 			return ctrl.Result{}, errors.Join(bindingErr, updateErr)
 		}
-		return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, bindingErr
+		if bindingErr != nil {
+			return engineGroupErrorResult(bindingErr)
+		}
+		return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, nil
 	}
 
 	// A failed binding may progress only through the fenced handoff, never through ordinary effects.
@@ -195,7 +198,7 @@ func (r *Reconciler) Reconcile(
 		group.Status.ObservedGeneration = group.Generation
 		setEngineGroupCondition(group, engineGroupConditionRuntimeReady, metav1.ConditionTrue, "RuntimeResolved",
 			"The Engine Group runtime and immutable profile are resolved")
-		projectEngineGroupReleaseMode(group, runtime)
+		projectEngineGroupReleaseMode(group, domain.CapacityReleaseUnknown)
 		if err := r.updateEngineGroupStatus(ctx, group, before); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -203,7 +206,8 @@ func (r *Reconciler) Reconcile(
 	}
 	if group.Status.Profile.Fingerprint != runtime.Profile.Fingerprint {
 		return r.reconcileUnavailableRuntime(ctx, group, fmt.Errorf(
-			"resolved profile fingerprint changed from %q to %q",
+			"%w: resolved profile fingerprint changed from %q to %q",
+			domain.ErrRecoveryRequired,
 			group.Status.Profile.Fingerprint,
 			runtime.Profile.Fingerprint,
 		))
@@ -240,6 +244,9 @@ func (r *Reconciler) reconcileWorkflow(
 	}
 	status := checkpoint.State
 	desiredPlan, validation, planningErr := r.resolveDesiredEngineGroupPlan(ctx, group, runtime, status)
+	if errors.Is(planningErr, domain.ErrRecoveryRequired) {
+		return r.reconcileUnavailableRuntime(ctx, group, planningErr)
+	}
 	group.Status.TargetValidation = validation
 
 	// Let the pure coordinator derive the next durable level or safely repeat an already persisted effect.
@@ -247,8 +254,10 @@ func (r *Reconciler) reconcileWorkflow(
 	result, reconcileErr := coordinator.Reconcile(ctx, engineGroupID(group), desiredPlan, status)
 	var observationErr *domain.ObservationError
 	errors.As(reconcileErr, &observationErr)
+	recoveryRequired := errors.Is(reconcileErr, domain.ErrRecoveryRequired) || result.Status.Transition.RequiresRecovery()
 	next, err := checkpoint.advance(group, runtime.Profile, result.Status, desiredPlan,
-		planningErr == nil && validation == nil && observationErr == nil, observationErr == nil)
+		planningErr == nil && validation == nil && observationErr == nil && !recoveryRequired,
+		observationErr == nil && !recoveryRequired)
 	if err != nil {
 		return r.reconcileCheckpointFailure(ctx, group, err)
 	}
@@ -260,12 +269,12 @@ func (r *Reconciler) reconcileWorkflow(
 	}
 	next.projectHistory(group)
 	r.projectEngineGroupStatus(group, runtime.Profile, result.Status, observationErr, planningErr)
-	projectEngineGroupReleaseMode(group, runtime)
+	projectEngineGroupRecovery(group, reconcileErr)
 	if updateErr := r.updateEngineGroupStatus(ctx, group, before); updateErr != nil {
 		return ctrl.Result{}, updateErr
 	}
 	if reconcileErr != nil || planningErr != nil {
-		return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, errors.Join(reconcileErr, planningErr)
+		return engineGroupErrorResult(errors.Join(reconcileErr, planningErr))
 	}
 	if result.Requeue {
 		return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, nil
@@ -302,13 +311,12 @@ func (r *Reconciler) initializeEngineGroupStatus(
 	observations, err := observeEngineGroupRuntime(ctx, runtime, engineGroupID(group), "")
 	if err != nil {
 		invalidateEngineGroupHealth(group, "ObservationFailed", "Initial external state could not be established")
+		projectEngineGroupRecovery(group, err)
 		if updateErr := r.updateEngineGroupStatus(ctx, group, before); updateErr != nil {
 			return ctrl.Result{}, updateErr
 		}
 
-		// Startup observation is pending; an error would override the bounded retry with exponential backoff.
-		ctrl.LoggerFrom(ctx).V(1).Info("Waiting for initial Engine Group runtime observations", "error", err)
-		return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, nil
+		return engineGroupErrorResult(err)
 	}
 
 	// Validate and persist one complete already-running base before any membership transition is planned.
@@ -330,7 +338,6 @@ func (r *Reconciler) initializeEngineGroupStatus(
 	}
 	next.projectHistory(group)
 	r.projectEngineGroupStatus(group, runtime.Profile, status, nil, nil)
-	projectEngineGroupReleaseMode(group, runtime)
 	if err := r.updateEngineGroupStatus(ctx, group, before); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -428,10 +435,11 @@ func (r *Reconciler) reconcileDeletion(
 		invalidateEngineGroupHealth(group, "ObservationFailed", "Current external state could not be established during deletion")
 		setEngineGroupCondition(group, engineGroupConditionProgressing, metav1.ConditionFalse, "DeletionBlocked",
 			"Deletion is blocked because current capacity, traffic, or membership cannot be established")
+		projectEngineGroupRecovery(group, observationErr)
 		if updateErr := r.updateEngineGroupStatus(ctx, group, before); updateErr != nil {
 			return ctrl.Result{}, updateErr
 		}
-		return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, observationErr
+		return engineGroupErrorResult(observationErr)
 	}
 
 	if !snapshot.Exists() {
@@ -536,10 +544,14 @@ func (r *Reconciler) blockEngineGroupDeletion(
 		invalidateEngineGroupHealth(group, "ObservationFailed", message)
 	}
 	setEngineGroupCondition(group, engineGroupConditionProgressing, metav1.ConditionFalse, "DeletionBlocked", message)
+	projectEngineGroupRecovery(group, err)
 	if updateErr := r.updateEngineGroupStatus(ctx, group, before); updateErr != nil {
 		return ctrl.Result{}, updateErr
 	}
-	return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, err
+	if err != nil {
+		return engineGroupErrorResult(err)
+	}
+	return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, nil
 }
 
 func (r *Reconciler) removeEngineGroupFinalizer(
@@ -563,13 +575,36 @@ func (r *Reconciler) reconcileUnavailableRuntime(
 	projectEngineGroupScaleIdentity(group)
 	setEngineGroupCondition(group, engineGroupConditionRuntimeReady, metav1.ConditionFalse, "RuntimeUnavailable", err.Error())
 	invalidateEngineGroupHealth(group, "RuntimeUnavailable", "Current external state cannot be established without a usable runtime")
+	projectEngineGroupRecovery(group, err)
 	if updateErr := r.updateEngineGroupStatus(ctx, group, before); updateErr != nil {
 		return ctrl.Result{}, updateErr
 	}
 	if errors.Is(err, ErrRuntimeUnavailable) {
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: engineGroupObservationInterval}, nil
 	}
-	return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, err
+	return engineGroupErrorResult(err)
+}
+
+// engineGroupErrorResult deliberately separates expected waiting and recovery polling from runtime error backoff.
+func engineGroupErrorResult(err error) (ctrl.Result, error) {
+	switch {
+	case errors.Is(err, domain.ErrRecoveryRequired):
+		return ctrl.Result{RequeueAfter: engineGroupObservationInterval}, nil
+	case errors.Is(err, domain.ErrObservationPending):
+		return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, nil
+	default:
+		return ctrl.Result{}, err
+	}
+}
+
+func projectEngineGroupRecovery(group *nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup, err error) {
+	if !errors.Is(err, domain.ErrRecoveryRequired) {
+		return
+	}
+	// Fresh, valid observations can still prove serving availability. Only an observation failure invalidates health.
+	message := "Normal effects are paused; explicit recovery or a fenced world restart is required: " + err.Error()
+	setEngineGroupCondition(group, engineGroupConditionRuntimeReady, metav1.ConditionFalse, "RecoveryRequired", message)
+	setEngineGroupCondition(group, engineGroupConditionProgressing, metav1.ConditionFalse, "RecoveryRequired", message)
 }
 
 func (r *Reconciler) reconcileCheckpointFailure(
@@ -581,10 +616,11 @@ func (r *Reconciler) reconcileCheckpointFailure(
 	invalidateEngineGroupHealth(group, "CheckpointUnavailable", "Recovery authority cannot be established: "+err.Error())
 	setEngineGroupCondition(group, engineGroupConditionProgressing, metav1.ConditionFalse, "CheckpointUnavailable",
 		"No new operation may proceed without its durable recovery checkpoint")
+	projectEngineGroupRecovery(group, err)
 	if updateErr := r.updateEngineGroupStatus(ctx, group, before); updateErr != nil {
 		return ctrl.Result{}, errors.Join(err, updateErr)
 	}
-	return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, err
+	return engineGroupErrorResult(err)
 }
 
 func (r *Reconciler) updateEngineGroupStatus(
@@ -614,6 +650,7 @@ func (r *Reconciler) projectEngineGroupStatus(
 	projectEngineGroupScaleIdentity(group)
 	group.Status.Profile = profile.DeepCopy()
 	group.Status.Replicas = int32(len(status.Capacity.Observed.Allocations))
+	projectEngineGroupReleaseMode(group, status.Capacity.Observed.ReleaseMode)
 	group.Status.ReleaseAuthorizations = engineGroupReleaseFencesToAPI(status.Capacity.Observed.ReleaseFences)
 
 	// Project fresh engine truth independently from the coordinator's accepted topology history.
@@ -660,15 +697,22 @@ func projectEngineGroupScaleIdentity(group *nvidiacomv1beta1.DynamoGraphDeployme
 	}, ",")
 }
 
-func projectEngineGroupReleaseMode(group *nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup, runtime Runtime) {
+func projectEngineGroupReleaseMode(group *nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup, mode domain.CapacityReleaseMode) {
 	// Serving health is independent of this physical release limitation.
-	if runtime.ReadinessSteeredRelease {
-		setEngineGroupCondition(group, "ExactReleaseSupported", metav1.ConditionFalse, "ReadinessSteeredRelease",
+	switch mode {
+	case domain.CapacityReleaseReadinessSteered:
+		setEngineGroupCondition(group, engineGroupConditionExactReleaseSupported, metav1.ConditionFalse, "ReadinessSteeredRelease",
 			"Experimental shrink steers Grove victim ordering and verifies deletion afterward; it does not provide exact-UID authorized release (R13)")
-		return
+	case domain.CapacityReleaseExactUID:
+		setEngineGroupCondition(group, engineGroupConditionExactReleaseSupported, metav1.ConditionTrue, "ExactUIDRelease",
+			"The capacity provider reports exact-UID authorized release")
+	case domain.CapacityReleaseUnsupported:
+		setEngineGroupCondition(group, engineGroupConditionExactReleaseSupported, metav1.ConditionFalse, "ReleaseUnsupported",
+			"The capacity provider does not support physical release in this configuration")
+	default:
+		setEngineGroupCondition(group, engineGroupConditionExactReleaseSupported, metav1.ConditionUnknown, "ReleaseCapabilityNotReported",
+			"The capacity provider has not established its physical release mechanism")
 	}
-	setEngineGroupCondition(group, "ExactReleaseSupported", metav1.ConditionUnknown, "ReleaseCapabilityNotReported",
-		"This runtime has not established exact-UID authorized release support")
 }
 
 func projectEngineGroupConditions(
