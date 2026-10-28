@@ -33,11 +33,10 @@ use dynamo_llm::http::service::service_v2::HttpService;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-/// A load report older than this is not used: three of the Relay's reports,
-/// which come about once a second.
-const LOAD_MAX_AGE: Duration = Duration::from_secs(3);
 /// How often the round trip to each pool is measured.
 const ROUND_TRIP_INTERVAL: Duration = Duration::from_secs(30);
+/// How often expired session pins are dropped.
+const PIN_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How each request picks a pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -75,7 +74,9 @@ struct Args {
     #[arg(long, required_if_eq("router_policy", "affinity"))]
     region: Option<String>,
     /// A pool's KV DC Relay, which streams the pool's load, as
-    /// `<site>/<namespace>/<DGD name>=<URL>`. Repeat the flag for each pool.
+    /// `<site>/<namespace>/<DGD name>=<URL>`. Repeat the flag for each pool;
+    /// each pool needs a Relay of its own, since a Relay reports the load of
+    /// everything it watches as one.
     #[arg(long = "pool-relay", value_parser = parse_pool_relay)]
     pool_relays: Vec<(PoolKey, Url)>,
     /// `affinity`: a request leaves its pool only for one with more than this
@@ -108,7 +109,30 @@ fn parse_pool_relay(value: &str) -> Result<(PoolKey, Url), String> {
     let (key, relay) = value
         .split_once('=')
         .ok_or_else(|| format!("expected <site>/<namespace>/<DGD name>=<URL>, got {value}"))?;
-    Ok((parse_key(key)?, parse_url(relay, "pool relay")?))
+    let relay = parse_url(relay, "pool relay")?;
+    // The Relay client is built without TLS.
+    if relay.scheme() != "http" {
+        return Err(format!("pool relay must be an http:// URL: {relay}"));
+    }
+    Ok((parse_key(key)?, relay))
+}
+
+/// Gives each pool its Relay. Every Relay must name a configured pool, and
+/// no two pools may share one.
+fn attach_relays(pools: &mut [Pool], relays: &[(PoolKey, Url)]) -> Result<()> {
+    for (key, relay) in relays {
+        if pools.iter().any(|pool| pool.relay.as_ref() == Some(relay)) {
+            bail!("--pool-relay {relay} is given for two pools; each pool needs its own Relay");
+        }
+        let id = V1PoolIdDeriver.derive(key);
+        let Some(pool) = pools.iter_mut().find(|pool| pool.id == id) else {
+            bail!("--pool-relay {relay} names a pool no --pool gives");
+        };
+        if pool.relay.replace(relay.clone()).is_some() {
+            bail!("--pool-relay is given twice for pool {id}");
+        }
+    }
+    Ok(())
 }
 
 fn parse_pool(value: &str) -> Result<Pool, String> {
@@ -146,17 +170,14 @@ async fn main() -> Result<()> {
     if let Some(repeated) = args.pools.iter().find(|pool| !ids.insert(&pool.id)) {
         bail!("--pool {} is given twice", repeated.id);
     }
-    for (key, relay) in &args.pool_relays {
-        let id = V1PoolIdDeriver.derive(key);
-        let Some(pool) = args.pools.iter_mut().find(|pool| pool.id == id) else {
-            bail!("--pool-relay {relay} names a pool no --pool gives");
-        };
-        if pool.relay.replace(relay.clone()).is_some() {
-            bail!("--pool-relay is given twice for pool {id}");
-        }
-    }
+    attach_relays(&mut args.pools, &args.pool_relays)?;
     if !(args.headroom_factor >= 1.0 && args.headroom_factor.is_finite()) {
         bail!("--headroom-factor must be at least 1");
+    }
+    if args.router_policy != RouterPolicy::Affinity
+        && (args.region.is_some() || !args.pool_relays.is_empty())
+    {
+        tracing::warn!("--region and --pool-relay are used only by --router-policy affinity");
     }
 
     let shutdown = CancellationToken::new();
@@ -191,7 +212,7 @@ async fn main() -> Result<()> {
                      and keeps each session on its nearest pool"
                 );
             }
-            let signals = Arc::new(PoolSignals::new(in_flight.clone(), LOAD_MAX_AGE));
+            let signals = Arc::new(PoolSignals::new(in_flight.clone()));
             tokio::spawn(follow_relays(
                 catalog.subscribe(),
                 signals.clone(),
@@ -204,12 +225,14 @@ async fn main() -> Result<()> {
                 shutdown.child_token(),
             ));
             let idle = Duration::from_secs(args.session_idle_secs);
-            Arc::new(AffinitySelector::new(
+            let selector = Arc::new(AffinitySelector::new(
                 signals,
                 region,
                 args.headroom_factor,
                 idle,
-            ))
+            ));
+            tokio::spawn(sweep_pins(selector.clone(), shutdown.child_token()));
+            selector
         }
     };
     let engine = Arc::new(PoolForwardingEngine::new(
@@ -230,6 +253,18 @@ async fn main() -> Result<()> {
         .run(shutdown)
         .await
         .context("serve the Global Frontend")
+}
+
+/// Drops expired session pins once a `PIN_SWEEP_INTERVAL`, off the request
+/// path, until `cancel` fires.
+async fn sweep_pins(selector: Arc<AffinitySelector>, cancel: CancellationToken) {
+    let mut ticks = tokio::time::interval(PIN_SWEEP_INTERVAL);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = ticks.tick() => selector.sweep(),
+        }
+    }
 }
 
 async fn shutdown_signal() -> Result<()> {
@@ -277,6 +312,15 @@ mod tests {
         assert_eq!(key.dgd_name(), "blue");
         assert_eq!(relay.as_str(), "http://relay:50051/");
         assert!(parse_pool_relay("ohio/dynamo=http://relay:50051").is_err());
+        assert!(parse_pool_relay("ohio/dynamo/blue=https://relay:50051").is_err());
+
+        // Each pool needs its own Relay.
+        let mut pools = ["blue", "green"]
+            .map(|dgd| parse_pool(&format!("ohio/dynamo/{dgd}=qwen@http://{dgd}:8000")).unwrap());
+        let relays = ["blue", "green"]
+            .map(|dgd| parse_pool_relay(&format!("ohio/dynamo/{dgd}=http://relay:50051")).unwrap());
+        assert!(attach_relays(&mut pools, &relays).is_err());
+        assert!(attach_relays(&mut pools[1..], &relays[1..]).is_ok());
 
         let pool = "--pool=ohio/dynamo/blue=qwen@http://blue:8000";
         let affinity = ["global-frontend", pool, "--router-policy", "affinity"];

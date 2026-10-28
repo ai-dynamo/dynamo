@@ -51,7 +51,9 @@ room. The session's pin moves with it. Pins are per process and expire after
 `--session-idle-secs` (default 1800) without a request.
 
 `affinity` needs `--region`, this process's region named as `--pool` names
-sites. It reads each pool's load from the pool's KV DC Relay, given per pool:
+sites. It reads each pool's load from the pool's KV DC Relay, given per pool
+over plain HTTP. Each pool needs a Relay of its own, since a Relay reports the
+load of everything it watches as one:
 
 ```bash
 cargo run -p dynamo-global-frontend -- --port 8000 \
@@ -62,11 +64,13 @@ cargo run -p dynamo-global-frontend -- --port 8000 \
   --pool-relay site-b/dynamo/green=http://127.0.0.1:50052
 ```
 
-A pool without a Relay, or whose Relay has not reported in the last 3 seconds,
-has no known load: requests leave it for any pool whose load is known, and new
-requests try it only after those. The round trip to each region is the median
-TCP connect time to its pools, measured every 30 seconds; the request's own
-region counts as zero.
+A report counts for three of its Relay's report windows, so a reconnect or a
+briefly incomplete view does not lose a pool's load. A pool without a Relay, or
+whose last report has aged out, counts as full: its sessions move to the
+nearest pool with room, if any, and new requests try it after the pools whose
+load is known. The round trip to each region is the median TCP connect time to
+its pools, measured every 30 seconds; the request's own region counts as
+zero.
 
 ## Deployment notes
 

@@ -104,11 +104,17 @@ impl LeastInFlightSelector {
 
 impl PoolSelector for LeastInFlightSelector {
     fn select(&self, _request: &RoutingRequest<'_>, candidates: &[&Pool]) -> Option<PoolTarget> {
-        let reachable = || candidates.iter().copied().filter(|pool| reachable(pool));
-        let fewest = reachable().map(|pool| self.in_flight.get(&pool.id)).min()?;
-        let tied = || reachable().filter(|pool| self.in_flight.get(&pool.id) == fewest);
-        let turn = self.ties.fetch_add(1, Ordering::Relaxed);
-        let pool = tied().nth(turn % tied().count().max(1))?;
+        // Read each count once: requests start and finish while this runs.
+        let counts = candidates
+            .iter()
+            .copied()
+            .filter(|pool| reachable(pool))
+            .map(|pool| (pool, self.in_flight.get(&pool.id)))
+            .collect::<Vec<_>>();
+        let fewest = counts.iter().map(|(_, count)| *count).min()?;
+        let tied = counts.iter().filter(|(_, count)| *count == fewest);
+        let turn = self.ties.fetch_add(1, Ordering::Relaxed) % tied.clone().count();
+        let (pool, _) = tied.clone().nth(turn)?;
         target(&self.frontends, pool)
     }
 }

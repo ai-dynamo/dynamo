@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use dynamo_global_common::{Pool, PoolId};
 use dynamo_global_router::PoolSignals;
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, lookup_host};
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -79,8 +79,14 @@ fn region_medians(
         .collect()
 }
 
-/// The median time to connect, over the connects that succeed.
+/// The median time to connect, over the connects that succeed. The name is
+/// resolved first, so the lookup is not timed.
 async fn connect_time(address: &str) -> Option<Duration> {
+    let address = tokio::time::timeout(CONNECT_TIMEOUT, lookup_host(address))
+        .await
+        .ok()?
+        .ok()?
+        .next()?;
     let mut samples = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
         let start = Instant::now();

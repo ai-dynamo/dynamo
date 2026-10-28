@@ -178,10 +178,21 @@ impl PoolForwardingEngine {
         tracing::debug!(request_id = ctx.id(), pool = %target.pool, %url, "forwarding request");
         // TODO: retry the next pool when this one rejects the request before
         // its first byte (HLD 2.2.2, priority retry).
-        let response = pool_request
-            .send()
-            .await
-            .map_err(|error| unavailable(format!("pool frontend {url} failed: {error}")))?;
+        // A pool answers only once it takes the request, which can be a long
+        // queue wait. If the client leaves first, dropping the send closes
+        // the connection, which cancels the request at the pool.
+        let response = tokio::select! {
+            biased;
+            _ = ctx.stopped() => {
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::Cancelled)
+                    .message("the request was cancelled before the pool answered")
+                    .build()
+                    .into());
+            }
+            response = pool_request.send() => response
+                .map_err(|error| unavailable(format!("pool frontend {url} failed: {error}")))?,
+        };
         let status = response.status();
         if !status.is_success() {
             // The HTTP service applies its existing status and sanitization policy.

@@ -6,14 +6,10 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use dynamo_global_common::{Pool, PoolId};
-use parking_lot::Mutex;
 
 use crate::placement::{headroom, place};
 use crate::selector::{Cursors, PoolSelector, PoolTarget, RoutingRequest, target};
 use crate::signals::PoolSignals;
-
-/// How often [`AffinitySelector`] drops pins that have expired.
-const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Keeps each session's turns on one pool, so the pool's KV cache for the
 /// session is reused, and moves a session only when another pool has much
@@ -29,7 +25,8 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// room. The session's pin moves with it.
 ///
 /// Requests without a session ID are placed the same way and pin nothing.
-/// Pins belong to this process and expire after `idle` without a request.
+/// Pins belong to this process and expire after `idle` without a request;
+/// call [`Self::sweep`] periodically to free them.
 #[derive(Debug)]
 pub struct AffinitySelector {
     signals: Arc<PoolSignals>,
@@ -37,7 +34,6 @@ pub struct AffinitySelector {
     headroom_factor: f64,
     idle: Duration,
     pins: DashMap<String, Pin>,
-    swept: Mutex<Instant>,
     frontends: Cursors<PoolId>,
 }
 
@@ -61,7 +57,6 @@ impl AffinitySelector {
             headroom_factor,
             idle,
             pins: DashMap::new(),
-            swept: Mutex::new(Instant::now()),
             frontends: Cursors::default(),
         }
     }
@@ -87,15 +82,9 @@ impl AffinitySelector {
         }
     }
 
-    fn sweep(&self) {
-        let Some(mut swept) = self.swept.try_lock() else {
-            return;
-        };
-        if swept.elapsed() < SWEEP_INTERVAL {
-            return;
-        }
-        *swept = Instant::now();
-        drop(swept);
+    /// Drops expired pins. It visits every pin, so run it off the request
+    /// path.
+    pub fn sweep(&self) {
         self.pins.retain(|_, pin| pin.used.elapsed() <= self.idle);
     }
 }
@@ -116,7 +105,6 @@ impl PoolSelector for AffinitySelector {
         if let Some(session) = request.session {
             self.pin(session, &choice.pool.id);
         }
-        self.sweep();
         target(&self.frontends, choice.pool)
     }
 }
@@ -208,16 +196,48 @@ mod tests {
     }
 
     #[test]
+    fn a_pool_whose_load_is_unknown_counts_as_full() {
+        let (pools, signals) = fleet();
+        let selector = selector(&signals, Duration::from_secs(60));
+        set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+
+        // Ohio-a's Relay goes quiet while every other pool is full: the
+        // session stays rather than move to a full pool.
+        set_occupancy(&pools, &signals, [0.1, 1.0, 1.1, 1.0]);
+        signals.forget_load(&pools[0].id);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        // Once a pool has room, the session goes to the nearest such pool.
+        set_occupancy(&pools, &signals, [0.1, 1.0, 0.9, 0.2]);
+        signals.forget_load(&pools[0].id);
+        assert_eq!(pick(&selector, &pools, Some("s")), "oregon-a");
+    }
+
+    #[test]
     fn forgets_idle_pins() {
         let (pools, signals) = fleet();
-        let selector = selector(&signals, Duration::from_millis(20));
+        let selector = selector(&signals, Duration::from_millis(200));
         set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
         assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
         // 0.5 spare against 0.9 is under twice, so the pin holds...
         set_occupancy(&pools, &signals, [0.5, 0.1, 0.5, 0.5]);
         assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
         // ...until it expires, and the session starts over on the emptier pool.
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(250));
         assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        selector.sweep();
+        assert_eq!(selector.pinned_sessions(), 1);
+    }
+
+    #[test]
+    fn sweep_drops_expired_pins() {
+        let (pools, signals) = fleet();
+        let selector = selector(&signals, Duration::ZERO);
+        set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
+        pick(&selector, &pools, Some("s"));
+        assert_eq!(selector.pinned_sessions(), 1);
+        std::thread::sleep(Duration::from_millis(1));
+        selector.sweep();
+        assert_eq!(selector.pinned_sessions(), 0);
     }
 }

@@ -6,15 +6,18 @@
 //! Two tasks per pool follow its Relay: one subscribes to the serving-load
 //! stream and records the pool's requests in flight and how many it can run
 //! at once; the other subscribes to the KV-load stream and records the KV
-//! blocks its workers hold. Both go to [`PoolSignals`]. A pool's Relay comes
-//! from the catalog; when it changes or the pool leaves, the subscription is
-//! replaced or ends.
+//! blocks its workers hold. Both go to [`PoolSignals`], where each report
+//! stays until it ages out, so a reconnect or a briefly incomplete view does
+//! not make a pool's load unknown. A pool's Relay comes from the catalog;
+//! when it changes or the pool leaves, the subscription is replaced or ends
+//! and the pool's load is dropped.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use dynamo_global_common::PoolId;
 use dynamo_global_router::{LoadReport, PoolSignals};
 use dynamo_llm::kv_dc_relay::wan::grpc::protocol::{
@@ -29,6 +32,9 @@ use url::Url;
 use crate::PoolSnapshot;
 
 const SUBSCRIBER_ID: &str = "global-frontend";
+const SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The Relay's report window when an update leaves it unset.
+const DEFAULT_WINDOW: Duration = Duration::from_secs(1);
 const FIRST_RETRY: Duration = Duration::from_millis(500);
 const LAST_RETRY: Duration = Duration::from_secs(30);
 /// A stream that lasted this long resets the retry delay.
@@ -100,20 +106,19 @@ async fn subscribe(
     let mut retry = FIRST_RETRY;
     loop {
         let started = Instant::now();
-        let result = match &feed {
-            Feed::Load { model } => stream_load(&pool, model, &relay, &signals, &cancel).await,
-            Feed::Kv => stream_kv(&pool, &relay, &signals, &cancel).await,
-        };
-        match result {
-            Ok(()) => return,
-            Err(error) => {
-                tracing::warn!(%pool, %relay, error = format!("{error:#}"), "Relay stream ended");
+        let stream = async {
+            match &feed {
+                Feed::Load { model } => stream_load(&pool, model, &relay, &signals).await,
+                Feed::Kv => stream_kv(&pool, &relay, &signals).await,
             }
-        }
-        match feed {
-            Feed::Load { .. } => signals.forget_load(&pool),
-            Feed::Kv => signals.forget_kv(&pool),
-        }
+        };
+        // Stop as soon as the subscription is cancelled, even while
+        // connecting, so a replaced subscription never records over the next.
+        let Err(error) = tokio::select! {
+            _ = cancel.cancelled() => return,
+            result = stream => result,
+        };
+        tracing::warn!(%pool, %relay, error = format!("{error:#}"), "Relay stream ended");
         if started.elapsed() >= HEALTHY_STREAM {
             retry = FIRST_RETRY;
         }
@@ -125,74 +130,69 @@ async fn subscribe(
     }
 }
 
-/// Records each load update until the stream fails, or returns `Ok` when
-/// `cancel` fires.
+/// Records each load update until the stream fails. An incomplete update is
+/// skipped, leaving the last report to age out.
 async fn stream_load(
     pool: &PoolId,
     model: &str,
     relay: &Url,
     signals: &PoolSignals,
-    cancel: &CancellationToken,
-) -> Result<()> {
-    let mut updates = KvEventRelayClient::new(connect(relay).await?)
-        .subscribe_serving_load(SubscribeServingLoadRequest {
-            subscriber_id: SUBSCRIBER_ID.to_owned(),
-            contract_marker: RELAY_CONTRACT_MARKER,
-        })
-        .await
-        .context("subscribe")?
-        .into_inner();
+) -> Result<Infallible> {
+    let mut client = KvEventRelayClient::new(connect(relay).await?);
+    let request = SubscribeServingLoadRequest {
+        subscriber_id: SUBSCRIBER_ID.to_owned(),
+        contract_marker: RELAY_CONTRACT_MARKER,
+    };
+    let mut updates =
+        tokio::time::timeout(SUBSCRIBE_TIMEOUT, client.subscribe_serving_load(request))
+            .await
+            .map_err(|_| anyhow!("subscribe timed out"))?
+            .context("subscribe")?
+            .into_inner();
     tracing::info!(%pool, %relay, "following the pool's Relay load");
     loop {
-        let update = tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
-            update = updates.message() => update.context("read")?,
-        };
-        let Some(update) = update else {
+        let Some(update) = updates.message().await.context("read")? else {
             bail!("the Relay closed the stream");
         };
         match pool_report(&update, model) {
             Some(report) => signals.record_load(pool, report),
-            None => {
-                tracing::debug!(%pool, "the Relay's load is incomplete");
-                signals.forget_load(pool);
-            }
+            None => tracing::debug!(%pool, "the Relay's load is incomplete"),
         }
     }
 }
 
-/// Records each KV-load update until the stream fails, or returns `Ok` when
-/// `cancel` fires.
-async fn stream_kv(
-    pool: &PoolId,
-    relay: &Url,
-    signals: &PoolSignals,
-    cancel: &CancellationToken,
-) -> Result<()> {
-    let mut updates = KvEventRelayClient::new(connect(relay).await?)
-        .subscribe_kv_pool_load(SubscribeKvPoolLoadRequest {
-            subscriber_id: SUBSCRIBER_ID.to_owned(),
-            contract_marker: RELAY_CONTRACT_MARKER,
-        })
-        .await
-        .context("subscribe")?
-        .into_inner();
+/// Records each KV-load update until the stream fails. An incomplete update
+/// is skipped, leaving the last report to age out.
+async fn stream_kv(pool: &PoolId, relay: &Url, signals: &PoolSignals) -> Result<Infallible> {
+    let mut client = KvEventRelayClient::new(connect(relay).await?);
+    let request = SubscribeKvPoolLoadRequest {
+        subscriber_id: SUBSCRIBER_ID.to_owned(),
+        contract_marker: RELAY_CONTRACT_MARKER,
+    };
+    let mut updates =
+        tokio::time::timeout(SUBSCRIBE_TIMEOUT, client.subscribe_kv_pool_load(request))
+            .await
+            .map_err(|_| anyhow!("subscribe timed out"))?
+            .context("subscribe")?
+            .into_inner();
     tracing::info!(%pool, %relay, "following the pool's Relay KV load");
     loop {
-        let update = tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
-            update = updates.message() => update.context("read")?,
-        };
-        let Some(update) = update else {
+        let Some(update) = updates.message().await.context("read")? else {
             bail!("the Relay closed the stream");
         };
         match pool_kv(&update) {
-            Some((used, total)) => signals.record_kv(pool, used, total),
-            None => {
-                tracing::debug!(%pool, "the Relay's KV load is incomplete");
-                signals.forget_kv(pool);
+            Some((used, total)) => {
+                signals.record_kv(pool, used, total, report_window(update.window_ms))
             }
+            None => tracing::debug!(%pool, "the Relay's KV load is incomplete"),
         }
+    }
+}
+
+fn report_window(window_ms: u64) -> Duration {
+    match window_ms {
+        0 => DEFAULT_WINDOW,
+        window_ms => Duration::from_millis(window_ms),
     }
 }
 
@@ -267,6 +267,7 @@ fn pool_report(update: &ServingLoadUpdate, model: &str) -> Option<LoadReport> {
         in_flight,
         generating,
         max_concurrency,
+        window: report_window(update.window_ms),
     })
 }
 
@@ -279,14 +280,15 @@ mod tests {
 
     use super::*;
 
-    /// An update from a pool of 8 workers that can run 16 requests each
-    /// (unless `capacity` is `None`), with each model's requests waiting and
+    /// An update over a 2 s window from a pool of 8 workers that can run
+    /// `capacity` requests in all, with each model's requests waiting and
     /// generating.
     fn update(
         capacity: Option<u64>,
         models: &[(&str, Option<u64>, Option<u64>)],
     ) -> ServingLoadUpdate {
         ServingLoadUpdate {
+            window_ms: 2000,
             pools: vec![PoolServingLoad {
                 deployment: Some(PoolDeploymentStatus {
                     live_workers: Some(8),
@@ -322,6 +324,7 @@ mod tests {
                 in_flight: 23,
                 generating: 20,
                 max_concurrency: Some(128),
+                window: Duration::from_secs(2),
             })
         );
         // A Relay naming the model differently still reports its pool.

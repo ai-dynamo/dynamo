@@ -76,9 +76,9 @@ fn by_load(left: &Candidate<'_>, right: &Candidate<'_>) -> Ordering {
 /// `default`, unless another pool has more than `factor` times its spare
 /// capacity (1 minus its load); then the first such pool in `candidates`'
 /// order, nearest first. A full default leaves for the first pool with any
-/// room, and stays if none has room; a default whose load is unknown leaves
-/// for the first pool whose load is known. Without a default, the first
-/// candidate.
+/// room, and stays if none has room. A default whose load is unknown counts
+/// as full: sending more there blind could overfill it. Without a default,
+/// the first candidate.
 ///
 /// With `factor` 2, a pool at 80% gives requests to one at 10%, but one at
 /// 10% keeps them from one at 2%. Coming back takes the same factor the
@@ -91,10 +91,9 @@ pub(crate) fn headroom<'a, 'b>(
     let Some(default) = default else {
         return candidates.first();
     };
-    // Less than none for a pool of unknown load, so any known pool beats it.
     let need = default
         .load
-        .map_or(f64::NEG_INFINITY, |load| (factor * (1.0 - load)).max(0.0));
+        .map_or(0.0, |load| (factor * (1.0 - load)).max(0.0));
     candidates
         .iter()
         .filter(|candidate| candidate.pool.id != default.pool.id)
@@ -126,10 +125,7 @@ pub(crate) mod tests {
             regional_pool(OREGON, "oregon-a", "qwen", &["http://oregon-a:8000"]),
             regional_pool(TOKYO, "tokyo-a", "qwen", &["http://tokyo-a:8000"]),
         ];
-        let signals = Arc::new(PoolSignals::new(
-            Arc::new(InFlightTracker::new()),
-            Duration::from_secs(60),
-        ));
+        let signals = Arc::new(PoolSignals::new(Arc::new(InFlightTracker::new())));
         signals.set_region_round_trips(HashMap::from([
             (OREGON.to_owned(), Duration::from_millis(50)),
             (TOKYO.to_owned(), Duration::from_millis(135)),
@@ -137,18 +133,21 @@ pub(crate) mod tests {
         (pools, signals)
     }
 
-    /// Sets each pool's occupancy: requests in flight, all generating, over
-    /// 128 slots, with too little KV in use to bind.
+    /// Sets each pool's occupancy, in reports fresh for a minute: requests in
+    /// flight, all generating, over 128 slots, with too little KV in use to
+    /// bind.
     pub(crate) fn set_occupancy(pools: &[Pool], signals: &PoolSignals, loads: [f64; 4]) {
+        let window = Duration::from_secs(20);
         for (pool, load) in pools.iter().zip(loads) {
             let in_flight = (load * 128.0).round() as u64;
             let report = LoadReport {
                 in_flight,
                 generating: in_flight,
                 max_concurrency: Some(128),
+                window,
             };
             signals.record_load(&pool.id, report);
-            signals.record_kv(&pool.id, 0, 16384);
+            signals.record_kv(&pool.id, 0, 16384, window);
         }
     }
 

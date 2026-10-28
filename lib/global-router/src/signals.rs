@@ -11,6 +11,11 @@ use parking_lot::RwLock;
 
 use crate::load::InFlightTracker;
 
+/// A report is used for this many of its Relay's report windows, as the Relay
+/// judges its own sources, so a late or missed report or a quick reconnect
+/// does not make a pool's load unknown.
+const FRESH_WINDOWS: u32 = 3;
+
 /// One serving-load report from a pool's Relay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LoadReport {
@@ -22,6 +27,8 @@ pub struct LoadReport {
     /// How many requests the pool's workers can run at once, as they report
     /// it. `None` if any worker has not.
     pub max_concurrency: Option<u64>,
+    /// How often the Relay reports.
+    pub window: Duration,
 }
 
 /// How full a pool is against its own capacity, 1 being full, on each
@@ -48,13 +55,12 @@ pub struct PoolSignals {
     kv: DashMap<PoolId, KvReport>,
     regions: RwLock<Arc<HashMap<String, Duration>>>,
     in_flight: Arc<InFlightTracker>,
-    max_age: Duration,
 }
 
 #[derive(Debug)]
 struct Report {
     report: LoadReport,
-    received: Instant,
+    expires: Instant,
     /// This process's requests to the pool so far, when the report arrived.
     started: u64,
 }
@@ -63,54 +69,52 @@ struct Report {
 struct KvReport {
     used: u64,
     total: u64,
-    received: Instant,
+    expires: Instant,
 }
 
 impl PoolSignals {
     /// `in_flight` must be the tracker the forwarding engine counts its
-    /// requests in. A report older than `max_age` is not used.
-    pub fn new(in_flight: Arc<InFlightTracker>, max_age: Duration) -> Self {
+    /// requests in.
+    pub fn new(in_flight: Arc<InFlightTracker>) -> Self {
         Self {
             loads: DashMap::new(),
             kv: DashMap::new(),
             regions: RwLock::default(),
             in_flight,
-            max_age,
         }
     }
 
     /// Records what a pool's Relay reported.
     pub fn record_load(&self, pool: &PoolId, report: LoadReport) {
         let current = Report {
+            expires: Instant::now() + report.window * FRESH_WINDOWS,
             report,
-            received: Instant::now(),
             started: self.in_flight.started(pool),
         };
         self.loads.insert(pool.clone(), current);
     }
 
-    /// Drops a pool's load, for when its Relay stream ends or its view is
-    /// incomplete.
+    /// Drops a pool's load, for when the pool leaves or its Relay changes.
     pub fn forget_load(&self, pool: &PoolId) {
         self.loads.remove(pool);
     }
 
     /// Records the KV blocks a pool's workers hold for running requests, and
-    /// their total, as the pool's Relay reported.
-    pub fn record_kv(&self, pool: &PoolId, used: u64, total: u64) {
-        let received = Instant::now();
+    /// their total, as the pool's Relay reported once a `window`.
+    pub fn record_kv(&self, pool: &PoolId, used: u64, total: u64, window: Duration) {
+        let expires = Instant::now() + window * FRESH_WINDOWS;
         self.kv.insert(
             pool.clone(),
             KvReport {
                 used,
                 total,
-                received,
+                expires,
             },
         );
     }
 
-    /// Drops a pool's KV report, for when its Relay stream ends or its view
-    /// is incomplete.
+    /// Drops a pool's KV report, for when the pool leaves or its Relay
+    /// changes.
     pub fn forget_kv(&self, pool: &PoolId) {
         self.kv.remove(pool);
     }
@@ -128,10 +132,11 @@ impl PoolSignals {
     /// is. `None` without a fresh report, or before the workers report how
     /// many requests they can run.
     pub fn occupancy(&self, pool: &PoolId) -> Option<PoolOccupancy> {
+        let now = Instant::now();
         let current = self
             .loads
             .get(pool)
-            .filter(|current| current.received.elapsed() <= self.max_age)?;
+            .filter(|current| now <= current.expires)?;
         let capacity = current
             .report
             .max_concurrency
@@ -144,7 +149,7 @@ impl PoolSignals {
         let kv = self
             .kv
             .get(pool)
-            .filter(|kv| kv.received.elapsed() <= self.max_age && kv.total > 0)
+            .filter(|kv| now <= kv.expires && kv.total > 0)
             .map(|kv| {
                 let held = if generating > 0.0 {
                     kv.used as f64 * in_flight.max(generating) / generating
@@ -177,19 +182,21 @@ mod tests {
 
     use super::*;
 
-    /// 64 requests in flight, 32 of them generating, of 128 slots.
+    /// 64 requests in flight, 32 of them generating, of 128 slots, in a
+    /// report fresh for a minute.
     fn half_full() -> LoadReport {
         LoadReport {
             in_flight: 64,
             generating: 32,
             max_concurrency: Some(128),
+            window: Duration::from_secs(20),
         }
     }
 
     #[test]
     fn occupancy_is_the_fuller_of_slots_and_kv() {
         let in_flight = Arc::new(InFlightTracker::new());
-        let signals = PoolSignals::new(in_flight.clone(), Duration::from_secs(60));
+        let signals = PoolSignals::new(in_flight.clone());
         let blue = pool("blue", "qwen", &["http://blue:8000"]).id;
         signals.record_load(&blue, half_full());
         // No KV view yet: the slots alone.
@@ -198,7 +205,8 @@ mod tests {
 
         // Slot-bound: half the slots, and 1,000 of 16,384 KV blocks for 32
         // running requests (2,000 for all 64).
-        signals.record_kv(&blue, 1000, 16384);
+        let window = Duration::from_secs(20);
+        signals.record_kv(&blue, 1000, 16384, window);
         let occupancy = signals.occupancy(&blue).unwrap();
         assert_eq!(occupancy.slots, 0.5);
         assert!((occupancy.kv.unwrap() - 2000.0 / 16384.0).abs() < 1e-12);
@@ -206,7 +214,7 @@ mod tests {
 
         // KV-bound: 8,000 blocks for 32 running requests; all 64 would need
         // 16,000, nearly every block, though half the slots are free.
-        signals.record_kv(&blue, 8000, 16384);
+        signals.record_kv(&blue, 8000, 16384, window);
         let occupancy = signals.occupancy(&blue).unwrap();
         assert!((occupancy.load - 16000.0 / 16384.0).abs() < 1e-12);
 
@@ -224,7 +232,7 @@ mod tests {
     #[test]
     fn adds_requests_sent_since_the_report_and_drops_stale_reports() {
         let in_flight = Arc::new(InFlightTracker::new());
-        let signals = PoolSignals::new(in_flight.clone(), Duration::from_millis(50));
+        let signals = PoolSignals::new(in_flight.clone());
         let blue = pool("blue", "qwen", &["http://blue:8000"]).id;
         let _before = in_flight.start(&blue);
 
@@ -233,7 +241,17 @@ mod tests {
         let _after = [in_flight.start(&blue), in_flight.start(&blue)];
         assert!((signals.occupancy(&blue).unwrap().slots - 66.0 / 128.0).abs() < 1e-12);
 
-        std::thread::sleep(Duration::from_millis(60));
+        // A report is used for three of its windows.
+        let window = Duration::from_millis(50);
+        signals.record_load(
+            &blue,
+            LoadReport {
+                window,
+                ..half_full()
+            },
+        );
+        assert!(signals.occupancy(&blue).is_some());
+        std::thread::sleep(window * 4);
         assert_eq!(signals.occupancy(&blue), None);
     }
 }
