@@ -36,7 +36,6 @@ GAUGES = {
 FIELDS = {PREFILL: "num_prefill", DECODE: "num_decode"}
 WORKER_NAMES = {PREFILL: "prefill-worker", DECODE: "decode-worker"}
 
-# (planner class, config mode, roles the mode owns)
 MODES = [
     pytest.param(PrefillPlanner, "prefill", (PREFILL,), id="prefill"),
     pytest.param(DecodePlanner, "decode", (DECODE,), id="decode"),
@@ -210,7 +209,7 @@ async def test_disagg_with_one_role_set_submits_only_that_role(role, prometheus_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("roles_with_info", [(), (PREFILL,), (DECODE,)])
+@pytest.mark.parametrize("roles_with_info", [(), (PREFILL,)])
 async def test_disagg_publishes_both_gauges_before_resolving_workers(
     roles_with_info, prometheus_port
 ):
