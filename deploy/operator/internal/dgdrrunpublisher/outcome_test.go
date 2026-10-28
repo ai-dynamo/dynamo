@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 )
 
 func TestExitCodes(t *testing.T) {
@@ -30,6 +32,7 @@ func TestExitCodes(t *testing.T) {
 	}{
 		{nil, ExitAcknowledged},
 		{ErrRunFailed, ExitRunFailed},
+		{fmt.Errorf("%w: details", ErrRunFailed), ExitRunFailed},
 		{ErrMissingTerminalSnapshot, ExitProtocolViolation},
 		{violation("bad"), ExitProtocolViolation},
 		{fmt.Errorf("reconciling last snapshot: %w", violation("bad")), ExitProtocolViolation},
@@ -43,11 +46,46 @@ func TestExitCodes(t *testing.T) {
 }
 
 func TestTerminalResult(t *testing.T) {
-	if err := terminalResult(PhaseSucceeded); err != nil {
-		t.Fatalf("succeeded: %v", err)
+	tests := []struct {
+		name      string
+		state     DesiredState
+		outcome   *TerminalOutcome
+		errorText string
+	}{
+		{
+			name:  "success with a materialized candidate",
+			state: DesiredState{Phase: PhaseSucceeded, Candidates: []dgdcreconcile.DesiredCandidate{{ID: "a"}}},
+		},
+		{
+			name:      "producer failure keeps its diagnostics",
+			state:     DesiredState{Phase: PhaseFailed, Message: "search failed", Error: "backend unavailable"},
+			outcome:   &TerminalOutcome{Phase: PhaseFailed, Message: "search failed", Error: "backend unavailable"},
+			errorText: ErrRunFailed.Error() + ": search failed: backend unavailable",
+		},
+		{
+			name:      "success without a materialized candidate is a failure",
+			state:     DesiredState{Phase: PhaseSucceeded, Failed: 1, FirstFailure: "x: render failed"},
+			outcome:   &TerminalOutcome{Phase: PhaseFailed, Message: "no candidate was materialized: 1 candidate materialization failure", Error: "x: render failed"},
+			errorText: ErrRunFailed.Error() + ": no candidate was materialized: 1 candidate materialization failure: x: render failed",
+		},
 	}
-	if err := terminalResult(PhaseFailed); !errors.Is(err, ErrRunFailed) {
-		t.Fatalf("failed: %v", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := terminalResult(test.state)
+			if test.outcome == nil {
+				if err != nil {
+					t.Fatalf("terminalResult() = %v, want success", err)
+				}
+				return
+			}
+			var failure *RunFailedError
+			if !errors.Is(err, ErrRunFailed) || !errors.As(err, &failure) || failure.Outcome != *test.outcome {
+				t.Fatalf("terminalResult() = %#v, want outcome %+v", err, *test.outcome)
+			}
+			if got := err.Error(); got != test.errorText {
+				t.Fatalf("error text = %q, want %q", got, test.errorText)
+			}
+		})
 	}
 }
 

@@ -35,9 +35,10 @@ const (
 // terminal snapshot, which violates the producer protocol.
 var ErrMissingTerminalSnapshot = fmt.Errorf("%w: sweeper exited without publishing a terminal snapshot", ErrProtocolViolation)
 
-// ErrRunFailed means the Sweeper published a terminal Failed snapshot. The snapshot is
-// reconciled first; the error keeps a producer that reports failure but exits 0 from
-// letting the Job complete successfully.
+// ErrRunFailed means the Sweeper reported failure or produced no usable recommendation.
+// The snapshot is reconciled first; the error keeps that outcome from letting the Job
+// complete successfully. The concrete error is a *RunFailedError carrying the bounded
+// diagnostics.
 var ErrRunFailed = errors.New("sweeper reported a failed run")
 
 // ExitCode maps the result of Run to the process exit code.
@@ -60,12 +61,28 @@ type SweeperState struct {
 	ExitCode int32
 }
 
-// terminalResult is the outcome once a terminal snapshot has been reconciled.
-func terminalResult(phase string) error {
-	if phase == PhaseFailed {
-		return ErrRunFailed
+// terminalResult is the outcome once a terminal snapshot has been reconciled. A Failed
+// snapshot fails the run with the producer's own (bounded) diagnostics. A Succeeded one
+// must also contain a materialized candidate: success with nothing to recommend is a
+// failed run, not a result. The error is a *RunFailedError, so errors.Is(err,
+// ErrRunFailed) and ExitCode are unchanged.
+func terminalResult(desired DesiredState) error {
+	if desired.Phase == PhaseSucceeded && len(desired.Candidates) > 0 {
+		return nil
 	}
-	return nil
+	outcome := TerminalOutcome{Phase: PhaseFailed, Message: desired.Message, Error: desired.Error}
+	if desired.Phase == PhaseSucceeded {
+		outcome.Message = "no candidate was materialized"
+		if desired.Failed > 0 {
+			noun := "failures"
+			if desired.Failed == 1 {
+				noun = "failure"
+			}
+			outcome.Message += fmt.Sprintf(": %d candidate materialization %s", desired.Failed, noun)
+		}
+		outcome.Error = desired.FirstFailure
+	}
+	return &RunFailedError{Outcome: outcome}
 }
 
 // exitResult is the outcome when the Sweeper exited and the last snapshot it wrote (if

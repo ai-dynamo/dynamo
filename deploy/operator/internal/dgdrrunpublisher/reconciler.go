@@ -28,7 +28,7 @@ import (
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -39,8 +39,8 @@ import (
 const (
 	// LabelRunUID ties a candidate to one incarnation of its run. The run name can be
 	// reused after a delete and recreate; the UID cannot, so candidates left over from a
-	// previous run of the same name are never mistaken for current ones. The manager's
-	// cache selects candidates by this label.
+	// previous run of the same name are never mistaken for current ones. It is a repairable
+	// index; the controller owner UID remains the authoritative ownership relation.
 	LabelRunUID = "nvidia.com/dgdr-run-uid"
 	// LabelCandidateID records the stable candidate id (the identity read back on list).
 	LabelCandidateID = "nvidia.com/dgdr-candidate-id"
@@ -52,10 +52,6 @@ const (
 
 	// fieldOwner is the server-side-apply field manager of the publisher.
 	fieldOwner = "dgdr-run-publisher"
-
-	// finalReconcileAttempts bounds the retries once the Sweeper has exited: nothing will
-	// rewrite the snapshot, so a persistent failure must end the process.
-	finalReconcileAttempts = 3
 )
 
 // Reconciler reconciles the one DynamoGraphDeploymentRun this publisher serves.
@@ -95,12 +91,6 @@ type Reconciler struct {
 	Observer   *Observer
 	Store      *InputStore
 	Completion *Completion
-
-	// The fields below are touched only by Reconcile; the controller runs one worker, so
-	// they need no locking.
-
-	// finalFailures counts failed reconciles after the Sweeper exited.
-	finalFailures int
 }
 
 func (r *Reconciler) key() types.NamespacedName {
@@ -145,7 +135,8 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 			r.Completion.Finish(input.Err)
 			return nil
 		}
-		return r.retryOrFail(exited, input.Err)
+		r.Completion.Finish(fmt.Errorf("reading last snapshot: %w", input.Err))
+		return nil
 	}
 	if input.Snapshot == nil {
 		if exited {
@@ -156,36 +147,25 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 
 	desired := Desire(r.RunName, r.RunUID, input.Snapshot)
 	if err := r.apply(ctx, &run, desired); err != nil {
-		return r.retryOrFail(exited, err)
+		return r.retryOrFail(err)
 	}
 	switch {
 	case desired.Terminal:
-		r.Completion.Finish(terminalResult(desired.Phase))
+		r.Completion.Finish(terminalResult(desired))
 	case exited:
 		r.Completion.Finish(exitResult(state))
 	}
 	return nil
 }
 
-// retryOrFail hands a failure to the workqueue's backoff, except where retrying cannot
-// help (malformed projection) or the Sweeper is gone and the attempts are used up.
-func (r *Reconciler) retryOrFail(exited bool, err error) error {
-	var inputErr *dgdcreconcile.DiffInputError
-	if errors.As(err, &inputErr) {
+// retryOrFail hands a transient failure to the workqueue's backoff. A malformed
+// projection is permanent and completes the publisher immediately. Kubernetes API and
+// network failures remain retryable after the Sweeper exits because the terminal snapshot
+// is durable and the publisher Pod's lifecycle is the cancellation boundary.
+func (r *Reconciler) retryOrFail(err error) error {
+	if _, ok := errors.AsType[*dgdcreconcile.DiffInputError](err); ok {
 		r.Completion.Finish(err) // retrying cannot fix it
 		return nil
-	}
-	if apierrors.IsConflict(err) {
-		// A write was based on a stale cached read. The informer delivers the newer
-		// version and the retry decides again, so this is not a failed attempt.
-		return err
-	}
-	if exited {
-		r.finalFailures++
-		if r.finalFailures >= finalReconcileAttempts {
-			r.Completion.Finish(fmt.Errorf("reconciling last snapshot: %w", err))
-			return nil
-		}
 	}
 	return err
 }
@@ -198,17 +178,42 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 		ctrl.LoggerFrom(ctx).V(1).Info("candidates failed materialization and are not published", "count", desired.Failed)
 	}
 	var list v1beta2.DynamoGraphDeploymentCandidateList
-	if err := r.Client.List(ctx, &list, client.InNamespace(r.Namespace), client.MatchingLabels{LabelRunUID: r.RunUID}); err != nil {
+	if err := r.Client.List(ctx, &list, client.InNamespace(r.Namespace)); err != nil {
 		return fmt.Errorf("listing candidates: %w", err)
 	}
 	current := make([]dgdcreconcile.CurrentDGDC, 0, len(list.Items))
+	ownedObsolete := make([]string, 0, len(list.Items))
 	uids := make(map[string]types.UID, len(list.Items))
 	versions := make(map[string]string, len(list.Items)) // cached resourceVersion per candidate
+	expectedIDs := make(map[string]string, len(desired.Names))
+	for id, name := range desired.Names {
+		expectedIDs[name] = id
+	}
 	for i := range list.Items {
 		item := &list.Items[i]
+
+		// A label match scopes the cache but does not establish ownership. Foreign
+		// candidates must never satisfy desired state or become deletion targets.
+		owner := metav1.GetControllerOf(item)
+		if owner == nil || owner.UID != run.UID {
+			continue
+		}
+
+		// The deterministic name is the authoritative identity. An owned object under
+		// another name is obsolete; an expected object with a stale identity label is
+		// reapplied in place instead of deleted.
+		expectedID, isExpected := expectedIDs[item.Name]
+		if !isExpected {
+			ownedObsolete = append(ownedObsolete, item.Name)
+			uids[item.Name] = item.UID
+			continue
+		}
+		if item.Labels[LabelRunUID] != r.RunUID || item.Labels[LabelCandidateID] != expectedID {
+			continue
+		}
 		current = append(current, dgdcreconcile.CurrentDGDC{
 			Name:       item.Name,
-			ID:         item.Labels[LabelCandidateID],
+			ID:         expectedID,
 			Incomplete: item.Status.Metrics == nil,
 		})
 		uids[item.Name] = item.UID
@@ -218,6 +223,7 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 	if err != nil {
 		return err
 	}
+	actions.Deletes = append(actions.Deletes, ownedObsolete...)
 	// populated names the candidates whose status the API server already has; they are
 	// known from the live read that follows each apply, not from the cache.
 	populated := map[string]struct{}{}

@@ -32,7 +32,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -90,7 +89,7 @@ func (w *memWriter) record(op string, err error) error {
 	return err
 }
 
-func (w *memWriter) CreateCandidate(ctx context.Context, _ *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (StoredCandidate, error) {
+func (w *memWriter) CreateCandidate(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, name string, candidate dgdcreconcile.DesiredCandidate) (StoredCandidate, error) {
 	if err := w.record("create:"+name, w.fail("create")); err != nil {
 		return StoredCandidate{}, err
 	}
@@ -101,12 +100,13 @@ func (w *memWriter) CreateCandidate(ctx context.Context, _ *v1beta2.DynamoGraphD
 	if w.lag {
 		return stored, nil
 	}
-	object := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
-		Namespace: testNamespace,
-		Name:      name,
-		UID:       types.UID("uid-" + name),
-		Labels:    map[string]string{LabelRunUID: testRunUID, LabelCandidateID: candidate.ID},
-	}}
+	object := &v1beta2.DynamoGraphDeploymentCandidate{
+		Namespace:       testNamespace,
+		Name:            name,
+		UID:             types.UID("uid-" + name),
+		Labels:          map[string]string{LabelRunUID: testRunUID, LabelCandidateID: candidate.ID},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(run, v1beta2.DynamoGraphDeploymentRunGVK)},
+	}
 	return stored, client.IgnoreAlreadyExists(w.c.Create(ctx, object))
 }
 
@@ -162,7 +162,10 @@ func (w *memWriter) DeleteCandidate(ctx context.Context, name string, _ types.UI
 	if w.lag {
 		return nil
 	}
-	return client.IgnoreNotFound(w.c.Delete(ctx, &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name}}))
+	return client.IgnoreNotFound(w.c.Delete(ctx, &v1beta2.DynamoGraphDeploymentCandidate{
+		Namespace: testNamespace,
+		Name:      name,
+	}))
 }
 
 type fixture struct {
@@ -178,8 +181,8 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := &v1beta2.DynamoGraphDeploymentRun{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testRunName, UID: testRunUID}}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testPodName}}
+	run := &v1beta2.DynamoGraphDeploymentRun{Namespace: testNamespace, Name: testRunName, UID: testRunUID}
+	pod := &corev1.Pod{Namespace: testNamespace, Name: testPodName}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run, pod).Build()
 	store := &InputStore{}
 	observer := &Observer{
@@ -212,7 +215,7 @@ func (f *fixture) publish(data []byte) {
 
 func (f *fixture) reconcile() error {
 	f.t.Helper()
-	_, err := f.r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testRunName}})
+	_, err := f.r.Reconcile(context.Background(), ctrl.Request{Namespace: testNamespace, Name: testRunName})
 	return err
 }
 
@@ -241,7 +244,7 @@ func (f *fixture) exitSweeper(code int32) {
 func (f *fixture) deleteCandidate(name string) {
 	f.t.Helper()
 	delete(f.w.server, name)
-	object := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name}}
+	object := &v1beta2.DynamoGraphDeploymentCandidate{Namespace: testNamespace, Name: name}
 	if err := f.c.Delete(context.Background(), object); err != nil {
 		f.t.Fatal(err)
 	}
@@ -259,6 +262,24 @@ func (f *fixture) lastStatus() RunStatus {
 		f.t.Fatal("no run status was written")
 	}
 	return f.w.status[len(f.w.status)-1]
+}
+
+func (f *fixture) currentRun() *v1beta2.DynamoGraphDeploymentRun {
+	f.t.Helper()
+	var run v1beta2.DynamoGraphDeploymentRun
+	if err := f.c.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testRunName}, &run); err != nil {
+		f.t.Fatal(err)
+	}
+	return &run
+}
+
+func candidateForRun(name, id string, run *v1beta2.DynamoGraphDeploymentRun) *v1beta2.DynamoGraphDeploymentCandidate {
+	return &v1beta2.DynamoGraphDeploymentCandidate{
+		Namespace:       run.Namespace,
+		Name:            name,
+		Labels:          map[string]string{LabelRunUID: string(run.UID), LabelCandidateID: id},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(run, v1beta2.DynamoGraphDeploymentRunGVK)},
+	}
 }
 
 // withProgress rewrites a snapshot's progress counters.
@@ -412,28 +433,9 @@ func TestDroppedCandidateIsDeletedAfterTheRunStatusUpdate(t *testing.T) {
 	}
 }
 
-func TestFailedMaterializationIsNotCreatedButCounted(t *testing.T) {
-	f := newFixture(t)
-	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}, cand{id: "x", failed: true}))
-	f.mustReconcile()
-	for _, op := range f.takeOps() {
-		if strings.Contains(op, "x") && strings.HasPrefix(op, "create") {
-			t.Fatalf("a failed candidate must not be created: %s", op)
-		}
-	}
-	status := f.lastStatus()
-	if !reflect.DeepEqual(status.CandidateNames, []string{cn("a")}) || status.Published != 1 {
-		t.Fatalf("status = %+v", status)
-	}
-}
-
 func TestCandidateWithoutStatusIsCompletedNotRecreated(t *testing.T) {
 	f := newFixture(t)
-	existing := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
-		Namespace: testNamespace,
-		Name:      cn("a"),
-		Labels:    map[string]string{LabelRunUID: testRunUID, LabelCandidateID: "a"},
-	}}
+	existing := candidateForRun(cn("a"), "a", f.currentRun())
 	if err := f.c.Create(context.Background(), existing); err != nil {
 		t.Fatal(err)
 	}
@@ -475,13 +477,30 @@ func TestTerminalSucceededSnapshotIsReconciledThenAcknowledged(t *testing.T) {
 
 func TestTerminalFailedSnapshotIsReconciledThenFails(t *testing.T) {
 	f := newFixture(t)
-	f.publish(snapshotJSON(t, PhaseFailed, cand{id: "a"}))
+	f.publish(withRunDiagnostics(t, snapshotJSON(t, PhaseFailed, cand{id: "a"}), "search failed", "backend unavailable"))
 	f.mustReconcile()
-	if err := f.r.Completion.Err(); !errors.Is(err, ErrRunFailed) || ExitCode(err) != ExitRunFailed {
+	if err := f.r.Completion.Err(); !errors.Is(err, ErrRunFailed) || ExitCode(err) != ExitRunFailed ||
+		!strings.Contains(err.Error(), "search failed") || !strings.Contains(err.Error(), "backend unavailable") {
 		t.Fatalf("err = %v", err)
 	}
 	if len(f.w.status) != 1 {
 		t.Fatal("the failed snapshot must still be reconciled")
+	}
+}
+
+func TestTerminalSucceededSnapshotWithoutAMaterializedCandidateFails(t *testing.T) {
+	f := newFixture(t)
+	f.publish(snapshotJSON(t, PhaseSucceeded, cand{id: "x", failed: true}))
+	f.mustReconcile()
+
+	err := f.r.Completion.Err()
+	var failure *RunFailedError
+	if !errors.Is(err, ErrRunFailed) || !errors.As(err, &failure) || ExitCode(err) != ExitRunFailed ||
+		!strings.Contains(err.Error(), "1 candidate materialization failure") || !strings.HasPrefix(failure.Outcome.Error, "x: ") {
+		t.Fatalf("err = %v", err)
+	}
+	if ops := f.takeOps(); len(ops) != 0 {
+		t.Fatalf("a failed materialization must not produce cluster writes, got %v", ops)
 	}
 }
 
@@ -565,6 +584,19 @@ func TestInvalidFinalSnapshotIsAProtocolViolationExit(t *testing.T) {
 	}
 }
 
+func TestFinalSnapshotReadFailureEndsThePublisher(t *testing.T) {
+	f := newFixture(t)
+	f.r.Store.fail(errors.New("permission denied"))
+	f.exitSweeper(1)
+
+	f.mustReconcile()
+
+	err := f.r.Completion.Err()
+	if err == nil || ExitCode(err) != ExitReconcileFailed || !strings.Contains(err.Error(), "reading last snapshot") {
+		t.Fatalf("err = %v, want terminal snapshot read failure", err)
+	}
+}
+
 func TestRegressingSnapshotIsNotReconciled(t *testing.T) {
 	f := newFixture(t)
 	f.publish(withProgress(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}), 3, 5))
@@ -577,40 +609,103 @@ func TestRegressingSnapshotIsNotReconciled(t *testing.T) {
 	}
 }
 
-func TestFinalReconcileFailureEndsTheProcessAfterBoundedRetries(t *testing.T) {
+func TestFinalReconcileRetriesUntilTheAPIRecovers(t *testing.T) {
 	f := newFixture(t)
 	f.w.failOn["status"] = errors.New("api unavailable")
 	f.w.sticky = true
 	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
 	f.exitSweeper(1)
-	for attempt := 1; attempt < finalReconcileAttempts; attempt++ {
+	for attempt := 1; attempt <= 5; attempt++ {
 		if err := f.reconcile(); err == nil || f.r.Completion.Finished() {
 			t.Fatalf("attempt %d: want a retry, err=%v", attempt, err)
 		}
 	}
+	delete(f.w.failOn, "status")
 	f.mustReconcile()
-	if err := f.r.Completion.Err(); err == nil || ExitCode(err) != ExitReconcileFailed {
-		t.Fatalf("err = %v", err)
+	if !f.r.Completion.Finished() || f.r.Completion.Err() != nil {
+		t.Fatalf("finished=%v err=%v", f.r.Completion.Finished(), f.r.Completion.Err())
 	}
 }
 
-func TestMalformedProjectionFailsImmediately(t *testing.T) {
+func TestForeignLabeledCandidateDoesNotSatisfyOrGetDeleted(t *testing.T) {
 	f := newFixture(t)
-	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
-	// Two live candidates claiming the same id make the diff input malformed.
-	for _, name := range []string{"x-1", "x-2"} {
-		object := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNamespace, Name: name,
-			Labels: map[string]string{LabelRunUID: testRunUID, LabelCandidateID: "dup"},
-		}}
-		if err := f.c.Create(context.Background(), object); err != nil {
-			t.Fatal(err)
-		}
+	foreignRun := &v1beta2.DynamoGraphDeploymentRun{
+		Namespace: testNamespace,
+		Name:      "foreign-run",
+		UID:       "foreign-run-uid",
 	}
+	foreign := candidateForRun("foreign-candidate", "a", foreignRun)
+	foreign.Labels[LabelRunUID] = testRunUID
+	if err := f.c.Create(context.Background(), foreign); err != nil {
+		t.Fatal(err)
+	}
+
+	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
 	f.mustReconcile()
-	var inputErr *dgdcreconcile.DiffInputError
-	if err := f.r.Completion.Err(); !errors.As(err, &inputErr) || ExitCode(err) != ExitReconcileFailed {
-		t.Fatalf("err = %v", err)
+	if got, want := f.takeOps(), []string{"create:" + cn("a"), "populate:" + cn("a"), "status"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ops = %v, want %v", got, want)
+	}
+	if err := f.c.Get(context.Background(), client.ObjectKeyFromObject(foreign), &v1beta2.DynamoGraphDeploymentCandidate{}); err != nil {
+		t.Fatalf("foreign candidate must remain untouched: %v", err)
+	}
+}
+
+func TestOwnedCandidateDriftIsReconciledSafely(t *testing.T) {
+	tests := []struct {
+		name           string
+		existingName   string
+		existingID     string
+		removeRunLabel bool
+		desired        []cand
+		want           []string
+	}{
+		{
+			name:         "wrong name is replaced before deletion",
+			existingName: "wrong-name",
+			existingID:   "a",
+			desired:      []cand{{id: "a"}},
+			want:         []string{"create:" + cn("a"), "populate:" + cn("a"), "status", "delete:wrong-name"},
+		},
+		{
+			name:           "obsolete candidate without run label is deleted",
+			existingName:   cn("obsolete"),
+			existingID:     "obsolete",
+			removeRunLabel: true,
+			want:           []string{"delete:" + cn("obsolete")},
+		},
+		{
+			name:         "wrong identity label is reapplied",
+			existingName: cn("a"),
+			existingID:   "wrong-id",
+			desired:      []cand{{id: "a"}},
+			want:         []string{"create:" + cn("a"), "populate:" + cn("a"), "status"},
+		},
+		{
+			name:           "missing run label is reapplied",
+			existingName:   cn("a"),
+			existingID:     "a",
+			removeRunLabel: true,
+			desired:        []cand{{id: "a"}},
+			want:           []string{"create:" + cn("a"), "populate:" + cn("a"), "status"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t)
+			existing := candidateForRun(test.existingName, test.existingID, f.currentRun())
+			if test.removeRunLabel {
+				delete(existing.Labels, LabelRunUID)
+			}
+			if err := f.c.Create(context.Background(), existing); err != nil {
+				t.Fatal(err)
+			}
+
+			f.publish(snapshotJSON(t, PhaseRunning, test.desired...))
+			f.mustReconcile()
+			if got := f.takeOps(); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("ops = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
@@ -637,7 +732,7 @@ func TestRunRecreatedUnderTheSameNameIsNotTouched(t *testing.T) {
 func TestReconcileIgnoresOtherKeysAndAFinishedRun(t *testing.T) {
 	f := newFixture(t)
 	f.publish(snapshotJSON(t, PhaseSucceeded, cand{id: "a"}))
-	if _, err := f.r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: "other"}}); err != nil || len(f.w.ops) != 0 {
+	if _, err := f.r.Reconcile(context.Background(), ctrl.Request{Namespace: testNamespace, Name: "other"}); err != nil || len(f.w.ops) != 0 {
 		t.Fatalf("another key must be ignored: err=%v ops=%v", err, f.w.ops)
 	}
 	f.mustReconcile()
@@ -691,7 +786,7 @@ func TestObservedStatusMirrorsTheRunStatus(t *testing.T) {
 	}
 }
 
-func TestCacheOptionsCoverOnlyThisRunItsCandidatesAndItsPod(t *testing.T) {
+func TestCacheOptionsCoverThisRunPodAndNamespaceCandidates(t *testing.T) {
 	cfg := Config{Namespace: "ns", RunName: "run", RunUID: "uid-1", PodName: "pod-1"}
 	opts := cacheOptions(cfg)
 	if _, ok := opts.DefaultNamespaces["ns"]; !ok || len(opts.DefaultNamespaces) != 1 {
@@ -707,8 +802,8 @@ func TestCacheOptionsCoverOnlyThisRunItsCandidatesAndItsPod(t *testing.T) {
 				t.Errorf("run selector = %q", selector.Field)
 			}
 		case *v1beta2.DynamoGraphDeploymentCandidate:
-			if selector.Label.String() != LabelRunUID+"=uid-1" {
-				t.Errorf("candidate selector = %q", selector.Label)
+			if selector.Field != nil || selector.Label != nil {
+				t.Errorf("candidates must remain visible after mutable label drift: %+v", selector)
 			}
 		case *corev1.Pod:
 			if selector.Field.String() != "metadata.name=pod-1" {
@@ -717,121 +812,6 @@ func TestCacheOptionsCoverOnlyThisRunItsCandidatesAndItsPod(t *testing.T) {
 		default:
 			t.Errorf("unexpected cached type %T", object)
 		}
-	}
-}
-
-func nested(t *testing.T, object *unstructured.Unstructured, fields ...string) (any, bool) {
-	t.Helper()
-	value, found, err := unstructured.NestedFieldNoCopy(object.Object, fields...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return value, found
-}
-
-func TestCandidateApplyPayload(t *testing.T) {
-	scheme, err := NewScheme()
-	if err != nil {
-		t.Fatal(err)
-	}
-	run := &v1beta2.DynamoGraphDeploymentRun{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testRunName, UID: testRunUID}}
-	candidate := dgdcreconcile.DesiredCandidate{ID: "a", Spec: validManifest, Parameters: map[string]any{"tp": 2}}
-	apply, err := buildCandidateApply(scheme, testNamespace, testRunUID, run, cn("a"), candidate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if apply.GetAPIVersion() != "nvidia.com/v1beta2" || apply.GetKind() != "DynamoGraphDeploymentCandidate" || apply.GetName() != cn("a") || apply.GetNamespace() != testNamespace {
-		t.Fatalf("identity = %s %s %s/%s", apply.GetAPIVersion(), apply.GetKind(), apply.GetNamespace(), apply.GetName())
-	}
-	if _, found := nested(t, apply, "status"); found {
-		t.Fatal("status goes through the status subresource")
-	}
-	if _, found := nested(t, apply, "metadata", "creationTimestamp"); found {
-		t.Fatal("creationTimestamp must not be part of an apply payload")
-	}
-	if got := apply.GetLabels(); got[LabelRunUID] != testRunUID || got[LabelCandidateID] != "a" {
-		t.Fatalf("labels = %v", got)
-	}
-	if _, found := nested(t, apply, "spec", "parameters"); !found {
-		t.Fatal("the resolved parameters belong in the spec")
-	}
-	owners := apply.GetOwnerReferences()
-	if len(owners) != 1 || owners[0].UID != testRunUID || owners[0].Controller == nil || !*owners[0].Controller {
-		t.Fatalf("owner references = %+v", owners)
-	}
-}
-
-func TestCandidateStatusApplyPayloadIsDeterministic(t *testing.T) {
-	candidate := dgdcreconcile.DesiredCandidate{ID: "a", Metrics: map[string]any{"score": 2}}
-	first, err := buildCandidateStatusApply(testNamespace, cn("a"), "17", candidate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := buildCandidateStatusApply(testNamespace, cn("a"), "17", candidate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(first.Object, second.Object) {
-		t.Fatal("the same input must produce the same payload")
-	}
-	if got, _ := nested(t, first, "metadata", "resourceVersion"); got != "17" {
-		t.Fatalf("the status write must be constrained to the version it was decided on, got %v", got)
-	}
-	if _, found := nested(t, first, "status", "metrics"); !found {
-		t.Fatal("the metrics are the candidate's status")
-	}
-	if _, found := nested(t, first, "status", "conditions"); found {
-		t.Fatal("candidate status is metrics only")
-	}
-}
-
-func TestCandidateStatusApplyAlwaysWritesMetricsEvenWhenEmpty(t *testing.T) {
-	apply, err := buildCandidateStatusApply(testNamespace, cn("a"), "17", dgdcreconcile.DesiredCandidate{ID: "a"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	metrics, found := nested(t, apply, "status", "metrics")
-	if !found {
-		t.Fatal("an evaluated candidate without metrics must still carry an empty metrics object: its presence marks it populated")
-	}
-	if object, ok := metrics.(map[string]any); !ok || len(object) != 0 {
-		t.Fatalf("metrics = %#v, want an empty object", metrics)
-	}
-}
-
-func TestRunStatusApplyPayload(t *testing.T) {
-	when := time.Date(2026, 10, 5, 21, 35, 12, 0, time.UTC)
-	status := RunStatus{Published: 2, LastProgress: when, CandidateNames: []string{"x", "y"}}
-	apply := buildRunStatusApply(testNamespace, testRunName, "42", status)
-	if apply.GetKind() != "DynamoGraphDeploymentRun" || apply.GetName() != testRunName {
-		t.Fatalf("identity = %s %s", apply.GetKind(), apply.GetName())
-	}
-	if got, _ := nested(t, apply, "metadata", "resourceVersion"); got != "42" {
-		t.Fatalf("the status write must be constrained to the observed run version, got %v", got)
-	}
-	if _, found := nested(t, buildRunStatusApply(testNamespace, testRunName, "", status), "metadata", "resourceVersion"); found {
-		t.Fatal("no version known, no constraint")
-	}
-	if got, _ := nested(t, apply, "status", "lastProgressTime"); got != "2026-10-05T21:35:12Z" {
-		t.Fatalf("lastProgressTime = %v", got)
-	}
-	if got, _ := nested(t, apply, "status", "progress", "candidates", "published"); got != int64(2) {
-		t.Fatalf("published = %#v", got)
-	}
-	for _, field := range []string{"message", "provenance"} {
-		if _, found := nested(t, apply, "status", field); found {
-			t.Fatalf("status.%s does not exist in the API and must not be written", field)
-		}
-	}
-	refs, _ := nested(t, apply, "status", "candidateRefs")
-	if list, ok := refs.([]any); !ok || len(list) != 2 {
-		t.Fatalf("candidateRefs = %v", refs)
-	}
-	// A status without a progress time leaves the field out; the reconciler is what
-	// carries the known time into the status it writes.
-	status.LastProgress = time.Time{}
-	if _, found := nested(t, buildRunStatusApply(testNamespace, testRunName, "42", status), "status", "lastProgressTime"); found {
-		t.Fatal("no time known, so none is written")
 	}
 }
 
@@ -862,11 +842,7 @@ func TestNewCandidateStatusUsesTheVersionReturnedByTheCreate(t *testing.T) {
 
 func TestExistingCandidateStatusUsesItsCachedVersion(t *testing.T) {
 	f := newFixture(t)
-	existing := &v1beta2.DynamoGraphDeploymentCandidate{ObjectMeta: metav1.ObjectMeta{
-		Namespace: testNamespace,
-		Name:      cn("a"),
-		Labels:    map[string]string{LabelRunUID: testRunUID, LabelCandidateID: "a"},
-	}}
+	existing := candidateForRun(cn("a"), "a", f.currentRun())
 	if err := f.c.Create(context.Background(), existing); err != nil {
 		t.Fatal(err)
 	}
@@ -881,13 +857,13 @@ func TestExistingCandidateStatusUsesItsCachedVersion(t *testing.T) {
 	}
 }
 
-func TestConflictIsRetriedWithoutUsingUpTheFinalAttempts(t *testing.T) {
+func TestConflictRemainsRetryableUntilTheCacheCatchesUp(t *testing.T) {
 	f := newFixture(t)
 	f.w.failOn["status"] = apierrors.NewConflict(schema.GroupResource{Group: "nvidia.com", Resource: "dynamographdeploymentruns"}, testRunName, errors.New("stale"))
 	f.w.sticky = true
 	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
 	f.exitSweeper(1)
-	for attempt := 0; attempt < 2*finalReconcileAttempts; attempt++ {
+	for attempt := range 6 {
 		if err := f.reconcile(); !apierrors.IsConflict(err) || f.r.Completion.Finished() {
 			t.Fatalf("attempt %d: a conflict from a stale read must be retried, err=%v finished=%v", attempt, err, f.r.Completion.Finished())
 		}

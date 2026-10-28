@@ -66,12 +66,20 @@ func TestChangedSnapshotIsStoredAndEnqueuedOnce(t *testing.T) {
 }
 
 func TestRewriteWithOnlyANewTimestampIsNotAChange(t *testing.T) {
-	o, _, dir, enqueued := newObserver(t)
-	writeSnapshot(t, dir, withTimestamp(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}), "2026-10-05T21:35:12Z"))
-	o.Check()
-	writeSnapshot(t, dir, withTimestamp(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}), "2026-10-05T21:35:14Z"))
-	if o.Check() || *enqueued != 1 {
-		t.Fatalf("a new timestamp alone is not a semantic change: enqueued=%d", *enqueued)
+	for _, phase := range []string{PhaseRunning, PhaseSucceeded} {
+		t.Run(phase, func(t *testing.T) {
+			o, _, dir, enqueued := newObserver(t)
+
+			t.Log("Accept the first snapshot")
+			writeSnapshot(t, dir, withTimestamp(t, snapshotJSON(t, phase, cand{id: "a"}), "2026-10-05T21:35:12Z"))
+			o.Check()
+
+			t.Log("Rewrite the same snapshot with only a new timestamp")
+			writeSnapshot(t, dir, withTimestamp(t, snapshotJSON(t, phase, cand{id: "a"}), "2026-10-05T21:35:14Z"))
+			if o.Check() || *enqueued != 1 {
+				t.Fatalf("a new timestamp alone is not a semantic change: enqueued=%d", *enqueued)
+			}
+		})
 	}
 }
 
@@ -124,6 +132,41 @@ func TestTerminalSnapshotMayReportItsFinalEvaluatedTotal(t *testing.T) {
 	}
 }
 
+func TestTerminalSnapshotCannotBeReplaced(t *testing.T) {
+	tests := []struct {
+		name        string
+		replacement []byte
+	}{
+		{name: "return to running", replacement: snapshotJSON(t, PhaseRunning, cand{id: "a"})},
+		{name: "change final candidates", replacement: snapshotJSON(t, PhaseSucceeded, cand{id: "a"}, cand{id: "b"})},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			o, store, dir, enqueued := newObserver(t)
+
+			t.Log("Accept the terminal snapshot")
+			writeSnapshot(t, dir, snapshotJSON(t, PhaseSucceeded, cand{id: "a"}))
+			if !o.Check() {
+				t.Fatal("terminal snapshot was not accepted")
+			}
+
+			t.Log("Attempt to replace the latched terminal state")
+			writeSnapshot(t, dir, test.replacement)
+			if o.Check() || *enqueued != 1 {
+				t.Fatalf("replacement must not be stored: enqueued=%d", *enqueued)
+			}
+
+			input := store.Load()
+			if !errors.Is(input.Err, ErrProtocolViolation) {
+				t.Fatalf("err = %v, want protocol violation", input.Err)
+			}
+			if input.Snapshot.Run.Phase != PhaseSucceeded || len(input.Snapshot.Candidates) != 1 {
+				t.Fatalf("terminal snapshot was replaced: %+v", input.Snapshot)
+			}
+		})
+	}
+}
+
 func TestUnreadableSnapshotIsRecordedAsANonViolation(t *testing.T) {
 	o, store, dir, _ := newObserver(t)
 	if err := os.Mkdir(filepath.Join(dir, SnapshotFileName), 0o700); err != nil { // reading a directory fails
@@ -139,7 +182,7 @@ func TestNextIntervalBacksOffWhileUnchangedAndResetsOnChange(t *testing.T) {
 	minimum, maximum := time.Second, 5*time.Second
 	got := []time.Duration{}
 	interval := minimum
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		interval = NextInterval(interval, minimum, maximum, false)
 		got = append(got, interval)
 	}

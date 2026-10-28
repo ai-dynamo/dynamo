@@ -41,6 +41,7 @@ func main() {
 
 func run() int {
 	var cfg dgdrrunpublisher.Config
+	var terminationLog string
 	logOptions := zap.Options{}
 	logOptions.BindFlags(flag.CommandLine)
 	flag.StringVar(&cfg.SnapshotDir, "snapshot-dir", "", "directory shared with the Sweeper container")
@@ -51,6 +52,10 @@ func run() int {
 	flag.DurationVar(
 		&cfg.MaxPollInterval, "max-poll-interval", 5*time.Second,
 		"longest snapshot check interval while the snapshot is unchanged",
+	)
+	flag.StringVar(
+		&terminationLog, "termination-log", dgdrrunpublisher.DefaultTerminationLog,
+		"file the failure outcome is written to as the container termination message",
 	)
 	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&logOptions)))
@@ -68,6 +73,9 @@ func run() int {
 	err := dgdrrunpublisher.Run(ctx, ctrl.GetConfigOrDie(), cfg)
 	if err != nil {
 		ctrl.Log.WithName("dgdr-run-publisher").Error(err, "publisher stopped")
+		if writeErr := dgdrrunpublisher.WriteTerminationMessage(terminationLog, err); writeErr != nil {
+			ctrl.Log.WithName("dgdr-run-publisher").Error(writeErr, "writing termination message")
+		}
 	}
 	return dgdrrunpublisher.ExitCode(err)
 }

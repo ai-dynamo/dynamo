@@ -60,8 +60,15 @@ type DesiredState struct {
 	Status   RunStatus
 	Terminal bool
 	Phase    string
-	// Failed counts the candidates whose materialization failed. They are not created
-	// and the Run status has no field for them, so they are only logged.
+	// Message and Error are the producer's terminal diagnostics. They pass through the
+	// process result into the container termination message.
+	Message string
+	Error   string
+	// FirstFailure is the bounded "id: error" of the first candidate whose
+	// materialization failed, for the run-failed diagnostics.
+	FirstFailure string
+	// Failed counts the candidates whose materialization failed. They are not created;
+	// the count is logged and prevents an empty terminal projection from succeeding.
 	Failed int
 }
 
@@ -91,12 +98,17 @@ func Desire(runName, runUID string, snap *Snapshot) DesiredState {
 		Names:    make(map[string]string, len(snap.Candidates)),
 		Terminal: snap.Run.Terminal,
 		Phase:    snap.Run.Phase,
+		Message:  boundDiagnostic(snap.Run.Message),
+		Error:    boundDiagnostic(snap.Run.Error),
 	}
 	failed := 0
 	var names []string
 	for _, candidate := range snap.Candidates {
 		if candidate.Outcome != OutcomeMaterialized {
 			failed++
+			if state.FirstFailure == "" {
+				state.FirstFailure = boundDiagnostic(candidate.ID + ": " + candidate.Error)
+			}
 			continue
 		}
 		name := CandidateName(runName, runUID, candidate.ID)
