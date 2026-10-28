@@ -12,7 +12,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::Response;
+use axum::http::{Response, Version, header};
 use axum::response::IntoResponse;
 
 use super::Metrics;
@@ -100,6 +100,19 @@ fn path_within_namespace(path: &str, namespace: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
+fn draining_inference_response(version: Version) -> axum::response::Response {
+    let mut response = super::openai::ErrorMessage::_service_unavailable().into_response();
+    if version <= Version::HTTP_11 {
+        *response.version_mut() = version;
+        // Do not let connection pools keep sending requests to a retiring frontend.
+        response.headers_mut().insert(
+            header::CONNECTION,
+            header::HeaderValue::from_static("close"),
+        );
+    }
+    response
+}
+
 async fn track_inflight_inference(
     axum::extract::State(state): axum::extract::State<Arc<State>>,
     request: axum::extract::Request,
@@ -109,7 +122,7 @@ async fn track_inflight_inference(
 
     // Requests rejected during draining should not extend the drain window.
     if !state.is_ready() {
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return draining_inference_response(request.version());
     }
 
     let permit = state.acquire_inflight();
@@ -117,7 +130,7 @@ async fn track_inflight_inference(
     // before this request is counted as inflight.
     if !state.is_ready() {
         drop(permit);
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return draining_inference_response(request.version());
     }
 
     let response = next.run(request).await;
@@ -1279,6 +1292,7 @@ impl HttpServiceConfigBuilder {
 
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
+        super::image_edits::validate_config()?;
         LazyLock::force(&DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION);
         let metrics_config = config.metrics_config.clone();
         let model_ready_metrics_prefix = metrics_config.prefix();
@@ -2498,6 +2512,56 @@ mod tests {
             },
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_health_lists_instances_only_on_request() {
+        let (port, state, handle) = spawn_service(|builder| builder).await;
+        state
+            .discovery()
+            .register(dynamo_runtime::discovery::DiscoverySpec::Endpoint {
+                namespace: "ns".to_string(),
+                component: "backend".to_string(),
+                endpoint: "generate".to_string(),
+                transport: dynamo_runtime::component::TransportType::Nats(
+                    "nats://localhost:4222".to_string(),
+                ),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+
+        let health: serde_json::Value = client
+            .get(format!("http://localhost:{port}/health"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            health,
+            serde_json::json!({"status": "healthy", "stage": "ready"})
+        );
+
+        let health: serde_json::Value = client
+            .get(format!("http://localhost:{port}/health?instances=true"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(health["status"], "healthy");
+        assert_eq!(
+            health["endpoints"],
+            serde_json::json!(["dyn://ns.backend.generate"])
+        );
+        assert_eq!(health["instances"].as_array().unwrap().len(), 1);
+
+        handle.abort();
     }
 
     #[tokio::test]

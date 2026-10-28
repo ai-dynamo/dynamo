@@ -632,19 +632,18 @@ worker_selection:
         );
     }
 
+    async fn build(port: u16) -> anyhow::Result<SelectionService> {
+        SelectionServiceBuilder::new(test_config(), WorkerType::Aggregated, test_registry())
+            .indexer_threads(1)
+            .replica_sync(port, Vec::new())
+            .build()
+            .await
+    }
+
     async fn build_on_port(port: u16) -> SelectionService {
         tokio::time::timeout(Duration::from_secs(5), async move {
             loop {
-                match SelectionServiceBuilder::new(
-                    test_config(),
-                    WorkerType::Aggregated,
-                    test_registry(),
-                )
-                .indexer_threads(1)
-                .replica_sync(port, Vec::new())
-                .build()
-                .await
-                {
+                match build(port).await {
                     Ok(service) => return service,
                     Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
                 }
@@ -669,7 +668,9 @@ worker_selection:
         assert_eq!(service.replica_sync_port(), Some(port));
         let weak_core = Arc::downgrade(&service.core);
         service.shutdown().await;
-        let replacement = build_on_port(port).await;
+        let replacement = build(port)
+            .await
+            .expect("shutdown releases the replica port");
         drop(service);
         assert!(weak_core.upgrade().is_none());
         replacement.shutdown().await;

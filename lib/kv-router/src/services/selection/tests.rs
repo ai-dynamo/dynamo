@@ -577,6 +577,58 @@ fn prompt_request_cache_salt_changes_normalized_hashes() {
 }
 
 #[test]
+fn prompt_carrying_requests_read_top_level_prompt_fields() {
+    let body = serde_json::json!({
+        "selection_id": "sel-1",
+        "worker_id": 7,
+        "token_ids": [1, 2, 3],
+        "cache_salt": "tenant-a",
+        "is_eagle": true,
+    });
+    let assert_prompt = |prompt: &PromptRequest| {
+        assert_eq!(prompt.token_ids.as_deref(), Some(&[1, 2, 3][..]));
+        assert_eq!(prompt.cache_namespace.as_deref(), Some("tenant-a"));
+        assert_eq!(prompt.is_eagle, Some(true));
+    };
+
+    let select: SelectRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&select.prompt);
+    assert_eq!(select.selection_id.as_deref(), Some("sel-1"));
+    assert_eq!(select.model_name, DEFAULT_MODEL_NAME);
+    let reserve: SelectAndReserveRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&reserve.prompt);
+    let booking: ReservationRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&booking.prompt);
+    assert_eq!(booking.worker_id, Some(7));
+    let loads: PotentialLoadsRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&loads.prompt);
+    let scores: OverlapScoresRequest = serde_json::from_value(body).unwrap();
+    assert_prompt(&scores.prompt);
+}
+
+#[tokio::test]
+async fn prompt_routes_keep_json_rejection_statuses() {
+    let untyped = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/select")
+                .body(Body::from(r#"{"token_ids":[1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(untyped.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let malformed = post(app(), "/select", "{").await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+    let wrong_shape = post(app(), "/select", r#"{"token_ids":"oops"}"#).await;
+    assert_eq!(wrong_shape.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(response_json(wrong_shape).await["error"].is_string());
+}
+
+#[test]
 fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
     let mut key_file = NamedTempFile::new().unwrap();
     key_file.write_all(&[0x35; 32]).unwrap();

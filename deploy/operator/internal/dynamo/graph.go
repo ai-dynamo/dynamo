@@ -2166,6 +2166,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			Infrastructure:                 parentContext.Infrastructure,
 			DynamoNamespace:                parentContext.DynamoNamespace,
 			RuntimeVersion:                 resolvedRuntimeVersion,
+			Annotations:                    parentContext.Annotations,
 		}
 
 		frontendDefaults := NewFrontendDefaults()
@@ -2236,7 +2237,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 	dynamoNamespace := v1beta1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
 	labels := GetPodTemplateLabels(component)
-	if workerHash := labels[commonconsts.KubeLabelDynamoWorkerHash]; IsWorkerComponent(string(component.ComponentType)) && workerHash != "" {
+	if workerHash := labels[commonconsts.KubeLabelDynamoWorkerHash]; (IsWorkerComponent(string(component.ComponentType)) || component.IsLPX()) && workerHash != "" {
 		workerHashSuffix = workerHash
 	}
 
@@ -2264,6 +2265,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
 		RuntimeVersion:                 resolvedRuntimeVersion,
+		Annotations:                    GetPodTemplateAnnotations(component),
 	}
 
 	// A native sidecar owns the worker runtime identity.

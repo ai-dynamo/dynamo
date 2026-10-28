@@ -55,6 +55,7 @@ pub(crate) fn tool_call_response_to_protocol(
             name: parsed.function.name,
             arguments: parsed.function.arguments,
         },
+        custom: None,
     }
 }
 
@@ -77,6 +78,7 @@ pub(crate) fn tool_call_response_chunk_to_protocol(
             name: f.name,
             arguments: f.arguments,
         }),
+        custom: None,
     }
 }
 
@@ -514,6 +516,22 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
     fn get_best_of(&self) -> Option<u8> {
         None // Not supported in chat completions
     }
+
+    /// Retrieves the logit_bias map with string token-ID keys converted to
+    /// `u32`. Validation rejects non-numeric keys before extraction.
+    fn get_logit_bias(&self) -> Option<HashMap<u32, f32>> {
+        self.inner
+            .logit_bias
+            .as_ref()
+            .filter(|bias| !bias.is_empty())
+            .map(|bias| {
+                bias.iter()
+                    .filter_map(|(token, value)| {
+                        Some((token.parse::<u32>().ok()?, value.as_f64()? as f32))
+                    })
+                    .collect()
+            })
+    }
 }
 
 /// Implements `CommonExtProvider` for `NvCreateChatCompletionRequest`,
@@ -690,6 +708,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
+        validate::validate_no_custom_tools(&self.inner)?;
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_guided_decoding(self)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
@@ -763,6 +782,46 @@ mod tests {
     };
     use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
     use serde_json::json;
+
+    #[test]
+    fn test_validate_rejects_custom_tools_everywhere() {
+        let function_tool = json!({"type": "function", "function": {"name": "lookup"}});
+        let custom_tool = json!({"type": "custom", "custom": {"name": "patch"}});
+        let base = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [function_tool]
+        });
+        let parse = |value: serde_json::Value| {
+            serde_json::from_value::<NvCreateChatCompletionRequest>(value).unwrap()
+        };
+        ValidateRequest::validate(&parse(base.clone())).unwrap();
+
+        let mut tools = base.clone();
+        tools["tools"] = json!([function_tool, custom_tool]);
+        let mut choice = base.clone();
+        choice["tool_choice"] = json!({"type": "custom", "custom": {"name": "lookup"}});
+        let mut history = base.clone();
+        history["messages"] = json!([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "tool_calls": [
+                {"id": "c1", "type": "custom", "custom": {"name": "patch", "input": "x"}}
+            ]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"}
+        ]);
+        let mut system = base.clone();
+        system["messages"] = json!([
+            {"role": "system", "content": "s", "tools": [custom_tool]},
+            {"role": "user", "content": "hi"}
+        ]);
+        for request in [tools, choice, history, system] {
+            let error = ValidateRequest::validate(&parse(request)).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Custom tools are not supported; use function tools"
+            );
+        }
+    }
 
     /// Builds a minimal chat request and merges `extra` into its top-level fields.
     fn chat_request_with(extra: &serde_json::Value) -> NvCreateChatCompletionRequest {
@@ -1165,6 +1224,23 @@ mod tests {
     }
 
     #[test]
+    fn test_logit_bias_reaches_sampling_options() {
+        let request = chat_request_with(&json!({"logit_bias": {"18": -100, "42": 5.5}}));
+        ValidateRequest::validate(&request).expect("valid logit_bias must pass validation");
+
+        let sampling_options = request
+            .extract_sampling_options()
+            .expect("logit_bias extraction failed");
+        let logit_bias = sampling_options
+            .logit_bias
+            .expect("logit_bias must survive extraction");
+
+        assert_eq!(logit_bias.len(), 2);
+        assert_eq!(logit_bias.get(&18), Some(&-100.0));
+        assert_eq!(logit_bias.get(&42), Some(&5.5));
+    }
+
+    #[test]
     fn test_validate_tool_choice_required_rejects_empty_tools() {
         let request_json = json!({
             "model": "test-model",
@@ -1460,6 +1536,7 @@ mod tests {
                 name: name.to_string(),
                 arguments: args.to_string(),
             },
+            custom: None,
         }
     }
 
@@ -1478,6 +1555,7 @@ mod tests {
                 name: Some(name.to_string()),
                 arguments: Some(args.to_string()),
             }),
+            custom: None,
         }
     }
 
@@ -1728,7 +1806,10 @@ mod tests {
                     description: None,
                     parameters: Some(json!({"type": "object", "properties": {}})),
                     strict: None,
+                    defer_loading: None,
                 },
+                custom: None,
+                defer_loading: None,
             }
         }
 
@@ -1737,13 +1818,24 @@ mod tests {
             make_tool("func-name_v2"),
             make_tool("FuncName"),
             make_tool("Func_Name-123"),
+            make_tool("my-tool.v2"),
         ];
         assert!(validate::validate_tools(&Some(&tools)).is_ok());
     }
 
     #[test]
     fn test_validate_tools_invalid_names() {
-        for name in ["<func_name>", "func name", "func@name", "func,name", ""] {
+        for name in [
+            "<func_name>",
+            "func name",
+            "func@name",
+            "func,name",
+            "func=name",
+            "func\"name",
+            "func:name",
+            "func/name",
+            "",
+        ] {
             let tools = vec![ChatCompletionTool {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionObject {
@@ -1751,7 +1843,10 @@ mod tests {
                     description: None,
                     parameters: Some(json!({"type": "object", "properties": {}})),
                     strict: None,
+                    defer_loading: None,
                 },
+                custom: None,
+                defer_loading: None,
             }];
             assert!(
                 validate::validate_tools(&Some(&tools)).is_err(),
@@ -1770,7 +1865,10 @@ mod tests {
                     description: None,
                     parameters: Some(parameters),
                     strict: None,
+                    defer_loading: None,
                 },
+                custom: None,
+                defer_loading: None,
             }];
 
             let error = validate::validate_tools(&Some(&tools))
@@ -1791,7 +1889,10 @@ mod tests {
                 description: None,
                 parameters: None,
                 strict: None,
+                defer_loading: None,
             },
+            custom: None,
+            defer_loading: None,
         }];
 
         validate::validate_tools(&Some(&tools))

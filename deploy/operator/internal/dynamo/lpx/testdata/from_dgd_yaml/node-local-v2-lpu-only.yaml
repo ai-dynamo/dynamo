@@ -61,6 +61,8 @@ spec:
             command:
             - /opt/dynamo-lpu
             env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/node-local-v2-connected
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -305,6 +307,9 @@ spec:
             - /tmp/dynamo-lpu-ssh/private.key
             command:
             - /bin/install
+            env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/node-local-v2-connected
             image: example.invalid/lpu-runtime:test
             name: prepare-ssh-key
             resources: {}

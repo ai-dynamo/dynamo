@@ -1,9 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Compatibility imports for vLLM's shared OpenAI protocol types."""
+"""Compatibility imports for vLLM's frontend helpers and OpenAI protocol types."""
 
 from importlib.util import find_spec
+
+# vLLM 0.32 moved the chat helpers to vllm.renderers.
+if find_spec("vllm.renderers.chat_utils") is not None:
+    from vllm.renderers.chat_utils import load_chat_template, make_tool_call_id
+else:
+    from vllm.entrypoints.chat_utils import load_chat_template, make_tool_call_id
 
 try:
     _HAS_GENERATE_PROTOCOL = (
@@ -34,4 +40,6 @@ __all__ = [
     "DeltaMessage",
     "DeltaToolCall",
     "FunctionDefinition",
+    "load_chat_template",
+    "make_tool_call_id",
 ]

@@ -123,7 +123,11 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .transpose()?;
 
         // Convert tool_choice
-        let tool_choice = req.tool_choice.as_ref().map(convert_anthropic_tool_choice);
+        let tool_choice = req
+            .tool_choice
+            .as_ref()
+            .map(convert_anthropic_tool_choice)
+            .transpose()?;
         let parallel_tool_calls = req
             .tool_choice
             .as_ref()
@@ -460,6 +464,7 @@ fn convert_assistant_blocks(
                         name: name.clone(),
                         arguments: serde_json::to_string(input).unwrap_or_default(),
                     },
+                    custom: None,
                 });
             }
             _ => {}
@@ -539,28 +544,26 @@ fn convert_anthropic_tools(
                     description: tool.description.clone(),
                     parameters: Some(schema),
                     strict: tool.strict,
+                    defer_loading: None,
                 },
+                custom: None,
+                defer_loading: None,
             })
         })
         .collect()
 }
 
 /// Convert Anthropic tool_choice to ChatCompletionToolChoiceOption.
-fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionToolChoiceOption {
-    match tc {
+fn convert_anthropic_tool_choice(
+    tc: &AnthropicToolChoice,
+) -> anyhow::Result<ChatCompletionToolChoiceOption> {
+    Ok(match tc {
         AnthropicToolChoice::Simple(simple) => match simple.choice_type {
             AnthropicToolChoiceMode::Auto => ChatCompletionToolChoiceOption::Auto,
             AnthropicToolChoiceMode::Any => ChatCompletionToolChoiceOption::Required,
             AnthropicToolChoiceMode::None => ChatCompletionToolChoiceOption::None,
             AnthropicToolChoiceMode::Tool => {
-                // {"type": "tool"} without a "name" field is invalid per the Anthropic spec.
-                // It deserialized as Simple because Named requires the name field.
-                // Treat as "any" (required) since the caller wants a specific tool but
-                // didn't specify which — this is the closest semantic match.
-                tracing::warn!(
-                    "tool_choice has type 'tool' without a 'name' field; treating as 'any' (required)"
-                );
-                ChatCompletionToolChoiceOption::Required
+                anyhow::bail!("tool_choice.name: field required when tool_choice.type is \"tool\"");
             }
         },
         AnthropicToolChoice::Named(named) => {
@@ -571,7 +574,7 @@ fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionTool
                 },
             })
         }
-    }
+    })
 }
 
 /// Convert Dynamo's OpenAI-compatible usage into Anthropic's non-overlapping
@@ -2782,6 +2785,7 @@ mod anthropic_types_tests {
                         name: "record_literal".into(),
                         arguments: (*arguments).into(),
                     },
+                    custom: None,
                 },
             )
             .collect();
