@@ -27,7 +27,7 @@ Busy thresholds are worker filters. They are configured separately from the queu
 - `--active-prefill-tokens-threshold`
 - `--active-prefill-tokens-threshold-frac`
 
-When a threshold is exceeded, worker monitoring reports that worker as overloaded. The scheduler then excludes that worker from normal candidate selection. The thresholds can be updated at runtime through the `/busy_threshold` endpoint on the frontend admin port (`127.0.0.1:8002` by default).
+When a threshold is exceeded, worker monitoring reports that worker as overloaded. The scheduler then excludes that worker from normal candidate selection. The thresholds can be updated at runtime through the `/busy_threshold` endpoint on the frontend admin port (`127.0.0.1:8002` by default) when `DYN_ENABLE_FRONTEND_ADMIN_API` is set.
 
 Busy filtering preserves error classification:
 

@@ -864,8 +864,8 @@ accepted fields, limits, errors, and rolling upgrades.
 
 ### Admin
 
-Admin routes are served on a separate listener, not the inference port. They are enabled by
-default and have no authentication; `DYN_DISABLE_FRONTEND_ADMIN_API` turns them off.
+Admin routes are served on a separate listener, not the inference port. They are disabled by
+default and have no authentication; `DYN_ENABLE_FRONTEND_ADMIN_API` turns them on.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -880,9 +880,8 @@ default and have no authentication; `DYN_DISABLE_FRONTEND_ADMIN_API` turns them 
 </ParamField>
 
 <ParamField path="DYN_FRONTEND_ADMIN_PORT" type="integer" default="8002">
-  Port of the admin listener. When this is set and the port cannot be bound, the frontend fails to
-  start. On the default port, a bind failure logs an error and the frontend serves inference
-  without admin routes.
+  Port of the admin listener. When the admin API is enabled and the port cannot be bound, the
+  frontend fails to start.
 </ParamField>
 
 `POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,
@@ -929,10 +928,9 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   these endpoints do not use `x-tenant-id` or `x-dynamo-*` routing headers in either mode.
 </ParamField>
 
-<ParamField path="DYN_DISABLE_FRONTEND_ADMIN_API" type="boolean" default="false">
-  When truthy, the admin listener does not start, so `/router_policy`,
-  `/router_policy/busy_threshold`, and `/busy_threshold` are not served. Inference, metrics,
-  models, health, and liveness routes are unaffected.
+<ParamField path="DYN_ENABLE_FRONTEND_ADMIN_API" type="boolean" default="false">
+  When truthy, the admin listener starts on `DYN_FRONTEND_ADMIN_HOST`:`DYN_FRONTEND_ADMIN_PORT`
+  and serves `/router_policy`, `/router_policy/busy_threshold`, and `/busy_threshold`.
 </ParamField>
 
 ### Endpoint path customization

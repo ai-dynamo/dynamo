@@ -438,19 +438,17 @@ pub mod llm {
         "DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION";
 
     /// Master switch for the frontend's HTTP admin API surface.
-    /// The admin API is **enabled by default** on its own listener (see
-    /// `DYN_FRONTEND_ADMIN_HOST` / `DYN_FRONTEND_ADMIN_PORT`); this variable disables it.
-    /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) prevent the admin
-    /// listener from starting, so `/router_policy`, its busy-threshold subresource,
-    /// and the legacy `/busy_threshold` routes are not served. Inference, metrics,
-    /// models, health, and liveness routes are unaffected.
-    pub const DYN_DISABLE_FRONTEND_ADMIN_API: &str = "DYN_DISABLE_FRONTEND_ADMIN_API";
+    /// The admin API is **disabled by default**. Truthy values (`1` / `true` / `yes` /
+    /// `on`, case-insensitive) start the admin listener (see `DYN_FRONTEND_ADMIN_HOST` /
+    /// `DYN_FRONTEND_ADMIN_PORT`), which serves `/router_policy`, its busy-threshold
+    /// subresource, and the legacy `/busy_threshold` routes.
+    pub const DYN_ENABLE_FRONTEND_ADMIN_API: &str = "DYN_ENABLE_FRONTEND_ADMIN_API";
 
     /// Host the frontend admin listener binds to. Default `127.0.0.1`.
     pub const DYN_FRONTEND_ADMIN_HOST: &str = "DYN_FRONTEND_ADMIN_HOST";
 
-    /// Port of the frontend admin listener. Default `8002`, where a bind failure only
-    /// logs an error; when this is set, a bind failure aborts startup.
+    /// Port of the frontend admin listener. Default `8002`. When the admin API is
+    /// enabled and this port cannot be bound, startup aborts.
     pub const DYN_FRONTEND_ADMIN_PORT: &str = "DYN_FRONTEND_ADMIN_PORT";
 
     /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
@@ -1190,7 +1188,7 @@ mod tests {
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
-            llm::DYN_DISABLE_FRONTEND_ADMIN_API,
+            llm::DYN_ENABLE_FRONTEND_ADMIN_API,
             llm::DYN_FRONTEND_ADMIN_HOST,
             llm::DYN_FRONTEND_ADMIN_PORT,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
