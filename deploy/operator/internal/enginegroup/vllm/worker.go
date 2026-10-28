@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"reflect"
 	"slices"
 	"time"
@@ -44,9 +45,9 @@ func (c *Client) workerRequest(ctx context.Context, path string, result any) err
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.ObservationTimeout)
 	defer cancel()
-	payload, err := c.request(ctx, path, nil)
+	payload, err := c.transport.Request(ctx, http.MethodPost, c.routePrefix+path, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("vLLM %w", err)
 	}
 	return json.Unmarshal(payload, result)
 }

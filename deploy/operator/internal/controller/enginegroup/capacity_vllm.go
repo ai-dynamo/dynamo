@@ -9,8 +9,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strconv"
-	"strings"
 
 	api "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -183,13 +181,13 @@ func validateVLLMCapacityBootstrap(target domain.CapacityTarget, profile dynamo.
 		if bootstrap == nil {
 			continue
 		}
-		index, err := strconv.ParseInt(strings.TrimPrefix(string(replica.SlotID), "slot-"), 10, 32)
-		if err == nil && index >= int64(profile.InitialReplicas) && bootstrap.Mode == domain.BootstrapModeJoin && bootstrap.BaseTopologyGeneration > 0 {
-			ids, layoutErr := layout.Members(int32(index))
+		index, err := vllmruntime.SlotIndex(replica.SlotID)
+		if err == nil && index >= profile.InitialReplicas && bootstrap.Mode == domain.BootstrapModeJoin && bootstrap.BaseTopologyGeneration > 0 {
+			expected, layoutErr := layout.Target(index)
 			actual := slices.Clone(bootstrap.NativeMembers)
-			slices.Sort(ids)
+			slices.Sort(expected.NativeMembers)
 			slices.Sort(actual)
-			if layoutErr == nil && slices.Equal(ids, actual) {
+			if layoutErr == nil && replica.ReplicaID == expected.ReplicaID && slices.Equal(expected.NativeMembers, actual) {
 				continue
 			}
 		}
@@ -206,11 +204,7 @@ func resolveVLLMLaunchMembers(pod *corev1.Pod, slot domain.CapacitySlotID, width
 			return nil, fmt.Errorf("%w: vLLM Pod %s restarted outside membership recovery", domain.ErrRecoveryRequired, pod.Name)
 		}
 	}
-	index, err := strconv.ParseInt(strings.TrimPrefix(string(slot), "slot-"), 10, 32)
-	if err != nil {
-		return nil, err
-	}
-	ids, err := (vllmruntime.ReplicaLayout{NativeMembersPerReplica: width}).Members(int32(index))
+	ids, err := (vllmruntime.ReplicaLayout{NativeMembersPerReplica: width}).MembersForSlot(slot)
 	if err != nil {
 		return nil, err
 	}

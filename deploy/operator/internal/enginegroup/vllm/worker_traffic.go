@@ -72,7 +72,7 @@ func (a *WorkerTraffic) Apply(ctx context.Context, groupID enginegroup.GroupID, 
 			}
 			continue
 		}
-		rank, err := nativeRank(membership.Members[0].ID)
+		rank, err := NativeRank(membership.Members[0].ID)
 		if err != nil || int(rank) >= len(binding.Instances) || !containsMemberSubset(binding.Topology.Replicas, membership) {
 			return enginegroup.ApplyResult{Rejection: terminalFailure("UnboundWithdrawal", "withdrawal does not identify a current native process")}, nil
 		}

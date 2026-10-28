@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/controlhttp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,7 +51,7 @@ func TestObserveNativeStatus(t *testing.T) {
 		{name: "idle cannot hide operation", payload: `{"instance_id":"api-0","operation_id":"grow-1","phase":"idle","effective_data_parallel_size":2,"topology_known":true}`, wantErr: "idle status must describe"},
 		{name: "idle cannot claim unknown", payload: `{"instance_id":"api-0","phase":"idle","effective_data_parallel_size":2,"topology_known":false}`, wantErr: "idle status must describe"},
 		{name: "trailing JSON rejected", payload: `{"instance_id":"api-0","phase":"idle","effective_data_parallel_size":2,"topology_known":true} {}`, wantErr: "decode vLLM"},
-		{name: "oversized response rejected", payload: strings.Repeat(" ", maximumResponseBytes+1), wantErr: "exceeds"},
+		{name: "oversized response rejected", payload: strings.Repeat(" ", controlhttp.MaximumResponseBytes+1), wantErr: "exceeds"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -166,8 +167,8 @@ func TestSubmitPreservesCorrelatedRequestAcrossRetry(t *testing.T) {
 
 	t.Log("return an ambiguous transport error without manufacturing a terminal rejection")
 	_, err = control.Submit(t.Context(), request)
-	require.ErrorContains(t, err, "call vLLM")
-	var responseErr *HTTPError
+	require.ErrorContains(t, err, "vLLM call")
+	var responseErr *controlhttp.HTTPError
 	assert.False(t, errors.As(err, &responseErr))
 
 	t.Log("a restarted client can replay the identical operation and instance precondition")
@@ -241,7 +242,7 @@ func TestHTTPFailuresStayInconclusive(t *testing.T) {
 			_, err = control.Submit(t.Context(), ScaleRequest{
 				OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120, BaseTopologyToken: "base-1",
 			})
-			var responseErr *HTTPError
+			var responseErr *controlhttp.HTTPError
 			require.ErrorAs(t, err, &responseErr)
 			assert.Equal(t, code, responseErr.StatusCode)
 			assert.Equal(t, submitPath, responseErr.Path)
@@ -355,7 +356,7 @@ func TestControlURLAndRedirectSafety(t *testing.T) {
 	_, err = control.Submit(t.Context(), ScaleRequest{
 		OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120, BaseTopologyToken: "base-1",
 	})
-	var responseErr *HTTPError
+	var responseErr *controlhttp.HTTPError
 	require.ErrorAs(t, err, &responseErr)
 	assert.Equal(t, http.StatusTemporaryRedirect, responseErr.StatusCode)
 	assert.Zero(t, redirected.Load())

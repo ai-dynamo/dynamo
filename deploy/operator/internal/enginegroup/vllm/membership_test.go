@@ -574,7 +574,7 @@ func (f *membershipFixture) target(t *testing.T, base enginegroup.MembershipTopo
 		plan.Change.Retire = &enginegroup.RetireChange{}
 		for _, replica := range base.Replicas {
 			for _, member := range replica.Members {
-				rank, err := nativeRank(member.ID)
+				rank, err := NativeRank(member.ID)
 				require.NoError(t, err)
 				if rank >= size {
 					plan.Change.Retire.Replicas = append(plan.Change.Retire.Replicas, replica.ReplicaID)
@@ -592,7 +592,7 @@ func (f *membershipFixture) target(t *testing.T, base enginegroup.MembershipTopo
 		}
 		targets := make([]enginegroup.ReplicaTarget, 0, len(joining))
 		for _, membership := range joining {
-			rank, err := nativeRank(membership.Members[0].ID)
+			rank, err := NativeRank(membership.Members[0].ID)
 			require.NoError(t, err)
 			ids := make([]enginegroup.NativeMemberID, len(membership.Members))
 			for i, member := range membership.Members {

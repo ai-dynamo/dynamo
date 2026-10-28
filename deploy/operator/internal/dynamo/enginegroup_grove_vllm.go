@@ -26,6 +26,10 @@ func (r groveEngineGroupRenderer) renderVLLM(
 	if err != nil {
 		return nil, grove.PodCliqueScalingGroupConfig{}, err
 	}
+	// This Grove realization releases vLLM allocations through an explicit retention gate.
+	if err := RequireGroveEngineGroupRetentionGate(component.PodTemplate); err != nil {
+		return nil, grove.PodCliqueScalingGroupConfig{}, err
+	}
 	return r.renderWorld(ctx, dgd, component, profile.Geometry, profile.InitialReplicas,
 		queueName, topologyDomains, restart, restartAnnotations)
 }

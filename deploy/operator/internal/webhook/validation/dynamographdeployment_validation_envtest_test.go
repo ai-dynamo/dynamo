@@ -378,11 +378,28 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantProvider: "grove",
 		},
 		{
+			name: "Grove Engine Group release still requires an explicit retention gate",
+			deployment: vllmEngineGroupSmokeDeployment(t, func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.GetComponentByName("Worker").PodTemplate.Spec.ReadinessGates = nil
+			}),
+			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: Engine Group podTemplate must declare exactly one dynamo.nvidia.com/retained readiness gate"},
+		},
+		{
+			name: "Grove Engine Groups reject inherited provider environment",
+			deployment: vllmEngineGroupSmokeDeployment(t, func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Env = []corev1.EnvVar{{Name: "GROVE_PCLQ_POD_INDEX", Value: "0"}}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: environment GROVE_PCLQ_POD_INDEX is supplied by Grove and cannot be shadowed in the Pod template"},
+		},
+		{
 			name: "Engine Group admission requires a supported backend launch profile",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).EngineGroup = &nvidiacomv1beta1.ComponentEngineGroupSpec{InitialSize: 2}
 			}),
-			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: vLLM Engine Groups require the supported Python-worker profile"},
+			wantWebhookErrs: []string{
+				"spec.components[1].engineGroup: Forbidden: vLLM Engine Groups require the supported Python-worker profile",
+				"spec.components[1].engineGroup: Forbidden: Engine Group podTemplate must declare exactly one dynamo.nvidia.com/retained readiness gate",
+			},
 		},
 		{
 			name: "Grove vLLM Python worker opts into complete managed-growth admission",
@@ -4255,7 +4272,7 @@ func setAlphaCompilationCacheVolumeNameEmpty(t *testing.T, request map[string]an
 	volumeMount["name"] = ""
 }
 
-func vllmEngineGroupSmokeDeployment(t *testing.T) *nvidiacomv1beta1.DynamoGraphDeployment {
+func vllmEngineGroupSmokeDeployment(t *testing.T, mutations ...func(*nvidiacomv1beta1.DynamoGraphDeployment)) *nvidiacomv1beta1.DynamoGraphDeployment {
 	t.Helper()
 	t.Log("load the actual managed-growth DGD through the same source-version admission chain")
 	payload, err := os.ReadFile("../../enginegroup/vllm/poc.yaml")
@@ -4267,6 +4284,9 @@ func vllmEngineGroupSmokeDeployment(t *testing.T) *nvidiacomv1beta1.DynamoGraphD
 		t.Fatal(err)
 	}
 	deployment.Namespace = "default"
+	for _, mutate := range mutations {
+		mutate(deployment)
+	}
 	return deployment
 }
 

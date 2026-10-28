@@ -42,9 +42,6 @@ func ResolveVLLMComponentEngineGroup(component *api.DynamoComponentDeploymentSha
 	if err := validateEngineGroupPodTemplate(component.PodTemplate); err != nil {
 		return VLLMProfileGeometrySource{}, ResolvedVLLMElasticEPProfile{}, err
 	}
-	if err := requireEngineGroupRetentionGate(component.PodTemplate); err != nil {
-		return VLLMProfileGeometrySource{}, ResolvedVLLMElasticEPProfile{}, err
-	}
 	for _, setting := range []struct{ name, value string }{
 		{vllmMultiprocessingEnvVar, "1"}, {"VLLM_USE_RUST_FRONTEND", "0"}, {vllmElasticEPDrainEnvVar, "1"},
 	} {
@@ -121,10 +118,10 @@ func vllmWorkloadRevision(spec *corev1.PodSpec, main *corev1.Container) (string,
 }
 
 func resolveVLLMComponentGPUs(spec *corev1.PodSpec, main *corev1.Container) (int64, error) {
-	// A container restart, shared host port or opaque GPU claim needs a different launch contract.
-	if (spec.RestartPolicy != "" && spec.RestartPolicy != corev1.RestartPolicyNever) || spec.HostNetwork ||
-		len(spec.ResourceClaims) != 0 || len(main.Resources.Claims) != 0 {
-		return 0, fmt.Errorf("vLLM Engine Groups require restartPolicy Never, Pod networking and scalar GPU limits")
+	// Share Kubernetes allocation checks, retaining vLLM-specific request and visibility restrictions.
+	gpus, err := resolveEngineGroupGPUAllocation(spec, main)
+	if err != nil {
+		return 0, err
 	}
 	for _, variable := range main.Env {
 		if variable.Name == "CUDA_VISIBLE_DEVICES" || variable.Name == "NVIDIA_VISIBLE_DEVICES" {
@@ -136,18 +133,16 @@ func resolveVLLMComponentGPUs(spec *corev1.PodSpec, main *corev1.Container) (int
 		if container.Name == consts.MainContainerName {
 			continue
 		}
-		limit := container.Resources.Limits[consts.KubeResourceGPUNvidia]
 		request := container.Resources.Requests[consts.KubeResourceGPUNvidia]
-		if !limit.IsZero() || !request.IsZero() || len(container.Resources.Claims) != 0 {
+		if !request.IsZero() {
 			return 0, fmt.Errorf("vLLM GPUs must belong exclusively to the main container")
 		}
 	}
 
 	// The complete TP subgroup must fit the exact, indivisible Pod allocation.
 	limit := main.Resources.Limits[consts.KubeResourceGPUNvidia]
-	gpus, exact := limit.AsInt64()
 	request, requested := main.Resources.Requests[consts.KubeResourceGPUNvidia]
-	if !exact || gpus < 1 || (requested && request.Cmp(limit) != 0) {
+	if requested && request.Cmp(limit) != 0 {
 		return 0, fmt.Errorf("vLLM main requires a positive whole-GPU limit and an equal GPU request when present")
 	}
 	return gpus, nil
@@ -165,19 +160,4 @@ func requireEngineGroupLiteralEnv(main *corev1.Container, name, value string) er
 		}
 	}
 	return fmt.Errorf("Engine Group main environment %s=%s must be explicit in the Pod template", name, value)
-}
-
-// requireEngineGroupRetentionGate keeps exact release explicit in the user's allocation template.
-// template must not be nil.
-func requireEngineGroupRetentionGate(template *corev1.PodTemplateSpec) error {
-	count := 0
-	for _, gate := range template.Spec.ReadinessGates {
-		if gate.ConditionType == corev1.PodConditionType(consts.EngineGroupRetainedReadinessGate) {
-			count++
-		}
-	}
-	if count != 1 {
-		return fmt.Errorf("Engine Group podTemplate must declare exactly one %s readiness gate", consts.EngineGroupRetainedReadinessGate)
-	}
-	return nil
 }
