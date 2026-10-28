@@ -13,7 +13,10 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
-    kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
+    kv_router::indexer::{
+        preprocessed_multimodal_cache_key_alternatives, preprocessed_multimodal_cache_keys,
+        try_build_cache_indexer,
+    },
     kv_router::{
         EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext,
         metrics::RouterRequestMetrics,
@@ -279,7 +282,8 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         embedding_cache_indexer,
         cache_key_extractor,
     )
-    .await?;
+    .await?
+    .with_multimodal_cache_key_alternatives(preprocessed_multimodal_cache_key_alternatives);
 
     // Eagerly register router request metrics so they appear as zeros before
     // RoutingHost is constructed. The host repeats this idempotently so the

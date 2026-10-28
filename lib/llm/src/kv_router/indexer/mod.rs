@@ -36,7 +36,8 @@ mod recovery;
 pub mod remote;
 
 pub use self::embedding_cache::{
-    EmbeddingCacheIndexer, preprocessed_multimodal_cache_keys, try_build_cache_indexer,
+    EmbeddingCacheIndexer, preprocessed_multimodal_cache_key_alternatives,
+    preprocessed_multimodal_cache_keys, try_build_cache_indexer,
 };
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
