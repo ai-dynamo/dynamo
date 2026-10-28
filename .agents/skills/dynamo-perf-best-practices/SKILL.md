@@ -1,15 +1,6 @@
 ---
 name: dynamo-perf-best-practices
-description: >-
-  Checks a Dynamo branch for performance problems before its pull request is opened. Reads the diff
-  against main, works out which changed code runs per output token, KV block, KV event, request,
-  connection or worker, and checks it against the cost mechanisms behind Dynamo's merged performance
-  fixes: shared state touched by every stream, repeated or discarded work, copies and serde round trips,
-  per-element memory at block scale, scaling with worker count, per-item async and GIL overhead, and
-  hot-path dependencies. Also guards external semantics and, when the change claims a speedup, checks its
-  evidence and tests. Reports what to fix before opening, with the mechanism and a fix for each finding.
-  Use before opening a pull request. Read-only unless asked to apply fixes. Not for deployment knob tuning
-  (consult-perf-knowledge) or benchmark campaigns (dynamo-frontend-benchmark).
+description: Checks a Dynamo change for performance problems in code that runs per output token, KV block, KV event, request, connection or worker. Compares it against the cost mechanisms behind Dynamo's merged performance fixes, guards external semantics, and checks the evidence behind performance claims. Use when making or reviewing a pull request that touches hot-path code; pr-checklist runs it for its Performance section. Read-only unless asked to apply fixes. Not for deployment tuning (consult-perf-knowledge) or benchmark campaigns (dynamo-frontend-benchmark).
 license: Apache-2.0
 metadata:
   author: NVIDIA
@@ -29,274 +20,81 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-A pre-PR check. Run it on your branch before opening a pull request. It reads what the branch
-changes, works out how often each changed piece of code runs, and checks that code against the cost
-mechanisms Dynamo's performance fixes have had to remove. The output is a short verdict: what to fix
-before opening, what to consider, and what the PR description still needs.
+## Usage
 
-The principles below are the mechanisms behind about 90 merged performance PRs. The PRs linked here
-and in [references/examples.md](references/examples.md) illustrate them; they are not a checklist.
-Reason from the mechanism. Flag new code whose cost times rate is concrete, whether or not Dynamo has
-hit that exact pattern before, and don't flag code that resembles an example but runs rarely.
+Use this skill when making or reviewing a pull request that changes hot-path code. Read the PR under review, or the branch diff: `git diff $(git merge-base HEAD refs/remotes/<remote>/main)` plus the new files from `git ls-files --others --exclude-standard`, where `<remote>` points to `ai-dynamo/dynamo` (`upstream` in a fork, `origin` in a direct clone). Don't fetch; if the diff pulls in main commits that aren't the branch's, say the ref is stale. Read the callers of every changed function, not only the hunks. Stay read-only unless asked to apply fixes.
 
-Out of scope: deployment and engine knob tuning (`consult-perf-knowledge`), benchmark campaigns
-(`dynamo-frontend-benchmark`), general Rust review (`graham-code-review`), and clone-by-clone audits
-(`dynamo-clone-hotpath-audit`).
+The mechanisms below come from about 90 merged performance PRs. The linked PRs illustrate them; they are not a checklist. Flag any changed code whose cost × rate is concrete, whether or not a past PR matches it, and don't flag code that looks like an example but runs rarely. General Rust review and clone audits belong to `graham-code-review` and `dynamo-clone-hotpath-audit`.
 
-## Inputs
+## 1. How Often It Runs
 
-- The branch diff, including uncommitted and untracked changes. Use the remote that points to
-  `ai-dynamo/dynamo` (`upstream` in a fork checkout, `origin` in a direct clone):
-  `git diff $(git merge-base HEAD refs/remotes/<remote>/main)`, plus the new files listed by
-  `git ls-files --others --exclude-standard`. The full ref avoids a local branch that happens to be
-  named `<remote>/main`. Don't fetch: the existing ref already holds the commit the branch started
-  from. If the diff pulls in main commits that aren't the branch's, the ref is stale; say so and ask
-  before fetching. If the user names a PR, commit range or patch, use that instead.
-- The checkout to read callers from. If the change is not applied there, read the patched lines from
-  the diff and the callers from the checkout.
-- The PR description draft and commit messages, if any. Step 4 needs them.
-- The surrounding code and the callers of every changed function, not only the hunks. Callers decide
-  how often code runs.
+Trace each changed function's callers and work out how often it runs across the whole process. The cost that matters is per-call cost × that rate. Concurrency matters separately, through shared state (mechanism 1).
 
-Stay read-only. Report findings, and edit code only when the user asks you to apply fixes.
+| Rate | Where it usually lives (starting points, not a boundary) |
+|---|---|
+| Per output token or stream chunk: millions/s per frontend | `lib/llm/src/http/service`, `lib/llm/src/protocols/openai`, `lib/llm/src/backend.rs`, `components/src/dynamo/{vllm,sglang,trtllm}`, the response transport |
+| Per KV block: blocks per request × workers; millions of entries held | `lib/kv-router/src/indexer`, `lib/kv-router/src/sequences`, `lib/mocker` |
+| Per KV event: every engine step on every worker | event ingest, `lib/runtime/src/transports` |
+| Per request: thousands/s | `lib/llm/src/preprocessor`, `lib/llm/src/kv_router`, `lib/kv-router/src/scheduling`, request parsing, `lib/bindings/python/rust` |
+| Per connection: thousands open | HTTP accept and serve, transport clients |
+| Per worker or publisher: N in the thousands, at startup and on every discovery change | discovery, subscriptions, sockets, threads |
 
-## Step 1: Find the multiplier
+Code that runs once, tests, and error paths that fail rarely are cold; note them in one line. An error path that every request can hit during an outage or a burst of bad input is hot, and so is a hot call inside a cold-looking file.
 
-For every changed function, trace its callers and work out how often it runs in production across the
-whole process. The cost that matters is per-call cost × that process-wide rate. The rates below are
-already process-wide, so don't multiply by concurrency again. Concurrency matters separately when the
-code touches shared state (principle 1).
+## 2. Mechanisms
 
-| Rate | Typical process-wide scale | Where it usually lives (starting points, not a boundary) |
-|---|---|---|
-| Per output token or stream chunk | millions per second per frontend | `lib/llm/src/http/service`, stream converters in `lib/llm/src/protocols/openai`, detokenization in `lib/llm/src/backend.rs`, engine handlers in `components/src/dynamo/{vllm,sglang,trtllm}`, the response transport |
-| Per KV block | blocks per request × workers; indexer state holds millions of entries | `lib/kv-router/src/indexer`, `lib/kv-router/src/sequences`, `lib/mocker` |
-| Per KV event or frame | every engine step on every worker | event ingest, `lib/runtime/src/transports` (ZMQ, TCP, event plane) |
-| Per request | thousands per second | `lib/llm/src/preprocessor`, `lib/llm/src/kv_router`, `lib/kv-router/src/scheduling`, request parsing, `lib/bindings/python/rust` |
-| Per connection | thousands open at once | HTTP accept and serve, transport clients |
-| Per worker or publisher | N in the thousands, at startup and on every discovery change | discovery, subscriptions, sockets, threads |
+1. **Shared state touched per item.** Anything every stream or request touches per item (atomics, metrics, locks, `DashMap` iteration, a shared `Notify` or `CancellationToken`, one actor) becomes contention that grows with total load. Ask how many times per second the whole process writes or locks it. Fix: accumulate per request and flush every N items and on drop, serve read-mostly data from a copy-on-write snapshot, shard, or touch it once per stream. [#17067](https://github.com/ai-dynamo/dynamo/pull/17067), [#16119](https://github.com/ai-dynamo/dynamo/pull/16119), [#16082](https://github.com/ai-dynamo/dynamo/pull/16082)
+2. **Work repeated per item or never read.** Look for per-item work that could run once per stream, request or discovery change; per-item messages that could be batched; full rescans when one entry changed; results no consumer reads; and work for a feature that is off. Fix: hoist, batch, maintain aggregates incrementally, gate on the consumer's condition. [#17349](https://github.com/ai-dynamo/dynamo/pull/17349), [#10273](https://github.com/ai-dynamo/dynamo/pull/10273), [#12863](https://github.com/ai-dynamo/dynamo/pull/12863)
+3. **Copies and re-encoding.** Look for copied prompts, buffers and frames, `serde_json::Value` or other intermediate trees, `serde(flatten)` in request parsing, unset wire fields, and buffers held past their last use. Fix: move or share (`Arc`, `Bytes`), borrow, transcode directly, release early. [#17238](https://github.com/ai-dynamo/dynamo/pull/17238), [#11104](https://github.com/ai-dynamo/dynamo/pull/11104), [#16223](https://github.com/ai-dynamo/dynamo/pull/16223)
+4. **Per-element memory at block × worker scale.** Indexer, tracker and mocker state holds millions of elements, so every byte, allocation, `Arc` and padding slot per element is multiplied. Ask the element's size (in Rust, `size_of` with padding and enum or `Option` tags), whether it allocates, whether the container fits the access pattern, and when dead state is reclaimed. Fix: reorder fields, box rare variants, intern wide IDs, use an arena instead of an `Arc` per element, reclaim eagerly, and pin sizes with a `const` assert. [#17109](https://github.com/ai-dynamo/dynamo/pull/17109), [#17143](https://github.com/ai-dynamo/dynamo/pull/17143), [#12244](https://github.com/ai-dynamo/dynamo/pull/12244)
+5. **Scaling with workers.** Look for sockets, contexts, threads or tasks per worker; O(N) work per event; O(N²) work at startup or on discovery changes; and ingest serialized through one hop. Ask what the code does at 2,048 workers. Fix: pool, reconcile incrementally, give each publisher its own lane. [#17253](https://github.com/ai-dynamo/dynamo/pull/17253), [#16568](https://github.com/ai-dynamo/dynamo/pull/16568)
+6. **Per-item async, syscall and thread cost.** Look for a task, `select!`, timer or channel hop per item; a syscall per item; blocking calls on executor threads; locks held across `.await` or around slow work; and one thread doing all the work. Fix: one long-lived reader per stream, reused timers, blocking work moved off the executor, short critical sections, and saturated threads split. [#16351](https://github.com/ai-dynamo/dynamo/pull/16351), [#11149](https://github.com/ai-dynamo/dynamo/pull/11149), [#11065](https://github.com/ai-dynamo/dynamo/pull/11065)
+7. **Python and the GIL.** A busy Python worker gets one core of Python, and per-item conversions, temporary objects and per-chunk asyncio orchestration all spend it. Fix: exact-type fast paths with a general fallback, interned keys, one reader per stream. [#17337](https://github.com/ai-dynamo/dynamo/pull/17337), [#11331](https://github.com/ai-dynamo/dynamo/pull/11331)
+8. **Hot-path dependencies.** Adding, swapping or bumping a crate or library on a hot path (HTTP server, async runtime, transport, serializer, tokenizer) changes what runs per connection and per poll. Read what it does per item and whether it shares state across connections. [#15564](https://github.com/ai-dynamo/dynamo/pull/15564) swapped the frontend listener and introduced a convoy that [#16728](https://github.com/ai-dynamo/dynamo/pull/16728) removed.
+9. **Inexact fast paths and skips.** A fast path checks its guard on every use, falls back to the unchanged general path, and has a test showing both give the same result. Skip work only when a predicate proves it unnecessary: the feature is off, or the input is empty or equal to what was already processed. A hash fingerprint is not equality; it needs an exact fallback or a documented, accepted collision bound. [#17149](https://github.com/ai-dynamo/dynamo/pull/17149), [#16265](https://github.com/ai-dynamo/dynamo/pull/16265)
 
-Code that runs once (configuration, startup at small N) and tests are cold. Error paths are cold only
-when failures are rare: an error path that every request can hit during an outage or a burst of bad
-input (logging, retries, per-failure allocation) is hot. Note cold code in one line and move on. A hot
-call inside a cold-looking file still counts, so follow the calls.
+## 3. Semantics
 
-## Step 2: Check the principles
+A performance change, or a fix for loss, lag or overload, must not do any of the following, whatever the gain:
 
-For each hot hunk, ask the questions under every principle that applies. Each principle lists the
-usual fixes and a few PRs that illustrate it. Read [references/examples.md](references/examples.md)
-when you need a concrete before/after shape for a fix, or to decide whether an illustration really
-matches a finding.
+- Grow queues, high-water marks or channel capacity to hide drops. Find the slow path instead.
+- Change streaming semantics, such as coalescing tokens into fewer SSE events.
+- Break wire compatibility, in either direction, between frontends, routers and workers.
+- Change KV-event, routing or scheduling semantics as a side effect.
+- Add mock-only behavior. Mocks and benchmarks send production wire types and follow the real discovery and event paths.
 
-### 1. Shared state touched per item grows with total concurrency
+## 4. Performance Claims
 
-Anything that every in-flight stream, request or worker touches on every item turns into contention
-whose cost rises with the total rate, not with one request's work. That includes shared atomics and
-counters, Prometheus metrics, mutexes and read-write locks, `DashMap` iteration, a shared `Notify` or
-cloned `CancellationToken`, a single actor or mailbox, and `ArcSwap` stores. Cache-line bouncing and
-convoys rarely show up in single-request tests.
+When the PR description or commit messages claim a speedup, a memory saving, or a fix for loss, lag or overload, check that the diagnosis matches the code the diff changes, and list what the evidence still needs. Don't run benchmark campaigns. `pr-checklist` covers the PR description.
 
-Ask: what in this hunk is shared across requests, and how many times per second does the whole
-process write or lock it?
-
-Usual fixes: keep the state per request or per connection (accumulate locally, flush every N items
-and in `Drop`); serve read-mostly data from a copy-on-write snapshot; shard by key; touch shared state
-once per stream instead of once per item. Illustrations:
-[#17067](https://github.com/ai-dynamo/dynamo/pull/17067),
-[#16119](https://github.com/ai-dynamo/dynamo/pull/16119),
-[#16118](https://github.com/ai-dynamo/dynamo/pull/16118),
-[#16082](https://github.com/ai-dynamo/dynamo/pull/16082).
-
-### 2. Do each piece of work once, at the coarsest correct granularity
-
-Look for work done per item that could be done per stream, per request or per discovery change. Also
-look for per-item messages that could be batched, for rebuilding or rescanning a whole structure when
-one entry changed, for computing something no consumer reads, and for feature work that runs while the
-feature is off.
-
-Ask: does this result change between items? Who reads it? Is the feature always on?
-
-Usual fixes: hoist (resolve handles, compile, and look up once per stream); batch with caps that never
-split a logical unit; maintain an aggregate incrementally and check it with a debug-only recompute;
-gate the work on the consumer's own condition. Illustrations:
-[#17349](https://github.com/ai-dynamo/dynamo/pull/17349),
-[#10645](https://github.com/ai-dynamo/dynamo/pull/10645),
-[#12863](https://github.com/ai-dynamo/dynamo/pull/12863),
-[#10273](https://github.com/ai-dynamo/dynamo/pull/10273).
-
-### 3. Don't move bytes you don't need
-
-Look for copies and clones of prompts, buffers and frames. Look for code that builds a
-`serde_json::Value` or another intermediate tree and then converts it again, for `serde(flatten)` and
-similar buffering in request parsing, for unset fields on wire frames, and for large buffers held past
-their last use.
-
-Ask: how many times are these bytes copied or re-encoded between the wire and their consumer? Does the
-size grow with the prompt or the stream?
-
-Usual fixes: move or share (`Arc`, `Bytes`) instead of copying; borrow when serializing; transcode
-directly between formats; skip unset fields while staying wire-compatible; release early.
-Illustrations: [#16223](https://github.com/ai-dynamo/dynamo/pull/16223),
-[#11104](https://github.com/ai-dynamo/dynamo/pull/11104),
-[#17238](https://github.com/ai-dynamo/dynamo/pull/17238),
-[#11574](https://github.com/ai-dynamo/dynamo/pull/11574).
-
-### 4. Per-element memory at block × worker scale
-
-Indexers, trackers and mocker KV state hold one element per block, often per worker, which is millions
-of entries. Every byte per element, every per-element allocation or refcount, and every wasted slot is
-multiplied by that count.
-
-Ask:
-- How many elements are there at 2,048 workers and long prompts?
-- What is `size_of` the element, counting padding, enum variants and `Option` tags?
-- Does each element allocate or carry an `Arc`?
-- Does the container fit the access pattern (LRU, monotonic IDs, ordered scans)?
-- When is dead state reclaimed?
-
-Usual fixes: order fields to avoid padding; box rare large variants; use sentinels instead of
-`Option`; intern wide IDs; use an arena with plain counts instead of an `Arc` per element; use an
-intrusive list or a direct-indexed vector where it fits; reclaim eagerly. Pin sizes with a `const`
-size assertion. Illustrations: [#17109](https://github.com/ai-dynamo/dynamo/pull/17109),
-[#17143](https://github.com/ai-dynamo/dynamo/pull/17143),
-[#11508](https://github.com/ai-dynamo/dynamo/pull/11508),
-[#12244](https://github.com/ai-dynamo/dynamo/pull/12244).
-
-### 5. Scaling with the number of workers, publishers or connections
-
-Look for sockets, contexts, threads or tasks created per worker; O(N) work on each event; O(N²) work at
-startup or on every discovery change; and ingest serialized through one thread or a lossy hop.
-
-Ask: what does this code do at 2,048 workers? How many threads, sockets and RPCs does it create? What
-runs on each discovery change?
-
-Usual fixes: pool shared resources; reconcile incrementally per change; give each publisher its own
-lane instead of one serial hop. Illustrations:
-[#17253](https://github.com/ai-dynamo/dynamo/pull/17253),
-[#16568](https://github.com/ai-dynamo/dynamo/pull/16568),
-[#14167](https://github.com/ai-dynamo/dynamo/pull/14167).
-
-### 6. Per-item async, syscall and thread overhead
-
-Look for:
-- a task, `select!` or `asyncio.wait`, a future, a timer or a channel hop created per item;
-- a syscall per item (timers, file I/O);
-- blocking calls on async executor threads;
-- work done under a lock or held across `.await`;
-- an async mutex guarding a short critical section;
-- one thread or actor doing all the work.
-
-Ask: what does each item cost the runtime beyond the work itself? Can this block an executor thread?
-What runs while a lock is held?
-
-Usual fixes: one long-lived reader or adapter per stream; pin futures once; reuse timers; move blocking
-work off executor threads; keep critical sections short under a synchronous mutex; split work that
-saturates one thread. Illustrations: [#16351](https://github.com/ai-dynamo/dynamo/pull/16351),
-[#11149](https://github.com/ai-dynamo/dynamo/pull/11149),
-[#14340](https://github.com/ai-dynamo/dynamo/pull/14340),
-[#11065](https://github.com/ai-dynamo/dynamo/pull/11065).
-
-### 7. The Python boundary and the GIL
-
-Python worker and binding code runs under the GIL, so a busy worker is capped at one core of Python.
-Per-item conversions (generic pyo3 extraction, temporary strings and dicts), per-chunk asyncio
-orchestration and object churn all spend that core.
-
-Ask: how much GIL-held time does each item add? Does the code convert data element by element?
-
-Usual fixes: exact-type fast paths with the general path as fallback; interned keys; one reader per
-stream. Illustrations: [#17337](https://github.com/ai-dynamo/dynamo/pull/17337),
-[#11331](https://github.com/ai-dynamo/dynamo/pull/11331).
-
-### 8. A dependency on a hot path is hot-path code
-
-Adding, swapping or bumping a crate or library on a hot path (HTTP server, async runtime, transport,
-serialization, tokenizer) changes what runs per connection and per poll. In
-[#15564](https://github.com/ai-dynamo/dynamo/pull/15564), switching the frontend listener to a server
-whose connection tasks polled shared notifiers created a convoy;
-[#16728](https://github.com/ai-dynamo/dynamo/pull/16728) removed it.
-
-Ask: what does the new dependency do per item and per connection? Does it share state across
-connections? Is it maintained?
-
-### 9. Fast paths and skips must be exact
-
-A fast path for a common case is fine when its guard is checked on every use, it falls back to the
-unchanged general path, and a test shows both paths give the same result. Skipping work is safe only
-when an exact predicate proves it unnecessary: the feature is off, the input is empty, or the input
-equals (or fingerprints the same as) what was already processed. Never skip on a heuristic.
-Illustrations: a scalar walk guarded at every step
-([#17149](https://github.com/ai-dynamo/dynamo/pull/17149)); an equal-size skip that overcounted until
-it also compared a fingerprint ([#16265](https://github.com/ai-dynamo/dynamo/pull/16265)).
-
-## Step 3: Semantics guard
-
-These apply to any change made for performance, and to any fix for loss, lag or overload under
-load. A change whose purpose is new behavior is out of scope here, but its cost is not: for example,
-editing every prompt changes KV prefix reuse. Treat any of these as must-fix, whatever the gain:
-
-- Hiding loss or overload by growing queues, high-water marks or channel capacity. Drops mean a path
-  does more work than it should, so find that work.
-- Changing external streaming semantics, for example coalescing tokens into fewer SSE events.
-- Breaking wire compatibility, in either direction, between frontends, routers and workers.
-- Changing KV-event, routing or scheduling semantics as a side effect.
-- Adding mock-only behavior. Mocks and benchmarks must send the same wire types and follow the same
-  discovery and event paths as real workers.
-
-## Step 4: Performance claims
-
-Run this step when the branch claims a speedup, a memory saving, or a fix for loss, lag or overload
-(in commits or the description), or when it changes a hot-path dependency or a block-scale data
-structure. Also check that the diagnosis in the claim matches the code path the diff changes. Read
-[references/perf-claims.md](references/perf-claims.md) and list what the PR still needs: evidence that
-matches the mechanism, the base it was measured on, what was not re-measured, and tests that show
-behavior is unchanged and, where the mechanism is observable, fail without the change. Don't run
-benchmark campaigns from this skill. Name where the numbers can be reproduced.
-
-## Prefer simple fixes
-
-When you suggest a fix, start with the smallest well-known change that removes the mechanism:
-sharding, a copy-on-write snapshot, per-request state, local accumulation, batching, or moving a value.
-Mention more elaborate designs (lock-free structures, epochs) in one line at most. Keep suggested tests
-in proportion to the fix, and don't ask for benchmarks on cold code.
+- **Metric.** Lead with the metric that matches the mechanism: blocked threads for contention, shared writes per second for atomics, CPU ms per request or µs per token for per-item CPU, bytes per element and RSS for memory, and utilization or lag for one saturated thread. Report throughput and latency as guardrails unless the changed component limits them.
+- **Fair A/B.** Recent main at a stated SHA, the same machine, alternating fresh processes, the same offered load, identical outputs for completed requests, and medians over enough runs to show the noise. For a loss or overload fix, report errors and drops for both arms.
+- **Claims that don't hold.** Counted `perf record -F` samples (use period-weighted `perf report`), closed-loop requests per second on a component that isn't the bottleneck, mocks that don't send production types, numbers from an older head that don't say so, and wall-clock timing in a GIL-saturated process (use `py-spy --gil`).
+- **Tests.** A test that fails on the parent commit when the mechanism is observable (a skip, a removed copy, fewer shared writes), a parity test against the old path for a rewrite, a `const` size assert for size-sensitive Rust types, and no timing thresholds in CI.
+- **Where to reproduce.** The `dynamo-frontend-benchmark` skill; `lib/bench/kv_router/` (protocol in `INDEXER_BENCH.md`); `lib/bench/offline_replay_bench.rs` and the `dynamo-kv-replay-parity` skill; Criterion benches in `lib/{kv-router,llm,runtime}/benches/`.
 
 ## Report
 
-Reply with the verdict in this shape. Leave out empty sections.
-
 ```markdown
-## Pre-PR performance check: <branch> vs <merge-base sha>
+## Performance check: <branch, PR or patch> vs <base sha>
 
-### Fix before opening
-- `lib/llm/src/path/file.rs:123` — per output token — <mechanism, one sentence> — <suggested fix>
+### Must fix
+- `lib/llm/src/path/file.rs:123` — per output token — <mechanism> — <fix>
 
 ### Consider
-- `lib/kv-router/src/path/file.rs:45` — per request — <mechanism> — <suggested fix>
-
-### Add to the PR description
-- <missing evidence, caveat or test> (Step 4 only)
+- `lib/kv-router/src/path/file.rs:45` — per request — <mechanism> — <fix>
 
 ### Not on a hot path
 - `lib/runtime/src/path/config.rs` — runs once at startup
-
-### Outside this check
-- <one line per non-performance problem noticed in passing, e.g. a correctness issue>
 ```
 
-Sort findings by cost × rate, not by rate alone:
+**Must fix** covers:
+- per-token, per-block, per-event or per-connection costs;
+- bad scaling with worker count;
+- per-request costs that can stall other requests, such as blocking I/O on an executor thread, a process-wide lock, or work that grows with payload size;
+- semantics violations;
+- claims the diff doesn't support.
 
-- **Fix before opening**:
-  - per-token, per-block, per-event or per-connection costs;
-  - anything that scales badly with worker count;
-  - per-request costs that are large or can stall others: blocking I/O or syscalls on an async
-    executor thread, a process-wide lock, or work that grows with prompt or payload size;
-  - semantics-guard violations.
-- **Consider**: smaller per-request costs with a concrete mechanism, and findings whose rate you could
-  not confirm. Say what you could not confirm.
-- Write one bullet per mechanism, even when two share a line. Cite line numbers in the changed version
-  of the file.
-- Cite an example PR only when it really matches.
-- **Outside this check** is for problems you happened to notice, one line each. Don't do a general
-  review.
-- If nothing is hot, or nothing hot has a problem, say "Clean: no hot-path findings" and list what you
-  checked.
+**Consider** covers smaller per-request costs, missing evidence, and findings whose rate you could not confirm. Say what you could not confirm.
+
+Write one bullet per code site, naming every mechanism it hits, with new-side line numbers from the diff. Leave out empty sections. Cite a past PR only when it really matches. Suggest the simplest fix that removes the mechanism, such as sharding, a snapshot, per-request state, batching or a move, before lock-free designs. If nothing hot has a problem, write "Clean: no hot-path findings" and list what you checked. Note any non-performance bug you happened to find in one line at the end.
