@@ -1324,6 +1324,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
         self._lora_state = LoRAState()
         self._lora_capacity: int | None = None
+        if getattr(self.engine_args, "enable_lora", False):
+            self._lora_capacity = getattr(self.engine_args, "max_cpu_loras", None)
+            if self._lora_capacity is None:
+                self._lora_capacity = getattr(self.engine_args, "max_loras", None)
         # Adapters known to have been handed to vLLM. Prefill registration is
         # metadata-only, but vLLM activates a prefill adapter lazily when an
         # inference request supplies its LoRARequest.
@@ -2900,12 +2904,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         engine_generator = None
         generation_cancelled = False
+        generation_failed = False
         try:
             engine_generator = create_generator(admitted_lora_request)
             async for result in engine_generator:
                 yield result
         except asyncio.CancelledError:
             generation_cancelled = True
+            raise
+        except BaseException:
+            generation_failed = True
             raise
         finally:
 
@@ -2927,7 +2935,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         release_error,
                     )
                 raise asyncio.CancelledError
-            if release_error is not None:
+            if release_error is not None and generation_failed:
+                logger.error(
+                    "Failed to release active LoRA lease after generation failure (%s)",
+                    type(release_error).__name__,
+                )
+            elif release_error is not None:
                 raise release_error
 
     def _preload_lora_into_engine(self) -> bool:
