@@ -1267,21 +1267,22 @@ mod nats_enablement_tests {
 
     #[test]
     fn ambient_nats_server_does_not_enable_nats_on_tcp_and_zmq() {
-        temp_env::with_vars(
-            [
-                (NATS_SERVER, Some("nats://127.0.0.1:9")),
-                (DYN_EVENT_PLANE, None),
-            ],
-            || {
-                let config = DistributedConfig::from_settings_with_overrides(
-                    Some("file"),
-                    Some("tcp"),
-                    None,
-                )
-                .unwrap();
-                assert!(config.nats_config.is_none());
-            },
-        );
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::ambient_nats_server_does_not_enable_nats_on_tcp_and_zmq"
+            ),
+            &[(NATS_SERVER, "nats://127.0.0.1:9")],
+        ) {
+            return;
+        }
+
+        temp_env::with_var_unset(DYN_EVENT_PLANE, || {
+            let config =
+                DistributedConfig::from_settings_with_overrides(Some("file"), Some("tcp"), None)
+                    .unwrap();
+            assert!(config.nats_config.is_none());
+        });
     }
 }
 
