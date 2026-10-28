@@ -115,6 +115,10 @@ func (c *Coordinator) reconcilePreMembershipTraffic(
 			if rejectionErr := validateRejection(result.Rejection); rejectionErr != nil {
 				return false, false, fmt.Errorf("invalid pre-membership traffic rejection: %w", rejectionErr)
 			}
+			// A rejected traffic target cannot cancel a membership transaction already submitted.
+			if !membershipProvablyUncommitted(*status) {
+				return false, false, &InvocationError{Failure: *result.Rejection}
+			}
 			c.beginRollback(status, *result.Rejection)
 			return false, true, nil
 		}
