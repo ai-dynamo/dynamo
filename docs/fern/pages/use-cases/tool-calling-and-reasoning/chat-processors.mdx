@@ -12,11 +12,13 @@ You have three options, selected with the `--dyn-chat-processor` **Frontend** fl
 - **`dynamo` (default)** — Dynamo's framework-agnostic Rust processor. It works on every backend (vLLM, SGLang, TRT-LLM), supports disaggregated serving, and ships built-in parsers for a broad set of model formats. **Use this whenever Dynamo has a parser for your model** — which is most of the time.
 - **`vllm` / `sglang` (engine fallback)** — hand parsing back to the engine's own Python parser. Use these **only** when Dynamo does not ship a parser for your model's format.
 
-All three keep Dynamo's tokenization, routing, and disaggregated serving — the only thing that changes is who runs the parser. Your choice also decides the parser flag names and which component carries them; the tabs below show exactly where they go.
+All three retain Dynamo routing and disaggregated serving; the selected processor owns request preprocessing and response parsing. Your choice also decides the parser flag names and which component carries them; the tabs below show exactly where they go.
 
 New here? Read the [Overview](overview.mdx) first for how the chat processor relates to the tool-call and reasoning parsers.
 
 ## Configuration
+
+For the `dynamo` processor, use the [canonical routing table](troubleshooting-tool-calls.md#parser-generation-routing) to select `DYN_PARSER_VERSION` and a compatible family. Engine fallback has a different parser owner and does not select the Rust V1/V2 pipeline. A native worker `--reasoning-parser` can still control engine grammar activation; it is separate from the frontend response-parser flags shown below.
 
 <Tabs>
   <Tab title="dynamo (default)" language="dynamo">
@@ -56,7 +58,7 @@ New here? Read the [Overview](overview.mdx) first for how the chat processor rel
     For the parser names, see [Tool Call Parsing](tool-call-parsing.mdx) and [Reasoning Parsing](reasoning-parsing.md).
   </Tab>
   <Tab title="vLLM" language="vllm">
-    vLLM parsing is an **engine fallback** — use it only when Dynamo lacks a parser for your model. Set `--dyn-chat-processor vllm` on the **Frontend**, and put the bare `--tool-call-parser` / `--reasoning-parser` there too — no `--dyn-` prefix, and using **vLLM's** parser names. The worker stays clean.
+    vLLM parsing is an **engine fallback** — use it only when Dynamo lacks a parser for your model. Set `--dyn-chat-processor vllm` on the **Frontend**, and put the bare `--tool-call-parser` / `--reasoning-parser` there too — no `--dyn-` prefix, and using **vLLM's** parser names. The worker does not select Dynamo response parsers for this fallback.
 
     <Warning>
     The parser flags live on the **Frontend**, not the worker. In fallback mode they drop the `--dyn-` prefix and use **vLLM's** registry names, which can differ from Dynamo's (e.g. vLLM `nemotron_v3` vs Dynamo `nemotron3`). See the [vLLM Chat Processor](../../developer-guide/knowledge-base/modular-components/backends/vllm/chat-processor.md) page for the engine names.
@@ -94,7 +96,7 @@ New here? Read the [Overview](overview.mdx) first for how the chat processor rel
     ```
   </Tab>
   <Tab title="SGLang" language="sglang">
-    SGLang parsing is an **engine fallback** — use it only when Dynamo lacks a parser for your model. Set `--dyn-chat-processor sglang` on the **Frontend**, and put the bare `--tool-call-parser` / `--reasoning-parser` there too — no `--dyn-` prefix, and using **SGLang's** parser names. The worker stays clean.
+    SGLang parsing is an **engine fallback** — use it only when Dynamo lacks a parser for your model. Set `--dyn-chat-processor sglang` on the **Frontend**, and put the bare `--tool-call-parser` / `--reasoning-parser` there too — no `--dyn-` prefix, and using **SGLang's** parser names. The worker does not select Dynamo response parsers for this fallback.
 
     <Warning>
     The parser flags live on the **Frontend**, not the worker. In fallback mode they drop the `--dyn-` prefix and use **SGLang's** registry names, which can differ from Dynamo's (e.g. SGLang `deepseekv3` vs Dynamo `deepseek_v3`). See the [SGLang Chat Processor](../../developer-guide/knowledge-base/modular-components/backends/sglang/chat-processor.md) page for the engine names.

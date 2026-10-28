@@ -185,17 +185,18 @@ Not all parsers support structural tags. Parsers without a structural-tag
 builder fall back to their existing best-effort tool-calling behavior without
 rejecting the request.
 
-Currently tested and supported:
+The selected builder is resolved from the compatible Unified route first, then the V1 registry. Current builder availability (backend compilation and request-schema support are separate):
 
 - `qwen3_coder`, `nemotron_nano`
 - `hermes`, `qwen25`
 - `deepseek_v3_2`, `deepseek_v4`
 - `kimi_k2`, `kimi_k3`, `kimi-k3`
 - `inkling`
-- `glm47` with parsers v2
+- `glm47` (V1 and V2 builders)
+- `harmony` / `gpt_oss` on V2; Dynamo suppresses the V1 Harmony builder because of a stop-token conflict
+- `beam` through the pinned Unified library builder; this registry entry alone does not qualify a model/backend deployment
 
-The parsers-v2 builders for `qwen3_coder`, `deepseek_v4`, and `glm47` require
-a compatible V2 parser route in the worker and frontend processes. Unset `DYN_PARSER_VERSION` and `auto` select V2 when the configured tool and reasoning parsers resolve to a compatible family; explicit `DYN_PARSER_VERSION=2` requires V2.
+V2 builders require a compatible route in the relevant frontend and worker processes; see the [canonical routing table](troubleshooting-tool-calls.md#parser-generation-routing). The pinned V2 library has no native builder for `deepseek_v41`, `muse_glimmer`, `gemma4`, or `nemotron_v3`. Parser support alone does not imply native structural-tag support. Engine fallback processors use their installed engine registry instead.
 
 Contributions adding structural tag support for new parsers are welcome.
 

@@ -7,6 +7,8 @@ subtitle: Connect Dynamo to external tools and services using Dynamo's built-in 
 
 Tool calling lets Dynamo connect models to external tools and services by returning function arguments for your application to execute. Requests use the `tool_choice` and `tools` parameters. This page covers Dynamo-native parsing; if your model is not listed, use [engine fallback](chat-processors.mdx), which also explains valid combinations of `--dyn-tool-call-parser`, `--dyn-chat-processor`, and `--dyn-reasoning-parser`.
 
+See the [canonical routing table](troubleshooting-tool-calls.md#parser-generation-routing) for `DYN_PARSER_VERSION=auto|1|2`, compatible selector pairs, and the reasoning-only Qwen exception. The catalogs below identify parser formats; a registered family does not establish qualification of every model and backend.
+
 ## Configure Tool Calling
 
 <Steps>
@@ -28,6 +30,8 @@ Tool calling lets Dynamo connect models to external tools and services by return
       --reasoning-parser qwen3 \
       --dyn-reasoning-parser qwen3
     ```
+
+    The native worker `--reasoning-parser qwen3` controls reasoning-aware grammar activation in SGLang. `--dyn-reasoning-parser qwen3` selects Dynamo extraction into `reasoning_content`; the two controls have different owners.
 
     <Info>
     If the model supports tool calling but its default chat template does not, add `--custom-jinja-template /path/to/template.jinja` to the worker command. The template must be readable inside the container.
@@ -174,17 +178,23 @@ truncated input.
 
 Choose a model family, then expand the matching model option to see its parser name and configuration details.
 
-The **Upstream name** column shows where the vLLM or SGLang parser name differs from Dynamo’s — relevant when using `--dyn-chat-processor vllm` or `sglang` (see [Parser Engine Fallback](chat-processors.mdx)). A blank upstream column means the same name works everywhere. `Dynamo-only` means no upstream parser exists for this format.
+The **Upstream name** column shows where the vLLM or SGLang parser name differs from Dynamo’s — relevant when using `--dyn-chat-processor vllm` or `sglang` (see [Parser Engine Fallback](chat-processors.mdx)). Upstream names are engine-version dependent. A `Dynamo-only` label describes this catalog's Dynamo entry; it is not a claim that no engine release can implement the format.
 
 <AccordionGroup>
   <Accordion title="Kimi">
     <AccordionGroup>
+      <Accordion title="Kimi K3">
+        **Parser:** `kimi_k3` (alias `kimi-k3`)
+
+        **Notes:** XTML tools and reasoning. Pair with `--dyn-reasoning-parser kimi_k3`. A named `tool_choice` forces `thinking=false` and `enable_thinking=false` before rendering, overriding an explicit request to enable thinking; `reasoning_effort` is retained. This override is specific to the K3 tool parser.
+      </Accordion>
+
       <Accordion title="Kimi K2 Instruct/Thinking and Kimi K2.5">
         **Parser:** `kimi_k2`
 
         **Upstream name:** Same name across Dynamo, vLLM, and SGLang
 
-        **Notes:** Pair with `--dyn-reasoning-parser kimi` or `kimi_k25`. For Kimi K2.5 thinking models, use `kimi_k25` so `<think>` blocks and tool calls are parsed from the same response. See [Reasoning Parsing (Dynamo)](reasoning-parsing.md).
+        **Notes:** For the default Unified route, pair with `--dyn-reasoning-parser kimi_k25`. The legacy Unicode-delimiter reasoning parser `kimi` is a separate V1 format; pairing it with `kimi_k2` uses the split route under auto and is rejected by explicit V2. For Kimi K2.5 thinking models, use `kimi_k25` so `<think>` blocks and tool calls are parsed from the same response. See [Reasoning Parsing (Dynamo)](reasoning-parsing.md).
       </Accordion>
     </AccordionGroup>
   </Accordion>
@@ -204,13 +214,19 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
 
         **Upstream name:** vLLM: `minimax_m3`
 
-        **Notes:** MiniMax namespace-token XML
+        **Notes:** MiniMax namespace-token XML. Aliases: `minimax-m3`, `minimax_m3_nom`, `minimax-m3-nom`
       </Accordion>
     </AccordionGroup>
   </Accordion>
 
   <Accordion title="DeepSeek">
     <AccordionGroup>
+      <Accordion title="DeepSeek V4.1">
+        **Parser:** `deepseek_v41`
+
+        **Notes:** Unified V4.1 reasoning and spaced DSML calls with JSON bodies or typed parameter tags. Use the same reasoning selector when setting both. V1 does not provide this selector.
+      </Accordion>
+
       <Accordion title="DeepSeek V4 Pro / Flash">
         **Parser:** `deepseek_v4`
 
@@ -260,7 +276,7 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
 
         **Upstream name:** vLLM: `qwen2_5`; SGLang: `qwen25` (for Qwen models)
 
-        **Notes:** `<tool_call>` JSON
+        **Notes:** `<tool_call>` JSON. Dynamo also provides the `qwen25` parser preset for this format.
       </Accordion>
     </AccordionGroup>
   </Accordion>
@@ -389,6 +405,22 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
         **Notes:** `<tool_calls>` JSON
       </Accordion>
     </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Muse Glimmer">
+    **Parser:** `muse_glimmer` (Dynamo alias `muse`)
+
+    **Notes:** Recipient-routed ATEM channels and calls. Unified owns reasoning, visible text, and tool output; no V1 selector exists. Library availability does not establish backend guidance support.
+  </Accordion>
+
+  <Accordion title="Additional Unified registry entries">
+    The pinned library also registers `beam`, `nemotron_v3` / `nemotron3`, and `gpt_oss` / `harmony`. See the [routing table](troubleshooting-tool-calls.md#parser-generation-routing). New library entries do not by themselves qualify model rendering, special-token handling, or engine integration.
+  </Accordion>
+
+  <Accordion title="Inkling">
+    **Parser:** `inkling`
+
+    **Notes:** V1 channel-framed JSON tool calls using `name` and `args`. Pair with the `inkling` reasoning parser. Auto uses the legacy route; explicit V2 rejects this name.
   </Accordion>
 
   <Accordion title="Fallback">
