@@ -124,6 +124,11 @@ async fn deadline_kills_stalled_dispatch_and_releases_local_admission() {
     .await;
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     assert!(parent.is_killed());
+    let recovered = tokio::time::timeout(Duration::from_secs(1), admission.clone().acquire_owned())
+        .await
+        .unwrap()
+        .unwrap();
+    drop(recovered);
     assert_eq!(admission.available_permits(), 1);
     assert!(
         engine
@@ -133,6 +138,43 @@ async fn deadline_kills_stalled_dispatch_and_releases_local_admission() {
             .iter()
             .all(|o| o.request_context.is_killed())
     );
+}
+
+#[tokio::test]
+async fn empty_and_closed_admission_are_not_capacity_rejections() {
+    for dialect in [
+        dynamo_decisions::Dialect::Jev,
+        dynamo_decisions::Dialect::OpenAi,
+    ] {
+        let admission = Arc::new(Semaphore::new(1));
+        let empty = *super::acquire_admission(admission.clone(), 0, 1, dialect).unwrap_err();
+        assert_eq!(
+            empty.status().as_u16(),
+            if dialect == dynamo_decisions::Dialect::Jev {
+                422
+            } else {
+                400
+            }
+        );
+        assert!(
+            empty
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .is_none()
+        );
+        admission.close();
+        let closed = *super::acquire_admission(admission, 1, 1, dialect).unwrap_err();
+        assert_eq!(closed.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            closed
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .is_none()
+        );
+        let body = response_body(closed).await;
+        assert_ne!(body["code"], "rate_limit_exceeded");
+        assert_ne!(body["error"]["code"], "rate_limit_exceeded");
+    }
 }
 
 use super::{
@@ -595,6 +637,7 @@ fn selection(engine: Arc<TestEngine>) -> SystemOneExecutionSelection {
         card,
         preprocessor,
         admitted_ids: None,
+        lifecycle_cancellation: None,
     }
 }
 

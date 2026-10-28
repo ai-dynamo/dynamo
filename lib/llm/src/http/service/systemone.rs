@@ -142,6 +142,16 @@ fn acquire_admission(
 ) -> Result<OwnedSemaphorePermit, Box<Response>> {
     decision_lifecycle::acquire_admission(admission, branches, limit).map_err(|cause| {
         let response = match cause {
+            decision_lifecycle::AdmissionError::InvalidBranchCount => error(
+                dialect,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "decision requests require at least one question",
+            ),
+            decision_lifecycle::AdmissionError::AdmissionClosed => error(
+                dialect,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "decision admission is closed",
+            ),
             decision_lifecycle::AdmissionError::RequestTooLarge => error(
                 dialect,
                 StatusCode::UNPROCESSABLE_ENTITY,
