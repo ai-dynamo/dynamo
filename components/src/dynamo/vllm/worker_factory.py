@@ -20,8 +20,9 @@ from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
+from dynamo.common.lora.runtime import RuntimeLoRAConfigurationError
 from dynamo.common.model_taints import register_model_taint_route
-from dynamo.common.rl import first_endpoint_response, register_rl_routes
+from dynamo.common.rl import env_bool, first_endpoint_response, register_rl_routes
 from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
@@ -103,6 +104,8 @@ BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 # worker is sub-second; a longer wait means the engine is gone, and neither
 # serving nor error propagation may hang on it.
 WORKER_GC_STOP_TIMEOUT_SECONDS = 30.0
+
+ASYNC_HANDLER_DRAIN_TIMEOUT_SECONDS = 30.0
 
 # Bound for the post-benchmark RPC that turns vLLM's cudagraph_metrics back
 # off in the model workers. It shares the restore budget bounded by
@@ -1755,6 +1758,7 @@ class WorkerFactory:
         self.setup_fpm_relay = setup_fpm_relay_fn
         self.setup_metrics_collection = setup_metrics_collection_fn
         self.state_agent_lifecycle = state_agent_lifecycle or StateAgentLifecycle()
+        self._pending_handler_drains: set[asyncio.Task[None]] = set()
 
     async def _setup_kv_routing(
         self,
@@ -1800,6 +1804,13 @@ class WorkerFactory:
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
+
+        if env_bool("DYN_LORA_RUNTIME_LOAD_ENABLED") and (
+            config.realtime or config.embedding_worker or config.classify_worker
+        ):
+            raise RuntimeLoRAConfigurationError(
+                "runtime LoRA protocol version 2 requires tokenized chat/completions workers"
+            )
 
         if config.realtime:
             await self._create_realtime_worker(
@@ -2276,6 +2287,7 @@ class WorkerFactory:
         Instantiate and serve
         """
         with _WorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
+            primary_error: BaseException | None = None
             try:
                 await self._run_decode_worker(
                     runtime,
@@ -2285,8 +2297,63 @@ class WorkerFactory:
                     snapshot_engine=snapshot_engine,
                     lifecycle=lifecycle,
                 )
+            except BaseException as exc:
+                primary_error = exc
+                raise
             finally:
-                await self.state_agent_lifecycle.close()
+                try:
+                    await self._drain_worker_resources(lifecycle)
+                except BaseException:
+                    if primary_error is None:
+                        raise
+                    logger.exception(
+                        "Failed to drain decode worker after an earlier failure"
+                    )
+
+    async def _drain_worker_resources(self, lifecycle: _WorkerLifecycle) -> None:
+        """Drain all async owners before synchronous handler and engine cleanup."""
+        errors: list[BaseException] = []
+        try:
+            await self.state_agent_lifecycle.close()
+        except (Exception, asyncio.CancelledError) as exc:
+            errors.append(exc)
+        if lifecycle.handler is not None:
+            try:
+                await self._drain_handler(lifecycle)
+            except (Exception, asyncio.CancelledError) as exc:
+                errors.append(exc)
+        if errors:
+            for secondary in errors[1:]:
+                logger.error(
+                    "Additional worker drain failure",
+                    exc_info=(type(secondary), secondary, secondary.__traceback__),
+                )
+            raise errors[0]
+
+    async def _drain_handler(self, lifecycle: _WorkerLifecycle) -> None:
+        if lifecycle.handler is None:
+            return
+        timeout = (
+            lifecycle.vllm_config.shutdown_timeout
+            if lifecycle.vllm_config is not None
+            else 0
+        )
+        if timeout <= 0:
+            timeout = ASYNC_HANDLER_DRAIN_TIMEOUT_SECONDS
+        task = asyncio.create_task(lifecycle.handler.aclose())
+        self._pending_handler_drains.add(task)
+        task.add_done_callback(self._finish_handler_drain)
+        done, _pending = await asyncio.wait({task}, timeout=timeout)
+        if not done:
+            raise TimeoutError(
+                "asynchronous handler drain timed out; shutting down the engine"
+            )
+        task.result()
+
+    def _finish_handler_drain(self, task: asyncio.Task[None]) -> None:
+        self._pending_handler_drains.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("Asynchronous handler drain failed")
 
     async def _run_decode_worker(
         self,
@@ -2600,6 +2667,7 @@ class WorkerFactory:
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         with _WorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
+            primary_error: BaseException | None = None
             try:
                 await self._run_prefill_worker(
                     runtime,
@@ -2609,8 +2677,18 @@ class WorkerFactory:
                     snapshot_engine=snapshot_engine,
                     lifecycle=lifecycle,
                 )
+            except BaseException as exc:
+                primary_error = exc
+                raise
             finally:
-                await self.state_agent_lifecycle.close()
+                try:
+                    await self._drain_worker_resources(lifecycle)
+                except BaseException:
+                    if primary_error is None:
+                        raise
+                    logger.exception(
+                        "Failed to drain prefill worker after an earlier failure"
+                    )
 
     async def _run_prefill_worker(
         self,
