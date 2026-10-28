@@ -161,11 +161,12 @@ sglang:
     # Self-baseline of the published XPU image, same convention as vllm.xpu's
     # vllm-openai-xpu@..., so NOTICES attribute only what Dynamo adds on top.
     baseline_sbom: sglang@a66de2a4
-    # XPU SGLang requires a different NIXL than the framework default, and the
-    # NIXL versions in the XPU and CUDA base images are sometimes out of sync, so
-    # Dynamo keeps its own. Scoped here to avoid affecting sglang-cuda or other
-    # frameworks (e.g. dynamo KVBM link).
-    nixl_ref: v1.1.0
+    # The NIXL versions in the XPU and CUDA base images are sometimes out of sync,
+    # so Dynamo builds and installs its own at this ref rather than using
+    # whatever the base ships. Stated per-device even though it currently matches
+    # the framework default, so a framework-level bump made for sglang-cuda
+    # cannot silently retarget the less-exercised XPU build.
+    nixl_ref: v1.5.0
   # Builds the NIXL C++ SDK in wheel_builder so the dev stage can link nixl-sys
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
