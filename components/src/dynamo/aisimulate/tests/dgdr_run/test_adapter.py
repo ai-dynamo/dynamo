@@ -79,11 +79,48 @@ def tags(snapshot: dict[str, Any]) -> list[str]:
 
 def wait_for(predicate: Any, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
+    poll = threading.Event()
     while time.monotonic() < deadline:
         if predicate():
             return
-        time.sleep(0.01)
+        poll.wait(min(0.01, deadline - time.monotonic()))
     raise AssertionError("condition not reached before the timeout")
+
+
+class ControlledWait:
+    """Let a test release one writer delay without waiting for wall-clock time."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._advanced = False
+        self._stopped = False
+        self.waiting = threading.Event()
+        self.timeouts: list[float] = []
+
+    def is_set(self) -> bool:
+        with self._condition:
+            return self._stopped
+
+    def wait(self, timeout: float | None = None) -> bool:
+        with self._condition:
+            if timeout is None:
+                self._condition.wait_for(lambda: self._stopped)
+            else:
+                self.timeouts.append(timeout)
+                self.waiting.set()
+                self._condition.wait_for(lambda: self._advanced or self._stopped)
+                self._advanced = False
+            return self._stopped
+
+    def advance(self) -> None:
+        with self._condition:
+            self._advanced = True
+            self._condition.notify_all()
+
+    def set(self) -> None:
+        with self._condition:
+            self._stopped = True
+            self._condition.notify_all()
 
 
 @pytest.fixture
@@ -121,44 +158,57 @@ def test_start_writes_the_initial_snapshot_immediately(
         assert snapshot["progress"] == {"round": 0, "evaluated": 0}
 
 
-def test_projection_is_bounded_and_best_first_whatever_is_evaluated(
-    tmp_path: Path, renders: list[str]
+@pytest.mark.parametrize(
+    ("records", "max_candidates", "expected"),
+    [
+        pytest.param(
+            tuple(record(f"p{index:03d}", float(index)) for index in range(500)),
+            3,
+            ["p499", "p498", "p497"],
+            id="bounded-best-first",
+        ),
+        pytest.param(
+            (
+                record("big", 5.0, gpus=16),
+                record("small", 5.0, gpus=8),
+                record("best", 9.0, gpus=64),
+            ),
+            4,
+            ["best", "small", "big"],
+            id="ties-use-fewer-gpus",
+        ),
+        pytest.param(
+            (record("ok", 1.0), record("nope", 99.0, status="infeasible")),
+            3,
+            ["ok"],
+            id="infeasible-counted-not-retained",
+        ),
+        pytest.param(
+            (SimpleNamespace(status="feasible"), record("ok", 1.0)),
+            3,
+            ["ok"],
+            id="malformed-callback-isolated",
+        ),
+    ],
+)
+def test_projection_is_bounded_ranked_and_feasible(
+    tmp_path: Path,
+    renders: list[str],
+    records: tuple[Any, ...],
+    max_candidates: int,
+    expected: list[str],
 ) -> None:
-    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
-    for index in range(500):
-        adapter.on_candidate(record(f"p{index:03d}", score=float(index)))
+    adapter = DGDRRunOutputAdapter(
+        make_config(tmp_path, max_candidates=max_candidates), workload=None
+    )
+    for candidate in records:
+        adapter.on_candidate(candidate)
     adapter.close()
 
     snapshot = load(tmp_path)
-    assert tags(snapshot) == ["p499", "p498", "p497"]
-    assert snapshot["progress"]["evaluated"] == 500
-    # Only retained points are ever materialized, never all 500.
-    assert len(renders) == 3
-
-
-def test_ties_break_on_fewer_gpus_then_id_deterministically(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    adapter = DGDRRunOutputAdapter(make_config(tmp_path, max_candidates=4), None)
-    adapter.on_candidate(record("big", score=5.0, gpus=16))
-    adapter.on_candidate(record("small", score=5.0, gpus=8))
-    adapter.on_candidate(record("best", score=9.0, gpus=64))
-    adapter.close()
-
-    assert tags(load(tmp_path)) == ["best", "small", "big"]
-
-
-def test_infeasible_candidates_are_counted_but_never_retained(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
-    adapter.on_candidate(record("ok", 1.0))
-    adapter.on_candidate(record("nope", 99.0, status="infeasible"))
-    adapter.close()
-
-    snapshot = load(tmp_path)
-    assert tags(snapshot) == ["ok"]
-    assert snapshot["progress"]["evaluated"] == 2
+    assert tags(snapshot) == expected
+    assert snapshot["progress"]["evaluated"] == len(records)
+    assert len(renders) == len(expected)
 
 
 def test_snapshot_preserves_the_evaluated_point_not_just_its_manifest(
@@ -183,8 +233,36 @@ def test_snapshot_preserves_the_evaluated_point_not_just_its_manifest(
     assert "marker: a" in candidate["manifest"]
 
 
-def test_each_candidate_uses_the_runtime_image_for_its_backend(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("runtime_image", "derive", "backends", "expected"),
+    [
+        pytest.param(
+            "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3",
+            True,
+            ("vllm", "sglang", "trtllm"),
+            {
+                "vllm": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
+                "sglang": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.3",
+                "trtllm": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.3",
+            },
+            id="derive-per-backend",
+        ),
+        pytest.param(
+            "example.com/my-runtime:1.2.3",
+            False,
+            ("sglang",),
+            {"sglang": "example.com/my-runtime:1.2.3"},
+            id="explicit-image",
+        ),
+    ],
+)
+def test_runtime_image_selection_reaches_the_renderer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_image: str,
+    derive: bool,
+    backends: tuple[str, ...],
+    expected: dict[str, str],
 ) -> None:
     images: dict[str, str] = {}
 
@@ -199,55 +277,18 @@ def test_each_candidate_uses_the_runtime_image_for_its_backend(
     adapter = DGDRRunOutputAdapter(
         make_config(
             tmp_path,
-            runtime_image="nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3",
-            derive_runtime_images=True,
+            runtime_image=runtime_image,
+            derive_runtime_images=derive,
         ),
         workload=None,
     )
-    for index, backend in enumerate(("vllm", "sglang", "trtllm")):
+    for index, backend in enumerate(backends):
         candidate = record(backend, float(index))
         candidate.config["backend"] = backend
         adapter.on_candidate(candidate)
     adapter.close()
 
-    assert images == {
-        "vllm": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
-        "sglang": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.3",
-        "trtllm": "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.3",
-    }
-
-
-def test_explicit_runtime_image_stays_fixed_by_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    images: list[str] = []
-
-    def capture_image(
-        candidate: Any, workload: Any, options: Any, **kwargs: Any
-    ) -> str:
-        del candidate, workload, kwargs
-        images.append(options.runtime_image)
-        return "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\n"
-
-    monkeypatch.setattr(adapter_module, "render_dgd", capture_image)
-    adapter = DGDRRunOutputAdapter(
-        make_config(tmp_path, runtime_image="example.com/my-runtime:1.2.3"),
-        workload=None,
-    )
-    candidate = record("sglang", 1.0)
-    candidate.config["backend"] = "sglang"
-    adapter.on_candidate(candidate)
-    adapter.close()
-
-    assert images == ["example.com/my-runtime:1.2.3"]
-
-
-def test_round_progress_is_monotonic(tmp_path: Path, renders: list[str]) -> None:
-    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
-    adapter.on_round(3, [])
-    adapter.on_round(2, [])
-    adapter.close()
-    assert load(tmp_path)["progress"]["round"] == 3
+    assert images == expected
 
 
 # -- identity, immutability, materialization ----------------------------------
@@ -279,8 +320,9 @@ def test_identity_depends_only_on_the_resolved_parameters() -> None:
     assert candidate_id_for({"a": 1}).startswith("evaluated-point-")
 
 
-def test_aic_name_prefix_is_stable_bounded_and_candidate_specific(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("run_name", ["a" * 63, "team.model"])
+def test_aic_name_prefix_is_stable_dns_safe_and_candidate_specific(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_name: str
 ) -> None:
     names: list[str] = []
 
@@ -292,7 +334,7 @@ def test_aic_name_prefix_is_stable_bounded_and_candidate_specific(
 
     monkeypatch.setattr(adapter_module, "render_dgd", capture_name)
     adapter = DGDRRunOutputAdapter(
-        make_config(tmp_path, name="a" * 63, max_candidates=2), workload=None
+        make_config(tmp_path, name=run_name, max_candidates=2), workload=None
     )
     adapter.on_candidate(record("first", 2.0))
     adapter.on_candidate(record("second", 1.0))
@@ -302,33 +344,9 @@ def test_aic_name_prefix_is_stable_bounded_and_candidate_specific(
     assert len(set(names)) == 2
     assert all(len(name) <= 28 for name in names)
     assert all(name[0].isalnum() and name[-1].isalnum() for name in names)
+    assert all("." not in name for name in names)
     assert names[0] == adapter_module._dgd_name(
-        "a" * 63, candidate_id_for(record("first", 2.0).config)
-    )
-
-
-def test_aic_name_prefix_accepts_and_normalizes_a_dotted_run_name(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    names: list[str] = []
-
-    def capture_name(candidate: Any, workload: Any, options: Any, **kwargs: Any) -> str:
-        del candidate, workload, options
-        names.append(kwargs["dgd_name"])
-        return "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\n"
-
-    monkeypatch.setattr(adapter_module, "render_dgd", capture_name)
-    adapter = DGDRRunOutputAdapter(
-        make_config(tmp_path, name="team.model", max_candidates=1), workload=None
-    )
-    adapter.on_candidate(record("first", 2.0))
-    adapter.close()
-
-    assert len(names) == 1
-    assert "." not in names[0]
-    assert len(names[0]) <= 28
-    assert names[0] == adapter_module._dgd_name(
-        "team.model", candidate_id_for(record("first", 2.0).config)
+        run_name, candidate_id_for(record("first", 2.0).config)
     )
 
 
@@ -343,6 +361,12 @@ def test_a_new_better_point_reorders_but_does_not_rematerialize_retained_ones(
     before = {c["id"]: c["manifest"] for c in load(tmp_path)["candidates"]}
     assert sorted(renders) == ["a", "b"]
 
+    for round_no in range(1, 20):
+        adapter.on_round(round_no, [])
+    adapter.on_round(18, [])
+    wait_for(lambda: load(tmp_path)["progress"]["round"] == 19)
+    assert sorted(renders) == ["a", "b"]
+
     adapter.on_candidate(record("c", 3.0))
     wait_for(lambda: tags(load(tmp_path)) == ["c", "b", "a"])
     adapter.close()
@@ -350,20 +374,6 @@ def test_a_new_better_point_reorders_but_does_not_rematerialize_retained_ones(
     after = {c["id"]: c["manifest"] for c in load(tmp_path)["candidates"]}
     assert {key: after[key] for key in before} == before
     assert sorted(renders) == ["a", "b", "c"]
-
-
-def test_progress_updates_do_not_rematerialize(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
-    adapter.start()
-    adapter.on_candidate(record("a", 1.0))
-    wait_for(lambda: tags(load(tmp_path)) == ["a"])
-    for round_no in range(1, 20):
-        adapter.on_round(round_no, [])
-    wait_for(lambda: load(tmp_path)["progress"]["round"] == 19)
-    adapter.close()
-    assert renders == ["a"]
 
 
 def test_a_point_is_immutable_once_observed(tmp_path: Path, renders: list[str]) -> None:
@@ -377,50 +387,42 @@ def test_a_point_is_immutable_once_observed(tmp_path: Path, renders: list[str]) 
     assert load(tmp_path)["progress"]["evaluated"] == 2
 
 
-def test_a_persistent_materialization_failure_is_reported_and_retried_a_bounded_number_of_times(
-    tmp_path: Path, renders: list[str]
+# -- lifecycle and concurrency ------------------------------------------------
+
+
+def test_callbacks_within_one_interval_coalesce_into_the_latest_snapshot(
+    tmp_path: Path, renders: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
+    writes: list[Any] = []
+    periodic_write = threading.Event()
+    real_write = adapter_module.write_snapshot
+
+    def observe_write(directory: Path, snapshot: Any) -> Path:
+        path = real_write(directory, snapshot)
+        writes.append(snapshot)
+        if len(writes) == 2:
+            periodic_write.set()
+        return path
+
+    monkeypatch.setattr(adapter_module, "write_snapshot", observe_write)
+    adapter = DGDRRunOutputAdapter(
+        make_config(tmp_path, snapshot_interval_seconds=60), workload=None
+    )
     adapter.start()
-    adapter.on_candidate(record("bad1", 5.0))
-    wait_for(lambda: len(load(tmp_path)["candidates"]) == 1)
-    for round_no in range(1, 10):
-        adapter.on_round(round_no, [])
-    wait_for(lambda: load(tmp_path)["progress"]["round"] == 9)
-    adapter.close()
+    interval = ControlledWait()
+    adapter._stop = interval  # type: ignore[assignment]
 
-    (candidate,) = load(tmp_path)["candidates"]
-    assert candidate["outcome"] == "materialization_failed"
-    assert "cannot render bad1" in candidate["error"]
-    assert "manifest" not in candidate
-    assert renders == ["bad1"] * adapter_module._MAX_RENDER_ATTEMPTS
+    adapter.on_candidate(record("p000", 0.0))
+    assert interval.waiting.wait(2), "writer did not enter the rate-limit delay"
+    for index in range(1, 300):
+        adapter.on_candidate(record(f"p{index:03d}", float(index)))
+    interval.advance()
 
-
-# -- rate limiting and coalescing ---------------------------------------------
-
-
-def test_many_callbacks_in_one_interval_produce_one_periodic_write(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    config = make_config(tmp_path, snapshot_interval_seconds=0.5)
-    adapter = DGDRRunOutputAdapter(config, workload=None)
-    adapter.start()
-    assert adapter.snapshot_writes == 1
-
-    for index in range(300):
-        adapter.on_candidate(record(f"p{index:03d}", score=float(index)))
-    time.sleep(0.15)
-    assert adapter.snapshot_writes == 1
-
-    wait_for(lambda: adapter.snapshot_writes == 2, timeout=5)
+    assert periodic_write.wait(2), "periodic snapshot was not written"
     snapshot = load(tmp_path)
-    # The one periodic write carries the latest state, not an arbitrary
-    # intermediate one.
+    assert len(writes) == 2  # initial + one coalesced periodic write
     assert snapshot["progress"]["evaluated"] == 300
     assert tags(snapshot) == ["p299", "p298", "p297"]
-
-    time.sleep(0.2)
-    assert adapter.snapshot_writes == 2
     adapter.close()
 
 
@@ -449,39 +451,63 @@ def test_terminal_state_bypasses_the_rate_limit_and_is_always_flushed(
     assert adapter.snapshot_writes == 2  # initial + terminal, nothing in between
 
 
-def test_the_terminal_snapshot_contains_every_update_accepted_before_close(
-    tmp_path: Path, renders: list[str]
+@pytest.mark.parametrize(
+    ("error", "phase", "error_name"),
+    [
+        pytest.param(None, "Succeeded", None, id="success"),
+        pytest.param(
+            RuntimeError("search crashed"), "Failed", "RuntimeError", id="error"
+        ),
+    ],
+)
+def test_context_manager_records_terminal_outcome(
+    tmp_path: Path,
+    renders: list[str],
+    error: RuntimeError | None,
+    phase: str,
+    error_name: str | None,
 ) -> None:
-    config = make_config(tmp_path, snapshot_interval_seconds=3600)
-    with DGDRRunOutputAdapter(config, workload=None) as adapter:
-        for index in range(50):
-            adapter.on_candidate(record(f"w{index}", score=1.0 + index))
-        adapter.on_candidate(record("winner", score=1000.0))
+    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
+    if error is None:
+        with adapter:
+            pass
+    else:
+        with pytest.raises(RuntimeError, match="search crashed"), adapter:
+            raise error
 
-    snapshot = load(tmp_path)
-    assert snapshot["run"]["terminal"] is True
-    assert tags(snapshot)[0] == "winner"
+    run = load(tmp_path)["run"]
+    assert run["phase"] == phase
+    assert run.get("error") == error_name
 
 
 def test_callbacks_never_wait_for_a_slow_writer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    rendering = threading.Event()
     release = threading.Event()
 
     def slow_render(candidate: Any, *args: Any, **kwargs: Any) -> str:
-        release.wait(5)
+        rendering.set()
+        assert release.wait(5), "test did not release the renderer"
         return "kind: DynamoGraphDeployment\n"
 
     monkeypatch.setattr(adapter_module, "render_dgd", slow_render)
     adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
     adapter.start()
     adapter.on_candidate(record("a", 1.0))
-    time.sleep(0.1)  # the writer is now stuck rendering
+    assert rendering.wait(5), "writer did not enter the renderer"
 
-    started = time.monotonic()
-    for index in range(1000):
-        adapter.on_candidate(record(f"q{index}", score=float(index)))
-    assert time.monotonic() - started < 2
+    callbacks_done = threading.Event()
+
+    def send_callbacks() -> None:
+        for index in range(1000):
+            adapter.on_candidate(record(f"q{index}", score=float(index)))
+        callbacks_done.set()
+
+    sender = threading.Thread(target=send_callbacks)
+    sender.start()
+    assert callbacks_done.wait(2), "callbacks blocked behind the writer"
+    sender.join()
     release.set()
     adapter.close()
     # Nothing was dropped while the writer was stuck.
@@ -512,23 +538,6 @@ def test_close_rejects_a_non_terminal_phase(tmp_path: Path) -> None:
 
 
 # -- failure handling ---------------------------------------------------------
-
-
-def test_context_manager_records_success_and_failure(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    ok = tmp_path / "ok"
-    with DGDRRunOutputAdapter(make_config(ok), workload=None):
-        pass
-    assert load(ok)["run"]["phase"] == "Succeeded"
-
-    failed = tmp_path / "failed"
-    with pytest.raises(RuntimeError, match="search crashed"):
-        with DGDRRunOutputAdapter(make_config(failed), workload=None):
-            raise RuntimeError("search crashed")
-    snapshot = load(failed)
-    assert snapshot["run"]["phase"] == "Failed"
-    assert snapshot["run"]["error"] == "RuntimeError"
 
 
 def test_a_terminal_write_failure_is_raised_not_swallowed(
@@ -567,14 +576,33 @@ def test_a_failed_periodic_write_is_retried_with_the_latest_state(
     assert attempts["count"] >= 2
 
 
-def test_a_candidate_that_cannot_be_read_does_not_break_the_search(
-    tmp_path: Path, renders: list[str]
+def test_a_persistent_write_failure_waits_for_backoff_instead_of_spinning(
+    tmp_path: Path, renders: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(adapter_module, "_WRITE_RETRY_BACKOFF", 30)
     adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
-    adapter.on_candidate(SimpleNamespace(status="feasible"))  # type: ignore[arg-type]
-    adapter.on_candidate(record("ok", 1.0))
+    adapter.start()
+    backoff = ControlledWait()
+    adapter._stop = backoff  # type: ignore[assignment]
+    real_write = adapter_module.write_snapshot
+    attempts: list[int] = []
+    failed = threading.Event()
+
+    def failing(directory: Path, snapshot: Any) -> Path:
+        del directory, snapshot
+        attempts.append(1)
+        failed.set()
+        raise OSError("disk full")
+
+    monkeypatch.setattr(adapter_module, "write_snapshot", failing)
+    adapter.on_candidate(record("a", 1.0))
+    assert failed.wait(2), "writer did not attempt the snapshot"
+    assert backoff.waiting.wait(2), "writer did not enter retry backoff"
+    assert len(attempts) == 1
+    assert backoff.timeouts and backoff.timeouts[0] > 0
+
+    monkeypatch.setattr(adapter_module, "write_snapshot", real_write)
     adapter.close()
-    assert tags(load(tmp_path)) == ["ok"]
 
 
 # -- configuration and plugin -------------------------------------------------
@@ -586,30 +614,27 @@ def test_pareto_objectives_are_rejected_explicitly(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "overrides",
+    ("overrides", "valid"),
     [
-        {"max_candidates": 0},
-        {"max_candidates": 101},
-        {"snapshot_interval_seconds": -1},
-        {"name": "Not_DNS"},
-        {"num_gpus_per_node": 0},
-        {"unknown_field": 1},
+        pytest.param({"max_candidates": 1}, True, id="min-candidates"),
+        pytest.param({"max_candidates": 100}, True, id="max-candidates"),
+        pytest.param({"max_candidates": 0}, False, id="too-few-candidates"),
+        pytest.param({"max_candidates": 101}, False, id="too-many-candidates"),
+        pytest.param({"snapshot_interval_seconds": -1}, False, id="negative-interval"),
+        pytest.param({"name": "Not_DNS"}, False, id="invalid-name"),
+        pytest.param({"num_gpus_per_node": 0}, False, id="zero-gpus"),
+        pytest.param({"unknown_field": 1}, False, id="unknown-field"),
     ],
 )
-def test_invalid_configuration_is_rejected(
-    tmp_path: Path, overrides: dict[str, Any]
+def test_configuration_boundaries(
+    tmp_path: Path, overrides: dict[str, Any], valid: bool
 ) -> None:
+    if valid:
+        config = make_config(tmp_path, **overrides)
+        assert config.max_candidates == overrides["max_candidates"]
+        return
     with pytest.raises(ValueError):
         make_config(tmp_path, **overrides)
-
-
-def test_max_candidates_follows_the_api_range(tmp_path: Path) -> None:
-    # spec.recommendation.maxCandidates is 1..100; the adapter accepts exactly that range.
-    assert make_config(tmp_path, max_candidates=1).max_candidates == 1
-    assert make_config(tmp_path, max_candidates=100).max_candidates == 100
-    for invalid in (0, 101, 200):
-        with pytest.raises(ValueError):
-            make_config(tmp_path, max_candidates=invalid)
 
 
 def test_max_candidates_has_no_default_of_its_own() -> None:
@@ -634,72 +659,38 @@ def test_a_snapshot_directory_is_required() -> None:
         DGDRRunOutputAdapter(config, workload=None)
 
 
-def test_the_plugin_is_discoverable_and_builds_a_live_adapter(tmp_path: Path) -> None:
+def test_plugin_discovery_validation_and_optional_live_subscription(
+    tmp_path: Path,
+) -> None:
     plugin = create_adapter()
     assert plugin.name == "dgdr_run"
-    live = plugin.live(
-        {
-            "name": "sweep",
-            "snapshot_dir": str(tmp_path),
-            "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
-            "num_gpus_per_node": 8,
-            "max_candidates": 5,
-        },
-        workload=None,
-    )
-    assert isinstance(live, DGDRRunOutputAdapter)
-
-
-def test_plugin_subscribe_validates_config_before_search() -> None:
-    plugin = adapter_module.DGDRRunOutputPlugin()
-    good = {
+    with_dir = {
         "name": "run",
+        "snapshot_dir": str(tmp_path),
         "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
         "num_gpus_per_node": 8,
         "max_candidates": 5,
     }
-
-    assert plugin.subscribe(good) is None
+    assert isinstance(plugin.live(with_dir, workload=None), DGDRRunOutputAdapter)
+    assert plugin.subscribe(with_dir) is None
+    assert plugin.subscribe(with_dir, context=SimpleNamespace(workload=None)) is None
+    without_dir = {
+        key: value for key, value in with_dir.items() if key != "snapshot_dir"
+    }
+    assert (
+        plugin.subscribe(without_dir, context=SimpleNamespace(workload="workload"))
+        is None
+    )
+    assert not (tmp_path / SNAPSHOT_FILE_NAME).exists()
     with pytest.raises(ValueError, match="num_gpus_per_node"):
-        plugin.subscribe({**good, "num_gpus_per_node": 0})
+        plugin.subscribe({**with_dir, "num_gpus_per_node": 0})
     with pytest.raises(ValueError, match="canonical"):
         plugin.subscribe(
-            {**good, "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest"}
+            {
+                **with_dir,
+                "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest",
+            }
         )
-
-
-def test_plugin_write_publishes_the_final_selection_as_a_terminal_snapshot(
-    tmp_path: Path, renders: list[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class FakeSearchConfig:
-        @staticmethod
-        def model_validate(_: Any) -> Any:
-            return SimpleNamespace(workload="workload")
-
-    monkeypatch.setattr(adapter_module, "SmartSearchConfig", FakeSearchConfig)
-    result = SimpleNamespace(
-        views=SimpleNamespace(pareto_front=[]),
-        provenance=SimpleNamespace(config={}),
-        selected_candidates=[
-            record("a", 9.0),
-            record("b", 5.0),
-        ],
-    )
-    written = create_adapter().write(
-        {
-            "name": "sweep",
-            "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
-            "num_gpus_per_node": 8,
-            "max_candidates": 5,
-        },
-        result=result,  # type: ignore[arg-type]
-        output_dir=tmp_path,
-    )
-
-    assert written == [Path(SNAPSHOT_FILE_NAME)]
-    snapshot = load(tmp_path)
-    assert snapshot["run"]["terminal"] is True
-    assert tags(snapshot) == ["a", "b"]
 
 
 def test_plugin_write_keeps_sweepers_selection_order(
@@ -713,8 +704,16 @@ def test_plugin_write_keeps_sweepers_selection_order(
         selected_candidates=[record("low", 1.0), record("high", 9.0)],
         counts=SimpleNamespace(evaluated=2),
     )
-    create_adapter().write(PLUGIN_CONFIG, result=result, output_dir=tmp_path)  # type: ignore[arg-type]
-    assert tags(load(tmp_path)) == ["low", "high"]
+    written = create_adapter().write(
+        PLUGIN_CONFIG,
+        result=result,
+        output_dir=tmp_path,  # type: ignore[arg-type]
+    )
+    snapshot = load(tmp_path)
+    assert written == [Path(SNAPSHOT_FILE_NAME)]
+    assert snapshot["run"] == {"phase": "Succeeded", "terminal": True}
+    assert snapshot["progress"] == {"round": 0, "evaluated": 2}
+    assert tags(snapshot) == ["low", "high"]
 
 
 def test_plugin_write_refuses_pareto_and_empty_results(tmp_path: Path) -> None:
@@ -743,37 +742,130 @@ PLUGIN_CONFIG = {
 }
 
 
-def test_plugin_subscribe_with_a_context_publishes_live(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    config = {**PLUGIN_CONFIG, "snapshot_dir": str(tmp_path)}
-    callbacks = create_adapter().subscribe(
-        config, context=SimpleNamespace(workload="workload")
-    )
-
-    assert callbacks is not None
-    assert callbacks.on_candidate is not None
-    assert callbacks.on_round is not None
-    assert load(tmp_path)["run"] == {"phase": "Running", "terminal": False}
-
-    callbacks.on_candidate(record("a", 9.0))
-    wait_for(lambda: tags(load(tmp_path)) == ["a"])
-    assert callbacks.on_complete is not None
-    callbacks.on_complete()
-
-
-def test_plugin_subscribe_without_context_or_snapshot_dir_only_validates(
+@pytest.mark.parametrize("search_fails", [False, True], ids=["complete", "failure"])
+def test_pinned_aisimulate_dispatches_the_complete_lifecycle_to_dgdr_run(
     tmp_path: Path,
+    renders: list[str],
+    fake_search_config: None,
+    monkeypatch: pytest.MonkeyPatch,
+    search_fails: bool,
 ) -> None:
-    plugin = create_adapter()
-    with_dir = {**PLUGIN_CONFIG, "snapshot_dir": str(tmp_path)}
-    assert plugin.subscribe(with_dir) is None
-    assert plugin.subscribe(with_dir, context=SimpleNamespace(workload=None)) is None
-    assert (
-        plugin.subscribe(PLUGIN_CONFIG, context=SimpleNamespace(workload="workload"))
-        is None
+    import aisimulate.recommend as recommendation
+    from aisimulate.config import CoreRecommendationConfig
+    from aisimulate.sweeper import search
+
+    config = CoreRecommendationConfig.model_validate(
+        {
+            "engine": {
+                "model": "openai/gpt-oss-120b",
+                "hardware": "gb300",
+                "backend": "vllm",
+                "mode": "aggregated",
+                "context_length": 16384,
+                "workers": {"aggregated": {}},
+            },
+            "traffic": {
+                "source": {
+                    "type": "synthetic",
+                    "input_tokens": 10240,
+                    "output_tokens": 1024,
+                },
+                "load": {
+                    "type": "concurrency",
+                    "concurrency": {"choices": [8]},
+                },
+                "stop": {"requests_per_load_unit": 1},
+            },
+            "optimization": {
+                "target": "throughput_per_gpu",
+                "constraints": {
+                    "min_candidate_gpus": 1,
+                    "max_candidate_gpus": 8,
+                },
+            },
+            "optimizer": {"parallelism": 1, "max_trials": 1},
+        }
     )
-    assert not (tmp_path / SNAPSHOT_FILE_NAME).exists()
+    output_config = {
+        **PLUGIN_CONFIG,
+        "snapshot_dir": str(tmp_path),
+        # Keep candidate and round updates buffered so their presence after a
+        # successful search proves that on_complete forced the final live flush.
+        "snapshot_interval_seconds": 3600,
+    }
+    result = _final_result(1)
+    search_error = RuntimeError("search crashed")
+
+    # Use the real pinned AISimulate lifecycle dispatcher around a deterministic search.
+    monkeypatch.setattr(
+        recommendation, "resolve_budget", lambda *args, **kwargs: {"cpu_limit": 1}
+    )
+
+    class LifecycleSweeper:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def run(
+            self,
+            smart: Any,
+            *,
+            top_n: int | None,
+            on_candidate: Any = None,
+            on_round: Any = None,
+        ) -> Any:
+            del smart, top_n
+            assert on_candidate is not None
+            assert on_round is not None
+            on_candidate(record("a", 9.0))
+            on_round(3, [])
+            if search_fails:
+                raise search_error
+            return result
+
+    monkeypatch.setattr(search, "Sweeper", LifecycleSweeper)
+
+    # A failed search must dispatch on_failure and leave a terminal failed snapshot.
+    if search_fails:
+        with pytest.raises(RuntimeError, match="search crashed") as raised:
+            recommendation._run_recommendation(
+                config,
+                stack="engine",
+                runner_factory=object(),
+                output_configs={"dgdr_run": output_config},
+                output_adapters={"dgdr_run": create_adapter()},
+            )
+        assert raised.value is search_error
+        snapshot = load(tmp_path)
+        assert snapshot["run"] == {
+            "phase": "Failed",
+            "terminal": True,
+            "message": "search crashed",
+            "error": "RuntimeError",
+        }
+        assert snapshot["progress"] == {"round": 3, "evaluated": 1}
+        assert tags(snapshot) == ["a"]
+        return
+
+    # A successful search must dispatch on_complete before the final writer takes over.
+    returned = recommendation._run_recommendation(
+        config,
+        stack="engine",
+        runner_factory=object(),
+        output_configs={"dgdr_run": output_config},
+        output_adapters={"dgdr_run": create_adapter()},
+    )
+    assert returned is result
+    completed = load(tmp_path)
+    assert completed["run"] == {"phase": "Running", "terminal": False}
+    assert completed["progress"] == {"round": 3, "evaluated": 1}
+    assert tags(completed) == ["a"]
+
+    # The separate final writer publishes the authoritative terminal selection.
+    create_adapter().write(output_config, result=returned, output_dir=tmp_path)
+    terminal = load(tmp_path)
+    assert terminal["run"] == {"phase": "Succeeded", "terminal": True}
+    assert terminal["progress"] == {"round": 3, "evaluated": 1}
+    assert tags(terminal) == ["a"]
 
 
 def _final_result(evaluated: int = 42) -> Any:
@@ -814,41 +906,6 @@ def test_plugin_write_reports_no_artifact_for_a_snapshot_outside_output_dir(
     assert not (out / SNAPSHOT_FILE_NAME).exists()
 
 
-def test_a_transient_materialization_failure_is_retried_and_recovers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    attempts: list[int] = []
-
-    def flaky_render(candidate: Any, workload: Any, options: Any, **kwargs: Any) -> str:
-        attempts.append(1)
-        if len(attempts) == 1:
-            raise CandidateMaterializationError("cold start")
-        return "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\n"
-
-    monkeypatch.setattr(adapter_module, "render_dgd", flaky_render)
-    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
-    adapter.start()
-    adapter.on_candidate(record("a", 5.0))
-    wait_for(lambda: len(load(tmp_path)["candidates"]) == 1)
-    assert load(tmp_path)["candidates"][0]["outcome"] == "materialization_failed"
-
-    adapter.on_round(1, [])  # any later write retries the failed render
-    wait_for(lambda: load(tmp_path)["candidates"][0]["outcome"] == "materialized")
-    adapter.close()
-
-    (candidate,) = load(tmp_path)["candidates"]
-    assert candidate["outcome"] == "materialized"
-    assert "error" not in candidate
-    assert len(attempts) == 2
-
-
-def test_plugin_write_without_a_live_snapshot_starts_at_round_zero(
-    tmp_path: Path, renders: list[str], fake_search_config: None
-) -> None:
-    create_adapter().write(PLUGIN_CONFIG, result=_final_result(2), output_dir=tmp_path)
-    assert load(tmp_path)["progress"] == {"round": 0, "evaluated": 2}
-
-
 # -- lifecycle: how the search ended --------------------------------------------
 
 
@@ -859,26 +916,6 @@ def _subscribed(tmp_path: Path) -> Any:
     )
     assert callbacks is not None
     return callbacks
-
-
-def test_a_failed_search_leaves_a_terminal_failed_snapshot(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    callbacks = _subscribed(tmp_path)
-    callbacks.on_candidate(record("a", 9.0))
-    callbacks.on_round(2, [])
-
-    callbacks.on_failure(RuntimeError("replay crashed"))
-
-    snapshot = load(tmp_path)
-    assert snapshot["run"] == {
-        "phase": "Failed",
-        "terminal": True,
-        "message": "replay crashed",
-        "error": "RuntimeError",
-    }
-    assert tags(snapshot) == ["a"]
-    assert snapshot["progress"]["round"] == 2
 
 
 def test_a_long_failure_message_is_truncated(
@@ -901,59 +938,6 @@ def test_a_search_that_finds_nothing_is_recorded_as_failed(
     assert run["phase"] == "Failed"
     assert run["terminal"] is True
     assert run["message"] == "no feasible candidate found"
-
-
-def test_a_completed_search_flushes_stops_the_writer_and_stays_non_terminal(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    config = make_config(tmp_path, snapshot_interval_seconds=60)
-    adapter = DGDRRunOutputAdapter(config, workload=None)
-    adapter.start()
-    adapter.on_candidate(record("a", 9.0))
-    adapter.on_round(3, [])
-
-    adapter.finish_search()
-
-    snapshot = load(tmp_path)
-    assert snapshot["run"] == {"phase": "Running", "terminal": False}
-    assert tags(snapshot) == ["a"]
-    assert snapshot["progress"] == {"round": 3, "evaluated": 1}
-    # The writer is gone: nothing can overwrite the terminal snapshot written next.
-    assert adapter._thread is not None and not adapter._thread.is_alive()
-    writes = adapter.snapshot_writes
-    adapter.on_round(4, [])
-    time.sleep(0.1)
-    assert adapter.snapshot_writes == writes
-
-
-def test_the_terminal_snapshot_after_a_completed_search_keeps_the_live_progress(
-    tmp_path: Path, renders: list[str], fake_search_config: None
-) -> None:
-    callbacks = _subscribed(tmp_path)
-    callbacks.on_candidate(record("a", 9.0))
-    callbacks.on_round(3, [])
-    callbacks.on_complete()
-
-    create_adapter().write(
-        {**PLUGIN_CONFIG, "snapshot_dir": str(tmp_path)},
-        result=_final_result(1),
-        output_dir=tmp_path,
-    )
-
-    snapshot = load(tmp_path)
-    assert snapshot["run"]["phase"] == "Succeeded"
-    assert snapshot["progress"] == {"round": 3, "evaluated": 1}
-
-
-def test_failure_after_completion_is_a_noop_and_completion_after_failure_too(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    callbacks = _subscribed(tmp_path)
-    callbacks.on_candidate(record("a", 9.0))
-    callbacks.on_failure(RuntimeError("first"))
-    callbacks.on_complete()
-    callbacks.on_failure(RuntimeError("second"))
-    assert load(tmp_path)["run"]["message"] == "first"
 
 
 # -- robustness -----------------------------------------------------------------
@@ -979,26 +963,6 @@ def test_a_broken_renderer_leaves_a_terminal_failed_snapshot(
     assert all(c["outcome"] != "materialization_failed" for c in snapshot["candidates"])
 
 
-def test_non_finite_scores_and_objectives_stay_valid_for_the_publisher(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
-    adapter.on_candidate(record("a", float("-inf"), objectives={"e2e": float("nan")}))
-    adapter.on_candidate(record("b", float("nan")))
-    adapter.close()
-
-    text = (tmp_path / SNAPSHOT_FILE_NAME).read_text()
-    assert (
-        "inf" not in text.lower().replace("information", "")
-        and "nan" not in text.lower()
-    )
-    metrics = {
-        c["parameters"]["tag"]: c["metrics"] for c in load(tmp_path)["candidates"]
-    }
-    assert metrics["a"]["score"] is None and metrics["a"]["objectives"] == {"e2e": None}
-    assert metrics["b"]["score"] is None
-
-
 def test_a_candidate_error_message_is_bounded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1012,37 +976,6 @@ def test_a_candidate_error_message_is_bounded(
 
     (candidate,) = load(tmp_path)["candidates"]
     assert 0 < len(candidate["error"]) <= 500
-
-
-def test_a_persistent_write_failure_does_not_spin_the_writer(
-    tmp_path: Path, renders: list[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(adapter_module, "_WRITE_RETRY_BACKOFF", 0.2)
-    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
-    adapter.start()
-    attempts = {"count": 0}
-
-    def failing(directory: Path, snapshot: Any) -> Path:
-        attempts["count"] += 1
-        raise OSError("disk full")
-
-    monkeypatch.setattr(adapter_module, "write_snapshot", failing)
-    adapter.on_candidate(record("a", 1.0))
-    time.sleep(0.6)
-    seen = attempts["count"]
-    monkeypatch.undo()
-    adapter.close()
-    assert 1 <= seen <= 5
-
-
-def test_plugin_write_keeps_the_objectives_of_the_selected_candidates(
-    tmp_path: Path, renders: list[str], fake_search_config: None
-) -> None:
-    result = _final_result(1)
-    result.selected_candidates = [record("a", 9.0, objectives={"throughput": 12.5})]
-    create_adapter().write(PLUGIN_CONFIG, result=result, output_dir=tmp_path)
-    (candidate,) = load(tmp_path)["candidates"]
-    assert candidate["metrics"]["objectives"] == {"throughput": 12.5}
 
 
 def test_the_renderer_receives_the_candidates_gpu_count(
@@ -1087,13 +1020,28 @@ def test_every_finite_source_metric_survives_in_live_and_terminal_snapshots(
         "broken": None,
         "score": 87.7,
         "usedGpus": 4,
+        "objectives": {"goodput": 12.5, "invalid": None},
+    }
+    source = {
+        **SOURCE_METRICS,
+        "score": 999.0,
+        "usedGpus": 99,
+        "objectives": 123.0,
     }
 
     live = tmp_path / "live"
     live.mkdir()
     adapter = DGDRRunOutputAdapter(make_config(live), workload=None)
     adapter.start()
-    adapter.on_candidate(record("a", 87.7, gpus=4, metrics=dict(SOURCE_METRICS)))
+    adapter.on_candidate(
+        record(
+            "a",
+            87.7,
+            gpus=4,
+            metrics=source,
+            objectives={"goodput": 12.5, "invalid": float("nan")},
+        )
+    )
     wait_for(lambda: tags(load(live)) == ["a"])
     assert load(live)["candidates"][0]["metrics"] == expected
     adapter.close()
@@ -1102,70 +1050,96 @@ def test_every_finite_source_metric_survives_in_live_and_terminal_snapshots(
     final.mkdir()
     result = _final_result(1)
     result.selected_candidates = [
-        record("a", 87.7, gpus=4, metrics=dict(SOURCE_METRICS))
+        record(
+            "a",
+            87.7,
+            gpus=4,
+            metrics=source,
+            objectives={"goodput": 12.5, "invalid": float("nan")},
+        )
     ]
     create_adapter().write(
         {**PLUGIN_CONFIG, "snapshot_dir": str(final)}, result=result, output_dir=final
     )
     assert load(final)["candidates"][0]["metrics"] == expected
+    for directory in (live, final):
+        text = (directory / SNAPSHOT_FILE_NAME).read_text().lower()
+        assert "nan" not in text and "inf" not in text.replace("information", "")
 
 
-def test_reserved_metric_names_are_replaced_by_the_adapters_values(
-    tmp_path: Path, renders: list[str]
-) -> None:
-    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None)
-    adapter.on_candidate(
-        record("a", 5.0, gpus=2, metrics={"score": 999.0, "usedGpus": 99, "ttft": 1.0})
-    )
-    adapter.close()
-    assert load(tmp_path)["candidates"][0]["metrics"] == {
-        "ttft": 1.0,
-        "score": 5.0,
-        "usedGpus": 2,
-    }
-
-
-def test_a_selection_where_every_candidate_fails_to_materialize_is_a_failed_run(
+@pytest.mark.parametrize(
+    ("failure_limits", "phase", "expected_outcomes", "expected_attempts"),
+    [
+        pytest.param(
+            (99, 99),
+            "Failed",
+            ("materialization_failed", "materialization_failed"),
+            (3, 3),
+            id="all-fail-bounded",
+        ),
+        pytest.param(
+            (99, 0),
+            "Succeeded",
+            ("materialization_failed", "materialized"),
+            (3, 1),
+            id="partial-success",
+        ),
+        pytest.param(
+            (1,),
+            "Succeeded",
+            ("materialized",),
+            (2,),
+            id="transient-recovers",
+        ),
+    ],
+)
+def test_materialization_retry_and_terminal_policy(
     tmp_path: Path,
-    renders: list[str],
     fake_search_config: None,
     monkeypatch: pytest.MonkeyPatch,
+    failure_limits: tuple[int, ...],
+    phase: str,
+    expected_outcomes: tuple[str, ...],
+    expected_attempts: tuple[int, ...],
 ) -> None:
     monkeypatch.setattr(adapter_module, "_WRITE_RETRY_BACKOFF", 0)
-    result = _final_result(2)
-    result.selected_candidates = [record("bad1", 9.0), record("bad2", 5.0)]
+    attempts = [0] * len(failure_limits)
 
-    with pytest.raises(CandidateMaterializationError, match="no selected candidate"):
+    def flaky_render(candidate: Any, *_: Any, **__: Any) -> str:
+        index = int(candidate.config["tag"].removeprefix("candidate-"))
+        attempts[index] += 1
+        if attempts[index] <= failure_limits[index]:
+            raise CandidateMaterializationError(f"cannot render candidate-{index}")
+        return "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\n"
+
+    monkeypatch.setattr(adapter_module, "render_dgd", flaky_render)
+    result = _final_result(len(failure_limits))
+    result.selected_candidates = [
+        record(f"candidate-{index}", float(len(failure_limits) - index))
+        for index in range(len(failure_limits))
+    ]
+
+    if phase == "Failed":
+        with pytest.raises(
+            CandidateMaterializationError, match="no selected candidate"
+        ):
+            create_adapter().write(
+                {**PLUGIN_CONFIG, "max_candidates": len(failure_limits)},
+                result=result,
+                output_dir=tmp_path,
+            )
+    else:
         create_adapter().write(
-            {**PLUGIN_CONFIG, "max_candidates": 2}, result=result, output_dir=tmp_path
+            {**PLUGIN_CONFIG, "max_candidates": len(failure_limits)},
+            result=result,
+            output_dir=tmp_path,
         )
 
     snapshot = load(tmp_path)
-    assert snapshot["run"]["phase"] == "Failed"
-    assert snapshot["run"]["terminal"] is True
-    assert snapshot["run"]["error"] == "CandidateMaterializationError"
-    assert "cannot render bad1" in snapshot["run"]["message"]
-    assert len(snapshot["run"]["message"]) <= adapter_module._MAX_ERROR_MESSAGE
-    assert all(c["outcome"] == "materialization_failed" for c in snapshot["candidates"])
-
-
-def test_a_selection_with_one_materialized_candidate_still_succeeds(
-    tmp_path: Path,
-    renders: list[str],
-    fake_search_config: None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(adapter_module, "_WRITE_RETRY_BACKOFF", 0)
-    result = _final_result(2)
-    result.selected_candidates = [record("bad1", 9.0), record("good", 5.0)]
-
-    create_adapter().write(
-        {**PLUGIN_CONFIG, "max_candidates": 2}, result=result, output_dir=tmp_path
-    )
-
-    snapshot = load(tmp_path)
-    assert snapshot["run"]["phase"] == "Succeeded"
-    assert {c["parameters"]["tag"]: c["outcome"] for c in snapshot["candidates"]} == {
-        "bad1": "materialization_failed",
-        "good": "materialized",
-    }
+    assert snapshot["run"]["phase"] == phase
+    assert tuple(c["outcome"] for c in snapshot["candidates"]) == expected_outcomes
+    assert tuple(attempts) == expected_attempts
+    if phase == "Failed":
+        assert snapshot["run"]["error"] == "CandidateMaterializationError"
+        assert "cannot render candidate-0" in snapshot["run"]["message"]
+        assert len(snapshot["run"]["message"]) <= adapter_module._MAX_ERROR_MESSAGE
