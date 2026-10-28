@@ -19,7 +19,6 @@ from dynamo.llm import AisPerfConfig, KvRouter, KvRouterConfig
 from dynamo.prometheus_names import frontend_service, name_prefix
 from tests.router.helper import (
     assert_event_dumps_equal,
-    frontend_admin_port,
     get_runtime,
     managed_runtime,
     poll_for_worker_instances,
@@ -31,6 +30,8 @@ from tests.router.helper import (
     wait_for_workers_ready,
 )
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
+from tests.utils.constants import DynamoPortRange
+from tests.utils.port_utils import reserved_ports
 from tests.utils.router_logs import (
     parse_kv_event_diagnostics,
     select_kv_event_diagnostics,
@@ -1716,7 +1717,7 @@ def _test_router_threshold_none_disables_rejection(
         frontend_port,
     )
 
-    with frontend_admin_port() as admin_port, KVRouterProcess(
+    with reserved_ports(1, DynamoPortRange.FRONTEND) as (admin_port,), KVRouterProcess(
         request=request,
         block_size=block_size,
         frontend_port=frontend_port,
@@ -3360,7 +3361,7 @@ def _test_busy_threshold_endpoint(
     initial_active_decode_blocks_threshold = 0.9
     initial_active_prefill_tokens_threshold = 1000  # Literal token count threshold
 
-    with frontend_admin_port() as admin_port, KVRouterProcess(
+    with reserved_ports(1, DynamoPortRange.FRONTEND) as (admin_port,), KVRouterProcess(
         request,
         block_size,
         frontend_port,

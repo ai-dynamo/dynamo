@@ -587,8 +587,8 @@ Use `--router-queue-policy wspt` when your workload has a mix of short and long 
 ## Runtime Policy Updates
 
 **Experimental.** `/router_policy` groups worker-selection parameters and model-level busy
-thresholds on the frontend admin port (`127.0.0.1:8002` by default), not the inference port.
-The admin port is off unless `DYN_ENABLE_FRONTEND_ADMIN_API=1` is set.
+thresholds on the frontend admin port (`127.0.0.1:8002` by default), which is off unless
+`DYN_ENABLE_FRONTEND_ADMIN_API=1` is set.
 
 | Resource | Methods | Scope |
 | --- | --- | --- |
@@ -696,11 +696,10 @@ reset. Updating thresholds and selection parameters is not one atomic transactio
 
 ### Scope and Access
 
-The frontend admin API is disabled by default. `DYN_ENABLE_FRONTEND_ADMIN_API=1` starts it on
-its own listener, bound to `127.0.0.1:8002`, with no admin authentication. The inference port
-does not serve these routes. Set `DYN_FRONTEND_ADMIN_PORT` to change the port; if the port cannot
-be bound, the frontend fails to start. `DYN_FRONTEND_ADMIN_HOST` widens the bind address; if you
-widen it, restrict the admin port at the network boundary.
+The admin listener has no authentication and is never served on the inference port. If you
+widen its bind address with `DYN_FRONTEND_ADMIN_HOST`, restrict the admin port at the network
+boundary. See [Admin](../../../../reference/components/frontend-configuration.mdx#admin) for the
+listener settings.
 
 Updates are process-local and not persisted. A rebuilt router receives a new ID and starts
 from its configured startup values. A controller must address each frontend replica directly,

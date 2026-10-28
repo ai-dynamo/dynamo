@@ -1381,8 +1381,6 @@ impl HttpServiceConfigBuilder {
         // builder flag can also force it off (e.g. tests), and wins.
         let nvext_enabled =
             config.enable_nvext && !env_is_truthy(env_llm::DYN_DISABLE_FRONTEND_NVEXT);
-        let admin_api_enabled =
-            config.enable_admin_api || env_is_truthy(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API);
         let state = Arc::new(State::new(
             model_manager,
             discovery_client,
@@ -1551,6 +1549,8 @@ impl HttpServiceConfigBuilder {
         // Admin routes are served on their own listener, so they are documented after the
         // inference port's `/openapi.json` is built: `route_docs()` lists them, that spec does not.
         // TODO: Add authentication to the admin listener.
+        let admin_api_enabled =
+            config.enable_admin_api || env_is_truthy(env_llm::DYN_ENABLE_FRONTEND_ADMIN_API);
         let admin = if admin_api_enabled {
             let mut admin_router = axum::Router::new();
             for (route_docs, route) in [
@@ -2657,33 +2657,19 @@ mod tests {
         assert_eq!(observer.inflight_count(), 0);
     }
 
-    /// Returns a local port that was free when this was called.
-    async fn free_local_port() -> u16 {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap().port()
-    }
-
     #[tokio::test]
     async fn test_admin_routes_only_on_admin_listener() {
-        let cancel_token = CancellationToken::new();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let admin_port = free_local_port().await;
-        let service = HttpService::builder()
-            .port(port)
-            .enable_admin_api(true)
-            .admin_port(admin_port)
-            .build()
-            .unwrap();
+        // Off by default.
+        assert!(HttpService::builder().build().unwrap().admin.is_none());
 
-        let service_token = cancel_token.clone();
-        let handle = tokio::spawn(async move {
-            service
-                .run_with_listener(service_token, listener)
-                .await
-                .unwrap();
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let admin_port = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (port, _, handle) =
+            spawn_service(|builder| builder.enable_admin_api(true).admin_port(admin_port)).await;
 
         let client = reqwest::Client::new();
         for (method, path) in [
@@ -2709,27 +2695,6 @@ mod tests {
             .await
             .expect("admin request failed");
         assert_eq!(admin.status(), reqwest::StatusCode::OK);
-
-        let live = client
-            .get(format!("http://localhost:{}/live", port))
-            .send()
-            .await
-            .expect("request failed");
-        assert_eq!(live.status(), reqwest::StatusCode::OK);
-
-        cancel_token.cancel();
-        handle.abort();
-
-        // Disabled by default: nothing listens on the admin port.
-        let admin_port = free_local_port().await;
-        let (_, _, handle) = spawn_service(|builder| builder.admin_port(admin_port)).await;
-        assert!(
-            client
-                .get(format!("http://127.0.0.1:{admin_port}/busy_threshold"))
-                .send()
-                .await
-                .is_err()
-        );
         handle.abort();
     }
 
