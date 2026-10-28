@@ -26,6 +26,11 @@ pub enum LoadMeasure {
     /// whose workers differ in speed or size. A pool not yet measured while
     /// generating takes the mean time per token of those that have been.
     Latency,
+    /// How full a pool is against its own capacity, 1 being full: the
+    /// fuller of its request slots and its KV blocks (see
+    /// [`PoolSignals::occupancy`]). It compares pools of any speed or size,
+    /// and a pool counts as overloaded only when it is full.
+    Occupancy,
 }
 
 /// When a pool counts as overloaded: its load is more than `ratio` times
@@ -63,6 +68,13 @@ pub enum SpillRule {
     /// takes the same margin the other way, so a session does not flip
     /// between pools that cost about the same.
     Cheapest { margin: Duration },
+    /// Leave the pool for the nearest pool with more than `factor` times its
+    /// spare capacity (1 minus [`LoadMeasure::Occupancy`]); a full pool
+    /// leaves for the nearest pool with any room, and stays if none has
+    /// room. With `factor` 2, a pool at 80% gives sessions to one at 10%,
+    /// but one at 10% keeps them from one at 2%. Coming back takes the same
+    /// factor the other way, so sessions do not flip between pools.
+    Headroom { factor: f64 },
 }
 
 /// How the session-aware selectors decide when a request leaves its pool.
@@ -148,18 +160,27 @@ pub(crate) fn place<'a>(
                 let fleet = (served > 0.0).then(|| weighted / served);
                 (busy, fleet, spill.overload.latency_floor.as_secs_f64())
             }
+            LoadMeasure::Occupancy => {
+                let busy = pools
+                    .iter()
+                    .map(|pool| signals.occupancy(&pool.id).map(|occupancy| occupancy.load))
+                    .collect::<Vec<_>>();
+                (busy, None, 0.0)
+            }
         };
     let distances = region_distances(&pools, region, signals);
     pools
         .into_iter()
         .zip(busy)
         .map(|(pool, busy)| {
-            let overloaded = match (busy, fleet) {
-                (Some(busy), Some(fleet)) => {
+            let overloaded = match (spill.measure, busy, fleet) {
+                // Relative to the pool's own capacity: full is 1.
+                (LoadMeasure::Occupancy, busy, _) => busy.is_none_or(|busy| busy >= 1.0),
+                (_, Some(busy), Some(fleet)) => {
                     busy > spill.overload.ratio * fleet && busy - fleet >= floor
                 }
-                (None, Some(_)) => true,
-                (_, None) => false,
+                (_, None, Some(_)) => true,
+                (_, _, None) => false,
             };
             Candidate {
                 pool,
@@ -272,6 +293,31 @@ fn cost(candidate: &Candidate<'_>) -> Option<f64> {
     Some(candidate.distance?.as_secs_f64() + candidate.busy?)
 }
 
+/// For [`SpillRule::Headroom`]: `default`, unless another pool has more than
+/// `factor` times its spare capacity (1 minus its occupancy); then the first
+/// such pool in `candidates`' order, nearest first. A full default leaves
+/// for the first pool with any room, and stays if none has room; a default
+/// whose occupancy is unknown leaves for the first pool whose occupancy is
+/// known. Without a default, the first candidate.
+pub(crate) fn headroom<'a, 'b>(
+    candidates: &'b [Candidate<'a>],
+    default: Option<&'b Candidate<'a>>,
+    factor: f64,
+) -> Option<&'b Candidate<'a>> {
+    let Some(default) = default else {
+        return candidates.first();
+    };
+    // Less than none for a pool of unknown load, so any known pool beats it.
+    let need = default
+        .busy
+        .map_or(f64::NEG_INFINITY, |busy| (factor * (1.0 - busy)).max(0.0));
+    candidates
+        .iter()
+        .filter(|candidate| candidate.pool.id != default.pool.id)
+        .find(|candidate| candidate.busy.is_some_and(|busy| 1.0 - busy > need))
+        .or(Some(default))
+}
+
 /// For [`SpillRule::Cheapest`]: `default`, unless the cheapest other pool
 /// is at least `margin` cheaper, or `default`'s cost is unknown; then that
 /// pool. Without a default, the cheapest pool. When no other pool's cost
@@ -352,6 +398,7 @@ pub(crate) mod tests {
                     started_total: 0,
                     completed_total: 0,
                     output_tokens_total: 0,
+                    max_concurrency: None,
                     observed_ms: 0,
                 },
             );
@@ -375,6 +422,7 @@ pub(crate) mod tests {
                     started_total,
                     completed_total: 0,
                     output_tokens_total: 0,
+                    max_concurrency: None,
                     observed_ms,
                 };
                 signals.record_load(&pool.id, report);
@@ -396,6 +444,36 @@ pub(crate) mod tests {
                 margin: Duration::from_secs(1),
             },
             ..by_latency()
+        }
+    }
+
+    /// Sets each pool's occupancy: requests in flight, all generating, over
+    /// 128 slots, with too little KV in use to bind.
+    pub(crate) fn set_occupancy(pools: &[Pool], signals: &PoolSignals, loads: [f64; 4]) {
+        for (pool, load) in pools.iter().zip(loads) {
+            let in_flight = (load * 128.0).round() as u64;
+            let report = LoadReport {
+                load: PoolLoad {
+                    in_flight,
+                    workers: 8,
+                },
+                awaiting: 0,
+                started_total: in_flight,
+                completed_total: 0,
+                output_tokens_total: 0,
+                max_concurrency: Some(128),
+                observed_ms: 0,
+            };
+            signals.record_load(&pool.id, report);
+            signals.record_kv(&pool.id, 0, 16384);
+        }
+    }
+
+    pub(crate) fn by_headroom() -> Spill {
+        Spill {
+            measure: LoadMeasure::Occupancy,
+            rule: SpillRule::Headroom { factor: 2.0 },
+            ..Spill::default()
         }
     }
 
@@ -474,6 +552,7 @@ pub(crate) mod tests {
                     started_total: completed_total + generating,
                     completed_total,
                     output_tokens_total,
+                    max_concurrency: None,
                     observed_ms,
                 };
                 signals.record_load(&pool.id, report);
@@ -557,6 +636,7 @@ pub(crate) mod tests {
             started_total: 0,
             completed_total: 0,
             output_tokens_total: 0,
+            max_concurrency: None,
             observed_ms: 0,
         };
         signals.record_load(&pools[1].id, report);

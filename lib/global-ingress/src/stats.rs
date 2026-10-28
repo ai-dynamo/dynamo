@@ -104,6 +104,7 @@ impl RoutingStats {
             .map(|pool| {
                 let load = signals.load(&pool.id);
                 let timing = signals.timing(&pool.id);
+                let occupancy = signals.occupancy(&pool.id);
                 json!({
                     "name": pool.name,
                     "region": pool.location.region,
@@ -115,6 +116,9 @@ impl RoutingStats {
                         .and_then(|timing| timing.token_time)
                         .map(|token_time| token_time.as_secs_f64() * 1000.0),
                     "served_per_s": timing.map(|timing| timing.served_per_s),
+                    "occupancy": occupancy.map(|occupancy| occupancy.load),
+                    "slot_occupancy": occupancy.map(|occupancy| occupancy.slots),
+                    "kv_occupancy": occupancy.map(|occupancy| occupancy.kv),
                     "round_trip_ms": signals
                         .round_trip(&pool.id)
                         .map(|round_trip| round_trip.as_secs_f64() * 1000.0),

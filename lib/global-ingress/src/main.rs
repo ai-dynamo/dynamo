@@ -97,6 +97,10 @@ struct Args {
     /// `--spill-rule cheapest`: how much cheaper another pool must be.
     #[arg(long, default_value_t = 1000)]
     switch_margin_ms: u64,
+    /// `--spill-rule headroom`: how many times more spare capacity another
+    /// pool must have.
+    #[arg(long, default_value_t = 2.0)]
+    headroom_factor: f64,
     /// `affinity`: forget a session's pool after this long without a request.
     #[arg(long, default_value_t = 1800)]
     pin_idle_secs: u64,
@@ -127,6 +131,10 @@ enum Rule {
     /// request, when it is at least `--switch-margin-ms` cheaper. Needs
     /// `--load-measure latency`.
     Cheapest,
+    /// For the nearest pool with more than `--headroom-factor` times the
+    /// spare capacity; a full pool's request for the nearest pool with any
+    /// room. Needs `--load-measure occupancy`.
+    Headroom,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -136,6 +144,9 @@ enum Measure {
     /// Expected time for a typical request: the wait for a first token plus
     /// the fleet's mean output length times the pool's time per token.
     Latency,
+    /// How full the pool is against its own capacity: the fuller of its
+    /// request slots and its KV blocks. Needs `--spill-rule headroom`.
+    Occupancy,
 }
 
 fn parse_pool(value: &str) -> Result<Pool, String> {
@@ -209,6 +220,7 @@ async fn main() -> Result<()> {
         measure: match args.load_measure {
             Measure::PerWorker => LoadMeasure::PerWorker,
             Measure::Latency => LoadMeasure::Latency,
+            Measure::Occupancy => LoadMeasure::Occupancy,
         },
         overload: Overload {
             ratio: args.overload_ratio,
@@ -220,10 +232,17 @@ async fn main() -> Result<()> {
             Rule::Cheapest => SpillRule::Cheapest {
                 margin: Duration::from_millis(args.switch_margin_ms),
             },
+            Rule::Headroom => SpillRule::Headroom {
+                factor: args.headroom_factor,
+            },
         },
     };
     if matches!(spill.rule, SpillRule::Cheapest { .. }) && spill.measure != LoadMeasure::Latency {
         bail!("--spill-rule cheapest needs --load-measure latency");
+    }
+    if matches!(spill.rule, SpillRule::Headroom { .. }) != (spill.measure == LoadMeasure::Occupancy)
+    {
+        bail!("--spill-rule headroom and --load-measure occupancy go together");
     }
     let region = || {
         args.region

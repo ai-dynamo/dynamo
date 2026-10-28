@@ -43,6 +43,9 @@ pub struct LoadReport {
     pub completed_total: u64,
     /// Output tokens the pool has produced since its Relay started.
     pub output_tokens_total: u64,
+    /// How many requests the pool's workers can run at once, as they report
+    /// it. `None` if any worker has not.
+    pub max_concurrency: Option<u64>,
     /// When the Relay observed these counts, in milliseconds on its clock.
     pub observed_ms: u64,
 }
@@ -66,6 +69,19 @@ pub struct PoolTiming {
     pub output_tokens: u64,
 }
 
+/// How full a pool is against its own capacity, 1 being full, on each
+/// resource that can run out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PoolOccupancy {
+    /// The fuller of the two.
+    pub load: f64,
+    /// Requests in flight over the requests the pool can run at once.
+    pub slots: f64,
+    /// The KV blocks all requests in flight would hold, at the blocks each
+    /// running request holds now, over the pool's KV blocks.
+    pub kv: f64,
+}
+
 /// What the router knows about each pool besides the catalog: its load, as
 /// its Relay last reported it, and the round trip to it, as this process
 /// measures it. Both are written by background tasks and read on every
@@ -73,6 +89,7 @@ pub struct PoolTiming {
 #[derive(Debug)]
 pub struct PoolSignals {
     loads: DashMap<PoolId, Report>,
+    kv: DashMap<PoolId, KvReport>,
     round_trips: DashMap<PoolId, Duration>,
     in_flight: Arc<InFlightTracker>,
     max_age: Duration,
@@ -94,6 +111,14 @@ struct Report {
     /// An idle pool keeps it: how fast a pool decodes does not change while
     /// it waits for work.
     token_time: Option<Duration>,
+    max_concurrency: Option<u64>,
+}
+
+#[derive(Debug)]
+struct KvReport {
+    used: u64,
+    total: u64,
+    received: Instant,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -112,6 +137,7 @@ impl PoolSignals {
     pub fn new(in_flight: Arc<InFlightTracker>, max_age: Duration) -> Self {
         Self {
             loads: DashMap::new(),
+            kv: DashMap::new(),
             round_trips: DashMap::new(),
             in_flight,
             max_age,
@@ -149,8 +175,10 @@ impl PoolSignals {
             started,
             samples: VecDeque::new(),
             token_time: None,
+            max_concurrency: report.max_concurrency,
         });
         current.load = report.load;
+        current.max_concurrency = report.max_concurrency;
         current.received = received;
         current.started = started;
         let samples = &mut current.samples;
@@ -184,6 +212,61 @@ impl PoolSignals {
     /// Drops a pool's load, for when its Relay stream ends.
     pub fn forget_load(&self, pool: &PoolId) {
         self.loads.remove(pool);
+    }
+
+    /// Records the KV blocks a pool's workers hold for running requests, and
+    /// their total, as the pool's Relay reported.
+    pub fn record_kv(&self, pool: &PoolId, used: u64, total: u64) {
+        let received = Instant::now();
+        self.kv.insert(
+            pool.clone(),
+            KvReport {
+                used,
+                total,
+                received,
+            },
+        );
+    }
+
+    /// Drops a pool's KV report, for when its Relay stream ends or its view
+    /// is incomplete.
+    pub fn forget_kv(&self, pool: &PoolId) {
+        self.kv.remove(pool);
+    }
+
+    /// How full the pool is against its own capacity. Requests this process
+    /// has sent since the last report count as in flight, as in
+    /// [`Self::load`]. The KV side counts waiting requests too, at the blocks
+    /// each running request holds now, so it reaches 1 when the pool's KV
+    /// cannot hold everything it has, even though the blocks in use never
+    /// exceed the total. `None` without fresh reports of both, or before the
+    /// workers report how many requests they can run.
+    pub fn occupancy(&self, pool: &PoolId) -> Option<PoolOccupancy> {
+        let report = self
+            .loads
+            .get(pool)
+            .filter(|report| report.received.elapsed() <= self.max_age)?;
+        let capacity = report.max_concurrency.filter(|capacity| *capacity > 0)?;
+        let kv = self
+            .kv
+            .get(pool)
+            .filter(|kv| kv.received.elapsed() <= self.max_age && kv.total > 0)?;
+        let in_flight = (report.load.in_flight
+            + self.in_flight.started(pool).saturating_sub(report.started))
+            as f64;
+        let generating = report.samples.back().map_or(0, |sample| sample.generating) as f64;
+        let slots = in_flight / capacity as f64;
+        let held = if generating > 0.0 {
+            kv.used as f64 * in_flight.max(generating) / generating
+        } else {
+            kv.used as f64
+        };
+        let kv = held / kv.total as f64;
+        Some(PoolOccupancy {
+            load: slots.max(kv),
+            slots,
+            kv,
+        })
     }
 
     /// The pool's load, if its last report is fresh. The Relay reports once
@@ -309,6 +392,7 @@ mod tests {
             started_total,
             completed_total: 0,
             output_tokens_total: 0,
+            max_concurrency: None,
             observed_ms,
         }
     }
@@ -331,6 +415,7 @@ mod tests {
             started_total: completed_total + generating,
             completed_total,
             output_tokens_total,
+            max_concurrency: None,
             observed_ms,
         }
     }
@@ -459,6 +544,42 @@ mod tests {
         let timing = signals.timing(&blue).unwrap();
         assert_eq!(timing.token_time, Some(Duration::from_millis(20)));
         assert_eq!((timing.completed, timing.output_tokens), (0, 0));
+    }
+
+    #[test]
+    fn occupancy_is_the_fuller_of_slots_and_kv() {
+        let in_flight = Arc::new(InFlightTracker::new());
+        let signals = PoolSignals::new(in_flight.clone(), Duration::from_secs(60));
+        let blue = pool("blue", "qwen", &["http://blue:8000"]).id;
+        // 64 in flight, 32 of them generating, of 128 slots.
+        let mut report = generating(0, 32, 0, 0);
+        report.load.in_flight = 64;
+        report.awaiting = 32;
+        report.max_concurrency = Some(128);
+        signals.record_load(&blue, report);
+        assert_eq!(signals.occupancy(&blue), None);
+
+        // Slot-bound: half the slots, and 1,000 of 16,384 KV blocks for 32
+        // running requests (2,000 for all 64).
+        signals.record_kv(&blue, 1000, 16384);
+        let occupancy = signals.occupancy(&blue).unwrap();
+        assert_eq!(occupancy.slots, 0.5);
+        assert!((occupancy.kv - 2000.0 / 16384.0).abs() < 1e-12);
+        assert_eq!(occupancy.load, 0.5);
+
+        // KV-bound: 8,000 blocks for 32 running requests; all 64 would need
+        // 16,000, nearly every block, though half the slots are free.
+        signals.record_kv(&blue, 8000, 16384);
+        let occupancy = signals.occupancy(&blue).unwrap();
+        assert!((occupancy.load - 16000.0 / 16384.0).abs() < 1e-12);
+
+        // Requests this process sent since the report count as in flight.
+        let _sent = [in_flight.start(&blue), in_flight.start(&blue)];
+        assert!((signals.occupancy(&blue).unwrap().slots - 66.0 / 128.0).abs() < 1e-12);
+
+        // Without the workers' capacity, or a KV report, nothing is known.
+        signals.forget_kv(&blue);
+        assert_eq!(signals.occupancy(&blue), None);
     }
 
     #[test]

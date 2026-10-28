@@ -17,7 +17,9 @@ use dynamo_runtime::pipeline::BuiltinRoutePicker;
 use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
 
 use crate::catalog::Pool;
-use crate::placement::{Spill, SpillRule, by_distance, cheapest, cost_order, least_loaded, place};
+use crate::placement::{
+    Spill, SpillRule, by_distance, cheapest, cost_order, headroom, least_loaded, place,
+};
 use crate::selector::{PoolSelector, PoolTarget, RoutingRequest, target};
 use crate::signals::PoolSignals;
 
@@ -76,6 +78,7 @@ impl PoolSelector for RendezvousSelector {
                 .or_else(|| least_loaded(&placed)),
             // Home is the first pool in hash order.
             SpillRule::Cheapest { margin } => cheapest(&placed, placed.first(), margin),
+            SpillRule::Headroom { factor } => headroom(&placed, placed.first(), factor),
         }?;
         target(&self.frontends, choice.pool)
     }
@@ -191,6 +194,13 @@ impl PoolSelector for AffinitySelector {
                     .or_else(|| placed.first());
                 cheapest(&placed, default, margin)
             }
+            SpillRule::Headroom { factor } => {
+                let default = placed
+                    .iter()
+                    .find(|candidate| is_pinned(candidate.pool))
+                    .or_else(|| placed.first());
+                headroom(&placed, default, factor)
+            }
         }?;
         if let Some(session) = request.session {
             self.pin(session, &choice.pool.id);
@@ -202,7 +212,9 @@ impl PoolSelector for AffinitySelector {
 
 #[cfg(test)]
 mod tests {
-    use crate::placement::tests::{OHIO, by_cost, by_latency, fleet, set_loads, set_waits};
+    use crate::placement::tests::{
+        OHIO, by_cost, by_headroom, by_latency, fleet, set_loads, set_occupancy, set_waits,
+    };
 
     use super::*;
 
@@ -384,6 +396,67 @@ mod tests {
 
         set_waits(&pools, &signals, [(4, 8); 4]);
         assert_eq!(pick(&selector, &pools, Some("s")), home);
+    }
+
+    // Occupancies below are fractions of each pool's own capacity.
+
+    #[test]
+    fn affinity_by_headroom_moves_for_twice_the_room_and_does_not_flip_back() {
+        let (pools, signals) = fleet();
+        let idle = Duration::from_secs(60);
+        let selector = AffinitySelector::new(signals.clone(), OHIO.into(), by_headroom(), idle);
+        set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+
+        // 10% against 2%: 0.9 spare against 0.98, nothing to gain.
+        set_occupancy(&pools, &signals, [0.1, 0.02, 0.02, 0.02]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        // 50% against 30%: 0.5 spare against 0.7, under twice.
+        set_occupancy(&pools, &signals, [0.5, 0.3, 0.3, 0.3]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        // 80% against 10%: 0.2 against 0.9, so to the nearest such pool.
+        set_occupancy(&pools, &signals, [0.8, 0.1, 0.1, 0.1]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        // Ohio-a recovers to 40% and Ohio-b fills to 60%: 0.4 spare
+        // against 0.6 is under twice, so no flip back.
+        set_occupancy(&pools, &signals, [0.4, 0.6, 0.6, 0.6]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+    }
+
+    #[test]
+    fn affinity_by_headroom_fails_over_from_a_full_pool_or_stays_if_all_are_full() {
+        let (pools, signals) = fleet();
+        let idle = Duration::from_secs(60);
+        let selector = AffinitySelector::new(signals.clone(), OHIO.into(), by_headroom(), idle);
+        set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+
+        // Ohio-a is full; Ohio-b has a little room, Oregon more, but the
+        // nearest pool with any room wins.
+        set_occupancy(&pools, &signals, [1.2, 0.95, 0.5, 0.5]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        // Every pool is full: moving would only cost a cold prefill.
+        set_occupancy(&pools, &signals, [1.1, 1.2, 1.1, 1.3]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+    }
+
+    #[test]
+    fn affinity_by_headroom_lets_a_quiet_region_take_load_from_busy_ones() {
+        let (pools, signals) = fleet();
+        let idle = Duration::from_secs(60);
+        let selector = AffinitySelector::new(signals.clone(), OHIO.into(), by_headroom(), idle);
+        set_occupancy(&pools, &signals, [0.1, 0.2, 0.2, 0.2]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+
+        // Ohio and Oregon at 90%, Tokyo at 20%: only Tokyo has twice the room.
+        set_occupancy(&pools, &signals, [0.9, 0.9, 0.9, 0.2]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "tokyo-a");
+        // A new session from Ohio goes there too.
+        assert_eq!(pick(&selector, &pools, Some("t")), "tokyo-a");
+        // With Ohio at 60%, a new session stays local: 0.4 spare against
+        // Tokyo's 0.8 is not more than twice.
+        set_occupancy(&pools, &signals, [0.6, 0.7, 0.9, 0.2]);
+        assert_eq!(pick(&selector, &pools, Some("u")), "ohio-a");
     }
 
     #[test]
