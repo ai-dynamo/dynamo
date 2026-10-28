@@ -396,6 +396,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
+    m.add_class::<llm::kv::SessionBindingStream>()?;
+    #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionCacheConfig>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::kv::MultimodalEmbeddingCachePublisher>()?;
@@ -421,7 +423,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelInput>()?;
     m.add_class::<WorkerType>()?;
     m.add_class::<llm::kv::KvRouter>()?;
-    m.add_class::<llm::kv_dc_relay::KvDcRelay>()?;
+    m.add_class::<llm::pool_relay::PoolRelay>()?;
     m.add_class::<llm::kv_state_agent::KvStateAgentHost>()?;
     m.add_class::<llm::kv_state_agent::KvStateAttachmentOwner>()?;
     m.add_class::<llm::routed_engine::RoutedEngine>()?;

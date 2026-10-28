@@ -69,6 +69,7 @@ to it — edit only the canonical copy.
 **Pull requests, review, and CI:**
 
 - `pr-checklist` — check a PR for design fit, tests, code quality, and description, when making or reviewing one
+- `dynamo-perf-best-practices` — check hot-path changes in a PR against Dynamo's performance practices; pr-checklist runs it
 - `graham-code-review` — strict Rust/systems review in Graham King's style
 - `visual-review` — interactive HTML review dashboard for a PR or diff
 - `pr-monitor` — a PR's CI status, why full CI has or has not triggered, and failure root cause against `main`
