@@ -17,6 +17,7 @@ pub mod common;
 pub mod openai;
 pub mod response_merge;
 pub mod sglang;
+pub mod systemone;
 pub mod tensor;
 pub(crate) mod unified;
 
