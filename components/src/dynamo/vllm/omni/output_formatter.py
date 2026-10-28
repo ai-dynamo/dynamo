@@ -65,7 +65,12 @@ except (ImportError, OSError):
     mux_video_audio_bytes = None  # type: ignore[assignment]
 
 from dynamo.common.protocols.audio_protocol import AudioData, NvAudioSpeechResponse
-from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
+from dynamo.common.protocols.image_protocol import (
+    ImageAccounting,
+    ImageData,
+    ImagesResponseNvExt,
+    NvImagesResponse,
+)
 from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
 from dynamo.common.storage import upload_to_fs
 from dynamo.common.utils.engine_response import normalize_finish_reason
@@ -280,7 +285,9 @@ class DiffusionFormatter:
             stage_output: vLLM-Omni stage output containing generated media.
             request_id: Identifier included in the response.
             request_type: Request kind used to distinguish image and video output.
-            **ctx: Response format, output format, and frame-rate overrides.
+            **ctx: Response format, output format, frame-rate overrides, and
+                the image accounting inputs ``input_images`` and
+                ``num_inference_steps``.
 
         Returns:
             Dict[str, Any] | None: Formatted response, or ``None`` for empty images.
@@ -309,6 +316,8 @@ class DiffusionFormatter:
             request_type=request_type,
             response_format=ctx.get("response_format"),
             output_format=ctx.get("output_format"),
+            input_images=ctx.get("input_images", 0),
+            num_inference_steps=ctx.get("num_inference_steps"),
         )
 
     async def _encode_video(
@@ -758,6 +767,8 @@ class DiffusionFormatter:
         request_type: Any,
         response_format: Optional[str] = None,
         output_format: Optional[str] = None,
+        input_images: int = 0,
+        num_inference_steps: int | None = None,
     ) -> Dict[str, Any] | None:
         """Encode generated images for chat or image-generation responses.
 
@@ -767,6 +778,11 @@ class DiffusionFormatter:
             request_type: Request kind selecting the response schema.
             response_format: ``"url"`` or ``"b64_json"`` output representation.
             output_format: ``"png"``, ``"jpeg"``, or ``"webp"`` encoding.
+            input_images: Reference images the request consumed, reported as
+                image accounting on an image-generation response.
+            num_inference_steps: The step count the request asked for, or
+                ``None`` when the model default applied. vLLM-Omni's stage
+                output does not carry the count the engine ran.
 
         Returns:
             Dict[str, Any] | None: Formatted response or ``None`` for other request kinds.
@@ -823,6 +839,13 @@ class DiffusionFormatter:
                 data=image_data_list,
                 output_format=output_format,
                 size=_resolved_image_size(images),
+                nvext=ImagesResponseNvExt(
+                    usage=ImageAccounting(
+                        output_images=len(image_data_list),
+                        input_images=input_images,
+                        num_inference_steps=num_inference_steps,
+                    )
+                ),
             ).model_dump(exclude_none=True)
 
         return None
@@ -933,6 +956,19 @@ class AudioFormatter:
             if stream_state is not None or aggregate_state is not None:
                 return None
             return self._error_response(request_id, "No audio generated")
+
+        # DELTA output drains the audio key but can retain sample-rate metadata.
+        # It is not a media result or a failure. Aggregate completion and health
+        # probes still require nonempty audio elsewhere in the response stream.
+        if (
+            isinstance(mm_output, Mapping)
+            and set(mm_output) == {"sr"}
+            and (
+                stream_state is not None
+                or (aggregate_state is not None and not aggregate_state.cumulative)
+            )
+        ):
+            return None
 
         response_format = ctx.get("response_format")
         output_format = ctx.get("output_format")

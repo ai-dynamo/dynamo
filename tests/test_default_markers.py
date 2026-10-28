@@ -87,31 +87,53 @@ def test_fully_marked_test_is_not_flagged_defaulted(root_conftest):
     assert item.markers == {"post_merge", "gpu_2"}
 
 
-def test_demo_trees_are_not_defaulted(pytester, monkeypatch):
-    """An unmarked demo script must stay deselected, not become pre_merge.
-
-    examples/backends/sglang/test_sglang_profile.py is a helper for that
-    script's main(); collected as a test it posts to a server nothing started.
-    """
+@pytest.mark.parametrize(
+    "test_root, authored_markers",
+    [
+        ("examples/backends", False),
+        ("deploy/helm/charts/platform/tests", False),
+        ("deploy/helm/charts/platform/tests", True),
+    ],
+)
+def test_demo_and_chart_trees_keep_authored_markers(
+    pytester, monkeypatch, test_root, authored_markers
+):
+    """Runtime defaults must not enroll demos or the separately gated Helm suite."""
     root_conftest_path = Path(__file__).parents[1] / "conftest.py"
     pytester.makeconftest(root_conftest_path.read_text())
-    demo_dir = pytester.path / "examples" / "backends"
+    demo_dir = pytester.path / test_root
     demo_dir.mkdir(parents=True)
     demo = demo_dir / "test_demo_script.py"
-    demo.write_text("def test_demo():\n    pass\n")
+    markers = (
+        "import pytest\npytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0]\n"
+        if authored_markers
+        else ""
+    )
+    demo.write_text(markers + "def test_demo():\n    pass\n")
 
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
 
     result = pytester.runpytest("-o", "addopts=", "-m", "pre_merge and gpu_0", demo)
 
-    result.assert_outcomes(passed=0, deselected=1)
+    result.assert_outcomes(
+        passed=int(authored_markers), deselected=int(not authored_markers)
+    )
 
 
-def test_managed_trees_are_still_defaulted(pytester, monkeypatch):
+@pytest.mark.parametrize(
+    "test_root",
+    [
+        "tests/unit",
+        "deploy/utils/tests",
+        "deploy/power-agent/tests",
+        "deploy/helm-extra/tests",
+    ],
+)
+def test_managed_trees_are_still_defaulted(pytester, monkeypatch, test_root):
     """The demo-tree exclusion must not leak into real test roots."""
     root_conftest_path = Path(__file__).parents[1] / "conftest.py"
     pytester.makeconftest(root_conftest_path.read_text())
-    suite_dir = pytester.path / "tests" / "unit"
+    suite_dir = pytester.path / test_root
     suite_dir.mkdir(parents=True)
     suite = suite_dir / "test_real.py"
     suite.write_text("def test_real():\n    pass\n")

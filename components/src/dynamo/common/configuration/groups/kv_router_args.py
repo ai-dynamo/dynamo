@@ -726,6 +726,7 @@ class KvRouterArgGroup(ArgGroup):
                 "[EXPERIMENTAL] KV Router: Multiplier for shared cache hits (0.0-1.0). "
                 "Blocks in the shared cache are less valuable than device-local blocks. "
                 "E.g. 0.5 means each shared hit counts as half a device-local hit. "
+                "Also credits blocks a worker can fetch from a peer through a KV fetch hint. "
                 "The default policy uses 0.5 when shared cache is enabled."
             ),
             arg_type=float,
