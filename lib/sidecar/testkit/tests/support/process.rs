@@ -166,12 +166,14 @@ impl Environment {
         Process::spawn::<F>(self, endpoint, mode, deadline, false, 0)
     }
 
-    pub fn spawn_with_grace<F: ProcessFixture>(
+    /// Configure a grace period longer than `Process::exit` waits, so a sidecar
+    /// that honored it would fail to exit in time.
+    pub fn spawn_with_long_grace<F: ProcessFixture>(
         &self,
         endpoint: &str,
         mode: DisaggregationMode,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, 5, false, 1)
+        Process::spawn::<F>(self, endpoint, mode, 5, false, 30)
     }
 
     pub fn spawn_env<F: ProcessFixture>(
@@ -388,10 +390,6 @@ impl Process {
     pub fn signal(&self, signal: i32) {
         // The child owns this process group; never signal a shared parent group.
         assert_eq!(unsafe { libc::kill(-(self.child.id() as i32), signal) }, 0);
-    }
-
-    pub fn is_running(&mut self) -> bool {
-        self.child.try_wait().unwrap().is_none()
     }
 
     pub async fn exit(&mut self) -> ExitStatus {

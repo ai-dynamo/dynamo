@@ -82,7 +82,9 @@ opt-out and lets `run.rs` stay non-generic.
   The default `Ok(None)` never frees KV early — vLLM and TRT-LLM keep it (no
   reliable idle signal); SGLang overrides it by counting in-flight prefill
   streams. The mode-gate, poll loop, and SIGTERM/SIGINT ownership live in the
-  `Worker`.
+  `Worker`. Sidecars (`Worker::run_with_drt`) skip both the grace period and
+  this drain: the engine is a separate process, so the sidecar unregisters,
+  runs `cleanup`, and exits without waiting for it.
 - `cleanup(&self) -> Result<(), DynamoError>` — called exactly once.
   Runs after `start()` returns Ok on shutdown (even if registration /
   serve fails), **and** after `start()` raises — so implementations
@@ -271,7 +273,8 @@ engines run an analogous protocol with their own KV transfer transport.
 NIXL/KV transfers are done, `Some(false)` while they're pulling. The
 `Worker` owns the mode-gate, the poll loop, and the timeout. Engines that
 can't introspect leave the default `Ok(None)` (wait the budget);
-aggregated/decode engines are never polled (drain is prefill-only).
+aggregated/decode engines are never polled (drain is prefill-only), and
+neither are sidecars of any role.
 
 `PrefillResult` and `BootstrapInfo` are re-exported from
 `dynamo-backend-common` so engines don't need a separate `dynamo-llm`
