@@ -18,7 +18,7 @@ New here? Read the [Overview](overview.mdx) first for how the chat processor rel
 
 ## Configuration
 
-For the `dynamo` processor, use the [canonical routing table](troubleshooting-tool-calls.md#parser-generation-routing) to select `DYN_PARSER_VERSION` and a compatible family. Engine fallback has a different parser owner and does not select the Rust V1/V2 pipeline. A native worker `--reasoning-parser` can still control engine grammar activation; it is separate from the frontend response-parser flags shown below.
+For Rust V1/V2 selection, see [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing). Engine fallback uses the engine's parser. A worker's native `--reasoning-parser` controls engine grammar activation separately from Dynamo response parsing.
 
 <Tabs>
   <Tab title="dynamo (default)" language="dynamo">

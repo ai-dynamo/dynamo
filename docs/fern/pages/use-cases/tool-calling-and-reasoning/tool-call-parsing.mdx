@@ -7,7 +7,7 @@ subtitle: Connect Dynamo to external tools and services using Dynamo's built-in 
 
 Tool calling lets Dynamo connect models to external tools and services by returning function arguments for your application to execute. Requests use the `tool_choice` and `tools` parameters. This page covers Dynamo-native parsing; if your model is not listed, use [engine fallback](chat-processors.mdx), which also explains valid combinations of `--dyn-tool-call-parser`, `--dyn-chat-processor`, and `--dyn-reasoning-parser`.
 
-See the [canonical routing table](troubleshooting-tool-calls.md#parser-generation-routing) for `DYN_PARSER_VERSION=auto|1|2`, compatible selector pairs, and the reasoning-only Qwen exception. The catalogs below identify parser formats; a registered family does not establish qualification of every model and backend.
+See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing) for version selection, compatible names, and the Qwen exception. The catalog lists parser formats; model/backend qualification is separate.
 
 ## Configure Tool Calling
 
@@ -31,7 +31,7 @@ See the [canonical routing table](troubleshooting-tool-calls.md#parser-generatio
       --dyn-reasoning-parser qwen3
     ```
 
-    The native worker `--reasoning-parser qwen3` controls reasoning-aware grammar activation in SGLang. `--dyn-reasoning-parser qwen3` selects Dynamo extraction into `reasoning_content`; the two controls have different owners.
+    SGLang's `--reasoning-parser qwen3` controls grammar activation; `--dyn-reasoning-parser qwen3` selects Dynamo extraction into `reasoning_content`.
 
     <Info>
     If the model supports tool calling but its default chat template does not, add `--custom-jinja-template /path/to/template.jinja` to the worker command. The template must be readable inside the container.
