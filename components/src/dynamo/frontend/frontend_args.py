@@ -289,6 +289,10 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
+        if self.isolate_tool_call_markers and self.chat_processor != "sglang":
+            raise ValueError(
+                "--isolate-tool-call-markers requires --dyn-chat-processor=sglang"
+            )
         if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
             raise ValueError(
                 "--ais-perf-config requires --router-prefill-load-model=ais"
@@ -768,12 +772,13 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_ISOLATE_TOOL_CALL_MARKERS",
             default=False,
             help=(
-                "[sglang chat processor] Tokenize message content that contains the "
-                "tool-call parser's delimiters (for example a literal <tool_call> in "
-                "a tool result) as plain sub-words instead of the delimiter tokens, "
-                "so the model cannot copy a delimiter token out of untrusted input "
-                "and have it parsed as a real tool call. Requests whose content the "
-                "chat template rewrites are rejected rather than encoded unsafely."
+                "Tokenize message content that contains the tool-call parser's "
+                "delimiters (for example a literal <tool_call> in a tool result) as "
+                "plain sub-words instead of the delimiter tokens, so the model cannot "
+                "copy a delimiter token out of untrusted input and have it parsed as "
+                "a real tool call. Requests whose content the chat template rewrites "
+                "are rejected rather than encoded unsafely. Requires "
+                "--dyn-chat-processor=sglang."
             ),
         )
         add_argument(

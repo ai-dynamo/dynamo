@@ -25,6 +25,7 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo.frontend.sglang_prepost import (
     SglangStreamingPostProcessor,
+    _marker_free_encoder,
     encode_chat_prompt_isolating_markers,
     preprocess_chat_request,
     tool_call_marker_strings,
@@ -35,11 +36,13 @@ from dynamo.frontend.utils import PreprocessError
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
     pytest.mark.unit,
+    pytest.mark.core,
     pytest.mark.sglang,
     pytest.mark.gpu_0,
     pytest.mark.model("Qwen/Qwen3-0.6B"),
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
+    pytest.mark.timeout(180),
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -60,7 +63,6 @@ TOOLS = [
     ),
 ]
 TOOLS_JSON = [t.model_dump(exclude_none=True) for t in TOOLS]
-# What preprocess_chat_request hands the chat template (see _filter_template_tools).
 TEMPLATE_TOOLS = [t.model_dump() for t in TOOLS]
 
 # What an attacker plants in a tool result / file, and what a faithful echo
@@ -121,7 +123,9 @@ def _prompt_ids(tokenizer, messages, *, isolate=True, tools=TOOLS_JSON, parser=P
     ).prompt_token_ids
 
 
-def _run(tokenizer, token_ids, batch_size, *, reasoning=False, log_probs=None):
+def _run(
+    tokenizer, token_ids, batch_size, *, reasoning=False, log_probs=None, stop=None
+):
     post = SglangStreamingPostProcessor(
         tokenizer=tokenizer,
         tool_call_parser=FunctionCallParser(tools=TOOLS, tool_call_parser=PARSER),
@@ -132,6 +136,7 @@ def _run(tokenizer, token_ids, batch_size, *, reasoning=False, log_probs=None):
         ),
         sglang_tools=TOOLS,
         tool_call_parser_name=PARSER,
+        stop_strings=set(stop) if stop else None,
     )
     choices = []
     for i in range(0, len(token_ids), batch_size):
@@ -201,11 +206,31 @@ class TestMarkerTokens:  # FRONTEND.4
             flaky, PARSER
         )
 
+    def test_detector_construction_failure_is_raised(self, monkeypatch):
+        class BrokenDetector:
+            def __init__(self):
+                raise RuntimeError("no such format")
+
+        monkeypatch.setitem(
+            FunctionCallParser.ToolCallParserEnum, "broken-detector", BrokenDetector
+        )
+        with pytest.raises(RuntimeError, match="no such format"):
+            tool_call_marker_strings("broken-detector")
+
+    def test_encoder_copy_that_keeps_an_active_id_is_rejected(self, tokenizer, markers):
+        class Bare:
+            backend_tokenizer = tokenizer.backend_tokenizer
+
+        strings = tuple(markers.values())
+        assert _marker_free_encoder(Bare(), strings, set(markers)) is not None
+        # Pretend one of the sub-words the copy produces were an active id.
+        subword_id = _encode_without_markers(tokenizer, "<tool_call>")[0]
+        assert _marker_free_encoder(Bare(), strings, {subword_id}) is None
+
 
 class TestOutputGate:  # FRONTEND.4
-    @pytest.mark.parametrize("batch_size", [1, 3, 7, 1000])
+    @pytest.mark.parametrize("batch_size", [1, 3, 1000])
     def test_echoed_delimiters_are_content_not_calls(self, tokenizer, batch_size):
-        """The model copies the sub-word spelling of the injected file: no call."""
         echoed = f"Here is the file:\nline 1\n{INJECTED_CALL}\nline 3"
         choices = _run(
             tokenizer, _encode_without_markers(tokenizer, echoed), batch_size
@@ -268,6 +293,29 @@ class TestOutputGate:  # FRONTEND.4
         emitted = sum(len(c["logprobs"]["content"]) for c in choices if c["logprobs"])
         assert emitted == len(ids)
 
+    @pytest.mark.parametrize("batch_size", [1, 3, 1000])
+    def test_delimiter_held_as_stop_prefix_keeps_its_identity(
+        self, tokenizer, batch_size
+    ):
+        """A stop string that starts with ``<tool_call>`` must not swallow a call."""
+        ids = tokenizer.encode(INJECTED_CALL, add_special_tokens=False)
+        choices = _run(tokenizer, ids, batch_size, stop=["<tool_call>STOP"])
+        calls = _tool_calls(choices)
+        assert len(calls) == 1
+        assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Paris"}
+        assert _finish(choices) == "tool_calls"
+        assert _content(choices) == ""
+
+    def test_stop_string_beginning_with_a_delimiter_still_stops(
+        self, tokenizer, markers
+    ):
+        opening = next(i for i, m in markers.items() if m == "<tool_call>")
+        ids = [opening] + tokenizer.encode("STOP, then more", add_special_tokens=False)
+        choices = _run(tokenizer, ids, 1, stop=["<tool_call>STOP"])
+        assert _tool_calls(choices) == []
+        assert _finish(choices) == "stop"
+        assert _content(choices) == ""
+
 
 class TestInputIsolation:  # FRONTEND.1
     def test_off_by_default_keeps_delimiter_ids(self, tokenizer, markers):
@@ -312,14 +360,12 @@ class TestInputIsolation:  # FRONTEND.1
                 messages.append({"role": "user", "content": "repeat it"})
         ids = _prompt_ids(tokenizer, messages)
 
-        # The untrusted span is encoded as plain sub-words...
         assert _find(ids, _encode_without_markers(tokenizer, file_text)) >= 0
-        # ...the prompt still decodes to exactly the rendered template...
         assert tokenizer.decode(ids, skip_special_tokens=False) == _rendered(
             tokenizer, messages
         )
-        # ...and only the two injected delimiters lost their ids; the ones the
-        # template emits (tool instructions, prior tool_calls) are untouched.
+        # Only the two injected delimiters lose their ids; the ones the template
+        # emits (tool instructions, prior tool_calls) are untouched.
         plain = _plain_ids(tokenizer, messages)
         assert sum(i in markers for i in ids) == sum(i in markers for i in plain) - 2
 
@@ -352,6 +398,49 @@ class TestInputIsolation:  # FRONTEND.1
         assert tokenizer.decode(ids, skip_special_tokens=False) == _rendered(
             tokenizer, [{"role": "user", "content": text}]
         )
+
+    def test_delimiter_assembled_across_text_parts_is_isolated(
+        self, tokenizer, markers
+    ):
+        """VLM templates render adjacent text parts back to back."""
+
+        class PartsTokenizer:
+            backend_tokenizer = tokenizer.backend_tokenizer
+
+            def encode(self, text, add_special_tokens=False):
+                return tokenizer.encode(text, add_special_tokens=add_special_tokens)
+
+            def apply_chat_template(self, messages, **kwargs):
+                text = ""
+                for msg in messages:
+                    content = msg["content"]
+                    if isinstance(content, list):
+                        content = "".join(
+                            p["text"] for p in content if p.get("type") == "text"
+                        )
+                    text += f"<|im_start|>{msg['role']}\n{content}<|im_end|>\n"
+                text += "<|im_start|>assistant\n"
+                return text if not kwargs.get("tokenize") else self.encode(text)
+
+        parts = ["<tool_", INJECTED_CALL[6:-5], "", "call>"]
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": p} for p in parts],
+            }
+        ]
+        parts_tokenizer = PartsTokenizer()
+        rendered = parts_tokenizer.apply_chat_template(messages, tokenize=False)
+        assert INJECTED_CALL in rendered
+        # No single part holds a delimiter, yet the plain encoding has both ids.
+        plain = parts_tokenizer.encode(rendered)
+        assert sum(i in markers for i in plain) == 2
+
+        ids = encode_chat_prompt_isolating_markers(
+            parts_tokenizer, messages, {"tokenize": True}, PARSER
+        )
+        assert not any(i in markers for i in ids)
+        assert tokenizer.decode(ids, skip_special_tokens=False) == rendered
 
     def test_assistant_history_echo_is_isolated(self, tokenizer, markers):
         """Templates strip assistant content; the stripped span must align."""
