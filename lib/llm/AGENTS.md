@@ -72,7 +72,7 @@ do not carry compatibility branches forward indefinitely.
 # Frontend Serving-Load Metrics
 
 The frontend's request metrics (`http/service/metrics.rs`) also feed the frame
-it publishes for the KV DC Relay's `SubscribeServingLoad` (`frontend_load.rs`),
+it publishes for the Pool Relay's `SubscribeServingLoad` (`frontend_load.rs`),
 so `/metrics` and the Relay report the same numbers. Three are specific to that
 use and are experimental (see the Metrics Catalog):
 
