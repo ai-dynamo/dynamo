@@ -170,7 +170,7 @@ impl SidecarFixture for Fixture {
                         .unwrap()
                         .map(|at| at.duration_since(started));
                     panic!(
-                        "SGLang fixture startup failed after {:?}; server entered GetServerInfo after {entered:?}: {error}",
+                        "SGLang fixture startup failed after {:?}; server entered GetServerInfo after {entered:?}: {error:?}",
                         started.elapsed()
                     )
                 })

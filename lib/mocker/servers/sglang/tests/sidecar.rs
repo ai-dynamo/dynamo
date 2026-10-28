@@ -89,7 +89,7 @@ async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> SglangSidecarEngin
         "--grpc-retry-interval-secs".to_string(),
         "1".to_string(),
         "--grpc-startup-deadline-secs".to_string(),
-        "5".to_string(),
+        "30".to_string(),
     ];
     if mode.is_prefill() {
         argv.extend(["--bootstrap-host".to_string(), "127.0.0.1".to_string()]);

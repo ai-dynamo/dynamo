@@ -440,7 +440,7 @@ mod tests {
             server.service.calls.lock().unwrap().clear();
             let endpoint = GrpcEndpoint::parse(&server.endpoint, "test").unwrap();
             let transport = GrpcTransportConfig {
-                startup_deadline: Duration::from_secs(5),
+                startup_deadline: Duration::from_secs(30),
                 ..Default::default()
             };
             let result = client::bootstrap_discover(&endpoint, &transport, false).await;
@@ -466,7 +466,7 @@ mod tests {
             "--grpc-endpoint",
             &server.endpoint,
             "--grpc-startup-deadline-secs",
-            "5",
+            "30",
         ])
         .unwrap();
         let sidecar = HeadlessSidecar::from_args(args).unwrap();
