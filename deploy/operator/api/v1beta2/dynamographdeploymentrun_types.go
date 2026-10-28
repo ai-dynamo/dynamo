@@ -27,7 +27,7 @@ import (
 // DynamoGraphDeploymentRunSpec is an immutable snapshot of an accepted DGDR spec.
 // Request admission resolves its structural defaults before the Request controller copies it;
 // Request admission defaulting does not apply to Runs.
-// +kubebuilder:validation:XValidation:rule="has(self.model)",message="model is required"
+// +kubebuilder:validation:XValidation:rule="has(self.model) && has(self.backends) && size(self.backends) > 0 && has(self.hardware) && has(self.hardware.gpu) && has(self.hardware.gpu.sku) && has(self.hardware.gpu.budget) && has(self.workload) && has(self.workload.static) && has(self.objective) && has(self.objective.mode) && has(self.objective.metric) && has(self.recommendation) && has(self.recommendation.maxCandidates) && self.recommendation.maxCandidates > 0",message="spec must be a fully resolved Request admission snapshot"
 //
 // The Run reconciler lowers this immutable typed snapshot plus inputOverrides exactly once and
 // records the resulting public recommendation input in status.aisimulate.input.

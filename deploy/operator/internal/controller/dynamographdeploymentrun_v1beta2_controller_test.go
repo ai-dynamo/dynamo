@@ -130,13 +130,19 @@ func dgdrRunForTest(t *testing.T, inputOverrides map[string]any) *nvidiacomv1bet
 	if err != nil {
 		t.Fatalf("marshal parameters: %v", err)
 	}
+	metric := nvidiacomv1beta2.ObjectiveMetric("ThroughputPerGPU")
 	return &nvidiacomv1beta2.DynamoGraphDeploymentRun{
 		Name: "search-1", Namespace: "default", UID: "run-uid", Generation: 1,
 		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRunSpec{NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
-			Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"},
+			Model:    &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"},
+			Backends: []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM},
 			Hardware: &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{
 				SKU: new("h200_sxm"), Budget: ptr.To[int32](16),
 			}},
+			Workload: &nvidiacomv1beta2.WorkloadSpec{Static: &nvidiacomv1beta2.StaticWorkloadSpec{}},
+			Objective: &nvidiacomv1beta2.ObjectiveSpec{
+				Mode: nvidiacomv1beta2.ObjectiveModeOptimize, Metric: &metric, SLA: &nvidiacomv1beta2.ObjectiveSLASpec{},
+			},
 			AISimulate:     &nvidiacomv1beta2.AISimulateSpec{InputOverrides: &runtime.RawExtension{Raw: raw}},
 			Recommendation: &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: 2},
 		}},
@@ -168,6 +174,36 @@ func TestV1beta2RunControllerCreatesOneIsolatedAISimulateJob(t *testing.T) {
 	stored := f.run()
 	assertDGDRRunPendingStatus(t, stored, job.Name)
 	assertDGDRRunStatusInputMatchesConfigMap(t, f.client, stored, job)
+}
+
+func TestV1beta2RunControllerUsesUnfilteredTopologyForAnExternalHardwareSKU(t *testing.T) {
+	hardware := &fixedRunHardware{info: gpu.GPUInfo{Model: "Future Accelerator", GPUsPerNode: 8}}
+	run := dgdrRunForTest(t, map[string]any{})
+	*run.Spec.Hardware.GPU.SKU = "future_accelerator"
+	f := newDGDRRunFixture(t, hardware, run)
+
+	f.reconcile()
+
+	if len(hardware.calls) != 1 || hardware.calls[0] != "" {
+		t.Fatalf("hardware discovery filters = %v, want one unfiltered topology lookup", hardware.calls)
+	}
+	if got := f.job().Spec.Template.Spec.Containers[0].Image; got != f.reconciler.PlannerImage {
+		t.Fatalf("sweeper image = %q, want %q", got, f.reconciler.PlannerImage)
+	}
+}
+
+func TestV1beta2RunControllerRejectsAmbiguousTopologyForAnExternalHardwareSKU(t *testing.T) {
+	hardware := &fixedRunHardware{info: gpu.GPUInfo{
+		Model: "Future Accelerator", GPUsPerNode: 8, OtherModels: []string{"Another Accelerator"},
+	}}
+	run := dgdrRunForTest(t, map[string]any{})
+	*run.Spec.Hardware.GPU.SKU = "future_accelerator"
+	f := newDGDRRunFixture(t, hardware, run)
+
+	_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	if err == nil || !strings.Contains(err.Error(), "among multiple GPU models") {
+		t.Fatalf("reconcile error = %v, want ambiguous external-SKU topology failure", err)
+	}
 }
 
 func TestV1beta2RunControllerFreezesExecutionBeforeCreatingTheJob(t *testing.T) {
@@ -283,34 +319,22 @@ func TestV1beta2RunControllerReportsImagePullSecretErrors(t *testing.T) {
 	}
 }
 
-func TestV1beta2RunControllerKeepsPlannerDigestButDerivesRuntimesFromReleaseTag(t *testing.T) {
+func TestV1beta2RunControllerRejectsDigestOnlyPlannerImage(t *testing.T) {
 	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
 	f.reconciler.PlannerImage = "example.com/dynamo-planner@sha256:0123"
 	f.reconciler.DynamoVersion = "1.7.0"
 
-	t.Log("Reconcile a digest-pinned Planner through the frozen execution artifact")
-	f.reconcile()
-
-	t.Log("Keep the Planner digest while giving sibling runtime derivation a shared release tag")
-	job := f.job()
-	planner := containerNamed(t, job.Spec.Template.Spec.Containers, dgdrRunSweeperContainer)
-	if planner.Image != "example.com/dynamo-planner@sha256:0123" {
-		t.Fatalf("planner image = %q, want configured digest", planner.Image)
+	t.Log("Reject the Planner before freezing an unrelated runtime release tag")
+	_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+	if err == nil || !strings.Contains(err.Error(), "digest-only planner image cannot identify sibling runtime images") {
+		t.Fatalf("reconcile error = %v, want digest-only Planner rejection", err)
 	}
-	configMap := &corev1.ConfigMap{}
-	if err := f.client.Get(t.Context(), client.ObjectKeyFromObject(job), configMap); err != nil {
-		t.Fatalf("get ConfigMap: %v", err)
+	jobs := &batchv1.JobList{}
+	if err := f.client.List(t.Context(), jobs, client.InNamespace("default")); err != nil {
+		t.Fatalf("list Jobs: %v", err)
 	}
-	if got := configMap.Data[dgdrRunRuntimeImageSourceKey]; got != "example.com/dynamo-planner:1.7.0" {
-		t.Fatalf("runtime image source = %q, want shared release tag", got)
-	}
-	var input map[string]any
-	if err := yaml.Unmarshal([]byte(configMap.Data[dgdrRunInputKey]), &input); err != nil {
-		t.Fatalf("decode input: %v", err)
-	}
-	output := input["dgdr_run"].(map[string]any)
-	if output["runtime_image"] != "example.com/dynamo-planner:1.7.0" || output["runtime_version_override"] != "1.7.0" {
-		t.Fatalf("dgdr_run runtime identity = %v", output)
+	if len(jobs.Items) != 0 {
+		t.Fatalf("Jobs = %d, want none for an ambiguous runtime source", len(jobs.Items))
 	}
 }
 
@@ -334,8 +358,20 @@ func assertDGDRRunJobIsolation(
 	if job.Spec.Template.Spec.AutomountServiceAccountToken == nil || *job.Spec.Template.Spec.AutomountServiceAccountToken {
 		t.Fatal("the pod must disable automatic service-account token mounting")
 	}
+	podSecurity := job.Spec.Template.Spec.SecurityContext
+	if podSecurity == nil || podSecurity.RunAsNonRoot == nil || !*podSecurity.RunAsNonRoot ||
+		podSecurity.SeccompProfile == nil || podSecurity.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Fatalf("pod security context = %+v, want runAsNonRoot and RuntimeDefault seccomp", podSecurity)
+	}
 	sweeper := containerNamed(t, job.Spec.Template.Spec.Containers, dgdrRunSweeperContainer)
 	publisher := containerNamed(t, job.Spec.Template.Spec.Containers, dgdrRunPublisherContainer)
+	for _, container := range []corev1.Container{sweeper, publisher} {
+		security := container.SecurityContext
+		if security == nil || security.AllowPrivilegeEscalation == nil || *security.AllowPrivilegeEscalation ||
+			security.Capabilities == nil || !reflect.DeepEqual(security.Capabilities.Drop, []corev1.Capability{"ALL"}) {
+			t.Fatalf("container %q security context = %+v, want restricted defaults", container.Name, security)
+		}
+	}
 	if sweeper.Image != plannerImage {
 		t.Fatalf("sweeper image = %q, want operator-configured planner image %q", sweeper.Image, plannerImage)
 	}
@@ -483,7 +519,7 @@ func TestDGDRRunInputResolvesRuntimeVersion(t *testing.T) {
 		{name: "prerelease planner tag", plannerImage: "example.com/dynamo-planner:1.7.0-rc.1", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:1.7.0-rc.1"},
 		{name: "build metadata planner tag", plannerImage: "example.com/dynamo-planner:1.7.0+build.5", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:1.7.0+build.5"},
 		{name: "tag and digest", plannerImage: "example.com/dynamo-planner:v1.7.0-rc.1@sha256:0123", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:v1.7.0-rc.1@sha256:0123"},
-		{name: "digest only", plannerImage: "example.com/dynamo-planner@sha256:0123", dynamoVersion: "1.7.0", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:1.7.0"},
+		{name: "digest only", plannerImage: "example.com/dynamo-planner@sha256:0123", dynamoVersion: "1.7.0", wantErr: true},
 		{name: "opaque CI tag", plannerImage: "example.com/dynamo-planner:git-sha", dynamoVersion: "1.7.0", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:git-sha"},
 		{name: "untagged planner image", plannerImage: "example.com/dynamo-planner", dynamoVersion: "1.7.0", wantErr: true},
 		{name: "opaque tag without canonical version", plannerImage: "example.com/dynamo-planner:git-sha", dynamoVersion: "1.7", wantErr: true},
@@ -493,7 +529,7 @@ func TestDGDRRunInputResolvesRuntimeVersion(t *testing.T) {
 			version, err := dgdrRunDynamoVersion(tt.plannerImage, tt.dynamoVersion)
 			var runtimeImage string
 			if err == nil {
-				runtimeImage, err = dgdrRunRuntimeImageSource(tt.plannerImage, version)
+				runtimeImage, err = dgdrRunRuntimeImageSource(tt.plannerImage)
 			}
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("resolve execution identity error = %v, wantErr %t", err, tt.wantErr)
@@ -639,6 +675,67 @@ func TestV1beta2RunControllerClassifiesPublisherProtocolFailure(t *testing.T) {
 	}
 	if !strings.Contains(condition.Message, "terminal snapshot missing") {
 		t.Fatalf("failure message = %q, want publisher termination message", condition.Message)
+	}
+}
+
+func TestV1beta2RunControllerPrefersPublisherOutcomeWhenBothContainersFail(t *testing.T) {
+	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
+	f.reconcile()
+	job := f.job()
+	outcome, err := json.Marshal(dgdrrunpublisher.TerminalOutcome{
+		Phase: "Failed", Message: "terminal snapshot is invalid", Error: "candidate rank is duplicated",
+	})
+	if err != nil {
+		t.Fatalf("encode terminal outcome: %v", err)
+	}
+
+	t.Log("Report both a generic sweeper failure and the publisher's structured protocol outcome")
+	pod := &corev1.Pod{
+		Name:      job.Name + "-pod",
+		Namespace: job.Namespace,
+		Labels:    map[string]string{batchv1.JobNameLabel: job.Name},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: batchv1.SchemeGroupVersion.String(), Kind: "Job", Name: job.Name, UID: job.UID,
+			Controller: new(true),
+		}},
+	}
+	if err := f.client.Create(t.Context(), pod); err != nil {
+		t.Fatalf("create Job pod: %v", err)
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{
+			Name: dgdrRunSweeperContainer,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ExitCode: 1, Message: "planner process exited",
+			}},
+		},
+		{
+			Name: dgdrRunPublisherContainer,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ExitCode: int32(dgdrrunpublisher.ExitProtocolViolation), Message: string(outcome),
+			}},
+		},
+	}
+	if err := f.client.Status().Update(t.Context(), pod); err != nil {
+		t.Fatalf("update Job pod status: %v", err)
+	}
+	failed := metav1.Now()
+	job.Status.Conditions = []batchv1.JobCondition{{
+		Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: failed,
+	}}
+	if err := f.client.Status().Update(t.Context(), job); err != nil {
+		t.Fatalf("fail Job: %v", err)
+	}
+
+	t.Log("Prefer and decode the publisher outcome instead of reporting the sweeper exit")
+	f.reconcile()
+	run := f.run()
+	condition := meta.FindStatusCondition(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+	if condition == nil || condition.Reason != dgdrRunReasonProtocolViolation {
+		t.Fatalf("Completed condition = %+v, want %s", condition, dgdrRunReasonProtocolViolation)
+	}
+	if condition.Message != "terminal snapshot is invalid: candidate rank is duplicated" {
+		t.Fatalf("failure message = %q, want decoded publisher diagnostics", condition.Message)
 	}
 }
 

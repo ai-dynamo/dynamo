@@ -822,6 +822,11 @@ func TestDynamoGraphDeploymentRunSpecIsImmutable(t *testing.T) {
 			run:        v1beta2RunForAdmission(alternateAdmissionModel, nil),
 			wantCELErr: `<nil>: Invalid value: spec is immutable`,
 		},
+		{
+			name:       "model-only Run is rejected before controller reconciliation",
+			run:        v1beta2ModelOnlyRunForAdmission(v1beta2AdmissionModel),
+			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1036,14 +1041,33 @@ func beta2DGDRForAdmission(
 }
 
 func v1beta2RunForAdmission(model string, labels map[string]string) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+	metric := nvidiacomv1beta2.ObjectiveMetric("ThroughputPerGPU")
 	return &nvidiacomv1beta2.DynamoGraphDeploymentRun{
 		APIVersion: nvidiacomv1beta2.GroupVersion.String(),
 		Kind:       "DynamoGraphDeploymentRun",
 		Name:       "test-v1beta2-dgdr-run", Namespace: "default", Labels: labels,
 		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRunSpec{NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
-			Model: &nvidiacomv1beta2.ModelSpec{Name: model},
+			Model:    &nvidiacomv1beta2.ModelSpec{Name: model},
+			Backends: []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM},
+			Hardware: &nvidiacomv1beta2.HardwareSpec{
+				GPU:            &nvidiacomv1beta2.GPUHardwareSpec{SKU: new("h200_sxm"), Budget: new(int32(8))},
+				NumGPUsPerNode: new(int32(8)),
+			},
+			Workload: &nvidiacomv1beta2.WorkloadSpec{Static: &nvidiacomv1beta2.StaticWorkloadSpec{}},
+			Objective: &nvidiacomv1beta2.ObjectiveSpec{
+				Mode: nvidiacomv1beta2.ObjectiveModeOptimize, Metric: &metric, SLA: &nvidiacomv1beta2.ObjectiveSLASpec{},
+			},
+			Recommendation: &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: 1},
 		}},
 	}
+}
+
+func v1beta2ModelOnlyRunForAdmission(model string) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+	run := v1beta2RunForAdmission(model, nil)
+	run.Spec.NativeSearchInput = nvidiacomv1beta2.NativeSearchInput{
+		Model: &nvidiacomv1beta2.ModelSpec{Name: model},
+	}
+	return run
 }
 
 const v1beta2AdmissionModel = "Qwen/Qwen3-0.6B"
@@ -1100,9 +1124,8 @@ func setV1beta2InputOverrides(spec map[string]any, overrides map[string]any) {
 
 // setBeta2AdmissionHardware names the hardware, so fixtures do not depend on GPU discovery.
 func setBeta2AdmissionHardware(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
-	sku, budget, numGPUsPerNode := "h100_sxm", int32(4), int32(4)
+	sku, budget := "h100_sxm", int32(4)
 	request.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{
-		GPU:            &nvidiacomv1beta2.GPUHardwareSpec{SKU: &sku, Budget: &budget},
-		NumGPUsPerNode: &numGPUsPerNode,
+		GPU: &nvidiacomv1beta2.GPUHardwareSpec{SKU: &sku, Budget: &budget},
 	}
 }
