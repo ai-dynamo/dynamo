@@ -30,17 +30,10 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	domain "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/kubejournal"
-	grove "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	controlleroptions "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -87,6 +80,7 @@ type ScalePlanResolver interface {
 
 // Runtime contains the typed adapters and immutable profile selected for one group.
 type Runtime struct {
+	Workload   WorkloadBinding
 	Profile    nvidiacomv1beta1.EngineGroupProfileStatus
 	Capacity   domain.CapacityAdapter
 	Membership domain.MembershipAdapter
@@ -110,6 +104,8 @@ type InitialCapacityReconciler interface {
 type Reconciler struct {
 	client.Client
 	RuntimeProvider RuntimeProvider
+	// WorkloadProvider is nil only for injected runtimes without separately managed physical workloads.
+	WorkloadProvider WorkloadProvider
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentenginegroups,verbs=get;list;watch;update;patch
@@ -119,9 +115,6 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=patch
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=patch
-// +kubebuilder:rbac:groups=grove.io,resources=podcliques,verbs=get;list;watch
-// +kubebuilder:rbac:groups=grove.io,resources=podcliquesets;podcliquescalinggroups,verbs=get;list;watch
-// +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 
 // Reconcile implements the level-based control loop for one independently resizable engine world.
@@ -148,6 +141,9 @@ func (r *Reconciler) Reconcile(
 	if runtimeErr == nil {
 		runtimeErr = validateEngineGroupRuntime(runtime)
 	}
+	if runtimeErr == nil && runtime.Workload.ID != "" && r.WorkloadProvider == nil {
+		runtimeErr = errors.New("a physical runtime requires its workload lifecycle provider")
+	}
 	if runtimeErr == nil && group.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(group, engineGroupFinalizer) {
 		controllerutil.AddFinalizer(group, engineGroupFinalizer)
 		if err := r.Update(ctx, group); err != nil {
@@ -157,7 +153,7 @@ func (r *Reconciler) Reconcile(
 	}
 
 	// Fence physical teardown even when the old runtime can no longer resolve its deleted clique.
-	pending, bindingErr := r.reconcileGroveWorld(ctx, group)
+	pending, bindingErr := r.reconcileWorkload(ctx, group)
 	if pending || bindingErr != nil {
 		before := group.Status.DeepCopy()
 		invalidateEngineGroupHealth(group, "WorldRestartPending", "Physical world teardown or restart has not yet established fresh membership")
@@ -221,8 +217,8 @@ func (r *Reconciler) reconcileWorkflow(
 	runtime Runtime,
 ) (ctrl.Result, error) {
 	// Load private recovery authority; a missing or mismatched checkpoint is never adopted as a new world.
-	store := engineGroupCheckpointStore(r, group)
-	checkpoint, snapshot, err := loadEngineGroupCheckpoint(ctx, store, group)
+	store := engineGroupCheckpointStore(r.Client, group)
+	checkpoint, snapshot, err := loadEngineGroupCheckpoint(ctx, store, group, runtime.Workload.ID)
 	if err != nil {
 		return r.reconcileCheckpointLoadFailure(ctx, group, runtime, store, snapshot, err)
 	}
@@ -292,15 +288,14 @@ func (r *Reconciler) initializeEngineGroupStatus(
 	snapshot kubejournal.Snapshot,
 ) (ctrl.Result, error) {
 	// Even an interrupted first formation needs a verified fresh lifetime after a fenced rebind.
-	uid := group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID]
-	if uid != "" {
-		var fence groveWorldFence
-		fenceSnapshot, err := groveWorldFenceStore(r.Client, group, types.UID(uid)).Load(ctx, &fence)
+	if runtime.Workload.ID != "" {
+		var fence worldFence
+		fenceSnapshot, err := runtime.Workload.Fence.Load(ctx, &fence)
 		if err != nil {
 			return r.reconcileCheckpointFailure(ctx, group, err)
 		}
-		if fenceSnapshot.Exists() && fence.PreviousUID != "" {
-			if err := r.authorizeGroveCheckpointRestart(ctx, group, fence.PreviousUID); err != nil {
+		if fenceSnapshot.Exists() && fence.PreviousID != "" {
+			if err := r.WorkloadProvider.AuthorizeRestart(ctx, group, fence.PreviousID); err != nil {
 				return r.reconcileCheckpointFailure(ctx, group, err)
 			}
 			return r.initializeRestartedEngineGroup(ctx, group, runtime, store, snapshot)
@@ -328,7 +323,7 @@ func (r *Reconciler) initializeEngineGroupStatus(
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("initialize Engine Group journal: %w", err)
 	}
-	next, err := newEngineGroupCheckpoint(group, runtime.Profile, status).advance(group, runtime.Profile, status, nil, true, true)
+	next, err := newEngineGroupCheckpoint(runtime.Profile, status, runtime.Workload.ID).advance(group, runtime.Profile, status, nil, true, true)
 	if err != nil {
 		return r.reconcileCheckpointFailure(ctx, group, err)
 	}
@@ -415,7 +410,7 @@ func (r *Reconciler) reconcileDeletion(
 	}
 	before := group.Status.DeepCopy()
 	transitionID := ""
-	checkpoint, snapshot, err := loadEngineGroupCheckpoint(ctx, engineGroupCheckpointStore(r, group), group)
+	checkpoint, snapshot, err := loadEngineGroupCheckpoint(ctx, engineGroupCheckpointStore(r.Client, group), group, runtime.Workload.ID)
 	if err != nil {
 		return r.reconcileCheckpointFailure(ctx, group, err)
 	}
@@ -464,7 +459,7 @@ func (r *Reconciler) reconcileDeletion(
 			}
 
 			// Capture already-formed startup membership without inventing a Bootstrap operation.
-			return r.initializeEngineGroupStatus(ctx, group, runtime, engineGroupCheckpointStore(r, group), snapshot)
+			return r.initializeEngineGroupStatus(ctx, group, runtime, engineGroupCheckpointStore(r.Client, group), snapshot)
 		}
 		return r.removeEngineGroupFinalizer(ctx, group)
 	}
@@ -702,7 +697,7 @@ func projectEngineGroupReleaseMode(group *nvidiacomv1beta1.DynamoGraphDeployment
 	switch mode {
 	case domain.CapacityReleaseReadinessSteered:
 		setEngineGroupCondition(group, engineGroupConditionExactReleaseSupported, metav1.ConditionFalse, "ReadinessSteeredRelease",
-			"Experimental shrink steers Grove victim ordering and verifies deletion afterward; it does not provide exact-UID authorized release (R13)")
+			"Experimental shrink steers workload victim ordering and verifies deletion afterward; it does not provide exact-UID authorized release (R13)")
 	case domain.CapacityReleaseExactUID:
 		setEngineGroupCondition(group, engineGroupConditionExactReleaseSupported, metav1.ConditionTrue, "ExactUIDRelease",
 			"The capacity provider reports exact-UID authorized release")
@@ -917,25 +912,6 @@ func chooseEngineGroupString(value bool, whenTrue string, whenFalse string) stri
 		return whenTrue
 	}
 	return whenFalse
-}
-
-// SetupWithManager registers the Engine Group controller and its status/finalizer writes.
-func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, groveEnabled bool) error {
-	// Native clique deletion and recreation must wake the same logical world, even without Pod updates.
-	controller := ctrl.NewControllerManagedBy(mgr).
-		WithOptions(controlleroptions.Options{MaxConcurrentReconciles: engineGroupConcurrentReconciles}).
-		For(&nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup{}).
-		Owns(&corev1.ConfigMap{}).
-		Watches(&nvidiacomv1beta1.DynamoGraphDeployment{}, handler.EnqueueRequestsFromMapFunc(r.engineGroupsForParent), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.engineGroupsForCapacity)).
-		Named("dynamographdeploymentenginegroup")
-	if groveEnabled {
-		controller = controller.
-			Watches(&grove.PodClique{}, handler.EnqueueRequestsFromMapFunc(r.engineGroupsForCapacity)).
-			Watches(&grove.PodCliqueSet{}, handler.EnqueueRequestsFromMapFunc(r.engineGroupsForParent)).
-			Watches(&grove.PodCliqueScalingGroup{}, handler.EnqueueRequestsFromMapFunc(r.engineGroupsForParent))
-	}
-	return controller.Complete(r)
 }
 
 func (r *Reconciler) engineGroupsForCapacity(

@@ -16,22 +16,25 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	domain "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/grovecapacity"
 	vllmruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/vllm"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/workload"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// VLLMGroveCapacity binds native process lifetimes to physical Grove allocations.
-// Grove and Group must not be nil. Source is immutable; effects require lifecycle ownership.
-type VLLMGroveCapacity struct {
-	Grove  *grovecapacity.Adapter
-	Group  *api.DynamoGraphDeploymentEngineGroup
-	Source dynamo.VLLMProfileGeometrySource
+// VLLMCapacity binds native process lifetimes to provider-neutral physical allocations.
+// Physical, Client and Group must not be nil. Source is immutable; effects require lifecycle ownership.
+type VLLMCapacity struct {
+	Physical workload.Capacity
+	Client   client.Client
+	WorldID  types.UID
+	Group    *api.DynamoGraphDeploymentEngineGroup
+	Source   dynamo.VLLMProfileGeometrySource
 }
 
 // ReconcileInitialCapacity protects and records physical identities before membership reconciliation.
-func (a *VLLMGroveCapacity) ReconcileInitialCapacity(ctx context.Context, groupID domain.GroupID) error {
+func (a *VLLMCapacity) ReconcileInitialCapacity(ctx context.Context, groupID domain.GroupID) error {
 	// Lifecycle effects remain scoped to the exact logical group.
 	if groupID == "" || groupID != domain.GroupID(a.Group.UID) {
 		return fmt.Errorf("initial capacity belongs to another Engine Group")
@@ -40,7 +43,7 @@ func (a *VLLMGroveCapacity) ReconcileInitialCapacity(ctx context.Context, groupI
 }
 
 // Observe remains read-only and reports allocation readiness independently of native API readiness.
-func (a *VLLMGroveCapacity) Observe(ctx context.Context, groupID domain.GroupID) (domain.CapacityObservation, error) {
+func (a *VLLMCapacity) Observe(ctx context.Context, groupID domain.GroupID) (domain.CapacityObservation, error) {
 	if groupID != domain.GroupID(a.Group.UID) || groupID == "" {
 		return domain.CapacityObservation{}, fmt.Errorf("vLLM capacity observation belongs to a different Engine Group")
 	}
@@ -48,7 +51,7 @@ func (a *VLLMGroveCapacity) Observe(ctx context.Context, groupID domain.GroupID)
 	if err != nil {
 		return domain.CapacityObservation{}, err
 	}
-	physical, err := a.Grove.Observe(ctx, groupID)
+	physical, err := a.Physical.Observe(ctx, groupID)
 	if err != nil {
 		return domain.CapacityObservation{}, err
 	}
@@ -58,11 +61,11 @@ func (a *VLLMGroveCapacity) Observe(ctx context.Context, groupID domain.GroupID)
 	}
 	observation := domain.CapacityObservation{AppliedRevision: physical.AppliedRevision, ReleaseFences: physical.ReleaseFences, ReleaseMode: physical.ReleaseMode}
 
-	// The engine integration owns process bindings; Grove reports only the physical Pod and slot.
+	// The engine integration owns process bindings; the workload provider reports only the physical Pod and slot.
 	for _, allocation := range physical.Allocations {
 		ref := allocation.Pod
 		pod := &corev1.Pod{}
-		if err := a.Grove.Client.Get(ctx, client.ObjectKey{Namespace: a.Group.Namespace, Name: ref.Name}, pod); err != nil {
+		if err := a.Client.Get(ctx, client.ObjectKey{Namespace: a.Group.Namespace, Name: ref.Name}, pod); err != nil {
 			return domain.CapacityObservation{}, err
 		}
 		if domain.PodUID(pod.UID) != ref.UID {
@@ -89,8 +92,8 @@ func (a *VLLMGroveCapacity) Observe(ctx context.Context, groupID domain.GroupID)
 	return observation, nil
 }
 
-// Apply reasserts absolute Grove capacity while preserving exact process and release bindings.
-func (a *VLLMGroveCapacity) Apply(ctx context.Context, groupID domain.GroupID, target domain.CapacityTarget) (domain.ApplyResult, error) {
+// Apply reasserts absolute physical capacity while preserving exact process and release bindings.
+func (a *VLLMCapacity) Apply(ctx context.Context, groupID domain.GroupID, target domain.CapacityTarget) (domain.ApplyResult, error) {
 	// Validate the immutable source before permitting a physical allocation effect.
 	if groupID != domain.GroupID(a.Group.UID) || groupID == "" || !slices.Contains(a.Group.Finalizers, engineGroupFinalizer) {
 		return domain.ApplyResult{}, fmt.Errorf("vLLM capacity effects require the exact lifecycle-owned Engine Group")
@@ -128,7 +131,7 @@ func (a *VLLMGroveCapacity) Apply(ctx context.Context, groupID domain.GroupID, t
 			return domain.ApplyResult{}, fmt.Errorf("%w: vLLM capacity target lost an exact process binding", domain.ErrRecoveryRequired)
 		}
 	}
-	result, err := a.Grove.Apply(ctx, groupID, target)
+	result, err := a.Physical.Apply(ctx, groupID, target)
 	if err != nil || result.Rejection != nil {
 		return result, err
 	}
@@ -136,7 +139,7 @@ func (a *VLLMGroveCapacity) Apply(ctx context.Context, groupID domain.GroupID, t
 }
 
 // ReconcileAllocations protects and records the physical slots without delivering executable commands.
-func (a *VLLMGroveCapacity) ReconcileAllocations(ctx context.Context) error {
+func (a *VLLMCapacity) ReconcileAllocations(ctx context.Context) error {
 	// Native startup is autonomous, while controller effects still require lifecycle ownership.
 	if !slices.Contains(a.Group.Finalizers, engineGroupFinalizer) {
 		return fmt.Errorf("%w: vLLM capacity is waiting for Engine Group lifecycle ownership", ErrRuntimeUnavailable)
@@ -144,10 +147,10 @@ func (a *VLLMGroveCapacity) ReconcileAllocations(ctx context.Context) error {
 	if _, err := a.capacityBindings(); err != nil {
 		return err
 	}
-	if err := a.Grove.InitializeRetention(ctx); err != nil {
+	if err := a.Physical.Prepare(ctx); err != nil {
 		return err
 	}
-	physical, err := a.Grove.Observe(ctx, domain.GroupID(a.Group.UID))
+	physical, err := a.Physical.Observe(ctx, domain.GroupID(a.Group.UID))
 	if err != nil {
 		return err
 	}
@@ -159,7 +162,7 @@ func (a *VLLMGroveCapacity) ReconcileAllocations(ctx context.Context) error {
 	// A new occupant is observed as a new incarnation, never mistaken for a stopped or retired process.
 	for _, allocation := range physical.Allocations {
 		pod := &corev1.Pod{}
-		if err := a.Grove.Client.Get(ctx, client.ObjectKey{Namespace: a.Group.Namespace, Name: allocation.Pod.Name}, pod); err != nil {
+		if err := a.Client.Get(ctx, client.ObjectKey{Namespace: a.Group.Namespace, Name: allocation.Pod.Name}, pod); err != nil {
 			return err
 		}
 		if domain.PodUID(pod.UID) != allocation.Pod.UID || pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
@@ -173,7 +176,7 @@ func (a *VLLMGroveCapacity) ReconcileAllocations(ctx context.Context) error {
 }
 
 func validateVLLMCapacityBootstrap(target domain.CapacityTarget, profile dynamo.ResolvedVLLMElasticEPProfile) *domain.Failure {
-	// Grove treats native IDs as opaque; this launcher accepts only a complete profile-defined append assignment.
+	// The workload provider treats native IDs as opaque; this launcher accepts only a complete profile-defined append assignment.
 	layout := vllmruntime.ReplicaLayout{NativeMembersPerReplica: profile.NativeMembersPerReplica}
 	for _, replica := range target.Replicas {
 		bootstrap := replica.Bootstrap
@@ -217,4 +220,4 @@ func resolveVLLMLaunchMembers(pod *corev1.Pod, slot domain.CapacitySlotID, width
 	return []domain.NativeMemberIncarnation{{ID: ids[0], RuntimeIncarnation: domain.RuntimeIncarnationID(pod.UID)}}, nil
 }
 
-var _ domain.CapacityAdapter = (*VLLMGroveCapacity)(nil)
+var _ domain.CapacityAdapter = (*VLLMCapacity)(nil)

@@ -24,7 +24,7 @@ func TestVLLMWorkerRuntimeResolvesBeforeBootstrapWithoutNativeRequests(t *testin
 	t.Log("resolve the production provider from the projected Pod cache before APIs or assignments exist")
 	kube, group := newVLLMRuntimeTestWorldForTransport(t, true)
 	transport := &vllmNoNativeRequests{}
-	provider := &groveRuntimeProvider{Client: kube, HTTP: &http.Client{Transport: transport}}
+	provider := &runtimeProvider{Client: kube, Workload: &GroveWorkloadProvider{Client: kube}, HTTP: &http.Client{Transport: transport}}
 	runtime, err := provider.Resolve(t.Context(), group)
 	require.NoError(t, err)
 	require.NoError(t, validateEngineGroupRuntime(runtime))

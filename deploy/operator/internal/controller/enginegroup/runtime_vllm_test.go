@@ -8,6 +8,7 @@
 package enginegroup
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -31,10 +32,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+func resolveVLLMTestCapacity(ctx context.Context, kube client.Client, group *api.DynamoGraphDeploymentEngineGroup) (*VLLMCapacity, error) {
+	world, err := (&GroveWorkloadProvider{Client: kube}).Resolve(ctx, group)
+	if err != nil {
+		return nil, err
+	}
+	return resolveVLLMCapacity(ctx, kube, group, world)
+}
+
 func TestVLLMRuntimeResolutionBeforeAPIReadiness(t *testing.T) {
 	t.Log("construct the DGD, PCS, PCSG and exact member clique from one native declaration")
 	kube, group := newVLLMRuntimeTestWorld(t)
-	capacity, err := ResolveVLLMGroveCapacity(t.Context(), kube, group)
+	capacity, err := resolveVLLMTestCapacity(t.Context(), kube, group)
 	require.NoError(t, err)
 	transport := &vllmNoNativeRequests{}
 	httpClient := &http.Client{Transport: transport}
@@ -45,7 +54,7 @@ func TestVLLMRuntimeResolutionBeforeAPIReadiness(t *testing.T) {
 	t.Log("persist launch identities before publication and use the watched Group observation to resume")
 	require.NoError(t, capacity.ReconcileAllocations(t.Context()))
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(group), group))
-	capacity, err = ResolveVLLMGroveCapacity(t.Context(), kube, group)
+	capacity, err = resolveVLLMTestCapacity(t.Context(), kube, group)
 	require.NoError(t, err)
 	require.NoError(t, capacity.ReconcileAllocations(t.Context()))
 
@@ -70,7 +79,7 @@ func TestVLLMRuntimeResolutionBeforeAPIReadiness(t *testing.T) {
 	t.Log("changing the live target does not reinterpret the immutable launch declaration")
 	group.Spec.Replicas = 4
 	require.NoError(t, kube.Update(t.Context(), group))
-	capacity, err = ResolveVLLMGroveCapacity(t.Context(), kube, group)
+	capacity, err = resolveVLLMTestCapacity(t.Context(), kube, group)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), capacity.Source.InitialReplicas)
 	assert.Equal(t, int32(4), group.Spec.Replicas)
@@ -95,11 +104,11 @@ func TestVLLMRuntimeResolutionRefusesChangedAuthority(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			t.Log("start from exact, persisted launch bindings in the production Pod-cache representation")
 			kube, group := newVLLMRuntimeTestWorld(t)
-			capacity, err := ResolveVLLMGroveCapacity(t.Context(), kube, group)
+			capacity, err := resolveVLLMTestCapacity(t.Context(), kube, group)
 			require.NoError(t, err)
 			require.NoError(t, capacity.ReconcileAllocations(t.Context()))
 			require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(group), group))
-			capacity, err = ResolveVLLMGroveCapacity(t.Context(), kube, group)
+			capacity, err = resolveVLLMTestCapacity(t.Context(), kube, group)
 			require.NoError(t, err)
 			require.NoError(t, capacity.ReconcileAllocations(t.Context()))
 			pod := &corev1.Pod{}
@@ -132,7 +141,7 @@ func TestVLLMRuntimeResolutionRefusesChangedAuthority(t *testing.T) {
 			require.NoError(t, kube.Update(t.Context(), pod))
 			pod.Status = *status
 			require.NoError(t, kube.Status().Update(t.Context(), pod))
-			capacity, err = ResolveVLLMGroveCapacity(t.Context(), kube, group)
+			capacity, err = resolveVLLMTestCapacity(t.Context(), kube, group)
 			if err == nil {
 				_, err = ResolveVLLMMembership(t.Context(), capacity, &http.Client{Transport: &vllmNoNativeRequests{}})
 			}
@@ -147,7 +156,7 @@ func TestVLLMRuntimeResolutionRefusesChangedAuthority(t *testing.T) {
 func TestVLLMRendezvousRefusesReplacementRoot(t *testing.T) {
 	t.Log("persist initial slot authority before any engine process has become Ready")
 	kube, group := newVLLMRuntimeTestWorld(t)
-	capacity, err := ResolveVLLMGroveCapacity(t.Context(), kube, group)
+	capacity, err := resolveVLLMTestCapacity(t.Context(), kube, group)
 	require.NoError(t, err)
 	require.NoError(t, capacity.ReconcileAllocations(t.Context()))
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(group), group))
@@ -164,7 +173,7 @@ func TestVLLMRendezvousRefusesReplacementRoot(t *testing.T) {
 	require.NoError(t, kube.Create(t.Context(), root))
 
 	t.Log("never redirect new launches to the replacement, even before native API observation")
-	_, err = ResolveVLLMGroveCapacity(t.Context(), kube, group)
+	_, err = resolveVLLMTestCapacity(t.Context(), kube, group)
 	require.ErrorIs(t, err, domain.ErrRecoveryRequired)
 	assert.Empty(t, root.Annotations)
 }
@@ -181,8 +190,12 @@ func TestEngineGroupParentWatchUsesExactOwners(t *testing.T) {
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKey{Namespace: group.Namespace, Name: "world"}, world))
 
 	t.Log("each asynchronous dependency can wake the logical world without inspecting the event edge")
-	for _, parent := range []client.Object{dgd, pcs, world} {
-		requests := reconciler.engineGroupsForParent(t.Context(), parent)
+	requests := reconciler.engineGroupsForParent(t.Context(), dgd)
+	require.Len(t, requests, 1)
+	assert.Equal(t, client.ObjectKeyFromObject(group), requests[0].NamespacedName)
+	workload := &GroveWorkloadProvider{Client: kube}
+	for _, parent := range []client.Object{pcs, world} {
+		requests := workload.engineGroupsForParent(t.Context(), parent)
 		require.Len(t, requests, 1)
 		assert.Equal(t, client.ObjectKeyFromObject(group), requests[0].NamespacedName)
 	}
@@ -191,7 +204,7 @@ func TestEngineGroupParentWatchUsesExactOwners(t *testing.T) {
 	dgd.UID = "another-dgd"
 	assert.Empty(t, reconciler.engineGroupsForParent(t.Context(), dgd))
 	world.OwnerReferences[0].UID = "another-pcs"
-	assert.Empty(t, reconciler.engineGroupsForParent(t.Context(), world))
+	assert.Empty(t, workload.engineGroupsForParent(t.Context(), world))
 }
 
 func newVLLMRuntimeTestWorld(t *testing.T) (client.Client, *api.DynamoGraphDeploymentEngineGroup) {
