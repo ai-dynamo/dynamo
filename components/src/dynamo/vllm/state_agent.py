@@ -7,6 +7,8 @@ import asyncio
 import ipaddress
 import logging
 import re
+import socket
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
 
@@ -24,7 +26,7 @@ from .kv_hints import resolve_kv_transfer_hint_sources
 
 logger = logging.getLogger(__name__)
 
-_CACHE_OWNER_PATTERN = re.compile(
+CACHE_OWNER_PATTERN = re.compile(
     r"^(?P<domain>[0-9a-f]{32}:[0-9a-f]{32})/[0-9a-f]{16}/[0-9a-f]{32}$"
 )
 _STATE_AGENT_CLOSE_TIMEOUT_SECS = 30.0
@@ -55,7 +57,7 @@ class StateAgentLifecycle:
         except BaseException:
             # A started owner already holds discovery registrations. Its Rust
             # cleanup task survives cancellation of this Python await.
-            await asyncio.shield(_close_attachment_owner(owner))
+            await asyncio.shield(bounded_close(owner.close()))
             raise
 
     async def close(self) -> None:
@@ -63,12 +65,13 @@ class StateAgentLifecycle:
             self._closed = True
             owner, self._owner = self._owner, None
         if owner is not None:
-            await _close_attachment_owner(owner)
+            await bounded_close(owner.close())
 
 
-async def _close_attachment_owner(owner: KvStateAttachmentOwner) -> None:
+async def bounded_close(cleanup: Awaitable[None]) -> None:
+    """Bound cleanup without replacing a worker's error or cancellation on timeout."""
     try:
-        await asyncio.wait_for(owner.close(), timeout=_STATE_AGENT_CLOSE_TIMEOUT_SECS)
+        await asyncio.wait_for(cleanup, timeout=_STATE_AGENT_CLOSE_TIMEOUT_SECS)
     except asyncio.TimeoutError:
         logger.warning(
             "KV state attachment cleanup timed out after %.0fs; continuing worker shutdown",
@@ -96,7 +99,7 @@ def state_agent_settings_from_engine_args(
     host = section.get("raw_advertise_host")
     if not isinstance(host, str) or not host:
         raise ValueError("dynamo_state_agent.raw_advertise_host is required")
-    _validate_advertise_host(host)
+    validate_advertise_host(host)
 
     raw_owners = section.get("cache_owner_ids")
     if not isinstance(raw_owners, dict) or not raw_owners:
@@ -111,7 +114,7 @@ def state_agent_settings_from_engine_args(
             ) from error
         if str(rank) != str(raw_rank):
             raise ValueError(f"non-canonical global DP rank key: {raw_rank!r}")
-        if not isinstance(owner, str) or _CACHE_OWNER_PATTERN.fullmatch(owner) is None:
+        if not isinstance(owner, str) or CACHE_OWNER_PATTERN.fullmatch(owner) is None:
             raise ValueError(f"invalid canonical CacheOwnerId for global rank {rank}")
         owners[rank] = owner
     if len(set(owners.values())) != len(owners):
@@ -252,8 +255,9 @@ def _advertised_raw_endpoint(base: str, rank: int, host: str) -> str:
     return f"tcp://{host}:{port}"
 
 
-def _validate_advertise_host(host: str) -> None:
-    if host in {"*", "localhost", "0.0.0.0", "::", "[::]"}:
+def validate_advertise_host(host: str) -> None:
+    """Require a connectable hostname, IPv4 address, or bracketed IPv6 literal."""
+    if host.rstrip(".").lower() in {"*", "localhost", "0.0.0.0", "::", "[::]"}:
         raise ValueError("raw_advertise_host must be a non-loopback connectable host")
     if "://" in host or "/" in host:
         raise ValueError("raw_advertise_host must not include a scheme, port, or path")
@@ -278,7 +282,14 @@ def _validate_advertise_host(host: str) -> None:
         try:
             address = ipaddress.ip_address(literal)
         except ValueError:
-            return
+            # POSIX accepts abbreviated/integer IPv4 literals (e.g.127.1).
+            # Check them without resolving arbitrary DNS names at startup.
+            try:
+                address = ipaddress.IPv4Address(socket.inet_aton(literal))
+            except OSError:
+                return
 
+    if address.version == 6 and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
     if address.is_loopback or address.is_unspecified:
         raise ValueError("raw_advertise_host must be a non-loopback connectable host")

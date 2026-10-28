@@ -4,10 +4,11 @@
 """Attachment helpers shared by KV state-agent workers."""
 
 import hashlib
+import logging
 from collections.abc import Iterable
 
-# Fixed width, so no worker's topic is a prefix of another's: SUB subscriptions
-# are prefix filters, and the state agent routes pooled raw streams by topic.
+logger = logging.getLogger(__name__)
+
 _RAW_TOPIC_HEX_DIGITS = 16
 
 

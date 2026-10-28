@@ -10,6 +10,7 @@ import pytest
 
 pytest.importorskip("vllm.config")
 
+from dynamo.vllm import state_agent as kv_state_agent  # noqa: E402  # isort: skip
 from dynamo.common.kv_state_agent import worker_raw_topic  # noqa: E402
 from dynamo.vllm import state_agent  # noqa: E402
 from dynamo.vllm.cache_info import DYNAMO_KV_EVENT_BLOCK_SIZE_KEY  # noqa: E402
@@ -17,6 +18,7 @@ from dynamo.vllm.cache_info import DYNAMO_KV_EVENT_BLOCK_SIZE_KEY  # noqa: E402
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.router,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator"),
@@ -102,7 +104,7 @@ async def test_closed_lifecycle_bounds_late_owner_cleanup(monkeypatch):
     never_finishes = asyncio.Event()
     lifecycle = state_agent.StateAgentLifecycle()
     owner = SimpleNamespace(close=AsyncMock(side_effect=never_finishes.wait))
-    monkeypatch.setattr(state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
+    monkeypatch.setattr(kv_state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
 
     await lifecycle.close()
     with pytest.raises(RuntimeError, match="closed"):
@@ -112,16 +114,17 @@ async def test_closed_lifecycle_bounds_late_owner_cleanup(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_close_has_a_bounded_wait(monkeypatch):
+async def test_lifecycle_close_has_a_bounded_wait(monkeypatch, caplog):
     never_finishes = asyncio.Event()
     lifecycle = state_agent.StateAgentLifecycle()
     owner = SimpleNamespace(close=AsyncMock(side_effect=never_finishes.wait))
-    monkeypatch.setattr(state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
+    monkeypatch.setattr(kv_state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
     await lifecycle.install(owner)
 
     await lifecycle.close()
 
     owner.close.assert_awaited_once()
+    assert "cleanup timed out" in caplog.text
 
 
 def test_cli_validates_state_agent_after_vllm_engine_config():
