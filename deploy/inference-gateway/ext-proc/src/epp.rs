@@ -129,6 +129,7 @@ pub struct Router {
     prefill_bookings: DashMap<String, PrefillReservation>,
     decode_router: ManagedKvRouter,
     preprocessor: Arc<OpenAIPreprocessor>,
+    frontend_decoding: bool,
     runtime: Runtime,
     worker_index: Arc<RwLock<WorkerEndpointIndex>>,
     pod_store_ready: Arc<AtomicBool>,
@@ -261,6 +262,7 @@ impl Router {
             prefill_bookings: DashMap::new(),
             decode_router,
             preprocessor: bootstrap.preprocessor,
+            frontend_decoding: bootstrap.card.media_decoder.is_some(),
             runtime,
             worker_index,
             pod_store_ready,
@@ -322,14 +324,22 @@ impl Router {
         }
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_value(value)?;
-        Self::tokenize_chat(&self.preprocessor, &request, headers).await
+        Self::tokenize_chat(
+            &self.preprocessor,
+            &request,
+            headers,
+            self.frontend_decoding,
+        )
+        .await
     }
 
-    /// Reuse Frontend preprocessing, including image expansion and hashing.
+    /// Use image-aware preprocessing only when workers own media decoding.
+    /// Frontend-decoded models keep template-only routing to avoid decoding twice.
     async fn tokenize_chat(
         preprocessor: &OpenAIPreprocessor,
         request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
         headers: &[(String, String)],
+        frontend_decoding: bool,
     ) -> Result<TokenizeResult> {
         // TODO(epp-request-routing): Preserve expected output length, LoRA, pins,
         // sessions, topology constraints, and additional protocols when routing.
@@ -339,17 +349,30 @@ impl Router {
         let cache_namespace = cache_namespace_from_request(request, headers);
 
         let start = Instant::now();
-        // A configured media decoder hashes decoded pixels; keep that identity even though
-        // EPP discards the decoded payload. Worker media loading is a separate step.
-        let (preprocessed, _, _) = preprocessor.preprocess_request(request, None).await?;
+        let (tokens, mm_routing_info) = if frontend_decoding {
+            // Decoded-pixel hashes require media decoding. Keep the previous EPP path
+            // until decoded media can be shared with the worker-side Frontend.
+            let encoding = match preprocessor.apply_template(request)? {
+                Some(prompt) => preprocessor.tokenize_rendered_prompt(&prompt)?,
+                None => preprocessor.tokenize("")?,
+            };
+            (encoding.token_ids().to_vec(), None)
+        } else {
+            let (preprocessed, _, _) = preprocessor.preprocess_request(request, None).await?;
+            (
+                Arc::unwrap_or_clone(preprocessed.token_ids),
+                preprocessed.mm_routing_info,
+            )
+        };
         tracing::debug!(
             preprocessing_seconds = start.elapsed().as_secs_f64(),
-            multimodal = preprocessed.mm_routing_info.is_some(),
+            multimodal = mm_routing_info.is_some(),
+            frontend_decoding,
             "EPP chat routing preprocessing completed"
         );
         Ok(TokenizeResult {
-            tokens: Arc::unwrap_or_clone(preprocessed.token_ids),
-            mm_routing_info: preprocessed.mm_routing_info,
+            tokens,
+            mm_routing_info,
             cache_namespace,
             priority_jump,
             strict_priority,
@@ -894,6 +917,12 @@ async fn fetch_preprocessor_from_discovery(
         "Found model card via discovery"
     );
 
+    if card.media_decoder.is_some() {
+        tracing::info!(
+            model = %card.display_name,
+            "Frontend media decoding is enabled; EPP will use token-only routing"
+        );
+    }
     card.download_config(None).await?;
     let preprocessor = OpenAIPreprocessor::new(card.clone())?;
 
@@ -1786,7 +1815,7 @@ mod tests {
                     {"type": "text", "text": after}
                 ]}]
             })).unwrap();
-            let epp = Router::tokenize_chat(&preprocessor, &request, &[])
+            let epp = Router::tokenize_chat(&preprocessor, &request, &[], false)
                 .await
                 .unwrap();
             let (frontend, _, _) = preprocessor
@@ -1878,7 +1907,7 @@ mod tests {
             "messages": [{"role": "user", "content": [{"type": "text", "text": "Hello world"}]}]
         }))
         .unwrap();
-        let epp = Router::tokenize_chat(&preprocessor, &text_request, &[])
+        let epp = Router::tokenize_chat(&preprocessor, &text_request, &[], false)
             .await
             .unwrap();
         let prompt = preprocessor.apply_template(&text_request).unwrap().unwrap();
@@ -1890,6 +1919,67 @@ mod tests {
                 .token_ids()
         );
         assert!(epp.mm_routing_info.is_none());
+    }
+
+    /// Frontend-decoded models must retain the old tokens without loading media in EPP.
+    #[tokio::test]
+    async fn frontend_decoding_keeps_legacy_chat_tokenization() {
+        let template = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            template.path(),
+            "{{ messages[0]['content'][0]['text'] }}<image>",
+        )
+        .unwrap();
+        let card = ModelDeploymentCard::load_from_disk(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../lib/llm/tests/data/sample-models/TinyLlama_v1.1"
+            ),
+            Some(template.path()),
+        )
+        .unwrap();
+        // The fallback needs only a tokenizer; no decoder or NIXL agent is needed.
+        let preprocessor = OpenAIPreprocessor::new(card).unwrap();
+        let image_url = format!(
+            "data:image/png;base64,{}",
+            "A".repeat(dynamo_llm::preprocessor::media::max_data_url_bytes() + 1)
+        );
+        let request = serde_json::from_value(serde_json::json!({
+            "model": "vision", "max_tokens": 1,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "Describe this image."},
+                {"type": "image_url", "image_url": {
+                    "url": image_url
+                }}
+            ]}]
+        }))
+        .unwrap();
+        // Full preprocessing rejects this oversized data URL before decoding it.
+        // The legacy routing path must leave media validation/loading to the worker.
+        #[cfg(feature = "mm-routing")]
+        assert!(
+            preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .is_err()
+        );
+        let result = Router::tokenize_chat(&preprocessor, &request, &[], true)
+            .await
+            .unwrap();
+        let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(
+            result.tokens,
+            preprocessor
+                .tokenize_rendered_prompt(&prompt)
+                .unwrap()
+                .token_ids()
+        );
+        assert!(result.mm_routing_info.is_none());
+        assert!(result.tokens_safe_to_inject);
+        assert_eq!(
+            routing_view(&result.tokens, None),
+            (&result.tokens[..], None)
+        );
     }
 
     /// Keep expanded routing and empty-metadata fallback consistent with the Frontend.
