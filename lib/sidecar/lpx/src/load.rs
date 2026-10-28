@@ -19,8 +19,9 @@ pub(crate) const RANK: u32 = 0;
 /// How long the load may go without a valid answer before the worker
 /// withdraws.
 pub(crate) const STALENESS_LIMIT: Duration = Duration::from_secs(30);
+/// Bound on one `GetLoad` call, at startup and in each poll.
+pub(crate) const GET_LOAD_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-const POLL_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_AGE: Duration = Duration::from_secs(5);
 const MAX_CLOCK_SKEW: Duration = Duration::from_secs(1);
 
@@ -65,8 +66,8 @@ pub(crate) fn snapshot(peer: &str, load: pb::LoadInfo) -> Result<ComponentSnapsh
     }
 }
 
-/// Publishes the engine's load every 100 ms until `shutdown`. Once no poll
-/// has succeeded for [`STALENESS_LIMIT`], it cancels `lost` and stops.
+/// Publishes the engine's load every [`POLL_INTERVAL`] until `shutdown`. Once
+/// no poll has succeeded for [`STALENESS_LIMIT`], it cancels `lost` and stops.
 pub(crate) async fn poll(
     client: Arc<OpenEngineClient>,
     publisher: Arc<SnapshotPublisher>,
@@ -87,7 +88,7 @@ pub(crate) async fn poll(
             }
             load = async {
                 interval.tick().await;
-                client.load(Instant::now() + POLL_TIMEOUT).await
+                client.load(Instant::now() + GET_LOAD_TIMEOUT).await
             } => load,
         };
         match load.and_then(|load| snapshot(client.peer(), load)) {

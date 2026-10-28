@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use dynamo_backend_common::metrics::{ComponentGauges, EngineMetrics, TestHierarchy};
 use dynamo_backend_common::{MetricsBindings, MetricsCtx, SnapshotPublisher};
@@ -80,8 +81,15 @@ async fn reported_load_is_polled_into_the_publisher() {
     start_publishing(&metrics, bindings);
     assert_eq!(usage(&metrics), Some(0.25));
 
-    // Past the first poll, so only a repeated one can see the change.
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // The bootstrap and two polls have read the startup load, so only a
+    // repeated poll can see the change.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while server.fake.0.load_calls.load(Ordering::SeqCst) < 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the poll repeats");
     server.fake.set_load(Load::Used(128));
     tokio::time::timeout(Duration::from_secs(5), async {
         while usage(&metrics) != Some(0.5) {

@@ -57,6 +57,7 @@ pub(super) struct State {
     pub(super) model_info_calls: AtomicUsize,
     pub(super) behavior: Mutex<Behavior>,
     pub(super) load: Mutex<Load>,
+    pub(super) load_calls: AtomicUsize,
 
     pub(super) requests: Mutex<Vec<pb::GenerateRequest>>,
     /// The trace metadata each Generate call carried.
@@ -79,6 +80,7 @@ impl FakeEngine {
             model_info_calls: AtomicUsize::new(0),
             behavior: Mutex::new(Behavior::Complete),
             load: Mutex::new(Load::Unimplemented),
+            load_calls: AtomicUsize::new(0),
             requests: Mutex::new(Vec::new()),
             metadata: Mutex::new(Vec::new()),
             aborts: Mutex::new(Vec::new()),
@@ -330,9 +332,10 @@ impl pb::control_server::Control for FakeEngine {
         if !request.into_inner().include_per_rank {
             return Err(Status::invalid_argument("the sidecar asks for each rank"));
         }
+        self.0.load_calls.fetch_add(1, Ordering::SeqCst);
         let load = *self.0.load.lock().unwrap();
         let used = match load {
-            Load::Unimplemented => return Err(Status::unimplemented("GetLoad is not used")),
+            Load::Unimplemented => return Err(Status::unimplemented("GetLoad is not implemented")),
             Load::Used(used) => used,
             Load::Hangs => std::future::pending().await,
         };

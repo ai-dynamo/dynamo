@@ -91,9 +91,8 @@ impl LpxSidecarEngine {
     pub(crate) async fn load_lost(&self) -> DynamoError {
         self.load_lost.cancelled().await;
         engine_shutdown(format!(
-            "{} load stayed unavailable for {:?}; withdrawing the worker",
-            engine_label(&self.discovered.engine_name),
-            load::STALENESS_LIMIT
+            "Routing load remained unavailable for {} seconds; withdrawing worker",
+            load::STALENESS_LIMIT.as_secs_f64()
         ))
     }
 
@@ -214,7 +213,7 @@ async fn discover(args: Args) -> Result<(LpxSidecarEngine, WorkerConfig), Dynamo
     let discovered = DiscoveredEngine::check(server_info, model_info, mode)?;
     discovered.check_served_name(args.served_model_name.as_deref())?;
     let load = probe
-        .load(deadline.min(Instant::now() + client::RPC_TIMEOUT))
+        .load(deadline.min(Instant::now() + load::GET_LOAD_TIMEOUT))
         .await?;
     drop(probe);
 
@@ -257,6 +256,7 @@ impl LLMEngine for LpxSidecarEngine {
             kv_block_size = ?discovered.kv_block_size,
             total_kv_blocks = ?discovered.total_kv_blocks,
             max_running_requests = ?discovered.max_running_requests,
+            reports_load = discovered.load.is_some(),
             connections,
             "LPX OpenEngine server identified"
         );
