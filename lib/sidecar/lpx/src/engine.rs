@@ -5,7 +5,7 @@
 //! servers.
 
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -18,6 +18,7 @@ use dynamo_sidecar_common::{
 };
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -66,6 +67,8 @@ pub struct LpxSidecarEngine {
     cancel: CancellationToken,
     /// Cancelled once the engine's load has stayed unavailable too long.
     load_lost: CancellationToken,
+    /// The load poll `setup_metrics` starts; `cleanup` joins it.
+    load_poll: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl LpxSidecarEngine {
@@ -83,6 +86,7 @@ impl LpxSidecarEngine {
             client: OnceCell::new(),
             cancel: CancellationToken::new(),
             load_lost: CancellationToken::new(),
+            load_poll: Arc::default(),
         }
     }
 
@@ -425,6 +429,11 @@ impl LLMEngine for LpxSidecarEngine {
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
         self.cancel.cancel();
+        // The poll stops at its next await, which watches the cancellation first.
+        let poll = self.load_poll.lock().expect("load poll mutex").take();
+        if let Some(poll) = poll {
+            let _ = poll.await;
+        }
         tracing::info!("LPX sidecar shutdown complete");
         Ok(())
     }
@@ -437,10 +446,12 @@ impl LLMEngine for LpxSidecarEngine {
         }
         let client = Arc::clone(self.connected()?);
         let (shutdown, lost) = (self.cancel.clone(), self.load_lost.clone());
+        let slot = Arc::clone(&self.load_poll);
         Ok(MetricsBindings {
             dp_ranks: vec![load::RANK],
             on_publisher_ready: Some(Box::new(move |publisher| {
-                tokio::spawn(load::poll(client, publisher, shutdown, lost));
+                let poll = tokio::spawn(load::poll(client, publisher, shutdown, lost));
+                *slot.lock().expect("load poll mutex") = Some(poll);
                 Ok(())
             })),
         })

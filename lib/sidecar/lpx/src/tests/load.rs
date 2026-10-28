@@ -150,7 +150,10 @@ fn only_a_fresh_valid_rank_0_load_is_accepted() {
     );
     let second = 1_000_000_000;
     for invalid in [
-        crate::pb::LoadInfo::default(),
+        crate::pb::LoadInfo {
+            timestamp_unix_nanos: None,
+            ..load(now, &[(0, 64, 256)])
+        },
         load(now - 6 * second, &[(0, 64, 256)]),
         load(now + 2 * second, &[(0, 64, 256)]),
         load(now, &[]),
