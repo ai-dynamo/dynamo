@@ -712,11 +712,8 @@ func (v *sharedValidation) validateComponentRoleSpec(
 				continue
 			}
 
-			// Only LPX authors have a role that may host the sidecar, so only they are pointed to it.
-			detail := "Dynamo sidecar mode is not supported in multinode or LPX role pod templates"
-			if lpx {
-				detail = "Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role"
-			}
+			// Point to the LPX role that may host the sidecar.
+			detail := "Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role"
 			allErrs = append(allErrs, field.Forbidden(fldPath.Child("podTemplate", "spec", "initContainers").Index(i).Child("name"), detail))
 		}
 	}

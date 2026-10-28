@@ -17,7 +17,9 @@ import (
 )
 
 // ValidateComponentSidecarConfiguration validates runtime init-container declarations
-// across all authored component and role templates for admission and rendering.
+// in the component PodTemplate and non-LPX role PodTemplates for admission and rendering.
+// LPX admission validates roles through validateComponentRoleSpec; LPX rendering
+// passes the selected role template as component.PodTemplate.
 // Components without a runtime init container have no sidecar-specific requirements.
 // component and fldPath must not be nil.
 func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, backendFramework string) field.ErrorList {
@@ -30,7 +32,7 @@ func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDep
 	templates[0] = component.PodTemplate
 	paths := make([]*field.Path, 1, 1+len(component.Roles))
 	paths[0] = fldPath.Child("podTemplate")
-	// LPX validates its authored roles separately; rendering validates the selected PodTemplate here.
+	// Avoid duplicate LPX admission errors; validateComponentRoleSpec owns its role checks.
 	if !component.IsLPX() {
 		for i := range component.Roles {
 			templates = append(templates, component.Roles[i].PodTemplate)
