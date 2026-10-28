@@ -46,10 +46,12 @@ class _NvdecAvailabilityProbe(Protocol):
     def cache_clear(self) -> None:
         ...
 
+
 def nvdec_unavailable(probe: _NvdecAvailabilityProbe | None = None) -> bool:
     """Probe NVDEC with the setting passed to NVDEC serve-test workers."""
     if probe is None:
         from dynamo.common.multimodal.nvdec_decoder import nvdec_available
+
         probe = nvdec_available
     probe.cache_clear()
     try:
