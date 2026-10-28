@@ -131,7 +131,9 @@ func ensureModelsDownloaded(
 	return downloaded, len(downloaded) == len(builds), err
 }
 
-// ensureDownloaded includes cached items when dividing the shared timeout budget.
+// ensureDownloaded returns downloaded and pending keys in input order, plus joined
+// download errors. Cached items count when dividing the shared timeout budget.
+// items must be non-empty, and key and download must be non-nil.
 func ensureDownloaded[T any](
 	ctx context.Context,
 	items []T,
@@ -140,10 +142,6 @@ func ensureDownloaded[T any](
 	key func(T) string,
 	download func(context.Context, T) (bool, error),
 ) ([]string, []string, error) {
-	if len(items) == 0 {
-		return nil, nil, nil
-	}
-
 	var (
 		downloaded     = make([]string, 0, len(items))
 		pending        []string

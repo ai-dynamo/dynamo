@@ -95,15 +95,14 @@ func (r *graphReconciler) reconcileCheckpointDownloads(
 
 // ensureCheckpointsDownloaded checks the checkpoints whose keys are not in
 // existing within one shared budget. It returns the downloaded keys and the
-// keys still in progress, both sorted.
+// keys still in progress, both sorted. registry may be nil when checkpoints is
+// empty.
 func ensureCheckpointsDownloaded(
 	ctx context.Context,
 	checkpoints []*lpx.Checkpoint,
 	registry lpx.ModelRegistry,
 	existing []string,
 ) ([]string, []string, error) {
-	// registry may be nil when there is nothing to check, and taking its method
-	// value would panic.
 	if len(checkpoints) == 0 {
 		return nil, nil, nil
 	}
