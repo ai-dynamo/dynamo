@@ -130,6 +130,29 @@ impl OpenEngineClient {
         .map_err(|status| status_to_dynamo("GetServerInfo", status))
     }
 
+    /// The engine's load per data-parallel rank, abandoned at `deadline`. An
+    /// engine without `GetLoad` reports no load.
+    pub(crate) async fn load(&self, deadline: Instant) -> Result<pb::LoadInfo, DynamoError> {
+        let request = pb::GetLoadRequest {
+            include_per_rank: true,
+        };
+        match timeout_at(deadline, self.control().get_load(request)).await {
+            Ok(Ok(response)) => Ok(response.into_inner()),
+            Ok(Err(status)) if status.code() == tonic::Code::Unimplemented => {
+                Ok(pb::LoadInfo::default())
+            }
+            Ok(Err(status)) => Err(status_to_dynamo("GetLoad", status)),
+            Err(_) => Err(connection_timeout(format!(
+                "the {} server did not answer GetLoad in time",
+                self.peer
+            ))),
+        }
+    }
+
+    pub(crate) fn peer(&self) -> &str {
+        &self.peer
+    }
+
     /// An LPX engine serves one model and accepts an empty model name. The
     /// sidecar does not know the name until this call returns it, so it asks
     /// for none.

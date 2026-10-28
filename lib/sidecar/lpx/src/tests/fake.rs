@@ -37,6 +37,15 @@ pub(super) enum Behavior {
     HangBeforeFirstToken,
 }
 
+/// What `GetLoad` answers.
+#[derive(Clone, Copy)]
+pub(super) enum Load {
+    Unimplemented,
+    /// Rank 0 uses this many of the 256 KV blocks.
+    Used(u64),
+    Hangs,
+}
+
 pub(super) struct State {
     server_info: pb::ServerInfo,
     /// GetServerInfo never answers this many more times.
@@ -47,6 +56,7 @@ pub(super) struct State {
     pub(super) model_info_stalls: Mutex<usize>,
     pub(super) model_info_calls: AtomicUsize,
     pub(super) behavior: Mutex<Behavior>,
+    pub(super) load: Mutex<Load>,
 
     pub(super) requests: Mutex<Vec<pb::GenerateRequest>>,
     /// The trace metadata each Generate call carried.
@@ -68,6 +78,7 @@ impl FakeEngine {
             model_info_stalls: Mutex::new(0),
             model_info_calls: AtomicUsize::new(0),
             behavior: Mutex::new(Behavior::Complete),
+            load: Mutex::new(Load::Unimplemented),
             requests: Mutex::new(Vec::new()),
             metadata: Mutex::new(Vec::new()),
             aborts: Mutex::new(Vec::new()),
@@ -78,6 +89,10 @@ impl FakeEngine {
     pub(super) fn with_behavior(self, behavior: Behavior) -> Self {
         *self.0.behavior.lock().unwrap() = behavior;
         self
+    }
+
+    pub(super) fn set_load(&self, load: Load) {
+        *self.0.load.lock().unwrap() = load;
     }
 
     pub(super) fn requests(&self) -> Vec<pb::GenerateRequest> {
@@ -310,9 +325,28 @@ impl pb::control_server::Control for FakeEngine {
 
     async fn get_load(
         &self,
-        _request: Request<pb::GetLoadRequest>,
+        request: Request<pb::GetLoadRequest>,
     ) -> Result<Response<pb::LoadInfo>, Status> {
-        Err(Status::unimplemented("GetLoad is not used"))
+        if !request.into_inner().include_per_rank {
+            return Err(Status::invalid_argument("the sidecar asks for each rank"));
+        }
+        let load = *self.0.load.lock().unwrap();
+        let used = match load {
+            Load::Unimplemented => return Err(Status::unimplemented("GetLoad is not used")),
+            Load::Used(used) => used,
+            Load::Hangs => std::future::pending().await,
+        };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+        Ok(Response::new(pb::LoadInfo {
+            timestamp_unix_nanos: Some(now.unwrap().as_nanos() as u64),
+            ranks: vec![pb::RankLoadInfo {
+                data_parallel_rank: Some(0),
+                used_kv_blocks: Some(used),
+                total_kv_blocks: Some(256),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))
     }
 
     async fn health(
