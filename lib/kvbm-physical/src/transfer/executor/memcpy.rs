@@ -46,6 +46,7 @@ pub fn execute_memcpy_transfer(
     // Validate layouts have compatible structure
     validate_layout_compatibility(src, dst)?;
     let src_layout = src.layout();
+    let dst_layout = dst.layout();
 
     let layers = layer_range.clone().unwrap_or(0..src_layout.num_layers());
 

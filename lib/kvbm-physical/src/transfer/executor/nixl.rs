@@ -210,6 +210,7 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
         // Validate layouts
         validate_layout_compatibility(src, dst)?;
         let src_layout = src.layout();
+        let dst_layout = dst.layout();
 
         // Get NIXL agent
         let nixl_agent = ctx.nixl_agent();
