@@ -2479,6 +2479,13 @@ dependencies = [
 [[package]]
 name = "dynamo-global-common"
 version = "1.7.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+]
 
 [[package]]
 name = "dynamo-global-discovery-client"
@@ -2491,6 +2498,26 @@ version = "1.7.0"
 [[package]]
 name = "dynamo-global-frontend"
 version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum 0.8.4",
+ "clap",
+ "dashmap",
+ "dynamo-global-common",
+ "dynamo-llm",
+ "dynamo-protocols",
+ "dynamo-runtime",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
 
 [[package]]
 name = "dynamo-global-router"
