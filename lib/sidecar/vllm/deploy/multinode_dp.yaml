@@ -89,8 +89,10 @@ spec:
             - '4'
             - --data-parallel-size-local
             - '2'
-            - --data-parallel-start-rank
-            - '0'
+            - --nnodes
+            - '2'
+            - --node-rank
+            - $(DYNAMO_RANK)
             - --data-parallel-address
             - $(DYNAMO_LEADER_ADDRESS)
             - --data-parallel-rpc-port
@@ -141,17 +143,30 @@ spec:
                 nvidia.com/gpu: '2'
               requests:
                 ephemeral-storage: 2Gi
-            # The worker's first global DP rank is its node rank times the local
-            # rank count, so the launch runs under a shell for the arithmetic.
+            # vLLM derives this node's first global DP rank from `--nnodes` and
+            # `--node-rank`, so the worker passes the same arguments as the leader.
             command:
-            - /bin/sh
-            - -c
+            - vllm
+            - serve
+            - Qwen/Qwen3-0.6B
             args:
-            - |
-              exec vllm serve Qwen/Qwen3-0.6B \
-                --host 0.0.0.0 --grpc-port 30001 \
-                --data-parallel-hybrid-lb --data-parallel-size 4 --data-parallel-size-local 2 \
-                --data-parallel-start-rank "$((2 * DYNAMO_RANK))" \
-                --data-parallel-address "${DYNAMO_LEADER_ADDRESS}" --data-parallel-rpc-port 13445 \
-                --kv-events-config '{"publisher":"zmq","endpoint":"tcp://*:20080","replay_endpoint":"tcp://*:20180","topic":"kv-events","enable_kv_cache_events":true}'
+            - --host
+            - 0.0.0.0
+            - --grpc-port
+            - '30001'
+            - --data-parallel-hybrid-lb
+            - --data-parallel-size
+            - '4'
+            - --data-parallel-size-local
+            - '2'
+            - --nnodes
+            - '2'
+            - --node-rank
+            - $(DYNAMO_RANK)
+            - --data-parallel-address
+            - $(DYNAMO_LEADER_ADDRESS)
+            - --data-parallel-rpc-port
+            - '13445'
+            - --kv-events-config
+            - '{"publisher":"zmq","endpoint":"tcp://*:20080","replay_endpoint":"tcp://*:20180","topic":"kv-events","enable_kv_cache_events":true}'
   backendFramework: vllm
