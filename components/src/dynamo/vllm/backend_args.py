@@ -283,6 +283,16 @@ class DynamoVllmArgGroup(ArgGroup):
             "Aggregated workers only.",
         )
 
+        for name in ("tool", "reasoning"):
+            add_argument(
+                g,
+                flag_name=f"--realtime-{name}-parser",
+                env_var=f"DYN_VLLM_REALTIME_{name.upper()}_PARSER",
+                default=None,
+                arg_type=str,
+                help=f"Native vLLM {name} parser for text --realtime serving.",
+            )
+
         add_negatable_bool_argument(
             g,
             flag_name="--classify-worker",
@@ -620,6 +630,8 @@ class DynamoVllmConfig(ConfigBase):
     embedding_frontend_tokenization: bool = False
     embedding_worker_processes: int = 1
     realtime: bool = False
+    realtime_tool_parser: Optional[str] = None
+    realtime_reasoning_parser: Optional[str] = None
     classify_worker: bool = False
 
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
@@ -1033,6 +1045,8 @@ class DynamoVllmConfig(ConfigBase):
     def _validate_realtime_worker_exclusivity(self) -> None:
         """Realtime serving uses a dedicated aggregated bidirectional worker."""
         if not self.realtime:
+            if self.realtime_tool_parser or self.realtime_reasoning_parser:
+                raise ValueError("realtime parser options require --realtime.")
             return
         if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
             mode = (

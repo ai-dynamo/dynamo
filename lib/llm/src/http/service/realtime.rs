@@ -63,10 +63,10 @@ const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 use super::{RouteDoc, error::SanitizedError, service_v2};
 use crate::discovery::ModelManagerError;
+use crate::protocols::realtime::{DynamoRealtimeClientEvent, SessionUpdate, TextClientEvent};
 use crate::types::RealtimeBidirectionalEngine;
 use dynamo_protocols::types::realtime::{
-    DynamoRealtimeClientEvent, EventType, RealtimeAPIError, RealtimeClientEvent,
-    RealtimeClientEventSessionUpdate, RealtimeServerEvent, RealtimeServerEventError,
+    EventType, RealtimeAPIError, RealtimeServerEvent, RealtimeServerEventError,
     RealtimeServerEventSessionCreated, Session,
 };
 use uuid::Uuid;
@@ -155,7 +155,9 @@ async fn handle_socket(
     // max_output_tokens, tools, output_modalities). The handler only used
     // it to pick the engine; the rest is the engine's to apply.
     if req_tx
-        .send(RealtimeClientEvent::SessionUpdate(session_update).into())
+        .send(DynamoRealtimeClientEvent::Text(
+            TextClientEvent::SessionUpdate(session_update),
+        ))
         .await
         .is_err()
     {
@@ -202,6 +204,7 @@ async fn handle_socket(
                         event_id: None,
                     },
                 })
+                .into()
             } else {
                 continue;
             };
@@ -371,10 +374,7 @@ async fn select_engine<S, T>(
     ws_rx: &mut S,
     ws_tx: &mut T,
     state: &service_v2::State,
-) -> Option<(
-    RealtimeBidirectionalEngine,
-    RealtimeClientEventSessionUpdate,
-)>
+) -> Option<(RealtimeBidirectionalEngine, SessionUpdate)>
 where
     S: futures::Stream<Item = Result<Message, axum::Error>> + Unpin,
     T: futures::Sink<Message, Error = axum::Error> + Unpin,
@@ -417,7 +417,7 @@ where
             Message::Ping(_) | Message::Pong(_) => continue, // axum handles ping replies
         };
         let session_update = match event {
-            DynamoRealtimeClientEvent::OpenAI(RealtimeClientEvent::SessionUpdate(req)) => req,
+            DynamoRealtimeClientEvent::Text(TextClientEvent::SessionUpdate(req)) => req,
             other => {
                 tracing::debug!(
                     event = other.event_type(),
@@ -435,7 +435,7 @@ where
         };
 
         // Extract model name from session update.
-        let (model_name, model_param) = match &session_update.session {
+        let (model_name, model_param) = match &session_update.session.inner {
             Session::RealtimeSession(s) => (
                 s.model.as_deref().filter(|m| !m.is_empty()),
                 "session.model",

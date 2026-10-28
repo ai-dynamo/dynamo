@@ -49,7 +49,16 @@ class RealtimeEchoWorkerProcess(ManagedProcess):
 
     def __init__(self, request, *, frontend_port: int) -> None:
         super().__init__(
-            command=["python3", "-m", "tests.frontend.realtime_echo_worker"],
+            command=[
+                "python3",
+                "-m",
+                "tests.frontend.realtime_echo_worker",
+                *(
+                    ["--text-tools"]
+                    if getattr(request, "param", None) == "text-tools"
+                    else []
+                ),
+            ],
             health_check_urls=[
                 (f"http://localhost:{frontend_port}/v1/models", self._model_listed)
             ],
@@ -227,3 +236,92 @@ def test_websocket_session_update_round_trip(realtime_frontend) -> None:
 def test_websocket_audio_envelope_round_trip(realtime_frontend) -> None:
     """`input_audio_buffer.append` returns the full response envelope over the WebSocket."""
     asyncio.run(_audio_envelope_round_trip(realtime_frontend))
+
+
+@pytest.mark.parametrize("realtime_frontend", ["text-tools"], indirect=True)
+@pytest.mark.timeout(120)
+def test_realtime_tool_cycle_through_python_bridge(realtime_frontend):
+    async def scenario():
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect(
+                f"ws://127.0.0.1:{realtime_frontend}/v1/realtime"
+            ) as ws:
+                await _drain_until(ws, "session.created")
+                await ws.send_json(
+                    {
+                        "type": "session.update",
+                        "session": {
+                            "type": "realtime",
+                            "model": MODEL_NAME,
+                            "output_modalities": ["text"],
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "name": "weather",
+                                    "description": "Weather",
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": {"city": {"type": "string"}},
+                                    },
+                                }
+                            ],
+                            "tool_choice": "auto",
+                            "parallel_tool_calls": False,
+                            "nvext": {
+                                "required_capabilities": [
+                                    "tools",
+                                    "reasoning",
+                                    "incremental_text",
+                                ],
+                                "sampling": {"temperature": 0},
+                                "chat_template_kwargs": {"enable_thinking": False},
+                            },
+                        },
+                    }
+                )
+                updated = await _drain_until(ws, "session.updated")
+                assert "tools" in updated["session"]["nvext"]["capabilities"]
+                await ws.send_json(
+                    {"type": "input_text.append", "text": "Weather in Warsaw?"}
+                )
+                await ws.send_json({"type": "input_text.commit"})
+                await ws.send_json(
+                    {"type": "response.create", "response": {"max_output_tokens": 32}}
+                )
+                events = []
+                while not events or events[-1]["type"] != "response.done":
+                    event = await _recv_json(ws, 5)
+                    assert event["type"] != "error", event
+                    events.append(event)
+                assert any(
+                    event["type"] == "response.nvext.reasoning.delta"
+                    for event in events
+                )
+                response = events[-1]["response"]
+                assert response["status"] == "completed", response
+                assert response["output"][0]["call_id"] == "call_weather"
+                assert response["output"][0]["arguments"] == '{"city":"Warsaw"}'
+                assert response["usage"]["input_token_details"]["cached_tokens"] == 5
+                assert response["nvext"]["usage"] == {
+                    "created_cache_tokens": 2,
+                    "reasoning_tokens": 1,
+                }
+                await ws.send_json(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "function_call_output",
+                            "status": "completed",
+                            "call_id": "call_weather",
+                            "output": "sunny",
+                        },
+                    }
+                )
+                await ws.send_json(
+                    {"type": "response.create", "response": {"tool_choice": "none"}}
+                )
+                response = (await _drain_until(ws, "response.done"))["response"]
+                assert response["status"] == "completed", response
+                assert response["output"][0]["content"][0]["text"] == "Sunny."
+
+    asyncio.run(scenario())

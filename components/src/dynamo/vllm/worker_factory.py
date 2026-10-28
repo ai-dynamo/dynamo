@@ -1916,6 +1916,8 @@ class WorkerFactory:
                 model_name=model_name,
                 model_path=config.model_source_path,
                 chat_template_path=config.custom_jinja_template,
+                tool_parser=config.realtime_tool_parser,
+                reasoning_parser=config.realtime_reasoning_parser,
             )
         if "realtime" in supported_tasks:
             handlers["transcription"] = RealtimeTranscriptionHandler.from_engine(

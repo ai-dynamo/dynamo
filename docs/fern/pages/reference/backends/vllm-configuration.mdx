@@ -341,3 +341,94 @@ With `--benchmark-mode` set and no points file, passing a legacy flag together w
     The equivalent Dynamo flag reference for the TensorRT-LLM backend.
   </Card>
 </CardGroup>
+
+## Realtime text and tool calls
+
+Aggregated workers started with `--realtime` accept text sessions through
+`/v1/realtime`. Set `session.type` to `realtime` and `output_modalities` to
+`["text"]`. Incremental `input_text.append`, `input_text.clear`, and
+`input_text.commit` events warm the prefix cache when prefix caching is enabled.
+Commit creates a user conversation item; send `response.create` to generate.
+
+| Flag | Environment variable | Default | Meaning |
+| --- | --- | --- | --- |
+| `--realtime-tool-parser` | `DYN_VLLM_REALTIME_TOOL_PARSER` | Unset | Native vLLM tool parser name, such as `hermes` for Qwen3. Required for tool-enabled sessions. |
+| `--realtime-reasoning-parser` | `DYN_VLLM_REALTIME_REASONING_PARSER` | Unset | Native vLLM reasoning parser name, such as `qwen3`. |
+
+These parser names are resolved by vLLM, independently of Dynamo's frontend
+chat-completion parsers. Choose parsers supported by the deployed model and
+vLLM version.
+
+`session.update.session` and `response.create.response` accept flat Realtime
+function `tools`, `tool_choice` (`auto`, `none`, `required`, or a named function),
+and `parallel_tool_calls`. Function tools require `name`, `description`, and a
+`parameters` schema. Strict tool schemas and MCP tools are unsupported.
+Response fields are optional and override the session for that response only.
+Omitted `input` uses the conversation; `input: []` clears input for that response.
+Nonempty `response.input` is unsupported.
+
+The following experimental options live under `nvext` in either location:
+
+| Field | Supported values |
+| --- | --- |
+| `sampling` | `temperature` (0–2), `top_p` (greater than 0, at most 1), `seed` (signed 64-bit integer), `frequency_penalty` and `presence_penalty` (−2–2), `repetition_penalty` (positive), `top_k` (−1 or positive integer). |
+| `chat_template_kwargs` | `enable_thinking` (boolean). |
+| `response_format` | Chat-completion `text`, `json_object`, or `json_schema` format. Structured answers require `tool_choice: "none"`. |
+| `required_capabilities` | Array of required capability names. An unsupported capability rejects the update before prefill or generation. |
+
+The effective tool and template options are shared by prefix warming and final
+generation. Final generation independently renders the committed conversation;
+prefill is a cache optimization and does not guarantee a latency improvement.
+Sampling overrides merge by key. Other nested options replace the corresponding
+session value. Set `tools: []` and `tool_choice: "none"` together to clear tools.
+
+`session.updated.session.nvext.capabilities` reports the worker's supported
+capabilities: `sampling`, `response_format`, `chat_template_kwargs`,
+`usage_details`, `incremental_text` when available, and `tools` or `reasoning`
+when their native parsers are configured. Clients using these extensions must
+check the acknowledgement before committing a turn. An older frontend or worker
+may omit the capability block; treat that as unsupported rather than assuming
+an option was applied.
+
+### Tool lifecycle
+
+Tool responses contain `function_call` items, with stable item IDs and call IDs.
+The server emits `response.output_item.added`,
+`response.function_call_arguments.delta`,
+`response.function_call_arguments.done`, `response.output_item.done`, and
+`response.done`. Text and multiple tool calls may occur in the same response.
+Arguments may arrive in interleaved fragments; collect them by item or call ID.
+
+Execute callbacks only after `response.done` reports `completed`. Cancelled,
+failed, filtered, and token-limited responses must not execute callbacks, even
+if argument-done events have arrived. Append a `function_call_output` item with
+the matching `call_id` and `status: "completed"` for each call, then send another
+`response.create`.
+A tool-result continuation needs no empty `input_text.commit`.
+
+With the default `conversation: "auto"`, generated items enter server history.
+With `conversation: "none"`, the client owns assistant history and must append
+its completed assistant text, function calls, and results before the next turn.
+Duplicate item IDs with identical content are idempotent; conflicting IDs,
+orphan results, and unresolved calls at generation time are rejected. Reconnect
+and replay history after rewriting committed context or discarding partial
+function calls from a cancelled response.
+
+### Blueprint client integration
+
+The NVIDIA Nemotron voice-agent blueprint can reuse Pipecat's NVIDIA LLM
+service and tool callbacks by adapting its streaming transport to this event
+sequence. Its `/v1/streaming-session` protocol has a different envelope and
+client-generated response IDs; changing only the URL is insufficient.
+
+When `reasoning` is required in `nvext.required_capabilities`, the worker emits
+`response.nvext.reasoning.delta` and `response.nvext.reasoning.done`. Map those
+to Pipecat thought frames, independently of text sent to speech synthesis.
+Standard usage includes cached input tokens. Optional
+`response.done.response.nvext.usage` includes `reasoning_tokens` and
+`created_cache_tokens`; the latter maps to Pipecat's cache-creation metric.
+
+A realtime-only worker does not register a chat-completion endpoint. Configure
+an explicit HTTP chat model for the service's one-shot inference and summary
+requests. The client adapter and that HTTP route are separate from realtime
+worker support.
