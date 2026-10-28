@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
 )
 
@@ -77,6 +78,9 @@ const (
 	dgdrRunReasonProtocolViolation = "ProtocolViolation"
 	dgdrRunReasonPublicationFailed = "PublicationFailed"
 	dgdrRunReasonJobFailed         = "JobFailed"
+	dgdrRunReasonSuperseded        = "Superseded"
+	dgdrRunReasonInvalidExecution  = "InvalidExecution"
+	dgdrRunReasonInvalidResource   = "InvalidResource"
 	dgdrRunMessagePending          = "AISimulate Job is waiting to start"
 	dgdrRunMessageRunning          = "AISimulate Job is running"
 	dgdrRunMessageSucceeded        = "AISimulate search completed successfully"
@@ -84,6 +88,20 @@ const (
 )
 
 var errDGDRRunExecutionPending = errors.New("immutable execution ConfigMap is not visible")
+
+type dgdrRunPermanentExecutionError struct {
+	cause error
+}
+
+func (e *dgdrRunPermanentExecutionError) Error() string { return e.cause.Error() }
+func (e *dgdrRunPermanentExecutionError) Unwrap() error { return e.cause }
+
+type dgdrRunRetryableError struct {
+	cause error
+}
+
+func (e *dgdrRunRetryableError) Error() string { return e.cause.Error() }
+func (e *dgdrRunRetryableError) Unwrap() error { return e.cause }
 
 type dgdrRunHardwareDiscoverer interface {
 	Discover(context.Context, nvidiacomv1beta1.GPUSKUType) (*gpu.GPUInfo, error)
@@ -110,7 +128,7 @@ type DynamoGraphDeploymentRunV1beta2Reconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentruns/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentcandidates,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentcandidates/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps;serviceaccounts,verbs=get;list;watch;create;update;patch
@@ -127,17 +145,42 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) Reconcile(
 	if run.DeletionTimestamp != nil || meta.IsStatusConditionTrue(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted) {
 		return ctrl.Result{}, nil
 	}
+	result, err := r.reconcileRun(ctx, run)
+	if err == nil || !dgdrRunIsPermanentError(err) {
+		return result, err
+	}
+	reason := dgdrRunReasonInvalidExecution
+	var ownershipConflict *commoncontroller.OwnershipConflictError
+	if errors.As(err, &ownershipConflict) {
+		reason = commoncontroller.EventReasonOwnershipConflict
+	} else if apierrors.IsInvalid(err) {
+		reason = dgdrRunReasonInvalidResource
+	}
+	if statusErr := r.completeRun(ctx, run, reason, err.Error()); statusErr != nil {
+		return ctrl.Result{}, statusErr
+	}
+	return ctrl.Result{}, reconcile.TerminalError(err)
+}
+
+func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileRun(
+	ctx context.Context,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+) (ctrl.Result, error) {
 	jobs, err := r.ownedJobs(ctx, run)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if len(jobs) > 1 {
-		return ctrl.Result{}, fmt.Errorf("Run %q controls %d Jobs; expected at most one", run.Name, len(jobs))
+		return ctrl.Result{}, &dgdrRunPermanentExecutionError{cause: fmt.Errorf(
+			"Run %q controls %d Jobs; expected at most one", run.Name, len(jobs))}
 	}
 
 	var job *batchv1.Job
 	if len(jobs) == 1 {
 		job = &jobs[0]
+	}
+	if supersedingGeneration, cancelRequested := dgdrRunSupersedingGeneration(run); cancelRequested {
+		return ctrl.Result{}, r.cancelSupersededRun(ctx, run, job, supersedingGeneration)
 	}
 	resourceName := dgdrRunResourceName(run.Name)
 	if err := r.reconcilePublisherAccess(ctx, run, resourceName); err != nil {
@@ -166,6 +209,81 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) Reconcile(
 	return ctrl.Result{}, r.reconcileRunStatus(ctx, run, job, execution)
 }
 
+func dgdrRunSupersedingGeneration(run *nvidiacomv1beta2.DynamoGraphDeploymentRun) (string, bool) {
+	runGeneration, err := dgdrV1beta2RunGeneration(run)
+	if err != nil {
+		return "", false
+	}
+	cancelGenerationValue, ok := run.Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation]
+	if !ok {
+		return "", false
+	}
+	cancelGeneration, err := strconv.ParseInt(cancelGenerationValue, 10, 64)
+	return cancelGenerationValue, err == nil && cancelGeneration > runGeneration
+}
+
+func (r *DynamoGraphDeploymentRunV1beta2Reconciler) cancelSupersededRun(
+	ctx context.Context,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	job *batchv1.Job,
+	supersedingGeneration string,
+) error {
+	if job != nil {
+		if job.DeletionTimestamp.IsZero() {
+			err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationForeground))
+			if err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("stop Job %q for superseded Run %q: %w", job.Name, run.Name, err)
+			}
+			if err == nil {
+				return nil
+			}
+		} else {
+			return nil
+		}
+	}
+
+	return r.completeRun(ctx, run, dgdrRunReasonSuperseded,
+		fmt.Sprintf("Run was superseded by Request generation %s", supersedingGeneration))
+}
+
+func (r *DynamoGraphDeploymentRunV1beta2Reconciler) completeRun(
+	ctx context.Context,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	reason, message string,
+) error {
+	original := run.DeepCopy()
+	run.Status.Phase = nvidiacomv1beta2.DGDRRunPhaseFailed
+	now := metav1.Now()
+	run.Status.CompletionTime = &now
+	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type:               nvidiacomv1beta2.DGDRRunConditionCompleted,
+		Status:             metav1.ConditionTrue,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: run.Generation,
+	})
+	if apiequality.Semantic.DeepEqual(original.Status, run.Status) {
+		return nil
+	}
+	if err := r.Status().Patch(ctx, run, client.MergeFrom(original)); err != nil {
+		return &dgdrRunRetryableError{cause: fmt.Errorf("complete Run %q: %w", run.Name, err)}
+	}
+	return nil
+}
+
+func dgdrRunIsPermanentError(err error) bool {
+	var retryable *dgdrRunRetryableError
+	if errors.As(err, &retryable) {
+		return false
+	}
+	var permanent *dgdrRunPermanentExecutionError
+	if errors.As(err, &permanent) {
+		return true
+	}
+	var ownershipConflict *commoncontroller.OwnershipConflictError
+	return errors.As(err, &ownershipConflict) || apierrors.IsInvalid(err)
+}
+
 func (r *DynamoGraphDeploymentRunV1beta2Reconciler) ownedJobs(
 	ctx context.Context,
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
@@ -191,6 +309,11 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcilePublisherAccess(
 ) error {
 	sa := &corev1.ServiceAccount{Name: name, Namespace: run.Namespace}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, sa, func() error {
+		if sa.ResourceVersion != "" {
+			if err := commoncontroller.CheckControllerOwnership(sa, run, r.Scheme()); err != nil {
+				return err
+			}
+		}
 		return controllerutil.SetControllerReference(run, sa, r.Scheme())
 	}); err != nil {
 		return fmt.Errorf("reconcile ServiceAccount %q: %w", name, err)
@@ -198,6 +321,11 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcilePublisherAccess(
 
 	role := &rbacv1.Role{Name: name, Namespace: run.Namespace}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, role, func() error {
+		if role.ResourceVersion != "" {
+			if err := commoncontroller.CheckControllerOwnership(role, run, r.Scheme()); err != nil {
+				return err
+			}
+		}
 		role.Rules = dgdrRunPublisherRules(run.Name)
 		return controllerutil.SetControllerReference(run, role, r.Scheme())
 	}); err != nil {
@@ -206,6 +334,11 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcilePublisherAccess(
 
 	binding := &rbacv1.RoleBinding{Name: name, Namespace: run.Namespace}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, binding, func() error {
+		if binding.ResourceVersion != "" {
+			if err := commoncontroller.CheckControllerOwnership(binding, run, r.Scheme()); err != nil {
+				return err
+			}
+		}
 		binding.RoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: name}
 		binding.Subjects = []rbacv1.Subject{{Kind: "ServiceAccount", Name: name, Namespace: run.Namespace}}
 		return controllerutil.SetControllerReference(run, binding, r.Scheme())
@@ -263,19 +396,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 	key := types.NamespacedName{Namespace: run.Namespace, Name: name}
 	err := r.Get(ctx, key, configMap)
 	if err == nil {
-		if !metav1.IsControlledBy(configMap, run) {
-			return dgdrRunExecution{}, fmt.Errorf("ConfigMap %q is not controlled by Run %q", name, run.Name)
-		}
-		execution, parseErr := dgdrRunExecutionFromConfigMap(configMap)
-		if parseErr != nil {
-			return dgdrRunExecution{}, fmt.Errorf("read ConfigMap %q: %w", name, parseErr)
-		}
-		if job != nil {
-			if validateErr := validateDGDRRunJobExecution(job, execution); validateErr != nil {
-				return dgdrRunExecution{}, fmt.Errorf("Job %q and ConfigMap %q disagree: %w", job.Name, name, validateErr)
-			}
-		}
-		return execution, nil
+		return r.existingRunExecution(configMap, run, job)
 	}
 	if !apierrors.IsNotFound(err) {
 		return dgdrRunExecution{}, fmt.Errorf("get ConfigMap %q: %w", name, err)
@@ -295,10 +416,10 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 				return dgdrRunExecution{}, fmt.Errorf("read ConfigMap %q directly from the API: %w", name, apiErr)
 			}
 		}
-		return dgdrRunExecution{}, fmt.Errorf(
+		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: fmt.Errorf(
 			"immutable execution ConfigMap %q is missing while Job %q exists; refusing to reconstruct it from current operator configuration",
 			name, job.Name,
-		)
+		)}
 	}
 
 	// Resolve every execution value before creating the immutable artifact.
@@ -318,11 +439,11 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 	}
 	execution.DynamoVersion, err = dgdrRunDynamoVersion(execution.PlannerImage, r.DynamoVersion)
 	if err != nil {
-		return dgdrRunExecution{}, err
+		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: err}
 	}
 	execution.RuntimeImageSource, err = dgdrRunRuntimeImageSource(execution.PlannerImage)
 	if err != nil {
-		return dgdrRunExecution{}, err
+		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: err}
 	}
 	execution.ImagePullSecrets, err = r.dgdrRunImagePullSecrets(run.Namespace, execution.PlannerImage, execution.PublisherImage)
 	if err != nil {
@@ -331,19 +452,19 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 
 	input, err := dgdrRunInput(run, execution.RuntimeImageSource, execution.DynamoVersion, execution.GPUsPerNode)
 	if err != nil {
-		return dgdrRunExecution{}, err
+		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: err}
 	}
 	contents, err := yaml.Marshal(input)
 	if err != nil {
-		return dgdrRunExecution{}, fmt.Errorf("encode AISimulate input: %w", err)
+		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: fmt.Errorf("encode AISimulate input: %w", err)}
 	}
 	execution.Input, err = dgdrRunStatusInput(string(contents))
 	if err != nil {
-		return dgdrRunExecution{}, err
+		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: err}
 	}
 	pullSecrets, err := json.Marshal(execution.ImagePullSecrets)
 	if err != nil {
-		return dgdrRunExecution{}, fmt.Errorf("encode image pull secrets: %w", err)
+		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: fmt.Errorf("encode image pull secrets: %w", err)}
 	}
 
 	configMap = &corev1.ConfigMap{
@@ -367,11 +488,43 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 			dgdrRunImagePullSecretsKey:    string(pullSecrets),
 		},
 	}
-	if err := controllerutil.SetControllerReference(run, configMap, r.Scheme()); err != nil {
-		return dgdrRunExecution{}, fmt.Errorf("set ConfigMap owner: %w", err)
+	desired := configMap
+	configMap = &corev1.ConfigMap{Name: name, Namespace: run.Namespace}
+	operation, err := controllerutil.CreateOrUpdate(ctx, r.Client, configMap, func() error {
+		if configMap.ResourceVersion != "" {
+			return commoncontroller.CheckControllerOwnership(configMap, run, r.Scheme())
+		}
+		configMap.Annotations = desired.Annotations
+		configMap.Immutable = desired.Immutable
+		configMap.Data = desired.Data
+		return controllerutil.SetControllerReference(run, configMap, r.Scheme())
+	})
+	if err != nil {
+		return dgdrRunExecution{}, fmt.Errorf("reconcile ConfigMap %q: %w", name, err)
 	}
-	if err := r.Create(ctx, configMap); err != nil {
-		return dgdrRunExecution{}, fmt.Errorf("create ConfigMap %q: %w", name, err)
+	if operation != controllerutil.OperationResultCreated {
+		return r.existingRunExecution(configMap, run, job)
+	}
+	return execution, nil
+}
+
+func (r *DynamoGraphDeploymentRunV1beta2Reconciler) existingRunExecution(
+	configMap *corev1.ConfigMap,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	job *batchv1.Job,
+) (dgdrRunExecution, error) {
+	if err := commoncontroller.CheckControllerOwnership(configMap, run, r.Scheme()); err != nil {
+		return dgdrRunExecution{}, err
+	}
+	execution, err := dgdrRunExecutionFromConfigMap(configMap)
+	if err != nil {
+		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: fmt.Errorf("read ConfigMap %q: %w", configMap.Name, err)}
+	}
+	if job != nil {
+		if err := validateDGDRRunJobExecution(job, execution); err != nil {
+			return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: fmt.Errorf(
+				"Job %q and ConfigMap %q disagree: %w", job.Name, configMap.Name, err)}
+		}
 	}
 	return execution, nil
 }
@@ -381,10 +534,11 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) discoverGPUsPerNode(
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
 ) (int, error) {
 	if r.Hardware == nil {
-		return 0, errors.New("discover GPUs per node: hardware discoverer is not configured")
+		return 0, &dgdrRunRetryableError{cause: errors.New("discover GPUs per node: hardware discoverer is not configured")}
 	}
 	if run.Spec.Hardware == nil || run.Spec.Hardware.GPU == nil || run.Spec.Hardware.GPU.SKU == nil {
-		return 0, errors.New("discover GPUs per node: spec.hardware.gpu.sku was not resolved by Request admission")
+		return 0, &dgdrRunPermanentExecutionError{cause: errors.New(
+			"discover GPUs per node: spec.hardware.gpu.sku was not resolved by Request admission")}
 	}
 	sku := *run.Spec.Hardware.GPU.SKU
 	filterSKU := nvidiacomv1beta1.GPUSKUType("")
@@ -393,16 +547,16 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) discoverGPUsPerNode(
 	}
 	info, err := r.Hardware.Discover(ctx, filterSKU)
 	if err != nil {
-		return 0, fmt.Errorf("discover GPUs per node: %w", err)
+		return 0, &dgdrRunRetryableError{cause: fmt.Errorf("discover GPUs per node: %w", err)}
 	}
 	if filterSKU == "" && info != nil && len(info.OtherModels) > 0 {
-		return 0, fmt.Errorf(
+		return 0, &dgdrRunRetryableError{cause: fmt.Errorf(
 			"discover GPUs per node for external AISimulate SKU %q: cluster discovery selected %q among multiple GPU models (%s)",
 			sku, info.Model, strings.Join(info.OtherModels, ", "),
-		)
+		)}
 	}
 	if info == nil || info.GPUsPerNode < 1 {
-		return 0, errors.New("discover GPUs per node: discovery returned no positive GPU count")
+		return 0, &dgdrRunRetryableError{cause: errors.New("discover GPUs per node: discovery returned no positive GPU count")}
 	}
 	return info.GPUsPerNode, nil
 }
@@ -501,7 +655,8 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) dgdrRunImagePullSecrets(
 	for _, image := range images {
 		names, err := r.DockerSecretRetriever.GetSecrets(namespace, image)
 		if err != nil {
-			return nil, fmt.Errorf("resolve image pull secrets for %q in namespace %q: %w", image, namespace, err)
+			return nil, &dgdrRunRetryableError{cause: fmt.Errorf(
+				"resolve image pull secrets for %q in namespace %q: %w", image, namespace, err)}
 		}
 		additional := make([]corev1.LocalObjectReference, 0, len(names))
 		for _, name := range names {
@@ -746,7 +901,8 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileRunStatus(
 	execution dgdrRunExecution,
 ) error {
 	if execution.Input == nil {
-		return errors.New("update Run status: effective AISimulate input is missing")
+		return &dgdrRunPermanentExecutionError{cause: errors.New(
+			"update Run status: effective AISimulate input is missing")}
 	}
 	original := run.DeepCopy()
 	run.Status.AISimulate = &nvidiacomv1beta2.AISimulateRunStatus{Input: execution.Input.DeepCopy()}
@@ -784,7 +940,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileRunStatus(
 		return nil
 	}
 	if err := r.Status().Patch(ctx, run, client.MergeFrom(original)); err != nil {
-		return fmt.Errorf("update Run %q status: %w", run.Name, err)
+		return &dgdrRunRetryableError{cause: fmt.Errorf("update Run %q status: %w", run.Name, err)}
 	}
 	return nil
 }
