@@ -213,6 +213,19 @@ def _connected_client(tmp_path, monkeypatch, *, slab_size: int):
 
 
 @pytest.mark.timeout(10)
+def test_client_arena_is_sized_from_the_cuda_visible_device(
+    tmp_path, monkeypatch
+) -> None:
+    def nvml_by_index(_device):
+        raise AssertionError("NVML indexes devices differently from CUDA")
+
+    with _connected_client(tmp_path, monkeypatch, slab_size=384) as (client, vmm):
+        monkeypatch.setattr(vmm, "total_memory", lambda _device: 1024)
+        monkeypatch.setattr(vmm, "device_memory_info", nvml_by_index)
+        va = client.create_mapping(65)
+        assert vmm.reservations[va] == 2048
+
+@pytest.mark.timeout(10)
 def test_client_slabs_pack_reuse_coalesce_and_remap(tmp_path, monkeypatch) -> None:
     with _connected_client(tmp_path, monkeypatch, slab_size=384) as (client, vmm):
         first = client.create_mapping(65)

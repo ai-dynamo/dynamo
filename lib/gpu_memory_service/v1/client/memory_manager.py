@@ -251,7 +251,8 @@ class GMSClientMemoryManager:
 
     def _add_slab(self, aligned_size: int) -> _InstalledMapping:
         if self._arena is None:
-            _, total = self._vmm.device_memory_info(self._device)
+            # connect() already initialized CUDA, so this adds no cuInit.
+            total = self._vmm.total_memory(self._device)
             # Room for every slab the GPU can back, plus gaps that freed
             # slabs leave between the ones still in use.
             arena_size = self._align(2 * total)
