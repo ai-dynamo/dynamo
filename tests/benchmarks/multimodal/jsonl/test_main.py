@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -17,7 +18,11 @@ pytest.importorskip("PIL", reason="Pillow required for image generation benchmar
 JSONL_DIR = Path(__file__).resolve().parents[4] / "benchmarks" / "multimodal" / "jsonl"
 sys.path.insert(0, str(JSONL_DIR))
 
-from generate_videos import generate_synthetic_video_pool  # noqa: E402
+from generate_images import sample_slots  # noqa: E402
+from generate_videos import (  # noqa: E402
+    generate_synthetic_video_pool,
+    sample_video_slots,
+)
 from main import main  # noqa: E402
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
@@ -77,6 +82,39 @@ class TestSingleTurnDefault:
             assert "text" in line
             assert len(line["images"]) == 2
             assert "session_id" not in line
+
+
+class TestSeededSlotSampling:
+    """A fixed seed must keep producing the same slots and RNG state."""
+
+    # Recorded from the image and video samplers before they shared a helper.
+    EXPECTED_SLOTS = [
+        "item_3",
+        "item_4",
+        "item_1",
+        "item_0",
+        "item_1",
+        "item_2",
+        "item_4",
+        "item_3",
+        "item_0",
+        "item_4",
+        "item_1",
+        "item_0",
+    ]
+    # main.py draws filler text from the same RNG after sampling.
+    EXPECTED_NEXT_DRAW = 0.7134101175845635
+
+    @pytest.mark.parametrize("sampler", [sample_slots, sample_video_slots])
+    def test_seeded_slot_order_and_rng_state(self, sampler) -> None:
+        py_rng = random.Random(1234)
+        pool = [f"item_{i}" for i in range(5)]
+
+        # 4 requests with 3 slots each
+        slots = sampler(py_rng, pool, 4, 3)
+
+        assert slots == self.EXPECTED_SLOTS
+        assert py_rng.random() == self.EXPECTED_NEXT_DRAW
 
 
 class TestSlidingWindow:
