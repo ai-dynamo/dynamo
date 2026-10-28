@@ -21,18 +21,27 @@ package dgdrrunpublisher
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 // These tests send the publisher's real server-side-apply payloads to an API server that
@@ -44,6 +53,7 @@ type writerFixture struct {
 	t      *testing.T
 	ctx    context.Context
 	client client.Client
+	config *rest.Config
 	run    *v1beta2.DynamoGraphDeploymentRun
 	writer *clientWriter
 }
@@ -59,7 +69,7 @@ func newWriterFixture(t *testing.T) *writerFixture {
 
 	metric := v1beta2.ObjectiveMetric("ThroughputPerGPU")
 	run := &v1beta2.DynamoGraphDeploymentRun{
-		ObjectMeta: metav1.ObjectMeta{Namespace: env.Namespace(), Name: "publisher-run"},
+		Namespace: env.Namespace(), Name: "publisher-run",
 		Spec: v1beta2.DynamoGraphDeploymentRunSpec{
 			NativeSearchInput: v1beta2.NativeSearchInput{
 				Model:    &v1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"},
@@ -82,6 +92,7 @@ func newWriterFixture(t *testing.T) *writerFixture {
 		t:      t,
 		ctx:    ctx,
 		client: c,
+		config: env.RESTConfig(),
 		run:    run,
 		writer: &clientWriter{
 			Client:    c,
@@ -124,6 +135,150 @@ func envtestCandidate() dgdcreconcile.DesiredCandidate {
 	}
 }
 
+func foreignCandidate(t *testing.T, namespace, name string, candidate dgdcreconcile.DesiredCandidate) *v1beta2.DynamoGraphDeploymentCandidate {
+	t.Helper()
+	spec, _, err := decodeManifest(candidate.ID, candidate.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parameters, err := json.Marshal(candidate.Parameters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &v1beta2.DynamoGraphDeploymentCandidate{
+		Namespace: namespace,
+		Name:      name,
+		Labels:    map[string]string{"owner": "foreign"},
+		Spec: v1beta2.DynamoGraphDeploymentCandidateSpec{
+			DynamoGraphDeploymentSpec: *spec,
+			Parameters:                runtime.RawExtension{Raw: parameters},
+		},
+	}
+}
+
+type writeInterceptClient struct {
+	client.Client
+	beforeCreate func()
+	beforeApply  func()
+}
+
+func (c *writeInterceptClient) Create(ctx context.Context, object client.Object, options ...client.CreateOption) error {
+	if c.beforeCreate != nil {
+		hook := c.beforeCreate
+		c.beforeCreate = nil
+		hook()
+	}
+	return c.Client.Create(ctx, object, options...)
+}
+
+func (c *writeInterceptClient) Apply(ctx context.Context, configuration runtime.ApplyConfiguration, options ...client.ApplyOption) error {
+	if c.beforeApply != nil {
+		hook := c.beforeApply
+		c.beforeApply = nil
+		hook()
+	}
+	return c.Client.Apply(ctx, configuration, options...)
+}
+
+type reconcileRecorder struct {
+	delegate *Reconciler
+	count    atomic.Int64
+}
+
+func (r *reconcileRecorder) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
+	result, err := r.delegate.Reconcile(ctx, request)
+	r.count.Add(1)
+	return result, err
+}
+
+func waitForReconcileQuiet(t *testing.T, recorder *reconcileRecorder, quiet, timeout time.Duration) {
+	t.Helper()
+	var last int64 = -1
+	var stableSince time.Time
+	require.Eventually(t, func() bool {
+		current := recorder.count.Load()
+		if current == 0 {
+			return false
+		}
+		if current != last {
+			last = current
+			stableSince = time.Now()
+			return false
+		}
+		return time.Since(stableSince) >= quiet
+	}, timeout, 10*time.Millisecond, "reconciliation count did not become stable")
+}
+
+func startPublisherController(t *testing.T, f *writerFixture, snapshot *Snapshot) (*reconcileRecorder, *Completion, *InputStore, chan event.GenericEvent) {
+	t.Helper()
+	podName := "publisher-pod"
+	pod := &corev1.Pod{
+		Namespace: f.run.Namespace, Name: podName,
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sweeper", Image: "example.invalid/sweeper"}}},
+	}
+	if err := f.client.Create(f.ctx, pod); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+
+	scheme, err := NewScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := ctrl.NewManager(f.config, ctrl.Options{
+		Scheme:         scheme,
+		Cache:          cacheOptions(Config{Namespace: f.run.Namespace, RunName: f.run.Name, RunUID: string(f.run.UID), PodName: podName}),
+		Metrics:        metricsserver.Options{BindAddress: "0"},
+		LeaderElection: false,
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	store := &InputStore{}
+	store.accept(snapshot)
+	completion := NewCompletion()
+	reconciler := &Reconciler{
+		Client: manager.GetClient(),
+		Writer: &clientWriter{
+			Client:    manager.GetClient(),
+			Reader:    manager.GetAPIReader(),
+			Namespace: f.run.Namespace,
+			RunName:   f.run.Name,
+			RunUID:    string(f.run.UID),
+		},
+		Namespace:        f.run.Namespace,
+		RunName:          f.run.Name,
+		RunUID:           string(f.run.UID),
+		PodName:          podName,
+		SweeperContainer: "sweeper",
+		Store:            store,
+		Completion:       completion,
+	}
+	recorder := &reconcileRecorder{delegate: reconciler}
+	events := make(chan event.GenericEvent, 1)
+	key := types.NamespacedName{Namespace: f.run.Namespace, Name: f.run.Name}
+	if err := setupController(manager, recorder, key, events); err != nil {
+		t.Fatalf("setup controller: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.Start(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("publisher stopped: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("publisher did not stop")
+		}
+	})
+	return recorder, completion, store, events
+}
+
 func hasApplyManager(fields []metav1.ManagedFieldsEntry, subresource string) bool {
 	for _, entry := range fields {
 		if entry.Manager == fieldOwner && entry.Operation == metav1.ManagedFieldsOperationApply && entry.Subresource == subresource {
@@ -155,6 +310,13 @@ func TestEnvtestCandidateApplyIsAcceptedAndIdempotent(t *testing.T) {
 	if !strings.Contains(got.Annotations[AnnotationAdditionalResources], "kind: ConfigMap") {
 		t.Errorf("companion annotation = %q", got.Annotations[AnnotationAdditionalResources])
 	}
+	var parameters map[string]any
+	if err := json.Unmarshal(got.Spec.Parameters.Raw, &parameters); err != nil || parameters["tp"] != float64(2) {
+		t.Errorf("parameters = %s, err = %v", got.Spec.Parameters.Raw, err)
+	}
+	if got.Status.Metrics != nil {
+		t.Errorf("candidate apply wrote through the status subresource: %+v", got.Status)
+	}
 	if !hasApplyManager(got.ManagedFields, "") {
 		t.Errorf("no apply manager %q on the candidate: %+v", fieldOwner, got.ManagedFields)
 	}
@@ -165,6 +327,102 @@ func TestEnvtestCandidateApplyIsAcceptedAndIdempotent(t *testing.T) {
 	}
 	if again.ResourceVersion != stored.ResourceVersion {
 		t.Errorf("re-applying the same candidate changed resourceVersion %s -> %s", stored.ResourceVersion, again.ResourceVersion)
+	}
+
+	drifted := f.candidate(name)
+	delete(drifted.Labels, LabelRunUID)
+	if err := f.client.Update(f.ctx, drifted); err != nil {
+		t.Fatalf("remove run label: %v", err)
+	}
+	if _, err := f.writer.CreateCandidate(f.ctx, f.run, name, envtestCandidate()); err != nil {
+		t.Fatalf("repair candidate labels: %v", err)
+	}
+	if got := f.candidate(name); got.Labels[LabelRunUID] != string(f.run.UID) {
+		t.Fatalf("run label was not repaired: %v", got.Labels)
+	}
+}
+
+func TestEnvtestCandidateApplyDoesNotAdoptAForeignObject(t *testing.T) {
+	f := newWriterFixture(t)
+	name := f.name("a")
+	candidate := envtestCandidate()
+	foreign := foreignCandidate(t, f.run.Namespace, name, candidate)
+	if err := f.client.Create(f.ctx, foreign); err != nil {
+		t.Fatalf("create foreign candidate: %v", err)
+	}
+
+	if _, err := f.writer.CreateCandidate(f.ctx, f.run, name, candidate); err == nil {
+		t.Fatal("applying a candidate over a foreign object succeeded")
+	}
+	got := f.candidate(name)
+	if owner := metav1.GetControllerOf(got); owner != nil {
+		t.Fatalf("foreign candidate was adopted by %+v", owner)
+	}
+	if got.Labels["owner"] != "foreign" || got.Labels[LabelRunUID] != "" {
+		t.Fatalf("foreign candidate was modified: labels = %v", got.Labels)
+	}
+}
+
+func TestEnvtestCandidateCreateRaceDoesNotAdoptForeignObject(t *testing.T) {
+	f := newWriterFixture(t)
+	name := f.name("a")
+	candidate := envtestCandidate()
+	foreign := foreignCandidate(t, f.run.Namespace, name, candidate)
+	intercept := &writeInterceptClient{Client: f.client}
+	intercept.beforeCreate = func() {
+		if err := f.client.Create(f.ctx, foreign); err != nil {
+			t.Fatalf("create racing foreign candidate: %v", err)
+		}
+	}
+	writer := *f.writer
+	writer.Client = intercept
+
+	if _, err := writer.CreateCandidate(f.ctx, f.run, name, candidate); err == nil {
+		t.Fatal("candidate creation adopted the foreign object that won the name race")
+	}
+	got := f.candidate(name)
+	if owner := metav1.GetControllerOf(got); owner != nil {
+		t.Fatalf("racing foreign candidate was adopted by %+v", owner)
+	}
+	if got.Labels["owner"] != "foreign" || got.Labels[LabelRunUID] != "" {
+		t.Fatalf("racing foreign candidate was modified: labels = %v", got.Labels)
+	}
+}
+
+func TestEnvtestCandidateApplyRejectsDeleteRecreateRace(t *testing.T) {
+	f := newWriterFixture(t)
+	name := f.name("a")
+	candidate := envtestCandidate()
+	if _, err := f.writer.CreateCandidate(f.ctx, f.run, name, candidate); err != nil {
+		t.Fatalf("create owned candidate: %v", err)
+	}
+	ownedUID := f.candidate(name).UID
+	foreign := foreignCandidate(t, f.run.Namespace, name, candidate)
+	intercept := &writeInterceptClient{Client: f.client}
+	intercept.beforeApply = func() {
+		current := f.candidate(name)
+		if err := f.client.Delete(f.ctx, current); err != nil {
+			t.Fatalf("delete owned candidate during apply race: %v", err)
+		}
+		if err := f.client.Create(f.ctx, foreign); err != nil {
+			t.Fatalf("recreate foreign candidate during apply race: %v", err)
+		}
+	}
+	writer := *f.writer
+	writer.Client = intercept
+
+	if _, err := writer.CreateCandidate(f.ctx, f.run, name, candidate); err == nil {
+		t.Fatal("UID- and resourceVersion-constrained apply accepted a replacement object")
+	}
+	got := f.candidate(name)
+	if got.UID == ownedUID {
+		t.Fatalf("candidate UID did not change across delete/recreate: %s", got.UID)
+	}
+	if owner := metav1.GetControllerOf(got); owner != nil {
+		t.Fatalf("replacement foreign candidate was adopted by %+v", owner)
+	}
+	if got.Labels["owner"] != "foreign" || got.Labels[LabelRunUID] != "" {
+		t.Fatalf("replacement foreign candidate was modified: labels = %v", got.Labels)
 	}
 }
 
@@ -184,6 +442,10 @@ func TestEnvtestCandidateStatusIsWrittenOnceAndGuardedByResourceVersion(t *testi
 	if got.Status.Metrics == nil {
 		t.Fatal("status.metrics is not set after PopulateStatus")
 	}
+	var metrics map[string]any
+	if err := json.Unmarshal(got.Status.Metrics.Raw, &metrics); err != nil || metrics["throughput"] != 12.5 {
+		t.Errorf("metrics = %s, err = %v", got.Status.Metrics.Raw, err)
+	}
 	if !hasApplyManager(got.ManagedFields, "status") {
 		t.Errorf("no status apply manager %q: %+v", fieldOwner, got.ManagedFields)
 	}
@@ -201,6 +463,28 @@ func TestEnvtestCandidateStatusIsWrittenOnceAndGuardedByResourceVersion(t *testi
 	}
 	if !after.Populated {
 		t.Error("a candidate with status was reported as not populated")
+	}
+
+	// Even an evaluated candidate without metrics gets an empty object. Presence, not
+	// contents, is the persisted marker that its status has been populated.
+	empty := envtestCandidate()
+	empty.ID = "empty"
+	empty.Metrics = nil
+	emptyName := f.name(empty.ID)
+	emptyStored, err := f.writer.CreateCandidate(f.ctx, f.run, emptyName, empty)
+	if err != nil {
+		t.Fatalf("create candidate without metrics: %v", err)
+	}
+	if err := f.writer.PopulateStatus(f.ctx, emptyName, emptyStored.ResourceVersion, empty); err != nil {
+		t.Fatalf("populate candidate without metrics: %v", err)
+	}
+	var emptyMetrics map[string]any
+	got = f.candidate(emptyName)
+	if got.Status.Metrics == nil {
+		t.Fatal("candidate without metrics was not marked populated")
+	}
+	if err := json.Unmarshal(got.Status.Metrics.Raw, &emptyMetrics); err != nil || len(emptyMetrics) != 0 {
+		t.Fatalf("metrics = %s, err = %v; want an empty object", got.Status.Metrics.Raw, err)
 	}
 }
 
@@ -273,5 +557,89 @@ func TestEnvtestDeleteCandidateHonorsTheUIDPrecondition(t *testing.T) {
 	}
 	if err := f.writer.DeleteCandidate(f.ctx, name, uid); err != nil {
 		t.Fatalf("deleting a missing candidate must not fail: %v", err)
+	}
+}
+
+func TestEnvtestProductionWatchesDriveRepairAndTerminalCompletion(t *testing.T) {
+	f := newWriterFixture(t)
+	candidate := envtestCandidate()
+	snapshot, err := ParseSnapshot(snapshotJSON(t, PhaseRunning, cand{id: "a", metrics: candidate.Metrics}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := Desire(f.run.Name, string(f.run.UID), snapshot)
+
+	t.Log("Arrange a fully converged Run and Candidate before starting the manager")
+	name := f.name("a")
+	stored, err := f.writer.CreateCandidate(f.ctx, f.run, name, candidate)
+	if err != nil {
+		t.Fatalf("create candidate: %v", err)
+	}
+	if err := f.writer.PopulateStatus(f.ctx, name, stored.ResourceVersion, candidate); err != nil {
+		t.Fatalf("populate candidate: %v", err)
+	}
+	if err := f.writer.UpdateRunStatus(f.ctx, f.currentRun().ResourceVersion, desired.Status); err != nil {
+		t.Fatalf("converge run status: %v", err)
+	}
+
+	t.Log("Start the production controller watches around an instrumented Reconciler")
+	recorder, completion, store, events := startPublisherController(t, f, snapshot)
+	waitForReconcileQuiet(t, recorder, 250*time.Millisecond, 10*time.Second)
+	beforeUpdate := recorder.count.Load()
+
+	t.Log("Clear only Candidate status after the controller is quiet")
+	var current v1beta2.DynamoGraphDeploymentCandidate
+	if err := f.client.Get(f.ctx, types.NamespacedName{Namespace: f.run.Namespace, Name: name}, &current); err != nil {
+		t.Fatalf("get candidate: %v", err)
+	}
+	current.Status.Metrics = nil
+	if err := f.client.Status().Update(f.ctx, &current); err != nil {
+		t.Fatalf("clear candidate status: %v", err)
+	}
+	require.Eventually(t, func() bool { return recorder.count.Load() > beforeUpdate }, 10*time.Second, 25*time.Millisecond,
+		"Candidate update did not trigger a new reconciliation")
+	require.Eventually(t, func() bool {
+		var repaired v1beta2.DynamoGraphDeploymentCandidate
+		if err := f.client.Get(f.ctx, types.NamespacedName{Namespace: f.run.Namespace, Name: name}, &repaired); err != nil {
+			return false
+		}
+		return repaired.Status.Metrics != nil
+	}, 10*time.Second, 25*time.Millisecond, "candidate status update did not trigger repair")
+	waitForReconcileQuiet(t, recorder, 250*time.Millisecond, 10*time.Second)
+
+	t.Log("Publish a terminal replacement and let write echoes drive completion")
+	terminal, err := ParseSnapshot(snapshotJSON(t, PhaseSucceeded, cand{id: "b", metrics: candidate.Metrics}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !store.accept(terminal) {
+		t.Fatal("terminal snapshot was not accepted")
+	}
+	beforeTerminal := recorder.count.Load()
+	events <- event.GenericEvent{Object: runKeyObject(types.NamespacedName{Namespace: f.run.Namespace, Name: f.run.Name})}
+	select {
+	case <-completion.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("terminal completion did not observe its replacement Candidate, Run status, and deletion through the cache")
+	}
+	if err := completion.Err(); err != nil {
+		t.Fatalf("terminal completion: %v", err)
+	}
+	if got := recorder.count.Load() - beforeTerminal; got < 2 {
+		t.Fatalf("terminal reconciliations = %d, want a write pass and a cache-observation pass", got)
+	}
+
+	t.Log("Verify the state acknowledged by the publisher is present in the API server")
+	if got := f.candidate(f.name("b")); got.Status.Metrics == nil {
+		t.Fatal("candidate metrics were not populated before completion")
+	}
+	run := f.currentRun()
+	if len(run.Status.CandidateRefs) != 1 || run.Status.CandidateRefs[0].Name != f.name("b") {
+		t.Fatalf("candidateRefs = %+v, want the terminal candidate", run.Status.CandidateRefs)
+	}
+	var removed v1beta2.DynamoGraphDeploymentCandidate
+	err = f.client.Get(f.ctx, types.NamespacedName{Namespace: f.run.Namespace, Name: f.name("a")}, &removed)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("obsolete candidate still exists after completion: %v", err)
 	}
 }

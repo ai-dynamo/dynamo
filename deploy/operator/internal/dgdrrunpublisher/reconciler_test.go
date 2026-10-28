@@ -96,7 +96,7 @@ func (w *memWriter) CreateCandidate(ctx context.Context, run *v1beta2.DynamoGrap
 	// The apply is idempotent; the read-back reports what the server holds.
 	populated := w.server[name]
 	w.server[name] = populated
-	stored := StoredCandidate{ResourceVersion: createdVersion(name), Populated: populated}
+	stored := StoredCandidate{UID: types.UID("uid-" + name), ResourceVersion: createdVersion(name), Populated: populated}
 	if w.lag {
 		return stored, nil
 	}
@@ -467,6 +467,10 @@ func TestTerminalSucceededSnapshotIsReconciledThenAcknowledged(t *testing.T) {
 	f := newFixture(t)
 	f.publish(snapshotJSON(t, PhaseSucceeded, cand{id: "a"}))
 	f.mustReconcile()
+	if f.r.Completion.Finished() {
+		t.Fatal("the publisher must wait for its candidate and run-status writes to reach the cache")
+	}
+	f.mustReconcile()
 	if !f.r.Completion.Finished() || f.r.Completion.Err() != nil {
 		t.Fatalf("finished=%v err=%v", f.r.Completion.Finished(), f.r.Completion.Err())
 	}
@@ -475,9 +479,53 @@ func TestTerminalSucceededSnapshotIsReconciledThenAcknowledged(t *testing.T) {
 	}
 }
 
+func TestTerminalCompletionWaitsForWritesFromThePreviousSnapshot(t *testing.T) {
+	f := newFixture(t)
+	f.w.lag = true
+	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
+	f.mustReconcile()
+	f.takeOps()
+
+	// The terminal snapshot arrives before the cache sees the candidate and Run status
+	// created for the previous snapshot. Their absence is not convergence: the API writes
+	// have succeeded and their watch echoes are still in flight.
+	f.publish(snapshotJSON(t, PhaseSucceeded, cand{id: "b"}))
+	f.mustReconcile()
+	if f.r.Completion.Finished() {
+		t.Fatal("terminal completion raced writes that were not observed through the cache")
+	}
+
+	// Deliver those echoes. The terminal projection then removes the now-visible
+	// candidate and status reference, and waits for those writes in turn.
+	run := f.currentRun()
+	run.Status.Progress = &v1beta2.DGDRRunProgress{Candidates: &v1beta2.CandidateProgress{Published: 1}}
+	run.Status.CandidateRefs = []corev1.LocalObjectReference{{Name: cn("a")}}
+	if err := f.c.Update(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	candidate := candidateForRun(cn("a"), "a", run)
+	candidate.UID = types.UID("uid-" + cn("a"))
+	candidate.Status.Metrics = &runtime.RawExtension{Raw: []byte("{}")}
+	if err := f.c.Create(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	f.w.server[cn("b")] = false
+	f.w.lag = false
+	f.mustReconcile()
+	if f.r.Completion.Finished() {
+		t.Fatal("terminal completion raced the candidate deletion and final Run status")
+	}
+
+	f.mustReconcile()
+	if !f.r.Completion.Finished() || f.r.Completion.Err() != nil {
+		t.Fatalf("finished=%v err=%v", f.r.Completion.Finished(), f.r.Completion.Err())
+	}
+}
+
 func TestTerminalFailedSnapshotIsReconciledThenFails(t *testing.T) {
 	f := newFixture(t)
 	f.publish(withRunDiagnostics(t, snapshotJSON(t, PhaseFailed, cand{id: "a"}), "search failed", "backend unavailable"))
+	f.mustReconcile()
 	f.mustReconcile()
 	if err := f.r.Completion.Err(); !errors.Is(err, ErrRunFailed) || ExitCode(err) != ExitRunFailed ||
 		!strings.Contains(err.Error(), "search failed") || !strings.Contains(err.Error(), "backend unavailable") {
@@ -512,6 +560,7 @@ func TestTerminalSnapshotReconcileFailureIsRetriedUntilItSucceeds(t *testing.T) 
 		t.Fatalf("a terminal snapshot that could not be reconciled must be retried, err=%v", err)
 	}
 	f.mustReconcile()
+	f.mustReconcile()
 	if !f.r.Completion.Finished() || f.r.Completion.Err() != nil {
 		t.Fatalf("finished=%v err=%v", f.r.Completion.Finished(), f.r.Completion.Err())
 	}
@@ -521,6 +570,7 @@ func TestSweeperCrashWithoutTerminalSnapshotReconcilesTheLastSnapshot(t *testing
 	f := newFixture(t)
 	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
 	f.exitSweeper(137)
+	f.mustReconcile()
 	f.mustReconcile()
 	if !f.r.Completion.Finished() || f.r.Completion.Err() != nil {
 		t.Fatalf("the Sweeper's own exit code fails the Job, not the publisher: finished=%v err=%v", f.r.Completion.Finished(), f.r.Completion.Err())
@@ -534,6 +584,7 @@ func TestSweeperCleanExitWithoutTerminalSnapshotIsAProtocolViolation(t *testing.
 	f := newFixture(t)
 	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
 	f.exitSweeper(0)
+	f.mustReconcile()
 	f.mustReconcile()
 	if err := f.r.Completion.Err(); !errors.Is(err, ErrMissingTerminalSnapshot) || ExitCode(err) != ExitProtocolViolation {
 		t.Fatalf("err = %v", err)
@@ -565,6 +616,7 @@ func TestSnapshotWrittenJustBeforeTheSweeperExitIsReadAfterTheExitIsSeen(t *test
 	// The Sweeper writes its terminal snapshot and exits; the observer has not looked yet.
 	writeSnapshot(t, filepath.Dir(f.r.Observer.Path), snapshotJSON(t, PhaseSucceeded, cand{id: "a"}, cand{id: "b"}))
 	f.exitSweeper(0)
+	f.mustReconcile()
 	f.mustReconcile()
 	if !f.r.Completion.Finished() || f.r.Completion.Err() != nil {
 		t.Fatalf("the terminal snapshot must be picked up on exit: finished=%v err=%v", f.r.Completion.Finished(), f.r.Completion.Err())
@@ -621,6 +673,7 @@ func TestFinalReconcileRetriesUntilTheAPIRecovers(t *testing.T) {
 		}
 	}
 	delete(f.w.failOn, "status")
+	f.mustReconcile()
 	f.mustReconcile()
 	if !f.r.Completion.Finished() || f.r.Completion.Err() != nil {
 		t.Fatalf("finished=%v err=%v", f.r.Completion.Finished(), f.r.Completion.Err())
@@ -735,6 +788,7 @@ func TestReconcileIgnoresOtherKeysAndAFinishedRun(t *testing.T) {
 	if _, err := f.r.Reconcile(context.Background(), ctrl.Request{Namespace: testNamespace, Name: "other"}); err != nil || len(f.w.ops) != 0 {
 		t.Fatalf("another key must be ignored: err=%v ops=%v", err, f.w.ops)
 	}
+	f.mustReconcile()
 	f.mustReconcile()
 	ops := len(f.w.ops)
 	f.mustReconcile()
@@ -869,6 +923,7 @@ func TestConflictRemainsRetryableUntilTheCacheCatchesUp(t *testing.T) {
 		}
 	}
 	delete(f.w.failOn, "status") // the cache caught up
+	f.mustReconcile()
 	f.mustReconcile()
 	if !f.r.Completion.Finished() || f.r.Completion.Err() != nil {
 		t.Fatalf("finished=%v err=%v", f.r.Completion.Finished(), f.r.Completion.Err())
