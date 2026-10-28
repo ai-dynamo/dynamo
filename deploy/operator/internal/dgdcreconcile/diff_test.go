@@ -101,8 +101,7 @@ func TestComputeActionsInputErrors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := ComputeActions(tc.desired, tc.current)
-			var inputErr *DiffInputError
-			if !errors.As(err, &inputErr) {
+			if _, ok := errors.AsType[*DiffInputError](err); !ok {
 				t.Fatalf("want *DiffInputError, got %v", err)
 			}
 		})
