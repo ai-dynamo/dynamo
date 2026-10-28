@@ -568,13 +568,13 @@ impl KvEventPublisher {
                 _ = self.cancellation_token.cancelled() => anyhow::bail!("KV event listener stopped during initialization"),
             }
         }
-        let stopped = self
+        let is_stopped = self
             .processor_handle
             .get_mut()
             .as_ref()
             .is_none_or(|handle| handle.is_finished());
         anyhow::ensure!(
-            !self.cancellation_token.is_cancelled() && !stopped,
+            !self.cancellation_token.is_cancelled() && !is_stopped,
             "KV event publisher stopped during initialization"
         );
         Ok(())

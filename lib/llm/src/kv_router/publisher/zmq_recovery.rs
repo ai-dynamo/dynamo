@@ -114,7 +114,8 @@ pub struct ZmqRecoveryConfig {
 
 /// `Success` describes whichever engine answers at the endpoints, so the owner verifies the
 /// engine's identity before acting on it. Only a `Failed` round that ran out of transport
-/// retries accepts `Restart`.
+/// retries accepts `Restart`. A listener that stops reports `Failed` unless its status is
+/// already final.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KvStreamStatus {
     Recovering,
@@ -158,7 +159,7 @@ const MAX_LIVE_DRAIN: usize = 4096;
 const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 const ROUND_TIMEOUT: Duration = Duration::from_secs(120);
-const INDEX_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+const BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn wait_for_handshake(monitor: &mut tmq::pair::Pair) -> Result<()> {
     let event = monitor
@@ -216,6 +217,26 @@ fn round_deadline(cap: Instant) -> Instant {
     (Instant::now() + ROUND_TIMEOUT).min(cap)
 }
 
+/// Runs however the listener exits, including cancellation, abort and panic.
+struct ReportStop<'a>(&'a tokio::sync::watch::Sender<KvStreamStatus>);
+
+impl Drop for ReportStop<'_> {
+    fn drop(&mut self) {
+        self.0.send_if_modified(|status| {
+            let is_final = matches!(
+                status,
+                KvStreamStatus::MissingHistory { .. } | KvStreamStatus::Failed { .. }
+            );
+            if !is_final {
+                *status = KvStreamStatus::Failed {
+                    reason: "KV event source stopped".to_string(),
+                };
+            }
+            !is_final
+        });
+    }
+}
+
 /// Applies batches in sequence order through the live path's normalizer and event processor.
 pub(super) struct RecoveryIngest<'a> {
     cursor: ReplayCursor,
@@ -260,8 +281,14 @@ impl<'a> RecoveryIngest<'a> {
                     );
                 }
                 Ok(batch) => {
-                    let events =
-                        normalize_batch(batch, self.normalizer, self.worker, self.next_event_id);
+                    let mut events = Vec::new();
+                    normalize_batch(
+                        batch,
+                        self.normalizer,
+                        self.worker,
+                        self.next_event_id,
+                        &mut events,
+                    );
                     if !events.is_empty() {
                         self.tx
                             .send(PublisherInput::Events(events))
@@ -284,6 +311,7 @@ pub(super) async fn recovering_listener(
     mut config: ZmqRecoveryConfig,
     cancel: tokio_util::sync::CancellationToken,
 ) {
+    let _report_stop = ReportStop(&config.status);
     // `None` while recovery has succeeded; otherwise the current round's deadline.
     let mut deadline = Some(round_deadline(config.deadline));
     let outcome = loop {
@@ -441,10 +469,6 @@ async fn recovery_session(
                         replay_first.get_or_insert(sequence);
                         replay_next = Some(sequence.saturating_add(1));
                         if !is_reply_truncated {
-                            if sequence > ingest.cursor.next() && is_success {
-                                is_success = false;
-                                revoke(&config.status, deadline);
-                            }
                             ingest.apply(sequence, payload)?;
                         }
                     }
@@ -463,14 +487,10 @@ async fn recovery_session(
                             return Err(RecoveryError::MissingHistory { expected: requested, got });
                         }
                         if ingest.cursor.gap().is_some() || is_reply_truncated {
-                            if is_success {
-                                is_success = false;
-                                revoke(&config.status, deadline);
-                            }
                             next_replay = Some(Instant::now());
-                        } else if !is_success {
+                        } else {
                             // Report success only after the index has finished every batch.
-                            tokio::time::timeout(INDEX_ACK_TIMEOUT, barrier(ingest.tx)).await
+                            tokio::time::timeout(BARRIER_TIMEOUT, barrier(ingest.tx)).await
                                 .map_err(fatal)?.map_err(fatal)?;
                             is_success = true;
                             *deadline = None;
@@ -849,6 +869,19 @@ mod socket_tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopped_listener_does_not_leave_success_behind() {
+        let mut f = Fixture::new(Duration::from_secs(5));
+        f.succeed().await;
+        // As the processor's reset fence or the supervisor stops the source.
+        f.cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), &mut f.listener)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(*f.updates.borrow(), KvStreamStatus::Failed { .. }));
     }
 
     #[tokio::test]

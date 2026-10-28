@@ -201,7 +201,7 @@ pub(super) async fn start_zmq_listener(
                         .expect("synthetic clear event always normalizes");
                     events.push(event);
                 }
-                events.extend(normalize_batch(batch, &mut normalizer, worker, &next_event_id));
+                normalize_batch(batch, &mut normalizer, worker, &next_event_id, &mut events);
                 if !events.is_empty() {
                     let event_count = events.len() as u64;
                     if tx.send(PublisherInput::Events(events)).is_err() {
@@ -232,9 +232,10 @@ pub(super) fn normalize_batch(
     normalizer: &mut ZmqEventNormalizer,
     worker: WorkerWithDpRank,
     next_event_id: &AtomicU64,
-) -> Vec<PlacementEvent> {
+    events: &mut Vec<PlacementEvent>,
+) {
     let metrics = kv_publisher_metrics();
-    let mut events = Vec::with_capacity(batch.events.len());
+    events.reserve(batch.events.len());
     for raw_event in batch.events {
         let event_type = raw_event.event_type_label();
         if let Some(metrics) = &metrics {
@@ -266,5 +267,4 @@ pub(super) fn normalize_batch(
         }
         events.push(event);
     }
-    events
 }
