@@ -9,7 +9,6 @@ from unittest.mock import Mock
 import pytest
 
 from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY, TokenBudget
-from dynamo.sglang import storage_config
 from dynamo.sglang.capacity import (
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
@@ -482,7 +481,7 @@ def test_mooncake_key_prefix_reads_at_file_extra_config(
 
     config_path = tmp_path / filename
     config_path.write_bytes(content.encode("utf-8"))
-    monkeypatch.setattr(storage_config, "open", open_with_ascii_default, raising=False)
+    monkeypatch.setattr(register, "open", open_with_ascii_default, raising=False)
     monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
     server_args = SimpleNamespace(
         hicache_storage_backend="mooncake",
@@ -498,9 +497,6 @@ def test_mooncake_key_prefix_reads_at_file_extra_config(
 
     assert runtime_data["extra_backend_tag"] == "équipe"
     assert runtime_data["key_prefix"] == "équipe_Qwen-Qwen3-0.6B"
-    assert storage_config.parse_hicache_storage_extra_config(
-        f"@{config_path}", strict=True
-    ) == {"extra_backend_tag": "équipe"}
 
 
 @pytest.mark.parametrize("filename", ["missing.json", "extra.ini"])
@@ -510,15 +506,6 @@ def test_unreadable_at_file_extra_config_is_ignored(register, tmp_path, filename
         path.write_text("extra_backend_tag = t\n")
 
     assert register._parse_hicache_storage_extra_config(f"@{path}") == {}
-    with pytest.raises((OSError, ValueError)):
-        storage_config.parse_hicache_storage_extra_config(f"@{path}", strict=True)
-
-
-@pytest.mark.parametrize("raw_config", ["{", "[]"])
-def test_storage_config_strict_parsing_preserves_errors(raw_config):
-    assert storage_config.parse_hicache_storage_extra_config(raw_config) == {}
-    with pytest.raises(ValueError):
-        storage_config.parse_hicache_storage_extra_config(raw_config, strict=True)
 
 
 @pytest.mark.parametrize(

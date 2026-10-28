@@ -5,13 +5,20 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from typing import Any, List, Optional
 
 import sglang as sgl
+import yaml
 from sglang.srt.environ import envs
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 from dynamo._core import Endpoint
 from dynamo.common.configuration.groups.router_args import build_router_config
@@ -57,9 +64,6 @@ from dynamo.sglang.gateway import (
     gateway_engine_id,
 )
 from dynamo.sglang.kv_hints import publish_kvcr_hint_capabilities
-from dynamo.sglang.storage_config import (
-    parse_hicache_storage_extra_config as _parse_hicache_storage_extra_config,
-)
 from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
@@ -306,6 +310,63 @@ def _get_bootstrap_info_for_config(
     from dynamo.sglang._disagg import compute_bootstrap_address
 
     return compute_bootstrap_address(engine)
+
+
+def _load_hicache_storage_extra_config_file(path: str) -> Any:
+    """Load an ``@path`` extra config the way SGLang's HiCache does.
+
+    SGLang accepts ``.json``, ``.toml``, ``.yaml`` and ``.yml`` files.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".json":
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    if ext == ".toml":
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    if ext in (".yaml", ".yml"):
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    raise ValueError(f"unsupported config file {path!r} (format {ext!r})")
+
+
+def _parse_hicache_storage_extra_config(
+    raw_extra_config: Optional[Any],
+) -> dict[str, Any]:
+    if raw_extra_config is None:
+        return {}
+
+    if isinstance(raw_extra_config, dict):
+        return dict(raw_extra_config)
+
+    if isinstance(raw_extra_config, str):
+        raw_extra_config = raw_extra_config.strip()
+        if not raw_extra_config:
+            return {}
+        try:
+            if raw_extra_config.startswith("@"):
+                parsed = _load_hicache_storage_extra_config_file(raw_extra_config[1:])
+            else:
+                parsed = json.loads(raw_extra_config)
+        except (OSError, ValueError, yaml.YAMLError) as e:
+            logging.warning(
+                "Failed to parse hicache_storage_backend_extra_config: %s", e
+            )
+            return {}
+
+        if isinstance(parsed, dict):
+            return parsed
+
+        logging.warning(
+            "hicache_storage_backend_extra_config was not an object; ignoring it."
+        )
+        return {}
+
+    logging.warning(
+        "Unsupported hicache_storage_backend_extra_config type %s; ignoring it.",
+        type(raw_extra_config).__name__,
+    )
+    return {}
 
 
 def _mooncake_key_prefix(
