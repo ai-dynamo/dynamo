@@ -92,6 +92,8 @@ navigation:
         contents:
         - page: Install Dynamo
           path: pages/kubernetes/installation/install-dynamo.md
+        - page: Install with AICR
+          path: pages/kubernetes/installation/install-with-aicr.md
         - page: Multinode Orchestration
           path: pages/kubernetes/installation/multinode-orchestration.md
         - page: Gateway API Inference Extension
@@ -355,9 +357,8 @@ navigation:
                   - page: Simulate a Kubernetes Deployment
                     slug: kubernetes-mocker
                     path: pages/kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx
-                  - page: Benchmark Planner Decisions
-                    slug: planner-replay
-                    path: pages/kubernetes/operations/simulation-with-dynosim/dynosim-planner-replay.mdx
+                  - link: Simulate Planner Decisions (AISimulate)
+                    href: /dynamo/dev/knowledge-base/modular-components/planner/aisimulate-planner-replay
                   - section: AISimulate (Experimental)
                     slug: ai-simulate
                     collapsed: true
@@ -515,6 +516,9 @@ navigation:
                     path: pages/developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md
                   - page: Planner Examples
                     path: pages/developer-guide/knowledge-base/modular-components/planner/planner-examples.md
+                  - page: Simulate Planner Decisions (AISimulate)
+                    slug: aisimulate-planner-replay
+                    path: pages/developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx
                   - page: Planner Design
                     path: pages/developer-guide/knowledge-base/modular-components/planner/planner-design.md
               - section: Profiler
@@ -1227,6 +1231,11 @@ navigation:
             contents:
               - page: API Reference (K8s)
                 path: pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
+
+      - page: Image Edits API
+        icon: image
+        path: pages/reference/api/image-edits.mdx
+        slug: api/image-edits
 
       - section: Components
         icon: sliders

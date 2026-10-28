@@ -850,6 +850,47 @@ async fn anthropic_tools_reject_unsupported_and_malformed_definitions() {
 
 #[tokio::test]
 #[serial]
+async fn anthropic_named_tool_choice_requires_a_name_before_dispatch() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
+        let svc = HarnessService::start([script]).await;
+        let mut body = json!({
+            "model": MODEL,
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{"role": "user", "content": "List the current directory."}],
+            "tools": [
+                {"name": "list_directory", "input_schema": {
+                    "type": "object", "properties": {"path": {"type": "string"}}
+                }},
+                {"name": "get_weather", "input_schema": {
+                    "type": "object", "properties": {"city": {"type": "string"}}
+                }}
+            ],
+            "tool_choice": {"type": "tool"}
+        });
+
+        let response = post_json(&svc, "/v1/messages", body.clone()).await;
+        assert_anthropic_error(response, ExpectedError::Validation, "tool_choice.name").await;
+        assert!(svc.engine.take_requests().await.is_empty());
+
+        body["tool_choice"]["name"] = json!("list_directory");
+        let response = post_json(&svc, "/v1/messages", body).await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        bounded(response.bytes()).await.unwrap();
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&requests[0].inner.tool_choice).unwrap(),
+            json!({"type": "function", "function": {"name": "list_directory"}})
+        );
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn anthropic_backend_error_events_record_status_classification() {
     temp_env::async_with_vars(BASE_ENV, async {
         let overload_status = reqwest::StatusCode::from_u16(529).unwrap();

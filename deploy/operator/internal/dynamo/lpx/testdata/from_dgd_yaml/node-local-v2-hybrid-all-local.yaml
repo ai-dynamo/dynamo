@@ -69,6 +69,8 @@ spec:
               value: "0"
             - name: GBUILD_MANIFEST_PATH
               value: /nfs/node-local-v2-connected-lpx/manifest.v2.capnp.bin
+            - name: LPX_MODEL_PATH
+              value: /nfs/node-local-v2-connected-lpx
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
               valueFrom:
                 fieldRef:
