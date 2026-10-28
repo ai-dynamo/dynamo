@@ -317,7 +317,7 @@ func (a *MembershipAdapter) process(rank int32) (Process, error) {
 }
 
 func (a *MembershipAdapter) processForMember(member enginegroup.NativeMemberID) (Process, error) {
-	rank, err := nativeRank(member)
+	rank, err := NativeRank(member)
 	if err != nil {
 		return Process{}, err
 	}

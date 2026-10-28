@@ -194,10 +194,8 @@ func (a *MembershipAdapter) adoptInitial(ctx context.Context, snapshot kubejourn
 			topology.Replicas = appendMemberSubset(topology.Replicas, process.Membership)
 		}
 	}
-	for _, allocation := range topology.Replicas {
-		if len(allocation.Members) != int(a.Layout.NativeMembersPerReplica) {
-			return membershipBinding{}, snapshot, fmt.Errorf("initial vLLM world does not match the profile's complete allocation width")
-		}
+	if err := a.Layout.ValidateComplete(topology); err != nil {
+		return membershipBinding{}, snapshot, fmt.Errorf("initial vLLM world does not match the profile: %w", err)
 	}
 	statuses, err := a.readTopology(ctx, topology, nil)
 	if err != nil {

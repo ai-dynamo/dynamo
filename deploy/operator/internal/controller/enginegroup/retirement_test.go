@@ -60,14 +60,14 @@ func TestEngineGroupRetirementPlanContract(t *testing.T) {
 			if verification == "" {
 				verification = domain.VerificationRequirementNone
 			}
-			planner := &engineGroupControllerTestPlanResolver{resolution: ScalePlanResolution{Plan: &domain.ResolvedPlan{
+			planner := &engineGroupControllerTestPlanResolver{resolution: domain.ScalePlanResolution{Plan: &domain.ResolvedPlan{
 				ID: "retire-world", ProfileFingerprint: fingerprint,
 				ProcessLifecycleOwner: domain.ProcessLifecycleOwnerOrchestrator,
 				TrafficRequirement:    domain.TrafficRequirementQuiesceGroup, VerificationRequirement: verification,
 				Change: domain.ResolvedChange{Kind: tc.kind, Retire: &domain.RetireChange{Replicas: tc.replicas}},
 			}}}
 			if tc.rejection {
-				planner.resolution = ScalePlanResolution{Rejection: &domain.Failure{
+				planner.resolution = domain.ScalePlanResolution{Rejection: &domain.Failure{
 					Classification: domain.FailureClassificationTerminal, Reason: "RetirementUnsupported",
 				}}
 			}
@@ -196,7 +196,7 @@ func TestEngineGroupUnsupportedRetirementPreservesWorld(t *testing.T) {
 	require.NoError(t, kube.Delete(t.Context(), group))
 	runtime, err := controller.RuntimeProvider.Resolve(t.Context(), group)
 	require.NoError(t, err)
-	runtime.Planner = &engineGroupControllerTestPlanResolver{resolution: ScalePlanResolution{
+	runtime.Planner = &engineGroupControllerTestPlanResolver{resolution: domain.ScalePlanResolution{
 		Rejection: &domain.Failure{Classification: domain.FailureClassificationTerminal, Reason: "RetirementUnsupported"},
 	}}
 
