@@ -297,9 +297,9 @@ async fn pool_server_errors_follow_frontend_sanitization() {
     .await;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = response.text().await.unwrap();
-    assert!(body.contains("[truncated]"), "expected a truncation marker");
     assert!(
-        body.len() < 20 * 1024,
-        "upstream error body was not bounded"
+        !body.contains(&"x".repeat(100)),
+        "upstream diagnostics must not be exposed"
     );
+    assert!(body.len() < 1024, "expected a sanitized error response");
 }
