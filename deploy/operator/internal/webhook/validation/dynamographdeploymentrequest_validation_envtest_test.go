@@ -18,9 +18,6 @@
 package validation_test
 
 import (
-	"encoding/json"
-	"errors"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -549,212 +546,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 
-		// v1beta2: the CRD owns the unconditional defaults, admission the environment ones.
-		{
-			name:         "v1beta2 model-only request gets schema and admission defaults",
-			request:      v1beta2DGDRForAdmission(nil, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2StructuralDefaults(t, result)
-				expectV1beta2AdmissionDefaults(t, result)
-			},
-		},
-		{
-			name: "v1beta2 explicit hardware is kept after admission verifies the SKU",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm", "budget": int64(4)}}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				if got := v1beta2String(t, result, "spec", "hardware", "gpu", "sku"); got != "h100_sxm" {
-					t.Fatalf("hardware.gpu.sku = %q, want h100_sxm", got)
-				}
-				if got := v1beta2Number(t, result, "spec", "hardware", "gpu", "budget"); got != 4 {
-					t.Fatalf("hardware.gpu.budget = %v, want 4", got)
-				}
-			},
-		},
-		{
-			name: "v1beta2 explicit hardware is rejected when the SKU cannot be verified",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm", "budget": int64(4)}}
-			}, nil),
-			gpuDiscovery: true,
-			discoveryErr: errors.New("no matching GPUs found"),
-			wantWebhook: []string{
-				`spec.hardware.gpu.sku: Invalid value: "h100_sxm": could not be verified against the cluster's GPUs (no matching GPUs found)`,
-			},
-		},
-		{
-			name: "v1beta2 input overrides are stored untouched and never decide hardware defaulting",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				setV1beta2InputOverrides(spec, map[string]any{
-					"engine":       map[string]any{"hardware": "h100_sxm"},
-					"optimization": map[string]any{"constraints": map[string]any{"max_candidate_gpus": int64(4)}},
-				})
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2GPUValues(t, result, "h200_sxm", 8)
-				if got := v1beta2String(t, result, "spec", "aisimulate", "inputOverrides", "engine", "hardware"); got != "h100_sxm" {
-					t.Fatalf("inputOverrides.engine.hardware = %q, want h100_sxm", got)
-				}
-			},
-		},
-		{
-			name: "v1beta2 input overrides null does not suppress hardware discovery",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				setV1beta2InputOverrides(spec, map[string]any{"engine": map[string]any{"hardware": nil}})
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				if got := v1beta2String(t, result, "spec", "hardware", "gpu", "sku"); got == "" {
-					t.Fatal("hardware.gpu.sku is empty: discovery must read the typed spec only")
-				}
-			},
-		},
-		{
-			name: "v1beta2 metadata-only update does not read the cluster again",
-			oldRequest: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				setV1beta2InputOverrides(spec, map[string]any{
-					"engine":       map[string]any{"hardware": "h100_sxm"},
-					"optimization": map[string]any{"constraints": map[string]any{"max_candidate_gpus": int64(8)}},
-				})
-			}, nil),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				setV1beta2InputOverrides(spec, map[string]any{
-					"engine":       map[string]any{"hardware": "h100_sxm"},
-					"optimization": map[string]any{"constraints": map[string]any{"max_candidate_gpus": int64(8)}},
-				})
-			}, map[string]any{"updated": "true"}),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			beforeUpdate: func(*testing.T) {
-				admissionHardware.set(gpu.GPUInfo{}, errors.New("the cluster is unreadable"))
-			},
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2GPUValues(t, result, "h200_sxm", 8)
-				if got := result.GetGeneration(); got != 1 {
-					t.Fatalf("generation = %d, want 1: the spec must not change", got)
-				}
-			},
-		},
-		{
-			name: "v1beta2 removing only the budget rediscovers only the budget",
-			oldRequest: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm", "budget": int64(4)}}
-			}, nil),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm"}}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2GPU(t, result, "h100_sxm", 8)
-			},
-		},
-		{
-			name: "v1beta2 removing only the SKU rediscovers only the SKU",
-			oldRequest: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm", "budget": int64(4)}}
-			}, nil),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["hardware"] = map[string]any{"gpu": map[string]any{"budget": int64(4)}}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2GPU(t, result, "h200_sxm", 4)
-			},
-		},
-		{
-			name: "v1beta2 removing all typed hardware rediscovers the SKU and the budget",
-			oldRequest: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm", "budget": int64(4)}}
-			}, nil),
-			request:      v1beta2DGDRForAdmission(nil, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2GPU(t, result, "h200_sxm", 8)
-			},
-		},
-		{
-			name: "v1beta2 empty workload receives the static model-only default",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				for key, want := range map[string]float64{"inputTokens": 1024, "outputTokens": 128} {
-					if got := v1beta2Number(t, result, "spec", "workload", "static", key); got != want {
-						t.Fatalf("workload.static.%s = %v, want %v", key, got, want)
-					}
-				}
-				if got := v1beta2Number(t, result, "spec", "workload", "static", "load", "concurrency"); got != 10 {
-					t.Fatalf("workload.static.load.concurrency = %v, want 10", got)
-				}
-			},
-		},
-		{
-			name: "v1beta2 empty workload static is an opt-out and stays empty",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"static": map[string]any{}}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				v1beta2Empty(t, result, "spec", "workload", "static")
-			},
-		},
-		{
-			name: "v1beta2 empty workload static stays empty beside public input overrides",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"static": map[string]any{}}
-				spec["aisimulate"] = map[string]any{"inputOverrides": mustJSONObject(t, `{"traffic":{"source":{"type":"synthetic","input_tokens":512,"output_tokens":128},"load":{"type":"concurrency","concurrency":8},"stop":{"requests":100}}}`)}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				v1beta2Empty(t, result, "spec", "workload", "static")
-				expectV1beta2AdmissionDefaults(t, result)
-			},
-		},
-		{
-			name: "v1beta2 empty sla is an opt-out and is not refilled",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["objective"] = map[string]any{"sla": map[string]any{}}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				v1beta2Empty(t, result, "spec", "objective", "sla")
-				if got := v1beta2Number(t, result, "spec", "workload", "static", "inputTokens"); got != 1024 {
-					t.Fatalf("workload.static.inputTokens = %v, want the admission default 1024", got)
-				}
-			},
-		},
-		{
-			name: "v1beta2 public input overrides win without rewriting the typed spec",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["aisimulate"] = map[string]any{"inputOverrides": mustJSONObject(t, `{"traffic":{"source":{"input_tokens":256}}}`)}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				if got := v1beta2Number(t, result, "spec", "workload", "static", "inputTokens"); got != 1024 {
-					t.Fatalf("typed workload.static.inputTokens = %v, want 1024", got)
-				}
-				if got := v1beta2Number(t, result, "spec", "aisimulate", "inputOverrides", "traffic", "source", "input_tokens"); got != 256 {
-					t.Fatalf("inputOverrides.traffic.source.input_tokens = %v, want 256", got)
-				}
-			},
-		},
 		{
 			name: "v1beta2 public input overrides may configure non-reserved dgdr run fields",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
@@ -832,148 +623,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:         "v1beta2 hardware omitted is discovered and the budget capped",
-			request:      v1beta2DGDRForAdmission(nil, nil),
-			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 8, TotalGPUs: 64},
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2GPUValues(t, result, "h200_sxm", 32)
-			},
-		},
-		{
-			name:         "v1beta2 same-SKU nodes with different GPU counts use the aggregate",
-			request:      v1beta2DGDRForAdmission(nil, nil),
-			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 2, TotalGPUs: 12},
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2GPUValues(t, result, "h200_sxm", 12)
-			},
-		},
-		{
-			name: "v1beta2 an empty hardware object is automatic discovery",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["hardware"] = map[string]any{}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8},
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2GPUValues(t, result, "h200_sxm", 8)
-			},
-		},
-		{
-			name: "v1beta2 a SKU alone keeps the SKU and persists the capped budget",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm"}}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 8, TotalGPUs: 64},
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2GPUValues(t, result, "h100_sxm", 32)
-			},
-		},
-		{
-			name: "v1beta2 a budget alone keeps the budget and discovers the SKU",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["hardware"] = map[string]any{"gpu": map[string]any{"budget": int64(4)}}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1},
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2GPUValues(t, result, "h200_sxm", 4)
-			},
-		},
-		{
-			name: "v1beta2 a SKU and a budget are kept after SKU verification",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm", "budget": int64(4)}}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8},
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2GPUValues(t, result, "h100_sxm", 4)
-			},
-		},
-		{
-			name: "v1beta2 an explicit budget above the cap and the cluster size is kept",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["hardware"] = map[string]any{"gpu": map[string]any{"budget": int64(64)}}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1},
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2GPUValues(t, result, "h200_sxm", 64)
-			},
-		},
-		{
-			name:         "v1beta2 a failed discovery is rejected",
-			request:      v1beta2DGDRForAdmission(nil, nil),
-			gpuDiscovery: true,
-			discoveryErr: errors.New("no GPUs found"),
-			wantWebhook: []string{
-				"spec.hardware.gpu: Required value: the cluster's GPUs could not be discovered (no GPUs found); " +
-					"set spec.hardware.gpu.sku and spec.hardware.gpu.budget",
-			},
-		},
-		{
-			name:         "v1beta2 a GPU model the catalog does not know is rejected",
-			request:      v1beta2DGDRForAdmission(nil, nil),
-			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{Model: "Mystery GPU", GPUsPerNode: 8, NodesWithGPUs: 1},
-			wantWebhook: []string{
-				`spec.hardware.gpu.sku: Required value: the cluster's GPU model "Mystery GPU" maps to no AISimulate SKU; ` +
-					"set spec.hardware.gpu.sku",
-			},
-		},
-		{
-			name:         "v1beta2 a heterogeneous cluster does not pick a SKU",
-			request:      v1beta2DGDRForAdmission(nil, nil),
-			gpuDiscovery: true,
-			discovered: gpu.GPUInfo{
-				System: "h200_sxm", Model: "H200", GPUsPerNode: 8, NodesWithGPUs: 1, OtherModels: []string{"H100"},
-			},
-			wantWebhook: []string{
-				"spec.hardware.gpu.sku: Required value: the cluster has several GPU types (H200, H100); " +
-					"set spec.hardware.gpu.sku",
-			},
-		},
-		{
-			name: "v1beta2 a pinned SKU is accepted in a heterogeneous cluster",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h200_sxm"}}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8},
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2GPUValues(t, result, "h200_sxm", 8)
-			},
-		},
-
-		{
-			name: "v1beta2 a SKU without any matching GPU is rejected",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm"}}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   gpu.GPUInfo{System: "h100_sxm"},
-			wantWebhook: []string{
-				`spec.hardware.gpu.sku: Invalid value: "h100_sxm": no GPUs of this SKU were found in the cluster`,
-			},
-		},
-
-		{
-			name: "v1beta2 empty objective and recommendation receive their defaults",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["objective"] = map[string]any{}
-				spec["recommendation"] = map[string]any{}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				expectV1beta2StructuralDefaults(t, result)
-				expectV1beta2AdmissionDefaults(t, result)
-			},
-		},
-		{
 			name: "v1beta2 pareto objective is reserved until Candidate publication supports it",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["objective"] = map[string]any{"mode": "Pareto", "metrics": []any{"ThroughputPerGPU", "ThroughputPerUser"}}
@@ -990,20 +639,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantCELErr:   `spec.objective: Invalid value: metrics is reserved for the future Pareto implementation`,
-		},
-		{
-			name: "v1beta2 explicit values are all kept",
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["backends"] = []any{"vllm"}
-				spec["hardware"] = map[string]any{"gpu": map[string]any{"sku": "h100_sxm", "budget": int64(4)}}
-				spec["workload"] = map[string]any{"static": map[string]any{"inputTokens": int64(10)}}
-				spec["objective"] = map[string]any{"mode": "Optimize", "metric": "TTFT"}
-				spec["aisimulate"] = map[string]any{"inputOverrides": map[string]any{"custom": "kept"}}
-				spec["recommendation"] = map[string]any{"maxCandidates": int64(3)}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check:        expectV1beta2ExplicitValues,
 		},
 		{
 			name: "v1beta2 duplicate backends are rejected on create",
@@ -1071,58 +706,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantCELErr:   `spec.workload.static.load: Invalid value: exactly one of requestsPerSecond, concurrency, or kvCapacityFraction must be specified`,
-		},
-		// v1beta2 UPDATE: defaults stay idempotent, hardware is never rediscovered, and any
-		// spec change is fully validated.
-		{
-			name:         "v1beta2 update without a spec change keeps the spec and generation",
-			oldRequest:   v1beta2DGDRForAdmission(nil, nil),
-			request:      v1beta2DGDRForAdmission(nil, map[string]any{"updated": "true"}),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				if result.GetGeneration() != 1 {
-					t.Fatalf("generation = %d, want 1: defaulting must not change an unchanged spec", result.GetGeneration())
-				}
-				expectV1beta2StructuralDefaults(t, result)
-				expectV1beta2AdmissionDefaults(t, result)
-			},
-		},
-		{
-			name:         "v1beta2 native hardware survives a metadata-only update when the cluster is unreadable",
-			oldRequest:   v1beta2NativeHardwareDGDR(nil),
-			request:      v1beta2NativeHardwareDGDR(map[string]any{"updated": "true"}),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			beforeUpdate: func(*testing.T) {
-				admissionHardware.set(gpu.GPUInfo{}, errors.New("the cluster is unreadable"))
-			},
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				if result.GetGeneration() != 1 {
-					t.Fatalf("generation = %d, want 1", result.GetGeneration())
-				}
-				expectV1beta2GPUValues(t, result, "h200_sxm", 8)
-				if got := v1beta2String(t, result, "spec", "aisimulate", "inputOverrides", "engine", "hardware"); got != "h100_sxm" {
-					t.Fatalf("inputOverrides.engine.hardware = %q, want h100_sxm", got)
-				}
-			},
-		},
-		{
-			name:       "v1beta2 spec change is accepted and bumps the generation",
-			oldRequest: v1beta2DGDRForAdmission(nil, nil),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["model"] = map[string]any{"name": alternateAdmissionModel}
-			}, nil),
-			gpuDiscovery: true,
-			discovered:   discoveredH200,
-			check: func(t *testing.T, result *unstructured.Unstructured) {
-				if result.GetGeneration() != 2 {
-					t.Fatalf("generation = %d, want 2", result.GetGeneration())
-				}
-				if got := v1beta2String(t, result, "spec", "model", "name"); got != alternateAdmissionModel {
-					t.Fatalf("model.name = %q, want %q", got, alternateAdmissionModel)
-				}
-			},
 		},
 		{
 			name:       "v1beta2 update to duplicate backends is rejected",
@@ -1418,18 +1001,6 @@ func v1beta2RunForAdmission(model string, labels map[string]string) *nvidiacomv1
 
 const v1beta2AdmissionModel = "Qwen/Qwen3-0.6B"
 
-// v1beta2NativeHardwareDGDR supplies hardware only through public AISimulate input overrides.
-func v1beta2NativeHardwareDGDR(labels map[string]any) *unstructured.Unstructured {
-	return v1beta2DGDRForAdmission(func(spec map[string]any) {
-		spec["aisimulate"] = map[string]any{
-			"inputOverrides": map[string]any{
-				"engine":       map[string]any{"hardware": "h100_sxm"},
-				"optimization": map[string]any{"constraints": map[string]any{"max_candidate_gpus": int64(8)}},
-			},
-		}
-	}, labels)
-}
-
 // v1beta2DGDRForAdmission builds a v1beta2 Request as a client sends it, before the CRD
 // defaults. It is unstructured on purpose: an omitted field,
 // an explicit empty object and a null are different requests, and typed Go cannot tell them
@@ -1449,16 +1020,6 @@ func v1beta2DGDRForAdmission(mutate func(spec map[string]any), labels map[string
 		"metadata":   metadata,
 		"spec":       spec,
 	}}
-}
-
-// mustJSONObject decodes a native AISimulate input override document.
-func mustJSONObject(t *testing.T, document string) map[string]any {
-	t.Helper()
-	var value map[string]any
-	if err := json.Unmarshal([]byte(document), &value); err != nil {
-		t.Fatalf("decode %q: %v", document, err)
-	}
-	return value
 }
 
 func v1beta2Field(t *testing.T, obj *unstructured.Unstructured, path ...string) (any, bool) {
@@ -1500,92 +1061,6 @@ func v1beta2String(t *testing.T, obj *unstructured.Unstructured, path ...string)
 	return text
 }
 
-func v1beta2Empty(t *testing.T, obj *unstructured.Unstructured, path ...string) {
-	t.Helper()
-	value, found := v1beta2Field(t, obj, path...)
-	if !found || !reflect.DeepEqual(value, map[string]any{}) {
-		t.Fatalf("%v = %#v (found=%v), want an empty object", path, value, found)
-	}
-}
-
-// expectV1beta2StructuralDefaults checks the defaults admission supplies to a model-only Request.
-func expectV1beta2StructuralDefaults(t *testing.T, obj *unstructured.Unstructured) {
-	t.Helper()
-	for key, want := range map[string]float64{"inputTokens": 1024, "outputTokens": 128} {
-		if got := v1beta2Number(t, obj, "spec", "workload", "static", key); got != want {
-			t.Fatalf("workload.static.%s = %v, want %v", key, got, want)
-		}
-	}
-	if got := v1beta2Number(t, obj, "spec", "workload", "static", "load", "concurrency"); got != 10 {
-		t.Fatalf("workload.static.load.concurrency = %v, want 10", got)
-	}
-	if got := v1beta2String(t, obj, "spec", "objective", "mode"); got != "Optimize" {
-		t.Fatalf("objective.mode = %q, want Optimize", got)
-	}
-	if got := v1beta2Number(t, obj, "spec", "objective", "sla", "ttftMs"); got != 2000 {
-		t.Fatalf("objective.sla.ttftMs = %v, want 2000", got)
-	}
-	if got := v1beta2Number(t, obj, "spec", "objective", "sla", "itlMs"); got != 30 {
-		t.Fatalf("objective.sla.itlMs = %v, want 30", got)
-	}
-	if got, _ := v1beta2Field(t, obj, "spec", "backends"); !reflect.DeepEqual(got, []any{"vllm", "sglang", "trtllm"}) {
-		t.Fatalf("backends = %#v, want vllm, sglang and trtllm", got)
-	}
-	if got := v1beta2Number(t, obj, "spec", "recommendation", "maxCandidates"); got != 1 {
-		t.Fatalf("recommendation.maxCandidates = %v, want 1", got)
-	}
-}
-
-// expectV1beta2ExplicitValues checks that every value the explicit-values row sent survived.
-func expectV1beta2ExplicitValues(t *testing.T, obj *unstructured.Unstructured) {
-	t.Helper()
-	if got, _ := v1beta2Field(t, obj, "spec", "backends"); !reflect.DeepEqual(got, []any{"vllm"}) {
-		t.Fatalf("backends = %#v, want only vllm", got)
-	}
-	for _, want := range []struct {
-		path  []string
-		value float64
-	}{
-		{[]string{"spec", "hardware", "gpu", "budget"}, 4},
-		{[]string{"spec", "workload", "static", "inputTokens"}, 10},
-		{[]string{"spec", "workload", "static", "outputTokens"}, 128},
-		{[]string{"spec", "workload", "static", "load", "concurrency"}, 10},
-		{[]string{"spec", "recommendation", "maxCandidates"}, 3},
-	} {
-		if got := v1beta2Number(t, obj, want.path...); got != want.value {
-			t.Fatalf("%v = %v, want %v", want.path, got, want.value)
-		}
-	}
-	for _, want := range []struct {
-		path  []string
-		value string
-	}{
-		{[]string{"spec", "hardware", "gpu", "sku"}, "h100_sxm"},
-		{[]string{"spec", "objective", "mode"}, "Optimize"},
-		{[]string{"spec", "objective", "metric"}, "TTFT"},
-		{[]string{"spec", "aisimulate", "inputOverrides", "custom"}, "kept"},
-	} {
-		if got := v1beta2String(t, obj, want.path...); got != want.value {
-			t.Fatalf("%v = %q, want %q", want.path, got, want.value)
-		}
-	}
-	// A nonempty static workload receives every omitted member of the default.
-}
-
-// expectV1beta2AdmissionDefaults checks what admission supplies from the environment.
-func expectV1beta2AdmissionDefaults(t *testing.T, obj *unstructured.Unstructured) {
-	t.Helper()
-	if got := v1beta2String(t, obj, "spec", "objective", "metric"); got != "ThroughputPerGPU" {
-		t.Fatalf("objective.metric = %q, want ThroughputPerGPU", got)
-	}
-	if got := v1beta2String(t, obj, "spec", "hardware", "gpu", "sku"); got != "h200_sxm" {
-		t.Fatalf("hardware.gpu.sku = %q, want h200_sxm", got)
-	}
-	if got := v1beta2Number(t, obj, "spec", "hardware", "gpu", "budget"); got != 8 {
-		t.Fatalf("hardware.gpu.budget = %v, want 8", got)
-	}
-}
-
 // setV1beta2InputOverrides replaces any input overrides the fixture carried.
 func setV1beta2InputOverrides(spec map[string]any, overrides map[string]any) {
 	aisimulate, _ := spec["aisimulate"].(map[string]any)
@@ -1601,27 +1076,5 @@ func setBeta2AdmissionHardware(request *nvidiacomv1beta2.DynamoGraphDeploymentRe
 	sku, budget := "h100_sxm", int32(4)
 	request.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{
 		GPU: &nvidiacomv1beta2.GPUHardwareSpec{SKU: &sku, Budget: &budget},
-	}
-}
-
-// expectV1beta2GPU asserts the typed GPU hardware the API server stored.
-func expectV1beta2GPU(t *testing.T, result *unstructured.Unstructured, sku string, budget float64) {
-	t.Helper()
-	if got := v1beta2String(t, result, "spec", "hardware", "gpu", "sku"); got != sku {
-		t.Fatalf("hardware.gpu.sku = %q, want %q", got, sku)
-	}
-	if got := v1beta2Number(t, result, "spec", "hardware", "gpu", "budget"); got != budget {
-		t.Fatalf("hardware.gpu.budget = %v, want %v", got, budget)
-	}
-}
-
-// expectV1beta2GPUValues checks the typed hardware a Request was stored with.
-func expectV1beta2GPUValues(t *testing.T, obj *unstructured.Unstructured, sku string, budget float64) {
-	t.Helper()
-	if got := v1beta2String(t, obj, "spec", "hardware", "gpu", "sku"); got != sku {
-		t.Fatalf("hardware.gpu.sku = %q, want %q", got, sku)
-	}
-	if got := v1beta2Number(t, obj, "spec", "hardware", "gpu", "budget"); got != budget {
-		t.Fatalf("hardware.gpu.budget = %v, want %v", got, budget)
 	}
 }

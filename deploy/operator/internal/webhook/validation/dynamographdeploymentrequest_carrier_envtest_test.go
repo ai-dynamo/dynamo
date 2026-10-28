@@ -25,6 +25,9 @@ func TestDynamoGraphDeploymentRequestCarrierObjectsStayWritable(t *testing.T) {
 	t.Run("native v1beta2 written through v1beta1", func(t *testing.T) {
 		carrierRoundTrip(t, beta2DGDRForAdmission(setBeta2AdmissionHardware), betaDGDRForAdmission(nil), "v1beta2")
 	})
+	t.Run("native v1beta2 written through v1alpha1", func(t *testing.T) {
+		carrierRoundTrip(t, beta2DGDRForAdmission(setBeta2AdmissionHardware), alphaDGDRForAdmission(nil), "v1beta2")
+	})
 }
 
 func carrierRoundTrip(t *testing.T, ownerFixture, otherFixture runtime.Object, carrierKey string) {
