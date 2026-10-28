@@ -24,7 +24,7 @@ import (
 
 func TestSGLangGroveCapacityOwnsProcessRestartFencing(t *testing.T) {
 	t.Log("observe the compatibility profile's one native process in its physical allocation")
-	capacity, pod := newSGLangGroveCapacityFixture(t)
+	capacity, pod, kube := newSGLangGroveCapacityFixture(t)
 	observed, err := capacity.Observe(t.Context(), "group-uid")
 	require.NoError(t, err)
 	require.Len(t, observed.Allocations, 1)
@@ -32,15 +32,15 @@ func TestSGLangGroveCapacityOwnsProcessRestartFencing(t *testing.T) {
 
 	t.Log("a non-engine container restart does not create a new native process incarnation")
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "telemetry", RestartCount: 1}}
-	require.NoError(t, capacity.Grove.Client.Status().Update(t.Context(), pod))
+	require.NoError(t, kube.Status().Update(t.Context(), pod))
 	unchanged, err := capacity.Observe(t.Context(), "group-uid")
 	require.NoError(t, err)
 	assert.Equal(t, observed.Allocations[0].Incarnation, unchanged.Allocations[0].Incarnation)
 
 	t.Log("a container restart preserves the physical Pod but invalidates the engine-process identity")
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "main", RestartCount: 1}}
-	require.NoError(t, capacity.Grove.Client.Status().Update(t.Context(), pod))
-	physical, err := capacity.Grove.Observe(t.Context(), "group-uid")
+	require.NoError(t, kube.Status().Update(t.Context(), pod))
+	physical, err := capacity.Physical.Observe(t.Context(), "group-uid")
 	require.NoError(t, err)
 	require.Len(t, physical.Allocations, 1)
 	_, err = capacity.Observe(t.Context(), "group-uid")
@@ -80,7 +80,7 @@ func TestSGLangGroveCapacityValidatesNativeTargetsBeforeScaling(t *testing.T) {
 	for _, scenario := range []string{"wrong-joining-member", "unsupported-recovery", "changed-process"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Log("pin the existing process and request one joining allocation")
-			capacity, _ := newSGLangGroveCapacityFixture(t)
+			capacity, _, kube := newSGLangGroveCapacityFixture(t)
 			observed, err := capacity.Observe(t.Context(), "group-uid")
 			require.NoError(t, err)
 			current := observed.Allocations[0].Incarnation
@@ -112,13 +112,13 @@ func TestSGLangGroveCapacityValidatesNativeTargetsBeforeScaling(t *testing.T) {
 				assert.Equal(t, "UnsupportedBootstrap", result.Rejection.Reason)
 			}
 			clique := &grove.PodClique{}
-			require.NoError(t, capacity.Grove.Client.Get(t.Context(), capacity.Grove.Clique, clique))
+			require.NoError(t, kube.Get(t.Context(), client.ObjectKey{Namespace: capacity.Namespace, Name: "world-0-members"}, clique))
 			assert.Equal(t, int32(1), clique.Spec.Replicas)
 		})
 	}
 }
 
-func newSGLangGroveCapacityFixture(t *testing.T) (*SGLangGroveCapacity, *corev1.Pod) {
+func newSGLangGroveCapacityFixture(t *testing.T) (*SGLangCapacity, *corev1.Pod, client.Client) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
@@ -127,8 +127,8 @@ func newSGLangGroveCapacityFixture(t *testing.T) (*SGLangGroveCapacity, *corev1.
 	clique := testSGLangMemberClique(pod)
 	clique.Spec.Replicas, clique.Spec.MinAvailable = 1, new(int32(1))
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}).WithObjects(pod, clique).Build()
-	return &SGLangGroveCapacity{MembersPerReplica: 1, Grove: &grovecapacity.Adapter{
+	return &SGLangCapacity{MembersPerReplica: 1, Reader: kube, Namespace: pod.Namespace, Physical: &grovecapacity.Adapter{
 		Client: kube, Clique: client.ObjectKeyFromObject(clique), CliqueUID: clique.UID, GroupName: "group",
 		Journal: kubejournal.NewStore(kube, pod.Namespace, "group", "group-uid", "grove-capacity"),
-	}}, pod
+	}}, pod, kube
 }

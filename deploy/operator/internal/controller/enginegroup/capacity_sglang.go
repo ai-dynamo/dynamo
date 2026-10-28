@@ -14,35 +14,37 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	domain "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/grovecapacity"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/workload"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// SGLangGroveCapacity binds the native profile's process identity to Grove capacity.
+// SGLangCapacity binds the native profile's process identity to physical capacity.
 // The native allocation is one process tree; container restarts require explicit group recovery.
-type SGLangGroveCapacity struct {
-	Grove             *grovecapacity.Adapter
+type SGLangCapacity struct {
+	Physical          workload.Capacity
+	Reader            client.Reader
+	Namespace         string
 	MembersPerReplica int32
 }
 
-// ReconcileInitialCapacity prepares Grove retention gates through the controller's existing capacity hook.
+// ReconcileInitialCapacity prepares physical allocation prerequisites through the controller's existing capacity hook.
 // Native bootstrap remains template-driven and does not wait for a serving permission.
-func (a *SGLangGroveCapacity) ReconcileInitialCapacity(ctx context.Context, _ domain.GroupID) error {
-	return a.Grove.InitializeRetention(ctx)
+func (a *SGLangCapacity) ReconcileInitialCapacity(ctx context.Context, _ domain.GroupID) error {
+	return a.Physical.Prepare(ctx)
 }
 
 // Observe binds each allocation's fixed member range to its non-restarting process tree.
-func (a *SGLangGroveCapacity) Observe(ctx context.Context, groupID domain.GroupID) (domain.CapacityObservation, error) {
-	// Grove owns Pod identity and placement; the engine integration owns process lifetime and rank assignment.
-	physical, err := a.Grove.Observe(ctx, groupID)
+func (a *SGLangCapacity) Observe(ctx context.Context, groupID domain.GroupID) (domain.CapacityObservation, error) {
+	// The workload provider owns Pod identity and placement; the engine integration owns process lifetime and rank assignment.
+	physical, err := a.Physical.Observe(ctx, groupID)
 	if err != nil {
 		return domain.CapacityObservation{}, err
 	}
 	observation := domain.CapacityObservation{AppliedRevision: physical.AppliedRevision, ReleaseFences: physical.ReleaseFences, ReleaseMode: physical.ReleaseMode}
 	for _, allocation := range physical.Allocations {
 		pod := &corev1.Pod{}
-		if err := a.Grove.Client.Get(ctx, client.ObjectKey{Namespace: a.Grove.Clique.Namespace, Name: allocation.Pod.Name}, pod); err != nil {
+		if err := a.Reader.Get(ctx, client.ObjectKey{Namespace: a.Namespace, Name: allocation.Pod.Name}, pod); err != nil {
 			return domain.CapacityObservation{}, err
 		}
 		if domain.PodUID(pod.UID) != allocation.Pod.UID {
@@ -69,13 +71,13 @@ func (a *SGLangGroveCapacity) Observe(ctx context.Context, groupID domain.GroupI
 }
 
 // Apply validates native bootstrap and frozen processes before any physical capacity effect.
-func (a *SGLangGroveCapacity) Apply(ctx context.Context, groupID domain.GroupID, target domain.CapacityTarget) (domain.ApplyResult, error) {
+func (a *SGLangCapacity) Apply(ctx context.Context, groupID domain.GroupID, target domain.CapacityTarget) (domain.ApplyResult, error) {
 	// Recovery is distinct from appending the fixed native-member range of a new allocation.
 	for _, replica := range target.Replicas {
 		if replica.Bootstrap == nil {
 			continue
 		}
-		// Every allocation's member range is fixed by its GPU width and Grove slot.
+		// Every allocation's member range is fixed by its GPU width and physical slot.
 		members, err := sglangMembersForSlot(replica.SlotID, a.MembersPerReplica)
 		bootstrap := replica.Bootstrap
 		if err != nil || replica.SlotID == "slot-0" || bootstrap.Mode != domain.BootstrapModeJoin ||
@@ -102,11 +104,11 @@ func (a *SGLangGroveCapacity) Apply(ctx context.Context, groupID domain.GroupID,
 			return domain.ApplyResult{}, fmt.Errorf("%w: SGLang capacity target lost an exact process binding", domain.ErrRecoveryRequired)
 		}
 	}
-	return a.Grove.Apply(ctx, groupID, target)
+	return a.Physical.Apply(ctx, groupID, target)
 }
 
 func sglangMembersForSlot(slot domain.CapacitySlotID, width int32) ([]domain.NativeMemberID, error) {
-	// Stable Grove slots map to non-overlapping native rank ranges.
+	// Stable physical slots map to non-overlapping native rank ranges.
 	literal := strings.TrimPrefix(string(slot), "slot-")
 	index, err := strconv.ParseInt(literal, 10, 32)
 	if err != nil || index < 0 || string(slot) != "slot-"+strconv.FormatInt(index, 10) {

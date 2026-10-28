@@ -73,7 +73,7 @@ func TestEngineGroupControllerPollsInitialObservationsWithoutBackoff(t *testing.
 				require.NotNil(t, condition)
 				assert.Equal(t, metav1.ConditionUnknown, condition.Status, conditionType)
 			}
-			_, snapshot, err := loadEngineGroupCheckpoint(ctx, engineGroupCheckpointStore(reconciler, group), group)
+			_, snapshot, err := loadEngineGroupCheckpoint(ctx, engineGroupCheckpointStore(reconciler.Client, group), group, "")
 			require.NoError(t, err)
 			assert.False(t, snapshot.Exists())
 			assert.Zero(t, backend.membershipApplyCount())
@@ -148,7 +148,7 @@ func TestEngineGroupControllerPollsSettledWorldsWithoutPodUpdates(t *testing.T) 
 				_, err := reconciler.Reconcile(ctx, req)
 				require.NoError(t, err)
 				require.NoError(t, kubeClient.Get(ctx, req.NamespacedName, group))
-				checkpoint, snapshot, loadErr := loadEngineGroupCheckpoint(ctx, engineGroupCheckpointStore(reconciler, group), group)
+				checkpoint, snapshot, loadErr := loadEngineGroupCheckpoint(ctx, engineGroupCheckpointStore(reconciler.Client, group), group, "")
 				require.NoError(t, loadErr)
 				journal := &checkpoint.State
 				if snapshot.Exists() && ((test.outcome == "" && journal.Transition == nil) ||

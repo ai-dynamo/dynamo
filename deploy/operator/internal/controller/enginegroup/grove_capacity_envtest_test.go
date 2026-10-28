@@ -15,6 +15,7 @@ import (
 	domain "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/grovecapacity"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/kubejournal"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/workload"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
@@ -63,7 +64,7 @@ func TestGroveProcessFenceUsesRealPodFinalization(t *testing.T) {
 	pod.Labels[consts.KubeLabelDynamoEngineGroup] = group.Name
 	require.NoError(t, env.Client().Create(ctx, pod))
 	controller := &Reconciler{Client: env.Client()}
-	_, changed, err := controller.reconcileGroveProcessFences(ctx, group, clique.Name, clique.UID)
+	_, changed, err := (&GroveWorkloadProvider{Client: controller.Client}).reconcileGroveProcessFences(ctx, group, clique.Name, clique.UID)
 	require.NoError(t, err)
 	require.True(t, changed)
 
@@ -72,7 +73,7 @@ func TestGroveProcessFenceUsesRealPodFinalization(t *testing.T) {
 	require.NoError(t, env.Client().Get(ctx, client.ObjectKeyFromObject(pod), pod))
 	require.NotNil(t, pod.DeletionTimestamp)
 	assert.Contains(t, pod.Finalizers, engineGroupProcessFinalizer)
-	fence, changed, err := controller.reconcileGroveProcessFences(ctx, group, clique.Name, clique.UID)
+	fence, changed, err := (&GroveWorkloadProvider{Client: controller.Client}).reconcileGroveProcessFences(ctx, group, clique.Name, clique.UID)
 	require.NoError(t, err)
 	assert.False(t, changed)
 	require.Len(t, fence.Pods, 1)
@@ -85,7 +86,7 @@ func TestGroveProcessFenceUsesRealPodFinalization(t *testing.T) {
 		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
 	}}
 	require.NoError(t, env.Client().Status().Update(ctx, pod))
-	fence, changed, err = controller.reconcileGroveProcessFences(ctx, group, clique.Name, clique.UID)
+	fence, changed, err = (&GroveWorkloadProvider{Client: controller.Client}).reconcileGroveProcessFences(ctx, group, clique.Name, clique.UID)
 	require.NoError(t, err)
 	require.True(t, changed)
 	assert.True(t, fence.Pods[0].Stopped)
@@ -93,7 +94,7 @@ func TestGroveProcessFenceUsesRealPodFinalization(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(env.Client().Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})))
 
 	t.Log("a restarted controller can still recover the stop proof after the Pod object is gone")
-	var restored groveWorldFence
+	var restored worldFence
 	snapshot, err := groveWorldFenceStore(env.Client(), group, clique.UID).Load(ctx, &restored)
 	require.NoError(t, err)
 	require.True(t, snapshot.Exists())
@@ -192,6 +193,6 @@ func TestGroveCapacityUsesRealScaleSubresource(t *testing.T) {
 	assert.Len(t, observed.Allocations, 1, "acceptance is not capacity convergence")
 }
 
-func groveCapacityAssertion(allocation grovecapacity.Allocation) domain.ReplicaIncarnation {
+func groveCapacityAssertion(allocation workload.Allocation) domain.ReplicaIncarnation {
 	return domain.ReplicaIncarnation{ReplicaID: allocation.ReplicaID, SlotID: allocation.SlotID, CapacityRefs: []domain.CapacityRef{allocation.Pod}}
 }
