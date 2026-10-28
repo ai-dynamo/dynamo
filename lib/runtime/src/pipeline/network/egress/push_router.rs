@@ -2017,6 +2017,11 @@ where
                             ErrorType::WorkerRankOverloaded(dp_rank) => tracing::debug!(
                                 "Leaving instance {instance_id} routable: its overload is limited to DP rank {dp_rank}: {err}"
                             ),
+                            // In direct mode the caller picked the worker, as the
+                            // EPP does, so the refusal goes back to it unmarked.
+                            _ if self.router_mode.is_direct_routing() => tracing::debug!(
+                                "Leaving instance {instance_id} routable in direct mode; its refusal goes back to the caller: {err}"
+                            ),
                             // Backpressure: the worker said "my queue is full,
                             // retry later". A bounded lease prevents an immediate
                             // retry loop. Fresh monitor data clears the lease early.
@@ -2678,7 +2683,8 @@ mod tests {
     /// Through the router's own fault detection, on one client: a refusal
     /// that names one DP rank leaves the worker selectable for its other work,
     /// while a whole-worker refusal — as an older worker's, which names none,
-    /// also is — marks it overloaded. Time is held still throughout, so no
+    /// also is — marks it overloaded, except in direct mode, where the caller
+    /// picked the worker. Time is held still throughout, so no
     /// lease can lapse between a refusal and the check after it. Neither
     /// reports the worker down; a real connection failure still does.
     #[tokio::test]
@@ -2705,8 +2711,12 @@ mod tests {
             PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
                 .await
                 .unwrap();
+        let direct =
+            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::Direct)
+                .await
+                .unwrap();
 
-        let refuse = |dp_rank| {
+        let refuse = |router: &PushRouter<u64, TestResponse>, dp_rank: Option<u32>| {
             let error = router
                 .wrap_with_fault_detection(
                     Err(admission_refusal(dp_rank).into()),
@@ -2726,7 +2736,9 @@ mod tests {
         };
 
         tokio::time::pause();
-        refuse(Some(4));
+        refuse(&direct, None);
+        assert!(!overloaded(), "a refusal in direct mode marks nothing");
+        refuse(&router, Some(4));
         assert!(!overloaded(), "a refusal for one rank marks nothing");
         assert!(
             router
@@ -2734,7 +2746,7 @@ mod tests {
                 .is_ok(),
             "so the same router still dispatches the worker's other work"
         );
-        refuse(None);
+        refuse(&router, None);
         assert!(overloaded(), "a whole-worker refusal marks it overloaded");
         assert!(
             router.check_workers_available(instance_id, "next").is_err(),

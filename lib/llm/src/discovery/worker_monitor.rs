@@ -142,19 +142,43 @@ impl LoadThresholdConfig {
 
 /// Shared threshold configuration for independently owned routing load contexts.
 #[derive(Clone)]
-pub struct LoadThresholdHandle(Arc<std::sync::RwLock<LoadThresholdConfig>>);
+pub struct LoadThresholdHandle {
+    config: Arc<std::sync::RwLock<LoadThresholdConfig>>,
+    /// False for a handle from [`Self::disabled`].
+    accepts_thresholds: bool,
+}
 
 impl LoadThresholdHandle {
     pub fn new(config: LoadThresholdConfig) -> Self {
-        Self(Arc::new(std::sync::RwLock::new(config)))
+        Self {
+            config: Arc::new(std::sync::RwLock::new(config)),
+            accepts_thresholds: true,
+        }
+    }
+
+    /// A handle that ignores thresholds, for a frontend in direct routing mode,
+    /// which does not pick workers. Its monitor never subscribes to KV metrics.
+    pub(crate) fn disabled() -> Self {
+        Self {
+            accepts_thresholds: false,
+            ..Self::new(LoadThresholdConfig::default())
+        }
+    }
+
+    /// False for a handle from [`Self::disabled`].
+    pub(crate) fn accepts_thresholds(&self) -> bool {
+        self.accepts_thresholds
     }
 
     pub fn get(&self) -> LoadThresholdConfig {
-        self.0.read().unwrap().clone()
+        self.config.read().unwrap().clone()
     }
 
     pub fn update(&self, config: &LoadThresholdConfig) {
-        let mut current = self.0.write().unwrap();
+        if !self.accepts_thresholds {
+            return;
+        }
+        let mut current = self.config.write().unwrap();
         if let Some(value) = config.active_decode_blocks_threshold {
             current.active_decode_blocks_threshold = Some(value);
         }
@@ -167,7 +191,7 @@ impl LoadThresholdHandle {
     }
 
     pub fn is_configured(&self) -> bool {
-        self.0.read().unwrap().is_configured()
+        self.config.read().unwrap().is_configured()
     }
 }
 
@@ -752,15 +776,26 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
             };
 
         // Subscribe to KV metrics over the configured event transport. This is
-        // optional; cleanup of TTFT and ITL metrics continues without it.
-        let kv_metrics_rx = match KvMetricsSubscriber::for_endpoint(endpoint).await {
-            Ok(sub) => Some(sub),
-            Err(e) => {
-                tracing::warn!(
-                    "KvWorkerMonitor: KV metrics subscriber not available ({}), skipping load metrics.",
-                    e
-                );
-                None
+        // optional; cleanup of TTFT and ITL metrics continues without it. The
+        // reports feed only threshold-based overload detection, and the
+        // subscription connects to every worker. A frontend in direct routing
+        // mode ignores thresholds, so it skips the subscription.
+        let kv_metrics_rx = if !self.thresholds.accepts_thresholds() {
+            tracing::debug!(
+                endpoint = %endpoint.id(),
+                "KvWorkerMonitor: direct routing mode, skipping the KV metrics subscription"
+            );
+            None
+        } else {
+            match KvMetricsSubscriber::for_endpoint(endpoint).await {
+                Ok(sub) => Some(sub),
+                Err(e) => {
+                    tracing::warn!(
+                        "KvWorkerMonitor: KV metrics subscriber not available ({}), skipping load metrics.",
+                        e
+                    );
+                    None
+                }
             }
         };
 

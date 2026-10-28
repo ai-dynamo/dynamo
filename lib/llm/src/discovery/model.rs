@@ -751,24 +751,40 @@ impl Model {
 
     // -- Worker monitoring (aggregated across WorkerSets) --
 
-    /// Get load threshold config from the first WorkerSet with a threshold handle.
-    /// When `config` is Some, updates every handle. WorkerSets may share a handle.
+    /// Get load threshold config from the first WorkerSet with a threshold handle,
+    /// preferring one that applies thresholds: a WorkerSet in direct routing mode
+    /// ignores them. When `config` is Some, updates every handle. WorkerSets may
+    /// share a handle.
     pub fn load_threshold_config(
         &self,
         config: Option<&LoadThresholdConfig>,
     ) -> Option<LoadThresholdConfig> {
-        let mut result = None;
+        let mut result: Option<(bool, LoadThresholdConfig)> = None;
         for worker_set in self.worker_sets.load().values() {
             if let Some(ref thresholds) = worker_set.load_thresholds {
                 if let Some(cfg) = config {
                     thresholds.update(cfg);
                 }
-                if result.is_none() {
-                    result = Some(thresholds.get());
+                let accepts = thresholds.accepts_thresholds();
+                if result
+                    .as_ref()
+                    .is_none_or(|(reported_accepts, _)| accepts && !reported_accepts)
+                {
+                    result = Some((accepts, thresholds.get()));
                 }
             }
         }
-        result
+        result.map(|(_, config)| config)
+    }
+
+    /// Whether any WorkerSet takes busy thresholds; none does in direct routing mode.
+    pub(crate) fn accepts_load_thresholds(&self) -> bool {
+        self.worker_sets.load().values().any(|worker_set| {
+            worker_set
+                .load_thresholds
+                .as_ref()
+                .is_some_and(|thresholds| thresholds.accepts_thresholds())
+        })
     }
 
     /// Total worker count across all WorkerSets.

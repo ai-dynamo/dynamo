@@ -2693,6 +2693,13 @@ impl ModelManager {
         model_entry.load_threshold_config(config)
     }
 
+    /// See [`Model::accepts_load_thresholds`].
+    pub(crate) fn accepts_load_thresholds(&self, model: &str) -> bool {
+        self.models
+            .get(model)
+            .is_some_and(|model| model.accepts_load_thresholds())
+    }
+
     /// Lists all models with worker monitors configured.
     pub fn list_busy_thresholds(&self) -> Vec<(String, LoadThresholdConfig)> {
         let mut result = Vec::new();

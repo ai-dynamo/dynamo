@@ -180,6 +180,21 @@ async fn busy_threshold_handler(
         );
     }
 
+    // A frontend in direct routing mode does not pick workers, so it ignores
+    // busy thresholds.
+    if is_setting && !manager.accepts_load_thresholds(&request.model) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!(ErrorResponse {
+                error: format!(
+                    "Model '{}' is served in direct routing mode, where the caller picks \
+                     workers and this frontend ignores busy thresholds.",
+                    request.model
+                ),
+            })),
+        );
+    }
+
     if is_setting {
         tracing::info!(
             model = %request.model,
