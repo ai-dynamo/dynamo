@@ -48,6 +48,9 @@ tests in this directory that guard it.
   change, not a refactor. See the README for what it would need to decide.
 - When conditional planning gains a new input, decide what a missing value
   means and write it down in the README. Do not let `None` mean several things.
+- A new public entry point, or a new caller of an existing one, adds its
+  column to the README's activation-state table and its own section there.
+  Decide what it does in `Pending` and in `Untargeted` separately.
 - Keep refactors behavior-preserving and separate from behavior changes, each
   with its guarding test named in the PR.
 
