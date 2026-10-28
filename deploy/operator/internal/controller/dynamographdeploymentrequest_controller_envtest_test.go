@@ -3043,7 +3043,7 @@ spec:
 			Expect(k8sClient.Get(ctx, request.NamespacedName, &persisted)).Should(Succeed())
 			Expect(persisted.Spec.Hardware).NotTo(BeNil())
 			Expect(persisted.Spec.Hardware.TotalGPUs).NotTo(BeNil())
-			Expect(*persisted.Spec.Hardware.TotalGPUs).To(Equal(int32(12)))
+			Expect(*persisted.Spec.Hardware.TotalGPUs).To(Equal(int32(8)))
 
 			GinkgoT().Log("creating the profiling Job from the persisted DGDR")
 			_, err = reconciler.Reconcile(ctx, request)
@@ -3107,11 +3107,12 @@ spec:
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			mockGPU := &gpu.GPUInfo{
-				GPUsPerNode:   8,
-				VRAMPerGPU:    81920,
-				System:        "h100_sxm",
-				NodesWithGPUs: 1,
-				TotalGPUs:     8,
+				GPUsPerNode:       8,
+				VRAMPerGPU:        81920,
+				System:            "h100_sxm",
+				NodesWithGPUs:     1,
+				TotalGPUs:         8,
+				SelectedShapeGPUs: 8,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
 			cache.Set("", mockGPU, 10*time.Minute)
@@ -3222,11 +3223,12 @@ spec:
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			mockGPU := &gpu.GPUInfo{
-				GPUsPerNode:   8,
-				VRAMPerGPU:    81920,
-				System:        "h100_sxm",
-				NodesWithGPUs: 1,
-				TotalGPUs:     8,
+				GPUsPerNode:       8,
+				VRAMPerGPU:        81920,
+				System:            "h100_sxm",
+				NodesWithGPUs:     1,
+				TotalGPUs:         8,
+				SelectedShapeGPUs: 8,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
 			cache.Set("", mockGPU, 10*time.Minute)
@@ -3338,11 +3340,12 @@ spec:
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			mockGPU := &gpu.GPUInfo{
-				GPUsPerNode:   8,
-				VRAMPerGPU:    81920,
-				System:        "h100_sxm",
-				NodesWithGPUs: 1,
-				TotalGPUs:     8,
+				GPUsPerNode:       8,
+				VRAMPerGPU:        81920,
+				System:            "h100_sxm",
+				NodesWithGPUs:     1,
+				TotalGPUs:         8,
+				SelectedShapeGPUs: 8,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
 			cache.Set("", mockGPU, 10*time.Minute)
@@ -3961,11 +3964,12 @@ spec:
 
 			// Mock GPU discovery so validation and enrichment succeed.
 			mockGPU := &gpu.GPUInfo{
-				GPUsPerNode:   8,
-				VRAMPerGPU:    81920,
-				System:        "a100_sxm",
-				NodesWithGPUs: 1,
-				TotalGPUs:     8,
+				GPUsPerNode:       8,
+				VRAMPerGPU:        81920,
+				System:            "a100_sxm",
+				NodesWithGPUs:     1,
+				TotalGPUs:         8,
+				SelectedShapeGPUs: 8,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
 			cache.Set("", mockGPU, 10*time.Minute)

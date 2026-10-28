@@ -229,19 +229,19 @@ class HardwareSpec(BaseModel):
 
     gpuSku: Optional[GPUSKUType] = Field(
         default=None,
-        description="GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the node with the most GPUs, then highest VRAM per GPU. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU. The legacy value gb200_sxm is deprecated; use gb200 instead.",
+        description="GPUSKU selects the GPU type to target. When omitted, auto-detected as the GPU type of the node with the most GPUs (ties broken by highest VRAM per GPU). In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU. The legacy value gb200_sxm is deprecated; use gb200 instead.",
     )
     vramMb: Optional[float] = Field(
         default=None,
-        description="VRAMMB is the VRAM per GPU in MiB. When omitted, auto-detected from cluster GPU nodes.",
+        description="VRAMMB is the VRAM per GPU in MiB. When omitted, auto-detected from cluster GPU nodes. When this value differs from the auto-selected shape and totalGpus is omitted, the request is rejected.",
     )
     totalGpus: Optional[int] = Field(
         default=None,
-        description="TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by summing GPUs on discovered nodes with the selected GPU type (filtered by gpuSku when set), temporarily capped at 32 to limit profiler search space. This cap may be removed in a future release. Set this field explicitly to override.",
+        description="TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by summing GPUs on nodes matching the selected shape: GPU type, GPUs per node, and VRAM per GPU. The result is temporarily capped at 32 to limit profiler search space. For example, same-type nodes with 8 and 4 GPUs represent 12 GPUs of inventory, while the selected 8-GPU shape yields an automatic budget of 8. This cap may be removed in a future release. Set this field explicitly to override the derived budget or use a numGpusPerNode or vramMb value that differs from the selected shape. A shape override without an explicit totalGpus is rejected.",
     )
     numGpusPerNode: Optional[int] = Field(
         default=None,
-        description="NumGPUsPerNode is the number of GPUs per node. When omitted, auto-detected from cluster GPU nodes.",
+        description="NumGPUsPerNode is the number of GPUs per node. When omitted, auto-detected as the highest GPU count on any discovered node of the selected GPU type. In clusters whose nodes have different GPU counts, set this explicitly to the node size you intend to schedule on. When this value differs from the auto-selected shape and totalGpus is omitted, the request is rejected.",
     )
     interconnect: Optional[str] = Field(
         default=None,

@@ -1901,6 +1901,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		"gpusPerNode", gpuInfo.GPUsPerNode,
 		"nodesWithGPUs", gpuInfo.NodesWithGPUs,
 		"totalGpus", gpuInfo.TotalGPUs,
+		"selectedShapeGpus", gpuInfo.SelectedShapeGPUs,
 		"model", gpuInfo.Model,
 		"vramMiB", gpuInfo.VRAMPerGPU,
 		"system", gpuInfo.System,
@@ -1909,6 +1910,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		"interconnectTier", gpuInfo.InterconnectTier,
 		"rdma", gpuInfo.RDMAEnabled,
 		"rdmaType", gpuInfo.RDMAType)
+
+	// An automatically derived budget is valid only for discovery's selected node shape.
+	if err := validateAutomaticGPUShape(hw, gpuInfo); err != nil {
+		return changed, err
+	}
 
 	if hw.GPUSKU == "" {
 		inferred := gpu.InferHardwareSystem(gpuInfo.Model)
@@ -1936,10 +1942,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		// TODO: This is a temporary limit to prevent the profiler from using too many GPUs.
 		// Will be removed once a fix is in the Profiler/AIC.
 		const defaultMaxAutoGPUs = 32
-		total := gpuInfo.TotalGPUs
+		total := gpuInfo.SelectedShapeGPUs
 		if total > defaultMaxAutoGPUs {
-			logger.Info("Capping auto-discovered TotalGPUs at default limit; set hardware.totalGpus to override",
-				"discovered", total, "cap", defaultMaxAutoGPUs)
+			logger.Info("Capping auto-discovered GPU budget at default limit; set hardware.totalGpus to override",
+				"selectedShapeGpus", total, "cap", defaultMaxAutoGPUs)
 			total = defaultMaxAutoGPUs
 		}
 		hw.TotalGPUs = new(int32(total))
@@ -1960,6 +1966,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 		changed = true
 	}
 	return changed, nil
+}
+
+func validateAutomaticGPUShape(hw *nvidiacomv1beta1.HardwareSpec, gpuInfo *gpu.GPUInfo) error {
+	if hw.TotalGPUs != nil {
+		return nil
+	}
+	if hw.NumGPUsPerNode != nil && int(*hw.NumGPUsPerNode) != gpuInfo.GPUsPerNode {
+		return fmt.Errorf("cannot auto-detect hardware.totalGpus: hardware.numGpusPerNode=%d does not match the selected discovered shape with %d GPUs per node; set hardware.totalGpus explicitly", *hw.NumGPUsPerNode, gpuInfo.GPUsPerNode)
+	}
+	if hw.VRAMMB != nil && *hw.VRAMMB != float64(gpuInfo.VRAMPerGPU) {
+		return fmt.Errorf("cannot auto-detect hardware.totalGpus: hardware.vramMb=%g does not match the selected discovered shape with %d MiB per GPU; set hardware.totalGpus explicitly", *hw.VRAMMB, gpuInfo.VRAMPerGPU)
+	}
+	return nil
 }
 
 func (r *DynamoGraphDeploymentRequestReconciler) discoverHardwareForEnrichment(ctx context.Context, hw *nvidiacomv1beta1.HardwareSpec, discoveryRequired bool) (*gpu.GPUInfo, error) {

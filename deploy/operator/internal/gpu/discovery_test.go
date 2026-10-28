@@ -55,20 +55,26 @@ func TestGPUDiscovery_TotalGPUs(t *testing.T) {
 	for _, source := range []string{"node labels", "DCGM"} {
 		t.Run(source, func(t *testing.T) {
 			tests := []struct {
-				name        string
-				h100Counts  []int
-				a100Counts  []int
-				filterSKU   nvidiacomv1beta1.GPUSKUType
-				wantSKU     nvidiacomv1beta1.GPUSKUType
-				wantPerNode int
-				wantNodes   int
-				wantTotal   int
+				name         string
+				h100Counts   []int
+				h100VRAM     []int
+				h100Models   []string
+				a100Counts   []int
+				filterSKU    nvidiacomv1beta1.GPUSKUType
+				wantSKU      nvidiacomv1beta1.GPUSKUType
+				wantPerNode  int
+				wantNodes    int
+				wantTotal    int
+				wantSelected int
 			}{
-				{name: "heterogeneous nodes", h100Counts: []int{8, 4}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12},
-				{name: "maximum selected after smaller node", h100Counts: []int{4, 8}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12},
-				{name: "unfiltered excludes other SKU", h100Counts: []int{8, 4}, a100Counts: []int{8, 2}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12},
-				{name: "filter selects other SKU", h100Counts: []int{8, 4}, a100Counts: []int{8, 2}, filterSKU: "a100_sxm", wantSKU: "a100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 10},
-				{name: "discovery does not cap the total", h100Counts: []int{8, 8, 8, 8, 4}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 5, wantTotal: 36},
+				{name: "different node sizes", h100Counts: []int{8, 4}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12, wantSelected: 8},
+				{name: "maximum selected after smaller node", h100Counts: []int{4, 8}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12, wantSelected: 8},
+				{name: "same selected shape", h100Counts: []int{8, 8}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 16, wantSelected: 16},
+				{name: "different VRAM per GPU", h100Counts: []int{8, 8}, h100VRAM: []int{81920, 40960}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 16, wantSelected: 8},
+				{name: "unknown models remain separate GPU types", h100Counts: []int{8, 8}, h100Models: []string{"FutureGPU-A", "FutureGPU-B"}, wantPerNode: 8, wantNodes: 1, wantTotal: 8, wantSelected: 8},
+				{name: "unfiltered excludes other SKU", h100Counts: []int{8, 4}, a100Counts: []int{8, 2}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 12, wantSelected: 8},
+				{name: "filter selects other SKU", h100Counts: []int{8, 4}, a100Counts: []int{8, 2}, filterSKU: "a100_sxm", wantSKU: "a100_sxm", wantPerNode: 8, wantNodes: 2, wantTotal: 10, wantSelected: 8},
+				{name: "discovery does not cap totals", h100Counts: []int{8, 8, 8, 8, 4}, wantSKU: "h100_sxm", wantPerNode: 8, wantNodes: 5, wantTotal: 36, wantSelected: 32},
 			}
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
@@ -79,17 +85,27 @@ func TestGPUDiscovery_TotalGPUs(t *testing.T) {
 						model  string
 						vram   int
 						counts []int
+						vrams  []int
+						models []string
 					}{
-						{model: "H100-SXM5-80GB", vram: 81920, counts: tt.h100Counts},
+						{model: "H100-SXM5-80GB", vram: 81920, counts: tt.h100Counts, vrams: tt.h100VRAM, models: tt.h100Models},
 						{model: "A100-SXM4-40GB", vram: 40960, counts: tt.a100Counts},
 					} {
-						for _, count := range group.counts {
+						for index, count := range group.counts {
+							vram := group.vram
+							if index < len(group.vrams) {
+								vram = group.vrams[index]
+							}
+							model := group.model
+							if index < len(group.models) {
+								model = group.models[index]
+							}
 							name := fmt.Sprintf("gpu-node-%d", len(metrics))
 							ip := fmt.Sprintf("10.0.0.%d", len(metrics)+1)
 							objects = append(objects, &corev1.Node{
 								Name: name,
 								Labels: map[string]string{
-									LabelGPUCount: fmt.Sprint(count), LabelGPUProduct: group.model, LabelGPUMemory: fmt.Sprint(group.vram),
+									LabelGPUCount: fmt.Sprint(count), LabelGPUProduct: model, LabelGPUMemory: fmt.Sprint(vram),
 								},
 							}, &corev1.Pod{
 								Name: name, Namespace: "gpu-operator",
@@ -97,7 +113,7 @@ func TestGPUDiscovery_TotalGPUs(t *testing.T) {
 								Spec:   corev1.PodSpec{NodeName: name},
 								Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: ip},
 							})
-							metrics[buildDCGMEndpoint(ip)] = GPUInfo{NodeName: name, GPUsPerNode: count, Model: group.model, VRAMPerGPU: group.vram}
+							metrics[buildDCGMEndpoint(ip)] = GPUInfo{NodeName: name, GPUsPerNode: count, Model: model, VRAMPerGPU: vram}
 						}
 					}
 					k8sClient := newFakeClient(objects...)
@@ -122,6 +138,7 @@ func TestGPUDiscovery_TotalGPUs(t *testing.T) {
 					assert.Equal(t, tt.wantPerNode, info.GPUsPerNode)
 					assert.Equal(t, tt.wantNodes, info.NodesWithGPUs)
 					assert.Equal(t, tt.wantTotal, info.TotalGPUs)
+					assert.Equal(t, tt.wantSelected, info.SelectedShapeGPUs)
 				})
 			}
 		})
@@ -1192,6 +1209,7 @@ func TestDiscoverGPUsFromDCGM_DeduplicatesNodes(t *testing.T) {
 			assert.Equal(t, tt.wantVRAM, info.VRAMPerGPU)
 			assert.Equal(t, 2, info.NodesWithGPUs)
 			assert.Equal(t, 12, info.TotalGPUs)
+			assert.Equal(t, 8, info.SelectedShapeGPUs)
 		})
 	}
 }

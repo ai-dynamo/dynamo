@@ -166,21 +166,22 @@ var gpuRules = []gpuRule{
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
 type GPUInfo struct {
-	NodeName         string                      // Name of the node with this GPU configuration
-	GPUsPerNode      int                         // Maximum GPUs per node with the selected SKU
-	NodesWithGPUs    int                         // Number of discovered nodes with the selected SKU
-	TotalGPUs        int                         // Sum of GPUs across discovered nodes with the selected SKU, before any budget cap
-	Model            string                      // GPU product name (e.g., "H100-SXM5-80GB")
-	VRAMPerGPU       int                         // VRAM in MiB per GPU
-	System           nvidiacomv1beta1.GPUSKUType // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
-	MIGEnabled       bool                        // True if MIG is enabled (inferred from model or additional labels, not implemented in this version)
-	MIGProfiles      map[string]int              // Optional: map of MIG profile name to count (requires additional label parsing, not implemented in this version)
-	CloudProvider    string                      // aws | gcp | aks | other | unknown
-	RDMAEnabled      bool                        // Indicates whether RDMA is enabled for this node (e.g., via InfiniBand, RoCE, or similar high-speed networking)
-	RDMAType         string                      // Type of RDMA transport detected (e.g., "infiniband", "roce", "rdma", "sriov", or "none")
-	Interconnect     string                      // Primary GPU-to-GPU interconnect technology used within the node (e.g., "nvlink" for high-bandwidth links or "pcie" for standard bus-based communication)
-	InterconnectTier string                      // Qualitative or platform-specific classification of the interconnect (e.g., NVLink generation, topology tier, or vendor-defined performance level)
-	NVLinkLinks      int                         // Number of NVLink connections per GPU (0 if NVLink is not present or interconnect is PCIe-only)
+	NodeName          string                      // Name of the node with this GPU configuration
+	GPUsPerNode       int                         // Maximum GPUs per node with the selected SKU
+	NodesWithGPUs     int                         // Number of discovered nodes with the selected SKU
+	TotalGPUs         int                         // Sum of GPUs across discovered nodes with the selected SKU, before any budget cap
+	SelectedShapeGPUs int                         // Sum of GPUs on nodes matching the selected SKU, GPU count, and VRAM per GPU
+	Model             string                      // GPU product name (e.g., "H100-SXM5-80GB")
+	VRAMPerGPU        int                         // VRAM in MiB per GPU
+	System            nvidiacomv1beta1.GPUSKUType // AIC hardware system identifier (e.g., "h100_sxm", "h200_sxm"), empty if unknown
+	MIGEnabled        bool                        // True if MIG is enabled (inferred from model or additional labels, not implemented in this version)
+	MIGProfiles       map[string]int              // Optional: map of MIG profile name to count (requires additional label parsing, not implemented in this version)
+	CloudProvider     string                      // aws | gcp | aks | other | unknown
+	RDMAEnabled       bool                        // Indicates whether RDMA is enabled for this node (e.g., via InfiniBand, RoCE, or similar high-speed networking)
+	RDMAType          string                      // Type of RDMA transport detected (e.g., "infiniband", "roce", "rdma", "sriov", or "none")
+	Interconnect      string                      // Primary GPU-to-GPU interconnect technology used within the node (e.g., "nvlink" for high-bandwidth links or "pcie" for standard bus-based communication)
+	InterconnectTier  string                      // Qualitative or platform-specific classification of the interconnect (e.g., NVLink generation, topology tier, or vendor-defined performance level)
+	NVLinkLinks       int                         // Number of NVLink connections per GPU (0 if NVLink is not present or interconnect is PCIe-only)
 }
 
 type ScrapeMetricsFunc func(ctx context.Context, endpoint string) (*GPUInfo, error)
@@ -260,8 +261,10 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //
 // When filterSKU is non-empty, only nodes whose inferred SKU matches are
 // considered. When empty, the best node is selected first (highest GPU count,
-// then VRAM). Each node with the selected SKU contributes once to NodesWithGPUs,
-// and its GPU count is summed into TotalGPUs.
+// then VRAM). Each node with the selected GPU type contributes once to NodesWithGPUs,
+// and its GPU count is summed into TotalGPUs. Known types are grouped by SKU; unknown
+// types are grouped by normalized model name. SelectedShapeGPUs counts only the nodes
+// that also match the selected GPU count and VRAM per GPU.
 //
 // The function performs the following:
 //
@@ -419,14 +422,15 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
 	totalGPUs := 0
+	selectedShapeGPUs := 0
 	var rdmaDetected bool
 	var rdmaType string
 	for _, n := range allNodes {
-		if n.sku != bestSKU {
+		if !matchesSelectedGPUType(n.sku, bestSKU, n.info.Model, bestNode.Model) {
 			continue
 		}
 		nodesWithGPUs++
-		totalGPUs += n.info.GPUsPerNode
+		totalGPUs, selectedShapeGPUs = accumulateGPUCapacity(totalGPUs, selectedShapeGPUs, n.info, bestNode)
 		if !rdmaDetected {
 			rdma, rType := detectRDMAFromNode(ctx, k8sClient, n.nodeName)
 			if rdma {
@@ -452,6 +456,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	bestNode.CloudProvider = cloudProvider
 	bestNode.NodesWithGPUs = nodesWithGPUs
 	bestNode.TotalGPUs = totalGPUs
+	bestNode.SelectedShapeGPUs = selectedShapeGPUs
 	bestNode.RDMAEnabled = rdmaDetected
 	bestNode.RDMAType = rdmaType
 
@@ -817,7 +822,9 @@ func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error
 //
 // When filterSKU is non-empty, only nodes whose inferred SKU matches are
 // considered for selection and counting. When empty, the best node is selected
-// first and then only nodes with the same SKU are counted.
+// first and then only nodes of the same GPU type are counted. Known types are grouped
+// by SKU; unknown types are grouped by normalized model name. SelectedShapeGPUs counts
+// only nodes that also match the selected GPU count and VRAM per GPU.
 //
 // This function requires cluster-wide node read permissions and expects nodes
 // to have GFD labels. If no nodes with GPU labels are found, it returns an error.
@@ -891,12 +898,13 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
 	totalGPUs := 0
+	selectedShapeGPUs := 0
 	var rdmaDetected bool
 	var rdmaType string
 	for _, n := range allNodes {
-		if n.sku == bestSKU {
+		if matchesSelectedGPUType(n.sku, bestSKU, n.info.Model, bestNode.Model) {
 			nodesWithGPUs++
-			totalGPUs += n.info.GPUsPerNode
+			totalGPUs, selectedShapeGPUs = accumulateGPUCapacity(totalGPUs, selectedShapeGPUs, n.info, bestNode)
 			if !rdmaDetected {
 				rdma, rType := detectRDMAFromNode(ctx, k8sClient, n.info.NodeName)
 				if rdma {
@@ -918,18 +926,35 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 	bestNode.System = bestSKU
 	bestNode.NodesWithGPUs = nodesWithGPUs
 	bestNode.TotalGPUs = totalGPUs
+	bestNode.SelectedShapeGPUs = selectedShapeGPUs
 	bestNode.RDMAEnabled = rdmaDetected
 	bestNode.RDMAType = rdmaType
 	logger.Info("GPU discovery completed",
 		"gpusPerNode", bestNode.GPUsPerNode,
 		"nodesWithGPUs", bestNode.NodesWithGPUs,
 		"totalGpus", bestNode.TotalGPUs,
+		"selectedShapeGpus", bestNode.SelectedShapeGPUs,
 		"model", bestNode.Model,
 		"vram", bestNode.VRAMPerGPU,
 		"system", bestNode.System,
 		"rdma", bestNode.RDMAEnabled,
 		"rdmaType", bestNode.RDMAType)
 	return bestNode, nil
+}
+
+func accumulateGPUCapacity(total, selected int, node, selectedShape *GPUInfo) (int, int) {
+	total += node.GPUsPerNode
+	if node.GPUsPerNode == selectedShape.GPUsPerNode && node.VRAMPerGPU == selectedShape.VRAMPerGPU {
+		selected += node.GPUsPerNode
+	}
+	return total, selected
+}
+
+func matchesSelectedGPUType(discoveredSKU, selectedSKU nvidiacomv1beta1.GPUSKUType, discoveredModel, selectedModel string) bool {
+	if discoveredSKU != selectedSKU {
+		return false
+	}
+	return selectedSKU != "" || normalize(discoveredModel) == normalize(selectedModel)
 }
 
 // extractGPUInfoFromNode extracts GPU information from a single node's labels.

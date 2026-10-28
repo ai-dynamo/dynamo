@@ -142,16 +142,16 @@ service.
 
 <Indent>
   <ParamField path="gpuSku" type="GPUSKUType">
-    GPU type to target (see [SKU format](#sku-format)). When omitted, auto-detected by selecting the node with the most GPUs, then highest VRAM per GPU. In mixed-GPU clusters, set this to choose the GPU type; discovery and `totalGpus` are then restricted to matching nodes.
+    GPU type to target (see [SKU format](#sku-format)). When omitted, auto-detected as the GPU type of the node with the most GPUs (ties broken by highest VRAM per GPU). In mixed-GPU clusters, set this to choose the GPU type; discovery and `totalGpus` are then restricted to matching nodes.
   </ParamField>
   <ParamField path="vramMb" type="number">
-    VRAM per GPU in MiB. Auto-detected from cluster GPU nodes when omitted.
+    VRAM per GPU in MiB. Auto-detected from cluster GPU nodes when omitted. If this value differs from the auto-selected shape and `totalGpus` is omitted, the request is rejected.
   </ParamField>
   <ParamField path="totalGpus" type="integer">
-    GPU budget for profiling and deployment; the profiler uses it to determine parallelism and replica count. When omitted, computed by summing GPUs on discovered nodes with the selected GPU type (filtered by `gpuSku` when set), temporarily capped at 32 to limit the profiler search space. For example, matching nodes with 8 and 4 GPUs yield a budget of 12, while `numGpusPerNode` remains 8. Set explicitly to override the cap.
+    GPU budget for profiling and deployment; the profiler uses it to determine parallelism and replica count. When omitted, computed by summing GPUs on nodes matching the auto-selected shape: GPU type, GPUs per node, and VRAM per GPU. The result is temporarily capped at 32 to limit the profiler search space. This reflects discovered GPUs, not currently free capacity. For example, same-type nodes with 8 and 4 GPUs represent 12 GPUs of inventory, while the selected 8-GPU shape yields an automatic budget of 8. Set explicitly to override the derived budget or use a `numGpusPerNode` or `vramMb` value that differs from the selected shape; a shape override without `totalGpus` is rejected.
   </ParamField>
   <ParamField path="numGpusPerNode" type="integer">
-    GPUs per node. Auto-detected when omitted.
+    GPUs per node. When omitted, auto-detected as the highest GPU count on any discovered node of the selected GPU type. If this value differs from the auto-selected shape and `totalGpus` is omitted, the request is rejected.
   </ParamField>
   <ParamField path="interconnect" type="string">
     Primary GPU-to-GPU interconnect within a node, for example `nvlink` or `pcie`. Capability metadata for profiling and planning only — it does not enable any interconnect. Best-effort discovery distinguishes `nvlink` from `pcie` when omitted. An over-optimistic value can lead the planner to overestimate intra-node bandwidth and pick overly aggressive parallelism.
