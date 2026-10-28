@@ -150,10 +150,14 @@ jobs:
       run: |
         go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.1
         echo "KUSTOMIZE_BIN=$(go env GOPATH)/bin/kustomize" >> "$GITHUB_ENV"
+        mkdir -p "$RUNNER_TEMP/bin"
+        wget -qO "$RUNNER_TEMP/bin/yq" https://github.com/mikefarah/yq/releases/download/v4.52.5/yq_linux_amd64
+        chmod +x "$RUNNER_TEMP/bin/yq"
+        echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
     - name: Check generated recipe manifests
       run: python3 scripts/kustomize-matrix.py check
     - name: Test recipe generators and docs artifacts
-      run: python3 -m pytest --noconftest tests/test_kustomize_matrix.py tests/test_generate_kustomize_openapi.py docs/tests/ tests/deploy/test_batch_profile_values.py
+      run: python3 -m pytest --noconftest tests/test_kustomize_matrix.py tests/test_generate_kustomize_openapi.py docs/tests/ tests/deploy/test_batch_profile_values.py .github/ci/test_kimi_cache.py
 
   api-docs:
     name: Generated API References

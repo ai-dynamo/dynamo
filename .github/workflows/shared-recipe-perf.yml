@@ -142,6 +142,9 @@ jobs:
           yq -i '.commonLabels.ci-run = strenv(RUN_KEY) |
             .commonLabels.ci-workflow = strenv(RECIPE)' "$OVERLAY/kustomization.yaml"
           kubectl kustomize "$OVERLAY" --load-restrictor LoadRestrictionsNone > "$ARTIFACTS/rendered.yaml"
+          if [[ "$RECIPE" == kimi-k25-agg || "$RECIPE" == kimi-k25-disagg ]]; then
+            bash .github/ci/prepare-kimi-cache.sh "$ARTIFACTS/rendered.yaml"
+          fi
           yq -i 'with(select(.kind == "Job");
             (.spec.template.spec.containers[].envFrom[]? | select(.secretRef.name == "hf-token-secret").secretRef.name) = strenv(HF_SECRET) |
             (.spec.template.spec.containers[].env[]? | select(.name == "HF_TOKEN").valueFrom.secretKeyRef.name) = strenv(HF_SECRET))' "$ARTIFACTS/rendered.yaml"
@@ -210,6 +213,20 @@ jobs:
         run: |
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
           "${k[@]}" create -f "$ARTIFACTS/prerequisites.yaml"
+      - name: Validate offline Kimi model cache
+        if: ${{ !inputs.preflight_only && startsWith(inputs.recipe, 'kimi-k25-') }}
+        timeout-minutes: 12
+        run: |
+          k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=30s)
+          job="$DGD-cache-preflight"
+          until "${k[@]}" wait "job/$job" --for=condition=Complete --timeout=5s; do
+            "${k[@]}" get job "$job" -o json |
+              jq -e 'all(.status.conditions[]?; .type != "Failed" or .status != "True")' >/dev/null || {
+              "${k[@]}" logs "job/$job" --all-containers
+              exit 1
+            }
+          done
+          "${k[@]}" logs "job/$job" --all-containers
       - name: Deploy and wait for readiness
         if: ${{ !inputs.preflight_only }}
         # DeepSeek V4 Pro disagg needs extra margin for four-node scheduling

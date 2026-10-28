@@ -150,6 +150,11 @@ const testCases = [
     desc: 'recipe matrix dotfile triggers recipe check without core'
   },
   {
+    file: '.github/ci/validate-kimi-cache.py',
+    expect: { examples: true },
+    desc: 'nightly cache validation changes trigger recipe regressions'
+  },
+  {
     file: 'scripts/kustomize-matrix.py',
     expect: { core: false, examples: true },
     desc: 'recipe generator triggers recipe check without core'

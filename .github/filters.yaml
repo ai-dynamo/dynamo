@@ -80,6 +80,8 @@ api_docs:
   - '**/Cargo.toml'
 
 examples:
+  - '.github/ci/**'
+  - '.github/workflows/shared-recipe-perf.yml'
   - 'recipes/**'
   - 'recipes/**/.kustomize-matrix.yaml'
   - 'examples/**'
