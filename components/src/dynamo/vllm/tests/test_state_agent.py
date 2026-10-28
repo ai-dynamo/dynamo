@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("vllm.config")
 
-from dynamo.vllm import state_agent as kv_state_agent  # noqa: E402  # isort: skip
+from dynamo.common import kv_state_agent  # noqa: E402
 from dynamo.common.kv_state_agent import worker_raw_topic  # noqa: E402
 from dynamo.vllm import state_agent  # noqa: E402
 from dynamo.vllm.cache_info import DYNAMO_KV_EVENT_BLOCK_SIZE_KEY  # noqa: E402

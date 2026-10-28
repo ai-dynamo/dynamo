@@ -4,18 +4,19 @@
 """Opt-in vLLM attachment configuration for the external KV state agent."""
 
 import asyncio
-import ipaddress
 import logging
-import re
-import socket
-from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-from dynamo.common.kv_state_agent import worker_raw_topic
+from dynamo.common.kv_state_agent import (
+    CACHE_OWNER_PATTERN,
+    bounded_close,
+    validate_advertise_host,
+    worker_raw_topic,
+)
 from dynamo.llm import KvStateAttachmentOwner, WorkerType
 from dynamo.runtime import Endpoint
 
@@ -25,11 +26,6 @@ from .dp_topology import get_dp_range_for_worker
 from .kv_hints import resolve_kv_transfer_hint_sources
 
 logger = logging.getLogger(__name__)
-
-CACHE_OWNER_PATTERN = re.compile(
-    r"^(?P<domain>[0-9a-f]{32}:[0-9a-f]{32})/[0-9a-f]{16}/[0-9a-f]{32}$"
-)
-_STATE_AGENT_CLOSE_TIMEOUT_SECS = 30.0
 
 
 @dataclass(frozen=True)
@@ -66,17 +62,6 @@ class StateAgentLifecycle:
             owner, self._owner = self._owner, None
         if owner is not None:
             await bounded_close(owner.close())
-
-
-async def bounded_close(cleanup: Awaitable[None]) -> None:
-    """Bound cleanup without replacing a worker's error or cancellation on timeout."""
-    try:
-        await asyncio.wait_for(cleanup, timeout=_STATE_AGENT_CLOSE_TIMEOUT_SECS)
-    except asyncio.TimeoutError:
-        logger.warning(
-            "KV state attachment cleanup timed out after %.0fs; continuing worker shutdown",
-            _STATE_AGENT_CLOSE_TIMEOUT_SECS,
-        )
 
 
 def state_agent_settings(config: Any) -> StateAgentSettings | None:
@@ -253,43 +238,3 @@ def _advertised_raw_endpoint(base: str, rank: int, host: str) -> str:
     if not port.isdigit():
         raise ValueError(f"vLLM KV event endpoint has no numeric port: {endpoint!r}")
     return f"tcp://{host}:{port}"
-
-
-def validate_advertise_host(host: str) -> None:
-    """Require a connectable hostname, IPv4 address, or bracketed IPv6 literal."""
-    if host.rstrip(".").lower() in {"*", "localhost", "0.0.0.0", "::", "[::]"}:
-        raise ValueError("raw_advertise_host must be a non-loopback connectable host")
-    if "://" in host or "/" in host:
-        raise ValueError("raw_advertise_host must not include a scheme, port, or path")
-    if host.startswith("["):
-        if not host.endswith("]"):
-            raise ValueError("raw_advertise_host has mismatched IPv6 brackets")
-        literal = host[1:-1]
-        try:
-            address = ipaddress.ip_address(literal)
-        except ValueError as error:
-            raise ValueError(
-                "bracketed raw_advertise_host must be an IPv6 literal"
-            ) from error
-        if address.version != 6:
-            raise ValueError("only IPv6 literals may use brackets")
-    else:
-        if "[" in host or "]" in host or ":" in host or any(c.isspace() for c in host):
-            raise ValueError(
-                "raw_advertise_host must be a hostname or bracketed IPv6 literal without a port"
-            )
-        literal = host
-        try:
-            address = ipaddress.ip_address(literal)
-        except ValueError:
-            # POSIX accepts abbreviated/integer IPv4 literals (e.g.127.1).
-            # Check them without resolving arbitrary DNS names at startup.
-            try:
-                address = ipaddress.IPv4Address(socket.inet_aton(literal))
-            except OSError:
-                return
-
-    if address.version == 6 and address.ipv4_mapped is not None:
-        address = address.ipv4_mapped
-    if address.is_loopback or address.is_unspecified:
-        raise ValueError("raw_advertise_host must be a non-loopback connectable host")
