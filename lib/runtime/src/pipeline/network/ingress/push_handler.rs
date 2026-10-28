@@ -1178,6 +1178,7 @@ mod tests {
                     [(true, true), (true, false), (false, true), (false, false)]
                 {
                     let capture = AdmissionCapture::default();
+                    let _interest_guard = crate::test_utils::tracing_interest_guard();
                     let subscriber = tracing_subscriber::registry().with(capture.clone());
                     async {
                         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
