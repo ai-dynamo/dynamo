@@ -228,11 +228,12 @@ pub(crate) fn parsers_v2_selected() -> bool {
     super::tool_parser_v2::enabled()
 }
 
-/// Request facts that affect channel interpretation before any bytes are consumed.
+/// Request facts for parser initialization and response interpretation.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct UnifiedRequestPolicy {
     pub reasoning_disabled: bool,
     pub structured_response: bool,
+    pub multiple_choices: bool,
 }
 
 impl UnifiedRequestPolicy {
@@ -244,6 +245,35 @@ impl UnifiedRequestPolicy {
             structured_response: self.structured_response && !constraint.frames_structured_answer(),
             ..self
         }
+    }
+
+    fn harmony_prefill_cache(
+        self,
+        family: &str,
+        prefix: Option<std::sync::Arc<str>>,
+    ) -> Option<HarmonyPrefill> {
+        if family == "gpt_oss" && self.multiple_choices {
+            prefix.map(HarmonyPrefill::new)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn resolve_stream_prefill(
+        self,
+        family: &str,
+        mut prefill: StreamPrefill,
+        constraint: &GuidedToolConstraint,
+        explicit_guidance: bool,
+        harmony_required_array: bool,
+    ) -> StreamPrefill {
+        if family == "gpt_oss"
+            && (explicit_guidance || constraint.installs_guided_json() && !harmony_required_array)
+        {
+            return UnifiedParserStartingState::Response.into();
+        }
+        prefill.starting_state = self.starting_state(family, prefill.starting_state);
+        prefill
     }
 
     fn starting_state(
@@ -665,6 +695,45 @@ fn starts_bare_json(content: &str) -> bool {
 pub(crate) struct StreamPrefill {
     pub starting_state: UnifiedParserStartingState,
     pub prefix: Option<std::sync::Arc<str>>,
+}
+
+// The consumed seed belongs to the request; choices keep independent parser state.
+struct HarmonyPrefill {
+    prefix: std::sync::Arc<str>,
+    token_ids: Option<Box<[u32]>>,
+}
+
+impl HarmonyPrefill {
+    fn new(prefix: std::sync::Arc<str>) -> Self {
+        Self {
+            prefix,
+            token_ids: None,
+        }
+    }
+
+    fn token_ids(&mut self) -> anyhow::Result<&[u32]> {
+        if self.token_ids.is_none() {
+            self.token_ids = Some(
+                dynamo_parsers_v2::unified::harmony::encode_harmony(&self.prefix)?
+                    .into_boxed_slice(),
+            );
+        }
+        Ok(self.token_ids.as_deref().expect("encoded above"))
+    }
+}
+
+fn replay_consumed_harmony(
+    parser: &mut dyn UnifiedParser,
+    tokens: &[u32],
+    chunk_size: usize,
+) -> anyhow::Result<()> {
+    let mut discarded = UnifiedParserOutput::default();
+    for chunk in tokens.chunks(chunk_size) {
+        parser.parse_token_ids_into(chunk, &mut discarded)?;
+        // Only the parser state survives consumed input; generated deltas start fresh.
+        discarded.events.clear();
+    }
+    Ok(())
 }
 
 impl From<UnifiedParserStartingState> for StreamPrefill {
@@ -1742,6 +1811,7 @@ pub(crate) struct ChoiceState {
 }
 
 impl ChoiceState {
+    #[cfg(test)]
     pub(crate) fn new(
         family: &str,
         tools: &[Tool],
@@ -1750,7 +1820,26 @@ impl ChoiceState {
         guided_streaming: bool,
         argument_framing: ArgumentFraming,
     ) -> anyhow::Result<Self> {
-        let prefill = prefill.into();
+        Self::new_with_prefill_cache(
+            family,
+            tools,
+            prefill.into(),
+            tool_output_mode,
+            guided_streaming,
+            argument_framing,
+            None,
+        )
+    }
+
+    fn new_with_prefill_cache(
+        family: &str,
+        tools: &[Tool],
+        prefill: StreamPrefill,
+        tool_output_mode: UnifiedToolOutputMode,
+        guided_streaming: bool,
+        argument_framing: ArgumentFraming,
+        cache: Option<&mut HarmonyPrefill>,
+    ) -> anyhow::Result<Self> {
         let mut parser = create_unified_parser_for_family(family, tools)?;
         // The built-in Harmony initializer resets its call counter. Replay consumed
         // tokens afterward so the open call and later calls share that counter.
@@ -1772,7 +1861,19 @@ impl ChoiceState {
                     (native_harmony && prefill.starting_state == UnifiedParserStartingState::None)
                         .then_some("<|start|>assistant")
                 })
-                .map(dynamo_parsers_v2::unified::harmony::encode_harmony)
+                .map(|prefix| {
+                    if replay_harmony
+                        && let Some(cache) = cache
+                        && prefill
+                            .prefix
+                            .as_ref()
+                            .is_some_and(|seed| std::sync::Arc::ptr_eq(seed, &cache.prefix))
+                    {
+                        return cache.token_ids().map(std::borrow::Cow::Borrowed);
+                    }
+                    dynamo_parsers_v2::unified::harmony::encode_harmony(prefix)
+                        .map(std::borrow::Cow::Owned)
+                })
                 .transpose()?
         } else {
             None
@@ -1780,7 +1881,10 @@ impl ChoiceState {
         let prompt_token_ids = if replay_harmony {
             Vec::new()
         } else {
-            harmony_prefix_tokens.take().unwrap_or_default()
+            harmony_prefix_tokens
+                .take()
+                .map(std::borrow::Cow::into_owned)
+                .unwrap_or_default()
         };
 
         // Streaming guided calls commit per call once the name and argument object opener
@@ -1807,7 +1911,7 @@ impl ChoiceState {
         if let Some(tokens) = harmony_prefix_tokens {
             // Consumed prompt deltas stay private; token replay preserves literal
             // delimiter fragments without joining them to generated text.
-            parser.parse_token_ids_into(&tokens, &mut UnifiedParserOutput::default())?;
+            replay_consumed_harmony(parser.as_mut(), &tokens, 256)?;
         }
         if family != "gpt_oss"
             && let Some(prefix) = prefill.prefix
@@ -3170,6 +3274,7 @@ where
         .filter(|_| family == "gpt_oss" || prefill == UnifiedParserStartingState::Reasoning);
     let has_consumed_harmony_prefix = family == "gpt_oss" && prefill_prefix.is_some();
     let argument_framing = argument_framing(&guided_tool_constraint);
+    let mut harmony_prefill_cache = policy.harmony_prefill_cache(family, prefill_prefix.clone());
     let tools = to_v2_tools(tool_definitions.as_deref());
     stream! {
         let mut undecided_guided_prefix: HashMap<u32, JsonPrefillProbe> = HashMap::new();
@@ -3691,7 +3796,7 @@ where
                             prefix: (choice_prefill == prefill && !records.get(&original.index).is_some_and(|record| record.detoured))
                                 .then(|| prefill_prefix.clone()).flatten(),
                         };
-                        match ChoiceState::new(family, &tools, choice_prefill, mode, guided_streaming, argument_framing) {
+                        match ChoiceState::new_with_prefill_cache(family, &tools, choice_prefill, mode, guided_streaming, argument_framing, harmony_prefill_cache.as_mut()) {
                             Ok(mut state) => {
                                 state.preserve_message_phases(family == MUSE_SPARK_UNIFIED_FAMILY);
                                 // A raw run resuming after an already-parsed detour
@@ -4671,6 +4776,251 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn gpt_oss_prefill_policy_preserves_guidance_envelope_ownership() {
+        for (family, explicit, guided, required_array, bare) in [
+            ("gpt_oss", false, false, false, false),
+            ("gpt_oss", true, false, false, true),
+            ("gpt_oss", false, true, false, true),
+            ("gpt_oss", false, true, true, false),
+            ("gpt_oss", true, true, true, true),
+            ("qwen3", true, true, true, false),
+        ] {
+            let constraint = if guided {
+                GuidedToolConstraint::GuidedJsonRequired
+            } else {
+                GuidedToolConstraint::None
+            };
+            for starting_state in [
+                UnifiedParserStartingState::None,
+                UnifiedParserStartingState::Reasoning,
+                UnifiedParserStartingState::Response,
+            ] {
+                let prefix = std::sync::Arc::<str>::from("consumed prompt");
+                let actual = UnifiedRequestPolicy::default().resolve_stream_prefill(
+                    family,
+                    StreamPrefill {
+                        starting_state,
+                        prefix: Some(prefix.clone()),
+                    },
+                    &constraint,
+                    explicit,
+                    required_array,
+                );
+                if bare {
+                    assert_eq!(actual.starting_state, UnifiedParserStartingState::Response);
+                    assert!(actual.prefix.is_none());
+                } else {
+                    assert_eq!(actual.starting_state, starting_state);
+                    assert!(std::sync::Arc::ptr_eq(
+                        actual.prefix.as_ref().unwrap(),
+                        &prefix
+                    ));
+                }
+            }
+        }
+    }
+
+    // Consumed prompt replay and discarded output are adapter-owned, outside parser fixtures.
+    #[test]
+    fn gpt_oss_replay_discards_output_between_bounded_token_batches() {
+        struct BoundedReplay {
+            received: Vec<u32>,
+        }
+        impl UnifiedParser for BoundedReplay {
+            fn parse_into(&mut self, _: &str, _: &mut UnifiedParserOutput) -> anyhow::Result<()> {
+                anyhow::bail!("consumed prefix must remain token-native")
+            }
+            fn parse_token_ids_into(
+                &mut self,
+                ids: &[u32],
+                output: &mut UnifiedParserOutput,
+            ) -> anyhow::Result<()> {
+                anyhow::ensure!(ids.len() <= 256, "whole-prefix batch");
+                anyhow::ensure!(output.events.is_empty(), "discarded history retained");
+                self.received.extend_from_slice(ids);
+                output.push_text("consumed");
+                Ok(())
+            }
+            fn finish(&mut self) -> anyhow::Result<UnifiedParserOutput> {
+                Ok(UnifiedParserOutput::default())
+            }
+        }
+        let tokens: Vec<u32> = (0..1025).collect();
+        let mut parser = BoundedReplay {
+            received: Vec::new(),
+        };
+        assert!(
+            parser
+                .parse_token_ids_into(&tokens, &mut UnifiedParserOutput::default())
+                .is_err()
+        );
+        let mut stale = UnifiedParserOutput::default();
+        stale.push_text("earlier consumed event");
+        assert!(
+            parser
+                .parse_token_ids_into(&tokens[..1], &mut stale)
+                .is_err()
+        );
+        replay_consumed_harmony(&mut parser, &tokens, 256).unwrap();
+        assert_eq!(parser.received, tokens);
+    }
+
+    #[test]
+    fn gpt_oss_replay_chunking_preserves_continuation_state() {
+        let large_body = "alpha ".repeat(512);
+        let seeds = [
+            ("<|start|>assistant<|channel|>analysis<|message|>thinking<".to_string(), "|end|><|end|><|start|>assistant<|channel|>final<|message|>answer<|return|>"),
+            ("<|start|>assistant to=functions.lookup<|channel|>commentary<|message|>{\"q\":\"hé".to_string(), "🙂\"}<|call|>"),
+            ("<|start|>assistant<|channel|>analysis to=functions.lookup<|message|>{\"q\":\"<|start|>assistant<|channel|>analysis<|message|>".to_string(), "literal\"}<|call|>"),
+            ("<|start|>assistant to=functions.lookup<|channel|>commentary<|message|>{\"q\":\"done\"}".to_string(), "<|call|><|start|>assistant to=functions.lookup<|channel|>commentary<|message|>{\"q\":\"next\"}<|call|>"),
+            ("<|start|>assistant to=functions.lookup<|channel|>commentary<|message|>{broken".to_string(), "}<|call|>"),
+            (format!("<|start|>assistant to=functions.lookup<|channel|>commentary<|message|>{{\"q\":\"{large_body}"), "tail\"}<|call|>"),
+        ];
+        for (prefix, generated) in seeds {
+            let ids = dynamo_parsers_v2::unified::harmony::encode_harmony(&prefix).unwrap();
+            let mut chunk_sizes: Vec<_> = if ids.len() < 256 {
+                (1..=ids.len()).collect()
+            } else {
+                vec![1, 255, 256, 257, ids.len()]
+            };
+            chunk_sizes.sort_unstable();
+            chunk_sizes.dedup();
+            for split in generated
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain(std::iter::once(generated.len()))
+            {
+                let parse = |chunk_size| {
+                    let mut parser = create_unified_parser_for_family("gpt_oss", &[]).unwrap();
+                    parser
+                        .initialize_request(UnifiedParserInit::default())
+                        .unwrap();
+                    replay_consumed_harmony(parser.as_mut(), &ids, chunk_size).unwrap();
+                    let mut output = UnifiedParserOutput::default();
+                    parser.parse_into(&generated[..split], &mut output).unwrap();
+                    parser.parse_into(&generated[split..], &mut output).unwrap();
+                    output.events.extend(parser.finish().unwrap().events);
+                    output.events
+                };
+                let expected = parse(ids.len());
+                for size in &chunk_sizes {
+                    assert_eq!(
+                        parse(*size),
+                        expected,
+                        "seed_bytes={} split={split} chunk={size}",
+                        prefix.len()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_oss_choices_share_encoding_without_sharing_parser_state() {
+        let prefix: std::sync::Arc<str> = std::sync::Arc::from(
+            "<|start|>assistant to=functions.lookup<|channel|>commentary<|message|>{\"q\":\"hé",
+        );
+        assert!(
+            UnifiedRequestPolicy::default()
+                .harmony_prefill_cache("gpt_oss", Some(prefix.clone()))
+                .is_none()
+        );
+        let policy = UnifiedRequestPolicy {
+            multiple_choices: true,
+            ..Default::default()
+        };
+        assert!(
+            policy
+                .harmony_prefill_cache("qwen3", Some(prefix.clone()))
+                .is_none()
+        );
+        assert!(policy.harmony_prefill_cache("gpt_oss", None).is_none());
+        let mut cache = policy
+            .harmony_prefill_cache("gpt_oss", Some(prefix.clone()))
+            .unwrap();
+        assert!(cache.token_ids.is_none());
+        let mut states = (0..2)
+            .map(|_| {
+                ChoiceState::new_with_prefill_cache(
+                    "gpt_oss",
+                    &[],
+                    StreamPrefill {
+                        starting_state: UnifiedParserStartingState::None,
+                        prefix: Some(prefix.clone()),
+                    },
+                    UnifiedToolOutputMode::Native,
+                    true,
+                    Some(&mut cache),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let encoded = cache.token_ids.as_ref().unwrap().as_ptr();
+        let count = cache.token_ids.as_ref().unwrap().len();
+        assert_eq!(cache.token_ids().unwrap().as_ptr(), encoded);
+        assert_eq!(cache.token_ids().unwrap().len(), count);
+        for (state, tail) in states.iter_mut().zip(["first", "second"]) {
+            let mut events = state.push(&format!("{tail}\"}}<|call|>"));
+            events.extend(state.finish());
+            let calls: Vec<_> = events
+                .into_iter()
+                .filter_map(|e| {
+                    if let UnifiedParserEvent::ToolCall(c) = e {
+                        Some(c)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(
+                calls
+                    .iter()
+                    .map(|c| c.arguments.as_str())
+                    .collect::<String>(),
+                format!("{tail}\"}}")
+            );
+            assert!(calls.iter().all(|c| c.tool_index == 0));
+            assert!(calls.last().unwrap().complete);
+        }
+        let mut other_cache = HarmonyPrefill::new(prefix.clone());
+        let other_seed: std::sync::Arc<str> = std::sync::Arc::from(prefix.as_ref());
+        ChoiceState::new_with_prefill_cache(
+            "gpt_oss",
+            &[],
+            StreamPrefill {
+                starting_state: UnifiedParserStartingState::None,
+                prefix: Some(other_seed),
+            },
+            UnifiedToolOutputMode::Native,
+            true,
+            Some(&mut other_cache),
+        )
+        .unwrap();
+        assert!(
+            other_cache.token_ids.is_none(),
+            "a different seed allocation cannot use this request's cache"
+        );
+        ChoiceState::new_with_prefill_cache(
+            "gpt_oss",
+            &[],
+            StreamPrefill {
+                starting_state: UnifiedParserStartingState::Reasoning,
+                prefix: Some(prefix),
+            },
+            UnifiedToolOutputMode::GuidedJson {
+                named_tool: Some("lookup".into()),
+            },
+            true,
+            Some(&mut other_cache),
+        )
+        .unwrap();
+        assert!(
+            other_cache.token_ids.is_none(),
+            "guided channel-only initialization does not encode the native seed"
+        );
+    }
+
+    #[test]
     fn gpt_oss_vendor_keeps_prompt_initialization() {
         if crate::test_utils::run_isolated(
             concat!(
@@ -4750,18 +5100,20 @@ pub(crate) mod tests {
                     named_tool: Some("lookup".into()),
                 },
             ] {
-                let mut state = ChoiceState::new(
+                let prefix: std::sync::Arc<str> =
+                    std::sync::Arc::from("<|start|>assistant<|channel|>final<|message|>");
+                let mut cache = HarmonyPrefill::new(prefix.clone());
+                let mut state = ChoiceState::new_with_prefill_cache(
                     "gpt_oss",
                     &[],
                     StreamPrefill {
                         starting_state: UnifiedParserStartingState::Reasoning,
-                        prefix: Some(std::sync::Arc::from(
-                            "<|start|>assistant<|channel|>final<|message|>",
-                        )),
+                        prefix: Some(prefix),
                     },
                     mode,
                     true,
                     ArgumentFraming::default(),
+                    Some(&mut cache),
                 )
                 .unwrap();
                 assert_eq!(
@@ -4769,6 +5121,7 @@ pub(crate) mod tests {
                     vec![UnifiedParserEvent::Text("answer".into())]
                 );
                 assert!(state.finish().is_empty());
+                assert!(cache.token_ids.is_none(), "vendor owns initialization");
             }
             assert!(dynamo_parsers_v2::unregister_unified_parser("gpt_oss").is_some());
         }
