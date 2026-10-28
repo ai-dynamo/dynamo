@@ -265,8 +265,12 @@ impl AnthropicStreamConverter {
             if single_tool && has_emitted {
                 break;
             }
+            let preserve_order = self
+                .pending_content
+                .iter()
+                .any(|content| content.after_calls > call_index);
             if !tool_call.is_emit_ready() {
-                if !is_final {
+                if !is_final && preserve_order {
                     break;
                 }
                 continue;
@@ -281,13 +285,22 @@ impl AnthropicStreamConverter {
             // the block and discard the fragments that follow, so leave it pending and
             // let the final drain decide.
             if !is_final && raw.is_empty() {
-                break;
+                if single_tool || preserve_order {
+                    break;
+                }
+                continue;
             }
             let parsed = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw);
             // Keep an earlier incomplete call pending; it may still become valid.
             if single_tool && !is_final && parsed.as_ref().is_err_and(|error| error.is_eof()) {
                 break;
             }
+            // Hold later blocks only when text or thinking follows this call.
+            // Independent parallel calls retain their existing partial-flush behavior.
+            if preserve_order && !is_final && parsed.as_ref().is_err_and(|error| error.is_eof()) {
+                break;
+            }
+            tool_call.needs_flush = false;
             let arguments_are_valid = if raw.is_empty() {
                 // An empty argument string is valid for a completed call, but at a
                 // token-limit finish it means generation stopped immediately after
@@ -302,14 +315,8 @@ impl AnthropicStreamConverter {
                 .then(|| super::types::tool_use_input(&tool_call.name, &raw, true))
                 .flatten();
             if !arguments_are_valid && repaired_input.is_none() {
-                // A later block must not overtake a call whose fragments can
-                // still arrive after the finish reason.
-                if !is_final {
-                    break;
-                }
                 continue;
             }
-            tool_call.needs_flush = false;
             drain_pending_content(
                 &mut self.pending_content,
                 Some(call_index),
