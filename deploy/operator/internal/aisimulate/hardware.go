@@ -31,7 +31,7 @@ var hardwareSKUsText string
 
 var hardwareSKUs = func() map[string]struct{} {
 	result := map[string]struct{}{}
-	for _, line := range strings.Split(hardwareSKUsText, "\n") {
+	for line := range strings.SplitSeq(hardwareSKUsText, "\n") {
 		value := strings.TrimSpace(line)
 		if value == "" || strings.HasPrefix(value, "#") {
 			continue
