@@ -158,13 +158,12 @@ func (p *sglangRuntimeProvider) Resolve(
 		Journal:  groveRuntimeJournal(p.client, group, "sglang-traffic"),
 	}
 	return Runtime{
-		ReadinessSteeredRelease: capacity.Grove.ReadinessScaleIn,
-		Profile:                 profile,
-		Capacity:                capacity,
-		Membership:              membership,
-		Traffic:                 traffic,
-		Verifier:                verifier,
-		Planner:                 sglangScalePlanner{profileFingerprint: profile.Fingerprint, worldUID: types.UID(cliqueUID), membersPerReplica: resolved.NativeMembersPerReplica},
+		Profile:    profile,
+		Capacity:   capacity,
+		Membership: membership,
+		Traffic:    traffic,
+		Verifier:   verifier,
+		Planner:    sglangScalePlanner{profileFingerprint: profile.Fingerprint, worldUID: types.UID(cliqueUID), membersPerReplica: resolved.NativeMembersPerReplica},
 	}, nil
 }
 

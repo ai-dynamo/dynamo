@@ -22,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -249,8 +250,92 @@ type staleMembershipReader struct {
 }
 
 func (c *staleMembershipReader) Get(_ context.Context, _ client.ObjectKey, out client.Object, _ ...client.GetOption) error {
+	if c.cached == nil {
+		return apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "membership")
+	}
 	*out.(*corev1.ConfigMap) = *c.cached.DeepCopy()
 	return nil
+}
+
+func TestNativeAcceptanceAheadOfCachedMembershipJournal(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cached absence=%t", missing), func(t *testing.T) {
+			t.Log("retain a cached baseline before the engine accepts the recorded growth")
+			engine := &nativeGrowthEngine{state: ScaleState{InstanceID: "runtime-1", TopologyToken: "topology-1", AllocationWidth: 1,
+				InitialEPSize: 2, EffectiveEPSize: 2, MaxCommittedEPSize: 2, RuntimeHealth: "healthy"}}
+			control, err := NewClient("http://sglang.test", &http.Client{Transport: engine})
+			require.NoError(t, err)
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			kube := fake.NewClientBuilder().WithScheme(scheme).Build()
+			capacity := &testCapacityObserver{allocations: []enginegroup.CapacityAllocation{testAllocation(0), testAllocation(1), testAllocation(2)}}
+			adapter := &MembershipAdapter{Client: control, Capacity: capacity, MembersPerReplica: 1, ProfileFingerprint: "profile-v1",
+				Journal: kubejournal.NewStore(kube, "test", "group", "group-uid", "membership")}
+			base, err := adapter.Observe(t.Context(), "group-uid", "")
+			require.NoError(t, err)
+			var cached *corev1.ConfigMap
+			if !missing {
+				cached = &corev1.ConfigMap{}
+				require.NoError(t, kube.Get(t.Context(), client.ObjectKey{Namespace: adapter.Journal.Namespace, Name: adapter.Journal.Name}, cached))
+			}
+			target := enginegroup.MembershipTarget{ControlRevision: 1, TransitionID: "grow", TargetDigest: "digest", BaseTopology: base.CommittedTopology,
+				Plan: testGrowPlan(2), Joining: []enginegroup.JoiningReplica{{ReplicaID: "replica-2", Members: testAllocation(2).Incarnation.Members}}}
+			require.NoError(t, adapter.Apply(t.Context(), "group-uid", target))
+			adapter.Journal.Client = &staleMembershipReader{Client: kube, cached: cached}
+
+			t.Log("do not claim authoritative absence or permanent recovery from cache lag")
+			observed, err := adapter.Observe(t.Context(), "group-uid", target.TransitionID)
+			require.ErrorIs(t, err, enginegroup.ErrObservationPending)
+			assert.NotErrorIs(t, err, enginegroup.ErrRecoveryRequired)
+			assert.Equal(t, enginegroup.MembershipObservation{}, observed)
+			assert.Len(t, engine.requests, 1)
+
+			t.Log("converge after the watch catches up, without issuing another native resize")
+			adapter.Journal.Client = kube
+			engine.state.Scaling = false
+			engine.state.EffectiveEPSize = 3
+			engine.state.TopologyToken = "committed-grow"
+			engine.state.OperationSucceeded = new(true)
+			observed, err = adapter.Observe(t.Context(), "group-uid", target.TransitionID)
+			require.NoError(t, err)
+			require.NotNil(t, observed.Transition)
+			assert.Equal(t, enginegroup.MembershipTransitionPhaseCommitted, observed.Transition.Phase)
+			assert.Equal(t, int64(2), observed.CommittedTopology.Generation)
+			assert.Len(t, engine.requests, 1)
+		})
+	}
+}
+
+func TestUnexplainedSGLangTokenDriftRequiresRecovery(t *testing.T) {
+	t.Log("bind a settled world and retain its unchanged size and native identity")
+	engine := &nativeGrowthEngine{state: ScaleState{InstanceID: "runtime-1", TopologyToken: "topology-1", AllocationWidth: 1,
+		InitialEPSize: 2, EffectiveEPSize: 2, MaxCommittedEPSize: 2, RuntimeHealth: "healthy"}}
+	control, err := NewClient("http://sglang.test", &http.Client{Transport: engine})
+	require.NoError(t, err)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	kube := fake.NewClientBuilder().WithScheme(scheme).Build()
+	capacity := &testCapacityObserver{allocations: []enginegroup.CapacityAllocation{testAllocation(0), testAllocation(1)}}
+	adapter := &MembershipAdapter{Client: control, Capacity: capacity, MembersPerReplica: 1, ProfileFingerprint: "profile-v1",
+		Journal: kubejournal.NewStore(kube, "test", "group", "group-uid", "membership")}
+	base, err := adapter.Observe(t.Context(), "group-uid", "")
+	require.NoError(t, err)
+
+	t.Log("a new unexplained token is a confirmed fault even when member count is unchanged")
+	engine.state.TopologyToken = "unrelated-epoch"
+	_, err = adapter.Observe(t.Context(), "group-uid", "")
+	require.ErrorIs(t, err, enginegroup.ErrRecoveryRequired)
+	_, err = adapter.ValidatePlan(t.Context(), "group-uid", enginegroup.PlanValidationRequest{BaseTopology: base.CommittedTopology,
+		Plan: testGrowPlan(2), PlanDigest: "digest"})
+	require.ErrorIs(t, err, enginegroup.ErrRecoveryRequired)
+	assert.Empty(t, engine.requests)
+
+	t.Log("do not silently adopt the new token or manufacture a rejection")
+	state := membershipJournal{}
+	_, err = adapter.Journal.Load(t.Context(), &state)
+	require.NoError(t, err)
+	assert.Equal(t, "topology-1", state.TopologyToken)
+	assert.Nil(t, state.Transition)
 }
 
 type nativeGrowthEngine struct {

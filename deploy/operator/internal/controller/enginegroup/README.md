@@ -26,8 +26,16 @@ external acceptance.
 Adapter records contain evidence their external systems do not durably expose.
 They are scoped to different lifetimes and effect boundaries; putting them in one
 ConfigMap would not make Kubernetes writes and native collectives atomic. Remove
-a compatibility record only when its external authority can retain and report the
+an adapter journal only when its external authority can retain and report the
 same evidence across the required restart boundary.
+
+`RecoveryRequired` pauses unsafe effects without rejecting or canceling the native
+operation. Observation faults are checked again on each pass. Invocation-only
+faults remain in the checkpoint's blocked transition until a validated recovery
+plan or fenced world restart replaces them. Fresh serving evidence is independent
+of that diagnosis; failed observations cannot refresh health or stability history.
+Known pending state uses bounded polling, while unexpected errors use controller
+backoff. Capacity observations, not engine flags, report the release mechanism.
 
 Grove readiness-steered shrink is an explicit experimental delivery choice.
 `ExactReleaseSupported=False`, reason `ReadinessSteeredRelease`, makes that limitation

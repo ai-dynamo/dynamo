@@ -12,6 +12,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/kubejournal"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 const capabilityGeneration = "sglang-elastic-ep-correlated-growth/v1"
@@ -142,7 +143,7 @@ func (a *MembershipAdapter) Observe(
 	}
 	if state.TopologyGeneration == 0 {
 		if engineState.OperationID != "" || engineState.Scaling {
-			return enginegroup.MembershipObservation{}, fmt.Errorf("cannot adopt an in-flight or previously resized SGLang world without its control journal")
+			return enginegroup.MembershipObservation{}, fmt.Errorf("%w: cannot correlate a resized SGLang world before its control journal is observable", enginegroup.ErrObservationPending)
 		}
 		state.InstanceID = engineState.InstanceID
 		state.TopologyToken = engineState.TopologyToken
@@ -168,6 +169,9 @@ func (a *MembershipAdapter) Observe(
 		RequestedTransitionID: transitionID,
 	}
 	if transitionID == "" || state.Transition == nil || state.Transition.TransitionID != transitionID {
+		if transitionID != "" && engineState.OperationID == transitionID {
+			return enginegroup.MembershipObservation{}, fmt.Errorf("%w: native operation %q has no matching durable transition", enginegroup.ErrRecoveryRequired, transitionID)
+		}
 		return observation, nil
 	}
 
@@ -232,8 +236,8 @@ func observedTopologyGeneration(state membershipJournal, native ScaleState) (int
 		return state.TopologyGeneration, nil
 	}
 	if state.Transition == nil || native.EffectiveEPSize != state.Transition.TargetEPSize {
-		return 0, fmt.Errorf("SGLang effective EP size changed from %d to unrelated size %d",
-			state.EffectiveEPSize, native.EffectiveEPSize)
+		return 0, fmt.Errorf("%w: SGLang effective EP size changed from %d to unrelated size %d",
+			enginegroup.ErrRecoveryRequired, state.EffectiveEPSize, native.EffectiveEPSize)
 	}
 
 	// A failed or still-running collective cannot establish a new committed topology.
@@ -241,7 +245,7 @@ func observedTopologyGeneration(state membershipJournal, native ScaleState) (int
 	if native.OperationID != record.TransitionID || native.TargetEPSize != record.TargetEPSize ||
 		!slices.Equal(native.JoiningAllocationIDs, record.JoiningAllocationIDs) ||
 		native.Scaling || native.OperationSucceeded == nil || !*native.OperationSucceeded {
-		return 0, fmt.Errorf("SGLang changed effective EP size without a correlated successful commit")
+		return 0, fmt.Errorf("%w: SGLang changed effective EP size without a correlated successful commit", enginegroup.ErrObservationPending)
 	}
 	return record.BaseTopology.Generation + 1, nil
 }
@@ -334,7 +338,7 @@ func (a *MembershipAdapter) Apply(
 		}
 		if record.Phase == enginegroup.MembershipTransitionPhasePending ||
 			record.Phase == enginegroup.MembershipTransitionPhaseUnknown {
-			return fmt.Errorf("membership transition %q is still %s", record.TransitionID, record.Phase)
+			return fmt.Errorf("%w: membership transition %q is still %s", enginegroup.ErrObservationPending, record.TransitionID, record.Phase)
 		}
 	}
 	current, err := topologyFromCapacity(ctx, a.Capacity, groupID, state.TopologyGeneration, engineState.EffectiveEPSize)
@@ -342,10 +346,10 @@ func (a *MembershipAdapter) Apply(
 		return err
 	}
 	if !enginegroup.SameTopology(current, target.BaseTopology) {
-		return a.persistRejection(ctx, state, snapshot, target, "BaseTopologyChanged", "SGLang topology no longer matches the validated base")
+		return fmt.Errorf("%w: SGLang topology no longer matches the validated base", enginegroup.ErrRecoveryRequired)
 	}
 	if engineState.TopologyToken != state.TopologyToken {
-		return fmt.Errorf("SGLang base topology token changed before target submission")
+		return fmt.Errorf("%w: SGLang base topology token changed before target submission", enginegroup.ErrRecoveryRequired)
 	}
 	if failure := a.validatePlan(target.BaseTopology, target.Plan); failure != nil {
 		return a.persistRejection(ctx, state, snapshot, target, failure.Reason, failure.Message)
@@ -426,7 +430,36 @@ func (a *MembershipAdapter) observeState(ctx context.Context) (membershipJournal
 	if state.InstanceID != "" && state.InstanceID != engineState.InstanceID {
 		return membershipJournal{}, kubejournal.Snapshot{}, ScaleState{}, fmt.Errorf("%w: SGLang runtime instance changed", enginegroup.ErrRecoveryRequired)
 	}
+	if snapshot.Exists() {
+		if err := a.validateNativeBinding(ctx, state, snapshot, engineState); err != nil {
+			return membershipJournal{}, kubejournal.Snapshot{}, ScaleState{}, err
+		}
+	}
 	return state, snapshot, engineState, nil
+}
+
+func (a *MembershipAdapter) validateNativeBinding(ctx context.Context, state membershipJournal, snapshot kubejournal.Snapshot, native ScaleState) error {
+	// Acceptance and commit rotate the native token. Only the exact recorded operation may explain that change.
+	if record := state.Transition; record != nil && native.OperationID == record.TransitionID &&
+		native.TargetEPSize == record.TargetEPSize && slices.Equal(native.JoiningAllocationIDs, record.JoiningAllocationIDs) &&
+		(record.Phase == enginegroup.MembershipTransitionPhasePending || record.Phase == enginegroup.MembershipTransitionPhaseUnknown ||
+			native.TopologyToken == state.TopologyToken) {
+		return nil
+	}
+	if !native.Scaling && native.OperationID == state.CommittedOperationID &&
+		native.EffectiveEPSize == state.EffectiveEPSize && native.TopologyToken == state.TopologyToken {
+		return nil
+	}
+
+	// Only mismatches need this compare-and-swap check. A conflicting cached snapshot is inconclusive, not recovery
+	// authority. Never adopt the native token, overwrite newer journal state, or use an unfenced direct read.
+	if _, err := a.Journal.Save(ctx, snapshot, state); err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("%w: SGLang native state is ahead of its cached journal: %v", enginegroup.ErrObservationPending, err)
+		}
+		return err
+	}
+	return fmt.Errorf("%w: SGLang native operation or topology token changed outside the recorded transition", enginegroup.ErrRecoveryRequired)
 }
 
 func (a *MembershipAdapter) validatePlan(
@@ -507,11 +540,11 @@ func (a *MembershipAdapter) validateBase(ctx context.Context, base enginegroup.M
 	}
 	if !snapshot.Exists() || native.Scaling || state.TopologyGeneration != base.Generation ||
 		state.EffectiveEPSize != native.EffectiveEPSize || native.TopologyToken != state.TopologyToken {
-		return fmt.Errorf("SGLang preflight requires its unchanged settled membership baseline")
+		return fmt.Errorf("%w: SGLang preflight requires its unchanged settled membership baseline", enginegroup.ErrObservationPending)
 	}
 	if state.Transition != nil && (state.Transition.Phase == enginegroup.MembershipTransitionPhasePending ||
 		state.Transition.Phase == enginegroup.MembershipTransitionPhaseUnknown) {
-		return fmt.Errorf("SGLang preflight cannot supersede an unresolved transition")
+		return fmt.Errorf("%w: SGLang preflight cannot supersede an unresolved transition", enginegroup.ErrObservationPending)
 	}
 	if native.OperationID != state.CommittedOperationID && !(state.Transition != nil &&
 		state.Transition.Phase == enginegroup.MembershipTransitionPhaseRejected && native.OperationID == state.Transition.TransitionID) {

@@ -33,8 +33,8 @@ import (
 // The journal stores revision fencing and exact release receipts, not the pod-count target
 // already persisted in Grove. Child-clique annotations
 // cannot replace it: PCSG reconciliation resets them from the PCS template.
-// Remove this compatibility store when durable native acceptance metadata or
-// the capacity contract makes it unnecessary; Engine Group status owns the full target.
+// The controller checkpoint owns the full target. This adapter journal is required
+// until Grove can retain the same acceptance and release evidence.
 type Adapter struct {
 	Client    client.Client
 	Clique    types.NamespacedName
@@ -59,6 +59,7 @@ type Observation struct {
 	AppliedRevision int64
 	Allocations     []Allocation
 	ReleaseFences   []enginegroup.ReleaseFence
+	ReleaseMode     enginegroup.CapacityReleaseMode
 }
 
 type journalState struct {
@@ -110,7 +111,11 @@ func (a *Adapter) Observe(ctx context.Context, _ enginegroup.GroupID) (Observati
 	sort.Slice(allocations, func(i, j int) bool {
 		return allocations[i].ReplicaID < allocations[j].ReplicaID
 	})
-	return Observation{AppliedRevision: state.AppliedRevision, Allocations: allocations, ReleaseFences: fences}, nil
+	mode := enginegroup.CapacityReleaseUnsupported
+	if a.ReadinessScaleIn {
+		mode = enginegroup.CapacityReleaseReadinessSteered
+	}
+	return Observation{AppliedRevision: state.AppliedRevision, Allocations: allocations, ReleaseFences: fences, ReleaseMode: mode}, nil
 }
 
 // Apply accepts an absolute allocation target durably before writing the PodClique's Scale subresource.

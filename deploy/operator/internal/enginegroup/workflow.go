@@ -72,6 +72,14 @@ func (c *Coordinator) reconcileMaintainedTargets(
 		}
 	}
 
+	// Validate current physical authority before replaying either maintained target, including an empty drain.
+	if status.Transition.Outcome != TransitionOutcomeBlocked || membershipCommittedForTransition(status) {
+		if err := validatePinnedCapacity(status.Registry, status.Capacity.Observed,
+			status.Membership.Observed.CommittedTopology); err != nil {
+			return ReconcileResult{Status: status}, observationError(ObservationAuthorityCapacity, err)
+		}
+	}
+
 	acceptedTraffic := status.Traffic.Accepted
 	if acceptedTraffic != nil && !trafficTargetConverged(*acceptedTraffic, status.Traffic.Observed) {
 		result, err := c.traffic.Apply(ctx, groupID, *acceptedTraffic)
@@ -92,17 +100,6 @@ func (c *Coordinator) reconcileMaintainedTargets(
 			)
 		}
 		return ReconcileResult{Status: status, Requeue: true}, nil
-	}
-
-	// Check the canonical pin even when partial recovery never needed a capacity mutation or accepted target.
-	if status.Transition.Outcome != TransitionOutcomeBlocked || membershipCommittedForTransition(status) {
-		if err := validatePinnedCapacity(
-			status.Registry,
-			status.Capacity.Observed,
-			status.Membership.Observed.CommittedTopology,
-		); err != nil {
-			return ReconcileResult{Status: status}, err
-		}
 	}
 
 	acceptedCapacity := status.Capacity.Accepted
