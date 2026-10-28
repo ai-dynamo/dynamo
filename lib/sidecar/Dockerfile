@@ -240,6 +240,19 @@ COPY --from=licenses /legal/ /
 FROM scratch AS sidecar-binaries
 COPY --from=sidecar-builder /out/bin/ /
 
+# ---- CI-only: live image integration test -----------------------------------
+# The live image test runs inside the upstream engine image, independently of
+# Dynamo's shared runtime. Keep test dependencies out of production artifacts.
+FROM builder-base AS trtllm-image-test-builder
+ARG TARGETARCH
+RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-image-tests-${TARGETARCH},target=/src/target,sharing=locked \
+    bash lib/sidecar/trtllm/ci/build.sh
+
+FROM scratch AS sidecar-trtllm-image-tests
+COPY --from=trtllm-image-test-builder /out/tests/ /
+
 # ---- shipped runtime ---------------------------------------------------------
 FROM runtime-base AS runtime
 

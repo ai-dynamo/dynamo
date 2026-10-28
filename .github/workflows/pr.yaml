@@ -33,6 +33,7 @@ jobs:
       snapshot_trtllm: ${{ steps.changes.outputs.snapshot_trtllm }}
       power_agent: ${{ steps.changes.outputs.power_agent }}
       sidecar: ${{ steps.changes.outputs.sidecar }}
+      sidecar_trtllm_image: ${{ steps.changes.outputs.sidecar_trtllm_image }}
       deploy: ${{ steps.changes.outputs.deploy }}
       dgdr: ${{ steps.changes.outputs.dgdr }}
       vllm: ${{ steps.changes.outputs.vllm }}
@@ -131,6 +132,7 @@ jobs:
       - helm-chart-tests
       - power-agent
       - sidecar-build
+      - sidecar-trtllm-nightly-image-test
       - vllm-build
       - vllm-local-dev-build
       - sglang-local-dev-build
@@ -165,6 +167,9 @@ jobs:
       - name: Check all dependent jobs
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+          if [[ '${{ needs.changed-files.outputs.sidecar_trtllm_image }}' == 'true' ]]; then
+            test '${{ needs.sidecar-trtllm-nightly-image-test.result }}' = 'success'
+          fi
 
   deploy-status-check:
     runs-on: ubuntu-24.04
@@ -339,6 +344,14 @@ jobs:
 # ============================================================================
 # Sidecar
 # ============================================================================
+
+  sidecar-trtllm-nightly-image-test:
+    needs: changed-files
+    if: needs.changed-files.outputs.sidecar_trtllm_image == 'true'
+    uses: $/.github/workflows/shared-test-trtllm-nightly-image.yml
+    with:
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+    secrets: inherit
 
   sidecar-build:
     name: dynamo-sidecar
@@ -2028,6 +2041,7 @@ jobs:
       - operator
       - power-agent
       - sidecar-build
+      - sidecar-trtllm-nightly-image-test
       - planner-test
       - planner-copy-to-acr
       - frontend-build

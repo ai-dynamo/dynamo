@@ -367,11 +367,32 @@ planner:
   - '!**/*.md'
   - '!**/*.rst'
 
+sidecar_trtllm_image:
+  - 'lib/sidecar/trtllm/**'
+  - 'lib/sidecar/common/**'
+  - 'lib/sidecar/Dockerfile'
+  - 'lib/backend-common/**'
+  - 'lib/llm/**'
+  - 'lib/runtime/**'
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - 'rust-toolchain.toml'
+  - '.cargo/**'
+  - '.github/actions/builder-refresher/**'
+  - '.github/actions/changed-files/**'
+  - '.github/filters.yaml'
+  - '.github/workflows/shared-test-trtllm-nightly-image.yml'
+  - '.github/workflows/pr.yaml'
+  - '.github/workflows/nightly-ci.yml'
+  - '!**/*.md'
+  - '!**/*.rst'
+
 sidecar:
   # TODO: Expand this to every Dockerfile and composite-action input after the
   # acceptable CI fan-out is agreed. Keep the remaining scope narrow for now.
   - 'lib/sidecar/**'
   - '.github/workflows/shared-build-sidecar.yml'
+  - '.github/workflows/shared-test-trtllm-nightly-image.yml'
   - 'tests/serve/test_sidecar.py'
   - 'tests/router/common.py'
   - 'tests/router/helper.py'
