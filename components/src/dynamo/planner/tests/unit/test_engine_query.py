@@ -146,6 +146,88 @@ def test_queued_prefill_uses_full_chunks_plus_tail():
     ] == [100, 50]
 
 
+@pytest.mark.parametrize("worker_type", ["prefill", "aggregated"])
+@pytest.mark.parametrize(
+    "scheduled_limit,expected_s,expected_chunks",
+    [(None, 0.01, [192]), (256, 0.01, [192]), (512, 0.01, [192]), (64, 0.03, [64])],
+)
+def test_prefill_chunks_use_scheduling_limit(
+    worker_type, scheduled_limit, expected_s, expected_chunks
+):
+    forward = _FakeForwardPassModel(lambda _metrics: 10.0)
+    limits = EnginePerfLimits(256, 128, 100_000, scheduled_limit)
+    model = AISCoreEnginePerfModel(
+        model=forward,
+        worker_type=worker_type,
+        limits=limits,
+        attention_dp_size=1,
+        max_observations=16,
+    )
+
+    duration = model.get_queued_prefill_time(
+        [
+            ForwardPassMetrics(
+                queued_requests=QueuedRequestMetrics(
+                    num_prefill_requests=1, sum_prefill_tokens=192
+                )
+            )
+        ]
+    )
+
+    assert duration == pytest.approx(expected_s)
+    assert [
+        call[0]["scheduled_requests"]["sum_prefill_tokens"]
+        for call in forward.estimate_calls
+    ] == expected_chunks
+    assert limits.max_num_batched_tokens == 256
+
+
+@pytest.mark.parametrize(
+    "worker_type,expected_rps",
+    [("prefill", 200.0), ("decode", 200.0), ("aggregated", 100.0)],
+)
+def test_capacity_search_uses_scheduling_limit(worker_type, expected_rps):
+    model = AISCoreEnginePerfModel(
+        model=_FakeForwardPassModel(lambda _metrics: 10.0),
+        worker_type=worker_type,
+        limits=EnginePerfLimits(256, 128, 100_000, 64),
+        attention_dp_size=1,
+        max_observations=16,
+    )
+
+    capacity = model.find_engine_capacity_rps(EngineCapacityRequest(isl=32, osl=32))
+
+    assert capacity is not None
+    assert capacity.rps == pytest.approx(expected_rps)
+
+
+def test_decode_scheduling_limit_applies_per_attention_dp_rank():
+    def price(metrics):
+        assert all(
+            item["scheduled_requests"]["num_decode_requests"] <= 64 for item in metrics
+        )
+        return 10.0
+
+    model = AISCoreEnginePerfModel(
+        model=_FakeForwardPassModel(price),
+        worker_type="decode",
+        limits=EnginePerfLimits(256, 128, 100_000, 64),
+        attention_dp_size=2,
+        max_observations=16,
+    )
+
+    capacity = model.find_engine_capacity_rps(EngineCapacityRequest(isl=32, osl=32))
+
+    assert capacity is not None
+    assert capacity.rps == pytest.approx(400.0)
+
+
+@pytest.mark.parametrize("scheduled_limit", [0, -1, 1 << 32, True, 1.5])
+def test_invalid_scheduling_limit_is_rejected(scheduled_limit):
+    with pytest.raises(ValueError, match="max_num_scheduled_tokens"):
+        EnginePerfLimits(256, 128, 100_000, scheduled_limit)
+
+
 def test_aggregated_decode_uses_learned_prefill_mix():
     model, forward_pass_model = _model(
         worker_type="aggregated",

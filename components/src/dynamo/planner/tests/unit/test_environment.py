@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,6 +23,47 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.planner,
 ]
+
+
+def test_scheduling_metadata_reaches_capabilities_and_change_detection():
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=_controller(),
+        require_prefill=False,
+        require_decode=True,
+    )
+    state = environment.deployment_state()
+    state.decode.info = WorkerInfo(
+        max_num_batched_tokens=256, max_num_scheduled_tokens=128
+    )
+
+    capabilities = build_worker_capabilities(state)
+    assert capabilities.decode.max_num_batched_tokens == 256
+    assert capabilities.decode.max_num_scheduled_tokens == 128
+    updated = replace(state.decode.info, max_num_scheduled_tokens=64)
+    assert util.worker_info_changed(state.decode.info, updated)
+
+
+def test_initial_metadata_backfill_includes_scheduling_limit():
+    controller = _controller()
+    controller.get_worker_info.side_effect = None
+    controller.get_worker_info.return_value = WorkerInfo(
+        max_num_batched_tokens=256,
+        max_num_scheduled_tokens=64,
+    )
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=False,
+        require_decode=True,
+    )
+    environment.deployment_state().decode.info = WorkerInfo()
+
+    environment._refresh_worker_info()
+
+    info = environment.deployment_state().decode.info
+    assert info.max_num_batched_tokens == 256
+    assert info.max_num_scheduled_tokens == 64
 
 
 def _config(**overrides) -> PlannerConfig:

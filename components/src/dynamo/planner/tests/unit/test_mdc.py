@@ -124,6 +124,27 @@ class TestWorkerInfoFromMdc:
         assert info.kv_cache_block_size == 16
         assert info.context_length == 8192
 
+    def test_scheduling_limit_keeps_raw_model_capacity(self):
+        entry = MdcEntry(
+            card_json=_card(
+                max_num_batched_tokens=256,
+                runtime_data={"max_num_scheduled_tokens": 64},
+            )
+        )
+
+        info = worker_info_from_mdc(entry, SubComponentType.DECODE, backend="vllm")
+
+        assert info.max_num_batched_tokens == 256
+        assert info.max_num_scheduled_tokens == 64
+
+    @pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
+    def test_legacy_metadata_has_no_scheduling_override(self, backend):
+        info = worker_info_from_mdc(
+            MdcEntry(card_json=_card()), SubComponentType.DECODE, backend=backend
+        )
+        assert info.max_num_scheduled_tokens is None
+        assert info.max_num_batched_tokens == 8192
+
     def test_runtime_data_spec_decode_nextn_populates_worker_info(self):
         entry = MdcEntry(
             card_json=_card(

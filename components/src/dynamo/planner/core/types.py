@@ -614,6 +614,9 @@ class EngineCapabilities:
     # cap has not been resolved. The final budget clamp reads this.
     power_watts_per_replica: Optional[int] = None
 
+    # Optional issued-token ceiling, separate from model-input capacity.
+    max_num_scheduled_tokens: Optional[int] = None
+
     @property
     def resolved_gpu_cost_per_replica(self) -> Optional[int]:
         """GPU budget cost, falling back to the legacy engine width."""
