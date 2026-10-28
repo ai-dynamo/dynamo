@@ -627,6 +627,35 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_images_engine()))
     }
 
+    /// Choose a ready WorkerSet whose admitted members all accept the reference count.
+    /// Return `None` for an unsupported count, but retain errors for unavailable models.
+    pub(crate) fn select_image_edit_engine(
+        &self,
+        count: usize,
+    ) -> Result<Option<super::image_edits::ImageEngineSelection>, ModelManagerError> {
+        let selection = self.select_worker_set_with(|ws| {
+            let snapshot = ws
+                .image_edit_admission
+                .as_ref()
+                .map(|admission| admission.snapshot());
+            let limit = snapshot.as_ref().map_or_else(
+                || super::image_edits::advertised_limit(ws.card()),
+                |snapshot| snapshot.max_input_images,
+            );
+            if count > limit {
+                return None;
+            }
+            ws.images_engine
+                .clone()
+                .map(|engine| super::image_edits::ImageEngineSelection { engine, snapshot })
+        });
+        if selection.is_none() {
+            // Distinguish an unsupported count from an unavailable model.
+            self.get_images_engine()?;
+        }
+        Ok(selection)
+    }
+
     pub fn get_videos_engine(&self) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.videos_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_videos_engine()))
@@ -862,6 +891,73 @@ mod tests {
     use tokio::sync::watch;
 
     struct StubGenerateEngine;
+
+    struct StubImageEngine;
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<crate::protocols::openai::images::NvCreateImageRequest>,
+            ManyOut<Annotated<crate::protocols::openai::images::NvImagesResponse>>,
+            Error,
+        > for StubImageEngine
+    {
+        async fn generate(
+            &self,
+            _: SingleIn<crate::protocols::openai::images::NvCreateImageRequest>,
+        ) -> Result<ManyOut<Annotated<crate::protocols::openai::images::NvImagesResponse>>, Error>
+        {
+            unreachable!("selection must not generate images")
+        }
+    }
+
+    /// Selection must carry the chosen set's admission snapshot into dispatch.
+    #[test]
+    fn image_edits_select_only_compatible_ready_sets_and_snapshot_membership() {
+        use super::super::image_edits::ImageEditAdmission;
+        let model = Model::new("served-alias".into());
+        let legacy_engine: OpenAIImagesStreamingEngine = Arc::new(StubImageEngine);
+        let upgraded_engine: OpenAIImagesStreamingEngine = Arc::new(StubImageEngine);
+        let mut legacy = WorkerSet::new(
+            "legacy".into(),
+            "same".into(),
+            ModelDeploymentCard::default(),
+        );
+        legacy.images_engine = Some(legacy_engine);
+        model.add_worker_set("legacy".into(), Arc::new(legacy));
+        let (tx, rx) = watch::channel(vec![1, 2]);
+        let admission = Arc::new(ImageEditAdmission::new(rx.clone()));
+        admission.replace([(1, 4), (2, 4), (99, 0)].into_iter());
+        let mut upgraded = WorkerSet::new(
+            "upgraded".into(),
+            "same".into(),
+            ModelDeploymentCard::default(),
+        );
+        upgraded.images_engine = Some(upgraded_engine.clone());
+        upgraded.image_edit_admission = Some(admission.clone());
+        upgraded.set_instance_watcher(rx);
+        model.add_worker_set("upgraded".into(), Arc::new(upgraded));
+        for _ in 0..20 {
+            let selected = model.select_image_edit_engine(4).unwrap().unwrap();
+            assert!(Arc::ptr_eq(&selected.engine, &upgraded_engine));
+            assert_eq!(
+                selected.snapshot.unwrap().worker_ids,
+                [1, 2].into_iter().collect()
+            );
+        }
+        assert!(model.select_image_edit_engine(5).unwrap().is_none());
+        // A legacy join disables multi-image requests for this entire set, even
+        // though the upgraded members still advertise four images.
+        tx.send_replace(vec![1, 2, 3]);
+        assert!(model.select_image_edit_engine(2).unwrap().is_none());
+        assert!(model.select_image_edit_engine(1).unwrap().is_some());
+        tx.send_replace(vec![1]);
+        assert!(model.select_image_edit_engine(4).unwrap().is_some());
+        tx.send_replace(vec![]);
+        assert!(model.select_image_edit_engine(2).unwrap().is_none());
+        model.remove_worker_set("legacy");
+        assert!(model.select_image_edit_engine(1).is_err());
+    }
 
     #[async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
