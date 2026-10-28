@@ -30,9 +30,12 @@ func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDep
 	templates[0] = component.PodTemplate
 	paths := make([]*field.Path, 1, 1+len(component.Roles))
 	paths[0] = fldPath.Child("podTemplate")
-	for i := range component.Roles {
-		templates = append(templates, component.Roles[i].PodTemplate)
-		paths = append(paths, fldPath.Child("roles").Index(i).Child("podTemplate"))
+	// LPX validates its authored roles separately; rendering validates the selected PodTemplate here.
+	if !component.IsLPX() {
+		for i := range component.Roles {
+			templates = append(templates, component.Roles[i].PodTemplate)
+			paths = append(paths, fldPath.Child("roles").Index(i).Child("podTemplate"))
+		}
 	}
 	for i, template := range templates {
 		if template == nil {
