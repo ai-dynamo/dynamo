@@ -83,15 +83,16 @@ impl RealtimeRecovery {
             .journal
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("realtime replay unavailable"))?;
-        anyhow::ensure!(journal.can_recover(), "realtime replay disabled by worker");
         let event = journal.next_replay();
         if event.is_none() && !journal.waiting_for_session {
-            let elapsed = RECOVERY_TIMEOUT - deadline.saturating_duration_since(Instant::now());
-            tracing::info!(
-                attempt = self.attempts.last(),
-                elapsed_ms = elapsed.as_millis(),
-                "Realtime transcription worker recovered"
-            );
+            if journal.can_recover() {
+                let elapsed = RECOVERY_TIMEOUT - deadline.saturating_duration_since(Instant::now());
+                tracing::info!(
+                    attempt = self.attempts.last(),
+                    elapsed_ms = elapsed.as_millis(),
+                    "Realtime transcription worker recovered"
+                );
+            }
             self.deadline = None;
         }
         Ok(event)

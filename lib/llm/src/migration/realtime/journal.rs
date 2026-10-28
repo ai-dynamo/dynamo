@@ -31,6 +31,8 @@ struct Turn {
 pub(super) struct Journal {
     session: Option<RealtimeClientEventSessionUpdate>,
     turns: VecDeque<Turn>,
+    unsent: VecDeque<RealtimeClientEvent>,
+    is_replaying: bool,
     previous_item: Option<(String, String)>,
     bytes: usize,
     events: usize,
@@ -59,6 +61,8 @@ impl Journal {
         Some(Self {
             session: Some(session.clone()),
             turns: VecDeque::new(),
+            unsent: VecDeque::new(),
+            is_replaying: false,
             previous_item: None,
             bytes,
             events: 1,
@@ -79,12 +83,21 @@ impl Journal {
         }
         tracing::debug!(reason, "Realtime recovery disabled");
         for turn in &mut self.turns {
+            if self.is_replaying {
+                // This input still belongs to the current worker, even without future retries.
+                self.unsent.extend(turn.events.drain(turn.next_event..));
+            }
             turn.events = Vec::new();
             // Keep only reconciliation still needed by output already in flight.
             if turn.replay_remaining == 0 {
                 turn.prefix = String::new();
             }
         }
+        if self.is_replaying {
+            self.turns
+                .retain(|turn| turn.client_item.is_some() || turn.worker_item.is_some());
+        }
+        self.waiting_for_session = false;
         self.bytes = 0;
         self.events = 0;
     }
@@ -167,6 +180,7 @@ impl Journal {
 
     pub(super) fn start_replay(&mut self) -> Option<DynamoRealtimeClientEvent> {
         let session = self.session.as_ref()?.clone();
+        self.is_replaying = true;
         self.waiting_for_session = true;
         if let Some((worker, client)) = self.previous_item.take() {
             self.bytes -= worker.len() + client.len();
@@ -183,7 +197,11 @@ impl Journal {
     }
 
     pub(super) fn next_replay(&mut self) -> Option<DynamoRealtimeClientEvent> {
-        if self.waiting_for_session {
+        if let Some(event) = self.unsent.pop_front() {
+            return Some(event.into());
+        }
+        self.unsent = VecDeque::new();
+        if !self.is_replaying || self.waiting_for_session {
             return None;
         }
         for turn in &mut self.turns {
@@ -192,6 +210,7 @@ impl Journal {
                 return clone_audio_event(event).map(Into::into);
             }
         }
+        self.is_replaying = false;
         None
     }
 
@@ -680,6 +699,139 @@ mod tests {
         record(&mut journal, json!({"type": "input_audio_buffer.commit"}));
         assert!(server(&mut journal, committed("early")).unwrap().is_some());
         assert!(journal.turns.is_empty());
+    }
+
+    #[test]
+    fn retention_overflow_drains_replay_and_preserves_output_reconciliation() {
+        let mut journal = Journal::new(&configuration()).unwrap();
+        acknowledge(&mut journal);
+        let frames = [
+            json!({"type": "input_audio_buffer.append", "audio": "AAAA"}),
+            json!({"type": "input_audio_buffer.append", "audio": "BBBB"}),
+            json!({"type": "input_audio_buffer.commit"}),
+        ];
+        for frame in &frames {
+            record(&mut journal, frame.clone());
+        }
+        server(&mut journal, committed("old")).unwrap();
+        server(&mut journal, delta("old", "hé🙂")).unwrap();
+        journal.start_replay().unwrap();
+        acknowledge(&mut journal);
+        let pending = journal.next_replay().unwrap();
+        assert_eq!(serde_json::to_value(pending).unwrap(), frames[0]);
+
+        journal.max_bytes = journal.bytes;
+        assert!(
+            server(&mut journal, delta("replacement", "h"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(!journal.can_recover());
+        for frame in &frames[1..] {
+            assert_eq!(
+                serde_json::to_value(journal.next_replay().unwrap()).unwrap(),
+                *frame
+            );
+        }
+        assert!(journal.next_replay().is_none());
+        let event = server(&mut journal, delta("replacement", "é🙂next"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(event["delta"], "next");
+        assert_eq!(event["item_id"], "old");
+        assert!(
+            server(&mut journal, committed("replacement"))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            server(&mut journal, completed("replacement", "hé🙂next"))
+                .unwrap()
+                .unwrap()["item_id"],
+            "old"
+        );
+
+        record(&mut journal, frames[0].clone());
+        assert!(
+            journal.next_replay().is_none(),
+            "live input must not be replayed"
+        );
+    }
+
+    #[test]
+    fn error_after_replay_drain_does_not_hide_output_before_a_clear() {
+        let mut journal = Journal::new(&configuration()).unwrap();
+        acknowledge(&mut journal);
+        for frame in [
+            json!({"type": "input_audio_buffer.append", "audio": "AAAA"}),
+            json!({"type": "input_audio_buffer.append", "audio": "BBBB"}),
+            json!({"type": "input_audio_buffer.commit"}),
+            json!({"type": "input_audio_buffer.clear"}),
+        ] {
+            record(&mut journal, frame);
+        }
+        server(&mut journal, delta("old", "hello")).unwrap();
+        journal.start_replay().unwrap();
+        acknowledge(&mut journal);
+        journal.next_replay().unwrap();
+        journal.max_bytes = journal.bytes;
+        server(&mut journal, delta("replacement", "h")).unwrap();
+        while journal.next_replay().is_some() {}
+        assert!(!journal.is_replaying);
+        server(
+            &mut journal,
+            json!({"type": "error", "event_id": "invalid", "error": {
+                "type": "invalid_request_error", "message": "invalid audio"
+            }}),
+        )
+        .unwrap();
+        let event = server(&mut journal, committed("residual"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(event["item_id"], "residual");
+        assert!(
+            server(&mut journal, delta("residual", "next"))
+                .unwrap()
+                .is_some()
+        );
+        server(
+            &mut journal,
+            json!({"type": "input_audio_buffer.cleared", "event_id": "clear"}),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn application_error_preserves_pending_clear_acknowledgements() {
+        let mut journal = Journal::new(&configuration()).unwrap();
+        acknowledge(&mut journal);
+        record(
+            &mut journal,
+            json!({"type": "input_audio_buffer.append", "audio": "AAAA"}),
+        );
+        record(&mut journal, json!({"type": "input_audio_buffer.clear"}));
+        server(
+            &mut journal,
+            json!({"type": "error", "event_id": "invalid", "error": {
+                "type": "invalid_request_error", "message": "invalid audio"
+            }}),
+        )
+        .unwrap();
+        assert!(
+            server(&mut journal, delta("cleared", "stale"))
+                .unwrap()
+                .is_none()
+        );
+        server(
+            &mut journal,
+            json!({"type": "input_audio_buffer.cleared", "event_id": "clear"}),
+        )
+        .unwrap();
+        assert!(
+            server(&mut journal, delta("fresh", "next"))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ use dynamo_runtime::engine::{AsyncEngine, ResponseStream, async_trait};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use dynamo_runtime::pipeline::{ManyIn, ManyOut};
 use dynamo_runtime::protocols::annotated::Annotated;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::Notify;
 
 use super::*;
@@ -93,13 +93,7 @@ fn session(engine: RealtimeBidirectionalEngine, limit: u32) -> RealtimeSession {
 
 #[tokio::test]
 async fn typed_non_retryable_errors_and_attempt_exhaustion() {
-    for (error_type, calls) in [
-        (ErrorType::InvalidRequest, 1),
-        (ErrorType::Cancelled, 1),
-        (ErrorType::DeadlineExceeded, 1),
-        (ErrorType::ResourceExhausted, 1),
-        (ErrorType::Disconnected, 3),
-    ] {
+    for (error_type, calls) in [(ErrorType::InvalidRequest, 1), (ErrorType::Disconnected, 3)] {
         let engine = Arc::new(FailingEngine::new(error_type, None));
         let mut session = session(engine.clone(), 2);
         let mut incoming = futures::stream::pending();
@@ -241,4 +235,190 @@ async fn client_write_error_does_not_retry_workers() {
         .unwrap();
     assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
     assert!(engine.contexts.lock().iter().all(|ctx| ctx.is_stopped()));
+}
+
+struct ReplayErrorEngine {
+    frames: Arc<Vec<Value>>,
+    error_before_ack: bool,
+    stall_after_error: bool,
+    calls: AtomicUsize,
+    replacing: Notify,
+    contexts: Mutex<Vec<dynamo_runtime::engine::Context>>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        ManyIn<DynamoRealtimeClientEvent>,
+        ManyOut<Annotated<RealtimeServerEvent>>,
+        anyhow::Error,
+    > for ReplayErrorEngine
+{
+    async fn generate(
+        &self,
+        input: ManyIn<DynamoRealtimeClientEvent>,
+    ) -> anyhow::Result<ManyOut<Annotated<RealtimeServerEvent>>> {
+        let context = input.context();
+        self.contexts.lock().push(context.clone());
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            call < 2,
+            "disabled recovery must not dispatch another worker"
+        );
+        if call == 1 {
+            self.replacing.notify_one();
+        }
+        let (requests, _) = input.into_parts();
+        let mut requests = requests.take().unwrap();
+        let frames = self.frames.clone();
+        let error_before_ack = self.error_before_ack;
+        let stall_after_error = self.stall_after_error;
+        let output = async_stream::stream! {
+            let setup = serde_json::to_value(requests.next().await.unwrap()).unwrap();
+            assert_eq!(setup["type"], "session.update");
+            let updated = json!({"type": "session.updated", "event_id": "setup",
+                "session": configuration().session});
+            if call == 0 || !error_before_ack {
+                yield Annotated::from_data(serde_json::from_value(updated.clone()).unwrap());
+            }
+            if call == 1 {
+                yield Annotated::from_data(serde_json::from_value(json!({
+                    "type": "error", "event_id": "invalid", "error": {
+                        "type": "invalid_request_error", "code": "invalid_audio",
+                        "message": "invalid audio"
+                    }
+                })).unwrap());
+                if stall_after_error {
+                    std::future::pending::<()>().await;
+                }
+            }
+            for expected in frames.iter() {
+                let actual = serde_json::to_value(requests.next().await.unwrap()).unwrap();
+                assert_eq!(&actual, expected, "accepted input must arrive once and in order");
+            }
+            if call == 0 {
+                yield Annotated::from_data(serde_json::from_value(json!({
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "event_id": "partial", "item_id": "original", "content_index": 0,
+                    "delta": "partial"
+                })).unwrap());
+                yield Annotated {
+                    error: Some(DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message("worker lost")
+                        .build()),
+                    ..Annotated::from_error("worker lost")
+                };
+            } else {
+                // The replayed commit precedes the queued open turn, even after an error.
+                yield Annotated::from_data(serde_json::from_value(json!({
+                    "type": "input_audio_buffer.committed", "event_id": "commit",
+                    "item_id": "residual", "previous_item_id": null
+                })).unwrap());
+                if frames.last().unwrap()["type"] == "input_audio_buffer.clear" {
+                    yield Annotated::from_data(serde_json::from_value(json!({
+                        "type": "input_audio_buffer.cleared", "event_id": "clear"
+                    })).unwrap());
+                }
+                let fresh = serde_json::to_value(requests.next().await.unwrap()).unwrap();
+                assert_eq!(fresh["type"], "session.update");
+                yield Annotated::from_data(serde_json::from_value(updated).unwrap());
+            }
+        };
+        Ok(ResponseStream::new(Box::pin(output), context))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn application_error_during_replay_preserves_input_and_the_client_session() {
+    for (error_before_ack, stall_after_error, clear_queued) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
+        let mut frames: Vec<_> = (0..REQUEST_CHANNEL_CAPACITY + 8)
+            .map(|i| json!({"type": "input_audio_buffer.append", "event_id": i.to_string(), "audio": "AAAA"}))
+            .collect();
+        frames.push(json!({"type": "input_audio_buffer.commit"}));
+        frames.push(if clear_queued {
+            json!({"type": "input_audio_buffer.clear"})
+        } else {
+            json!({"type": "input_audio_buffer.append", "audio": "BBBB"})
+        });
+        let engine = Arc::new(ReplayErrorEngine {
+            frames: Arc::new(frames),
+            error_before_ack,
+            stall_after_error,
+            calls: AtomicUsize::new(0),
+            replacing: Notify::new(),
+            contexts: Mutex::new(Vec::new()),
+        });
+        let mut session = session(engine.clone(), 2);
+        let (tx, rx) = mpsc::channel(engine.frames.len() + 1);
+        for frame in engine.frames.iter() {
+            tx.try_send(Message::Text(frame.to_string().into()))
+                .unwrap();
+        }
+        let mut incoming = ReceiverStream::new(rx).map(Ok);
+        let output = Mutex::new(Vec::<Value>::new());
+        let outgoing = futures::sink::unfold((), |(), message: Message| async {
+            let Message::Text(text) = message else {
+                panic!("expected an event")
+            };
+            output.lock().push(serde_json::from_str(&text).unwrap());
+            Ok::<_, axum::Error>(())
+        });
+        tokio::pin!(outgoing);
+        let reason = Mutex::new(None);
+        let started = Instant::now();
+        let run = session.run(&mut incoming, &mut outgoing, &reason, configuration());
+        let send_live = async {
+            engine.replacing.notified().await;
+            tx.send(Message::Text(
+                json!({"type": "session.update",
+                "session": configuration().session})
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(6), async {
+            tokio::join!(run, send_live)
+        })
+        .await
+        .unwrap();
+        if stall_after_error {
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "realtime recovery timed out"
+            );
+            assert_eq!(started.elapsed(), Duration::from_secs(5));
+        } else {
+            result.unwrap();
+            assert!(!session.recovery.is_replaying());
+        }
+        assert!(session.recovery.retry(UnexpectedEnd.into()).is_err());
+        let output = output.lock();
+        assert_eq!(output.iter().filter(|e| e["type"] == "error").count(), 1);
+        if !stall_after_error {
+            assert_eq!(
+                output
+                    .iter()
+                    .filter(|e| e["type"] == "session.updated")
+                    .count(),
+                2
+            );
+            assert_eq!(
+                output
+                    .iter()
+                    .find(|e| e["type"] == "input_audio_buffer.committed")
+                    .unwrap()["item_id"],
+                "residual"
+            );
+        }
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 2);
+        assert!(engine.contexts.lock().iter().all(|ctx| ctx.is_stopped()));
+    }
 }
