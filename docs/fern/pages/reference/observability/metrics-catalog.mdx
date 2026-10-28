@@ -37,6 +37,10 @@ Engine pass-through metrics (`vllm:*`, `sglang:*`, `trtllm_*`) are emitted by th
 
 Emitted by the HTTP frontend at `/metrics` on port 8000 by default. Most carry a `model` label. For endpoints that canonicalize aliases, that label holds the primary served model name — the first `--served-model-name` value — so a request sent to an alias is counted under the primary. A name the frontend has not registered is counted under `unknown_model`.
 
+<ParamField path="dynamo_frontend_decision_cleanup_overruns_total" type="counter">
+  Decision dispatch tasks that exceed the one-second cancellation grace after their request deadline. One unlabeled series per frontend process. Alert on increases to detect noncooperative work that continues holding admission; the task is drained in the background and admission remains owned until its local work finishes. This counter does not measure physical GPU cancellation or settlement.
+</ParamField>
+
 <ParamField path="dynamo_frontend_active_requests" type="gauge">
   Requests currently being handled by the frontend, from HTTP handler entry until the response stream completes. The top-level in-flight count with no stage breakdown.
 </ParamField>

@@ -67,6 +67,24 @@ pub(crate) static DYNAM_FAILURES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(
     new_failure_counter(Some(prefix.as_str()))
 });
 
+pub(crate) static DECISION_CLEANUP_OVERRUNS_TOTAL: LazyLock<prometheus::IntCounter> =
+    LazyLock::new(|| {
+        let prefix = FAILURE_METRICS_PREFIX.get_or_init(|| {
+            let raw = std::env::var(env_metrics::DYN_METRICS_PREFIX)
+                .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
+            sanitize_frontend_prometheus_prefix(&raw)
+        });
+        prometheus::IntCounter::new(
+            format!(
+                "{}_{}",
+                prefix,
+                frontend_service::DECISION_CLEANUP_OVERRUNS_TOTAL
+            ),
+            "Decision tasks exceeding cancellation grace while retaining admission",
+        )
+        .expect("the fixed decision cleanup metric name is valid")
+    });
+
 fn record_failure_into(counter: &IntCounterVec, error: &DynamoError) {
     counter
         .with_label_values(&[error.class().as_str(), error.reason().as_str()])
@@ -1794,6 +1812,7 @@ impl Metrics {
         registry.register(Box::new(self.images_per_request.clone()))?;
         registry.register(Box::new(self.videos_per_request.clone()))?;
         registry.register(Box::new(DYNAM_FAILURES_TOTAL.clone()))?;
+        registry.register(Box::new(DECISION_CLEANUP_OVERRUNS_TOTAL.clone()))?;
         registry.register(Box::new(self.audio_per_request.clone()))?;
         registry.register(Box::new(self.image_tokens_per_request.clone()))?;
 

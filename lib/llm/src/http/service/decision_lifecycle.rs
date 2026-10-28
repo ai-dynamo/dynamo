@@ -4,12 +4,16 @@
 use std::sync::Arc;
 
 use dynamo_runtime::engine::AsyncEngineContext;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
+
+use super::metrics::DECISION_CLEANUP_OVERRUNS_TOTAL;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AdmissionError {
+    InvalidBranchCount,
     RequestTooLarge,
     CapacityExhausted,
+    AdmissionClosed,
 }
 
 #[cfg_attr(
@@ -17,17 +21,24 @@ pub(crate) enum AdmissionError {
     expect(dead_code, reason = "Consumed by decision execution integration")
 )]
 /// Reject excess load immediately, matching frontend admission rather than queueing.
+/// The caller must initialize the semaphore and `limit` from the same bounded configuration.
 pub(crate) fn acquire_admission(
     admission: Arc<Semaphore>,
     branches: u32,
     limit: usize,
 ) -> Result<OwnedSemaphorePermit, AdmissionError> {
+    if branches == 0 {
+        return Err(AdmissionError::InvalidBranchCount);
+    }
     if branches as usize > limit {
         return Err(AdmissionError::RequestTooLarge);
     }
     admission
         .try_acquire_many_owned(branches)
-        .map_err(|_| AdmissionError::CapacityExhausted)
+        .map_err(|cause| match cause {
+            TryAcquireError::NoPermits => AdmissionError::CapacityExhausted,
+            TryAcquireError::Closed => AdmissionError::AdmissionClosed,
+        })
 }
 
 #[cfg_attr(
@@ -40,6 +51,7 @@ pub(crate) async fn run_until_killed<T>(
 ) -> Option<T> {
     tokio::pin!(operation);
     tokio::select! {
+        // Preserve completed results when completion and cancellation are both ready.
         biased;
         result = &mut operation => Some(result),
         _ = context.killed() => None,
@@ -77,9 +89,9 @@ pub(crate) enum DispatchWaitError {
     expect(dead_code, reason = "Consumed by decision execution integration")
 )]
 /// The task must own admission until its work completes and should observe `parent.kill()`.
-/// After a one-second cancellation grace, it is detached with its permits still owned.
+/// Cleanup runs separately so the response does not wait for the cancellation grace.
 /// Local completion does not establish physical GPU settlement.
-pub(crate) async fn dispatch_with_deadline<T>(
+pub(crate) async fn dispatch_with_deadline<T: Send + 'static>(
     mut task: tokio::task::JoinHandle<T>,
     deadline: tokio::time::Instant,
     parent: Arc<dyn AsyncEngineContext>,
@@ -92,14 +104,25 @@ pub(crate) async fn dispatch_with_deadline<T>(
         }
         Err(_) => {
             parent.kill();
-            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut task)
-                .await
-                .is_err()
-            {
-                tracing::warn!("Decision task exceeded cancellation grace; detaching task");
-            }
+            tokio::spawn(drain_cancelled_task(task));
             Err(DispatchWaitError::Deadline)
         }
+    }
+}
+
+async fn drain_cancelled_task<T: Send + 'static>(mut task: tokio::task::JoinHandle<T>) {
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(1), &mut task).await {
+        Ok(result) => result,
+        Err(_) => {
+            DECISION_CLEANUP_OVERRUNS_TOTAL.inc();
+            tracing::warn!(
+                "Decision task exceeded cancellation grace; retaining admission until completion"
+            );
+            task.await
+        }
+    };
+    if let Err(cause) = result {
+        tracing::error!(error = %cause, "Cancelled decision task failed during cleanup");
     }
 }
 
@@ -126,7 +149,49 @@ mod tests {
         assert!(acquire_admission(admission, 1, 2).is_ok());
     }
 
-    #[tokio::test]
+    #[test]
+    fn admission_rejects_empty_and_closed_requests_without_reporting_overload() {
+        let admission = Arc::new(Semaphore::new(1));
+        assert_eq!(
+            acquire_admission(admission.clone(), 0, 1).unwrap_err(),
+            AdmissionError::InvalidBranchCount,
+        );
+        admission.close();
+        assert_eq!(
+            acquire_admission(admission, 1, 1).unwrap_err(),
+            AdmissionError::AdmissionClosed,
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_returns_without_waiting_for_noncooperative_work() {
+        let parent = Context::new(()).context();
+        let (release_tx, release_rx) = oneshot::channel();
+        let task = tokio::spawn(async move { release_rx.await });
+        let start = tokio::time::Instant::now();
+        let deadline = start + Duration::from_secs(2);
+        let result = dispatch_with_deadline(task, deadline, parent.clone()).await;
+        assert!(matches!(result, Err(DispatchWaitError::Deadline)));
+        assert!(parent.is_killed());
+        assert_eq!(tokio::time::Instant::now(), deadline);
+        release_tx.send(()).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn graceful_stop_preserves_inflight_results() {
+        let parent = Context::new(()).context();
+        let task_context = parent.clone();
+        let (result_tx, result_rx) = oneshot::channel();
+        let task =
+            tokio::spawn(async move { run_until_killed(task_context.as_ref(), result_rx).await });
+        parent.stop_generating();
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        result_tx.send(42).unwrap();
+        assert_eq!(task.await.unwrap().unwrap().unwrap(), 42);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn expired_deadline_kills_and_drains_local_work() {
         let parent = Context::new(()).context();
         let worker_context = parent.clone();
@@ -140,35 +205,45 @@ mod tests {
             dispatch_with_deadline(task, tokio::time::Instant::now(), parent.clone()).await;
         assert!(matches!(result, Err(DispatchWaitError::Deadline)));
         assert!(parent.is_killed());
-        assert_eq!(admission.available_permits(), 1);
+        let permit = tokio::time::timeout(Duration::from_secs(1), admission.acquire_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permit);
     }
 
-    #[tokio::test]
-    async fn expired_deadline_bounds_noncooperative_work_without_releasing_admission() {
+    #[tokio::test(start_paused = true)]
+    async fn overdue_cleanup_is_exposed_and_keeps_admission_until_work_finishes() {
+        let registry = prometheus::Registry::new();
+        super::super::metrics::Metrics::new()
+            .register(&registry)
+            .unwrap();
+        let initial_count = DECISION_CLEANUP_OVERRUNS_TOTAL.get();
         let parent = Context::new(()).context();
         let admission = Arc::new(Semaphore::new(1));
         let permit = admission.clone().acquire_owned().await.unwrap();
         let (release_tx, release_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             let _permit = permit;
-            // Dropping the sender also releases the worker if an assertion fails.
             let _ = release_rx.await;
         });
-        let result = tokio::time::timeout(
-            Duration::from_secs(3),
-            dispatch_with_deadline(task, tokio::time::Instant::now(), parent.clone()),
-        )
-        .await;
-        assert!(matches!(result, Ok(Err(DispatchWaitError::Deadline))));
-        assert!(parent.is_killed());
+        let result = dispatch_with_deadline(task, tokio::time::Instant::now(), parent).await;
+        assert!(matches!(result, Err(DispatchWaitError::Deadline)));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(DECISION_CLEANUP_OVERRUNS_TOTAL.get() > initial_count);
         assert_eq!(admission.available_permits(), 0);
+        assert!(registry.gather().iter().any(|family| {
+            family.name().ends_with("decision_cleanup_overruns_total")
+                && family.get_metric()[0].get_counter().value() > initial_count as f64
+        }));
         release_tx.send(()).unwrap();
-        let returned_permit =
-            tokio::time::timeout(Duration::from_secs(2), admission.acquire_owned())
-                .await
-                .unwrap()
-                .unwrap();
-        drop(returned_permit);
+        let permit = tokio::time::timeout(Duration::from_secs(1), admission.acquire_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permit);
     }
 
     #[tokio::test]
