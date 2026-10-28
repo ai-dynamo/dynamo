@@ -55,9 +55,9 @@ def state_agent_descriptors(engine, config) -> list[dict]:
     server_args = resolved_server_args(config.server_args)
     if (
         not server_args.enable_hierarchical_cache
-        or getattr(server_args, "nnodes", 1) != 1
-        or getattr(server_args, "pp_size", 1) != 1
-        or getattr(server_args, "tokenizer_worker_num", 1) != 1
+        or server_args.nnodes != 1
+        or server_args.pp_size != 1
+        or server_args.tokenizer_worker_num != 1
         or not config.dynamo_args.use_kv_events
     ):
         raise ValueError(
@@ -77,6 +77,10 @@ def state_agent_descriptors(engine, config) -> list[dict]:
         raise ValueError("KVCR inventory must cover every managed DP rank")
     infos = engine._scheduler_init_result.scheduler_infos
     endpoints = kvcr_hint_endpoints(infos, bounds)
+    if set(endpoints) != {str(rank) for rank in sources}:
+        raise ValueError(
+            "KVCR inventory requires a router_hint source for every managed DP rank"
+        )
     raw_sources = {}
     for info in infos:
         for source in info.get("kv_event_sources", []):
@@ -158,17 +162,33 @@ def state_agent_descriptors(engine, config) -> list[dict]:
 class StateAgentLifecycle:
     def __init__(self):
         self._owner = None
+        self._cleanup_task = None
 
     async def start(self, engine, config, endpoint):
         descriptors = state_agent_descriptors(engine, config)
         if not descriptors:
             return
         owner = KvStateAttachmentOwner(endpoint, endpoint.connection_id(), descriptors)
-        await owner.start()
+        startup = asyncio.ensure_future(owner.start())
+        try:
+            await asyncio.shield(startup)
+        except asyncio.CancelledError:
+            self._cleanup_task = asyncio.create_task(
+                self._close_after_start(owner, startup)
+            )
+            raise
         self._owner = owner
         logger.info("Attached %d KVCR HiCache inventory owners", len(descriptors))
 
+    async def _close_after_start(self, owner, startup):
+        # Let the native binding initialize its OnceCell before withdrawal.
+        await startup
+        await owner.close()
+
     async def close(self):
+        if self._cleanup_task is not None:
+            await asyncio.wait_for(asyncio.shield(self._cleanup_task), timeout=30.0)
+            return
         owner, self._owner = self._owner, None
         if owner is not None:
             await asyncio.wait_for(owner.close(), timeout=30.0)
