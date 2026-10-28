@@ -77,7 +77,7 @@ func (r *graphReconciler) resolveWorkloads(
 		}
 		workloads[groupName] = workload
 
-		plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment))
+		plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment), dgd.GetComponentByName(workload.ServingComponentName()))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -133,10 +133,13 @@ func (r *graphReconciler) renderPodCliqueSet(
 			return nil, nil, err
 		}
 
-		// Discovery selects only this workload's conductor; all auxiliary roles stay private.
+		// Discovery selects only this workload's serving role; all auxiliary roles stay private.
 		serving := plan.ConductorTemplate
 		if serving == "" {
 			serving = plan.CyborgTemplate
+		}
+		if serving == "" {
+			serving = plan.Agents[len(plan.Agents)-1].TemplateName
 		}
 		for _, clique := range rendered.Cliques {
 			if token := deployment.Annotations[dynamo.LPXRestartAnnotation]; token != "" {

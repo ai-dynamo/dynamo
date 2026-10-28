@@ -90,6 +90,7 @@
 /components/src/dynamo/thunderagent_router/                                                             @ai-dynamo/dynamo-router-codeowners
 
 # === global-router  (@ai-dynamo/dynamo-global-router-codeowners) ===
+/lib/global-*/**                                                                                        @ai-dynamo/dynamo-global-router-codeowners
 /components/src/dynamo/kv_dc_relay/                                                                     @ai-dynamo/dynamo-global-router-codeowners
 
 # === backend-vllm  (@ai-dynamo/dynamo-backend-vllm-codeowners) ===
@@ -375,6 +376,9 @@
 /deploy/operator/internal/namespace_scope/                                                              @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/controller_common/                                                            @ai-dynamo/dynamo-operator-codeowners
 
+# === lpx  (@ai-dynamo/dynamo-lpx-codeowners) ===
+/lib/sidecar/lpx/                                                                                       @ai-dynamo/dynamo-lpx-codeowners
+
 # === gms  (@ai-dynamo/dynamo-gms-codeowners) ===
 /lib/gpu_memory_service/                                                                                @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/cli/                                                                            @ai-dynamo/dynamo-gms-codeowners
@@ -606,6 +610,7 @@ requirements.txt                                                                
 /.lycheeignore                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
 /deploy/**/*lpx*                                                                                        @ai-dynamo/dynamo-operator-codeowners
+/lib/sidecar/lpx/                                                                                       @ai-dynamo/dynamo-lpx-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/vllm/                                                                                      @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /benchmarks/router/                                                                                     @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
 /recipes/**/vllm/**                                                                                     @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
@@ -726,6 +731,7 @@ requirements.txt                                                                
 /lib/kv-router/src/services/shared_cache/                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/kv-router/src/zmq_wire/extra_keys.rs                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /lib/runtime/src/metrics/frontend_perf.rs                                                               @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-frontend-codeowners
+/lib/sidecar/testkit/tests/support/lpx.rs                                                               @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-lpx-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /tests/fault_tolerance/migration/utils.py                                                               @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/test_generate_kustomize_openapi.py                                                               @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-ops-codeowners
 /components/src/dynamo/sglang/publisher.py                                                              @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
@@ -738,6 +744,7 @@ requirements.txt                                                                
 /components/src/dynamo/vllm/health_check.py                                                             @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /dev/observability/grafana_dashboards/*xpu*                                                             @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-xpu-codeowners
 /lib/llm/src/http/service/busy_threshold.rs                                                             @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/components/src/dynamo/aisimulate/tests/dgd/                                                            @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /container/templates/vllm_runtime.Dockerfile                                                            @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /lib/sidecar/testkit/tests/support/sglang.rs                                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /tests/fault_tolerance/cancellation/utils.py                                                            @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners

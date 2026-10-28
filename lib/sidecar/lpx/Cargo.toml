@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-lpx-sidecar"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Dynamo LPX sidecar for an out-of-process engine exposed through its OpenEngine gRPC service."
+
+[[bin]]
+name = "dynamo-lpx-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+dynamo-backend-common = { workspace = true }
+# `logging::get_distributed_tracing_context` for W3C trace metadata and the
+# system server settings a standby rank answers its probes on.
+dynamo-runtime = { workspace = true }
+dynamo-sidecar-common = { workspace = true }
+# Generated `openengine.v1` types; see `src/lib.rs`. The Mocker server
+# (`lib/mocker/servers/trtllm`) reuses them the same way.
+dynamo-trtllm-sidecar = { path = "../trtllm" }
+
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+futures = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+dynamo-backend-common = { workspace = true, features = ["testing"] }
+prost-types = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+tokio-stream = { workspace = true, features = ["net"] }
+tracing-subscriber = { workspace = true }
