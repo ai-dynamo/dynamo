@@ -2514,8 +2514,8 @@ dependencies = [
  "async-trait",
  "axum 0.8.4",
  "clap",
- "dashmap",
  "dynamo-global-common",
+ "dynamo-global-router",
  "dynamo-llm",
  "dynamo-protocols",
  "dynamo-runtime",
@@ -2532,6 +2532,12 @@ dependencies = [
 [[package]]
 name = "dynamo-global-router"
 version = "1.7.0"
+dependencies = [
+ "dashmap",
+ "dynamo-global-common",
+ "parking_lot",
+ "url",
+]
 
 [[package]]
 name = "dynamo-global-view-broadcaster"

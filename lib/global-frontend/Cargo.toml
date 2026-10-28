@@ -17,13 +17,13 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-global-common = { path = "../global-common" }
+dynamo-global-router = { path = "../global-router" }
 # The block manager serves workers. A frontend that only forwards requests
 # never uses it.
 dynamo-llm = { path = "../llm", default-features = false }
 dynamo-protocols = { workspace = true }
 dynamo-runtime = { workspace = true }
 
-dashmap = { workspace = true }
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }

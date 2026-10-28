@@ -17,7 +17,6 @@ pub use forward::{ForwardedRequest, PoolForwardingEngine};
 pub use model_sync::ModelSync;
 
 mod catalog;
-mod selector;
 pub use catalog::{PoolCatalog, PoolSnapshot, StaticPoolCatalog};
 pub use dynamo_global_common::Pool;
-pub use selector::{PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest};
+pub use dynamo_global_router::{PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest};

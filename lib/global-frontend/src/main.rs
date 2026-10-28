@@ -73,6 +73,7 @@ fn parse_pool(value: &str) -> Result<Pool, String> {
             datacenter: None,
         },
         frontends,
+        relay: None,
     })
 }
 

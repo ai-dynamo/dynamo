@@ -77,6 +77,7 @@ pub(crate) mod tests {
                 datacenter: None,
             },
             frontends: frontends.iter().map(|url| url.parse().unwrap()).collect(),
+            relay: None,
         }
     }
 

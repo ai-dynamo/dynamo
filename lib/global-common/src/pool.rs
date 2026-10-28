@@ -235,4 +235,8 @@ pub struct Pool {
     /// Frontends that accept forwarded requests. Each is the root of an
     /// OpenAI-compatible HTTP API, for example `http://10.0.0.5:8000/`.
     pub frontends: Vec<Url>,
+    /// The pool's Relay WAN gRPC endpoint, which streams the pool's load,
+    /// for example `http://10.0.0.6:50051`. `None` when the pool's load is
+    /// not followed.
+    pub relay: Option<Url>,
 }

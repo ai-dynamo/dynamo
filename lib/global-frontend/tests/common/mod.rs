@@ -109,6 +109,7 @@ pub fn pool(dgd: &str, model: &str, frontend: &Url) -> Pool {
             datacenter: None,
         },
         frontends: vec![frontend.clone()],
+        relay: None,
     }
 }
 
