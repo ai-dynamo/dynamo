@@ -278,13 +278,6 @@ With `--enable-loader`, each device's server process loads its weights in a
 thread and keeps serving. The `mx` backend starts its NIXL agent while the
 loader allocates.
 
-Peers publish their weights for `mx` with
-`python3 -m gpu_memory_service.v1.snapshot.mx_source --device N --source-key <checkpoint>`.
-Device N's loader listens on `--mx-listen-port` (default 25555) + N. It fills
-from the peer's device N, so the peer must hold the same rank on its N-th GPU
-in bus order, as pods of one deployment do. Ranks of equal size cannot be told
-apart.
-
 The loader also accepts `nixl` and `sharded-ssd`, the existing sharded SSD root
 and queue flags, and repeatable `--posix-backend-param KEY=VALUE` overrides.
 Start the restored worker with `GMS_SOCKET_DIR`. Only the `weights` socket is
@@ -295,3 +288,49 @@ Dynamo vLLM and SGLang backends select the V1 client from that env; no extra
 CLI flag is required. vLLM keeps its normal load format and uses
 `GMSV1Worker`. SGLang enables `--enable-memory-saver` (a real SGLang
 ServerArgs field) from the same env.
+
+### ModelExpress restore (experimental)
+
+The `mx` backend fills each device from a peer that serves the same weights
+over ModelExpress RDMA. It is V1 only. The V0 loader rejects it. No CI lane
+runs a live peer-to-peer transfer yet.
+
+Peers publish their weights with
+`python3 -m gpu_memory_service.v1.snapshot.mx_source --source-key <checkpoint>`.
+It serves every device, one process each. Pass `--device N` to serve one.
+Device N's loader listens on `--mx-listen-port` (default 25555) + N. It fills
+from the peer's device N, so the peer must hold the same rank on its N-th GPU
+in bus order, as pods of one deployment do. Ranks of equal size cannot be told
+apart. The loader does not fall back to another backend: it fails if no peer
+serves the key.
+
+The operator has no MX field. Declare the loader and the source as your own
+containers and list them under `experimental.gpuMemoryService.extraClientContainers`.
+The operator then gives each one the GMS socket, the shared DRA claim and
+`DYN_GMS_USE_V1=true`:
+
+```yaml
+experimental:
+  gpuMemoryService:
+    extraClientContainers: [gms-loader, gms-mx-source]
+podTemplate:
+  spec:
+    containers:
+    - name: main
+      # ... the engine ...
+    - name: gms-loader  # on pods that restore from a peer
+      image: my-registry/runtime:my-tag
+      command: [python3, -m, gpu_memory_service.cli.snapshot.loader]
+      args: [--checkpoint-dir, /checkpoints/run/versions/1,
+             --transfer-backend, mx, --mx-source-key, <checkpoint>]
+    - name: gms-mx-source  # on pods that serve their weights to peers
+      image: my-registry/runtime:my-tag
+      command: [python3, -m, gpu_memory_service.v1.snapshot.mx_source]
+      args: [--source-key, <checkpoint>]
+```
+
+The source waits until the weights are committed, then holds a read-only
+lease on them until it stops. A pod running it cannot be checkpointed:
+checkpoint prepare refuses while the lease is held, and the pod keeps serving.
+Do not list the source under `checkpoint.job.gmsClientContainers`. The lease
+does not block restored engines, which attach the weights read-only.
