@@ -150,8 +150,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) Reconcile(
 		return result, err
 	}
 	reason := dgdrRunReasonInvalidExecution
-	var ownershipConflict *commoncontroller.OwnershipConflictError
-	if errors.As(err, &ownershipConflict) {
+	if _, ok := errors.AsType[*commoncontroller.OwnershipConflictError](err); ok {
 		reason = commoncontroller.EventReasonOwnershipConflict
 	} else if apierrors.IsInvalid(err) {
 		reason = dgdrRunReasonInvalidResource
@@ -272,16 +271,14 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) completeRun(
 }
 
 func dgdrRunIsPermanentError(err error) bool {
-	var retryable *dgdrRunRetryableError
-	if errors.As(err, &retryable) {
+	if _, ok := errors.AsType[*dgdrRunRetryableError](err); ok {
 		return false
 	}
-	var permanent *dgdrRunPermanentExecutionError
-	if errors.As(err, &permanent) {
+	if _, ok := errors.AsType[*dgdrRunPermanentExecutionError](err); ok {
 		return true
 	}
-	var ownershipConflict *commoncontroller.OwnershipConflictError
-	return errors.As(err, &ownershipConflict) || apierrors.IsInvalid(err)
+	_, ownershipConflict := errors.AsType[*commoncontroller.OwnershipConflictError](err)
+	return ownershipConflict || apierrors.IsInvalid(err)
 }
 
 func (r *DynamoGraphDeploymentRunV1beta2Reconciler) ownedJobs(

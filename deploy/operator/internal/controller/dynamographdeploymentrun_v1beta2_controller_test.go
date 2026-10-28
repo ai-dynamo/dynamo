@@ -342,22 +342,32 @@ func TestV1beta2RunControllerRejectsSupportResourceOwnershipCollisionsWithoutMut
 		new  func(string) client.Object
 	}{
 		{name: "ServiceAccount", new: func(name string) client.Object {
-			return &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
-				Name: name, Namespace: "default", Labels: map[string]string{"existing": "service-account"},
-			}}
+			return &corev1.ServiceAccount{
+				Name:      name,
+				Namespace: "default",
+				Labels:    map[string]string{"existing": "service-account"},
+			}
 		}},
 		{name: "Role", new: func(name string) client.Object {
-			return &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-				Rules: []rbacv1.PolicyRule{{APIGroups: []string{"existing.example"}, Resources: []string{"kept"}, Verbs: []string{"get"}}}}
+			return &rbacv1.Role{
+				Name:      name,
+				Namespace: "default",
+				Rules:     []rbacv1.PolicyRule{{APIGroups: []string{"existing.example"}, Resources: []string{"kept"}, Verbs: []string{"get"}}},
+			}
 		}},
 		{name: "RoleBinding", new: func(name string) client.Object {
-			return &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{
-				Name: name, Namespace: "default", Labels: map[string]string{"existing": "role-binding"},
-			}}
+			return &rbacv1.RoleBinding{
+				Name:      name,
+				Namespace: "default",
+				Labels:    map[string]string{"existing": "role-binding"},
+			}
 		}},
 		{name: "ConfigMap", new: func(name string) client.Object {
-			return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-				Data: map[string]string{"existing": "config-map"}}
+			return &corev1.ConfigMap{
+				Name:      name,
+				Namespace: "default",
+				Data:      map[string]string{"existing": "config-map"},
+			}
 		}},
 	}
 	owners := []struct {
@@ -392,8 +402,7 @@ func TestV1beta2RunControllerRejectsSupportResourceOwnershipCollisionsWithoutMut
 				if !errors.Is(err, reconcile.TerminalError(nil)) {
 					t.Fatalf("reconcile error = %v, want terminal ownership conflict", err)
 				}
-				var ownershipConflict *commoncontroller.OwnershipConflictError
-				if !errors.As(err, &ownershipConflict) {
+				if _, ok := errors.AsType[*commoncontroller.OwnershipConflictError](err); !ok {
 					t.Fatalf("reconcile error = %T %v, want OwnershipConflictError", err, err)
 				}
 
