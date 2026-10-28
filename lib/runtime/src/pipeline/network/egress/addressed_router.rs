@@ -1652,7 +1652,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_response_guard_defers_tcp_cancellation_until_prologue() {
+    async fn first_response_guard_defers_cancellation_until_prologue() {
         struct CapturingClient(tokio::sync::mpsc::Sender<ConnectionInfo>);
 
         #[async_trait::async_trait]
@@ -1680,6 +1680,8 @@ mod tests {
 
         temp_env::async_with_vars(
             [
+                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+                ("DYN_VELO_RESPONSE_TRANSPORT", Some("tcp")),
                 ("DYN_TCP_TLS_CERT_PATH", None::<&str>),
                 ("DYN_TCP_TLS_KEY_PATH", None),
                 ("DYN_TCP_TLS_CLIENT_CA_CERT_PATH", None),
@@ -1690,72 +1692,117 @@ mod tests {
             ],
             async {
                 tokio::time::timeout(Duration::from_secs(5), async {
-                    let server = TcpStreamServer::new(
-                        TcpStreamServer::options_builder()
-                            .interface(Some("127.0.0.1".to_string()))
-                            .build()
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                    let (connection_tx, mut connection_rx) = tokio::sync::mpsc::channel(1);
-                    let router =
-                        AddressedPushRouter::new(Arc::new(CapturingClient(connection_tx)), server)
-                            .unwrap();
-                    let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
-                    let mut request = Context::new(AddressedRequest::new(1_u64, "worker".into()));
-                    attach_first_response_guard(
-                        &mut request,
-                        Arc::new(DropSignal(Some(guard_dropped_tx))),
-                    );
-                    let context = request.context();
-                    let mut generation = tokio::spawn(async move {
-                        let response: ManyOut<Annotated<u64>> = router.generate(request).await?;
-                        Ok::<_, anyhow::Error>(response)
-                    });
-                    let connection_info = connection_rx.recv().await.unwrap();
-                    let worker_context = Context::with_id_and_metadata(
-                        (),
-                        context.id().to_string(),
-                        Default::default(),
-                    )
-                    .context();
-                    let mut sender = TcpClient::create_response_stream(
-                        worker_context.clone(),
-                        connection_info,
-                        None,
-                    )
-                    .await
-                    .unwrap();
-
-                    for kill in [false, true] {
-                        if kill {
-                            context.kill();
+                    let runtime = crate::Runtime::from_current().unwrap();
+                    for velo in [false, true] {
+                        let service = if velo {
+                            Some(runtime.velo_response_service().service().await.unwrap())
                         } else {
-                            context.stop_generating();
-                        }
-                        tokio::select! {
-                            _ = worker_context.stopped() => panic!("guarded worker was cancelled before prologue"),
-                            _ = &mut guard_dropped_rx => panic!("guard was released before prologue"),
-                            _ = &mut generation => panic!("guarded generation completed before prologue"),
-                            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-                        }
-                        assert!(!worker_context.is_stopped());
-                        assert_eq!(guard_dropped_rx.try_recv(), Err(TryRecvError::Empty));
-                        assert!(!generation.is_finished());
-                    }
-
-                    sender
-                        .send_prologue(Some("worker setup failed".into()))
+                            None
+                        };
+                        let server = TcpStreamServer::new(
+                            TcpStreamServer::options_builder()
+                                .interface(Some("127.0.0.1".to_string()))
+                                .build()
+                                .unwrap(),
+                        )
                         .await
                         .unwrap();
-                    let mut response = generation.await.unwrap().unwrap();
-                    assert!(response.context().is_killed());
-                    assert!(response.next().await.is_none());
-                    guard_dropped_rx.await.unwrap();
+                        let (connection_tx, mut connection_rx) = tokio::sync::mpsc::channel(1);
+                        let client = Arc::new(CapturingClient(connection_tx));
+                        let router = if let Some(service) = &service {
+                            Arc::new(AddressedPushRouter {
+                                req_client: client,
+                                request_callbacks: server,
+                                responses: super::ResponseServer::Registered(service.clone()),
+                            })
+                        } else {
+                            AddressedPushRouter::new(client, server).unwrap()
+                        };
+                        let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
+                        let mut request =
+                            Context::new(AddressedRequest::new(1_u64, "worker".into()));
+                        attach_first_response_guard(
+                            &mut request,
+                            Arc::new(DropSignal(Some(guard_dropped_tx))),
+                        );
+                        let context = request.context();
+                        let generation = tokio::spawn(async move {
+                            let response: ManyOut<Annotated<u64>> =
+                                router.generate(request).await?;
+                            Ok::<_, anyhow::Error>(response)
+                        });
+                        let connection_info = connection_rx.recv().await.unwrap();
+                        let worker_context = Context::with_id_and_metadata(
+                            (),
+                            context.id().to_string(),
+                            Default::default(),
+                        )
+                        .context();
+                        let (mut tcp_sender, mut velo_sender) = if let Some(service) = service {
+                            (
+                                None,
+                                Some(
+                                    service
+                                        .sender(worker_context.clone(), connection_info, None)
+                                        .await
+                                        .unwrap(),
+                                ),
+                            )
+                        } else {
+                            (
+                                Some(
+                                    TcpClient::create_response_stream(
+                                        worker_context.clone(),
+                                        connection_info,
+                                        None,
+                                    )
+                                    .await
+                                    .unwrap(),
+                                ),
+                                None,
+                            )
+                        };
+
+                        for kill in [false, true] {
+                            if kill {
+                                context.kill();
+                            } else {
+                                context.stop_generating();
+                            }
+                            tokio::time::pause();
+                            tokio::time::advance(Duration::from_millis(100)).await;
+                            tokio::time::resume();
+                            assert!(!worker_context.is_stopped());
+                            assert_eq!(guard_dropped_rx.try_recv(), Err(TryRecvError::Empty));
+                            assert!(!generation.is_finished());
+                        }
+
+                        if let Some(sender) = &mut tcp_sender {
+                            sender
+                                .send_prologue(Some("worker setup failed".into()))
+                                .await
+                                .unwrap();
+                        } else {
+                            velo_sender
+                                .as_mut()
+                                .unwrap()
+                                .send_prologue(Some(
+                                    crate::pipeline::network::StreamPrologueError::from_message(
+                                        "worker setup failed",
+                                    ),
+                                ))
+                                .await
+                                .unwrap();
+                        }
+                        let mut response = generation.await.unwrap().unwrap();
+                        assert!(response.context().is_killed());
+                        assert!(response.next().await.is_none());
+                        guard_dropped_rx.await.unwrap();
+                    }
+                    runtime.velo_response_service().shutdown().await;
                 })
                 .await
-                .expect("guarded TCP dispatch did not complete after the error prologue");
+                .expect("guarded dispatch did not complete after the error prologue");
             },
         )
         .await;
