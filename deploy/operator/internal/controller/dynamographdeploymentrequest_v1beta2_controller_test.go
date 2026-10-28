@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -66,7 +67,9 @@ func newDGDRV1beta2FixtureWithInterceptor(
 		WithStatusSubresource(&nvidiacomv1beta2.DynamoGraphDeploymentRequest{}, &nvidiacomv1beta2.DynamoGraphDeploymentRun{}).
 		WithInterceptorFuncs(funcs).
 		Build()
-	return &dgdrV1beta2Fixture{t: t, client: c, reconciler: &DynamoGraphDeploymentRequestV1beta2Reconciler{Client: c}}
+	return &dgdrV1beta2Fixture{t: t, client: c, reconciler: &DynamoGraphDeploymentRequestV1beta2Reconciler{
+		Client: c, APIReader: c,
+	}}
 }
 
 func (f *dgdrV1beta2Fixture) reconcile() {
@@ -79,7 +82,7 @@ func (f *dgdrV1beta2Fixture) reconcile() {
 func (f *dgdrV1beta2Fixture) tryReconcile() error {
 	f.t.Helper()
 	_, err := f.reconciler.Reconcile(f.t.Context(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "default", Name: "search"},
+		Namespace: "default", Name: "search",
 	})
 	return err
 }
@@ -106,6 +109,15 @@ func (f *dgdrV1beta2Fixture) runNames() []string {
 	return names
 }
 
+func (f *dgdrV1beta2Fixture) run(name string) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+	f.t.Helper()
+	run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{}
+	if err := f.client.Get(f.t.Context(), types.NamespacedName{Namespace: "default", Name: name}, run); err != nil {
+		f.t.Fatalf("get run %s: %v", name, err)
+	}
+	return run
+}
+
 func (f *dgdrV1beta2Fixture) updateRunStatus(name string, mutate func(*nvidiacomv1beta2.DynamoGraphDeploymentRunStatus)) {
 	f.t.Helper()
 	run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{}
@@ -127,20 +139,6 @@ func (f *dgdrV1beta2Fixture) finish(name, phase string) {
 	})
 }
 
-// setPhaseOnly writes a terminal phase without the Completed condition.
-func (f *dgdrV1beta2Fixture) setPhaseOnly(name, phase string) {
-	f.t.Helper()
-	f.updateRunStatus(name, func(status *nvidiacomv1beta2.DynamoGraphDeploymentRunStatus) {
-		status.Phase = nvidiacomv1beta2.DGDRRunPhase(phase)
-	})
-}
-
-// setCompletedOnly publishes Completed without a terminal phase.
-func (f *dgdrV1beta2Fixture) setCompletedOnly(name string) {
-	f.t.Helper()
-	f.updateRunStatus(name, setCompletedForTest)
-}
-
 func setCompletedForTest(status *nvidiacomv1beta2.DynamoGraphDeploymentRunStatus) {
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:   nvidiacomv1beta2.DGDRRunConditionCompleted,
@@ -160,7 +158,7 @@ func (f *dgdrV1beta2Fixture) bumpGeneration(generation int64) {
 
 func dgdrV1beta2Request(withHardware bool) *nvidiacomv1beta2.DynamoGraphDeploymentRequest {
 	request := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "search", Namespace: "default", UID: "request-uid", Generation: 1},
+		Name: "search", Namespace: "default", UID: "request-uid", Generation: 1,
 	}
 	request.Spec.Model = &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"}
 	request.Spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{
@@ -217,37 +215,37 @@ func TestV1beta2RequestControllerCreatesTheRunOfTheCurrentGeneration(t *testing.
 	}
 }
 
-func TestV1beta2RequestControllerIsIdempotent(t *testing.T) {
-	f := newDGDRV1beta2Fixture(t, dgdrV1beta2Request(true))
-	f.reconcile()
-	f.reconcile()
-	f.reconcile()
-	if names := f.runNames(); len(names) != 1 || names[0] != "search-1" {
-		t.Fatalf("runs = %v, want only search-1", names)
-	}
-}
-
-func TestV1beta2RequestControllerWaitsForTheActiveRunBeforeStartingTheNext(t *testing.T) {
+func TestV1beta2RequestControllerCancelsTheActiveRunBeforeStartingTheNext(t *testing.T) {
 	f := newDGDRV1beta2Fixture(t, dgdrV1beta2Request(true))
 	f.reconcile()
 
-	t.Log("A spec change while search-1 runs creates nothing and says why")
+	t.Log("A spec change requests cancellation without deleting search-1")
 	f.bumpGeneration(2)
 	f.reconcile()
-	if names := f.runNames(); len(names) != 1 {
-		t.Fatalf("runs = %v, want only the active run", names)
+	if names := f.runNames(); len(names) != 1 || names[0] != "search-1" {
+		t.Fatalf("runs = %v, want the superseded Run retained", names)
+	}
+	if got := f.run("search-1").Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation]; got != "2" {
+		t.Fatalf("cancellation generation = %q, want 2", got)
 	}
 	request := f.request()
 	if request.Status.ObservedGeneration != 1 {
 		t.Fatalf("observedGeneration = %d, want 1 until generation 2 is accepted", request.Status.ObservedGeneration)
 	}
 	condition := dgdrV1beta2AcceptedCondition(t, request)
-	if condition.Status != metav1.ConditionFalse || condition.Reason != dgdrReasonWaitingForActiveRun {
-		t.Fatalf("condition = %v, want False/%s", condition, dgdrReasonWaitingForActiveRun)
+	if condition.Status != metav1.ConditionFalse || condition.Reason != dgdrReasonCancelingStaleRun {
+		t.Fatalf("condition = %v, want False/%s", condition, dgdrReasonCancelingStaleRun)
 	}
 
-	t.Log("Once search-1 is completed, search-2 is created and search-1 moves to the history")
-	f.finish("search-1", "Succeeded")
+	t.Log("Retries leave the retained Run active until its controller publishes Completed")
+	f.reconcile()
+	if names := f.runNames(); len(names) != 1 || names[0] != "search-1" {
+		t.Fatalf("runs = %v, want no replacement before cancellation completes", names)
+	}
+
+	t.Log("The terminal cancellation outcome releases the latest generation")
+	f.updateRunStatus("search-1", setCompletedForTest)
+	f.reconcile()
 	f.reconcile()
 	request = f.request()
 	if request.Status.ObservedGeneration != 2 {
@@ -257,7 +255,99 @@ func TestV1beta2RequestControllerWaitsForTheActiveRunBeforeStartingTheNext(t *te
 		t.Fatalf("activeRunRef = %v, want search-2", request.Status.ActiveRunRef)
 	}
 	if len(request.Status.RecentRunRefs) != 1 || request.Status.RecentRunRefs[0].Name != "search-1" {
-		t.Fatalf("recentRunRefs = %v, want [search-1]", request.Status.RecentRunRefs)
+		t.Fatalf("recentRunRefs = %v, want the canceled Run retained in terminal history", request.Status.RecentRunRefs)
+	}
+}
+
+func TestV1beta2RequestControllerDoesNotStartANewGenerationWhileTheRunCacheLags(t *testing.T) {
+	request := dgdrV1beta2Request(true)
+	request.Status.ActiveRunRef = &corev1.LocalObjectReference{Name: "search-1"}
+	meta.SetStatusCondition(&request.Status.Conditions, metav1.Condition{
+		Type:               nvidiacomv1beta2.DGDRRequestConditionAccepted,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: 1,
+		Reason:             dgdrReasonRunCreating,
+		Message:            "Creating Run search-1 for generation 1",
+	})
+	hideRuns := true
+	f := newDGDRV1beta2FixtureWithInterceptor(t, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, isRunList := list.(*nvidiacomv1beta2.DynamoGraphDeploymentRunList); hideRuns && isRunList {
+				return nil
+			}
+			return c.List(ctx, list, opts...)
+		},
+	}, request, dgdrV1beta2OwnedRun(request, 1, false))
+
+	t.Log("Observe generation 2 before the Run cache has observed generation 1's reserved create")
+	f.bumpGeneration(2)
+
+	result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: "default",
+		Name:      "search",
+	}})
+	if err != nil {
+		t.Fatalf("reconcile with lagging Run cache: %v", err)
+	}
+	if result.RequeueAfter <= 0 {
+		t.Fatal("lagging Run cache did not schedule a bounded retry")
+	}
+
+	t.Log("The durable RunCreating reservation prevents generation 2 from being created beside generation 1")
+	hideRuns = false
+	if names := f.runNames(); len(names) != 1 || names[0] != "search-1" {
+		t.Fatalf("runs = %v, want only search-1 while its cache observation lags", names)
+	}
+	live := f.request()
+	if live.Status.ActiveRunRef == nil || live.Status.ActiveRunRef.Name != "search-1" {
+		t.Fatalf("activeRunRef = %v, want the durable search-1 reservation", live.Status.ActiveRunRef)
+	}
+	if live.Status.ObservedGeneration != 0 {
+		t.Fatalf("observedGeneration = %d, want 0 until the reserved Run is observed", live.Status.ObservedGeneration)
+	}
+
+	t.Log("Once the cache catches up, cancellation is requested and the old Run remains retained")
+	f.reconcile()
+	if got := f.run("search-1").Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation]; got != "2" {
+		t.Fatalf("cancellation generation = %q, want 2", got)
+	}
+	f.updateRunStatus("search-1", setCompletedForTest)
+	f.reconcile()
+	if names := f.runNames(); len(names) != 2 {
+		t.Fatalf("runs = %v, want retained search-1 and active search-2", names)
+	}
+}
+
+func TestV1beta2RequestControllerReleasesAReservationAfterAFailedCreate(t *testing.T) {
+	failCreate := true
+	f := newDGDRV1beta2FixtureWithInterceptor(t, interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.CreateOption) error {
+			if _, isRun := object.(*nvidiacomv1beta2.DynamoGraphDeploymentRun); isRun && failCreate {
+				failCreate = false
+				return errors.New("unknown create outcome")
+			}
+			return c.Create(ctx, object, opts...)
+		},
+	}, dgdrV1beta2Request(true))
+
+	t.Log("Persist generation 1's reservation before its Run create fails")
+	if err := f.tryReconcile(); err == nil || !strings.Contains(err.Error(), "unknown create outcome") {
+		t.Fatalf("reconcile error = %v, want failed Run create", err)
+	}
+	reserved := f.request()
+	if reserved.Status.ActiveRunRef == nil || reserved.Status.ActiveRunRef.Name != "search-1" {
+		t.Fatalf("activeRunRef = %v, want durable search-1 reservation", reserved.Status.ActiveRunRef)
+	}
+
+	t.Log("A newer generation replaces the stale reservation after the API confirms no Run exists")
+	f.bumpGeneration(2)
+	f.reconcile()
+	if names := f.runNames(); len(names) != 1 || names[0] != "search-2" {
+		t.Fatalf("runs = %v, want only search-2", names)
+	}
+	accepted := dgdrV1beta2AcceptedCondition(t, f.request())
+	if accepted.Status != metav1.ConditionTrue || accepted.ObservedGeneration != 2 {
+		t.Fatalf("condition = %v, want generation 2 accepted", accepted)
 	}
 }
 
@@ -270,35 +360,73 @@ func TestV1beta2RequestControllerCoalescesIntermediateGenerations(t *testing.T) 
 	f.bumpGeneration(3)
 	f.reconcile()
 
-	// Completing search-1 admits the current level, generation 3.
-	f.finish("search-1", "Succeeded")
-	f.reconcile()
-
-	// Generation 2 was an intermediate desired state and is never materialized.
-	names := f.runNames()
-	if len(names) != 2 {
-		t.Fatalf("runs = %v, want search-1 and search-3", names)
+	t.Log("The latest generation replaces the causal cancellation marker without creating generation 2")
+	if names := f.runNames(); len(names) != 1 || names[0] != "search-1" {
+		t.Fatalf("runs = %v, want only the retained active search-1", names)
 	}
-	for _, name := range names {
-		if name != "search-1" && name != "search-3" {
-			t.Fatalf("runs = %v, want search-1 and search-3 only", names)
-		}
+	if got := f.run("search-1").Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation]; got != "3" {
+		t.Fatalf("cancellation generation = %q, want the latest generation 3", got)
+	}
+
+	t.Log("A stale retry cannot move the causal cancellation generation backwards")
+	if err := f.reconciler.requestRunCancellation(t.Context(), f.run("search-1"), 2); err != nil {
+		t.Fatalf("retry stale cancellation: %v", err)
+	}
+	if got := f.run("search-1").Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation]; got != "3" {
+		t.Fatalf("cancellation generation = %q after stale retry, want 3", got)
+	}
+
+	t.Log("Once cancellation completes, generation 3 starts and generation 2 remains coalesced")
+	f.updateRunStatus("search-1", setCompletedForTest)
+	f.reconcile()
+	if names := f.runNames(); len(names) != 2 || names[0] != "search-1" || names[1] != "search-3" {
+		t.Fatalf("runs = %v, want retained search-1 and active search-3", names)
 	}
 }
 
-func TestV1beta2RequestControllerIgnoresAPhaseWithoutTheCompletedCondition(t *testing.T) {
+func TestV1beta2RequestControllerRepairsInvalidOrStaleCancellationGeneration(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing string
+	}{
+		{name: "malformed", existing: "malformed"},
+		{name: "zero", existing: "0"},
+		{name: "negative", existing: "-1"},
+		{name: "stale", existing: "2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := dgdrV1beta2Request(true)
+			run := dgdrV1beta2OwnedRun(request, 1, false)
+			run.Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation] = tt.existing
+			f := newDGDRV1beta2Fixture(t, request, run)
+			f.bumpGeneration(3)
+
+			t.Log("Reconcile the newer Request generation")
+			f.reconcile()
+
+			if got := f.run(run.Name).Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation]; got != "3" {
+				t.Fatalf("cancellation generation = %q, want repaired generation 3", got)
+			}
+		})
+	}
+}
+
+func TestV1beta2RequestControllerAllowsTheCurrentRunToRemainActiveIndefinitely(t *testing.T) {
 	f := newDGDRV1beta2Fixture(t, dgdrV1beta2Request(true))
 	f.reconcile()
-	f.bumpGeneration(2)
 
-	f.setPhaseOnly("search-1", "Succeeded")
+	f.updateRunStatus("search-1", func(status *nvidiacomv1beta2.DynamoGraphDeploymentRunStatus) {
+		status.Phase = nvidiacomv1beta2.DGDRRunPhaseSucceeded
+	})
 	f.reconcile()
 
-	if names := f.runNames(); len(names) != 1 {
-		t.Fatalf("runs = %v, want the next Run held back until Completed is published", names)
+	if names := f.runNames(); len(names) != 1 || names[0] != "search-1" {
+		t.Fatalf("runs = %v, want the current Run left alone without a new generation", names)
 	}
-	if condition := dgdrV1beta2AcceptedCondition(t, f.request()); condition.Reason != dgdrReasonWaitingForActiveRun {
-		t.Fatalf("condition = %v, want reason %s", condition, dgdrReasonWaitingForActiveRun)
+	if condition := dgdrV1beta2AcceptedCondition(t, f.request()); condition.Reason != dgdrReasonRunCreated {
+		t.Fatalf("condition = %v, want reason %s", condition, dgdrReasonRunCreated)
 	}
 }
 
@@ -307,7 +435,7 @@ func TestV1beta2RequestControllerReleasesOnCompletedWithoutATerminalPhase(t *tes
 	f.reconcile()
 	f.bumpGeneration(2)
 
-	f.setCompletedOnly("search-1") // the phase is still empty
+	f.updateRunStatus("search-1", setCompletedForTest) // the phase is still empty
 	f.reconcile()
 
 	if names := f.runNames(); len(names) != 2 {
@@ -315,7 +443,7 @@ func TestV1beta2RequestControllerReleasesOnCompletedWithoutATerminalPhase(t *tes
 	}
 }
 
-func TestV1beta2RequestControllerCountsAnUnlabeledOwnedRunAsActive(t *testing.T) {
+func TestV1beta2RequestControllerCancelsAnUnlabeledOwnedRun(t *testing.T) {
 	request := dgdrV1beta2Request(true)
 	active := dgdrV1beta2OwnedRun(request, 1, false) // correct controller OwnerReference, no labels
 	f := newDGDRV1beta2Fixture(t, request, active)
@@ -324,10 +452,13 @@ func TestV1beta2RequestControllerCountsAnUnlabeledOwnedRunAsActive(t *testing.T)
 	f.reconcile()
 
 	if names := f.runNames(); len(names) != 1 || names[0] != "search-1" {
-		t.Fatalf("runs = %v, want no second active Run next to search-1", names)
+		t.Fatalf("runs = %v, want the superseded owned Run retained", names)
+	}
+	if got := f.run("search-1").Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation]; got != "2" {
+		t.Fatalf("cancellation generation = %q, want 2", got)
 	}
 	if ref := f.request().Status.ActiveRunRef; ref == nil || ref.Name != "search-1" {
-		t.Fatalf("activeRunRef = %v, want search-1", ref)
+		t.Fatalf("activeRunRef = %v, want search-1 retained until cancellation is observed", ref)
 	}
 }
 
@@ -369,16 +500,6 @@ func dgdrV1beta2RunFixtures(request *nvidiacomv1beta2.DynamoGraphDeploymentReque
 	return objects
 }
 
-func TestV1beta2RequestControllerRetainsFiveTerminalRuns(t *testing.T) {
-	request := dgdrV1beta2Request(true)
-	request.Generation = 8
-	f := newDGDRV1beta2Fixture(t, dgdrV1beta2RunFixtures(request, 7)...)
-	f.reconcile()
-
-	t.Log("The two oldest terminal runs are deleted and the newest five are listed newest first")
-	assertRetained(t, f)
-}
-
 func assertRetained(t *testing.T, f *dgdrV1beta2Fixture) {
 	t.Helper()
 	for _, name := range []string{"search-1", "search-2"} {
@@ -409,6 +530,7 @@ func TestV1beta2RequestControllerOrdersRetainedRunsByTheirGenerationAnnotation(t
 		objects = append(objects, run)
 	}
 	f := newDGDRV1beta2Fixture(t, objects...)
+	f.reconcile()
 	f.reconcile()
 
 	refs := f.request().Status.RecentRunRefs
@@ -483,13 +605,14 @@ func TestV1beta2RequestControllerPublishesStatusBeforeDeletingRetiredRuns(t *tes
 	if err := f.tryReconcile(); err == nil {
 		t.Fatal("reconcile succeeded although the status patch failed")
 	}
-	// search-8 was created; the two oldest terminal Runs must still exist because the status did not
-	// move on.
-	if names := f.runNames(); len(names) != 8 {
-		t.Fatalf("runs = %v, want all eight: nothing may be deleted before the status is published", names)
+	// The durable reservation is published before search-8 is created. A failed status write must
+	// leave every existing Run untouched and must not perform the create side effect.
+	if names := f.runNames(); len(names) != 7 {
+		t.Fatalf("runs = %v, want the seven existing Runs and no unreserved search-8", names)
 	}
 
 	failPatch = false
+	f.reconcile()
 	f.reconcile()
 	assertRetained(t, f)
 }
@@ -500,18 +623,16 @@ func dgdrV1beta2OwnedRun(
 	terminal bool,
 ) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
 	run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        fmt.Sprintf("%s-%d", request.Name, generation),
-			Namespace:   request.Namespace,
-			Annotations: map[string]string{dgdrV1beta2GenerationAnnotation: fmt.Sprint(generation)},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: nvidiacomv1beta2.GroupVersion.String(),
-				Kind:       "DynamoGraphDeploymentRequest",
-				Name:       request.Name,
-				UID:        request.UID,
-				Controller: boolPointerForTest(true),
-			}},
-		},
+		Name:        fmt.Sprintf("%s-%d", request.Name, generation),
+		Namespace:   request.Namespace,
+		Annotations: map[string]string{dgdrV1beta2GenerationAnnotation: fmt.Sprint(generation)},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: nvidiacomv1beta2.GroupVersion.String(),
+			Kind:       "DynamoGraphDeploymentRequest",
+			Name:       request.Name,
+			UID:        request.UID,
+			Controller: new(true),
+		}},
 	}
 	if terminal {
 		run.Status.Phase = nvidiacomv1beta2.DGDRRunPhase("Succeeded")
@@ -519,8 +640,6 @@ func dgdrV1beta2OwnedRun(
 	}
 	return run
 }
-
-func boolPointerForTest(value bool) *bool { return &value }
 
 // apiextensionsJSONForTest is a non-empty v1beta1 carrier payload.
 var apiextensionsJSONForTest = apiextensionsv1.JSON{Raw: []byte(`{"model":"carrier"}`)}
@@ -576,22 +695,20 @@ func TestV1beta2RequestControllerReconcilesAnOverlengthRequestToOneRun(t *testin
 
 func TestV1beta2RequestControllerDoesNotAdoptARunOfAnotherOwner(t *testing.T) {
 	stale := &nvidiacomv1beta2.DynamoGraphDeploymentRun{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "search-1",
-			Namespace: "default",
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: nvidiacomv1beta2.GroupVersion.String(),
-				Kind:       "DynamoGraphDeploymentRequest",
-				Name:       "search",
-				UID:        "old-uid",
-				Controller: boolPointerForTest(true),
-			}},
-		},
+		Name:      "search-1",
+		Namespace: "default",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: nvidiacomv1beta2.GroupVersion.String(),
+			Kind:       "DynamoGraphDeploymentRequest",
+			Name:       "search",
+			UID:        "old-uid",
+			Controller: new(true),
+		}},
 	}
 	f := newDGDRV1beta2Fixture(t, dgdrV1beta2Request(true), stale)
 
 	result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "default", Name: "search"},
+		Namespace: "default", Name: "search",
 	})
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)

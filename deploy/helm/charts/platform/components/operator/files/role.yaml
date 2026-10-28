@@ -328,6 +328,7 @@ rules:
   - nvidia.com
   resources:
   - dynamographdeploymentcandidates
+  - dynamographdeploymentruns
   - snapshotjobs
   verbs:
   - create
@@ -335,16 +336,6 @@ rules:
   - get
   - list
   - patch
-  - watch
-- apiGroups:
-  - nvidia.com
-  resources:
-  - dynamographdeploymentruns
-  verbs:
-  - create
-  - delete
-  - get
-  - list
   - watch
 - apiGroups:
   - nvidia.com

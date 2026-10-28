@@ -21,11 +21,13 @@ package controller
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,7 +37,7 @@ import (
 )
 
 // This test runs the controller under a real manager, so only the watch events (a Request edit, a Run
-// status update, a deleted Run) can make it reconcile. It fails if SetupWithManager loses the Owns
+// annotation/status update, a deleted Run) can make it reconcile. It fails if SetupWithManager loses the Owns
 // watch, an event predicate drops Run status updates, or the owner mapping breaks. It also covers the
 // API server and admission side: the Request is created model-only and admission persists the
 // structural defaults and discovered hardware before the controller snapshots it.
@@ -48,6 +50,7 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 	env.StartManager(func(mgr ctrl.Manager) error {
 		return (&DynamoGraphDeploymentRequestV1beta2Reconciler{
 			Client:        mgr.GetClient(),
+			APIReader:     mgr.GetAPIReader(),
 			Config:        env.OperatorConfig(),
 			RuntimeConfig: env.RuntimeConfig(),
 		}).SetupWithManager(mgr)
@@ -57,7 +60,7 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 	const poll = 200 * time.Millisecond
 
 	request := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{Name: "watched", Namespace: env.Namespace()},
+		Name: "watched", Namespace: env.Namespace(),
 		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
 			NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
 				Model: &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-32B"},
@@ -98,7 +101,7 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 	g.Expect(apiequality.Semantic.DeepEqual(first.Spec.NativeSearchInput, live.Spec.NativeSearchInput)).To(BeTrue())
 	g.Expect(first.Status.AISimulate).To(BeNil())
 
-	t.Log("Editing the Request while its Run is active is reported and starts nothing")
+	t.Log("Editing the Request causally requests cancellation without deleting the active Run")
 	g.Eventually(func(g Gomega) {
 		live := getRequest(g)
 		live.Spec.Model.Name = "Qwen/Qwen3-30B-A3B"
@@ -106,25 +109,32 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
 	g.Eventually(func(g Gomega) {
 		live := getRequest(g)
+		terminating := getRun(g, firstName)
+		g.Expect(terminating.DeletionTimestamp).To(BeNil())
+		g.Expect(terminating.Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation]).
+			To(Equal(strconv.FormatInt(live.Generation, 10)))
 		condition := accepted(live)
 		g.Expect(condition).NotTo(BeNil())
 		g.Expect(condition.Status).To(Equal(metav1.ConditionFalse))
-		g.Expect(condition.Reason).To(Equal(dgdrReasonWaitingForActiveRun))
-		g.Expect(condition.ObservedGeneration).To(Equal(live.Generation))
+		g.Expect(condition.Reason).To(Equal(dgdrReasonCancelingStaleRun))
+		g.Expect(live.Status.ActiveRunRef).NotTo(BeNil())
+		g.Expect(live.Status.ActiveRunRef.Name).To(Equal(firstName))
 	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
 
-	t.Log("Only the Run status update wakes the Request: Completed releases the next generation")
+	t.Log("Publish the Run controller's terminal superseded outcome")
 	g.Eventually(func(g Gomega) {
-		run := getRun(g, firstName)
-		run.Status.Phase = nvidiacomv1beta2.DGDRRunPhase("Succeeded")
-		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:   nvidiacomv1beta2.DGDRRunConditionCompleted,
-			Status: metav1.ConditionTrue,
-			Reason: "Finished",
+		terminal := getRun(g, firstName)
+		terminal.Status.Phase = nvidiacomv1beta2.DGDRRunPhaseFailed
+		meta.SetStatusCondition(&terminal.Status.Conditions, metav1.Condition{
+			Type:               nvidiacomv1beta2.DGDRRunConditionCompleted,
+			Status:             metav1.ConditionTrue,
+			Reason:             "Superseded",
+			ObservedGeneration: terminal.Generation,
 		})
-		g.Expect(c.Status().Update(ctx, run)).To(Succeed())
+		g.Expect(c.Status().Update(ctx, terminal)).To(Succeed())
 	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
 
+	t.Log("The Completed status event wakes the Request and starts only the newest generation")
 	var secondName string
 	var secondUID types.UID
 	g.Eventually(func(g Gomega) {
@@ -133,8 +143,7 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 		g.Expect(live.Status.ActiveRunRef.Name).NotTo(Equal(firstName))
 		g.Expect(live.Status.ObservedGeneration).To(Equal(live.Generation))
 		g.Expect(accepted(live).Status).To(Equal(metav1.ConditionTrue))
-		g.Expect(live.Status.RecentRunRefs).To(HaveLen(1))
-		g.Expect(live.Status.RecentRunRefs[0].Name).To(Equal(firstName))
+		g.Expect(live.Status.RecentRunRefs).To(ConsistOf(corev1.LocalObjectReference{Name: firstName}))
 		second := getRun(g, live.Status.ActiveRunRef.Name)
 		g.Expect(second.Spec.Model.Name).To(Equal("Qwen/Qwen3-30B-A3B"))
 		secondName, secondUID = second.Name, second.UID
