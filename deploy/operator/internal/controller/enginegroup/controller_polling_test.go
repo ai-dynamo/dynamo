@@ -10,6 +10,7 @@ package enginegroup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -37,7 +38,7 @@ func TestEngineGroupControllerPollsInitialObservationsWithoutBackoff(t *testing.
 			ctx := t.Context()
 			backend := newEngineGroupControllerTestBackend(1)
 			backend.observationErrors = map[domain.ObservationAuthority]error{
-				authority: errors.New("engine is still starting"),
+				authority: domain.ErrObservationPending,
 			}
 			group := &nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup{
 				Name: "starting", Namespace: "test", UID: "group-uid",
@@ -217,16 +218,15 @@ func TestEngineGroupControllerPollsSettledWorldsWithoutPodUpdates(t *testing.T) 
 			backend.capacity.Allocations[0].Incarnation.Members[0].RuntimeIncarnation = "runtime-restarted"
 			backend.mu.Unlock()
 			result, err = reconciler.Reconcile(ctx, req)
-			if test.outcome != "" {
-				require.ErrorIs(t, err, domain.ErrRecoveryRequired)
-			} else {
-				require.NoError(t, err)
-			}
+			require.NoError(t, err)
 			assert.Positive(t, result.RequeueAfter)
 			require.NoError(t, kubeClient.Get(ctx, req.NamespacedName, group))
 			available = meta.FindStatusCondition(group.Status.Conditions, engineGroupConditionAvailable)
 			require.NotNil(t, available)
-			assert.Equal(t, metav1.ConditionFalse, available.Status)
+			assert.Equal(t, metav1.ConditionUnknown, available.Status)
+			recovery := meta.FindStatusCondition(group.Status.Conditions, engineGroupConditionRuntimeReady)
+			require.NotNil(t, recovery)
+			assert.Equal(t, "RecoveryRequired", recovery.Reason)
 			assert.Equal(t, initialCheckpoint.State.Registry, engineGroupControllerTestCheckpoint(t, ctx, kubeClient, group).State.Registry)
 			assert.Equal(t, initialCheckpoint.State.Membership.Desired, engineGroupControllerTestCheckpoint(t, ctx, kubeClient, group).State.Membership.Desired)
 			assert.Equal(t, membershipCalls, backend.membershipApplyCount())
@@ -247,6 +247,7 @@ func TestEngineGroupRuntimeResolutionFailureInvalidatesHealth(t *testing.T) {
 	}{
 		{name: "allocation observation failure", err: errors.New("capacity unavailable")},
 		{name: "runtime no longer selected", err: ErrRuntimeUnavailable},
+		{name: "confirmed runtime recovery fault", err: fmt.Errorf("native instance changed: %w", domain.ErrRecoveryRequired)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -274,11 +275,20 @@ func TestEngineGroupRuntimeResolutionFailureInvalidatesHealth(t *testing.T) {
 			}
 
 			t.Log("fail runtime resolution before any coordinator observation can establish current health")
-			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(group)})
-			if !errors.Is(test.err, ErrRuntimeUnavailable) {
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(group)})
+			if errors.Is(test.err, domain.ErrRecoveryRequired) || errors.Is(test.err, ErrRuntimeUnavailable) {
+				require.NoError(t, err)
+				assert.Equal(t, engineGroupObservationInterval, result.RequeueAfter)
+			} else {
 				require.ErrorIs(t, err, test.err)
+				assert.Zero(t, result.RequeueAfter)
 			}
 			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(group), group))
+			if errors.Is(test.err, domain.ErrRecoveryRequired) {
+				condition := meta.FindStatusCondition(group.Status.Conditions, engineGroupConditionRuntimeReady)
+				require.NotNil(t, condition)
+				assert.Equal(t, "RecoveryRequired", condition.Reason)
+			}
 
 			t.Log("retain historical generation while making every current health claim unknown")
 			assert.Equal(t, int64(1), group.Status.ObservedGeneration)
@@ -362,11 +372,24 @@ func TestEngineGroupControllerPeriodicObservationFailsClosed(t *testing.T) {
 			assert.Equal(t, 0, backend.membershipApplyCount())
 			assert.Equal(t, int32(1), group.Spec.Replicas)
 
+			t.Log("a confirmed recovery fault has an actionable diagnosis and bounded observation, not transient backoff")
+			backend.mu.Lock()
+			backend.observationErrors[authority] = fmt.Errorf("native authority: %w", domain.ErrRecoveryRequired)
+			backend.mu.Unlock()
+			result, err := reconciler.Reconcile(ctx, req)
+			require.NoError(t, err)
+			assert.Equal(t, engineGroupObservationInterval, result.RequeueAfter)
+			require.NoError(t, kubeClient.Get(ctx, req.NamespacedName, group))
+			condition := meta.FindStatusCondition(group.Status.Conditions, engineGroupConditionRuntimeReady)
+			require.NotNil(t, condition)
+			assert.Equal(t, "RecoveryRequired", condition.Reason)
+			assert.Equal(t, journal, engineGroupControllerTestCheckpoint(t, ctx, kubeClient, group).State)
+
 			t.Log("recover observation authority and resume periodic healthy observation without an external event")
 			backend.mu.Lock()
 			delete(backend.observationErrors, authority)
 			backend.mu.Unlock()
-			result, err := reconciler.Reconcile(ctx, req)
+			result, err = reconciler.Reconcile(ctx, req)
 			require.NoError(t, err)
 			assert.Equal(t, 10*time.Second, result.RequeueAfter)
 			require.NoError(t, kubeClient.Get(ctx, req.NamespacedName, group))

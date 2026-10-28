@@ -35,6 +35,7 @@ const (
 type testCapacityAdapter struct {
 	observation      CapacityObservation
 	observeErr       error
+	applyErr         error
 	planned          map[ReplicaID]ReplicaIncarnation
 	firstTarget      *CapacityTarget
 	lastTarget       *CapacityTarget
@@ -60,6 +61,9 @@ func (a *testCapacityAdapter) Apply(
 ) (ApplyResult, error) {
 	a.applyCalls++
 	*a.events = append(*a.events, fmt.Sprintf("capacity:%d", target.ControlRevision))
+	if a.applyErr != nil {
+		return ApplyResult{}, a.applyErr
+	}
 	if target.ControlRevision < a.observation.AppliedRevision {
 		return rejected("StaleCapacityRevision", "capacity revision is stale"), nil
 	}
@@ -140,6 +144,7 @@ type testTrafficAdapter struct {
 	membership      *testMembershipAdapter
 	observation     TrafficObservation
 	observeErr      error
+	applyErr        error
 	lastTarget      *TrafficTarget
 	applyCalls      int
 	autoDrain       bool
@@ -162,6 +167,9 @@ func (a *testTrafficAdapter) Apply(
 ) (ApplyResult, error) {
 	a.applyCalls++
 	*a.events = append(*a.events, fmt.Sprintf("traffic:%d", target.ControlRevision))
+	if a.applyErr != nil {
+		return ApplyResult{}, a.applyErr
+	}
 	if target.ControlRevision < a.observation.AppliedRevision {
 		return rejected("StaleTrafficRevision", "traffic revision is stale"), nil
 	}
@@ -250,10 +258,12 @@ type testMembershipAdapter struct {
 	unavailable           []ReplicaMembership
 	topology              MembershipTopology
 	observeErr            error
+	applyErr              error
 	transitions           map[string]MembershipTransitionObservation
 	targets               map[string]MembershipTarget
 	lastPlanValidation    *PlanValidationRequest
 	planValidationCalls   int
+	planValidationErr     error
 	targetValidationCalls int
 	applyCalls            int
 	failBeforeFirstAccept bool
@@ -273,6 +283,9 @@ func (a *testMembershipAdapter) ValidatePlan(
 	request.BaseTopology = cloneTopology(request.BaseTopology)
 	request.Plan = cloneResolvedPlan(request.Plan)
 	a.lastPlanValidation = &request
+	if a.planValidationErr != nil {
+		return PreflightResult{}, a.planValidationErr
+	}
 	if a.planRejection != nil {
 		return PreflightResult{Rejection: cloneFailure(a.planRejection)}, nil
 	}
@@ -325,6 +338,9 @@ func (a *testMembershipAdapter) Apply(
 ) error {
 	a.applyCalls++
 	*a.events = append(*a.events, "membership:"+target.TransitionID)
+	if a.applyErr != nil && !a.failAfterFirstAccept {
+		return a.applyErr
+	}
 	if a.failBeforeFirstAccept && a.applyCalls == 1 {
 		return errors.New("request timed out before acceptance")
 	}
@@ -348,6 +364,9 @@ func (a *testMembershipAdapter) Apply(
 	}
 	a.transitions[target.TransitionID] = transition
 	if a.failAfterFirstAccept && a.applyCalls == 1 {
+		if a.applyErr != nil {
+			return a.applyErr
+		}
 		return errors.New("request timed out after acceptance")
 	}
 	return nil

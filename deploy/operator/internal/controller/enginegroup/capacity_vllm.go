@@ -56,7 +56,7 @@ func (a *VLLMGroveCapacity) Observe(ctx context.Context, groupID domain.GroupID)
 	if err != nil {
 		return domain.CapacityObservation{}, err
 	}
-	observation := domain.CapacityObservation{AppliedRevision: physical.AppliedRevision, ReleaseFences: physical.ReleaseFences}
+	observation := domain.CapacityObservation{AppliedRevision: physical.AppliedRevision, ReleaseFences: physical.ReleaseFences, ReleaseMode: physical.ReleaseMode}
 
 	// The engine integration owns process bindings; Grove reports only the physical Pod and slot.
 	for _, allocation := range physical.Allocations {

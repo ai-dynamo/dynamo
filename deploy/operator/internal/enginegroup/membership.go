@@ -52,6 +52,9 @@ func (c *Coordinator) reconcilePlanPreflight(
 		},
 	)
 	if validationErr != nil {
+		if errors.Is(validationErr, ErrRecoveryRequired) {
+			return false, false, observationError(ObservationAuthorityMembership, validationErr)
+		}
 		return false, false, fmt.Errorf("validate membership plan: %w", validationErr)
 	}
 	if err := validatePreflightResult(result); err != nil {
@@ -139,6 +142,9 @@ func (c *Coordinator) prepareMembershipTarget(
 	}
 	result, err := c.membership.ValidateTarget(ctx, groupID, target)
 	if err != nil {
+		if errors.Is(err, ErrRecoveryRequired) {
+			return false, false, observationError(ObservationAuthorityMembership, err)
+		}
 		return false, false, fmt.Errorf("validate exact membership target: %w", err)
 	}
 	if err := validatePreflightResult(result); err != nil {

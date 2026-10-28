@@ -170,7 +170,7 @@ func (w *workerControlFixture) RoundTrip(request *http.Request) (*http.Response,
 		return nil, err
 	}
 	path := strings.TrimPrefix(request.URL.Path, "/engine/control")
-	if path == statusPath || path == scalePath || path == submitPath {
+	if path == statusPath || path == submitPath {
 		copy := request.Clone(request.Context())
 		copy.URL.Path = path
 		return w.engine.handle(rank, copy)
