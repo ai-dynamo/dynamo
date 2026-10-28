@@ -1,0 +1,233 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Interpreting Optimal Model Packing Results
+subtitle: Sizing GPU fractions from measured forward-pass curves instead of splitting each GPU in half
+---
+
+The [GPU sharing results](gpu-sharing-results.mdx) pack two models onto each GPU by giving each model half of the GPU's SMs and memory. This page repeats that experiment on one GPU, but sizes each model's share from its latency targets instead of fixing it at one half. With the same model, prompt shape, and GPU fractioning stack, the sized packing fits five models on the GPU where the even split fits two, and every model still meets its targets.
+
+<Note>
+Any performance results on this page are purely illustrative and are not indicative of optimal performance. Your deployment or configuration may vary.
+</Note>
+
+## Setup
+
+All runs use one NVIDIA RTX PRO 6000 Blackwell Workstation Edition (188 SMs, 96 GiB) under KAI-Scheduler with GPU fractions in `sm-sharing` mode, the same stack as the [KAI + GPU fractions experiment](deploy-kai-gpu-fractions.md). Each model is `Qwen/Qwen3-4B`, served by one Dynamo frontend and one aggregated vLLM worker, with a fixed input length of 2048 tokens and a fixed output length of 256 tokens.
+
+The results are pessimistic in the same way as the A100 study: prefix caching is off, so every request computes its full 2048-token input.
+
+| Configuration | Models on the GPU | SM share per model | How the share was chosen |
+|---|---:|---:|---|
+| Baseline | 1 | Whole GPU | Dedicated GPU, no MPS (`nvidia.com/gpu: 1`) |
+| Naive | 2 | 0.50 | Even split, as in the A100 study |
+| Optimal | 5 | 0.20 | Smallest share that meets the targets, from measured curves |
+| Overpack | 6 | 0.15 | One model more than the optimal packing; the sizing procedure rejects this share |
+
+Each model's memory request is its measured runtime overhead plus the KV cache its traffic needs, so memory is not the limit in any packed configuration.
+
+## How the Optimal Packing Is Chosen
+
+The packing follows the aggregated-engine procedure for Poisson arrivals from *Many-Model Inequalities*. It needs only measurements, taken once per model and GPU type and reused for every packing decision:
+
+1. **Measure forward-pass curves.** For each SM share on a grid from 0.10 to 0.75, measure the time of one prefill pass and of one decode step at batch sizes 1 to 32, with a neighbouring engine loading the rest of the GPU. Also measure the memory the engine uses beyond its KV cache.
+2. **Admit a share.** For a per-model request rate `R`, a time-to-first-token ceiling `TTFT_max`, and an inter-token latency ceiling `ITL_max`, the procedure computes the engine's load `rho`, the queue depth a request can wait behind and still meet `TTFT_max`, and the expected time until the first `TTFT_max` violation, `tau`. A share is admitted when `rho < 1`, decode steps meet `ITL_max`, and `tau` is at least one hour.
+3. **Pack.** Choose the smallest admitted share for each model, size its memory, and place models while the shares sum to at most 1 and the memory requests fit in HBM.
+
+Curves are only read at measured points. Between two measured batch sizes, the procedure uses the larger, so it never interpolates toward a faster value than was measured.
+
+### Measured Curves
+
+![Three line charts against SM share. Prefill pass time stays near 415 ms from share 0.10 to 0.15, drops to 269 ms at 0.20, and falls to 92 ms at 0.75. Decode step time at batch 1 and batch 8 falls from about 19 and 27 ms at 0.10 to about 8 and 13 ms at 0.75. Memory beyond the KV cache stays between 8.2 and 8.5 GiB at every share.](../../../assets/img/optimal-packing-curves.svg)
+
+<details>
+<summary>Measured curves table</summary>
+
+| SM share | Prefill pass (ms) | Decode step, batch 1 (ms) | Decode step, batch 8 (ms) | Memory beyond KV cache (GiB) |
+|---:|---:|---:|---:|---:|
+| 0.10 | 416.9 | 19.4 | 26.5 | 8.16 |
+| 0.12 | 417.0 | 19.6 | 26.6 | 8.16 |
+| 0.15 | 414.5 | 19.2 | 28.2 | 8.16 |
+| 0.20 | 268.6 | 14.6 | 21.4 | 8.21 |
+| 0.25 | 203.1 | 12.6 | 16.8 | 8.26 |
+| 0.30 | 202.3 | 12.6 | 18.3 | 8.26 |
+| 0.35 | 162.6 | 9.3 | 15.1 | 8.32 |
+| 0.40 | 144.2 | 11.3 | 16.9 | 8.32 |
+| 0.50 | 126.5 | 10.1 | 14.4 | 8.43 |
+| 0.60 | 107.9 | 7.5 | 13.7 | 8.48 |
+| 0.75 | 91.7 | 7.7 | 12.9 | 8.54 |
+
+</details>
+
+Prefill time does not fall between shares 0.10 and 0.15, then drops by a third at 0.20. A share inside such a plateau buys no speed, which is why the optimal share lands on 0.20 rather than anywhere between 0.15 and 0.20.
+
+### Choosing the Targets
+
+How many models fit depends on the targets. The table below shows the models packed per GPU across request rates and `TTFT_max` ceilings, with `ITL_max` at 100 ms. Compute, not memory, is the binding limit in every cell.
+
+| Rate per model (req/s) | `TTFT_max` 10 s | `TTFT_max` 20 s | `TTFT_max` 30 s |
+|---:|---:|---:|---:|
+| 0.02 | 10 | 10 | 10 |
+| 0.05 | 5 | 10 | 10 |
+| 0.10 | 2 | **5** | 10 |
+| 0.20 | 1 | 2 | 4 |
+
+The experiments use `R` = 0.1 req/s, `TTFT_max` = 20 s, and `ITL_max` = 100 ms, the loosest of these targets at which the even split is no longer the answer: the procedure admits share 0.20 and rejects 0.15, so it packs five models, and a sixth would not fit.
+
+## Results
+
+### Why the Sixth Model Does Not Fit
+
+Overpack's predicted worst-model TTFT p99 is 16.4 s, under the 20-second target, and its decode steps are far below 100 ms, so it can look as if it should have been admitted. It is rejected because a share must pass three checks, and share 0.15 fails one of them. A sixth model needs a share of at most 1/6, and the largest measured share that fits is 0.15.
+
+![Three charts of the admission checks against SM share, at 0.1 req/s per model. ITL check: the predicted decode step is about 20 ms at shares 0.10 to 0.15 and 15 ms at 0.20, and the worst measured request's mean ITL is at most 31 ms, all far below the 100 ms limit. Load check: rho is about 0.53 at shares 0.10 to 0.15 and 0.40 at 0.20, below the limit of 1. Violation check, on a log scale: the expected time to the first TTFT violation is about 39 minutes at share 0.15, below the one-hour limit, and about 13 hours at share 0.20. Shares 0.10, 0.12, and 0.15 are marked rejected; shares 0.20 and above are admitted.](../../../assets/img/optimal-packing-admission.svg)
+
+| Check | Limit | Share 0.20 (optimal) | Share 0.15 (overpack) |
+|---|---|---:|---:|
+| ITL: predicted decode step | at most 100 ms | 15.0 ms, passes | 19.8 ms, passes |
+| Load: `rho` | below 1 | 0.40, passes | 0.53, passes |
+| Expected time to first TTFT violation: `tau` | at least 1 hour | 13 hours, passes | 39 minutes, **fails** |
+
+ITL and load are not what limit the packing. Every share from 0.10 up passes both. The limit is the violation check, and it is set by prefill. At share 0.15 a 2048-token prefill takes 415 ms, half again as long as the 269 ms it takes at 0.20, because prefill time does not fall between shares 0.10 and 0.15 (see [Measured Curves](#measured-curves)). Each request queued ahead adds a full prefill to a new request's TTFT, so the longer prefill both raises the load and lowers the number of queued requests that still fit within 20 seconds. Together, those cut the expected time to the first TTFT violation from 13 hours to 39 minutes, below the one-hour requirement.
+
+### Targets Under Poisson Load
+
+Each model receives its own Poisson stream at 0.1 req/s, all models at once, for 30 minutes (60 minutes for overpack) after a 5-minute lead-in. TTFT met is the fraction of requests with TTFT at or under 20 s. Predicted values come from the same procedure that chose the shares.
+
+![Two bar charts comparing measured and predicted TTFT for each configuration. Median-model TTFT p50: baseline 68 ms measured; naive 127 ms predicted, 94 ms measured; optimal 270 ms predicted, 254 ms measured; overpack 417 ms predicted, 371 ms measured. Worst-model TTFT p99, against a 20-second target line: baseline 0.14 s measured; naive 2.84 s predicted, 1.22 s measured; optimal 8.26 s predicted, 6.06 s measured; overpack 16.41 s predicted, 7.94 s measured.](../../../assets/img/optimal-packing-poisson-ttft.svg)
+
+<details>
+<summary>Targets under Poisson load table</summary>
+
+| Configuration | Models | Requests | TTFT p50 | Predicted TTFT p50 | Worst model's TTFT p99 | Predicted TTFT p99 | ITL p50 | TTFT met |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Baseline | 1 | 180 | 68 ms | — | 138 ms | — | 7.0 ms | 100% |
+| Naive | 2 | 339 | 94 ms | 127 ms | 1.22 s | 2.84 s | 7.2 ms | 100% |
+| Optimal | 5 | 878 | 254 ms | 270 ms | 6.06 s | 8.26 s | 11.7 ms | 100% |
+| Overpack | 6 | 2,148 | 371 ms | 417 ms | 7.94 s | 16.41 s | 15.8 ms | 100% |
+
+</details>
+
+The optimal packing serves 2.5 times as many models as the naive packing on the same GPU, and every request on every model met its TTFT target. For the optimal packing, the predicted TTFT median is within 6% of the measured median. In every packed configuration, the predicted p99 is above every model's measured p99.
+
+<Note>
+The packing procedure is deliberately pessimistic, and the measurements agree. In every packed configuration, each measured TTFT bar sits below the predicted bar to its left: the measured p50 is 6% to 26% under the prediction, and the worst model's measured p99 is 27% to 57% under it. No model in these runs did worse than its prediction, so a share the procedure admits can be expected to meet its targets, and the optimal packing's five models clear the 20-second target with room to spare.
+</Note>
+
+Overpack still met its TTFT target on every request, which a single run can show even for a rejected share. As described in [Why the Sixth Model Does Not Fit](#why-the-sixth-model-does-not-fit), a violation is expected about once every 39 minutes on average, but the timing is random, and the 60-minute overpack run happened to have none: no request exceeded 9 s, and the measured tail is about half the predicted tail. The procedure is conservative, so some capacity goes unused at these targets. Even so, the requirement is the expected time to a violation, not one clean run, and share 0.15 does not meet it.
+
+### Cost per 1M Output Tokens at Fixed Traffic per Model
+
+When each model's traffic is set by its users, not by how fast the GPU can serve it, every configuration produces the same output tokens per model. Cost then depends only on how many models share each GPU. This table prices one model's traffic at 0.1 req/s with 256 output tokens per request, or 92,160 output tokens per hour, at a normalized \$1.00 per GPU-hour. Multiply the $/1M column by your GPU-hour price to get your cost; the percentage columns do not depend on the price.
+
+| Configuration | Models per GPU | GPUs for 30 models | $/1M output tokens | vs Baseline | vs Naive | Meets requirements |
+|---|---:|---:|---:|---:|---:|---|
+| Baseline | 1 | 30 | $10.85 | — | +100% | Yes |
+| Naive | 2 | 15 | $5.43 | −50% | — | Yes |
+| Optimal | 5 | 6 | $2.17 | −80% | −60% | Yes |
+| Overpack | 6 | 5 | $1.81 | −83% | −67% | No |
+
+Thirty models is the smallest fleet that every configuration packs into whole GPUs. At these targets the optimal packing serves the same traffic as the naive packing on 40% of the GPUs. Overpack is cheaper still, but it does not meet the requirements, so the optimal packing is the cheapest configuration that does.
+
+### Throughput Across Concurrency
+
+The rest of this page repeats the A100 study's closed-loop measurement on each configuration: every model holds `c` requests in flight, for `c` from 1 to 32. Each point has 90 seconds of unmeasured load (240 seconds for the first point of a configuration), then a 120-second measured window with every model loaded throughout. Throughput counts each output token that arrived inside the window.
+
+The packed configurations keep their SM shares from the table above, but their KV caches are enlarged to hold 32 full sequences per model, so concurrency, not KV capacity, sets the load. Overpack cannot fit that in memory and holds at most 22 sequences per model, so at `c` = 32 part of each model's requests queue in the engine.
+
+Rows are matched on concurrency per model, as in the A100 study's cost table. A packed GPU therefore carries several times the in-flight requests of the baseline GPU in the same row: at `c` = 4, the baseline GPU holds 4 requests and the optimal GPU holds 20.
+
+![Line chart of output tokens per second per GPU as a percentage of the baseline, against concurrency per model from 1 to 32 on a log scale, with a dashed line at 100%; the region above the line is tinted green and the region below it red. Optimal and overpack start near 136% at concurrency 1 and fall below 100% at 32, to 91% and 81%. Naive starts at 128% and stays above 100%, ending at 106%.](../../../assets/img/optimal-packing-sweep-throughput.svg)
+
+In the green region above the dashed line, a packed GPU produces more output tokens than a dedicated GPU at the same concurrency per model; in the red region below it, it produces fewer. The packed configurations lead by the widest margin at low concurrency, where a dedicated GPU is mostly idle, and the lead shrinks as concurrency rises. At 32 requests per model, the optimal and overpack packings fall below the line: once each model has enough load to keep a GPU busy on its own, splitting the GPU into smaller shares costs throughput, and packing no longer makes sense.
+
+<details>
+<summary>Throughput table</summary>
+
+| Concurrency per model | Baseline tok/s per GPU | Naive tok/s per GPU | Optimal tok/s per GPU | Overpack tok/s per GPU | Naive % of Baseline | Optimal % of Baseline | Overpack % of Baseline |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 138.3 | 177.7 | 188.3 | 187.8 | 128.5% | 136.1% | 135.8% |
+| 2 | 256.9 | 304.7 | 346.2 | 351.7 | 118.6% | 134.7% | 136.9% |
+| 4 | 466.0 | 564.4 | 586.4 | 597.7 | 121.1% | 125.8% | 128.3% |
+| 8 | 781.8 | 936.7 | 905.3 | 933.4 | 119.8% | 115.8% | 119.4% |
+| 16 | 1,155.4 | 1,338.8 | 1,222.7 | 1,264.5 | 115.9% | 105.8% | 109.4% |
+| 32 | 1,504.7 | 1,587.3 | 1,371.1 | 1,214.0 | 105.5% | 91.1% | 80.7% |
+
+</details>
+
+<details>
+<summary>TTFT p50 (ms)</summary>
+
+| Concurrency per model | Baseline | Naive | Optimal | Overpack |
+|---:|---:|---:|---:|---:|
+| 1 | 62 | 107 | 418 | 582 |
+| 2 | 104 | 125 | 464 | 670 |
+| 4 | 209 | 272 | 701 | 1,007 |
+| 8 | 278 | 367 | 754 | 1,076 |
+| 16 | 247 | 300 | 944 | 1,160 |
+| 32 | 254 | 489 | 1,888 | 7,867 |
+
+</details>
+
+<details>
+<summary>ITL p50 (ms)</summary>
+
+| Concurrency per model | Baseline | Naive | Optimal | Overpack |
+|---:|---:|---:|---:|---:|
+| 1 | 7.0 | 10.9 | 25.1 | 29.9 |
+| 2 | 7.4 | 12.6 | 27.2 | 31.5 |
+| 4 | 7.8 | 13.2 | 31.2 | 37.3 |
+| 8 | 9.2 | 15.7 | 40.3 | 48.9 |
+| 16 | 12.8 | 22.5 | 60.4 | 71.1 |
+| 32 | 20.0 | 37.2 | 102.5 | 101.1 |
+
+</details>
+
+### Cost per 1M Output Tokens Across Concurrency
+
+This table prices the closed-loop runs for a fleet of 30 models, each holding the same concurrency: 30 GPUs for the baseline, 15 for naive, 6 for optimal, and 5 for overpack. As above, GPUs are priced at a normalized $1.00 per GPU-hour. Every GPU in a configuration carries the same packing, so $/1M is the GPU-hour price divided by one GPU's output tokens per hour, scaled to one million tokens. Only output tokens are counted.
+
+![Line chart of cost per 1M output tokens as a percentage of the baseline, against concurrency per model from 1 to 32 on a log scale, with a dashed line at 100%; the region below the line is tinted green and the region above it red. Optimal and overpack start near 74% at concurrency 1 and rise above 100% at 32, to 110% and 124%. Naive starts at 78% and stays below 100%, ending at 95%.](../../../assets/img/optimal-packing-sweep-cost.svg)
+
+In the green region below the dashed line, a packed GPU serves each token for less than a dedicated GPU. In the red region above it, packing costs more than giving each model its own GPU.
+
+<details>
+<summary>Cost per 1M output tokens table</summary>
+
+| Concurrency per model | Baseline $/1M | Naive $/1M | Optimal $/1M | Overpack $/1M | Naive vs Baseline | Optimal vs Baseline | Overpack vs Baseline |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | $2.0079 | $1.5628 | $1.4749 | $1.4791 | −22.2% | −26.5% | −26.3% |
+| 2 | $1.0811 | $0.9115 | $0.8025 | $0.7898 | −15.7% | −25.8% | −26.9% |
+| 4 | $0.5961 | $0.4922 | $0.4737 | $0.4647 | −17.4% | −20.5% | −22.0% |
+| 8 | $0.3553 | $0.2966 | $0.3068 | $0.2976 | −16.5% | −13.6% | −16.2% |
+| 16 | $0.2404 | $0.2075 | $0.2272 | $0.2197 | −13.7% | −5.5% | −8.6% |
+| 32 | $0.1846 | $0.1750 | $0.2026 | $0.2288 | −5.2% | +9.7% | +23.9% |
+
+</details>
+
+At one to four requests per model, a dedicated GPU sits mostly idle, and every packing recovers that idle capacity. The optimal and overpack packings are the cheapest there, at 20% to 27% below the baseline and within 1.4 points of each other.
+
+<Warning>
+Overpack's lower $/1M in some rows is not a saving you can take. Overpack does not meet the service requirements, and the optimal packing does. The requirements are a 20-second TTFT ceiling and a 100 ms ITL ceiling at 0.1 req/s per model, with an expected time of at least one hour before the first TTFT violation. At share 0.15, that expected time is about 39 minutes, so the packing procedure rejects overpack. At share 0.20 it is about 13 hours, so the procedure admits the optimal packing. Overpack appears here as the control that shows what one more model per GPU would cost, not as a packing to deploy.
+</Warning>
+
+As concurrency rises, each packed GPU fills up, and splitting it into smaller shares stops paying. At 32 requests per model the optimal packing costs 9.7% more per token than the baseline, and overpack, which is also short of KV cache, costs 23.9% more.
+
+## Reading the Tables
+
+### Two Ways to Hold Load Equal
+
+The two cost tables answer different questions.
+
+- **Fixed traffic per model** holds each model's request rate constant. This is the case the packing procedure is built for: models whose traffic is set by their users, and latency targets each model must meet. The cost advantage of a tighter packing grows with the number of models per GPU, as long as each model still meets its targets.
+- **Fixed concurrency per model** holds each model's in-flight requests constant, so a model on a larger share serves more traffic. Here the configurations converge in cost, because every GPU is doing as much work as it can and the packing only decides how that work is divided.
+
+Choose the table that matches how your traffic arrives.
+
+### Latency Is the Price of a Smaller Share
+
+Every model on a share of 0.20 decodes more slowly than a model on a whole GPU: ITL p50 rises from 7.0 ms to 25.1 ms at one request per model. The packing procedure accounts for this. The share it picks is the smallest at which the targets still hold, so the latency each model pays is the latency its targets allow, and no more. In the closed-loop sweep, the optimal packing stays under the 100 ms ITL target up to 16 requests per model and reaches it at 32. That is past the load the targets were set for.
+
+## Summary
+
+Measure the forward-pass curves once for each model and GPU type, then let each model's targets choose its share. On this GPU, at 0.1 req/s per model with a 20-second TTFT target, that fits five models where an even split fits two. All five met their targets on every request, and the cost of serving each model's traffic fell by 60% compared with the even split and by 80% compared with one model per GPU. When models are instead driven to high concurrency, the configurations converge in cost, and the smaller shares begin to cost throughput.

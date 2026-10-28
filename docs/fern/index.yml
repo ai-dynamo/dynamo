@@ -796,6 +796,8 @@ navigation:
         contents:
           - page: Interpreting GPU Sharing Results
             path: pages/use-cases/gpu-sharing/gpu-sharing-results.mdx
+          - page: Interpreting Optimal Model Packing Results
+            path: pages/use-cases/gpu-sharing/optimal-packing-results.mdx
           - page: Deploy the Baseline Experiment
             path: pages/use-cases/gpu-sharing/deploy-baseline.md
           - page: Deploy the KAI + HAMi Experiment
