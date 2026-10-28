@@ -20,6 +20,7 @@ from dynamo.profiler.utils.config import (
     parse_override_engine_args,
     remove_valued_arguments,
     set_argument_value,
+    set_unique_argument_value,
     setup_worker_component_resources,
     update_image,
     validate_and_get_worker_args,
@@ -260,6 +261,21 @@ def enable_trtllm_chunked_prefill(config: dict) -> dict:
     return config
 
 
+def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[str]:
+    """Restore the Dynamo runtime arguments omitted by AIC engine tuning."""
+    # dynamo.trtllm defaults to aggregated serving, so each worker needs its role.
+    finalized = set_unique_argument_value(
+        break_arguments(args), "--disaggregation-mode", role.value
+    )
+    # The disagg blueprint publishes prefill KV events for the KV router; an
+    # explicit --no-publish-kv-events stays authoritative.
+    if role == SubComponentType.PREFILL and not any(
+        arg in ("--publish-kv-events", "--no-publish-kv-events") for arg in finalized
+    ):
+        finalized = append_argument(finalized, "--publish-kv-events")
+    return finalized
+
+
 class TrtllmConfigModifier(BaseConfigModifier):
     BACKEND = "trtllm"
 
@@ -271,6 +287,33 @@ class TrtllmConfigModifier(BaseConfigModifier):
     def update_image(cls, config, image: str) -> dict:
         """Update container image for all DGD components."""
         return update_image(config, image)
+
+    @classmethod
+    def _apply_disagg_workers(
+        cls,
+        cfg: Config,
+        prefill_cli_args: list[str],
+        prefill_replicas: int,
+        prefill_gpus: int,
+        decode_cli_args: list[str],
+        decode_replicas: int,
+        decode_gpus: int,
+        num_gpus_per_node: int | None = None,
+    ) -> None:
+        super()._apply_disagg_workers(
+            cfg,
+            prefill_cli_args=_finalize_disagg_cli_args(
+                prefill_cli_args, SubComponentType.PREFILL
+            ),
+            prefill_replicas=prefill_replicas,
+            prefill_gpus=prefill_gpus,
+            decode_cli_args=_finalize_disagg_cli_args(
+                decode_cli_args, SubComponentType.DECODE
+            ),
+            decode_replicas=decode_replicas,
+            decode_gpus=decode_gpus,
+            num_gpus_per_node=num_gpus_per_node,
+        )
 
     @classmethod
     def convert_config(

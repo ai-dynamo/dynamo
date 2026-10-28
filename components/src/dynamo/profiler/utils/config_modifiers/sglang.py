@@ -174,6 +174,27 @@ def _normalize_prefill_dp_limits(args: list[str]) -> list[str]:
     )
 
 
+# Disagg blueprint defaults that AIC engine tuning may omit. SGLang binds the
+# prefill bootstrap server to --host, whose default (127.0.0.1) decode workers
+# in other pods cannot reach. dynamo.sglang reserves a bootstrap port itself.
+_DISAGG_DEFAULT_ARGS = (
+    ("--disaggregation-transfer-backend", "nixl"),
+    ("--host", "0.0.0.0"),
+)
+
+
+def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[str]:
+    """Restore the Dynamo runtime arguments omitted by AIC engine tuning."""
+    # SGLang treats a missing --disaggregation-mode as aggregated serving.
+    finalized = set_unique_argument_value(
+        break_arguments(args), "--disaggregation-mode", role.value
+    )
+    for key, value in _DISAGG_DEFAULT_ARGS:
+        if not _has_arg(finalized, key):
+            finalized = append_argument(finalized, [key, value])
+    return finalized
+
+
 class SGLangConfigModifier(BaseConfigModifier):
     BACKEND = "sglang"
 
@@ -204,10 +225,14 @@ class SGLangConfigModifier(BaseConfigModifier):
         )
         super()._apply_disagg_workers(
             cfg,
-            prefill_cli_args=prefill_cli_args,
+            prefill_cli_args=_finalize_disagg_cli_args(
+                prefill_cli_args, SubComponentType.PREFILL
+            ),
             prefill_replicas=prefill_replicas,
             prefill_gpus=prefill_gpus,
-            decode_cli_args=decode_cli_args,
+            decode_cli_args=_finalize_disagg_cli_args(
+                decode_cli_args, SubComponentType.DECODE
+            ),
             decode_replicas=decode_replicas,
             decode_gpus=decode_gpus,
             num_gpus_per_node=num_gpus_per_node,
