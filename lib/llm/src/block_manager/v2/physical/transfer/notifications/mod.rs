@@ -47,6 +47,27 @@ struct OutstandingPollingTransfer<C: CompletionChecker> {
     last_warned_at: Option<Instant>,
 }
 
+/// How long a transfer may stay pending before it is reported as slow.
+const SLOW_TRANSFER_WARN_AFTER: Duration = Duration::from_secs(60);
+/// Minimum time between two slow-transfer warnings for the same transfer.
+const SLOW_TRANSFER_WARN_REPEAT: Duration = Duration::from_secs(30);
+
+/// Returns how long the transfer has been pending when a slow-transfer warning is due.
+///
+/// Shared by the completion handlers. Each handler emits the warning itself so
+/// that the event keeps that handler's module as its tracing target.
+fn slow_transfer_warning_due(
+    arrived_at: Instant,
+    last_warned_at: Option<Instant>,
+) -> Option<Duration> {
+    let elapsed = arrived_at.elapsed();
+    let should_warn = elapsed > SLOW_TRANSFER_WARN_AFTER
+        && last_warned_at
+            .map(|last| last.elapsed() > SLOW_TRANSFER_WARN_REPEAT)
+            .unwrap_or(true);
+    should_warn.then_some(elapsed)
+}
+
 /// Helper function to check if a transfer should be warned about and log the warning.
 /// Returns the new last_warned_at time if a warning was issued.
 fn check_and_warn_slow_transfer(
@@ -54,22 +75,15 @@ fn check_and_warn_slow_transfer(
     arrived_at: Instant,
     last_warned_at: Option<Instant>,
 ) -> Option<Instant> {
-    let elapsed = arrived_at.elapsed();
-    if elapsed > Duration::from_secs(60) {
-        let should_warn = last_warned_at
-            .map(|last| last.elapsed() > Duration::from_secs(30))
-            .unwrap_or(true);
-
-        if should_warn {
-            warn!(
-                uuid = %uuid,
-                elapsed_secs = elapsed.as_secs(),
-                "Transfer has been pending for over 1 minute"
-            );
-            return Some(Instant::now());
-        }
-    }
-    last_warned_at
+    let Some(elapsed) = slow_transfer_warning_due(arrived_at, last_warned_at) else {
+        return last_warned_at;
+    };
+    warn!(
+        uuid = %uuid,
+        elapsed_secs = elapsed.as_secs(),
+        "Transfer has been pending for over 1 minute"
+    );
+    Some(Instant::now())
 }
 
 /// Generic polling-based transfer completion handler.
@@ -172,5 +186,25 @@ pub async fn process_polling_notifications<C: CompletionChecker>(
                 let _ = transfer.done.send(result);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ago(secs: u64) -> Instant {
+        Instant::now()
+            .checked_sub(Duration::from_secs(secs))
+            .expect("monotonic clock is too close to its start for this test")
+    }
+
+    /// Warn after 60 s pending, then at most once per 30 s.
+    #[test]
+    fn slow_transfer_warning_waits_and_throttles() {
+        assert!(slow_transfer_warning_due(ago(59), None).is_none());
+        assert!(slow_transfer_warning_due(ago(61), None).is_some());
+        assert!(slow_transfer_warning_due(ago(61), Some(ago(29))).is_none());
+        assert!(slow_transfer_warning_due(ago(61), Some(ago(31))).is_some());
     }
 }

@@ -36,22 +36,16 @@ fn check_and_warn_slow_transfer(
     arrived_at: Instant,
     last_warned_at: Option<Instant>,
 ) -> Option<Instant> {
-    let elapsed = arrived_at.elapsed();
-    if elapsed > Duration::from_secs(60) {
-        let should_warn = last_warned_at
-            .map(|last| last.elapsed() > Duration::from_secs(30))
-            .unwrap_or(true);
-
-        if should_warn {
-            warn!(
-                uuid = %uuid,
-                elapsed_secs = elapsed.as_secs(),
-                "Transfer has been pending for over 1 minute"
-            );
-            return Some(Instant::now());
-        }
-    }
-    last_warned_at
+    // The warn! stays in this file so the event keeps this module's tracing target.
+    let Some(elapsed) = super::slow_transfer_warning_due(arrived_at, last_warned_at) else {
+        return last_warned_at;
+    };
+    warn!(
+        uuid = %uuid,
+        elapsed_secs = elapsed.as_secs(),
+        "Transfer has been pending for over 1 minute"
+    );
+    Some(Instant::now())
 }
 
 /// NIXL notification-based transfer completion handler.
@@ -184,5 +178,60 @@ pub async fn process_nixl_notification_events(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The slow-transfer warning keeps this module as its tracing target, so a
+    /// per-module log filter on `nixl_events` still selects it.
+    #[test]
+    fn slow_transfer_warning_keeps_nixl_events_target() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let arrived_at = Instant::now()
+            .checked_sub(Duration::from_secs(61))
+            .expect("monotonic clock is too close to its start for this test");
+
+        let warned_at = tracing::subscriber::with_default(subscriber, || {
+            check_and_warn_slow_transfer(&Uuid::new_v4(), arrived_at, None)
+        });
+
+        assert!(warned_at.is_some());
+        let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains(
+                "dynamo_llm::block_manager::v2::physical::transfer::notifications::nixl_events:"
+            ),
+            "{output}"
+        );
+        assert!(
+            output.contains("Transfer has been pending for over 1 minute"),
+            "{output}"
+        );
     }
 }
