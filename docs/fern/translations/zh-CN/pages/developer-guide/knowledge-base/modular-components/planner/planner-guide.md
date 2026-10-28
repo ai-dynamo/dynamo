@@ -282,6 +282,6 @@ planner 通过 `--config /path/to/planner_config.json` 接收其配置，该文�
 
 - [Planner overview](../../../../../../../pages/developer-guide/knowledge-base/modular-components/planner/overview.md) — 为什么 LLM 推理需要不同的 autoscaler
 - [Planner 设计](planner-design.md) — 架构和算法内部机制
-- [DGDR Templates](../../../../../../../pages/recipes/kubernetes-templates/dgdr.mdx) — DGDR YAML 示例、样例配置、高级模式
+- [DGDR Templates](../../../../../../../pages/recipes/examples/dgdr.mdx) — DGDR YAML 示例、样例配置、高级模式
 - [Global Planner Guide](../../../../../../../pages/developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md) — 多 DGD 协调、共享 GPU 预算、单端点多 pool 部署
 - [Profiler Guide](../../../../../../../pages/developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md) — profiling 数据的生成方式

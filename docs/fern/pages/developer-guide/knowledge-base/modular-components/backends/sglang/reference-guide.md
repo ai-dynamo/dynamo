@@ -176,7 +176,7 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 
 ## See Also
 
-- **[Examples](../../../../../recipes/cli-templates/sglang.mdx)**: Local deployment launch scripts
+- **[Examples](../../../../../recipes/examples/overview.mdx)**: Local deployment launch scripts
 - **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer
 - **[Diffusion](../../../../../use-cases/diffusion/overview.md)**: LLM, image, and video diffusion models
 - **[Configuration and Tuning](../../router/configuration-and-tuning.md)**: KV-aware routing configuration

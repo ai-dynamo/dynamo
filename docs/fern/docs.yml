@@ -2359,7 +2359,7 @@ redirects:
   - source: "/dynamo/backends/sg-lang/disaggregation"
     destination: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/disaggregation"
   - source: "/dynamo/backends/sg-lang/examples"
-    destination: "/dynamo/dev/recipes/cli-templates/sg-lang"
+    destination: "/dynamo/dev/recipes/examples/overview"
   - source: "/dynamo/backends/sg-lang/frontend-processor-fallback"
     destination: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/chat-processor"
   - source: "/dynamo/backends/sg-lang/logits-processing"
@@ -2375,7 +2375,7 @@ redirects:
   - source: "/dynamo/backends/tensor-rt-llm/diffusion-experimental"
     destination: "/dynamo/dev/diffusion/overview"
   - source: "/dynamo/backends/tensor-rt-llm/examples"
-    destination: "/dynamo/dev/recipes/cli-templates/tensor-rt-llm"
+    destination: "/dynamo/dev/recipes/examples/overview"
   - source: "/dynamo/backends/tensor-rt-llm/known-issues-and-mitigations"
     destination: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/known-issues"
   - source: "/dynamo/backends/tensor-rt-llm/observability"
@@ -2385,7 +2385,7 @@ redirects:
   - source: "/dynamo/backends/v-llm"
     destination: "/dynamo/dev/knowledge-base/modular-components/backends/v-llm/overview"
   - source: "/dynamo/backends/v-llm/examples"
-    destination: "/dynamo/dev/recipes/cli-templates/v-llm"
+    destination: "/dynamo/dev/recipes/examples/overview"
   - source: "/dynamo/backends/v-llm/frontend-processor-fallback"
     destination: "/dynamo/dev/knowledge-base/modular-components/backends/v-llm/chat-processor"
   - source: "/dynamo/backends/v-llm/kv-cache-offloading"
@@ -2543,7 +2543,7 @@ redirects:
   - source: "/dynamo/kubernetes-deployment/cloud-provider-guides/gcp/gke-setup"
     destination: "/dynamo/dev/kubernetes/installation/managed-kubernetes/gcp/gke-setup"
   - source: "/dynamo/kubernetes-deployment/deploy-models/dgdr-examples"
-    destination: "/dynamo/dev/recipes/kubernetes-templates/dgdr"
+    destination: "/dynamo/dev/recipes/examples/dgdr"
   - source: "/dynamo/kubernetes-deployment/deploy-models/dgdr-reference"
     destination: "/dynamo/dev/kubernetes/auto-deployment/dgdr-walkthrough"
   - source: "/dynamo/kubernetes-deployment/deploy-models/managing-models-with-dynamo-model"
@@ -2588,8 +2588,8 @@ redirects:
     destination: "/dynamo/dev/kubernetes/getting-started/quickstart"
   - source: "/dynamo/kubernetes-deployment/start-here/minikube-setup"
     destination: "/dynamo/dev/cli/installation/minikube-setup"
-  # The Examples reference page was an empty stub and has been removed. Worked, runnable
-  # deployments live in the recipes catalog, so both Examples URLs land there.
+  # The Examples reference page has been removed. Runnable deployments live in the
+  # Recipes tab, so legacy Examples URLs land there.
   - source: "/dynamo/resources/examples"
     destination: "/dynamo/dev/recipes/browse"
   - source: "/dynamo/resources/feature-matrix"
@@ -2771,8 +2771,8 @@ redirects:
     destination: "/dynamo/dev/reference/release-artifacts"
   - source: "/dynamo/dev/getting-started/examples"
     destination: "/dynamo/dev/recipes/browse"
-  # The Examples reference page was an empty stub and is gone; keep its dev URL
-  # serving. No redirect for the Model Storage overview: unlike Examples it is
+  # The Examples reference page is gone; keep its dev URL serving. No redirect for
+  # the Model Storage overview: unlike Examples it is
   # a live 41-line page, still listed at index.yml:110, so redirecting it would
   # bounce readers off working content to the AKS provider guide and make the
   # overview unreachable.
@@ -2885,13 +2885,13 @@ redirects:
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/dgdr-reference"
     destination: "/dynamo/dev/kubernetes/auto-deployment/dgdr-walkthrough"
   - source: "/dynamo/dev/kubernetes/auto-deployment/dgdr-examples"
-    destination: "/dynamo/dev/recipes/kubernetes-templates/dgdr"
+    destination: "/dynamo/dev/recipes/examples/dgdr"
   - source: "/dynamo/dev/recipes/kubernetes-templates/v-llm"
-    destination: "/dynamo/dev/recipes/kubernetes-templates/dgd/v-llm"
+    destination: "/dynamo/dev/recipes/examples/overview"
   - source: "/dynamo/dev/recipes/kubernetes-templates/tensor-rt-llm"
-    destination: "/dynamo/dev/recipes/kubernetes-templates/dgd/tensor-rt-llm"
+    destination: "/dynamo/dev/recipes/examples/overview"
   - source: "/dynamo/dev/recipes/kubernetes-templates/sg-lang"
-    destination: "/dynamo/dev/recipes/kubernetes-templates/dgd/sg-lang"
+    destination: "/dynamo/dev/recipes/examples/overview"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/model-caching"
     destination: "/dynamo/dev/kubernetes/installation/model-storage/overview"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/autoscaling"
@@ -2951,11 +2951,11 @@ redirects:
   - source: "/dynamo/dev/cli/operations/logging"
     destination: "/dynamo/dev/cli/operations/observability"
   - source: "/dynamo/dev/cli/model-deployment/backends/v-llm-deployments"
-    destination: "/dynamo/dev/recipes/cli-templates/v-llm"
+    destination: "/dynamo/dev/recipes/examples/overview"
   - source: "/dynamo/dev/cli/model-deployment/backends/sg-lang-deployments"
-    destination: "/dynamo/dev/recipes/cli-templates/sg-lang"
+    destination: "/dynamo/dev/recipes/examples/overview"
   - source: "/dynamo/dev/cli/model-deployment/backends/trt-llm-deployments"
-    destination: "/dynamo/dev/recipes/cli-templates/tensor-rt-llm"
+    destination: "/dynamo/dev/recipes/examples/overview"
   - source: "/dynamo/dev/cli/model-deployment/kv-cache-offloading/lm-cache-integration"
     destination: "/dynamo/dev/cli/kv-cache-offloading/overview"
   - source: "/dynamo/dev/cli/model-deployment/kv-cache-offloading/hicache-integration"
@@ -3203,6 +3203,38 @@ redirects:
     destination: "/dynamo/dev/advanced-customizations/writing-custom-backends/:slug*"
   - source: "/dynamo/dev/backends/:slug*"
     destination: "/dynamo/dev/knowledge-base/modular-components/backends/:slug*"
+
+  # Platform-first template pages consolidated into the Examples catalog.
+  - source: "/dynamo/dev/recipes/cli-templates/v-llm"
+    destination: "/dynamo/dev/recipes/examples/overview"
+  - source: "/dynamo/dev/recipes/cli-templates/sg-lang"
+    destination: "/dynamo/dev/recipes/examples/overview"
+  - source: "/dynamo/dev/recipes/cli-templates/tensor-rt-llm"
+    destination: "/dynamo/dev/recipes/examples/overview"
+  - source: "/dynamo/dev/recipes/cli-templates/additional-backends"
+    destination: "/dynamo/dev/recipes/examples/overview"
+  - source: "/dynamo/dev/recipes/kubernetes-templates/dgd/v-llm"
+    destination: "/dynamo/dev/recipes/examples/overview"
+  - source: "/dynamo/dev/recipes/kubernetes-templates/dgd/sg-lang"
+    destination: "/dynamo/dev/recipes/examples/overview"
+  - source: "/dynamo/dev/recipes/kubernetes-templates/dgd/tensor-rt-llm"
+    destination: "/dynamo/dev/recipes/examples/overview"
+  - source: "/dynamo/dev/recipes/kubernetes-templates/dgdr"
+    destination: "/dynamo/dev/recipes/examples/dgdr"
+  - source: "/dynamo/dev/recipes/kubernetes-templates/cloud-deployments"
+    destination: "/dynamo/dev/recipes/examples/cloud-deployments"
+  - source: "/dynamo/dev/recipes/kubernetes-templates/integration-deployments"
+    destination: "/dynamo/dev/recipes/examples/overview"
+
+  # Supporting-only example pages are deferred from the deployment catalog.
+  - source: "/dynamo/dev/recipes/examples/cancellation"
+    destination: "/dynamo/dev/recipes/examples/overview"
+  - source: "/dynamo/dev/recipes/examples/chat-templates"
+    destination: "/dynamo/dev/recipes/examples/overview"
+  - source: "/dynamo/dev/recipes/examples/custom-routing"
+    destination: "/dynamo/dev/recipes/examples/overview"
+  - source: "/dynamo/dev/recipes/examples/power-budget"
+    destination: "/dynamo/dev/recipes/examples/overview"
 
 # GitHub repository link in navbar
 navbar-links:

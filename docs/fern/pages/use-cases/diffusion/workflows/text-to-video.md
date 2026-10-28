@@ -266,7 +266,7 @@ curl http://localhost:8000/v1/videos \
 - [Image-to-Video with SGLang](image-to-video.md#sglang)
 - [Text-to-Video with vLLM-Omni](text-to-video.md#vllm-omni)
 - [Text-to-Video with TensorRT-LLM](text-to-video.md#tensorrt-llm)
-- [SGLang Examples](../../../recipes/cli-templates/sglang.mdx)
+- [Deployment Examples](../../../recipes/examples/video-generation.mdx)
 
 </Tab>
 <Tab title="TensorRT-LLM">

@@ -1,0 +1,179 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Video Generation"
+subtitle: "Text-to-video and image-to-video deployments and launch scripts."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+See [Text-to-Video](../../use-cases/diffusion/workflows/text-to-video.md) and
+[Image-to-Video](../../use-cases/diffusion/workflows/image-to-video.md) for request formats.
+
+<Warning>
+**Experimental Kubernetes examples.** T2V and I2V were validated on September 22, 2026 with one
+amd64 H100 80 GB worker each, a Dynamo 1.4.2 frontend/operator, and the digest-pinned custom worker
+image in the manifests. This is not an official release image. It includes both the video
+`response_format` forwarding fix and an FFmpeg RGB-to-YUV color-conversion fix. Do not substitute
+stock 1.4.2 or an arbitrary nightly and assume equivalent results. Keep `--enforce-eager` and
+`runtimeVersionOverride: 1.4.2` on both components as tested.
+
+Replace the cache PVC/subpath and add your cluster’s GPU node selectors before applying.
+`HF_HUB_OFFLINE=1` requires complete model snapshots in the read-only cache; prepare `hf-token-secret`
+with `HF_TOKEN`. Run the two deployments sequentially for a one-GPU budget. Request
+`response_format: "b64_json"` and decode the returned MP4 on the client: `file://` URLs are pod-local.
+These were functional checks, not performance benchmarks; changing infrastructure requires revalidation.
+</Warning>
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-t2v-experimental-yaml", "target": "kubernetes:vllm", "label": "T2V (experimental)", "description": "Wan2.1 T2V 1.3B · patched Dynamo 1.4.2 build"},
+    {"id": "kubernetes-vllm-i2v-experimental-yaml", "target": "kubernetes:vllm", "label": "I2V (experimental)", "description": "Wan2.2 TI2V 5B · patched Dynamo 1.4.2 build"},
+    {"id": "local-sglang-text-to-video-diffusion-sh", "target": "local:sglang", "label": "text-to-video-diffusion.sh", "description": "Text-to-Video Generation"},
+    {"id": "local-trtllm-agg-video-diffusion-sh", "target": "local:trtllm", "label": "agg_video_diffusion.sh", "description": "Text-to-Video Generation"},
+    {"id": "local-vllm-agg-omni-i2v-sh", "target": "local:vllm", "label": "agg_omni_i2v.sh", "description": "Image-to-Video Generation"},
+    {"id": "local-vllm-agg-omni-video-sh", "target": "local:vllm", "label": "agg_omni_video.sh", "description": "Text-to-Video Generation"},
+    {"id": "local-vllm-agg-omni-cosmos3-video-sh", "target": "local:vllm", "label": "agg_omni_cosmos3_video.sh", "description": "Cosmos3 Nano Text-to-Video (experimental)"},
+    {"id": "local-vllm-agg-omni-cosmos3-i2v-sh", "target": "local:vllm", "label": "agg_omni_cosmos3_i2v.sh", "description": "Cosmos3 Nano Image-to-Video (experimental)"},
+    {"id": "local-vllm-agg-omni-minimax-h3-sh", "target": "local:vllm", "label": "agg_omni_minimax_h3.sh", "description": "MiniMax-H3 Text-to-Video with Audio"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-t2v-experimental-yaml">
+
+The validated request used 832×480, 50 inference steps, 33 frames, 16 fps, and seed 42. Four-step runs tested request and output handling only.
+
+[Source: `agg_omni_video.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/experimental/agg_omni_video.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/experimental/agg_omni_video.yaml" title="agg_omni_video.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-i2v-experimental-yaml">
+
+Provide a valid image in `input_reference`. The validated request used 832×480, 50 inference steps,
+33 frames, 16 fps, seed 42, `guidance_scale: 1.0`, `boundary_ratio: 0.875`, and `guidance_scale_2: 1.0`.
+
+<Warning>
+The output retained the input subject but distorted its proportions. This validates video delivery
+and decoding, not general image fidelity or model quality.
+</Warning>
+
+[Source: `agg_omni_i2v.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/experimental/agg_omni_i2v.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/experimental/agg_omni_i2v.yaml" title="agg_omni_i2v.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-text-to-video-diffusion-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/text-to-video-diffusion.sh)
+```
+
+[Source: `text-to-video-diffusion.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/text-to-video-diffusion.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/text-to-video-diffusion.sh" title="text-to-video-diffusion.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-agg-video-diffusion-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/agg_video_diffusion.sh)
+```
+
+[Source: `agg_video_diffusion.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_video_diffusion.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/agg_video_diffusion.sh" title="agg_video_diffusion.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-i2v-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_i2v.sh)
+```
+
+[Source: `agg_omni_i2v.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_i2v.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_i2v.sh" title="agg_omni_i2v.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-video-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_video.sh)
+```
+
+[Source: `agg_omni_video.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_video.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_video.sh" title="agg_omni_video.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-cosmos3-video-sh">
+
+**Prerequisites:** [Cosmos3 README](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/omni/cosmos3/README.md)
+
+**Experimental.** Requires vLLM `0.31.0`, vLLM-Omni `0.31.0rc1`, and the pinned Cosmos3 Nano
+checkpoint. Qualified on one GH200 GPU with `--no-guardrails` and 33-frame, 24 fps, 1280×720
+requests; these are short clips, not Cosmos's native 189-frame default. The wrapper starts the
+shared launcher in video mode.
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_cosmos3_video.sh --no-guardrails)
+```
+
+[Source: `agg_omni_cosmos3_video.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_cosmos3_video.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_cosmos3_video.sh" title="agg_omni_cosmos3_video.sh" language="bash" maxLines={0} />
+
+[Source: `agg_omni_cosmos3.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_cosmos3.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_cosmos3.sh" title="agg_omni_cosmos3.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-cosmos3-i2v-sh">
+
+**Prerequisites:** [Cosmos3 README](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/omni/cosmos3/README.md#animate-a-reference-image)
+
+**Experimental.** Starts the same Cosmos3 Nano video worker as `agg_omni_cosmos3_video.sh`; a
+request's `input_reference` selects image-to-video. Send a client-local image as a data URI:
+worker-local paths and `file://` URLs are rejected. Qualified on one GH200 GPU with
+`--no-guardrails`.
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_cosmos3_i2v.sh --no-guardrails)
+```
+
+[Source: `agg_omni_cosmos3_i2v.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_cosmos3_i2v.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_cosmos3_i2v.sh" title="agg_omni_cosmos3_i2v.sh" language="bash" maxLines={0} />
+
+[Source: `agg_omni_cosmos3.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_cosmos3.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_cosmos3.sh" title="agg_omni_cosmos3.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-minimax-h3-sh">
+
+**Prerequisites:** [MiniMax-H3 workflow](../../use-cases/diffusion/workflows/text-to-video.md#minimax-h3)
+
+Requires four B200 GPUs and the video-audio image overlay described in the workflow.
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_minimax_h3.sh)
+```
+
+[Source: `agg_omni_minimax_h3.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_minimax_h3.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_minimax_h3.sh" title="agg_omni_minimax_h3.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

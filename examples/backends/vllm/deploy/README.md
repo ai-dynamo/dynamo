@@ -339,7 +339,7 @@ args:
 - **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md)
 - **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md)
 - **Global Planner**: [Global Planner Deployment Guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md)
-- **Kubernetes Templates**: [vLLM Deployment Templates](../../../../docs/fern/pages/recipes/kubernetes-templates/dgd/vllm.mdx)
+- **Deployment Examples**: [Examples catalog](../../../../docs/fern/pages/recipes/examples/overview.mdx)
 - **Architecture Docs**: [Disaggregated Serving](../../../../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md), [KV-Aware Routing](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/overview.md)
 
 ## Troubleshooting

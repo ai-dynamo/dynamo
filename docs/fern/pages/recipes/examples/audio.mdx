@@ -1,0 +1,61 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Audio and Realtime Serving"
+subtitle: "Speech-to-speech, transcription, and cascaded voice pipelines."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+For text-to-speech deployments and launch scripts, see [Audio Generation](audio-generation.mdx).
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-nemotron-speech-agg-yaml", "target": "kubernetes:vllm", "label": "Nemotron Speech · agg.yaml", "description": "Cascaded ASR, LLM, and TTS pipeline"},
+    {"id": "local-vllm-agg-omni-realtime-sh", "target": "local:vllm", "label": "agg_omni_realtime.sh", "description": "Realtime Speech-to-Speech"},
+    {"id": "local-vllm-agg-realtime-transcription-sh", "target": "local:vllm", "label": "agg_realtime_transcription.sh", "description": "Qwen3-ASR Realtime Transcription"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-nemotron-speech-agg-yaml">
+
+**Prerequisites:** [Nemotron Speech README](https://github.com/ai-dynamo/dynamo/blob/main/examples/nemotron_speech_cascaded_pipeline/README.md#deploy-on-kubernetes)
+
+Uses three GPUs, NGC access to the ASR and TTS Speech NIM images, and a custom adapter image.
+Published Dynamo 1.5.0 runtime images are not compatible; use compatible source-built images.
+
+[Source: `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/nemotron_speech_cascaded_pipeline/deploy/agg.yaml)
+
+<Code src="../../../../../examples/nemotron_speech_cascaded_pipeline/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-realtime-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_realtime.sh)
+```
+
+[Source: `agg_omni_realtime.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_realtime.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_realtime.sh" title="agg_omni_realtime.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-realtime-transcription-sh">
+
+**Experimental.** Validated with English audio. To serve another realtime-capable model, pass
+`--model` and `--hf-overrides` with its realtime architecture.
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_realtime_transcription.sh)
+```
+
+[Source: `agg_realtime_transcription.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_realtime_transcription.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_realtime_transcription.sh" title="agg_realtime_transcription.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

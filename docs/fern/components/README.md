@@ -32,6 +32,32 @@ Import the component, then place it in the page body. Ambient use without an
 import renders `Unsupported JSX tag`. The `@/` prefix resolves to the `fern/`
 root and is rewritten to a relative path at publish time.
 
+### DiffusionCatalog
+
+The diffusion overview's searchable, filterable card grid. Keep card markup, provider images, and
+the single native sidebar-page link per card in MDX so Fern can rewrite them. The component injects
+scoped styles on the server, including dark mode, keyboard focus, and reduced-motion support. Its
+neutral panels, fields, and pill chips mirror the Reference palette (`ReferenceStyles`, the
+`CompatibilityHero` select, and the `.dynamo-chip-*` tints in `main.css`). Each card's modality
+color marks a 3px top bar, drawn like the site's inset accent bars on recommended recipe rows and
+the active sidebar link, and its type badge. The badge sits top right, a size above the other
+chips, with the main catalog's icon for the destination page; on narrow cards, a container query
+moves it onto its own line. Backend chips carry per-backend tints, experimental entries use the
+dashed-amber badge, and hover and focus states use green.
+`DiffusionCatalogControls` reads the rendered card metadata and visible labels
+for type, backend, provider, weight size, and experimental-status filters. Search includes card
+text, model IDs, and source paths; sorting supports names, labels, and numeric weight sizes. It
+reorders the native cards so keyboard and screen-reader order follow the visual order. All cards
+remain readable without JavaScript, and no model metadata is fetched in the browser.
+
+```mdx
+import { DiffusionCatalog } from "@/components/DiffusionCatalog";
+
+<DiffusionCatalog>
+  {/* Native card markup; see pages/recipes/examples/diffusion-overview.mdx. */}
+</DiffusionCatalog>
+```
+
 ### RecipeStyles
 
 Once per recipe/benchmark page, and on the two landing READMEs, immediately
@@ -161,3 +187,132 @@ refreshed by their own workflows, and need no local step.
   do.
 - Keep backticks out of any string inside a CSS template literal, comments
   included. A raw backtick closes the literal and the file stops compiling.
+
+### ExamplesCatalog
+
+The main Examples overview owns the catalog metadata and its version-aware card links.
+Subsection overview pages mirror only their topic's cards, without the topic label, and pass
+`topicFilter={false}` to drop the single-option Topic filter; tests enforce parity. The component
+adds search and topic/platform/backend filters to either page shape. Each filter is a row of
+toggle chips, like the quickstart selectors: chips in one row combine with OR, rows combine with
+AND, and **All** clears its row. A row with only one option on the page stays hidden. The panel
+ends with the result count, a removable chip for each active selection, and **Reset filters**.
+Options come from the cards' MDX props on the server, so the rows render before hydration. Its
+styles match `DiffusionCatalog`: each topic tints the card's icon tile, topic label, arrow, and
+glow, backend chips reuse the diffusion catalog's tints, and hover and focus states use green.
+Topic chips show the compact labels in `EXAMPLE_TOPIC_SHORT_LABELS`, each a part of the full topic
+label, which stays the accessible name and tooltip. `ExampleTargets` renders an outlined
+Kubernetes or Local / CLI tag for each platform, then one chip per backend with a glyph for each
+platform it runs on, from the card's `platform:backend` pairs. The chips share one flat row, so
+each wraps only when it no longer fits.
+
+```mdx
+import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+import { ExampleTargets } from "@/components/ExampleTargets";
+
+<ExamplesCatalog>
+
+<div className="dynamo-example-card" data-example="aggregated" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="kubernetes:vllm local:vllm" data-keywords="agg.sh agg.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="cube" /></span>
+
+<p className="dynamo-example-topic">Basic Serving</p>
+
+### Aggregated Serving
+
+Frontend and aggregated workers.
+
+<ExampleTargets targets="kubernetes:vllm local:vllm" />
+
+<a className="dynamo-example-card-link" href="aggregated.mdx">Open Aggregated Serving example</a>
+
+</div>
+
+</ExamplesCatalog>
+```
+
+See [Authoring Examples](../pages/recipes/examples/_catalog/README.md) for the card contract.
+
+### ExampleSelector
+
+Use once on a deployment example page. Each option names a DGD/DGDR or launch-script source bundle; the component
+selects the platform, backend, and (when there are multiple choices) the example in one panel.
+It reuses the local installation selector's styles and leaves the selected source blocks open.
+
+```mdx
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-agg", "target": "kubernetes:vllm", "label": "agg.yaml", "description": "Aggregated serving"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg">
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+</ExampleSelector>
+```
+
+Keep source blocks and links in MDX, rather than passing their contents through component props.
+The first valid target is open in the server-rendered HTML; changing a row switches the source
+bundle in place. Unavailable backend/platform combinations cannot be selected.
+
+Only deployment manifests and launch scripts belong in the picker. Supporting files stay out of the
+selector and its code blocks for now. Singleton rows use the selected button style, not plain text;
+clicking an already-selected axis does not reset the example choice.
+
+Every embedded YAML manifest renders through `DeploymentCustomizer` (below), so example pages need
+no extra markup for it.
+
+### DeploymentCustomizer
+
+Tailors a Kubernetes manifest in the browser. Readers choose the model (any Hugging Face ID, or a
+suggestion), the image registry and tag, replicas, GPUs, and nodes per component, environment
+variables, a shared model-cache PVC with a download Job, and how the Hugging Face token Secret is
+created. The viewer highlights YAML and shell, marks changed lines, shows a diff, and copies or
+downloads each output: the edited manifest, any generated Secret or `model-cache.yaml`, and deploy
+steps. Edits rewrite only the lines they touch, so comments, key order, and quoting survive.
+
+The customizer reads the manifest from the `CodeBlock` element Fern renders for a `<Code src>`
+embed. The source therefore stays a native embed: Fern resolves the file for each docs version, and
+the page's Markdown twin keeps the original file. If a manifest cannot be read or customized, the
+native code block renders instead.
+
+A paragraph holding only a link to the embedded file, such as
+``[Source: `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/…/agg.yaml)`` directly before
+the embed, moves into the customizer header. The URL path must end with the embed's `title`, so
+other links stay in place, and the paragraph renders again on fallback.
+
+The panel keeps the model, image, scale, template variables, and deploy names in view. The model
+cache, token Secret, environment variables, and file bundling sit under **Additional options**,
+closed by default, which lists its sections and counts changed ones. Scale, variables, model cache,
+and environment variables collapse to a one-line summary. Environment variables, and scale tables
+with more than four components, start collapsed.
+
+`ExampleSelector` wraps its bundles in `DeploymentCustomizerProvider`, so model, image, storage,
+and Secret choices, and which sections are open, carry across the bundles on a page; replicas,
+environment variables, and names stay per manifest. Outside `ExampleSelector`, wrap a YAML embed
+directly; other content inside the wrapper renders as written:
+
+```mdx
+import { DeploymentCustomizer } from "@/components/DeploymentCustomizer";
+
+<DeploymentCustomizer>
+
+[Source: `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+
+</DeploymentCustomizer>
+```
+
+`deployment-customizer.ts` holds the manifest engine: the YAML line model, analysis, the
+transform, generated files, highlighting, and the line diff. Keep it import-free:
+`docs/tests/test_deployment_customizer.py` runs it with Node against every embedded manifest and
+checks the results with PyYAML. `deployment-customizer-data.ts` holds the model suggestions and
+derives image tags and published repositories from `releases.data.ts`. Styles live in
+`DeploymentCustomizerStyles.tsx`.

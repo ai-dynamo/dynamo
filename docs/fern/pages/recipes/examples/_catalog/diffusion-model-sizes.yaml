@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Metadata snapshot for the overview's weight-size chips, not runtime VRAM.
+# Update the snapshot and the MDX chips together if the checkpoint selection changes.
+
+recorded_on: '2026-09-23'
+unit: decimal GB (1 GB = 1000000000 bytes)
+basis: Sum of safetensors checkpoint files, including text encoders, VAE and speech tokenizer where present.
+  Diffusers pipeline files exclude duplicate root-level single-file exports. Not GPU memory or a download-size
+  guarantee for every backend.
+provider_logos:
+  black-forest-labs:
+    asset: docs/fern/assets/img/recipes/providers/black-forest-labs.webp
+    source: https://cdn-avatars.huggingface.co/v1/production/uploads/633f7a8f4be90e06da248e0f/m5YoF33abJ09vcwFxt1Mj.png
+    organization_metadata: https://huggingface.co/api/organizations/black-forest-labs/overview
+  inclusionAI:
+    asset: docs/fern/assets/img/recipes/providers/inclusionai.webp
+    source: https://cdn-avatars.huggingface.co/v1/production/uploads/662e1f9da266499277937d33/fyKuazRifqiaIO34xrhhm.jpeg
+    organization_metadata: https://huggingface.co/api/organizations/inclusionAI/overview
+  Wan-AI:
+    asset: docs/fern/assets/img/recipes/providers/wan-ai.webp
+    source: https://cdn-avatars.huggingface.co/v1/production/uploads/67b610677ea7952def8b29c6/N6jQbbeaa_FcUY-wI1dgG.png
+    organization_metadata: https://huggingface.co/api/organizations/Wan-AI/overview
+models:
+  Qwen/Qwen-Image:
+    revision: 75e0b4be04f60ec59a75f475837eced720f823b6
+    source: https://huggingface.co/Qwen/Qwen-Image/tree/75e0b4be04f60ec59a75f475837eced720f823b6
+    size_bytes: 57699249390
+    size_gb: 57.7
+    files:
+      text_encoder/model-00001-of-00004.safetensors: 4968243304
+      text_encoder/model-00002-of-00004.safetensors: 4991495816
+      text_encoder/model-00003-of-00004.safetensors: 4932751040
+      text_encoder/model-00004-of-00004.safetensors: 1691924384
+      transformer/diffusion_pytorch_model-00001-of-00009.safetensors: 4989364312
+      transformer/diffusion_pytorch_model-00002-of-00009.safetensors: 4984214160
+      transformer/diffusion_pytorch_model-00003-of-00009.safetensors: 4946470000
+      transformer/diffusion_pytorch_model-00004-of-00009.safetensors: 4984213736
+      transformer/diffusion_pytorch_model-00005-of-00009.safetensors: 4946471896
+      transformer/diffusion_pytorch_model-00006-of-00009.safetensors: 4946451560
+      transformer/diffusion_pytorch_model-00007-of-00009.safetensors: 4908690520
+      transformer/diffusion_pytorch_model-00008-of-00009.safetensors: 4984232856
+      transformer/diffusion_pytorch_model-00009-of-00009.safetensors: 1170918840
+      vae/diffusion_pytorch_model.safetensors: 253806966
+  Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice:
+    revision: 0c0e3051f131929182e2c023b9537f8b1c68adfe
+    source: https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/tree/0c0e3051f131929182e2c023b9537f8b1c68adfe
+    size_bytes: 4515695644
+    size_gb: 4.5
+    files:
+      model.safetensors: 3833402552
+      speech_tokenizer/model.safetensors: 682293092
+  Wan-AI/Wan2.1-T2V-1.3B-Diffusers:
+    revision: 0fad780a534b6463e45facd96134c9f345acfa5b
+    source: https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/tree/0fad780a534b6463e45facd96134c9f345acfa5b
+    size_bytes: 28907334284
+    size_gb: 28.9
+    files:
+      text_encoder/model-00001-of-00005.safetensors: 4972389712
+      text_encoder/model-00002-of-00005.safetensors: 4899225672
+      text_encoder/model-00003-of-00005.safetensors: 4966309504
+      text_encoder/model-00004-of-00005.safetensors: 4999880704
+      text_encoder/model-00005-of-00005.safetensors: 2885866152
+      transformer/diffusion_pytorch_model-00001-of-00002.safetensors: 4998781576
+      transformer/diffusion_pytorch_model-00002-of-00002.safetensors: 677289072
+      vae/diffusion_pytorch_model.safetensors: 507591892
+  Wan-AI/Wan2.2-TI2V-5B-Diffusers:
+    revision: b8fff7315c768468a5333511427288870b2e9635
+    source: https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/tree/b8fff7315c768468a5333511427288870b2e9635
+    size_bytes: 34179863648
+    size_gb: 34.2
+    files:
+      text_encoder/model-00001-of-00003.safetensors: 4935812536
+      text_encoder/model-00002-of-00003.safetensors: 4983103192
+      text_encoder/model-00003-of-00003.safetensors: 1442935480
+      transformer/diffusion_pytorch_model-00001-of-00005.safetensors: 4978254344
+      transformer/diffusion_pytorch_model-00002-of-00005.safetensors: 4846784976
+      transformer/diffusion_pytorch_model-00003-of-00005.safetensors: 4972658392
+      transformer/diffusion_pytorch_model-00004-of-00005.safetensors: 4846785080
+      transformer/diffusion_pytorch_model-00005-of-00005.safetensors: 354751840
+      vae/diffusion_pytorch_model.safetensors: 2818777808
+  black-forest-labs/FLUX.1-schnell:
+    revision: 741f7c3ce8b383c54771c7003378a50191e9efe9
+    source: https://huggingface.co/black-forest-labs/FLUX.1-schnell/tree/741f7c3ce8b383c54771c7003378a50191e9efe9
+    size_bytes: 33720953870
+    size_gb: 33.7
+    files:
+      text_encoder/model.safetensors: 246144352
+      text_encoder_2/model-00001-of-00002.safetensors: 4994582224
+      text_encoder_2/model-00002-of-00002.safetensors: 4530066360
+      transformer/diffusion_pytorch_model-00001-of-00003.safetensors: 9962580296
+      transformer/diffusion_pytorch_model-00002-of-00003.safetensors: 9949328904
+      transformer/diffusion_pytorch_model-00003-of-00003.safetensors: 3870584832
+      vae/diffusion_pytorch_model.safetensors: 167666902
+  black-forest-labs/FLUX.2-klein-4B:
+    revision: e7b7dc27f91deacad38e78976d1f2b499d76a294
+    source: https://huggingface.co/black-forest-labs/FLUX.2-klein-4B/tree/e7b7dc27f91deacad38e78976d1f2b499d76a294
+    size_bytes: 15964212614
+    size_gb: 16.0
+    files:
+      text_encoder/model-00001-of-00002.safetensors: 4967215360
+      text_encoder/model-00002-of-00002.safetensors: 3077766632
+      transformer/diffusion_pytorch_model.safetensors: 7751109744
+      vae/diffusion_pytorch_model.safetensors: 168120878
+  inclusionAI/LLaDA2.0-mini-preview:
+    revision: 98062a17531adc03f0334d1e81d9be24b3865b2b
+    source: https://huggingface.co/inclusionAI/LLaDA2.0-mini-preview/tree/98062a17531adc03f0334d1e81d9be24b3865b2b
+    size_bytes: 32513122520
+    size_gb: 32.5
+    files:
+      model-00001-of-00007.safetensors: 4999889080
+      model-00002-of-00007.safetensors: 4998882664
+      model-00003-of-00007.safetensors: 4998882664
+      model-00004-of-00007.safetensors: 4998884840
+      model-00005-of-00007.safetensors: 4998885040
+      model-00006-of-00007.safetensors: 4998885040
+      model-00007-of-00007.safetensors: 2518813192

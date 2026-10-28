@@ -1,0 +1,143 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Image Generation"
+subtitle: "Image-generation deployments and launch scripts across three backends."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+The Kubernetes manifests were functionally validated on September 10, 2026 with one H100 GPU and
+Dynamo 1.4.2 serving images and operator; these are correctness checks, not performance benchmarks.
+Use matching 1.4.2 runtime images, and request `response_format: "b64_json"` because the
+`file:///tmp/dynamo_media` storage in these examples is pod-local. See
+[Text-to-Image](../../use-cases/diffusion/workflows/text-to-image.md) for requests.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-sglang-agg-image-diffusion-yaml", "target": "kubernetes:sglang", "label": "agg_image_diffusion.yaml", "description": "FLUX.1-schnell · validated on Dynamo 1.4.2"},
+    {"id": "kubernetes-trtllm-agg-image-diffusion-yaml", "target": "kubernetes:trtllm", "label": "agg_image_diffusion.yaml", "description": "FLUX.2-klein-4B · validated on Dynamo 1.4.2"},
+    {"id": "kubernetes-vllm-agg-omni-image-yaml", "target": "kubernetes:vllm", "label": "agg_omni_image.yaml", "description": "Qwen-Image · validated on Dynamo 1.4.2"},
+    {"id": "local-sglang-image-diffusion-sh", "target": "local:sglang", "label": "image_diffusion.sh", "description": "Text-to-Image Generation"},
+    {"id": "local-trtllm-agg-image-diffusion-sh", "target": "local:trtllm", "label": "agg_image_diffusion.sh", "description": "Text-to-Image Generation"},
+    {"id": "local-vllm-agg-omni-image-sh", "target": "local:vllm", "label": "agg_omni_image.sh", "description": "Text-to-Image Generation"},
+    {"id": "local-vllm-disagg-omni-glm-image-sh", "target": "local:vllm", "label": "disagg_omni_glm_image.sh", "description": "Two-Stage GLM-Image Generation"},
+    {"id": "local-vllm-disagg-omni-glm-image-nixl-sh", "target": "local:vllm", "label": "disagg_omni_glm_image_nixl.sh", "description": "Cross-Node GLM-Image with NIXL"},
+    {"id": "local-vllm-agg-omni-cosmos3-image-sh", "target": "local:vllm", "label": "agg_omni_cosmos3_image.sh", "description": "Cosmos3 Nano Text-to-Image (experimental)"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-agg-image-diffusion-yaml">
+
+Keep `shareProcessNamespace: true` for the tested SGLang runtime; it prevents the worker from treating PID 1 as a dead parent.
+
+[Source: `agg_image_diffusion.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_image_diffusion.yaml)
+
+<Code src="../../../../../examples/backends/sglang/deploy/agg_image_diffusion.yaml" title="agg_image_diffusion.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-trtllm-agg-image-diffusion-yaml">
+
+The functional check used a 256×256 image with 10 inference steps.
+
+[Source: `agg_image_diffusion.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/agg_image_diffusion.yaml)
+
+<Code src="../../../../../examples/backends/trtllm/deploy/agg_image_diffusion.yaml" title="agg_image_diffusion.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-omni-image-yaml">
+
+The visual check used a 512×512 image with 20 inference steps.
+
+[Source: `agg_omni_image.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_omni_image.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg_omni_image.yaml" title="agg_omni_image.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-image-diffusion-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/image_diffusion.sh)
+```
+
+[Source: `image_diffusion.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/image_diffusion.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/image_diffusion.sh" title="image_diffusion.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-agg-image-diffusion-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/agg_image_diffusion.sh)
+```
+
+[Source: `agg_image_diffusion.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_image_diffusion.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/agg_image_diffusion.sh" title="agg_image_diffusion.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-image-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_image.sh)
+```
+
+[Source: `agg_omni_image.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_image.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_image.sh" title="agg_omni_image.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-omni-glm-image-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_omni_glm_image.sh)
+```
+
+[Source: `disagg_omni_glm_image.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_omni_glm_image.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_omni_glm_image.sh" title="disagg_omni_glm_image.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-omni-glm-image-nixl-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_omni_glm_image_nixl.sh)
+```
+
+[Source: `disagg_omni_glm_image_nixl.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_omni_glm_image_nixl.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_omni_glm_image_nixl.sh" title="disagg_omni_glm_image_nixl.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-cosmos3-image-sh">
+
+**Prerequisites:** [Cosmos3 README](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/omni/cosmos3/README.md)
+
+**Experimental.** Requires vLLM `0.31.0`, vLLM-Omni `0.31.0rc1`, and the pinned Cosmos3 Nano
+checkpoint. Qualified on one GH200 GPU with `--no-guardrails`, which skips the optional Cosmos
+guardrail models. The wrapper starts the shared launcher in image mode.
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_cosmos3_image.sh --no-guardrails)
+```
+
+[Source: `agg_omni_cosmos3_image.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_cosmos3_image.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_cosmos3_image.sh" title="agg_omni_cosmos3_image.sh" language="bash" maxLines={0} />
+
+[Source: `agg_omni_cosmos3.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_cosmos3.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_cosmos3.sh" title="agg_omni_cosmos3.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

@@ -172,10 +172,10 @@ spec:
 
 You can then use `s3://hf-models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B` as your Dataset mount.
 
-<!--
+{/*
 Maintenance: The DynamoGraphDeployment examples below use the legacy v1alpha1 API and are stale.
 Track their update or removal in GitHub issue #13852.
--->
+*/}
 
 ## Usage with Dynamo
 

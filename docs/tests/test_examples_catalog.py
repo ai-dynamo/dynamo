@@ -1,0 +1,1045 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+import pytest
+import yaml
+
+pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
+ROOT = Path(__file__).resolve().parents[2]
+FERN = ROOT / "docs/fern"
+EXAMPLES = FERN / "pages/recipes/examples"
+SECTION_OVERVIEWS = {
+    "basic-serving-overview": "basic-serving",
+    "routing-overview": "routing",
+    "kv-cache-offloading-overview": "kv-cache-offloading",
+    "multimodal-serving-overview": "multimodal-serving",
+    "workloads-overview": "workloads",
+    "autoscaling-and-budgets-overview": "autoscaling-and-budgets",
+    "observability-and-recovery-overview": "observability-and-recovery",
+    "cloud-and-integrations-overview": "cloud-and-integrations",
+    "development-examples-overview": "development-examples",
+}
+LANDING_PAGES = {"overview", "diffusion-overview", *SECTION_OVERVIEWS}
+EMBED = re.compile(r'<Code\s+src="([^"]+)"')
+CARD = re.compile(r'<div className="dynamo-example-card" ([^>]+)>')
+CARD_BLOCK = re.compile(
+    r'<div className="dynamo-example-card" ([^>]+)>\n(.*?)\n</div>\n', re.DOTALL
+)
+# Blank lines keep each part a separate MDX block, which Fern needs to resolve
+# the card link. The link stays out of the heading because Fern's heading click
+# handler copies the heading anchor instead of following a link inside it.
+CARD_BODY = re.compile(
+    r'\n<span className="dynamo-example-icon"><Icon icon="(?P<icon>[a-z0-9-]+)" /></span>\n\n'
+    r'(?:<p className="dynamo-example-topic">(?P<topic>[^<]+)</p>\n\n)?'
+    r"### (?P<title>[^\n\[\]<>]+)\n\n"
+    r"(?P<description>[^\n<]+)\n\n"
+    r'<ExampleTargets targets="(?P<targets>[^"]+)" />\n\n'
+    r'<a className="dynamo-example-card-link" href="(?P<href>[^"]+)">(?P<link>[^<]+)</a>\n'
+)
+ATTRIBUTE = re.compile(r'([\w-]+)="([^"]*)"')
+
+
+def cards() -> dict[str, dict[str, str]]:
+    result = {}
+    for match in CARD.finditer((EXAMPLES / "overview.mdx").read_text()):
+        attributes = dict(ATTRIBUTE.findall(match[1]))
+        key = attributes["data-example"]
+        assert key not in result, f"duplicate catalog card: {key}"
+        result[key] = attributes
+    assert result, "empty examples catalog"
+    return result
+
+
+def card_blocks(page: Path) -> list[tuple[dict[str, str], str]]:
+    text = page.read_text()
+    blocks = [
+        (dict(ATTRIBUTE.findall(attributes)), body)
+        for attributes, body in CARD_BLOCK.findall(text)
+    ]
+    assert len(blocks) == len(CARD.findall(text)), page
+    return blocks
+
+
+def embeds(page: Path) -> set[Path]:
+    return {(page.parent / src).resolve() for src in EMBED.findall(page.read_text())}
+
+
+def all_embeds() -> set[Path]:
+    return {asset for page in EXAMPLES.glob("*.mdx") for asset in embeds(page)}
+
+
+def navigation_paths(node: object) -> set[str]:
+    if isinstance(node, dict):
+        own = {node["path"]} if isinstance(node.get("path"), str) else set()
+        return own | {
+            path for value in node.values() for path in navigation_paths(value)
+        }
+    if isinstance(node, list):
+        return {path for value in node for path in navigation_paths(value)}
+    return set()
+
+
+def test_catalog_pages_and_navigation_agree() -> None:
+    catalog = cards()
+    pages = {page.stem for page in EXAMPLES.glob("*.mdx")} - LANDING_PAGES
+    assert set(catalog) == pages
+    nav = yaml.safe_load((FERN / "index.yml").read_text())
+    paths = navigation_paths(nav)
+    overview = (EXAMPLES / "overview.mdx").read_text()
+    for name in pages:
+        assert f"pages/recipes/examples/{name}.mdx" in paths
+        assert f'<a className="dynamo-example-card-link" href="{name}.mdx">' in overview
+    for name in LANDING_PAGES:
+        assert f"pages/recipes/examples/{name}.mdx" in paths
+    assert "[Diffusion Overview](diffusion-overview.mdx)" in overview
+    assert not any(
+        "cli-templates/" in path or "kubernetes-templates/" in path for path in paths
+    )
+
+
+def test_subsection_overviews_mirror_the_main_catalog_cards() -> None:
+    # Only the mixed-topic main overview labels each card with its topic.
+    def without_topic(attributes: dict[str, str], body: str) -> str:
+        label = f'<p className="dynamo-example-topic">{attributes["data-topic-label"]}</p>\n\n'
+        assert body.count(label) == 1, attributes["data-example"]
+        return body.replace(label, "")
+
+    source = EXAMPLES / "overview.mdx"
+    assert source.read_text().count("<ExamplesCatalog>") == 1
+    source_cards = {
+        attributes["data-example"]: (attributes, without_topic(attributes, body))
+        for attributes, body in card_blocks(source)
+    }
+    assert set(source_cards) == set(cards())
+
+    nav = yaml.safe_load((FERN / "index.yml").read_text())
+    recipes = next(item for item in nav["navigation"] if item.get("tab") == "recipes")
+    examples = next(
+        item for item in recipes["layout"] if item.get("section") == "Examples"
+    )
+    sections = {
+        item["section"]: item
+        for item in examples["contents"]
+        if item.get("section") and item["section"] != "Diffusion"
+    }
+    assert len(sections) == len(SECTION_OVERVIEWS)
+
+    mirrored = set()
+    for page_name, topic in SECTION_OVERVIEWS.items():
+        page = EXAMPLES / f"{page_name}.mdx"
+        text = page.read_text()
+        # A single-topic page hides the Topic filter, as it does the topic label.
+        assert text.count("<ExamplesCatalog topicFilter={false}>") == 1
+        assert "dynamo-example-topic" not in text
+        entries = card_blocks(page)
+        expected = {
+            name: card
+            for name, card in source_cards.items()
+            if card[0]["data-topic"] == topic
+        }
+        assert entries
+        assert {entry[0]["data-example"] for entry in entries} == set(expected)
+        for attributes, body in entries:
+            name = attributes["data-example"]
+            assert (attributes, body) == expected[name]
+            assert name not in mirrored
+            mirrored.add(name)
+
+        section = next(
+            section
+            for section in sections.values()
+            if section["contents"][0]["path"]
+            == f"pages/recipes/examples/{page_name}.mdx"
+        )
+        assert section["contents"][0] == {
+            "page": "Overview",
+            "path": f"pages/recipes/examples/{page_name}.mdx",
+            "slug": topic,
+        }
+
+    assert mirrored == {
+        name
+        for name, metadata in cards().items()
+        if metadata["data-topic"] != "diffusion"
+    }
+
+
+@pytest.mark.parametrize("page_name", ["overview", *SECTION_OVERVIEWS])
+def test_catalog_cards_share_the_icon_chip_and_link_layout(page_name: str) -> None:
+    page = EXAMPLES / f"{page_name}.mdx"
+    text = page.read_text()
+    assert 'import { ExampleTargets } from "@/components/ExampleTargets";' in text
+    for retired in ("dynamo-example-eyebrow", "dynamo-example-badges", "· Example"):
+        assert retired not in text, retired
+    icons: dict[str, list[str]] = {}
+    for attributes, body in card_blocks(page):
+        name = attributes["data-example"]
+        card = CARD_BODY.fullmatch(body)
+        assert card, f"{page_name}: {name}"
+        assert card["targets"] == attributes["data-targets"], name
+        assert card["href"] == f"{name}.mdx", name
+        assert card["link"] == f"Open {card['title']} example", name
+        assert card["topic"] == (
+            attributes["data-topic-label"] if page_name == "overview" else None
+        ), name
+        icons.setdefault(attributes["data-topic"], []).append(card["icon"])
+    for topic, names in icons.items():
+        # Cards that share a topic page need distinguishable icons.
+        assert len(names) == len(set(names)), (page_name, topic)
+
+
+def test_card_chips_cover_every_declared_backend_and_platform() -> None:
+    options = (FERN / "components/example-options.ts").read_text()
+
+    def keys(name: str) -> set[str]:
+        (block,) = re.findall(
+            rf"export const {name}: Record<string, string> = \{{(.*?)\}};",
+            options,
+            re.DOTALL,
+        )
+        return set(re.findall(r"^\s*(\w+):", block, re.MULTILINE))
+
+    backends, platforms = keys("EXAMPLE_BACKENDS"), keys("EXAMPLE_PLATFORMS")
+    targets = [
+        target.split(":")
+        for card in cards().values()
+        for target in card["data-targets"].split()
+    ]
+    assert {backend for _, backend in targets} <= backends
+    assert {platform for platform, _ in targets} == platforms
+    chips = (FERN / "components/ExampleTargets.tsx").read_text()
+    for platform in platforms:
+        assert re.search(rf"^\s*{platform}: \(", chips, re.MULTILINE), platform
+    assert 'className="dynamo-example-sr"' in chips
+    assert 'aria-hidden="true"' in chips
+    # Each card tags its platforms, then every backend chip carries the glyphs
+    # of its platforms. One flat row lets each chip wrap only when it must.
+    assert "data-platform={platform}" in chips
+    assert "partial" not in chips
+    assert "dynamo-example-chip-group" not in chips
+    styles = (FERN / "components/ExamplesCatalog.tsx").read_text()
+    assert ".dynamo-example-chip[data-platform]" in styles
+    # Inference engines get the diffusion catalog's tints; test backends stay neutral.
+    for backend in backends - {"mocker", "sample", "custom"}:
+        assert f'.dynamo-example-chip[data-backend="{backend}"]' in styles, backend
+
+
+def test_examples_catalog_is_styled_accessible_and_responsive() -> None:
+    component = (FERN / "components/ExamplesCatalog.tsx").read_text()
+    # Development examples keep the neutral default accent.
+    for topic in {card["data-topic"] for card in cards().values()} - {
+        "development-examples"
+    }:
+        assert f'.dynamo-example-card[data-topic="{topic}"]' in component, topic
+    assert ".dark .dynamo-examples" in component
+    assert ".dynamo-example-card-link:focus-visible" in component
+    assert "prefers-reduced-motion" in component
+    assert "@media (max-width:" in component
+    assert ".dynamo-example-card[hidden] { display: none !important; }" in component
+    assert 'role="search"' in component
+    assert 'aria-atomic="true"' in component
+    assert "topicFilter = true" in component
+    assert "<PlatformGlyph" in component
+    assert "dynamo-example-eyebrow" not in component
+    assert "dynamo-example-badges" not in component
+
+
+def test_examples_catalog_filters_are_multi_select_chip_rows() -> None:
+    component = (FERN / "components/ExamplesCatalog.tsx").read_text()
+    # Toggle chips like the quickstart selectors replace single-choice dropdowns.
+    assert "<select" not in component
+    assert 'className="dynamo-example-option"' in component
+    assert "aria-pressed={selected[key].includes(value)}" in component
+    assert "aria-pressed={selected[key].length === 0}" in component
+    assert 'role="group"' in component
+    # Options within a row widen the match; a single-option row cannot narrow it.
+    assert "platform.includes(targetPlatform)" in component
+    assert "backend.includes(targetBackend)" in component
+    assert "options[key].length > 1" in component
+    # The count, removable active-filter chips, and reset live inside the panel,
+    # which drops the separate results row and its platform-glyph legend.
+    controls = component[component.index('className="dynamo-example-controls"') :]
+    controls = controls[: controls.index('className="dynamo-example-grid"')]
+    for part in (
+        'className="dynamo-example-summary"',
+        'className="dynamo-example-active-chip"',
+        "aria-label={`Remove ${FILTER_LABELS[key]} filter: ${label}`}",
+        'className="dynamo-example-reset"',
+    ):
+        assert part in controls, part
+    for retired in ("dynamo-example-results", "dynamo-example-legend"):
+        assert retired not in component, retired
+    # Options render on the server from the MDX card props, through Fern's wrappers.
+    assert "metadataFromChildren(props.children" in component
+
+
+def test_topic_filter_chips_use_short_labels_within_the_full_name() -> None:
+    options = (FERN / "components/example-options.ts").read_text()
+    (block,) = re.findall(
+        r"export const EXAMPLE_TOPIC_SHORT_LABELS: Record<string, string> = \{(.*?)\};",
+        options,
+        re.DOTALL,
+    )
+    short = dict(re.findall(r'^\s*"?([\w-]+)"?: "([^"]+)",', block, re.MULTILINE))
+    topics = {card["data-topic"]: card["data-topic-label"] for card in cards().values()}
+    assert set(short) == set(topics)
+    for topic, label in topics.items():
+        # The visible text stays part of the full accessible name.
+        assert short[topic] in label, topic
+        assert len(short[topic]) <= len(label), topic
+
+
+def variants(page: Path) -> list[dict[str, str]]:
+    match = re.search(
+        r"<ExampleSelector\s+variants=\{(\[.*?\])\}\s*>", page.read_text(), re.DOTALL
+    )
+    assert match, f"missing unified selector: {page}"
+    return json.loads(match[1])
+
+
+def test_card_targets_match_available_page_variants() -> None:
+    for name, metadata in cards().items():
+        page = EXAMPLES / f"{name}.mdx"
+        targets = metadata["data-targets"].split()
+        assert len(targets) == len(set(targets)), name
+        actual = {variant["target"] for variant in variants(page)}
+        assert set(targets) == actual, name
+        assert all(
+            re.fullmatch(r"(local|kubernetes):[a-z]+", target) for target in targets
+        ), name
+        assert metadata["data-topic"] and metadata["data-topic-label"], name
+
+
+def test_each_selector_option_has_one_native_source_bundle() -> None:
+    for name in cards():
+        page = EXAMPLES / f"{name}.mdx"
+        text = page.read_text()
+        options = variants(page)
+        ids = [option["id"] for option in options]
+        blocks = re.findall(
+            r'<div className="dynamo-example-variant" data-example-variant="([^"]+)">(.*?)</div>',
+            text,
+            re.DOTALL,
+        )
+        assert len(ids) == len(set(ids)), name
+        assert len(blocks) == len(ids), name
+        assert {key for key, _ in blocks} == set(ids), name
+        for key, body in blocks:
+            assert EMBED.search(body), (name, key)
+        assert all(re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", key) for key in ids), name
+        assert all(
+            option["label"] and option["description"] for option in options
+        ), name
+        assert not re.search(r"</?(?:Tabs?|Accordion(?:Group)?)\b", text), name
+        assert text.count("<ExampleSelector") == 1, name
+        assert "hide-toc: true" in text, name
+
+
+def test_unified_selector_options_are_distinguishable_per_target() -> None:
+    for name in cards():
+        options = variants(EXAMPLES / f"{name}.mdx")
+        keys = [(option["target"], option["label"]) for option in options]
+        assert len(keys) == len(set(keys)), name
+
+
+def test_example_pages_share_the_toc_less_article_alignment_fix() -> None:
+    styles = (FERN / "components/examples-layout.ts").read_text()
+    assert ".fern-layout-guide > article" in styles
+    assert "margin-left: 0 !important" in styles
+    assert "margin-right: auto !important" in styles
+    assert "--content-width:" not in styles
+    assert "--page-width:" not in styles
+    for component in ["ExamplesCatalog.tsx", "ExampleSelector.tsx"]:
+        assert "EXAMPLES_LAYOUT_CSS" in (FERN / "components" / component).read_text()
+
+
+def test_sparse_target_combinations_are_not_invented() -> None:
+    catalog = cards()
+    assert set(catalog["lora"]["data-targets"].split()) == {
+        "local:sglang",
+        "local:vllm",
+        "kubernetes:vllm",
+    }
+    assert (
+        "kubernetes:sglang"
+        not in catalog["disaggregated-kv-routing"]["data-targets"].split()
+    )
+    assert set(catalog["embeddings"]["data-targets"].split()) == {
+        "kubernetes:sglang",
+        "local:sglang",
+        "local:vllm",
+    }
+    six_targets = {
+        f"{platform}:{backend}"
+        for platform in ["local", "kubernetes"]
+        for backend in ["vllm", "sglang", "trtllm"]
+    }
+    for name in ["aggregated", "disaggregated", "aggregated-kv-routing"]:
+        assert set(catalog[name]["data-targets"].split()) == six_targets
+
+
+def test_embedded_assets_exist_and_remain_repo_sources() -> None:
+    for page in EXAMPLES.glob("*.mdx"):
+        if page.stem in LANDING_PAGES:
+            continue
+        sources = embeds(page)
+        assert sources, f"example without source files: {page}"
+        for source in sources:
+            assert source.is_file(), f"{page}: missing {source}"
+            assert source.is_relative_to(ROOT / "examples"), source
+
+
+LAUNCH_HELPERS = {
+    "setup_minio.sh",
+    "_test_agg.sh",
+    "validate_lora_agg.sh",
+    "validate_omni_lora_agg.sh",
+    "validate_omni_minimax_h3.sh",
+}
+# Inference launchers that live outside a launch/ directory.
+LAUNCH_SCRIPTS = {
+    ROOT / "examples/diffusers/local/run_local.sh",
+    ROOT / "examples/backends/tokenspeed/launch_disagg.sh",
+}
+DEFERRED_PAGES = {"cancellation", "chat-templates", "custom-routing", "power-budget"}
+
+
+def manifest_documents(source: Path) -> list[dict]:
+    if source.suffix not in {".yaml", ".yml"}:
+        return []
+    try:
+        return [
+            doc
+            for doc in yaml.safe_load_all(source.read_text())
+            if isinstance(doc, dict)
+        ]
+    except yaml.YAMLError:
+        # Infrastructure templates can require envsubst before parsing. They are
+        # not deployments eligible for this catalog.
+        return []
+
+
+def is_deployment_source(source: Path) -> bool:
+    if source == ROOT / "examples/power-aware-budget/dgd.yaml":
+        # Explicitly documented as a contract fragment, not a complete DGD.
+        return False
+    if source.suffix == ".sh":
+        return (
+            "launch" in source.relative_to(ROOT).parts
+            and source.name not in LAUNCH_HELPERS
+        ) or source in LAUNCH_SCRIPTS
+    return any(
+        doc.get("kind") in {"DynamoGraphDeployment", "DynamoGraphDeploymentRequest"}
+        for doc in manifest_documents(source)
+    )
+
+
+def test_only_deployments_and_launch_scripts_are_embedded() -> None:
+    for page in EXAMPLES.glob("*.mdx"):
+        for source in embeds(page):
+            assert is_deployment_source(source), (page, source)
+
+
+def test_backend_deployments_and_launch_inventory_is_preserved() -> None:
+    actual = all_embeds()
+    for backend in ["vllm", "sglang", "trtllm"]:
+        base = ROOT / "examples/backends" / backend
+        candidates = set(base.joinpath("deploy").rglob("*.yaml"))
+        candidates |= set(base.joinpath("launch").rglob("*.sh"))
+        required = {
+            p.resolve() for p in candidates if is_deployment_source(p.resolve())
+        }
+        assert required <= actual, sorted(str(p) for p in required - actual)
+
+
+def test_batch_gateway_exposes_only_the_dgd() -> None:
+    page = EXAMPLES / "batch-gateway.mdx"
+    assert len(variants(page)) == 1
+    assert embeds(page) == {ROOT / "examples/deployments/batch-gateway/dynamo.yaml"}
+    card = cards()["batch-gateway"]
+    assert card["data-targets"] == "kubernetes:vllm"
+    assert card["data-keywords"] == "dynamo.yaml"
+
+
+def test_cloud_picker_has_only_kubernetes_deployments() -> None:
+    page = EXAMPLES / "cloud-deployments.mdx"
+    assert {v["target"] for v in variants(page)} == {
+        "kubernetes:vllm",
+        "kubernetes:sglang",
+    }
+    for source in embeds(page):
+        assert source.is_relative_to(
+            ROOT / "examples/deployments/EKS/manifests"
+        ) or source.is_relative_to(ROOT / "examples/deployments/GKE")
+        assert any(
+            doc.get("kind") == "DynamoGraphDeployment"
+            for doc in manifest_documents(source)
+        )
+    labels = (FERN / "components/example-options.ts").read_text()
+    assert 'ecs: "Amazon ECS"' not in labels
+    assert 'platform: "Platform configuration"' not in labels
+
+
+def test_dgdr_backend_labels_match_the_manifest() -> None:
+    page = EXAMPLES / "dgdr.mdx"
+    text = page.read_text()
+    blocks = dict(
+        re.findall(
+            r'<div className="dynamo-example-variant" data-example-variant="([^"]+)">(.*?)</div>',
+            text,
+            re.DOTALL,
+        )
+    )
+    for option in variants(page):
+        sources = [
+            (page.parent / src).resolve() for src in EMBED.findall(blocks[option["id"]])
+        ]
+        for source in sources:
+            (doc,) = manifest_documents(source)
+            assert doc["kind"] == "DynamoGraphDeploymentRequest"
+            assert option["target"] == f"kubernetes:{doc['spec']['backend']}"
+    assert len(variants(page)) == len(
+        list((ROOT / "examples/deployments/dgdr").glob("*.yaml"))
+    )
+
+
+def test_single_options_keep_the_selected_button_style() -> None:
+    component = (FERN / "components/ExampleSelector.tsx").read_text()
+    assert "lqs-static" not in component
+    assert "choices.length === 1" not in component
+    assert "aria-pressed={selected === choice.id}" in component
+    assert (
+        '.lqs-chip[aria-pressed="true"] { background-color: var(--lqs-stable); }'
+        in component
+    )
+    assert "if (next === platform) return;" in component
+    assert "if (next === backend) return;" in component
+
+
+def test_yaml_sources_render_through_the_deployment_customizer() -> None:
+    selector = (FERN / "components/ExampleSelector.tsx").read_text()
+    assert "<DeploymentCustomizerProvider>" in selector
+    assert "withDeploymentCustomizer(children)" in selector
+    customizer = (FERN / "components/DeploymentCustomizer.tsx").read_text()
+    # The manifest comes from Fern's rendered embed, so pages keep native Code
+    # sources and fall back to them when a manifest cannot be customized.
+    assert 'typeof props.code !== "string"' in customizer
+    assert "<FallbackBoundary fallback={native}>" in customizer
+    assert "dangerouslySetInnerHTML" in customizer
+    styles = (FERN / "components/DeploymentCustomizerStyles.tsx").read_text()
+    assert ".dark .dc {" in styles
+    assert ":focus-visible" in styles
+    assert "prefers-reduced-motion" in styles
+    assert "@media (max-width:" in styles
+    data = (FERN / "components/deployment-customizer-data.ts").read_text()
+    assert 'from "./releases.data"' in data
+
+
+def test_deployment_customizer_keeps_secondary_options_collapsed() -> None:
+    customizer = (FERN / "components/DeploymentCustomizer.tsx").read_text()
+    # Secondary settings sit below the primary rows in a section that starts closed.
+    order = [
+        'label="Model"',
+        'label="Image"',
+        'label="Scale"',
+        'label="Deploy"',
+        "Additional options",
+        'label="Model cache"',
+        'label="HF token"',
+        'label="Env vars"',
+        'label="Output"',
+    ]
+    positions = [customizer.index(marker) for marker in order]
+    assert positions == sorted(positions)
+    assert 'isOpen("more", false)' in customizer
+    assert 'disclosure("env", false, envSummary)' in customizer
+    # Long scale tables start as their one-line GPU and pod summary.
+    assert "info.components.length <= OPEN_SCALE_ROWS" in customizer
+    for section in ("variables", "cache"):
+        assert f'disclosure("{section}", true,' in customizer, section
+    # A source link above the embed moves into the panel header.
+    assert "sourceLinkFor(child, nextYaml.title)" in customizer
+    assert 'className="dc-source"' in customizer
+    styles = (FERN / "components/DeploymentCustomizerStyles.tsx").read_text()
+    # Rows use display: grid, which would otherwise override the hidden attribute.
+    assert ".dc [hidden] { display: none !important; }" in styles
+
+
+SOURCE_LINKED_EMBED = re.compile(
+    r"\[Source: `(?P<label>[^`]+)`\]\((?P<url>https://github\.com/ai-dynamo/dynamo/blob/main/[^)\s]+)\)\n\n"
+    r'<Code src="(?P<src>[^"]+)" title="(?P<title>[^"]+)"'
+)
+
+
+def test_each_embed_sits_under_a_source_link_to_the_same_file() -> None:
+    # The deployment customizer moves this link into its header, so it must
+    # directly precede the embed and end with the embed's title.
+    for page in EXAMPLES.glob("*.mdx"):
+        if page.stem in LANDING_PAGES:
+            continue
+        text = page.read_text()
+        linked = list(SOURCE_LINKED_EMBED.finditer(text))
+        assert len(linked) == len(EMBED.findall(text)), page.name
+        for match in linked:
+            path = (page.parent / match["src"]).resolve().relative_to(ROOT).as_posix()
+            assert match["url"].endswith(f"/blob/main/{path}"), (page.name, path)
+            assert match["label"] == match["title"], (page.name, path)
+            assert f"/{path}".endswith(f"/{match['title']}"), (page.name, path)
+
+
+GENERIC_SETUP_PROSE = [
+    "Run local commands from the repository root",
+    "Run commands from the repository root",
+    "Review model and GPU requirements in the files",
+    "Review each script’s model, GPU, and environment requirements",
+    "Replace image, secret, storage, and hardware settings before applying",
+    "Keep supporting resources with their deployment",
+]
+
+
+def test_example_pages_skip_generic_setup_prose() -> None:
+    # Run commands and the deployment customizer cover these; prerequisites
+    # use a one-line **Prerequisites:** link instead.
+    for page in EXAMPLES.glob("*.mdx"):
+        text = page.read_text()
+        for sentence in GENERIC_SETUP_PROSE:
+            assert sentence not in text, (page.name, sentence)
+
+
+def test_multimodal_topology_mapping_uses_semantics_not_filenames() -> None:
+    epd = embeds(EXAMPLES / "encode-prefill-decode.mdx")
+    e_pd = embeds(EXAMPLES / "encode-pd.mdx")
+    assert ROOT / "examples/backends/sglang/launch/multimodal_disagg.sh" in epd
+    assert ROOT / "examples/backends/sglang/launch/multimodal_epd.sh" in e_pd
+    assert (
+        ROOT / "examples/backends/trtllm/launch/epd_multimodal_image_and_embeddings.sh"
+        in epd
+    )
+    assert ROOT / "examples/backends/sglang/launch/multimodal_epd.sh" not in epd
+
+
+def test_tracing_uses_existing_backend_flags() -> None:
+    page = EXAMPLES / "tracing.mdx"
+    for backend in ["sglang", "trtllm"]:
+        for topology in ["agg", "disagg"]:
+            source = ROOT / f"examples/backends/{backend}/launch/{topology}.sh"
+            assert source in embeds(page)
+            assert "--enable-otel" in source.read_text()
+            assert (
+                f"cd examples/backends/{backend} && bash launch/{topology}.sh --enable-otel"
+                in page.read_text()
+            )
+
+
+def test_old_template_redirects_are_dev_scoped_and_do_not_chain() -> None:
+    config = yaml.safe_load((FERN / "docs.yml").read_text())
+    assert all(isinstance(css, str) for css in config["css"])
+    redirects = {entry["source"]: entry["destination"] for entry in config["redirects"]}
+    old_paths = [
+        "cli-templates/v-llm",
+        "cli-templates/sg-lang",
+        "cli-templates/tensor-rt-llm",
+        "cli-templates/additional-backends",
+        "kubernetes-templates/dgd/v-llm",
+        "kubernetes-templates/dgd/sg-lang",
+        "kubernetes-templates/dgd/tensor-rt-llm",
+        "kubernetes-templates/dgdr",
+        "kubernetes-templates/cloud-deployments",
+        "kubernetes-templates/integration-deployments",
+    ]
+    for old in old_paths:
+        destination = redirects[f"/dynamo/dev/recipes/{old}"]
+        assert destination.startswith("/dynamo/dev/recipes/examples/")
+        assert destination not in redirects
+        assert (EXAMPLES / f"{destination.rsplit('/', 1)[1]}.mdx").is_file()
+        assert f"/dynamo/latest/recipes/{old}" not in redirects
+    assert not any(
+        "recipes/cli-templates/" in destination
+        or "recipes/kubernetes-templates/" in destination
+        for destination in redirects.values()
+    )
+
+
+def test_supporting_only_pages_are_deferred_without_deleting_sources() -> None:
+    catalog = cards()
+    redirects = {
+        entry["source"]: entry["destination"]
+        for entry in yaml.safe_load((FERN / "docs.yml").read_text())["redirects"]
+    }
+    for name in DEFERRED_PAGES:
+        assert name not in catalog
+        assert not (EXAMPLES / f"{name}.mdx").exists()
+        assert (
+            redirects[f"/dynamo/dev/recipes/examples/{name}"]
+            == "/dynamo/dev/recipes/examples/overview"
+        )
+    for path in [
+        "examples/power-aware-budget/dgd.yaml",
+        "examples/custom_backend/cancellation/server.py",
+        "examples/chat_templates/gemma4_tool.jinja",
+        "examples/router/policy-class-queues.yaml",
+        "examples/deployments/batch-gateway/run_example.py",
+        "examples/deployments/batch-gateway/profile-external-storage.yaml",
+    ]:
+        assert (ROOT / path).is_file()
+
+
+def test_source_filenames_are_searchable_in_the_catalog() -> None:
+    for name, metadata in cards().items():
+        source_names = {source.name for source in embeds(EXAMPLES / f"{name}.mdx")}
+        assert source_names == set(metadata["data-keywords"].split()), name
+
+
+def test_custom_encoder_choices_name_the_actual_inference_backend() -> None:
+    page = EXAMPLES / "custom-encoders.mdx"
+    assert {option["target"] for option in variants(page)} == {"local:vllm"}
+    for source in embeds(page):
+        assert "python -m dynamo.vllm" in source.read_text()
+
+
+def test_diffusion_section_matches_catalog_without_changing_existing_slugs() -> None:
+    nav = yaml.safe_load((FERN / "index.yml").read_text())
+    recipes = next(item for item in nav["navigation"] if item.get("tab") == "recipes")
+    examples = next(
+        item for item in recipes["layout"] if item.get("section") == "Examples"
+    )
+    diffusion = next(
+        item for item in examples["contents"] if item.get("section") == "Diffusion"
+    )
+    assert diffusion["skip-slug"] is True
+    expected = {
+        "image-generation",
+        "video-generation",
+        "audio-generation",
+        "text-diffusion",
+        "fastvideo",
+    }
+    overview, *detail_pages = diffusion["contents"]
+    assert overview == {
+        "page": "Overview",
+        "path": "pages/recipes/examples/diffusion-overview.mdx",
+        "slug": "diffusion",
+    }
+    assert {Path(item["path"]).stem for item in detail_pages} == expected
+    catalog = cards()
+    assert {
+        name for name, card in catalog.items() if card["data-topic"] == "diffusion"
+    } == expected
+    for item in detail_pages:
+        assert item["slug"] == Path(item["path"]).stem
+        assert catalog[item["slug"]]["data-topic-label"] == "Diffusion"
+    assert catalog["audio"]["data-topic"] == "workloads"
+
+
+@pytest.mark.parametrize(
+    ("page", "sources"),
+    [
+        (
+            "image-generation",
+            [
+                "sglang/deploy/agg_image_diffusion.yaml",
+                "trtllm/deploy/agg_image_diffusion.yaml",
+                "vllm/deploy/agg_omni_image.yaml",
+                "vllm/launch/agg_omni_cosmos3_image.sh",
+                "vllm/launch/agg_omni_cosmos3.sh",
+            ],
+        ),
+        ("text-diffusion", ["sglang/deploy/agg_llm_diffusion.yaml"]),
+        (
+            "audio-generation",
+            [
+                "vllm/deploy/agg_omni_audio.yaml",
+                "vllm/deploy/experimental/agg_omni_audio.yaml",
+                "vllm/launch/agg_omni_audio.sh",
+            ],
+        ),
+        (
+            "video-generation",
+            [
+                "vllm/deploy/experimental/agg_omni_video.yaml",
+                "vllm/deploy/experimental/agg_omni_i2v.yaml",
+                "vllm/launch/agg_omni_cosmos3_video.sh",
+                "vllm/launch/agg_omni_cosmos3_i2v.sh",
+                "vllm/launch/agg_omni_cosmos3.sh",
+            ],
+        ),
+    ],
+)
+def test_diffusion_sources_are_on_the_matching_workload_page(
+    page: str, sources: list[str]
+) -> None:
+    expected = {ROOT / "examples/backends" / source for source in sources}
+    assert expected <= embeds(EXAMPLES / f"{page}.mdx")
+
+
+@pytest.mark.parametrize(
+    "filename", ["agg_omni_audio.yaml", "agg_omni_video.yaml", "agg_omni_i2v.yaml"]
+)
+def test_experimental_diffusion_preserves_image_and_cache_requirements(
+    filename: str,
+) -> None:
+    source = ROOT / "examples/backends/vllm/deploy/experimental" / filename
+    (manifest,) = manifest_documents(source)
+    assert "Experimental" in source.read_text()
+    assert manifest["apiVersion"] == "nvidia.com/v1beta1"
+    assert "namespace" not in manifest["metadata"]
+    assert manifest["spec"]["backendFramework"] == "vllm"
+    components = manifest["spec"]["components"]
+    frontend = next(c for c in components if c["type"] == "frontend")
+    worker = next(c for c in components if c["type"] == "worker")
+    for component in components:
+        pod = component["podTemplate"]["spec"]
+        assert pod["nodeSelector"] == {"kubernetes.io/arch": "amd64"}
+    pod = worker["podTemplate"]["spec"]
+    container = pod["containers"][0]
+    assert container["resources"]["limits"]["nvidia.com/gpu"] == "1"
+    assert "--enforce-eager" in container["args"]
+    env = {item["name"]: item["value"] for item in container["env"]}
+    (cache,) = [
+        v["persistentVolumeClaim"]
+        for v in pod["volumes"]
+        if "persistentVolumeClaim" in v
+    ]
+    assert cache["claimName"] == "model-cache-pvc"
+    if filename == "agg_omni_audio.yaml":
+        for component in components:
+            assert component["runtimeVersionOverride"] == "1.6.0"
+            image = component["podTemplate"]["spec"]["containers"][0]["image"]
+            assert image.endswith(":20260918-a9792db")
+        assert env["HF_HOME"] == "/model-cache"
+        assert not cache.get("readOnly", False)
+    else:
+        for component in components:
+            assert component["runtimeVersionOverride"] == "1.4.2"
+        assert frontend["podTemplate"]["spec"]["containers"][0]["image"] == (
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:"
+            "4d6435ad3893487e7e5a8751eb2381199464f80248284bb98c5e0998f09a91c0"
+        )
+        assert container["image"] == (
+            "docker.io/jont828/dynamo-ffmpeg-color@sha256:"
+            "1b72cc6dfbbf610ba6e1135832c9cb702f7e6ddca2d57ddfc01e7e67e066980c"
+        )
+        assert env["HF_HUB_OFFLINE"] == "1"
+        assert cache["readOnly"] is True
+        (mount,) = [
+            m for m in container["volumeMounts"] if m["name"] == "shared-model-cache"
+        ]
+        assert mount["readOnly"] is True
+        assert mount["subPath"] == "model-cache"
+        assert env["HF_HUB_CACHE"] == mount["mountPath"] + "/hub"
+
+
+DIFFUSION_MODALITY_LABELS = {
+    "text-to-image": "Text → Image",
+    "text-to-text": "Text → Text",
+    "text-to-audio": "Text → Audio",
+    "text-to-video": "Text → Video",
+    "image-to-video": "Image → Video",
+}
+
+
+def diffusion_cards() -> list[tuple[dict[str, str], str]]:
+    text = (EXAMPLES / "diffusion-overview.mdx").read_text()
+    return [
+        (dict(ATTRIBUTE.findall(attributes)), body)
+        for attributes, body in re.findall(
+            r'<article className="dynamo-diffusion-card" ([^>]+)>(.*?)</article>',
+            text,
+            re.DOTALL,
+        )
+    ]
+
+
+def test_diffusion_overview_cards_match_the_dgd_models_and_backends() -> None:
+    page = EXAMPLES / "diffusion-overview.mdx"
+    text = page.read_text()
+    detail_pages = [
+        "image-generation",
+        "video-generation",
+        "audio-generation",
+        "text-diffusion",
+    ]
+    source_pages = {
+        source: name
+        for name in detail_pages
+        for source in embeds(EXAMPLES / f"{name}.mdx")
+        if source.suffix == ".yaml"
+    }
+    assert len(source_pages) == 8
+    assert not embeds(page)
+    assert "<Accordion" not in text
+    assert "<CardGroup" not in text
+    entries = diffusion_cards()
+    assert len(entries) == len(source_pages)
+    topic_icons = {
+        attributes["data-example"]: CARD_BODY.fullmatch(body)["icon"]
+        for attributes, body in card_blocks(EXAMPLES / "overview.mdx")
+    }
+    seen = set()
+    models = set()
+    for attributes, body in entries:
+        source = ROOT / attributes["data-source"]
+        assert source in source_pages
+        assert source not in seen
+        seen.add(source)
+        (manifest,) = manifest_documents(source)
+        backend = manifest["spec"]["backendFramework"]
+        assert attributes["data-backend"] == backend
+        assert {"sglang": "SGLang", "trtllm": "TensorRT-LLM", "vllm": "vLLM-Omni"}[
+            backend
+        ] in body
+        worker = next(
+            c for c in manifest["spec"]["components"] if c["type"] == "worker"
+        )
+        args = worker["podTemplate"]["spec"]["containers"][0]["args"]
+        flag = "--model" if "--model" in args else "--model-path"
+        model = args[args.index(flag) + 1]
+        models.add(model)
+        assert attributes["data-model"] == model
+        assert "dynamo-diffusion-model" not in body
+        (href,) = re.findall(r'href="([^"]+)"', body)
+        assert href == f"{source_pages[source]}.mdx"
+        assert body.count("<a ") == 1
+        assert "aria-label=" in body
+        assert 'className="dynamo-diffusion-name"' in body
+        assert "dynamo-diffusion-card-footer" not in body
+        # The type badge closes the top row, after the title, so the grid places it
+        # top right. It reuses the main catalog's icon for the page it opens. Cards
+        # have no arrow and no description line.
+        header, _ = body.split('<div className="dynamo-diffusion-chips">', 1)
+        ((icon, modality),) = re.findall(
+            r'</h3>\n<span className="dynamo-diffusion-chip dynamo-diffusion-modality">'
+            r'<Icon icon="([a-z0-9-]+)" />([^<]+)</span>\n</div>\n\n$',
+            header,
+        )
+        assert modality == DIFFUSION_MODALITY_LABELS[attributes["data-case"]]
+        assert icon == topic_icons[source_pages[source]]
+        assert body.count("dynamo-diffusion-modality") == 1
+        assert "dynamo-diffusion-card-arrow" not in body
+        assert "dynamo-diffusion-description" not in body
+        assert re.findall(r'<p className="([^"]+)"', body) == [
+            "dynamo-diffusion-provider"
+        ]
+        assert all(line.startswith("<") for line in body.split("\n") if line)
+        assert "dynamo-diffusion-experimental" not in header
+        (image,) = re.findall(r'<img[^>]+src="([^"]+)"', body)
+        assert (page.parent / image).resolve().is_file()
+        experimental = "agg_omni_audio" in source.name or "experimental" in source.parts
+        assert attributes["data-experimental"] == str(experimental).lower()
+        (chips,) = re.findall(
+            r'<div className="dynamo-diffusion-chips">(.*?)</div>', body, re.DOTALL
+        )
+        badge = (
+            '<span className="dynamo-diffusion-chip '
+            'dynamo-diffusion-experimental">Experimental</span>'
+        )
+        assert (badge in chips) == experimental
+        assert body.count("dynamo-diffusion-experimental") == int(experimental)
+        assert "One GPU" not in body
+        assert "Dynamo 1." not in body
+        assert "validated" not in body.lower()
+        assert "tested" not in body.lower()
+    assert len(models) == 7
+    assert seen == set(source_pages)
+
+
+def test_diffusion_weight_chips_match_the_recorded_checkpoint_files() -> None:
+    snapshot = yaml.safe_load(
+        (EXAMPLES / "_catalog/diffusion-model-sizes.yaml").read_text()
+    )
+    referenced = set()
+    for attributes, body in diffusion_cards():
+        model = attributes["data-model"]
+        referenced.add(model)
+        recorded = snapshot["models"][model]
+        assert re.fullmatch(r"[0-9a-f]{40}", recorded["revision"])
+        assert (
+            recorded["source"]
+            == f"https://huggingface.co/{model}/tree/{recorded['revision']}"
+        )
+        assert recorded["size_bytes"] == sum(recorded["files"].values())
+        size = f"{recorded['size_bytes'] / 1e9:.1f}"
+        assert float(size) == recorded["size_gb"]
+        assert attributes["data-size-gb"] == size
+        (chip,) = re.findall(r'dynamo-diffusion-size"[^>]*>([^<]+)</span>', body)
+        assert chip == f"{size} GB"
+        assert all(name.endswith(".safetensors") for name in recorded["files"])
+        if any(name.startswith("transformer/") for name in recorded["files"]):
+            assert all("/" in name for name in recorded["files"])
+    assert referenced == set(snapshot["models"])
+    text = (EXAMPLES / "diffusion-overview.mdx").read_text()
+    assert "not GPU memory requirements" in text
+
+
+def test_diffusion_catalog_is_server_styled_accessible_and_responsive() -> None:
+    component = (FERN / "components/DiffusionCatalog.tsx").read_text()
+    assert '"use client"' not in component
+    assert "EXAMPLES_LAYOUT_CSS" in component
+    assert "dangerouslySetInnerHTML" in component
+    assert ".dark .dynamo-diffusion" in component
+    assert "dynamo-diffusion-card-arrow" not in component
+    assert "dynamo-diffusion-description" not in component
+    assert '"logo provider type" "logo name name"' in component
+    # Narrow cards move the type badge onto its own top-right line.
+    assert "container-type: inline-size" in component
+    assert '"logo . type" "logo provider provider" "logo name name"' in component
+    # The modality's top bar is an inset accent bar that persists on hover.
+    assert (
+        "--diffusion-card-bar: inset 0 3px 0 var(--diffusion-accent-fg);" in component
+    )
+    assert component.count("box-shadow: var(--diffusion-card-bar)") == 3
+    assert "dynamo-diffusion-card-footer" not in component
+    assert ":focus-visible" in component
+    assert "prefers-reduced-motion" in component
+    assert "@media (max-width:" in component
+    assert ".dynamo-diffusion-card[hidden] { display: none !important; }" in component
+    assert (
+        "<DiffusionCatalogControls>{children}</DiffusionCatalogControls>" in component
+    )
+    styles = (FERN / "components/examples-layout.ts").read_text()
+    assert ".dynamo-diffusion" in styles
+
+
+def test_diffusion_catalog_controls_preserve_native_mdx_cards() -> None:
+    component = (FERN / "components/DiffusionCatalogControls.tsx").read_text()
+    assert '"use client"' in component
+    assert 'type="search"' in component
+    assert 'role="status"' in component
+    assert 'aria-atomic="true"' in component
+    assert "useId()" in component
+    for field in ("type", "backend", "provider", "size", "status"):
+        assert f'key: "{field}"' in component
+    assert "a.sizeGB - b.sizeGB" in component
+    assert "b.sizeGB - a.sizeGB" in component
+    assert 'setQuery("")' in component
+    assert "setFilters(EMPTY_FILTERS)" in component
+    assert 'setSort("default")' in component
+    assert 'className="dynamo-diffusion-grid" ref={grid}>{children}</div>' in component
+    assert "appendChild(node)" in component
+    assert "fetch(" not in component
+
+
+def test_diffusion_overview_keeps_local_only_cases_discoverable() -> None:
+    text = (EXAMPLES / "diffusion-overview.mdx").read_text()
+    for name in [
+        "text-to-video-diffusion.sh",
+        "agg_video_diffusion.sh",
+        "disagg_omni_glm_image.sh",
+        "disagg_omni_glm_image_nixl.sh",
+        "agg_omni_minimax_h3.sh",
+        "agg_omni_cosmos3_image.sh",
+        "agg_omni_cosmos3_video.sh",
+        "agg_omni_cosmos3_i2v.sh",
+    ]:
+        assert name in text
+        assert any(name == source.name for source in all_embeds())
+    assert "black-forest-labs/FLUX.1-dev" in text
+    assert "FastVideo/FastWan2.1-T2V-1.3B-Diffusers" in text
+    assert "[Local script and two existing DGDs](fastvideo.mdx)" in text
