@@ -17,14 +17,11 @@ use super::batching::BatchingState;
 use super::dedup::{EventDedupFilter, EventDedupPolicy};
 use super::sinks::{RouterEventBatchSink, emit};
 
-pub(super) async fn run_event_processor_loop<
-    P: RouterEventBatchSink + 'static,
-    I: Into<super::PublisherInput> + Send,
->(
+pub(super) async fn run_event_processor_loop<P: RouterEventBatchSink + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    mut rx: mpsc::UnboundedReceiver<I>,
+    mut rx: mpsc::UnboundedReceiver<super::PublisherInput>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     timeout_ms: Option<u64>,
     max_batch_blocks: usize,
@@ -50,7 +47,7 @@ pub(super) async fn run_event_processor_loop<
                     publish_output(&publisher, worker_id, &output).await;
                     break;
                 };
-                let event_batch = match event_batch.into() {
+                let event_batch = match event_batch {
                     super::PublisherInput::Events(events) => events,
                     super::PublisherInput::Barrier(done) => {
                         let mut output = Vec::new();
@@ -222,14 +219,11 @@ async fn publish_output<P: RouterEventBatchSink>(
     }
 }
 
-pub(super) async fn start_event_processor<
-    P: RouterEventBatchSink + 'static,
-    I: Into<super::PublisherInput> + Send,
->(
+pub(super) async fn start_event_processor<P: RouterEventBatchSink + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    rx: mpsc::UnboundedReceiver<I>,
+    rx: mpsc::UnboundedReceiver<super::PublisherInput>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     batching_timeout_ms: Option<u64>,
 ) {

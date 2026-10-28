@@ -69,7 +69,7 @@ pub(crate) async fn connect_sub_socket_with_monitor(
     topic: &str,
 ) -> Result<(SubSocket, tmq::pair::Pair)> {
     let ctx = Context::new();
-    let monitor_endpoint = "inproc://bootstrap-live-monitor";
+    let monitor_endpoint = "inproc://live-monitor";
     // Attach the monitor reader before connecting so the handshake event cannot be missed.
     let monitor = tmq::pair(&ctx).connect(monitor_endpoint)?;
     let socket = configure_receive_builder(subscribe(&ctx))
