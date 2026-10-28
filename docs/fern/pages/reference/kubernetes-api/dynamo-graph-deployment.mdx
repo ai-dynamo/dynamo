@@ -150,7 +150,9 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 </ParamField>
 
 <Note>
-  Each new non-LPX component must supply `spec.components[*].podTemplate.spec.containers[name=main]` with a non-empty `image`. The runtime image is `spec.components[*].podTemplate.spec.initContainers[name=runtime].image` in Dynamo sidecar mode, or `spec.components[*].podTemplate.spec.containers[name=main].image` otherwise. If that image has no parseable semantic-version tag, set `spec.components[*].runtimeVersionOverride` to its Dynamo runtime version. Also set it when the tag identifies a different version, such as the inference engine's version. See [Runtime Version Compatibility](dynamo-component-deployment.mdx#runtime-version-compatibility). DGD has no graph-level `runtimeVersionOverride`; the DGDR-level field supplies a default when generating components.
+  Each new non-LPX component must supply a shared `podTemplate` or complete `roles[].podTemplate` definitions. Each supplied template must include `spec.containers[name=main]` with a non-empty `image`. Existing components without a `podTemplate` may retain that omission on update.
+
+  For non-LPX components, admission requires `spec.components[*].runtimeVersionOverride` when any runtime image tag lacks a parseable semantic version. The override must also be set when the parsed tag differs from the Dynamo runtime version. In sidecar mode, this applies to runtime init container images. Main container images are not used to infer Dynamo versions, including for roles without a runtime init container. See [Runtime Version Compatibility](dynamo-component-deployment.mdx#runtime-version-compatibility). DGD has no graph-level `runtimeVersionOverride`. The DGDR-level field supplies a default when generating components.
 
   LPX components use `roles[].podTemplate` instead and do not require `runtimeVersionOverride`. See [Shared component spec](dynamo-component-deployment.mdx#shared-component-spec).
 </Note>
