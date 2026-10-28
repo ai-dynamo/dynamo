@@ -3290,7 +3290,8 @@ def _test_router_lora_isolation(
         token_ids = list(range(1_000, 1_000 + block_size * 2))
         expected_blocks = len(token_ids) // block_size
 
-        async def generate(lora: Optional[str], worker_id: Optional[int] = None):
+        async def generate(lora: Optional[str], worker_id: Optional[int] = None) -> int:
+            """Run one request and return the worker it was routed to."""
             routing: dict[str, Any] = {}
             if lora is not None:
                 routing["lora_name"] = lora
@@ -3306,14 +3307,19 @@ def _test_router_lora_isolation(
                 "routing": routing,
             }
             stream = await kv_router.generate_from_request(request)
+            routed_worker = None
             terminal = None
             async for response in stream:
-                if (
-                    isinstance(response, dict)
-                    and response.get("finish_reason") is not None
-                ):
+                if not isinstance(response, dict):
+                    continue
+                worker_info = (response.get("routing_data") or {}).get("worker_id")
+                if worker_info and routed_worker is None:
+                    routed_worker = worker_info.get("decode_worker_id")
+                if response.get("finish_reason") is not None:
                     terminal = response
             assert terminal is not None, f"lora={lora!r} request did not finish"
+            assert routed_worker is not None, f"lora={lora!r}: no routed worker"
+            return routed_worker
 
         async def device_blocks(lora: Optional[str]) -> dict[tuple[int, int], int]:
             scores = await kv_router.get_overlap_scores(
@@ -3371,10 +3377,10 @@ def _test_router_lora_isolation(
         await wait_for_worker(lora_name, worker_a)
         await wait_for_worker(None, worker_b)
 
-        # Unpinned repeats must go back to the worker that holds their blocks;
-        # routing either to the other worker would publish a second score.
-        await generate(lora_name)
-        await generate(None)
+        # Unpinned repeats must go back to the worker that holds their blocks,
+        # and must not leave a copy on the other worker.
+        assert await generate(lora_name) == worker_a[0]
+        assert await generate(None) == worker_b[0]
         await wait_for_scores(lora_name, {worker_a: expected_blocks})
         await wait_for_scores(None, {worker_b: expected_blocks})
 
