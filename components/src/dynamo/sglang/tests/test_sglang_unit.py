@@ -9,12 +9,14 @@ import logging
 import os
 import re
 import sys
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
+from packaging.requirements import Requirement
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import ProfileReq
 
@@ -1940,6 +1942,7 @@ def test_use_modelexpress_remote_instance_rejects_other_load_paths(
         ({"disable_overlap_schedule": False}, "Tokens", "Aggregated", False),
         ({"pp_size": 2}, "Tokens", "Aggregated", False),
         ({"speculative_algorithm": "EAGLE"}, "Tokens", "Aggregated", False),
+        ({"dllm_algorithm": "LowConfidence"}, "Tokens", "Aggregated", False),
         ({"enable_priority_scheduling": True}, "Tokens", "Aggregated", False),
         (
             {"enable_priority_scheduling": True, "disable_priority_preemption": True},
@@ -2046,6 +2049,28 @@ def test_systemone_unqualified_serial_version_warns(monkeypatch, caplog):
     assert "decision" in caplog.text.lower()
 
 
+def test_systemone_serial_profile_covers_pinned_sglang_version(monkeypatch):
+    assert sglang_register is not None
+    with (REPO_ROOT / "pyproject.toml").open("rb") as project_file:
+        project = tomllib.load(project_file)
+    dependency = next(
+        Requirement(value)
+        for value in project["project"]["optional-dependencies"]["sglang"]
+        if Requirement(value).name == "sglang"
+    )
+    pins = list(dependency.specifier)
+    assert len(pins) == 1 and pins[0].operator == "=="
+    monkeypatch.setattr(sglang_register, "version", lambda package: pins[0].version)
+    assert sglang_register._supports_systemone_serial(
+        SimpleNamespace(
+            max_running_requests=1, disable_overlap_schedule=True, pp_size=1
+        ),
+        sglang_register.ModelInput.Tokens,
+        sglang_register.ModelType.Chat,
+        sglang_register.WorkerType.Aggregated,
+    ), "Qualify the pinned SGLang release before enabling its decision profile"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("serial", [False, True])
 @pytest.mark.parametrize("installed", ["0.5.19", "0.5.22+cu130"])
@@ -2093,6 +2118,7 @@ async def test_systemone_serial_capability_published_only_when_isolated(
     assert ("including chat and completions" in caplog.text) is serial
     if serial:
         assert f"Published SGLang {installed} System One capability" in caplog.text
+        assert "separate served-model name or namespace-scoped frontend" in caplog.text
 
 
 def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():

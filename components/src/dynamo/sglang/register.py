@@ -138,8 +138,8 @@ def _supports_systemone_serial(
     and XPU remains unqualified.
 
     Serialization and disabled overlap apply to the entire worker, including
-    chat and completions. Use dedicated decision workers for this low-throughput
-    profile; other versions require separate qualification.
+    chat and completions. Isolate decision workers with a separate served-model
+    name or namespace-scoped frontend; other versions require qualification.
     """
     # Relax the validated pin only after mixed scoring/decode GPU validation.
     priority_preemption = getattr(
@@ -153,6 +153,7 @@ def _supports_systemone_serial(
         and getattr(server_args, "disable_overlap_schedule", False) is True
         and getattr(server_args, "pp_size", 1) == 1
         and not getattr(server_args, "speculative_algorithm", None)
+        and not getattr(server_args, "dllm_algorithm", None)
         and not priority_preemption
     )
     if not eligible:
@@ -280,7 +281,8 @@ async def _register_model_with_runtime_config(
             logging.info(
                 "Published SGLang %s System One capability: the entire worker, "
                 "including chat and completions, is serialized with overlap disabled; "
-                "use dedicated decision workers for this low-throughput profile",
+                "isolate decision workers with a separate served-model name or "
+                "namespace-scoped frontend for this low-throughput profile",
                 version("sglang"),
             )
     # Configure the Rust frontend's media decoder so it ships pre-decoded
