@@ -133,12 +133,11 @@ def test_mx_source_serves_every_device_by_default(monkeypatch):
         def wait(self) -> int:
             return 0
 
-    class _Vmm:
-        def list_devices(self) -> list[int]:
-            return [0, 1, 2]
+    def no_cuda(_device_type):
+        raise AssertionError("listing devices must not start CUDA")
 
-    monkeypatch.setattr(per_device, "init_vmm", lambda _device_type: None)
-    monkeypatch.setattr(per_device, "get_vmm", _Vmm)
+    monkeypatch.setattr(per_device, "init_vmm", no_cuda)
+    monkeypatch.setattr(mx_source.device_identity, "node_gpus", lambda: [object()] * 3)
     monkeypatch.setattr(per_device.subprocess, "Popen", _Exited)
 
     mx_source.main(["--source-key", "ckpt-1"])

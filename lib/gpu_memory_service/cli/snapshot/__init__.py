@@ -31,18 +31,21 @@ def start_per_device(
     return processes
 
 
-def run_per_device(module: str, argv: list[str]) -> None:
+def run_per_device(
+    module: str, argv: list[str], devices: list[int] | None = None
+) -> None:
+    """Run ``module`` once per device and wait. ``devices`` defaults to every
+    CUDA device, which starts CUDA in this process."""
     scoped = any(
         argument in {"-h", "--help"}
         or argument == "--device"
         or argument.startswith("--device=")
         for argument in argv
     )
-    if not scoped:
+    if not scoped and devices is None:
         init_vmm(VMMDeviceType.CUDA)
-    processes = start_per_device(
-        module, argv, [] if scoped else get_vmm().list_devices()
-    )
+        devices = get_vmm().list_devices()
+    processes = start_per_device(module, argv, [] if scoped else devices)
     try:
         pending = list(processes)
         while pending:
