@@ -2090,7 +2090,20 @@ class SglangStreamingPostProcessor:
             if choice["delta"].get(key):
                 delta[key] = (delta.get(key) or "") + choice["delta"][key]
         if choice["delta"].get("tool_calls"):
-            delta["tool_calls"] = choice["delta"]["tool_calls"]
+            # Only the finishing segment emits tool calls today; merge by
+            # index anyway so a later segment can never drop an earlier one.
+            by_index = {tc["index"]: tc for tc in delta.get("tool_calls") or []}
+            for tc in choice["delta"]["tool_calls"]:
+                prev = by_index.get(tc["index"])
+                if prev is None:
+                    by_index[tc["index"]] = tc
+                    continue
+                prev_fn, fn = prev["function"], tc["function"]
+                prev_fn["name"] = fn.get("name") or prev_fn.get("name")
+                prev_fn["arguments"] = (prev_fn.get("arguments") or "") + (
+                    fn.get("arguments") or ""
+                )
+            delta["tool_calls"] = [by_index[i] for i in sorted(by_index)]
         acc["finish_reason"] = choice["finish_reason"]
         logprobs = choice.get("logprobs")
         if logprobs:

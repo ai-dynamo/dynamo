@@ -249,6 +249,40 @@ class TestOutputGate:  # FRONTEND.4
         assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Paris"}
         assert _finish(choices) == "tool_calls"
 
+    @pytest.mark.parametrize("batch_size", [1, 3, 1000])
+    def test_parallel_genuine_calls_in_one_batch_all_survive(
+        self, tokenizer, batch_size
+    ):
+        second = INJECTED_CALL.replace("Paris", "Tokyo")
+        ids = tokenizer.encode(INJECTED_CALL + second, add_special_tokens=False)
+        calls = _tool_calls(_run(tokenizer, ids, batch_size))
+        assert [
+            (c["index"], json.loads(c["function"]["arguments"])) for c in calls
+        ] == [
+            (0, {"city": "Paris"}),
+            (1, {"city": "Tokyo"}),
+        ]
+
+    def test_merge_choices_keeps_every_segment_tool_call(self):
+        def call(index, name, arguments):
+            return {
+                "index": index,
+                "id": f"id{index}",
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            }
+
+        first = {"delta": {"tool_calls": [call(0, "a", '{"x"')]}, "finish_reason": None}
+        second = {
+            "delta": {"tool_calls": [call(0, None, ": 1}"), call(1, "b", "{}")]},
+            "finish_reason": "tool_calls",
+        }
+        merged = SglangStreamingPostProcessor._merge_choices(first, second)
+        assert [
+            (c["index"], c["function"]["name"], c["function"]["arguments"])
+            for c in merged["delta"]["tool_calls"]
+        ] == [(0, "a", '{"x": 1}'), (1, "b", "{}")]
+
     @pytest.mark.parametrize("batch_size", [1, 5, 1000])
     def test_content_around_a_genuine_call_is_preserved(self, tokenizer, batch_size):
         ids = (
