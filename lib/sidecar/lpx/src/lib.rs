@@ -55,7 +55,6 @@ pub fn serve(
             tokio::select! {
                 result = &mut worker => result.map_err(Into::into),
                 error = engine.load_lost() => {
-                    // Withdraw from discovery and drain, then exit with the cause.
                     shutdown.cancel();
                     if let Err(stopped) = worker.await {
                         tracing::warn!(error = %stopped, "Worker shutdown failed");

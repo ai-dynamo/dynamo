@@ -429,17 +429,17 @@ impl LLMEngine for LpxSidecarEngine {
         Ok(())
     }
 
-    /// Publishes the load of an engine that reported load at startup.
+    /// Polls the load of an engine that reported load at startup. Only polled
+    /// load is published: the startup sample may be stale by now.
     async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
-        let Some(initial) = self.discovered.load else {
+        if self.discovered.load.is_none() {
             return Ok(MetricsBindings::default());
-        };
+        }
         let client = Arc::clone(self.connected()?);
         let (shutdown, lost) = (self.cancel.clone(), self.load_lost.clone());
         Ok(MetricsBindings {
             dp_ranks: vec![load::RANK],
             on_publisher_ready: Some(Box::new(move |publisher| {
-                publisher.publish(load::RANK, initial);
                 tokio::spawn(load::poll(client, publisher, shutdown, lost));
                 Ok(())
             })),
