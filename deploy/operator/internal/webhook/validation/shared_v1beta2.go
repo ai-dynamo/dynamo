@@ -23,7 +23,45 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// validateAISimulateSpec validates the Request's native AISimulate overrides.
+// validateNativeSearchInput validates the typed search fields. spec and fldPath must not be nil.
+// Schema and CEL own the remaining typed child rules; upstream input validation runs after lowering.
+func (v *sharedValidation) validateNativeSearchInput(spec *nvidiacomv1beta2.NativeSearchInput, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if spec.Hardware != nil {
+		allErrs = append(allErrs, v.validateHardwareSpecV1beta2(spec.Hardware, fldPath.Child("hardware"))...)
+	}
+	if spec.AISimulate != nil {
+		allErrs = append(allErrs, validateAISimulateSpec(spec.AISimulate, fldPath.Child("aisimulate"))...)
+	}
+	return allErrs
+}
+
+// validateHardwareSpecV1beta2 validates hardware. spec and fldPath must not be nil.
+func (v *sharedValidation) validateHardwareSpecV1beta2(
+	spec *nvidiacomv1beta2.HardwareSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if spec.GPU == nil {
+		return nil
+	}
+	return v.validateGPUHardwareSpecV1beta2(spec.GPU, fldPath.Child("gpu"))
+}
+
+// validateGPUHardwareSpecV1beta2 validates gpu. spec and fldPath must not be nil.
+func (v *sharedValidation) validateGPUHardwareSpecV1beta2(
+	spec *nvidiacomv1beta2.GPUHardwareSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if spec.SKU != nil && !aisimulate.IsKnownHardwareSKU(*spec.SKU) {
+		v.warnf(
+			"%s: %q is not known to the AISimulate release bundled with this operator; the value is passed through unchanged and may work with an external AISimulate systems catalog",
+			fldPath.Child("sku"), *spec.SKU,
+		)
+	}
+	return nil
+}
+
+// validateAISimulateSpec validates native AISimulate overrides. input and fldPath must not be nil.
 func validateAISimulateSpec(
 	input *nvidiacomv1beta2.AISimulateSpec,
 	fldPath *field.Path,

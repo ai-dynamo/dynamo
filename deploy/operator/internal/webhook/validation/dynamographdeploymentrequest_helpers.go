@@ -7,16 +7,48 @@ package validation
 
 import (
 	"cmp"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/aisimulate"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/santhosh-tekuri/jsonschema/v6/kind"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
+
+// decodeDynamoGraphDeploymentRequestSpecV1beta2 unwraps the public conversion carrier.
+// raw must not be nil; callers report decode errors at the carrier's field path.
+func decodeDynamoGraphDeploymentRequestSpecV1beta2(raw *apiextensionsv1.JSON) (*nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec, error) {
+	var spec nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
+	if err := json.Unmarshal(raw.Raw, &spec); err != nil {
+		return nil, err
+	}
+	return &spec, nil
+}
+
+// recommendationInputErrors checks the lowered input after structural API validation.
+// spec and fldPath must not be nil. A lowering failure prevents only the dependent schema check.
+func recommendationInputErrors(spec *nvidiacomv1beta2.NativeSearchInput, fldPath *field.Path) field.ErrorList {
+	input, err := aisimulate.Lower(spec)
+	if err != nil {
+		return field.ErrorList{field.Invalid(fldPath, "<redacted>", "cannot be lowered to the public AISimulate recommendation input: "+err.Error())}
+	}
+	if err := aisimulate.ValidateInput(input); err != nil {
+		var schemaErr *jsonschema.ValidationError
+		if !errors.As(err, &schemaErr) {
+			return field.ErrorList{field.InternalError(fldPath, err)}
+		}
+		return inputSchemaErrors(schemaErr, fldPath)
+	}
+	return nil
+}
 
 // inputSchemaErrors reports native JSON pointers at the shared spec owner. Lowering
 // combines typed fields and overrides, so a native path need not name an override.
