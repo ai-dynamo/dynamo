@@ -511,9 +511,18 @@ func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
 func TestSGLangMultinodeSidecarRendering(t *testing.T) {
 	for _, provider := range []commonconsts.MultinodeDeploymentType{commonconsts.MultinodeDeploymentTypeGrove, commonconsts.MultinodeDeploymentTypeLWS} {
 		for _, roleTemplates := range []bool{false, true} {
-			for _, workerRuntime := range []bool{false, true} {
+			for _, tc := range []struct {
+				workerRuntime        bool
+				engineProbesAndPorts bool
+			}{
+				{workerRuntime: false, engineProbesAndPorts: true},
+				{workerRuntime: true, engineProbesAndPorts: true},
+				{workerRuntime: false, engineProbesAndPorts: false},
+				{workerRuntime: true, engineProbesAndPorts: false},
+			} {
+				workerRuntime := tc.workerRuntime
 				for _, componentType := range []v1beta1.ComponentType{v1beta1.ComponentTypeWorker, v1beta1.ComponentTypePrefill, v1beta1.ComponentTypeDecode} {
-					t.Run(fmt.Sprintf("%s/roles=%t/worker-runtime=%t/%s", provider, roleTemplates, workerRuntime, componentType), func(t *testing.T) {
+					t.Run(fmt.Sprintf("%s/roles=%t/worker-runtime=%t/engine-probes-and-ports=%t/%s", provider, roleTemplates, workerRuntime, tc.engineProbesAndPorts, componentType), func(t *testing.T) {
 						t.Log("Declare a native engine with an unversioned image and independent runtime")
 						component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 							ComponentName: "engine", ComponentType: componentType,
@@ -534,6 +543,14 @@ func TestSGLangMultinodeSidecarRendering(t *testing.T) {
 									InitContainers: []corev1.Container{{Name: "setup", Image: "setup:latest"}, {Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), Command: []string{"dynamo-sglang-sidecar"}, Args: []string{"--grpc-endpoint", "127.0.0.1:30001"}}},
 								},
 							},
+						}
+						if !tc.engineProbesAndPorts {
+							t.Log("Leave engine probes and ports unset in the authored templates")
+							engine := &component.PodTemplate.Spec.Containers[0]
+							engine.StartupProbe = nil
+							engine.ReadinessProbe = nil
+							engine.LivenessProbe = nil
+							engine.Ports = nil
 						}
 						if workerRuntime {
 							component.PodTemplate.Spec.Containers[0].Args = append(component.PodTemplate.Spec.Containers[0].Args, "--enable-dp-attention", "--dp-size", "2")
