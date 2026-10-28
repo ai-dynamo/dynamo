@@ -15,8 +15,10 @@ from __future__ import annotations
 import argparse
 import logging
 import signal
+import sys
 import threading
 
+from gpu_memory_service.cli.snapshot import run_per_device
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.snapshot.backends.mx import byte_tensors, mx_load_context
@@ -88,7 +90,9 @@ def main(argv: list[str] | None = None) -> None:
         description="Serve committed GMS V1 weights to ModelExpress peers."
     )
     parser.add_argument(
-        "--device", type=int, required=True, help="GMS device whose weights to serve"
+        "--device",
+        type=int,
+        help="GMS device whose weights to serve. Default: every device, one process each.",
     )
     parser.add_argument(
         "--source-key",
@@ -102,7 +106,13 @@ def main(argv: list[str] | None = None) -> None:
             "own setting, the MX_SERVER_ADDRESS environment variable."
         ),
     )
+    # python -m passes no argv, and run_per_device forwards argv verbatim to
+    # the per-device processes, so substitute the real command line first.
+    argv = argv if argv is not None else sys.argv[1:]
     args = parser.parse_args(argv)
+    if args.device is None:
+        run_per_device("gpu_memory_service.v1.snapshot.mx_source", argv)
+        return
     init_vmm(VMMDeviceType.CUDA)
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())

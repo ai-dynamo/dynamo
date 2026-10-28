@@ -9,7 +9,7 @@ import importlib.util
 from unittest.mock import patch
 
 import pytest
-from _deps import HAS_GMS
+from _deps import HAS_GMS, HAS_TORCH
 
 if not HAS_GMS:
     pytest.skip(
@@ -17,8 +17,14 @@ if not HAS_GMS:
         allow_module_level=True,
     )
 
+from gpu_memory_service.cli import snapshot as per_device
 from gpu_memory_service.snapshot.backends import mx
-from gpu_memory_service.v1.snapshot import loader
+from gpu_memory_service.snapshot.transfer import (
+    FileTransferSource,
+    GMSSnapshotConfig,
+    GMSTransferTarget,
+)
+from gpu_memory_service.v1.snapshot import loader, mx_source
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -113,6 +119,35 @@ def test_mx_needs_a_source_key():
         _backend_config(["--transfer-backend", "mx"])
 
 
+def test_mx_source_serves_every_device_by_default(monkeypatch):
+    launched = []
+
+    class _Exited:
+        def __init__(self, argv) -> None:
+            launched.append(argv[3:])
+            self.pid = len(launched)
+
+        def poll(self) -> int:
+            return 0
+
+        def wait(self) -> int:
+            return 0
+
+    class _Vmm:
+        def list_devices(self) -> list[int]:
+            return [0, 1, 2]
+
+    monkeypatch.setattr(per_device, "init_vmm", lambda _device_type: None)
+    monkeypatch.setattr(per_device, "get_vmm", _Vmm)
+    monkeypatch.setattr(per_device.subprocess, "Popen", _Exited)
+
+    mx_source.main(["--source-key", "ckpt-1"])
+
+    assert launched == [
+        ["--source-key", "ckpt-1", "--device", str(device)] for device in range(3)
+    ]
+
+
 @pytest.mark.skipif(
     importlib.util.find_spec("modelexpress") is None, reason="modelexpress required"
 )
@@ -124,3 +159,85 @@ def test_source_key_is_the_whole_identity():
     assert dict(identity.extra_parameters) == {"memory": "gms-v1"}
     assert mx.source_identity("ckpt-1") == identity
     assert mx.source_identity("ckpt-2") != identity
+
+
+class _FakeAgent:
+    def __init__(self, port: int) -> None:
+        self.port = port
+        self.shut_down = False
+
+    def shutdown(self) -> None:
+        self.shut_down = True
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("modelexpress") is None or not HAS_TORCH,
+    reason="modelexpress and torch required",
+)
+def test_mx_restore_retries_the_next_source_on_its_listen_port(monkeypatch):
+    import torch
+    from modelexpress import p2p_pb2
+    from modelexpress.adapter import StrategyFailed
+    from modelexpress.load_strategy.rdma_strategy import RdmaStrategy
+    from modelexpress.metadata import client_factory
+
+    agents: list[_FakeAgent] = []
+
+    def start_agent(_rank, _device, port):
+        agents.append(_FakeAgent(port))
+        return agents[-1]
+
+    tried = []
+
+    def load_as_target(_self, result, ctx, _worker, _source_id, worker_id):
+        tried.append((worker_id, ctx.nixl_manager.port))
+        if worker_id == "peer-0":
+            raise StrategyFailed("peer-0 broke mid-transfer", mutated=True)
+        return result
+
+    monkeypatch.setattr(mx, "_start_nixl_manager", start_agent)
+    monkeypatch.setattr(
+        mx,
+        "byte_tensors",
+        lambda _extents, _device: {
+            mx.allocation_tensor_name(0): torch.zeros(64, dtype=torch.uint8)
+        },
+    )
+    monkeypatch.setattr(torch.cuda, "set_device", lambda _device: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda _device: None)
+    monkeypatch.setattr(client_factory, "create_metadata_client", lambda **_: None)
+    monkeypatch.setattr(RdmaStrategy, "is_available", lambda _self, _ctx: True)
+    monkeypatch.setattr(
+        RdmaStrategy,
+        "_find_source_instances",
+        lambda _self, _ctx: [
+            p2p_pb2.SourceInstanceRef(mx_source_id="src", worker_id=f"peer-{i}")
+            for i in range(2)
+        ],
+    )
+    monkeypatch.setattr(
+        RdmaStrategy,
+        "_fetch_worker_metadata",
+        lambda *_args: p2p_pb2.WorkerMetadata(),
+    )
+    monkeypatch.setattr(RdmaStrategy, "_accelerator_compatible", lambda *_args: True)
+    monkeypatch.setattr(RdmaStrategy, "_load_as_target", load_as_target)
+
+    backend = mx.MXTransferBackend(
+        config=GMSSnapshotConfig(
+            device=0,
+            max_workers=1,
+            backend_config={
+                "mx_rank": 2,
+                "mx_source_key": "ckpt-1",
+                "mx_listen_port": 25557,
+            },
+        )
+    )
+    session = backend.start_restore([FileTransferSource("a0", "", 0, 64)])
+    session.restore({"a0": GMSTransferTarget("a0", 0x1000, 0, 64)})
+    backend.close()
+
+    assert tried == [("peer-0", 25557), ("peer-1", 25557)]
+    assert [agent.port for agent in agents] == [25557, 25557]
+    assert all(agent.shut_down for agent in agents)

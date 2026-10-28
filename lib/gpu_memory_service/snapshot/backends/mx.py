@@ -117,6 +117,10 @@ def mx_load_context(
         def discover_tensors(self, result):
             return dict(tensors)
 
+        def reinit_for_retry(self, result):
+            # The next source overwrites every byte of these preallocated buffers.
+            return result
+
     server_url = config.get("mx_server_url")
     return LoadContext(
         model_config=None,
@@ -179,6 +183,7 @@ class MXTransferSession:
         backend = self._config.backend_config
         device = self._config.device
         rank = int(backend["mx_rank"])
+        listen_port = int(backend["mx_listen_port"])
         extents = [(targets[s.allocation_id].va, s.byte_count) for s in self._sources]
         tensors = byte_tensors(extents, device)
 
@@ -196,13 +201,25 @@ class MXTransferSession:
                     )
                 return scoped
 
+            def rollback(self, ctx) -> None:
+                # Without an agent, ModelExpress would start one on
+                # MX_METADATA_PORT + CUDA ordinal, which other GMS devices or
+                # the engine may hold. Restart it on this device's port.
+                super().rollback(ctx)
+                ctx.nixl_manager = _start_nixl_manager(rank, device, listen_port)
+
         torch.cuda.set_device(device)
         ctx = mx_load_context(backend, rank, device, tensors, nixl_manager=manager)
-        strategy = _SameAllocationsRdmaStrategy()
-        if not strategy.is_available(ctx):
-            raise RuntimeError("ModelExpress RDMA P2P is unavailable")
-        strategy.load(LoadResult(value=None, model=nn.Module()), ctx)
-        torch.cuda.synchronize(device)
+        try:
+            strategy = _SameAllocationsRdmaStrategy()
+            if not strategy.is_available(ctx):
+                raise RuntimeError("ModelExpress RDMA P2P is unavailable")
+            strategy.load(LoadResult(value=None, model=nn.Module()), ctx)
+            torch.cuda.synchronize(device)
+        finally:
+            # restore() shuts down the first agent. A retry replaced it.
+            if ctx.nixl_manager is not None and ctx.nixl_manager is not manager:
+                ctx.nixl_manager.shutdown()
 
     def close(self) -> None:
         if self._manager is not None and self._manager.exception() is None:
