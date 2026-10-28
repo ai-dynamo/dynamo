@@ -305,9 +305,11 @@ installer's Pod/log read permissions. With older Helm, read them with `kubectl l
 Successful Jobs are deleted. Supporting ServiceAccount/ClusterRole/ClusterRoleBinding hooks
 persist until the next attempt and require manual removal when retiring the release.
 
-**Existing deployments:** The operator origin version gates alias injection. An operator-only
-upgrade leaves existing multinode workload pod templates unchanged and does not roll them solely to
-add the aliases.
+**Existing deployments:** `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` are injected only
+into DGDs originally created by operator 1.6.0 or later. Upgrading the operator does
+not enable these variables for older DGDs. They remain absent after subsequent
+workload edits, including a switch to sidecar mode. See the
+[SGLang sidecar migration instructions](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#migrate-an-existing-dgd-to-multinode-sidecars).
 
 ### v1.5.0
 

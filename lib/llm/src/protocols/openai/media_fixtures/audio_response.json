@@ -1,0 +1,19 @@
+{
+  "id": "speech-1",
+  "object": "audio.speech",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+  "status": "completed",
+  "progress": 100,
+  "created": 1700000000,
+  "data": [
+    {
+      "output_format": "mp3",
+      "url": "https://example.com/speech-1.mp3"
+    },
+    {
+      "output_format": "wav",
+      "b64_json": "UklGRg=="
+    }
+  ],
+  "inference_time_s": 0.42
+}

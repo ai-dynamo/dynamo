@@ -1,0 +1,21 @@
+{
+  "id": "video-1",
+  "object": "video",
+  "model": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+  "status": "completed",
+  "progress": 100,
+  "created": 1700000000,
+  "data": [
+    {
+      "output_format": "mp4",
+      "url": "https://example.com/video-1.mp4",
+      "fps": 24,
+      "audio_sample_rate": 16000
+    },
+    {
+      "output_format": "mp4",
+      "b64_json": "AAAAIGZ0eXA="
+    }
+  ],
+  "inference_time_s": 12.5
+}
