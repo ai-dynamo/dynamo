@@ -5,12 +5,12 @@
 //! `DYN_HTTP_FORWARD_ROUTES` when none is configured), for backend-specific
 //! HTTP APIs the frontend does not implement. Built-in routes always win: a request is forwarded only
 //! when no frontend route matched it. A route forwards to one fixed upstream,
-//! or, as `PREFIX=session-owner`, to the worker holding the session the path
-//! names (see [`sessions`]). WebSocket upgrades are tunnelled: on the
+//! or, as `PREFIX=owner`, to the worker owning the resource the path
+//! names (see [`owners`]). WebSocket upgrades are tunnelled: on the
 //! upstream's `101`, both connections are spliced together. Other upgrade
 //! requests are forwarded as plain requests.
 
-mod sessions;
+mod owners;
 
 use axum::body::{Body, Bytes, HttpBody};
 use axum::extract::Request;
@@ -23,12 +23,12 @@ use hyper::upgrade::OnUpgrade;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-pub(crate) use sessions::WorkerDiscovery;
-use sessions::{SessionOwners, WorkerUrls};
+pub(crate) use owners::WorkerDiscovery;
+use owners::{Owners, WorkerUrls};
 
-/// The upstream of a route whose requests go to the worker holding their
-/// session.
-const SESSION_OWNER: &str = "session-owner";
+/// The upstream of a route whose requests go to the worker owning the
+/// resource they name.
+const OWNER: &str = "owner";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Below common upstream keep-alive timeouts, so a pooled connection is not
 /// reused just as the upstream closes it.
@@ -55,8 +55,8 @@ struct ForwardRoute {
 
 enum Upstream {
     Fixed(reqwest::Url),
-    /// The worker holding the session the path names.
-    SessionOwner,
+    /// The worker owning the resource the path names.
+    Owner,
 }
 
 /// Path prefixes forwarded to an upstream HTTP server with the request's
@@ -66,8 +66,8 @@ pub(crate) struct ForwardRoutes {
     /// HTTP/1.1 only: an `https` upstream could otherwise negotiate HTTP/2,
     /// which has no `Upgrade`.
     client: reqwest::Client,
-    /// Present when a route forwards to session owners.
-    sessions: Option<SessionOwners>,
+    /// Present when a route forwards to owners.
+    owners: Option<Owners>,
 }
 
 /// Where a request is forwarded. Only [`ForwardRoutes::resolve`] makes one.
@@ -77,16 +77,16 @@ enum Target {
     /// The upstream URL, query included, checked to stay under the route that
     /// covers it.
     Url(reqwest::Url),
-    /// The owner of the session the path names, under the route at this index.
-    SessionOwner(usize),
+    /// The owner of the resource the path names, under the route at this index.
+    Owner(usize),
 }
 
 impl ForwardRoutes {
-    /// Parses `routes` when given, one `PREFIX=URL` or `PREFIX=session-owner`
+    /// Parses `routes` when given, one `PREFIX=URL` or `PREFIX=owner`
     /// entry each (an empty list disables forwarding); otherwise falls back to
     /// the whitespace-separated entries of `DYN_HTTP_FORWARD_ROUTES` (direct
     /// Rust entrypoints). `None` when the chosen source has no entries.
-    /// Session-owner routes find workers through `workers`, and are refused
+    /// Owner routes find workers through `workers`, and are refused
     /// without it.
     pub(crate) fn from_config(
         routes: Option<&[String]>,
@@ -105,15 +105,15 @@ impl ForwardRoutes {
         if let Some(route) = parsed
             .routes
             .iter()
-            .find(|r| matches!(r.upstream, Upstream::SessionOwner))
+            .find(|r| matches!(r.upstream, Upstream::Owner))
         {
             let Some(workers) = workers else {
                 anyhow::bail!(
-                    "forward route {:?} needs worker discovery to find session owners",
+                    "forward route {:?} needs worker discovery to find owners",
                     route.prefix
                 );
             };
-            parsed.sessions = Some(SessionOwners::new(WorkerUrls::watch(workers)));
+            parsed.owners = Some(Owners::new(WorkerUrls::watch(workers)));
         }
         Ok(Some(parsed))
     }
@@ -130,8 +130,8 @@ impl ForwardRoutes {
                 anyhow::bail!("forward route {n}: prefix must start with '/'");
             }
             let prefix = prefix.trim_end_matches('/').to_string();
-            let upstream = if url == SESSION_OWNER {
-                Upstream::SessionOwner
+            let upstream = if url == OWNER {
+                Upstream::Owner
             } else {
                 Upstream::Fixed(
                     upstream_base(url)
@@ -159,15 +159,15 @@ impl ForwardRoutes {
                 Upstream::Fixed(url) => {
                     tracing::info!(prefix = %route.prefix, upstream = %url, "forwarding HTTP route");
                 }
-                Upstream::SessionOwner => {
-                    tracing::info!(prefix = %route.prefix, "forwarding HTTP route to session owners");
+                Upstream::Owner => {
+                    tracing::info!(prefix = %route.prefix, "forwarding HTTP route to owners");
                 }
             }
         }
         Ok(Some(Self {
             routes,
             client,
-            sessions: None,
+            owners: None,
         }))
     }
 
@@ -179,7 +179,7 @@ impl ForwardRoutes {
             Upstream::Fixed(base) => {
                 Target::Url(scoped_url(base, &route.prefix, uri.path(), uri.query())?)
             }
-            Upstream::SessionOwner => Target::SessionOwner(index),
+            Upstream::Owner => Target::Owner(index),
         };
         Some(ForwardTarget(target))
     }
@@ -231,13 +231,13 @@ impl ForwardRoutes {
     ) -> Response {
         match target.0 {
             Target::Url(url) => self.forward_to(request, url, cancel, permit).await,
-            Target::SessionOwner(index) => match &self.sessions {
+            Target::Owner(index) => match &self.owners {
                 Some(owners) => {
                     let prefix = &self.routes[index].prefix;
-                    self.forward_session(owners, prefix, request, cancel, permit)
+                    self.forward_owned(owners, prefix, request, cancel, permit)
                         .await
                 }
-                None => sessions::no_workers(),
+                None => owners::no_workers(),
             },
         }
     }

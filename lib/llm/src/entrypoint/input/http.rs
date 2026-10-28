@@ -253,7 +253,7 @@ async fn run_with_router_plugins(
                 model.namespace_prefix(),
             );
             // Pass the discovery client so the /health endpoint can query active instances,
-            // and session-owner forward routes can find workers
+            // and owner forward routes can find workers
             http_service_builder = http_service_builder
                 .discovery(Some(distributed_runtime.discovery()))
                 .namespace_filter(Some(namespace_filter.clone()));

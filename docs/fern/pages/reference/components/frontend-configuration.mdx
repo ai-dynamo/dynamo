@@ -59,8 +59,8 @@ see the [TLS reference](tls-configuration.mdx#http-tls-and-mtls).
   `/v1/custom=http://127.0.0.1:8080`). Use it to expose backend-specific APIs that the Frontend
   does not implement. Repeat the option to forward multiple prefixes; the option replaces the
   environment variable. Invalid or duplicate entries, and URLs that contain credentials, fail
-  startup. As `PREFIX=session-owner` (for example `/v1/sessions=session-owner`), the prefix is
-  forwarded to the worker that holds the session the request names, as described below.
+  startup. As `PREFIX=owner` (for example `/v1/sessions=owner`), the prefix is
+  forwarded to the worker that holds the resource the request names, as described below.
 
   A prefix matches whole path segments, and the longest prefix wins. Built-in routes always take
   precedence: only requests that no Frontend route matches are forwarded, with their method, path,
@@ -80,20 +80,20 @@ see the [TLS reference](tls-configuration.mdx#http-tls-and-mtls).
   no per-route TLS settings or credentials, no timeouts other than a connect timeout, and no
   retries.
 
-  A `session-owner` route serves backends whose sessions keep state on the one worker that created
-  them. Each worker advertises the base URL of its HTTP API as `forward_url` in its model card's
+  An `owner` route serves backends whose resources, sessions for example, keep state on the one
+  worker that created them. Each worker advertises the base URL of its HTTP API as `forward_url` in its model card's
   `runtime_data`, and the route only reaches workers in the namespaces the Frontend serves. It needs
   worker discovery, so it fails startup on a Frontend that serves an in-process engine.
 
-  - `POST PREFIX` creates a session. The JSON body's `id` names it (1 to 256 characters of
+  - `POST PREFIX` creates a resource. The JSON body's `id` names it (1 to 256 characters of
     `A-Z a-z 0-9 - . _ ~`); when the body names none, the Frontend generates one and adds it to the
     body. An id that a worker already holds is sent to that worker, which answers the request
     itself. Otherwise rendezvous hashing of the id picks the worker, so Frontends agree.
   - `PREFIX/{id}` and every path under it go to the worker that holds `{id}`. Each Frontend caches
     owners. On a cache miss it asks every worker `GET PREFIX/{id}`, passing on the request's
-    `Authorization` header, and the worker that answers `2xx` holds the session.
+    `Authorization` header, and the worker that answers `2xx` holds the resource.
   - The Frontend returns `404` when every worker answers `404`, and `503` when a worker gives no
-    answer, because it might hold the session. A session whose worker has left discovery is not
+    answer, because it might hold the resource. A resource whose worker has left discovery is not
     found. Other requests to `PREFIX` itself, such as a listing, return `501`, and `503` means no
     worker advertises a URL.
 

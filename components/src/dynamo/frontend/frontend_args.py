@@ -680,8 +680,8 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "Reverse-proxy a path prefix to an upstream HTTP server, as "
                 "PREFIX=URL (e.g. /v1/custom=http://127.0.0.1:8080), or as "
-                "PREFIX=session-owner to the worker holding the session the path "
-                "names (e.g. /v1/sessions=session-owner). Requests "
+                "PREFIX=owner to the worker owning the resource the path "
+                "names (e.g. /v1/sessions=owner). Requests "
                 "no built-in route matches are forwarded with their method, "
                 "query, headers, and body. May be repeated; replaces "
                 "DYN_HTTP_FORWARD_ROUTES, which accepts whitespace-separated values."

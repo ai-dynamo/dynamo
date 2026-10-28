@@ -605,7 +605,7 @@ fn upstream_url_matches_whole_segments_longest_first() {
     assert_eq!(url(&routes, "/v1/models", None), None);
 }
 
-mod session_owner {
+mod owner {
     use super::*;
     use crate::namespace::NamespaceFilter;
     use dynamo_runtime::discovery::{
@@ -708,7 +708,7 @@ mod session_owner {
         (discovery, instance)
     }
 
-    /// A frontend's session-owner route at `/v1/sessions`, once it sees
+    /// A frontend's owner route at `/v1/sessions`, once it sees
     /// `workers` workers.
     async fn frontend(
         registry: &SharedMockRegistry,
@@ -716,7 +716,7 @@ mod session_owner {
         workers: usize,
     ) -> ForwardRoutes {
         let routes = ForwardRoutes::from_config(
-            Some(&["/v1/sessions=session-owner".to_string()]),
+            Some(&["/v1/sessions=owner".to_string()]),
             Some(WorkerDiscovery {
                 discovery: Arc::new(MockDiscovery::new(None, registry.clone())),
                 namespaces,
@@ -730,7 +730,7 @@ mod session_owner {
     }
 
     async fn wait_for_workers(routes: &ForwardRoutes, count: usize) {
-        let owners = routes.sessions.as_ref().unwrap();
+        let owners = routes.owners.as_ref().unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
             owners.workers().wait_for_count(count),
@@ -759,8 +759,8 @@ mod session_owner {
     }
 
     #[test]
-    fn session_owner_routes_need_worker_discovery() {
-        let routes = ["/v1/sessions=session-owner".to_string()];
+    fn owner_routes_need_worker_discovery() {
+        let routes = ["/v1/sessions=owner".to_string()];
         assert!(ForwardRoutes::parse(&routes).unwrap().is_some());
         let err = ForwardRoutes::from_config(Some(&routes), None)
             .err()
@@ -781,7 +781,10 @@ mod session_owner {
         let (status, created) = call(&first, "POST", "/v1/sessions", "").await;
         assert_eq!(status, StatusCode::OK);
         let id = created["id"].as_str().unwrap().to_string();
-        assert!(id.starts_with("sess_"), "{id}");
+        assert!(
+            id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{id}"
+        );
         let owner = created["worker"].clone();
         for _ in 0..3 {
             let (status, warmed) =
@@ -810,7 +813,7 @@ mod session_owner {
         }
         let (status, missing) = call(&second, "GET", "/v1/sessions/nope", "").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(missing["message"], "no worker holds this session");
+        assert_eq!(missing["message"], "no worker holds this resource");
 
         let (status, _) = call(&first, "GET", "/v1/sessions", "").await;
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED);

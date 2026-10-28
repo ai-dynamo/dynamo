@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Session-owner forward routes (`PREFIX=session-owner`), for backends whose
-//! sessions keep state on the one worker that created them. Each request goes
-//! to the worker holding the session it names. A worker takes part by
-//! advertising the base URL of its HTTP API as `forward_url` in its model
-//! card's runtime data.
+//! Owner forward routes (`PREFIX=owner`), for backends whose resources
+//! (sessions, for example) keep state on the one worker that created them.
+//! Each request goes to the worker owning the resource it names. A worker
+//! takes part by advertising the base URL of its HTTP API as `forward_url`
+//! in its model card's runtime data.
 //!
-//! - `POST PREFIX` creates a session. The body's `id` names it; when the body
+//! - `POST PREFIX` creates a resource. The body's `id` names it; when the body
 //!   names none, the frontend mints one and adds it. An id some worker already
 //!   holds goes to that worker, whose answer is its own (typically a
 //!   conflict). Otherwise rendezvous hashing picks the worker, so concurrent
@@ -15,10 +15,10 @@
 //! - `PREFIX/{id}`, and everything under it, goes to the worker holding
 //!   `{id}`. Owners are cached; on a miss, every worker is asked
 //!   `GET PREFIX/{id}`, and the one answering 2xx holds it. Workers stay the
-//!   source of truth, so any frontend finds any session, also after a restart.
-//! - A session no worker holds is a 404, and nothing is forwarded. When a
+//!   source of truth, so any frontend finds any resource, also after a restart.
+//! - A resource no worker holds is a 404, and nothing is forwarded. When a
 //!   worker cannot be asked, the answer is a 503 instead: a client that hears
-//!   404 recreates the session, possibly beside the original.
+//!   404 recreates the resource, possibly beside the original.
 //! - Other requests to `PREFIX` itself, such as a listing, would span every
 //!   worker, and are refused.
 
@@ -46,14 +46,14 @@ use crate::namespace::{NamespaceFilter, NamespacePrefixMode};
 /// The runtime-data key under which a worker advertises its HTTP API's base
 /// URL.
 pub(crate) const FORWARD_URL_KEY: &str = "forward_url";
-/// How long a worker may take to say whether it holds a session.
+/// How long a worker may take to say whether it holds a resource.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Owners cached at most. Past it, owners unused for [`CACHE_IDLE`] go first.
 const MAX_CACHED_OWNERS: usize = 65_536;
 const CACHE_IDLE: Duration = Duration::from_secs(3600);
-const MAX_SESSION_ID_BYTES: usize = 256;
+const MAX_ID_BYTES: usize = 256;
 
-/// Where session-owner routes find workers: the frontend's discovery, scoped
+/// Where owner routes find workers: the frontend's discovery, scoped
 /// to the namespaces it serves. Watching ends when `cancel` fires.
 pub(crate) struct WorkerDiscovery {
     pub(crate) discovery: Arc<dyn Discovery>,
@@ -81,7 +81,7 @@ impl WorkerUrls {
             {
                 Ok(events) => events,
                 Err(err) => {
-                    tracing::error!(error = %err, "session-owner forward routes cannot watch workers");
+                    tracing::error!(error = %err, "owner forward routes cannot watch workers");
                     return;
                 }
             };
@@ -116,7 +116,7 @@ impl WorkerUrls {
                     }
                     Ok(DiscoveryEvent::ModelTaintsUpdated(_)) => continue,
                     Err(err) => {
-                        tracing::warn!(error = %err, "session-owner forward routes: discovery error");
+                        tracing::warn!(error = %err, "owner forward routes: discovery error");
                         continue;
                     }
                 }
@@ -184,12 +184,12 @@ fn advertised_url(
     }
 }
 
-/// Which worker holds each session.
-pub(super) struct SessionOwners {
+/// Which worker holds each resource.
+pub(super) struct Owners {
     workers: WorkerUrls,
     /// Owners found so far. Only a cache: an entry is dropped when its worker
     /// leaves or answers 404, and a missing one is looked up again, so a
-    /// session deleted and recreated elsewhere costs one 404.
+    /// resource deleted and recreated elsewhere costs one 404.
     cached: Mutex<HashMap<String, Cached>>,
 }
 
@@ -198,7 +198,7 @@ struct Cached {
     used: Instant,
 }
 
-impl SessionOwners {
+impl Owners {
     pub(super) fn new(workers: WorkerUrls) -> Self {
         Self {
             workers,
@@ -211,28 +211,28 @@ impl SessionOwners {
         &self.workers
     }
 
-    /// The worker holding `session` and its base URL; `None` when every
-    /// worker says it holds no such session; otherwise the response to send
+    /// The worker holding `id` and its base URL; `None` when every
+    /// worker says it holds no such resource; otherwise the response to send
     /// instead. `auth` goes with each question, for workers that check it.
     async fn locate(
         &self,
         client: &reqwest::Client,
         prefix: &str,
-        session: &str,
+        id: &str,
         auth: Option<&HeaderValue>,
     ) -> Result<Option<(WorkerId, reqwest::Url)>, Response> {
-        if let Some(worker) = self.cached(session) {
+        if let Some(worker) = self.cached(id) {
             match self.workers.get(worker) {
                 Some(url) => return Ok(Some((worker, url))),
-                // The session left with its worker; the id may since name another.
-                None => self.forget(session),
+                // The resource left with its worker; the id may since name another.
+                None => self.forget(id),
             }
         }
         let workers = self.workers.all();
         if workers.is_empty() {
             return Err(no_workers());
         }
-        let path = format!("{prefix}/{session}");
+        let path = format!("{prefix}/{id}");
         let mut asked: FuturesUnordered<_> = workers
             .into_iter()
             .map(|(worker, base)| {
@@ -244,7 +244,7 @@ impl SessionOwners {
         while let Some((worker, base, held)) = asked.next().await {
             match held {
                 Some(true) => {
-                    self.remember(session, worker);
+                    self.remember(id, worker);
                     return Ok(Some((worker, base)));
                 }
                 Some(false) => {}
@@ -254,45 +254,46 @@ impl SessionOwners {
         if unanswered {
             return Err(error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "could not ask every worker for this session",
+                "could not ask every worker for this resource",
             ));
         }
         Ok(None)
     }
 
-    /// The worker a new session goes to: rendezvous hashing of its id over
+    /// The worker a new resource goes to: rendezvous hashing of its id over
     /// the live workers, so frontends agree while membership holds.
-    fn place(&self, session: &str) -> Option<(WorkerId, reqwest::Url)> {
-        self.workers.all().into_iter().max_by_key(|(worker, _)| {
-            xxhash_rust::xxh3::xxh3_64_with_seed(session.as_bytes(), *worker)
-        })
+    fn place(&self, id: &str) -> Option<(WorkerId, reqwest::Url)> {
+        self.workers
+            .all()
+            .into_iter()
+            .max_by_key(|(worker, _)| xxhash_rust::xxh3::xxh3_64_with_seed(id.as_bytes(), *worker))
     }
 
-    fn cached(&self, session: &str) -> Option<WorkerId> {
+    fn cached(&self, id: &str) -> Option<WorkerId> {
         let mut cached = self.cached.lock();
-        let entry = cached.get_mut(session)?;
+        let entry = cached.get_mut(id)?;
         entry.used = Instant::now();
         Some(entry.worker)
     }
 
-    fn remember(&self, session: &str, worker: WorkerId) {
+    fn remember(&self, id: &str, worker: WorkerId) {
         let mut cached = self.cached.lock();
         let now = Instant::now();
-        if cached.len() >= MAX_CACHED_OWNERS && !cached.contains_key(session) {
+        if cached.len() >= MAX_CACHED_OWNERS && !cached.contains_key(id) {
             cached.retain(|_, entry| now.duration_since(entry.used) < CACHE_IDLE);
             if cached.len() >= MAX_CACHED_OWNERS {
                 return;
             }
         }
-        cached.insert(session.to_string(), Cached { worker, used: now });
+        cached.insert(id.to_string(), Cached { worker, used: now });
     }
 
-    fn forget(&self, session: &str) {
-        self.cached.lock().remove(session);
+    fn forget(&self, id: &str) {
+        self.cached.lock().remove(id);
     }
 }
 
-/// Whether the worker at `url` holds the session: `None` when it gave no
+/// Whether the worker at `url` holds the resource: `None` when it gave no
 /// answer to go by.
 async fn holds(
     client: &reqwest::Client,
@@ -308,22 +309,22 @@ async fn holds(
         Ok(response) if response.status().is_success() => Some(true),
         Ok(response) if response.status() == StatusCode::NOT_FOUND => Some(false),
         Ok(response) => {
-            tracing::warn!(%url, status = %response.status(), "session lookup got no answer");
+            tracing::warn!(%url, status = %response.status(), "owner lookup got no answer");
             None
         }
         Err(err) => {
-            tracing::warn!(%url, error = %err, "session lookup failed");
+            tracing::warn!(%url, error = %err, "owner lookup failed");
             None
         }
     }
 }
 
 impl ForwardRoutes {
-    /// Forwards `request`, under the session-owner route at `prefix`, as the
+    /// Forwards `request`, under the owner route at `prefix`, as the
     /// module docs describe; see [`Self::forward`] for the rest.
-    pub(super) async fn forward_session<P: Send + Sync + 'static>(
+    pub(super) async fn forward_owned<P: Send + Sync + 'static>(
         &self,
-        owners: &SessionOwners,
+        owners: &Owners,
         prefix: &str,
         request: Request,
         cancel: CancellationToken,
@@ -336,47 +337,47 @@ impl ForwardRoutes {
             if request.method() != Method::POST {
                 return error_response(
                     StatusCode::NOT_IMPLEMENTED,
-                    "sessions span workers; only creating one is forwarded here",
+                    "a listing spans workers; only creating a resource is forwarded here",
                 );
             }
             return self
-                .create_session(owners, prefix, request, cancel, permit)
+                .create_resource(owners, prefix, request, cancel, permit)
                 .await;
         }
-        let session = rest[1..].split('/').next().unwrap_or_default().to_string();
-        if session.is_empty() {
-            return no_such_session();
+        let id = rest[1..].split('/').next().unwrap_or_default().to_string();
+        if id.is_empty() {
+            return no_such_resource();
         }
-        let deletes = request.method() == Method::DELETE
-            && rest[1..].trim_end_matches('/') == session.as_str();
+        let deletes =
+            request.method() == Method::DELETE && rest[1..].trim_end_matches('/') == id.as_str();
         let auth = request.headers().get(header::AUTHORIZATION).cloned();
         let located = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
                 return super::super::openai::ErrorMessage::_service_unavailable().into_response();
             }
-            located = owners.locate(&self.client, prefix, &session, auth.as_ref()) => located,
+            located = owners.locate(&self.client, prefix, &id, auth.as_ref()) => located,
         };
         let base = match located {
             Ok(Some((_, base))) => base,
-            Ok(None) => return no_such_session(),
+            Ok(None) => return no_such_resource(),
             Err(refused) => return refused,
         };
         let Some(url) = scoped_url(&base, prefix, path, request.uri().query()) else {
-            return no_such_session();
+            return no_such_resource();
         };
         let response = self.forward_to(request, url, cancel, permit).await;
         let status = response.status();
         if status == StatusCode::NOT_FOUND || (deletes && status.is_success()) {
-            owners.forget(&session);
+            owners.forget(&id);
         }
         response
     }
 
-    /// Creates a session on its worker, and remembers the worker once it has.
-    async fn create_session<P: Send + Sync + 'static>(
+    /// Creates a resource on its worker, and remembers the worker once it has.
+    async fn create_resource<P: Send + Sync + 'static>(
         &self,
-        owners: &SessionOwners,
+        owners: &Owners,
         prefix: &str,
         request: Request,
         cancel: CancellationToken,
@@ -395,16 +396,16 @@ impl ForwardRoutes {
                 Err(_) => {
                     return error_response(
                         StatusCode::BAD_REQUEST,
-                        "a session is created from a JSON object",
+                        "a resource is created from a JSON object",
                     );
                 }
             }
         };
-        let (session, body, minted) = match fields.get("id") {
+        let (id, body, minted) = match fields.get("id") {
             Some(serde_json::Value::String(id)) => (id.clone(), body, false),
             None | Some(serde_json::Value::Null) => {
                 // Minted here, so the frontend knows the id before any worker does.
-                let id = format!("sess_{}", uuid::Uuid::new_v4().simple());
+                let id = uuid::Uuid::new_v4().simple().to_string();
                 fields.insert("id".to_string(), id.clone().into());
                 let body = Bytes::from(serde_json::Value::Object(fields).to_string());
                 parts.headers.insert(
@@ -415,7 +416,7 @@ impl ForwardRoutes {
             }
             Some(_) => return error_response(StatusCode::BAD_REQUEST, "'id' must be a string"),
         };
-        if !valid_session_id(&session) {
+        if !valid_id(&id) {
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "'id' must be 1 to 256 characters of A-Z a-z 0-9 - . _ ~",
@@ -430,12 +431,12 @@ impl ForwardRoutes {
                 _ = cancel.cancelled() => {
                     return super::super::openai::ErrorMessage::_service_unavailable().into_response();
                 }
-                located = owners.locate(&self.client, prefix, &session, auth) => located,
+                located = owners.locate(&self.client, prefix, &id, auth) => located,
             }
         };
         let (worker, base) = match located {
             Ok(Some(held)) => held,
-            Ok(None) => match owners.place(&session) {
+            Ok(None) => match owners.place(&id) {
                 Some(placed) => placed,
                 None => return no_workers(),
             },
@@ -450,15 +451,15 @@ impl ForwardRoutes {
         let request = Request::from_parts(parts, Body::from(body));
         let response = self.forward_to(request, url, cancel, permit).await;
         if response.status().is_success() {
-            owners.remember(&session, worker);
+            owners.remember(&id, worker);
         }
         response
     }
 }
 
 /// An id usable verbatim as one path segment.
-fn valid_session_id(id: &str) -> bool {
-    (1..=MAX_SESSION_ID_BYTES).contains(&id.len())
+fn valid_id(id: &str) -> bool {
+    (1..=MAX_ID_BYTES).contains(&id.len())
         && !matches!(id, "." | "..")
         && id
             .bytes()
@@ -472,6 +473,6 @@ pub(super) fn no_workers() -> Response {
     )
 }
 
-fn no_such_session() -> Response {
-    error_response(StatusCode::NOT_FOUND, "no worker holds this session")
+fn no_such_resource() -> Response {
+    error_response(StatusCode::NOT_FOUND, "no worker holds this resource")
 }

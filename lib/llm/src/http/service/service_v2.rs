@@ -834,12 +834,12 @@ pub struct HttpServiceConfig {
     frontend_route_extensions: Vec<FrontendRouteExtension>,
 
     /// Path prefixes reverse-proxied to upstream servers, as `PREFIX=URL` or
-    /// `PREFIX=session-owner` entries. `None` falls back to
+    /// `PREFIX=owner` entries. `None` falls back to
     /// `DYN_HTTP_FORWARD_ROUTES`.
     #[builder(default)]
     forward_routes: Option<Vec<String>>,
 
-    /// Namespaces whose workers this frontend serves; session-owner forward
+    /// Namespaces whose workers this frontend serves; owner forward
     /// routes reach only those. `None` means every namespace.
     #[builder(default)]
     namespace_filter: Option<NamespaceFilter>,
@@ -1359,7 +1359,7 @@ impl HttpServiceConfigBuilder {
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
-        // Session-owner forward routes find workers through real discovery only.
+        // Owner forward routes find workers through real discovery only.
         let forward_workers = config.discovery.clone().map(|discovery| WorkerDiscovery {
             discovery,
             namespaces: config
