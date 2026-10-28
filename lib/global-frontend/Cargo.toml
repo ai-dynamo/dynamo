@@ -18,15 +18,13 @@ path = "src/main.rs"
 [dependencies]
 dynamo-global-common = { path = "../global-common" }
 dynamo-global-router = { path = "../global-router" }
-# The block manager serves workers. A frontend that only forwards requests
-# never uses it.
+# For the KV DC Relay protocol and the session header. The block manager is
+# for workers; a frontend that only forwards requests never uses it.
 dynamo-llm = { path = "../llm", default-features = false }
-dynamo-protocols = { workspace = true }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }
-async-stream = { workspace = true }
-async-trait = { workspace = true }
+axum = { workspace = true }
 clap = { version = "4.5.49", features = ["derive"] }
 futures = { workspace = true }
 reqwest = { workspace = true }
@@ -37,7 +35,3 @@ tokio-util = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
-
-[dev-dependencies]
-
-axum = { workspace = true }

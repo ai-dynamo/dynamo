@@ -2510,14 +2510,11 @@ name = "dynamo-global-frontend"
 version = "1.7.0"
 dependencies = [
  "anyhow",
- "async-stream",
- "async-trait",
  "axum 0.8.4",
  "clap",
  "dynamo-global-common",
  "dynamo-global-router",
  "dynamo-llm",
- "dynamo-protocols",
  "dynamo-runtime",
  "futures",
  "reqwest 0.12.28",

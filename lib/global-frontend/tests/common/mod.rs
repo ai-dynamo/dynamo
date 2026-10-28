@@ -13,7 +13,6 @@ use axum::Router;
 use axum::http::HeaderMap;
 use axum::routing;
 use dynamo_global_common::{PoolIdDeriver, PoolKey, PoolLocation, V1PoolIdDeriver};
-use dynamo_global_frontend::{ModelSync, PoolForwardingEngine};
 use dynamo_global_frontend::{Pool, PoolSelector, PoolSnapshot, RoundRobinSelector};
 use dynamo_global_router::InFlightTracker;
 use dynamo_llm::http::service::service_v2::HttpService;
@@ -67,10 +66,15 @@ pub fn http_service(url: &Url) -> HttpService {
 pub async fn serve(service: HttpService, listener: TcpListener, url: Url) -> Server {
     let cancel = CancellationToken::new();
     service.spawn_with_listener(cancel.clone(), listener).await;
-    let health = url.join("health").unwrap();
+    wait_until_ok(&url.join("health").unwrap()).await;
+    Server { url, cancel }
+}
+
+/// Waits until `url` answers a GET with success.
+async fn wait_until_ok(url: &Url) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while !client()
-            .get(health.clone())
+            .get(url.clone())
             .send()
             .await
             .is_ok_and(|response| response.status().is_success())
@@ -79,34 +83,28 @@ pub async fn serve(service: HttpService, listener: TcpListener, url: Url) -> Ser
         }
     })
     .await
-    .expect("server did not become healthy");
-    Server { url, cancel }
+    .expect("server did not come up");
 }
 
 /// A Global Frontend that routes round robin over the pools `pools` publishes.
 pub async fn global_frontend(pools: watch::Receiver<Arc<PoolSnapshot>>) -> Server {
-    global_frontend_with(pools, Arc::new(RoundRobinSelector::new())).await
+    let selector = Arc::new(RoundRobinSelector::new());
+    global_frontend_with(pools, selector, Arc::new(InFlightTracker::new())).await
 }
 
 /// A Global Frontend that routes with `selector` over the pools `pools`
-/// publishes.
+/// publishes, counting requests in flight in `in_flight`.
 pub async fn global_frontend_with(
     pools: watch::Receiver<Arc<PoolSnapshot>>,
     selector: Arc<dyn PoolSelector>,
+    in_flight: Arc<InFlightTracker>,
 ) -> Server {
     let (listener, url) = bind().await;
-    let service = http_service(&url);
-    let engine = Arc::new(PoolForwardingEngine::new(
-        pools.clone(),
-        selector,
-        Arc::new(InFlightTracker::new()),
-        client(),
-    ));
-    let mut models = ModelSync::new(service.clone(), engine);
-    models.apply(&pools.borrow());
-    let server = serve(service, listener, url).await;
-    tokio::spawn(models.follow(pools, server.cancel.child_token()));
-    server
+    let cancel = CancellationToken::new();
+    let app = dynamo_global_frontend::app(pools, selector, in_flight, client());
+    tokio::spawn(dynamo_global_frontend::serve(listener, app, cancel.clone()));
+    wait_until_ok(&url.join("live").unwrap()).await;
+    Server { url, cancel }
 }
 
 pub fn pool(dgd: &str, model: &str, frontend: &Url) -> Pool {

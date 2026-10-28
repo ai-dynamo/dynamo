@@ -24,12 +24,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_common::{PoolIdDeriver, PoolKey, PoolLocation, V1PoolIdDeriver};
-use dynamo_global_frontend::{ModelSync, PoolForwardingEngine, follow_relays, measure_round_trips};
 use dynamo_global_frontend::{
     Pool, PoolCatalog, PoolSelector, RoundRobinSelector, StaticPoolCatalog,
 };
+use dynamo_global_frontend::{app, follow_relays, measure_round_trips, serve};
 use dynamo_global_router::{AffinitySelector, InFlightTracker, LeastInFlightSelector, PoolSignals};
-use dynamo_llm::http::service::service_v2::HttpService;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -190,12 +189,6 @@ async fn main() -> Result<()> {
     });
 
     let catalog = StaticPoolCatalog::new(args.pools);
-    let service = HttpService::builder()
-        .host(args.host.clone())
-        .port(args.port)
-        .cancel_token(Some(shutdown.clone()))
-        .build()
-        .context("build the HTTP service")?;
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(args.connect_timeout_secs))
         .build()
@@ -235,22 +228,13 @@ async fn main() -> Result<()> {
             selector
         }
     };
-    let engine = Arc::new(PoolForwardingEngine::new(
-        catalog.subscribe(),
-        selector,
-        in_flight,
-        http,
-    ));
-
-    // Register the models before serving, so the first request finds them.
-    let pools = catalog.subscribe();
-    let mut models = ModelSync::new(service.clone(), engine);
-    models.apply(&pools.borrow());
-    tokio::spawn(models.follow(pools, shutdown.child_token()));
-
-    tracing::info!(host = %args.host, port = args.port, "Global Frontend listening");
-    service
-        .run(shutdown)
+    let app = app(catalog.subscribe(), selector, in_flight, http);
+    let address = format!("{}:{}", args.host, args.port);
+    let listener = tokio::net::TcpListener::bind(&address)
+        .await
+        .with_context(|| format!("listen on {address}"))?;
+    tracing::info!(%address, "Global Frontend listening");
+    serve(listener, app, shutdown)
         .await
         .context("serve the Global Frontend")
 }

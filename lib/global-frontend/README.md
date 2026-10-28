@@ -6,9 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 # Global Frontend
 
 An HTTP entry point that forwards requests to explicitly configured Dynamo pool
-frontends. It reuses Dynamo's HTTP service and performs no tokenization; the pool
-frontend owns preprocessing and generation. Shared pool identity and description
-types live in `dynamo-global-common`.
+frontends. It reads only each request's `model` and passes the request and the
+pool's response through as they are; the pool frontend owns validation,
+preprocessing, generation, and the response format. Shared pool identity and
+description types live in `dynamo-global-common`.
 
 ```bash
 cargo run -p dynamo-global-frontend -- --port 8000 \
@@ -21,11 +22,15 @@ Repeat the flag for different pools. Comma-separated URLs after `@` configure
 multiple frontends for the same pool. Pool identities are derived from the
 site, namespace, and DGD name; duplicate identities are rejected.
 
-`/v1/models` lists the configured models. Chat completions and
-completions support streaming and non-streaming requests; the existing Responses
-API translation goes through the chat forwarding engine. Non-streaming requests
-ask the pool for a stream including usage, which the HTTP service aggregates.
-The `x-dynamo-session-id` header is forwarded to the selected pool.
+Every `POST /v1/...` request (chat completions, completions, Responses,
+embeddings, Anthropic messages, and so on) goes to the same route on the
+selected pool's frontend, with the client's headers except hop-by-hop ones,
+including `x-dynamo-session-id`, `x-request-id`, and `authorization`. The pool's
+status, headers, and body come back unchanged, streamed or not, including its
+error responses and SSE keep-alives. A request whose model no pool serves gets
+404, and one whose pool cannot be reached gets 503. `/v1/models` lists the
+configured models, `/health` is healthy while some pool has a frontend, and
+`/live` always answers.
 
 ## Pool selection
 
@@ -74,8 +79,11 @@ zero.
 
 ## Deployment notes
 
-- The Global Frontend holds a request's prompt only while it parses and
-  uploads it, not while the pool queues it.
+- The Global Frontend holds a request's body, as received, only until it is
+  written to the pool, not while the pool queues it. The body limit is
+  `DYN_HTTP_BODY_LIMIT_MB` (default 45), as for Dynamo's HTTP service.
+- A client that disconnects closes its connection to the pool, which cancels
+  the request there.
 - Requests to other regions go over long-lived connections that sit idle
   between bursts. Set `net.ipv4.tcp_slow_start_after_idle=0` on the Global
   Frontend's hosts, or each idle connection starts over with a small send
@@ -86,12 +94,8 @@ zero.
 This first implementation uses static configuration. The catalog interface also
 accepts snapshots for embedding and tests, but there is no discovery client,
 polling, or registration. There is no automatic failover or retry: unreachable
-pools return 503. Upstream HTTP errors use the existing frontend error policy:
-404 remains 404, while an upstream 502 is classified as internal and returns
-500; diagnostic bodies are sanitized. The existing SSE
-codec does not distinguish a clean upstream EOF from `[DONE]`; premature clean
-EOF handling remains a limitation of this draft. Request-ID/trace propagation
-and authentication header forwarding are not implemented.
+pools return 503. The Global Frontend serves no `/metrics` of its own, and its
+listener has no TLS.
 
 ## Tests
 
