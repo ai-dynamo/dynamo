@@ -118,6 +118,7 @@ func TestLowerModelOnlyRequest(t *testing.T) {
 	want := `{"engine":{"backend":{"choices":["vllm","sglang","trtllm"]},"hardware":"h200_sxm","model":"meta-llama/Llama-3.1-8B-Instruct","workers":{"aggregated":{},"decode":{},"prefill":{}}},` +
 		`"evaluation":{"sla":{"itl_ms":30,"ttft_ms":2000}},` +
 		`"optimization":{"constraints":{"max_candidate_gpus":8},"strict_sla":true,"target":"throughput_per_gpu"},` +
+		`"optimizer":{"max_trials":320},` +
 		`"traffic":{"load":{"concurrency":10,"type":"concurrency"},"source":{"input_tokens":1024,"output_tokens":128,"type":"synthetic"},"stop":{"requests":1000}}}`
 	if got := encode(t, lower(t, defaultedSpec())); got != want {
 		t.Fatalf("effective input\n got: %s\nwant: %s", got, want)
@@ -246,32 +247,25 @@ func TestRequestCountDefault(t *testing.T) {
 }
 
 func TestMaxTrialsDefault(t *testing.T) {
-	t.Run("added for a KV-load range", func(t *testing.T) {
-		if nested(t, lower(t, withKVRange(defaultedSpec())), "optimizer", "max_trials") != 320.0 {
-			t.Fatal("no default max_trials for a range search")
-		}
-	})
-	t.Run("not derived for the model-only fixed concurrency", func(t *testing.T) {
-		if input := lower(t, defaultedSpec()); nested(t, input, "optimizer") != nil {
-			t.Fatalf("unexpected optimizer: %s", encode(t, input))
-		}
-	})
-	t.Run("not added for a pinned load", func(t *testing.T) {
-		spec := withKVRange(defaultedSpec())
-		spec.Workload.Static.Load.KVCapacityFraction = &v1beta2.KVCapacityFractionSpec{Value: new(0.5)}
-		input := lower(t, spec)
-		if nested(t, input, "optimizer") != nil {
-			t.Fatalf("unexpected optimizer: %s", encode(t, input))
-		}
-		if nested(t, input, "traffic", "load", "fraction") != 0.5 {
-			t.Fatal("a one-value ratio should be a scalar")
-		}
-	})
+	emptyWorkload := defaultedSpec()
+	emptyWorkload.Workload = &v1beta2.WorkloadSpec{}
+
+	for name, spec := range map[string]*v1beta2.DynamoGraphDeploymentRequestSpec{
+		"model-only fixed concurrency": defaultedSpec(),
+		"KV-load range":                withKVRange(defaultedSpec()),
+		"empty workload":               emptyWorkload,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if nested(t, lower(t, spec), "optimizer", "max_trials") != 320.0 {
+				t.Fatal("optimizer.max_trials not derived")
+			}
+		})
+	}
 	t.Run("override value or null wins", func(t *testing.T) {
-		if nested(t, lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"optimizer":{"max_trials":7}}`)), "optimizer", "max_trials") != json.Number("7") {
+		if nested(t, lower(t, withInputOverrides(defaultedSpec(), `{"optimizer":{"max_trials":7}}`)), "optimizer", "max_trials") != json.Number("7") {
 			t.Fatal("override max_trials ignored")
 		}
-		if nested(t, lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"optimizer":{"max_trials":null}}`)), "optimizer", "max_trials") != nil {
+		if nested(t, lower(t, withInputOverrides(defaultedSpec(), `{"optimizer":{"max_trials":null}}`)), "optimizer", "max_trials") != nil {
 			t.Fatal("max_trials re-added after an override null")
 		}
 	})
@@ -318,26 +312,26 @@ func TestStrictSLADerivation(t *testing.T) {
 
 func TestInputOverridesApplyOnceAfterDerivedDefaults(t *testing.T) {
 	t.Run("optimizer null removes the complete derived optimizer", func(t *testing.T) {
-		input := lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"optimizer":null}`))
+		input := lower(t, withInputOverrides(defaultedSpec(), `{"optimizer":null}`))
 		if nested(t, input, "optimizer") != nil {
 			t.Fatalf("optimizer survived an override null: %s", encode(t, input))
 		}
 	})
 	t.Run("max_trials null removes only max_trials", func(t *testing.T) {
-		input := lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"optimizer":{"max_trials":null,"seed":3}}`))
+		input := lower(t, withInputOverrides(defaultedSpec(), `{"optimizer":{"max_trials":null,"seed":3}}`))
 		if nested(t, input, "optimizer", "max_trials") != nil || nested(t, input, "optimizer", "seed") != json.Number("3") {
 			t.Fatalf("unexpected optimizer: %s", encode(t, input))
 		}
 	})
 	t.Run("an override max_trials replaces the derived value", func(t *testing.T) {
-		input := lower(t, withInputOverrides(withKVRange(defaultedSpec()), `{"optimizer":{"max_trials":7}}`))
+		input := lower(t, withInputOverrides(defaultedSpec(), `{"optimizer":{"max_trials":7}}`))
 		if nested(t, input, "optimizer", "max_trials") != json.Number("7") {
 			t.Fatalf("unexpected optimizer: %s", encode(t, input))
 		}
 	})
-	t.Run("nothing is derived from values only overrides introduce", func(t *testing.T) {
+	t.Run("cross-field defaults are not derived from values only overrides introduce", func(t *testing.T) {
 		input := lower(t, withInputOverrides(withoutSLA(defaultedSpec()), `{"traffic":{"load":{"fraction":{"range":{"min":0.1,"max":1}}}},"evaluation":{"sla":{"ttft_ms":500}}}`))
-		if nested(t, input, "optimizer") != nil || nested(t, input, "optimization", "strict_sla") != nil {
+		if nested(t, input, "optimizer", "max_trials") != 320.0 || nested(t, input, "optimization", "strict_sla") != nil {
 			t.Fatalf("a field was derived from override-only values: %s", encode(t, input))
 		}
 	})

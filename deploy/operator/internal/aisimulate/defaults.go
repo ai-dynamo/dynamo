@@ -27,8 +27,9 @@ const (
 	// this value when replacing it.
 	DefaultRequestCount int64 = 1000
 
-	// DefaultMaxTrials bounds a KV-load range search that has no explicit optimizer.max_trials.
-	// It matches the trial budget of AISimulate's unified CLI.
+	// DefaultMaxTrials bounds every search that has no explicit optimizer.max_trials.
+	// It matches the trial budget of AISimulate's unified CLI while making the
+	// effective input persisted in Run status self-contained.
 	DefaultMaxTrials int64 = 320
 )
 
@@ -59,10 +60,9 @@ func applyDefaults(underlay map[string]any) error {
 		if !has(underlay, trafficStopRequests...) {
 			b.set(float64(DefaultRequestCount), trafficStopRequests)
 		}
-		fraction, _, _ := unstructured.NestedMap(underlay, trafficLoadFraction...)
-		if has(fraction, "range") && !has(underlay, optimizerMaxTrials...) {
-			b.set(float64(DefaultMaxTrials), optimizerMaxTrials)
-		}
+	}
+	if !has(underlay, optimizerMaxTrials...) {
+		b.set(float64(DefaultMaxTrials), optimizerMaxTrials)
 	}
 
 	if hasSLABound(underlay) && !has(underlay, optimizationStrictSLA...) {
