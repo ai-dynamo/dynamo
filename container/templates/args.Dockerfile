@@ -102,10 +102,6 @@ ARG PLANNER_PYTHON_VERSION={{ context.dynamo.planner_python_version }}
 
 {% if framework == "vllm" -%}
 ARG MAX_JOBS={{ context.vllm.max_jobs }}
-{% if context.vllm[device_key].transformers_version is defined -%}
-ARG TRANSFORMERS_VERSION={{ context.vllm[device_key].transformers_version }}
-ARG TOKENIZERS_VERSION={{ context.vllm[device_key].tokenizers_version }}
-{% endif -%}
 ARG VLLM_OMNI_REF={{ context.vllm[device_key].get("vllm_omni_ref", context.vllm.vllm_omni_ref) }}
 
 {% if device == "cuda" -%}
