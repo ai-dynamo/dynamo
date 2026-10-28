@@ -298,6 +298,8 @@ func admissionResource(t *testing.T, kind string) string {
 		return "dynamographdeployments"
 	case "DynamoGraphDeploymentRequest":
 		return "dynamographdeploymentrequests"
+	case "DynamoGraphDeploymentRun":
+		return "dynamographdeploymentruns"
 	default:
 		t.Fatalf("unsupported admission kind %q", kind)
 		return ""
@@ -324,6 +326,8 @@ func admissionGVK(t *testing.T, object runtime.Object) schema.GroupVersionKind {
 		return nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK
 	case *nvidiacomv1beta2.DynamoGraphDeploymentRequest:
 		return nvidiacomv1beta2.DynamoGraphDeploymentRequestGVK
+	case *nvidiacomv1beta2.DynamoGraphDeploymentRun:
+		return nvidiacomv1beta2.DynamoGraphDeploymentRunGVK
 	default:
 		t.Fatalf("unsupported admission object type %T", object)
 		return schema.GroupVersionKind{}
