@@ -59,6 +59,15 @@ pub fn attachment_record_id(publisher_id: PublisherId, generation: u64) -> Publi
 pub enum KvStateIngressProtocol {
     FrameworkV1,
     VllmResidencyV1,
+    /// HiCache backend memory is owned by the attached engine, not a Guard.
+    #[serde(rename = "sglang_hicache_v1")]
+    SglangHiCacheV1,
+}
+
+impl KvStateIngressProtocol {
+    pub fn supports_owned_residency(self) -> bool {
+        matches!(self, Self::VllmResidencyV1 | Self::SglangHiCacheV1)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

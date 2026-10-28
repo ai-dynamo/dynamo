@@ -582,7 +582,7 @@ fn validate_intent(
     if intent.cache_owner_id.pool().indexer_domain() != intent.indexer_domain_id {
         anyhow::bail!("attachment intent indexer domain disagrees with CacheOwnerId");
     }
-    if intent.ingress_protocol != KvStateIngressProtocol::VllmResidencyV1 {
+    if !intent.ingress_protocol.supports_owned_residency() {
         anyhow::bail!("unsupported state-agent raw ingress protocol");
     }
     if intent.raw_zmq_endpoint.is_empty() {
@@ -622,6 +622,12 @@ async fn reconcile_owner(
         0 => {
             if let Some(slot) = slots.get_mut(&owner) {
                 detach_slot(slot).await?;
+                if slot.ingress_protocol == KvStateIngressProtocol::SglangHiCacheV1 {
+                    if let Some(agent) = slot.agent.as_ref() {
+                        agent.shutdown().await?;
+                    }
+                    slot.agent = None;
+                }
                 if slot.agent.is_none() {
                     slots.remove(&owner);
                 }
