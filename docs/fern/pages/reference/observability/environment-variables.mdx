@@ -87,8 +87,16 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 </ParamField>
 
 <Warning>
-  The system server uses plaintext HTTP and does not authenticate or authorize callers. Keep it private even when health and metrics endpoints must be scraped. Bind it to loopback where possible; otherwise restrict the port with NetworkPolicy or place it behind an authenticated TLS or service-mesh proxy. Treat `/engine/*` and LoRA routes as privileged control surfaces.
+  The system server uses plaintext HTTP and does not authenticate or authorize callers. Keep it private even when health and metrics endpoints must be scraped. Restrict the port with NetworkPolicy or place it behind an authenticated TLS or service-mesh proxy. Treat `/engine/*` and LoRA routes as privileged control surfaces.
 </Warning>
+
+Loopback binding is suitable only when all consumers are local. Operator-generated
+startup, liveness, and readiness probes use HTTP on the Pod address, and other
+components can fetch advertised model metadata from the system server. Setting
+`DYN_SYSTEM_HOST=127.0.0.1` without adapting those consumers breaks that access.
+For Kubernetes deployments, retain the required Pod-address reachability and
+restrict access to trusted consumers. If a proxy fronts the server, preserve
+probe, metrics, and metadata access while restricting management routes.
 
 <ParamField path="DYN_HTTP_PORT" type="integer" default="8000">
   Frontend HTTP port, where `dynamo_frontend_*` metrics are served at `/metrics`. Also configurable via the `--http-port` flag.

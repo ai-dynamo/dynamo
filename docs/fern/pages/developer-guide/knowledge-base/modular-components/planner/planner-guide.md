@@ -405,6 +405,15 @@ The Planner exposes several privileged diagnostic and extension surfaces:
   to the monitoring system with NetworkPolicy. The runtime minimum-endpoint API
   has no authentication but binds only to loopback and is not exposed by a
   Kubernetes Service; use port-forwarding only from a trusted operator session.
+- Setting `enable_runtime_reconfiguration: true` exposes the separate
+  `GET/PATCH /engine/planner/config` and
+  `GET /engine/planner/operations/{request_id}` APIs on `DYN_SYSTEM_PORT`.
+  This is disabled by default. Unlike the loopback-only `control_api_port` API,
+  these routes use the system server's bind address and have no application
+  authentication. Restrict the system listener to trusted controllers and
+  operators before enabling runtime reconfiguration. Setting `control_api_port: 0`
+  does not disable these routes. See the
+  [system-port reconfiguration API](../../../../reference/components/planner-configuration.mdx#system-port-reconfiguration-api).
 - The plugin-registration gateway is disabled by default and defaults to an
   in-Pod Unix-domain socket. Prefer that boundary for same-Pod plugins. A TCP
   gateway carries plugin registration tokens and must not be exposed in plaintext

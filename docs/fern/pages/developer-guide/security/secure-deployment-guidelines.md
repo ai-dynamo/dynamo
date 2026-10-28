@@ -60,15 +60,23 @@ hop separately when it crosses an untrusted segment.
   service mesh, enable Frontend TLS and configure the gateway to verify it. See
   [Frontend client authentication and exposure](../../reference/components/frontend-configuration.mdx#client-authentication-and-exposure)
   and [Secure the public request path](../../kubernetes/model-deployment/expose-the-frontend.md#secure-the-public-request-path).
+- [ ] **Bind tenant state to authenticated identity.** Have the gateway replace
+  client-supplied tenant headers and normalize cache salts from the authenticated
+  identity. Disabling NvExt does not disable cache salts or `x-tenant-id`. See
+  [tenant identity and cache salts](../../reference/components/frontend-configuration.mdx#tenant-identity-and-cache-salts).
 - [ ] **Limit Frontend routes.** Keep metrics, health, model discovery, OpenAPI,
   and Swagger endpoints private. Disable client-controlled routing extensions and
-  the `/busy_threshold` administration API when they are not required. See
+  the `/router_policy`, `/router_policy/busy_threshold`, and legacy
+  `/busy_threshold` administration routes when they are not required. See
   [Frontend HTTP endpoints](../../reference/components/frontend-configuration.mdx#http-endpoints)
   and [Frontend feature switches](../../reference/components/frontend-configuration.mdx#frontend-feature-switches).
 - [ ] **Secure the request plane.** Keep request and response-stream ports private.
   Configure TCP TLS or mTLS on every component, or configure authenticated TLS to
   NATS when using the NATS request plane. Constrain client and server trust roots
-  to the intended peers and verify the expected server identity. See the
+  to the intended peers and verify the expected server identity. QUIC responses
+  use a separate certificate-pinning model that depends on the request transport's
+  integrity; TCP TLS settings do not configure QUIC. See the
+  [QUIC response security guidance](../../reference/components/tls-configuration.mdx#quic-response-security), the
   [request-plane architecture](../knowledge-base/concepts/system-architecture/architecture.md#request-plane),
   [TLS trust-domain guidance](../../reference/components/tls-configuration.mdx#trust-domain-and-peer-verification),
   and [Operator TLS setup](../../kubernetes/installation/tls.md).
@@ -83,7 +91,9 @@ hop separately when it crosses an untrusted segment.
   authenticate and encrypt it in supported local, bare-metal, or legacy deployments.
   See the [discovery-plane architecture](../knowledge-base/concepts/system-architecture/architecture.md#discovery-plane).
 - [ ] **Isolate Planner control surfaces.** Disable the unauthenticated live
-  dashboard when unused. Configure plugin registration authentication explicitly,
+  dashboard when unused. Restrict optional system-port runtime reconfiguration
+  separately from the loopback control API. Configure plugin registration
+  authentication explicitly,
   keep the default Unix-domain registration socket where possible, and do not treat
   the Global Planner's caller namespace allowlist as caller authentication. See
   [Planner security](../knowledge-base/modular-components/planner/planner-guide.md#security),
@@ -104,11 +114,21 @@ hop separately when it crosses an untrusted segment.
   immutable revisions or reviewed local snapshots. Enable model-supplied remote
   code only after review, and inspect generated DGDs before applying them. See
   [secure model and image provenance](../../kubernetes/model-deployment/introduction.mdx#secure-model-and-image-provenance).
+- [ ] **Constrain media fetching.** Keep internal destinations blocked for
+  untrusted media inputs. Opt into egress-proxy trust only when the proxy enforces
+  destination policy, restrict local file access, and bound downloads and decoding.
+  Verify the policy on both Dynamo-owned and engine-owned fetch paths. See
+  [media input security](../../use-cases/multimodal-serving/overview.md#media-input-security).
 - [ ] **Control operational data.** Apply access and retention policies to
   [request traces](../../reference/observability/request-traces.mdx),
   [request payload exports](../../reference/observability/logging.mdx#request-payload-export),
   metrics, Planner reports, and model or KV caches. Validate request-derived URLs,
   paths, and serialized values before using them in privileged operations.
+- [ ] **Restrict workload creation.** Grant DGDR access only to principals trusted
+  to create workloads in the namespace. Profiling runs even with `autoApply: false`;
+  enforce Pod Security Admission on resulting Pods and control ServiceAccount
+  selection separately. See
+  [DGDR workload creation and trust](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#workload-creation-and-trust).
 - [ ] **Run with least privilege.** Use dedicated ServiceAccounts, narrow RBAC,
   NetworkPolicies, non-root containers, read-only filesystems where compatible,
   and minimal Linux capabilities. Review privileged features such as

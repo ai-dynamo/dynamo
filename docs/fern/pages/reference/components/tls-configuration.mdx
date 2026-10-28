@@ -27,6 +27,10 @@ request and response streams; NATS traffic is encrypted separately via NATS TLS
 when it runs over ZMQ it is **not** encrypted, and when it runs over NATS it is
 encrypted only if NATS TLS is configured.
 
+`DYN_RESPONSE_PLANE=quic` selects a separate encrypted response transport with
+certificate pinning. The `DYN_TCP_TLS_*` settings do not configure QUIC. See
+[QUIC Response Security](#quic-response-security).
+
 ## HTTP TLS and mTLS
 
 The frontend accepts HTTPS connections from external clients or an API gateway.
@@ -174,6 +178,23 @@ For platform-wide TLS that the operator injects into every deployment
 automatically — instead of setting env vars on each component — see
 [Operator TLS](../../kubernetes/installation/tls.md).
 
+## QUIC Response Security
+
+`DYN_RESPONSE_PLANE` selects `tcp` (default) or `quic` independently of
+`DYN_REQUEST_PLANE`. With QUIC, the frontend generates a self-signed certificate
+when its response server starts and sends its SHA-256 fingerprint in the
+response-connection metadata carried by the request. The worker accepts only
+that pinned certificate and verifies the TLS handshake signature. It does not
+validate a CA chain or DNS name for this connection.
+
+QUIC encrypts the response connection but does not request a worker client
+certificate. Neither `DYN_TCP_TLS_*` nor HTTP TLS settings change that behavior.
+The fingerprint's authenticity depends on the integrity and trusted peer identity
+of the request transport that delivered it; pinning alone does not establish an
+independent workload identity. Protect the request plane with the appropriate
+TCP or NATS security controls and keep the QUIC listener on the trusted network.
+Do not describe QUIC responses as covered by TCP mTLS.
+
 ## NATS TLS
 
 NATS carries event-plane messages such as KV events and router replica sync,
@@ -192,6 +213,14 @@ async-nats handles TLS natively with system roots.
 The `NATS_SERVER` URL accepts both `nats://` and `tls://` schemes, but setting
 any explicit NATS TLS variable (`NATS_TLS_*`) requires the `tls://` scheme —
 startup fails with a clear error otherwise.
+
+TLS is independent of the selected NATS authentication method. The runtime
+checks username/password, token, NKey, and credentials-file settings in that
+order; the first configured method wins. Without an explicit method it sends
+the shared `user` / `user` credentials. Configure deployment-specific identities
+and server-side subject permissions; encryption alone does not restrict which
+subjects a client can access. See [Event-Plane Security](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#event-plane-security)
+for the authentication variables and precedence.
 
 CLI flags (all backends via `DynamoRuntimeArgGroup`):
 

@@ -77,12 +77,25 @@ software supply-chain dependencies:
   deployer approved that code.
 </Warning>
 
-For DGDR-generated deployments, a mutable remote model whose `config.json`
-contains `auto_map` is not granted implicit remote-code trust. Use a reviewed
-local snapshot, or opt in explicitly through a generated-DGD argument override.
-Use `$patch.args: append`; replacing the atomic `args` list discards the
-profiler-generated command arguments. Set `autoApply: false` and inspect the
-selected DGD before applying it. See [Generated DGD overrides](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-dgd-overrides)
+For DGDR-generated vLLM and SGLang deployments, set
+`spec.overrides.trustRemoteCode: true` only after reviewing the model repository.
+The profiler applies `--trust-remote-code` to every generated worker, including
+workers used during profiling, without depending on the selected topology.
+
+<Warning>
+  A local model directory is an implicit remote-code trust boundary. If its
+  `config.json` declares `auto_map`, the profiler can add `--trust-remote-code`
+  even when `trustRemoteCode` is `false`. It checks that the path is a directory;
+  it does not verify that the contents are immutable or reviewed. Protect local
+  directories and PVC-backed snapshots before submitting the DGDR. Remote model
+  IDs do not receive this implicit trust.
+</Warning>
+
+Set `autoApply: false` to review the selected DGD before its final application.
+Profiling Jobs and any benchmark deployments still run, so review the DGDR's
+images, model sources, overrides, and namespace permissions before submitting it.
+See [DGDR workload creation and trust](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#workload-creation-and-trust),
+[Generated DGD overrides](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-dgd-overrides),
 and the [Model Storage Overview](../installation/model-storage/overview.md).
 
 For the full deployment trust model, see

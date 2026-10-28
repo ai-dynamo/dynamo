@@ -73,6 +73,10 @@ For supported local, bare-metal, or legacy deployments that use etcd, do not run
 etcd anonymously on a shared network. Dynamo supports username and password
 authentication through `ETCD_AUTH_USERNAME` and `ETCD_AUTH_PASSWORD`, or mutual
 TLS through `ETCD_AUTH_CA`, `ETCD_AUTH_CLIENT_CERT`, and `ETCD_AUTH_CLIENT_KEY`.
+The three TLS variables contain PEM data, not file paths. When both username
+and password are set, that authentication branch takes precedence and the
+runtime does not apply the TLS variables. Do not expect these settings to combine
+password authentication with a client certificate.
 Configure the etcd server to require the selected method, encrypt connections,
 and authorize clients only for the Dynamo key prefixes they need.
 
@@ -109,6 +113,14 @@ protect the separate NIXL/RDMA data-transfer fabric used by disaggregated
 serving. Keep that fabric on the trusted network and restrict it to participating
 workers.
 
+The response transport is selected independently with `DYN_RESPONSE_PLANE`
+(`tcp` by default, or `quic`). QUIC encrypts responses using a generated
+self-signed server certificate. The worker pins the certificate fingerprint
+received in the request's response-connection metadata; it does not use the TCP
+CA settings or require a client certificate. Protect the request transport and
+keep the response listener internal. See [QUIC Response Security](../../../../reference/components/tls-configuration.mdx#quic-response-security)
+for the separate trust boundary.
+
 ### Event Plane
 
 The event plane carries KV cache updates, worker telemetry, and other asynchronous signals. `DYN_EVENT_PLANE` selects `zmq` or `nats`. ZMQ is the default and discovers publishers through the discovery plane. NATS uses subjects scoped by namespace and component.
@@ -130,6 +142,11 @@ permissions on the NATS server:
 2. `NATS_AUTH_TOKEN`
 3. `NATS_AUTH_NKEY`
 4. `NATS_AUTH_CREDENTIALS_FILE`
+
+The first configured method wins; username/password is selected only when both
+variables are present. If none is selected, the runtime sends username `user`
+and password `user`. Replace these shared defaults with deployment-specific
+credentials and restrict their subject permissions on the server.
 
 Use a `tls://` endpoint and configure TLS or mTLS as described in the
 [NATS TLS reference](../../../../reference/components/tls-configuration.mdx#nats-tls).

@@ -21,6 +21,35 @@ and modify a request through the API version that owns its native fields; do not
 set or edit the conversion field directly. An unchanged conversion view can be
 written back without changing the stored request.
 
+## Workload Creation and Trust
+
+<Warning>
+  Grant DGDR `create` and `update` permissions only to principals trusted to
+  create Jobs and Pods in that namespace. A DGDR starts a profiling Job, and
+  thorough profiling can create benchmark deployments, before the final DGD is
+  selected. `autoApply: false` pauses final DGD application; it does not make
+  profiling a read-only operation or prevent workload execution.
+</Warning>
+
+`spec.overrides.profilingJob` accepts a Kubernetes Job spec, including its Pod
+specification. The profiling Job runs in the DGDR's namespace, and the override
+cannot change that namespace. Namespace containment does not provide node or
+cross-tenant isolation. Enforce the Kubernetes Pod Security Standards through
+Pod Security Admission on the resulting Pods. Dynamo's profiling Job supports
+the Baseline standard; use non-exempt `baseline` enforcement to block privileged
+containers, host namespaces, and `hostPath` volumes.
+
+ServiceAccount selection is a separate trust boundary. A profiling Job override
+can set `template.spec.serviceAccountName` and
+`template.spec.automountServiceAccountToken`; Pod Security Admission does not
+restrict those choices. Keep namespace ServiceAccounts and their RBAC grants
+least-privileged, and restrict workload authors or enforce an additional admission
+policy when only selected ServiceAccounts may be used.
+
+Review images, model code, and overrides before creating the DGDR. See
+[Secure Model and Image Provenance](../../kubernetes/model-deployment/introduction.mdx#secure-model-and-image-provenance)
+and the [Secure Deployment Guidelines](../../developer-guide/security/secure-deployment-guidelines.md).
+
 ## Spec reference
 
 Only `model` is unconditionally required by the schema. Admission rejects a new DGDR whose supplied `spec.image` has no parseable semantic-version tag unless `spec.runtimeVersionOverride` is set. When `spec.image` is omitted, the operator supplies a versioned default as described below.
@@ -52,7 +81,7 @@ Only `model` is unconditionally required by the schema. Admission rejects a new 
 </ParamField>
 
 <ParamField path="autoApply" type="boolean" default="true">
-  Automatically create a DGD after profiling completes. When `false`, the generated spec is stored in `status` for manual review instead of being applied.
+  Automatically create a DGD after profiling completes. When `false`, the generated spec is stored in `status` for manual review instead of being applied. Profiling and benchmark workloads still execute; see [Workload Creation and Trust](#workload-creation-and-trust).
 </ParamField>
 
 ### Profiler image version compatibility
@@ -221,9 +250,12 @@ service.
 
 <Indent>
   <ParamField path="profilingJob" type="batch/v1.JobSpec">
-    Overrides merged into the controller-generated profiling Job spec (for example, tolerations or node selectors). Only customizes the profiling Job — not the deployed worker pods.
+    Overrides merged into the controller-generated profiling Job spec (for example, tolerations or node selectors). Only customizes the profiling Job — not the deployed worker pods. Includes Pod-spec fields such as `template.spec.serviceAccountName`; see [Workload Creation and Trust](#workload-creation-and-trust).
 
     <a href="https://pkg.go.dev/k8s.io/api/batch/v1#JobSpec" target="_blank">batch/v1.JobSpec</a>
+  </ParamField>
+  <ParamField path="trustRemoteCode" type="boolean" default="false">
+    Explicitly permit custom model repository code in generated vLLM and SGLang workers. The profiler applies `--trust-remote-code` to every worker in generated benchmark and final deployments. Enable only for reviewed model repositories. `false` does not disable the implicit trust granted to local directories described in [Model Code Trust](#model-code-trust).
   </ParamField>
   <ParamField path="dgd" type="runtime.RawExtension">
     A partial, versioned DGD merged into the generated deployment. Use `nvidia.com/v1beta1` for new overrides; `nvidia.com/v1alpha1` remains supported for compatibility. See [Generated DGD overrides](#generated-dgd-overrides).
@@ -653,10 +685,42 @@ containers, and container environment variables merge by `name`; atomic lists
 such as graph-level `spec.env` and container `args` replace their generated
 values.
 
-To permit custom model repository code without depending on the selected topology, set
-`spec.overrides.trustRemoteCode: true`. The profiler applies `--trust-remote-code` to every generated
-vLLM or SGLang worker after the component topology is known. Enable this setting only for model
-repositories you trust.
+### Model Code Trust
+
+To permit custom model repository code without depending on the selected topology,
+set `spec.overrides.trustRemoteCode: true`. The profiler applies
+`--trust-remote-code` to every generated vLLM or SGLang worker, including benchmark
+workers, after the component topology is known. Enable this setting only for model
+repositories you have reviewed.
+
+For example, this request opts in to model code execution while retaining manual
+review of the final DGD:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: reviewed-model
+spec:
+  model: your-org/reviewed-model
+  backend: vllm
+  autoApply: false
+  overrides:
+    trustRemoteCode: true
+```
+
+<Warning>
+  When a local model directory's `config.json` declares `auto_map`, the profiler
+  can add `--trust-remote-code` even with `trustRemoteCode: false`. The local-path
+  check only establishes that the path is a directory, including a PVC-resolved
+  directory; it does not verify a commit hash, immutability, or review. Treat write
+  access to that directory as authority to supply executable model code.
+</Warning>
+
+Remote model IDs with `auto_map` do not receive implicit trust. Without explicit
+`trustRemoteCode: true` or a trust flag already supplied to every generated worker
+through an override, materialization rejects them. Set overrides before profiling
+starts. See [Secure Model and Image Provenance](../../kubernetes/model-deployment/introduction.mdx#secure-model-and-image-provenance).
 
 ### Generated component names
 
