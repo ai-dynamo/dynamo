@@ -159,7 +159,7 @@ jobs:
 
   vllm-publish-nvstaging:
     name: Publish vllm-runtime-enterprise-nightly
-    needs: [vllm-build]
+    needs: [vllm-build, vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, deploy-test-vllm]
     if: github.event_name == 'schedule' && github.ref == 'refs/heads/main'
     runs-on: prod-builder-amd-v1
     environment: automated-release
