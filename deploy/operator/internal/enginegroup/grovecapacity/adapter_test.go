@@ -36,6 +36,7 @@ func TestGrowthScalesMemberCliqueAndObservesGroveSlots(t *testing.T) {
 	initial, err := fixture.adapter.Observe(ctx, "group")
 	require.NoError(t, err)
 	require.Len(t, initial.Allocations, 1)
+	assert.Equal(t, enginegroup.CapacityReleaseUnsupported, initial.ReleaseMode)
 	target := growthTarget(initial.Allocations[0])
 	originalTemplate := fixture.clique.Spec.PodSpec.DeepCopy()
 
@@ -93,6 +94,16 @@ func TestGrowthScalesMemberCliqueAndObservesGroveSlots(t *testing.T) {
 	require.NotNil(t, result.Rejection)
 	assert.Equal(t, "MissingExactIncarnation", result.Rejection.Reason)
 	assert.Equal(t, 1, fixture.scale.updates)
+}
+
+func TestConfiguredReadinessSteeringDoesNotAdvertiseExactRelease(t *testing.T) {
+	t.Log("observe the configured physical release mechanism without consulting engine flags")
+	fixture := newCapacityFixture(t)
+	fixture.adapter.ReadinessScaleIn = true
+	observation, err := fixture.adapter.Observe(t.Context(), "group")
+	require.NoError(t, err)
+	assert.Equal(t, enginegroup.CapacityReleaseReadinessSteered, observation.ReleaseMode)
+	assert.NotEqual(t, enginegroup.CapacityReleaseExactUID, observation.ReleaseMode)
 }
 
 func TestGrowthReplayRepairsDriftAndAmbiguousScaleWrite(t *testing.T) {

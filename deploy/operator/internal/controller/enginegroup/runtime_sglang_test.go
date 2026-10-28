@@ -66,7 +66,7 @@ func TestSGLangRetentionIsPreparedOutsideResolution(t *testing.T) {
 
 func TestSGLangScalePlannerRetiresOnlyTheHighestCompleteAllocation(t *testing.T) {
 	t.Log("start from two committed packed allocations and retain the complete initial allocation")
-	planner := sglangScalePlanner{profileFingerprint: "profile-v1", worldUID: "world", membersPerReplica: 2, initialReplicas: 1, retirementEnabled: true}
+	planner := sglangScalePlanner{profileFingerprint: "profile-v1", worldUID: "world", membersPerReplica: 2, retirementEnabled: true}
 	status := domain.GroupStatus{Membership: domain.MembershipStatus{Observed: domain.MembershipObservation{
 		CommittedTopology: domain.MembershipTopology{Generation: 2, Replicas: []domain.ReplicaMembership{
 			{ReplicaID: "replica-0", Members: []domain.NativeMemberIncarnation{{ID: "dp-0", RuntimeIncarnation: "pod-0/dp-0"}, {ID: "dp-1", RuntimeIncarnation: "pod-0/dp-1"}}},
@@ -81,14 +81,6 @@ func TestSGLangScalePlannerRetiresOnlyTheHighestCompleteAllocation(t *testing.T)
 	assert.Equal(t, []domain.ReplicaID{"replica-1"}, resolution.Plan.Change.Retire.Replicas)
 	assert.Equal(t, domain.TrafficRequirementEngineManagedDrain, resolution.Plan.TrafficRequirement)
 	assert.Equal(t, domain.VerificationRequirementRequired, resolution.Plan.VerificationRequirement)
-
-	t.Log("retain the complete configured initial world even when the native API could shrink further")
-	planner.initialReplicas = 2
-	resolution, err = planner.ResolveScalePlan(t.Context(), "group", 1, status)
-	require.NoError(t, err)
-	require.NotNil(t, resolution.Rejection)
-	assert.Equal(t, "InitialWorldMinimum", resolution.Rejection.Reason)
-	planner.initialReplicas = 1
 
 	t.Log("refuse retirement when the workload has not opted into external release")
 	planner.retirementEnabled = false

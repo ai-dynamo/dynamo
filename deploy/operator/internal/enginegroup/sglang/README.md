@@ -85,6 +85,11 @@ from becoming new work after a safe successor replaces its retained result.
 Shrink requires its own native acceptance and completion qualification; growth
 behavior alone does not establish that contract.
 
+A native operation visible before its cached journal is inconclusive, not absent.
+On an unexplained token/operation mismatch, a compare-and-swap check distinguishes
+stale cached state from confirmed drift. It preserves the original token and
+request; confirmed drift requires recovery even when the member count is unchanged.
+
 The Kubernetes journal retains Dynamo control revision/digest correlation and the
 topology-generation projection. Native engine status remains the transaction authority.
 A changed runtime instance, allocation width or frozen Pod/process binding fails closed.

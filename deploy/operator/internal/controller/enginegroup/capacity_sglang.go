@@ -39,7 +39,7 @@ func (a *SGLangGroveCapacity) Observe(ctx context.Context, groupID domain.GroupI
 	if err != nil {
 		return domain.CapacityObservation{}, err
 	}
-	observation := domain.CapacityObservation{AppliedRevision: physical.AppliedRevision, ReleaseFences: physical.ReleaseFences}
+	observation := domain.CapacityObservation{AppliedRevision: physical.AppliedRevision, ReleaseFences: physical.ReleaseFences, ReleaseMode: physical.ReleaseMode}
 	for _, allocation := range physical.Allocations {
 		pod := &corev1.Pod{}
 		if err := a.Grove.Client.Get(ctx, client.ObjectKey{Namespace: a.Grove.Clique.Namespace, Name: allocation.Pod.Name}, pod); err != nil {

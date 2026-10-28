@@ -226,7 +226,6 @@ func (r *Reconciler) initializeRestartedEngineGroup(ctx context.Context, group *
 	group.Status = api.DynamoGraphDeploymentEngineGroupStatus{Profile: runtime.Profile.DeepCopy()}
 	next.projectHistory(group)
 	r.projectEngineGroupStatus(group, runtime.Profile, state, nil, nil)
-	projectEngineGroupReleaseMode(group, runtime)
 	if err := r.updateEngineGroupStatus(ctx, group, before); err != nil {
 		return ctrl.Result{}, err
 	}

@@ -87,8 +87,10 @@ func (p *sglangRuntimeProvider) Resolve(
 	if argumentValue(main.Args, "--elastic-ep-join-mode") != "auto" {
 		return Runtime{}, fmt.Errorf("SGLang Engine Groups require native automatic bootstrap")
 	}
-	// External retirement keeps the shared process tree alive until exact Pod release.
-	capacity.Grove.ReadinessScaleIn = argumentValue(main.Args, "--elastic-ep-retiree-lifecycle") == "external"
+	// Capacity release is a workload mechanism; engine retirement eligibility is checked independently by the planner.
+	capacity.Grove.ReadinessScaleIn = slices.ContainsFunc(primary.Spec.ReadinessGates, func(gate corev1.PodReadinessGate) bool {
+		return gate.ConditionType == corev1.PodConditionType(consts.EngineGroupRetainedReadinessGate)
+	})
 	workloadRevision := primary.Labels[grovecommon.LabelPodTemplateHash]
 	if workloadRevision == "" {
 		return Runtime{}, fmt.Errorf(
@@ -161,18 +163,16 @@ func (p *sglangRuntimeProvider) Resolve(
 		Membership: membership,
 	}
 	return Runtime{
-		ReadinessSteeredRelease: capacity.Grove.ReadinessScaleIn,
-		Profile:                 profile,
-		Capacity:                capacity,
-		Membership:              membership,
-		Traffic:                 traffic,
-		Verifier:                verifier,
+		Profile:    profile,
+		Capacity:   capacity,
+		Membership: membership,
+		Traffic:    traffic,
+		Verifier:   verifier,
 		Planner: sglangScalePlanner{
 			profileFingerprint: profile.Fingerprint,
 			worldUID:           types.UID(cliqueUID),
 			membersPerReplica:  resolved.NativeMembersPerReplica,
-			initialReplicas:    resolved.InitialReplicas,
-			retirementEnabled:  capacity.Grove.ReadinessScaleIn,
+			retirementEnabled:  argumentValue(main.Args, "--elastic-ep-retiree-lifecycle") == "external",
 		},
 	}, nil
 }
@@ -211,7 +211,6 @@ type sglangScalePlanner struct {
 	profileFingerprint string
 	worldUID           types.UID
 	membersPerReplica  int32
-	initialReplicas    int32
 	retirementEnabled  bool
 }
 
@@ -247,13 +246,6 @@ func (p sglangScalePlanner) ResolveScalePlan(
 				Classification: domain.FailureClassificationTerminal,
 				Reason:         "SGLangShrinkUnsupported",
 				Message:        "planned shrink requires explicit native external retiree lifecycle and a retention gate",
-			}}, nil
-		}
-		if targetReplicas < p.initialReplicas {
-			return ScalePlanResolution{Rejection: &domain.Failure{
-				Classification: domain.FailureClassificationTerminal,
-				Reason:         "InitialWorldMinimum",
-				Message:        "SGLang planned shrink retains the complete initial world",
 			}}, nil
 		}
 		return ScalePlanResolution{Plan: &domain.ResolvedPlan{
