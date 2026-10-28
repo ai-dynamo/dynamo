@@ -70,6 +70,14 @@ sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob
 with matching attention-DP metadata support. Engine-failure KV recovery remains
 incomplete and is tracked in [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
 
+The multinode examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which require
+a DGD originally created by operator 1.6.0 or later. Upgrading the operator or
+switching to sidecar mode does not enable these variables for older DGDs.
+For an older DGD, delete and recreate it after upgrading, or replace the topology
+arguments in both role templates with Grove or LeaderWorkerSet variables. See the
+[SGLang sidecar migration instructions](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#migrate-an-existing-dgd-to-multinode-sidecars)
+for the provider-specific arguments.
+
 ### Kubernetes manifest notes
 
 The examples use an engine-primary layout: SGLang runs as the `main` container

@@ -3,6 +3,12 @@
 #
 # EXPERIMENTAL: multinode SGLang attention-DP with explicit leader and worker templates
 # Multinode attention-DP requires SGLang v0.5.22 or later and a matching Dynamo sidecar.
+# This example uses DYNAMO_RANK and DYNAMO_LEADER_ADDRESS, which require a
+# DGD originally created by operator 1.6.0 or later. Upgrading the operator
+# does not enable these variables for an existing older DGD.
+# For older DGDs, delete and recreate after upgrading, or replace the
+# topology arguments in both role templates with Grove/LWS variables.
+# See ../README.md#deploy-on-kubernetes for migration guidance.
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
