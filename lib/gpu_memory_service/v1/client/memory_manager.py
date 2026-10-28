@@ -259,6 +259,16 @@ class GMSClientMemoryManager:
                 int(self._vmm.address_reserve(arena_size, self._granularity)),
                 arena_size,
             )
+        try:
+            return self._map_slab(aligned_size)
+        except Exception:
+            # Release an arena that no slab ended up using.
+            if not self._mappings:
+                self._vmm.address_free(*self._arena)
+                self._arena = None
+            raise
+
+    def _map_slab(self, aligned_size: int) -> _InstalledMapping:
         base, slab_bytes = self._place_slab(aligned_size)
         session = self._require_rw()
         allocation_id = f"allocation-{uuid4()}"
