@@ -31,6 +31,7 @@ from ..events import (
 )
 from ..factories import (
     ChatCompletionFactory,
+    HeldTextRequest,
     TextPrefillFactory,
     build_realtime_text_factories,
     vllm_parser_names,
@@ -66,8 +67,10 @@ class _TextTurn(RealtimeTurn):
         items: list[dict[str, Any]],
         metadata: dict[str, str] | None = None,
         tool_options: dict[str, Any] | None = None,
+        prefill: HeldTextRequest | None = None,
     ) -> None:
         super().__init__()
+        self.prefill = prefill
         self.response_id = f"resp_{uuid.uuid4().hex}"
         self.item_id = f"item_{uuid.uuid4().hex}"
         self.messages = messages
@@ -261,9 +264,9 @@ class _TextPrefill:
     ) -> None:
         self.text = ""
         self._text_bytes = 0
-        self._cancel_requested = False
+        self._committed = False
         self._updated = asyncio.Event()
-        self.task: asyncio.Task[None] = asyncio.create_task(
+        self.task: asyncio.Task[HeldTextRequest | None] = asyncio.create_task(
             factory(messages, self.updates(), tool_options or {})
         )
 
@@ -271,6 +274,8 @@ class _TextPrefill:
         while True:
             await self._updated.wait()
             self._updated.clear()
+            if self._committed:
+                return
             yield self.text
 
     def append(self, text: str) -> None:
@@ -283,16 +288,27 @@ class _TextPrefill:
             self._updated.set()
 
     def commit(self) -> None:
-        # Final generation reuses completed prefix blocks. Finishing another
-        # warming generation here would put speculative work on its critical path.
-        if not self._cancel_requested:
-            self._cancel_requested = True
-            self.task.cancel()
+        """End the updates, so the prefill returns the request holding its prefix."""
+        self._committed = True
+        self._updated.set()
+
+    async def held(self) -> HeldTextRequest | None:
+        """Return the held request for final generation, which then owns closing it."""
+        self.commit()
+        (result,) = await asyncio.shield(
+            asyncio.gather(self.task, return_exceptions=True)
+        )
+        return result if isinstance(result, HeldTextRequest) else None
 
     async def cancel(self) -> None:
         self.commit()
+        self.task.cancel()
         # Session cancellation must not interrupt the engine's abort cleanup.
-        await asyncio.shield(asyncio.gather(self.task, return_exceptions=True))
+        (result,) = await asyncio.shield(
+            asyncio.gather(self.task, return_exceptions=True)
+        )
+        if isinstance(result, HeldTextRequest):
+            await asyncio.shield(result.close())
 
 
 class RealtimeTextHandler:
@@ -428,8 +444,9 @@ class RealtimeTextHandler:
         stopped = context.async_killed_or_stopped()
         stopped.add_done_callback(cancel_generation)
         try:
+            prefill, turn.prefill = turn.prefill, None
             stream = await self._chat_completion_factory(
-                turn.messages, turn.max_output_tokens, turn.tool_options
+                turn.messages, turn.max_output_tokens, turn.tool_options, prefill
             )
             async for frame in stream:
                 if context.is_stopped():
@@ -505,6 +522,8 @@ class RealtimeTextHandler:
             # Cancellation may interrupt an output queue put, not stream.__anext__.
             if stream is not None:
                 await stream.aclose()
+            if turn.prefill is not None:
+                await asyncio.shield(turn.prefill.close())
 
     async def generate(
         self,
@@ -526,6 +545,7 @@ class RealtimeTextHandler:
         active_response: _TextTurn | None = None
         active_prefill: _TextPrefill | None = None
         committed_prefill: _TextPrefill | None = None
+        prefilled_turns: list[_TextTurn] = []
 
         def append_item(item: dict[str, Any]) -> None:
             previous_item_id = items[-1]["id"] if items else None
@@ -737,8 +757,11 @@ class RealtimeTextHandler:
                 except ValueError as exc:
                     emit_error(event, "invalid_response", str(exc))
                     return
-                if committed_prefill is not None:
-                    await committed_prefill.cancel()
+                prefill = (
+                    await committed_prefill.held()
+                    if committed_prefill is not None
+                    else None
+                )
                 active_response = await connection.ensure_turn(
                     lambda: _TextTurn(
                         messages=prompt,
@@ -748,8 +771,11 @@ class RealtimeTextHandler:
                         items=items,
                         metadata=metadata,
                         tool_options=tool_options,
+                        prefill=prefill,
                     )
                 )
+                if prefill is not None:
+                    prefilled_turns.append(active_response)
                 committed_prefill = None
                 connection.finish_active_turn()
             elif event_type == "response.cancel":
@@ -799,3 +825,7 @@ class RealtimeTextHandler:
                 await active_prefill.cancel()
             if committed_prefill is not None:
                 await committed_prefill.cancel()
+            # A turn cancelled before generation never hands its request on.
+            for turn in prefilled_turns:
+                if turn.prefill is not None:
+                    await asyncio.shield(turn.prefill.close())

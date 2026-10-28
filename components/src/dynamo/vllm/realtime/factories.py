@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
@@ -20,22 +21,28 @@ StreamingInputFactory = Callable[
     [AsyncGenerator[np.ndarray, None], "asyncio.Queue[list[int]]"],
     AsyncGenerator[Any, None],
 ]
-#: Await with chat messages, an optional output-token limit, and chat ``tools`` /
-#: ``tool_choice`` options to obtain a stream of OpenAI chat-completion SSE frames.
-#: The caller owns closing that stream.
+#: Await with chat messages, an optional output-token limit, chat ``tools`` /
+#: ``tool_choice`` options, and the turn's held prefill request, if any, to obtain
+#: a stream of OpenAI chat-completion SSE frames. The caller owns closing that
+#: stream. The factory owns the held request and closes it if it cannot continue it.
 ChatCompletionFactory = Callable[
-    [list[dict[str, Any]], int | None, dict[str, Any]],
+    [list[dict[str, Any]], int | None, dict[str, Any], "HeldTextRequest | None"],
     Awaitable[AsyncGenerator[str, None]],
 ]
-#: Consume cumulative user-text updates alongside committed chat history to warm
-#: the prefix cache. Cancellation must complete engine cleanup before returning.
-#: Takes the same tool options as ``ChatCompletionFactory`` so both render one prefix.
+#: Prefill cumulative user-text updates alongside committed chat history, and
+#: return the engine request holding that prefix once updates end. Cancellation
+#: must complete engine cleanup before returning. Takes the same tool options as
+#: ``ChatCompletionFactory`` so both render one prefix.
 TextPrefillFactory = Callable[
     [list[dict[str, Any]], AsyncGenerator[str, None], dict[str, Any]],
-    Coroutine[Any, Any, None],
+    Coroutine[Any, Any, "HeldTextRequest | None"],
 ]
 
 logger = logging.getLogger(__name__)
+
+_HELD_REQUEST: contextvars.ContextVar[HeldTextRequest | None] = contextvars.ContextVar(
+    "realtime_held_text_request", default=None
+)
 
 
 def vllm_parser_names(
@@ -76,6 +83,165 @@ def vllm_parser_names(
         )
         else None,
     )
+
+
+class HeldTextRequest:
+    """One StreamingInput engine request that prefills a turn and then generates its answer.
+
+    Prefill chunks generate one throwaway token, which vLLM drops when the next
+    chunk arrives, so the engine keeps the prompt's KV cache and recurrent state
+    without relying on prefix caching. The answer must be the last chunk: a
+    resumable request whose input stream stays open can keep decoding past EOS.
+    """
+
+    def __init__(
+        self,
+        engine_client: Any,
+        make_chunk: Callable[[list[int], Any], Any],
+        prefill_params: Any,
+    ) -> None:
+        self.fed: list[int] = []
+        self.prefill_params = prefill_params
+        self.answering = False
+        self._engine = engine_client
+        self._make_chunk = make_chunk
+        self._pending: list[int] = []
+        self._next_answer: tuple[Any, asyncio.Queue[Any]] | None = None
+        self._answer: asyncio.Queue[Any] | None = None
+        self._wake = asyncio.Event()
+        self._chunk_done = asyncio.Event()
+        self._request_id = f"rt-prefill-{uuid.uuid4().hex}"
+        self._task: asyncio.Task[None] | None = None
+        self._closed = False
+
+    def extends(self, token_ids: list[int]) -> bool:
+        """Whether ``token_ids`` continue the fed prompt and can still be appended."""
+        return not self._closed and token_ids[: len(self.fed)] == self.fed
+
+    def feed(self, token_ids: list[int]) -> None:
+        """Queue the tokens of ``token_ids`` beyond the fed prompt, which it must extend."""
+        delta = token_ids[len(self.fed) :]
+        if delta:
+            self._queue(delta)
+
+    def answer(
+        self, token_ids: list[int], sampling_params: Any
+    ) -> AsyncGenerator[Any, None]:
+        """Append the rest of the final prompt as the last chunk and stream its outputs."""
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        self._next_answer = (sampling_params, queue)
+        self.answering = True
+        self._queue(token_ids[len(self.fed) :])
+        self._closed = True
+        return self._answer_outputs(queue)
+
+    async def close(self) -> None:
+        """Cancel the request and abort it on the engine."""
+        self._closed = True
+        task, self._task = self._task, None
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await self._engine.abort(self._request_id)
+
+    def _queue(self, token_ids: list[int]) -> None:
+        self.fed += token_ids
+        self._pending += token_ids
+        if self._task is None:
+            self._task = asyncio.create_task(self._run())
+        self._wake.set()
+
+    async def _answer_outputs(
+        self, queue: asyncio.Queue[Any]
+    ) -> AsyncGenerator[Any, None]:
+        try:
+            while (output := await queue.get()) is not None:
+                if isinstance(output, Exception):
+                    raise output
+                yield output
+        finally:
+            await asyncio.shield(self.close())
+
+    async def _inputs(self) -> AsyncGenerator[Any, None]:
+        # Merge appends that arrive while a chunk runs, and route each output by
+        # waiting for the previous chunk before yielding the next.
+        while True:
+            await self._wake.wait()
+            self._wake.clear()
+            token_ids, self._pending = self._pending, []
+            answer, self._next_answer = self._next_answer, None
+            if not token_ids and answer is None:
+                continue
+            self._chunk_done.clear()
+            if answer is not None:
+                params, self._answer = answer
+                yield self._make_chunk(token_ids, params)
+                return
+            yield self._make_chunk(token_ids, self.prefill_params)
+            await self._chunk_done.wait()
+
+    async def _run(self) -> None:
+        try:
+            async for output in self._engine.generate(
+                prompt=self._inputs(),
+                sampling_params=self.prefill_params,
+                request_id=self._request_id,
+            ):
+                if self._answer is None:
+                    self._chunk_done.set()
+                    continue
+                self._answer.put_nowait(output)
+                if output.finished:
+                    break
+        except Exception as exc:  # noqa: BLE001 - surfaced as an answer failure
+            if self._answer is None:
+                logger.warning("realtime text prefill stopped: %s", exc)
+            else:
+                self._answer.put_nowait(exc)
+        finally:
+            self._closed = True
+            self._chunk_done.set()
+            if self._answer is not None:
+                self._answer.put_nowait(None)
+
+
+class _HeldRequestEngine:
+    """Engine client whose ``generate`` continues the turn's held prefill request.
+
+    vLLM's chat serving still validates the request, renders the prompt, and
+    builds the sampling parameters. Only the engine call reuses the held
+    request, when the final prompt extends it and the answer needs no
+    per-request engine options or seed.
+    """
+
+    def __init__(self, engine_client: Any) -> None:
+        self._engine = engine_client
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)
+
+    def generate(
+        self, prompt: Any, sampling_params: Any, request_id: str, **kwargs: Any
+    ) -> AsyncGenerator[Any, None]:
+        held = _HELD_REQUEST.get()
+        token_ids = prompt.get("prompt_token_ids") if isinstance(prompt, dict) else None
+        if (
+            held is not None
+            and token_ids is not None
+            and len(token_ids) > len(held.fed)
+            and held.extends(list(token_ids))
+            and sampling_params.structured_outputs is None
+            # The engine seeds a request's generator from its first chunk.
+            and sampling_params.seed is None
+            and sampling_params.skip_special_tokens
+            == held.prefill_params.skip_special_tokens
+            and sampling_params.spaces_between_special_tokens
+            == held.prefill_params.spaces_between_special_tokens
+            and kwargs.get("lora_request") is None
+        ):
+            return held.answer(list(token_ids), sampling_params)
+        return self._engine.generate(prompt, sampling_params, request_id, **kwargs)
 
 
 def _build_models(*, engine_client: Any, model_name: str, model_path: str) -> Any:
@@ -130,12 +296,14 @@ def build_realtime_text_factories(
     applies to every render, since Realtime sessions carry no template options.
 
     Awaiting the first callback with chat messages and an optional output-token
-    limit returns an SSE stream that the caller must close. The second consumes
-    cumulative pending-user text with committed chat history and warms stable,
-    complete prefix-cache blocks through vLLM StreamingInput. Cancel and await
-    this prefill callback before final generation, which renders the exact
-    committed conversation independently. Without prefix caching, updates are
-    consumed without starting speculative generation.
+    limit returns an SSE stream that the caller must close. The second prefills
+    cumulative pending-user text with committed chat history on one vLLM
+    StreamingInput request and returns that request when its updates end. Final
+    generation renders the exact committed conversation and appends it to the
+    held request when it extends what the request holds, so the answer starts
+    from the prefilled state instead of a prefix-cache lookup. Hybrid models
+    cache recurrent state only at large block boundaries, so a separate request
+    would recompute most of the prompt.
     """
     from vllm.engine.protocol import StreamingInput
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -181,7 +349,7 @@ def build_realtime_text_factories(
         default_chat_template_kwargs=default_chat_template_kwargs,
     )
     serving = RealtimeServingChat(
-        engine_client=engine_client,
+        engine_client=_HeldRequestEngine(engine_client),
         models=_build_models(
             engine_client=engine_client,
             model_name=model_name,
@@ -202,6 +370,7 @@ def build_realtime_text_factories(
         messages: list[dict[str, Any]],
         max_output_tokens: int | None,
         tool_options: dict[str, Any],
+        prefill: HeldTextRequest | None,
     ) -> AsyncGenerator[str, None]:
         request = ChatCompletionRequest(
             messages=messages,
@@ -211,14 +380,20 @@ def build_realtime_text_factories(
             stream_options={"include_usage": True},
             **tool_options,
         )
-        response = await serving.create_chat_completion(request)
+        token = _HELD_REQUEST.set(prefill)
+        try:
+            response = await serving.create_chat_completion(request)
+        finally:
+            _HELD_REQUEST.reset(token)
+            if prefill is not None and not prefill.answering:
+                await prefill.close()
         if isinstance(response, ErrorResponse):
             raise ValueError(response.error.message)
         return response
 
     async def render_tokens(
         messages: list[dict[str, Any]], tool_options: dict[str, Any]
-    ) -> list[int]:
+    ) -> tuple[list[int], ChatCompletionRequest]:
         request = ChatCompletionRequest(
             messages=messages,
             model=model_name,
@@ -235,62 +410,58 @@ def build_realtime_text_factories(
         token_ids = engine_inputs[0].get("prompt_token_ids")
         if token_ids is None:
             raise ValueError("Realtime text prefill requires tokenized chat input")
-        return list(token_ids)
+        return list(token_ids), request
+
+    def make_chunk(token_ids: list[int], params: SamplingParams) -> StreamingInput:
+        return StreamingInput(prompt=tokens_input(token_ids), sampling_params=params)
 
     async def prefill_text(
         messages: list[dict[str, Any]],
         updates: AsyncGenerator[str, None],
         tool_options: dict[str, Any],
-    ) -> None:
-        cache_config = engine_client.vllm_config.cache_config
-        block_size = cache_config.block_size
-        if not cache_config.enable_prefix_caching or not block_size:
-            async for _ in updates:
-                pass
-            return
-
-        emitted: list[int] = []
-        sampling_params = SamplingParams.from_optional(
-            temperature=0.0,
-            max_tokens=1,
-            output_kind=RequestOutputKind.DELTA,
-            skip_clone=True,
-        )
-
-        async def streaming_input() -> AsyncGenerator[Any, None]:
-            nonlocal emitted
+    ) -> HeldTextRequest | None:
+        held: HeldTextRequest | None = None
+        try:
             async for text in updates:
-                token_ids = await render_tokens(
+                # ASR can still extend the last word, which would change its
+                # tokens, so only whole words are prefilled before the commit.
+                text = text[: text.rfind(" ") + 1].rstrip()
+                if not text:
+                    continue
+                token_ids, request = await render_tokens(
                     [*messages, {"role": "user", "content": text}],
                     tool_options,
                 )
-                if token_ids[: len(emitted)] != emitted:
-                    # Appending text can change tokenizer boundaries. Stop this
-                    # optimization instead of feeding an incorrect token stream;
-                    # final generation independently renders the exact prompt.
-                    return
-                # Retokenizing appended text may alter the last few tokens.
-                # Keep one cache block pending and submit only full blocks,
-                # which also avoids engine work that the final request
-                # cannot reuse through prefix caching.
-                stable_end = max(0, len(token_ids) - block_size)
-                end = stable_end // block_size * block_size
-                if end > len(emitted):
-                    delta = token_ids[len(emitted) : end]
-                    emitted = token_ids[:end]
-                    yield StreamingInput(tokens_input(delta))
-
-        try:
-            result_stream = engine_client.generate(
-                prompt=streaming_input(),
-                sampling_params=sampling_params,
-                request_id=f"rt-prefill-{uuid.uuid4().hex}",
-            )
-            async for _ in result_stream:
-                pass
+                if held is not None and not held.extends(token_ids):
+                    await held.close()
+                    held = None
+                if held is None:
+                    # vLLM detokenizes the whole request as its first chunk
+                    # says, so keep the special tokens the final request keeps.
+                    held = HeldTextRequest(
+                        engine_client,
+                        make_chunk,
+                        SamplingParams.from_optional(
+                            temperature=0.0,
+                            max_tokens=1,
+                            ignore_eos=True,
+                            output_kind=RequestOutputKind.DELTA,
+                            skip_special_tokens=request.skip_special_tokens,
+                            spaces_between_special_tokens=(
+                                request.spaces_between_special_tokens
+                            ),
+                        ),
+                    )
+                held.feed(token_ids)
         except asyncio.CancelledError:
+            if held is not None:
+                await asyncio.shield(held.close())
             raise
         except Exception as exc:  # noqa: BLE001 - prefill is an optional optimization
             logger.warning("realtime text prefill disabled for this turn: %s", exc)
+            if held is not None:
+                await held.close()
+            return None
+        return held
 
     return create_chat_completion, prefill_text
