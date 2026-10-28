@@ -20,6 +20,7 @@ import time
 import types
 from collections import deque
 from multiprocessing.reduction import ForkingPickler
+from typing import get_args
 
 import pytest
 
@@ -28,10 +29,13 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
+from dynamo.planner.config.planner_config import RetuneObjective
 from dynamo.planner.core.types import RetuneParams, TrafficObservation
 from dynamo.planner.retune import sweep as sweep_module
 from dynamo.planner.retune.sweep import (
+    _OBJECTIVES,
     GOODPUT_KEY,
+    objective_maximized,
     score_summary,
     with_predictor_fields,
 )
@@ -76,6 +80,111 @@ def test_score_uses_the_fixed_window_denominator():
     ]:
         with pytest.raises(ValueError, match=match):
             score_summary(bad, window_s=10.0)
+
+
+# Four average GPUs over a 1,800 s replay of a 1,500 s window.
+SUMMARY = {
+    "output_throughput_tok_s": 300.0,
+    GOODPUT_KEY: 120.0,
+    "gpu_hours": 2.0,
+    "duration_ms": 1_800_000.0,
+    "mean_output_token_throughput_per_user": 40.0,
+    "mean_ttft_ms": 250.0,
+    "num_ttft_samples": 10,
+    "mean_e2e_latency_ms": 900.0,
+    "num_e2e_latency_samples": 10,
+}
+
+
+@pytest.mark.parametrize(
+    ("objective", "target", "raw", "score", "maximized"),
+    [
+        ("Throughput", "throughput", 300.0, 300.0, True),
+        ("ThroughputPerGPU", "throughput_per_gpu", 75.0, 75.0, True),
+        ("ThroughputPerUser", "throughput_per_user", 40.0, 40.0, True),
+        ("TTFT", "ttft", 250.0, 250.0, False),
+        ("E2ELatency", "e2e_latency", 900.0, 900.0, False),
+        # Goodput is rescaled from the 1,800 s replay to the 1,500 s window.
+        ("Goodput", "goodput", 120.0, 144.0, True),
+        ("GoodputPerGPU", "goodput_per_gpu", 30.0, 36.0, True),
+    ],
+)
+def test_each_objective_scores_the_target_the_dgdr_operator_lowers_it_to(
+    objective, target, raw, score, maximized
+):
+    # The targets are those of the DGDR operator's v1beta2 publicMetric.
+    assert get_args(RetuneObjective) == tuple(_OBJECTIVES)
+    assert _OBJECTIVES[objective].target.value == target
+
+    value, metrics = score_summary(SUMMARY, 1_500.0, objective)
+
+    assert value == pytest.approx(score)
+    assert metrics[f"objective_{target}"] == pytest.approx(raw)
+    assert objective_maximized(objective) is maximized
+
+
+def test_only_goodput_objectives_ignore_the_drain():
+    # One window of 600k output tokens, 300k of them SLA-good, on 2 GPUs,
+    # with a 100 s or a 300 s drain. The mean latencies are the same.
+    def replay(duration_s):
+        return {
+            **SUMMARY,
+            "output_throughput_tok_s": 600_000 / duration_s,
+            GOODPUT_KEY: 300_000 / duration_s,
+            "gpu_hours": 2 * duration_s / 3_600,
+            "duration_ms": duration_s * 1_000.0,
+        }
+
+    fast, slow = replay(1_000.0), replay(1_200.0)
+    scores = {
+        objective: (
+            score_summary(fast, 900.0, objective)[0],
+            score_summary(slow, 900.0, objective)[0],
+        )
+        for objective in get_args(RetuneObjective)
+    }
+
+    # Good tokens per window second (per GPU): the drain does not count.
+    assert scores["Goodput"] == pytest.approx((300_000 / 900,) * 2)
+    assert scores["GoodputPerGPU"] == pytest.approx((300_000 / 900 / 2,) * 2)
+    # The token total is fixed, so throughput ranks the shorter drain.
+    assert scores["Throughput"] == pytest.approx((600.0, 500.0))
+    assert scores["ThroughputPerGPU"] == pytest.approx((300.0, 250.0))
+    for objective in ("ThroughputPerUser", "TTFT", "E2ELatency"):
+        assert scores[objective][0] == scores[objective][1]
+
+
+@pytest.mark.parametrize(
+    ("objective", "update", "match"),
+    [
+        ("GoodputPerGPU", {GOODPUT_KEY: None}, "needs an SLA"),
+        ("Goodput", {"duration_ms": 0.0}, "positive duration_ms"),
+        ("ThroughputPerGPU", {"gpu_hours": 0.0}, "positive gpu_hours"),
+        ("Throughput", {"output_throughput_tok_s": None}, "must be numeric"),
+        (
+            "ThroughputPerUser",
+            {"mean_output_token_throughput_per_user": math.inf},
+            "finite",
+        ),
+        # AISimulate scores a latency without samples as infinite; retune
+        # leaves that candidate unscored instead.
+        ("TTFT", {"num_ttft_samples": 0}, "positive num_ttft_samples"),
+        ("E2ELatency", {"num_e2e_latency_samples": 0}, "positive num_e2e"),
+        ("E2ELatency", {"mean_e2e_latency_ms": math.nan}, "finite"),
+    ],
+)
+def test_a_missing_score_input_fails_the_candidate(objective, update, match):
+    with pytest.raises(ValueError, match=match):
+        score_summary({**SUMMARY, **update}, 1_500.0, objective)
+
+
+def test_only_goodput_objectives_need_the_sla_and_gpu_hours():
+    # A latency replay without goodput (no SLA) or GPU accounting scores.
+    summary = {"mean_ttft_ms": 250.0, "num_ttft_samples": 10}
+
+    assert score_summary(summary, 1_500.0, "TTFT")[0] == 250.0
+    with pytest.raises(ValueError, match="needs an SLA"):
+        score_summary(summary, 1_500.0, "Goodput")
 
 
 def test_a_grid_point_equivalent_to_the_baseline_gets_its_key():
@@ -383,6 +492,28 @@ def test_equivalent_candidates_replay_once_and_share_the_score(tmp_path, monkeyp
     assert result.status == "ok", result.error
     assert len(evaluated) == 2
     assert result.scores[same.key()] == result.scores[baseline.key()] is not None
+
+
+def test_every_candidate_is_scored_on_the_request_objective(tmp_path, monkeypatch):
+    monkeypatch.setattr(sweep_module, "_WorkerPool", _InlinePool)
+    objectives = []
+
+    def recording_evaluator(*args):
+        objectives.append(args[-1])
+        return fake_evaluator(*args)
+
+    trace = write_trace(
+        tmp_path / "trace.jsonl", trace_rows([ORIGIN_MS + 100 * i for i in range(5)])
+    )
+    a, b = retune_params(0.0), retune_params(1.0)
+
+    result = sweep_module.run_sweep(
+        sweep_request([trace], [a, b], a, objective="TTFT"),
+        evaluator=recording_evaluator,
+    )
+
+    assert result.status == "ok", result.error
+    assert objectives == ["TTFT", "TTFT"]
 
 
 def test_a_predictor_winner_is_prepared_in_the_sweep(tmp_path, monkeypatch):

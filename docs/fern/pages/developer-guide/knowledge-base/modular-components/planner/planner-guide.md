@@ -335,9 +335,12 @@ spec:
 Retune lets the Planner tune its own runtime parameters from the traffic it served. Every
 `retune.interval_seconds`, it takes the window of the request trace that just ended and replays it
 once per candidate parameter point, on the deployment's engine configuration and from the replica
-counts at the window start. It scores each candidate by SLA goodput per GPU: SLA-good output tokens
-per second of the window, divided by the GPUs provisioned. When the best candidate beats the current
-point on the same window by more than `min_improvement_percentage`, the Planner switches to it.
+counts at the window start. It scores each candidate on `retune.objective`, by default SLA goodput
+per GPU: SLA-good output tokens per second of the window, divided by the GPUs provisioned. The
+objective takes the DGDR v1beta2 `spec.objective.metric` values, such as `ThroughputPerGPU` or
+`TTFT`; see [Objectives](../../../../reference/components/planner-configuration.mdx#objectives).
+When the best candidate beats the current point on the same window by more than
+`min_improvement_percentage`, the Planner switches to it.
 
 Retune searches parameters a running deployment can change without a restart:
 
@@ -355,7 +358,7 @@ Retune supports two scenarios:
 | Scenario | Planner | Searched | Each candidate replay |
 |---|---|---|---|
 | Fixed replicas | Retune-only mode: `retune` set with both `enable_load_scaling: false` and `enable_throughput_scaling: false`. The Planner never scales | Router parameters | Keeps the replica counts fixed |
-| Autoscaling | Load-based or throughput-based scaling, or both | Router parameters, Planner fields, or both | Runs the current Planner with the candidate's fields |
+| Autoscaling | Load-based or throughput-based scaling, or both. `retune.objective` must be `GoodputPerGPU` or `ThroughputPerGPU`, because the candidates' GPU counts differ | Router parameters, Planner fields, or both | Runs the current Planner with the candidate's fields |
 
 With `advisory: true`, the Planner still runs every sweep but only records the decision it would
 apply, with outcome `advisory`; the router and Planner parameters keep their starting values.

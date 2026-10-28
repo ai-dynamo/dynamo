@@ -828,12 +828,32 @@ class RetuneEngineSpec(BaseModel):
         return kwargs
 
 
+# Retune scoring metrics: the DGDR v1beta2 ``spec.objective.metric`` values,
+# spelled the same so a Request can carry the metric unchanged.
+RetuneObjective = Literal[
+    "Throughput",
+    "ThroughputPerGPU",
+    "ThroughputPerUser",
+    "TTFT",
+    "E2ELatency",
+    "Goodput",
+    "GoodputPerGPU",
+]
+# The objectives that divide by provisioned GPUs; with scaling, the others
+# favor the candidates that provision the most.
+RETUNE_PER_GPU_OBJECTIVES: tuple[RetuneObjective, ...] = (
+    "GoodputPerGPU",
+    "ThroughputPerGPU",
+)
+
+
 class RetuneConfig(BaseModel):
     """Periodic replay-based retune of router and planner runtime parameters.
 
     Every ``interval_seconds`` the planner replays the previous window of
     recorded traffic against a grid of candidate parameters and applies the
-    best point by SLA goodput per GPU. ``router`` and ``planner`` are search
+    best point by ``objective`` (SLA goodput per GPU by default; see
+    ``retune.sweep.score_summary``). ``router`` and ``planner`` are search
     domains in the AISimulate recommendation syntax of the Dynamo router and
     planner adapters (``RouterRetuneConfig``, ``PlannerRetuneConfig``), stored
     as written; ``retune.domains`` expands them into a grid keyed by live
@@ -902,17 +922,32 @@ class RetuneConfig(BaseModel):
             "None means interval_seconds."
         ),
     )
+    objective: RetuneObjective = Field(
+        default="GoodputPerGPU",
+        description=(
+            "Metric each candidate is scored on, named as DGDR v1beta2 "
+            "objective.metric. TTFT and E2ELatency (mean, ms) are minimized; "
+            "the others are maximized. With load or throughput scaling, only "
+            "GoodputPerGPU and ThroughputPerGPU are accepted."
+        ),
+    )
     sla_ttft_ms: float | None = Field(
         default=None,
         gt=0,
         allow_inf_nan=False,
-        description="Scoring TTFT SLA. None uses the planner's ttft_ms.",
+        description=(
+            "TTFT SLA of the Goodput and GoodputPerGPU objectives. None uses "
+            "the planner's ttft_ms."
+        ),
     )
     sla_itl_ms: float | None = Field(
         default=None,
         gt=0,
         allow_inf_nan=False,
-        description="Scoring ITL SLA. None uses the planner's itl_ms.",
+        description=(
+            "ITL SLA of the Goodput and GoodputPerGPU objectives. None uses "
+            "the planner's itl_ms."
+        ),
     )
     min_improvement_percentage: float = Field(
         default=3.0,
@@ -920,8 +955,9 @@ class RetuneConfig(BaseModel):
         lt=100,
         allow_inf_nan=False,
         description=(
-            "Apply a candidate only if its score exceeds the current point's "
-            "score on the same window by more than this percentage."
+            "Apply a candidate only if it beats the current point's score on "
+            "the same window by more than this percentage of that score: "
+            "higher for a maximized objective, lower for TTFT and E2ELatency."
         ),
     )
     max_candidates: int = Field(
@@ -1026,7 +1062,10 @@ class RetuneConfig(BaseModel):
         return self.timeout_seconds
 
     def scoring_sla(self, ttft_ms: float, itl_ms: float) -> tuple[float, float]:
-        """Return the scoring ``(ttft_ms, itl_ms)``; unset values use the planner's."""
+        """Return the scoring ``(ttft_ms, itl_ms)``; unset values use the planner's.
+
+        Only the Goodput objectives score against it.
+        """
 
         return (
             ttft_ms if self.sla_ttft_ms is None else self.sla_ttft_ms,
@@ -1912,6 +1951,18 @@ class PlannerConfig(BaseModel):
         if self.mode not in ("agg", "disagg"):
             raise ValueError(
                 f"retune requires mode='agg' or mode='disagg', got {self.mode!r}"
+            )
+        if self.scaling_enabled() and retune.objective not in RETUNE_PER_GPU_OBJECTIVES:
+            # Every candidate replay runs an inner planner that sizes its own
+            # replicas, and min_workers or the GPU budgets may be searched; a
+            # metric that ignores GPU count picks the largest deployment.
+            raise ValueError(
+                f"retune.objective {retune.objective!r} does not divide by "
+                "GPUs, so with load or throughput scaling it favors the "
+                "candidates that provision the most GPUs; use "
+                f"{' or '.join(RETUNE_PER_GPU_OBJECTIVES)}, or retune with "
+                "fixed replicas (enable_load_scaling and "
+                "enable_throughput_scaling both false)"
             )
         if not _is_multiple_of(
             retune.interval_seconds, self.scheduling.scale_interval_seconds

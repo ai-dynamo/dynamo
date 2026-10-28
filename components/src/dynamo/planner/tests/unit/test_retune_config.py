@@ -4,9 +4,11 @@
 # Optional-dependency preflight must run before the retune imports.
 
 """The planner retune config section: a valid round trip, a rejected
-startup-only knob and the grid-size limit, plus the retune-only, decision
-latency and history rules that only config validation enforces, and one
-error per invalid knob."""
+startup-only knob and the grid-size limit, plus the retune-only, objective,
+decision latency and history rules that only config validation enforces, and
+one error per invalid knob."""
+
+from typing import get_args
 
 import pytest
 
@@ -17,7 +19,11 @@ pytest.importorskip(
 
 from pydantic import ValidationError
 
-from dynamo.planner.config.planner_config import PlannerConfig, RetuneConfig
+from dynamo.planner.config.planner_config import (
+    PlannerConfig,
+    RetuneConfig,
+    RetuneObjective,
+)
 from dynamo.planner.reconfiguration import candidate_config
 from dynamo.planner.retune.domains import (
     expand_planner_domain,
@@ -279,6 +285,41 @@ def test_retune_only_mode_needs_both_scaling_flags_explicitly_false():
     # Without retune, both flags false is still an error.
     with pytest.raises(ValidationError, match="At least one scaling mode must be"):
         _config(optimization_target="sla", **RETUNE_ONLY)
+
+
+def test_objective_takes_the_dgdr_metric_names_and_defaults_to_goodput_per_gpu():
+    assert RetuneConfig(interval_seconds=600).objective == "GoodputPerGPU"
+    # The DGDR v1beta2 ObjectiveMetric enum, spelled as a Request writes it.
+    assert get_args(RetuneObjective) == (
+        "Throughput",
+        "ThroughputPerGPU",
+        "ThroughputPerUser",
+        "TTFT",
+        "E2ELatency",
+        "Goodput",
+        "GoodputPerGPU",
+    )
+    for objective in get_args(RetuneObjective):
+        config = _config(mode="agg", retune=_retune(objective=objective), **RETUNE_ONLY)
+        assert config.retune.objective == objective
+    # AISimulate target names and other spellings are not the DGDR names.
+    for objective in ("goodput_per_gpu", "goodputPerGPU", "MinGPUs", "Pareto"):
+        with pytest.raises(ValidationError, match="objective"):
+            RetuneConfig(interval_seconds=600, objective=objective)
+
+
+@pytest.mark.parametrize("objective", get_args(RetuneObjective))
+def test_scaling_retune_needs_a_per_gpu_objective(objective):
+    # Easy mode forces load scaling on, so each candidate replay sizes its
+    # own replicas; a metric that ignores GPU count would buy the most.
+    if objective in ("GoodputPerGPU", "ThroughputPerGPU"):
+        config = _config(retune=_retune(objective=objective))
+        assert config.scaling_enabled()
+        return
+    with pytest.raises(ValidationError, match=f"{objective}' does not divide by GPUs"):
+        _config(retune=_retune(objective=objective))
+    with pytest.raises(ValidationError, match="does not divide by GPUs"):
+        _config(retune=_retune(objective=objective), **SLA_THROUGHPUT)
 
 
 def test_measured_decision_latency_must_fit_the_interval():

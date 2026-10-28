@@ -427,23 +427,45 @@ keeps the current predictor. The decision records the result in `predictor_presw
 
 ### Scoring and Outcomes
 
-Each candidate's score is SLA-good output tokens per second of the window per GPU:
+Each candidate is scored on `retune.objective`, by default SLA-good output tokens per second of the
+window per GPU. The score is AISimulate's `objective_value` for the target that the
+[objective](../../../../reference/components/planner-configuration.mdx#objectives) maps to, in the
+metric's own units, rescaled for the Goodput objectives only:
 
 ```text
-score = objective_value(summary, GOODPUT_PER_GPU) × duration_ms / (window_s × 1000)
+Goodput, GoodputPerGPU:   score = objective_value(summary, target) × duration_ms / (window_s × 1000)
+other objectives:         score = objective_value(summary, target)
 ```
 
-`objective_value` is AISimulate's goodput-per-GPU objective over the replay's `duration_ms`, which
-includes the drain after the last arrival. Rescaling to the fixed window length `window_s` keeps
-candidates whose drains differ on one time base. A replay whose summary lacks
-`goodput_output_throughput_tok_s`, or has a non-positive `gpu_hours` or `duration_ms`, fails that
-candidate instead of scoring zero. The current point is re-scored on every window, so every
-comparison is paired on the same window file and the same random numbers.
+A candidate replay runs until every request of the window completes, so every candidate produces
+the same output tokens, and its `duration_ms` is the window plus a drain after the last arrival that
+differs by candidate. The rescaling follows from that:
 
-Candidates rank by score, with ties going to the current point and then to the canonical order. The
-best candidate is applied only when its score exceeds the current score × (1 +
-`min_improvement_percentage` / 100) and it changes a router parameter or a Planner field. Each
-decision has one outcome:
+- **Goodput and GoodputPerGPU** count only SLA-good tokens, so the SLA already penalizes a candidate
+  that falls behind. Dividing by the replay's duration would penalize its longer drain a second
+  time, and the drain is an artifact of cutting the trace at the window end: live traffic keeps
+  arriving. Rescaling to the fixed window length `window_s` puts every candidate on one time base:
+  SLA-good tokens per window second (per average GPU).
+- **Throughput and ThroughputPerGPU** are not rescaled. Over the window, both would equal the
+  offered load for every candidate (per GPU too, with fixed replicas), so every candidate would tie.
+  Over the replay's duration, they rank the candidate that finishes the window's tokens sooner,
+  which is how more serving capacity shows when the window backs up.
+- **ThroughputPerUser, TTFT, and E2ELatency** are per-request means, which the duration does not
+  enter.
+
+The score fails closed. A replay that lacks an input of the objective fails that candidate instead
+of scoring zero, which would tie every candidate, or infinity: for example, a Goodput objective
+without `goodput_output_throughput_tok_s`, a per-GPU or Goodput objective with a non-positive
+`gpu_hours` or `duration_ms`, or `TTFT` or `E2ELatency` without samples. Only the Goodput
+objectives use the scoring SLA. The current point is re-scored on every window, so every comparison
+is paired on the same window file and the same random numbers.
+
+Candidates rank best first, highest score for a maximized objective and lowest for `TTFT` and
+`E2ELatency`, with ties going to the current point and then to the canonical order. The best
+candidate is applied only when it beats the current score by more than `min_improvement_percentage`
+/ 100 × |current score| (above it for a maximized objective, below it for a minimized one) and it
+changes a router parameter or a Planner field. A zero current score therefore needs any strict
+gain, and a zero latency is never beaten. Each decision has one outcome:
 
 | Outcome | Meaning |
 |---|---|
