@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use dynamo_runtime::engine::AsyncEngineContext;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tracing::Instrument;
 
 use super::metrics::DECISION_CLEANUP_OVERRUNS_TOTAL;
 
@@ -104,7 +105,7 @@ pub(crate) async fn dispatch_with_deadline<T: Send + 'static>(
         }
         Err(_) => {
             parent.kill();
-            tokio::spawn(drain_cancelled_task(task));
+            tokio::spawn(drain_cancelled_task(task).in_current_span());
             Err(DispatchWaitError::Deadline)
         }
     }
@@ -214,6 +215,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn overdue_cleanup_is_exposed_and_keeps_admission_until_work_finishes() {
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(Arc::new(log.reopen().unwrap()))
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
         let registry = prometheus::Registry::new();
         super::super::metrics::Metrics::new()
             .register(&registry)
@@ -227,12 +236,23 @@ mod tests {
             let _permit = permit;
             let _ = release_rx.await;
         });
-        let result = dispatch_with_deadline(task, tokio::time::Instant::now(), parent).await;
+        let result = dispatch_with_deadline(task, tokio::time::Instant::now(), parent)
+            .instrument(tracing::info_span!(
+                "http-request",
+                request_id = "cleanup-request"
+            ))
+            .await;
         assert!(matches!(result, Err(DispatchWaitError::Deadline)));
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
         assert!(DECISION_CLEANUP_OVERRUNS_TOTAL.get() > initial_count);
+        let output = std::fs::read_to_string(log.path()).unwrap();
+        assert!(output.contains("exceeded cancellation grace"), "{output}");
+        assert!(
+            output.contains("request_id=\"cleanup-request\""),
+            "{output}"
+        );
         assert_eq!(admission.available_permits(), 0);
         assert!(registry.gather().iter().any(|family| {
             family.name().ends_with("decision_cleanup_overruns_total")
