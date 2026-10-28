@@ -68,6 +68,16 @@ def test_v1_restore_probe_reaches_each_gpu_without_cuda(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("flag", ["--no-isolation", "--probe-restore-ready"])
+def test_v1_fails_when_no_gpu_is_visible(monkeypatch, flag):
+    monkeypatch.setenv("DYN_GMS_USE_V1", "true")
+    monkeypatch.setattr(server, "node_gpus", lambda: [])
+    monkeypatch.setattr(server.signal, "signal", lambda *_args: None)
+
+    with pytest.raises(SystemExit, match="found no GPU"):
+        server.main([flag])
+
+
 class _Process:
     def __init__(self, exit_code: int | None = None) -> None:
         self.exit_code = exit_code

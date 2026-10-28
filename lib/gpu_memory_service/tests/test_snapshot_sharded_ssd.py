@@ -6,8 +6,14 @@
 import pytest
 
 try:
-    from gpu_memory_service.snapshot.backends.sharded_ssd import _group_sources_by_root
-    from gpu_memory_service.snapshot.transfer import FileTransferSource
+    from gpu_memory_service.snapshot.backends.sharded_ssd import (
+        ShardedSSDTransferBackend,
+        _group_sources_by_root,
+    )
+    from gpu_memory_service.snapshot.transfer import (
+        FileTransferSource,
+        GMSSnapshotConfig,
+    )
 except ModuleNotFoundError:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",
@@ -63,3 +69,18 @@ def test_group_sources_by_root_rejects_paths_outside_configured_roots():
 
     with pytest.raises(RuntimeError, match="not.*under.*sharded SSD root"):
         _group_sources_by_root([source], ["/mnt/nvme0/gms"], queues_per_root=2)
+
+
+@pytest.mark.parametrize("queues_per_root", [0, -1])
+def test_backend_rejects_non_positive_queues_per_root(queues_per_root):
+    config = GMSSnapshotConfig(
+        device=0,
+        max_workers=1,
+        backend_config={
+            "sharded_ssd_roots": "/mnt/nvme0/gms",
+            "sharded_ssd_queues_per_root": queues_per_root,
+        },
+    )
+
+    with pytest.raises(ValueError, match="must be positive"):
+        ShardedSSDTransferBackend(config=config)

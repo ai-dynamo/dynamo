@@ -119,9 +119,8 @@ class ShardedSSDTransferBackend(NixlPosixStagingTransferBackend):
                 for root in configured_roots
                 if str(root).strip()
             ]
-        self._queues_per_root = int(
-            config.backend_config.get("sharded_ssd_queues_per_root") or 2
-        )
+        queues_per_root = config.backend_config.get("sharded_ssd_queues_per_root")
+        self._queues_per_root = 2 if queues_per_root is None else int(queues_per_root)
         if self._queues_per_root <= 0:
             raise ValueError("sharded_ssd_queues_per_root must be positive")
         if not self._roots:
