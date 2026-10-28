@@ -1425,14 +1425,7 @@ def test_build_vllm_kv_hints_constructs_envelope():
             }
         ],
     }
-    action_type = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
-    envelope_type = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
-
-    with patch(
-        "dynamo.vllm.handlers._vllm_kv_hints_types",
-        return_value=(action_type, envelope_type),
-    ):
-        envelope = _build_vllm_kv_hints({"kv_hint": kv_hint})
+    envelope = _build_vllm_kv_hints({"kv_hint": kv_hint})
 
     assert envelope.protocol_version == "0.1"
     assert envelope.message_id == "msg-123"
@@ -1815,16 +1808,6 @@ class TestRunnerPreservation:
         update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
 
         assert engine_cfg.runner == "draft"
-
-    def test_no_runner_attr_skipped_gracefully(self):
-        """If engine_config lacks a 'runner' attr (older vLLM), no error is raised."""
-        dynamo_cfg = _make_dynamo_config()
-        engine_cfg = _make_engine_config_with_runner()
-        del engine_cfg.runner  # simulate older vLLM without runner
-
-        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
-
-        assert not hasattr(engine_cfg, "runner")
 
 
 class TestForwardPassMetricsActivation:

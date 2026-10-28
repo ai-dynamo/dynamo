@@ -11,11 +11,7 @@ from typing import Any, Dict, Optional
 
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-
-try:
-    from vllm.utils import FlexibleArgumentParser
-except ImportError:
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups.router_args import (
@@ -388,8 +384,7 @@ def update_engine_config_with_dynamo(
         "disable_log_stats": False,
     }
 
-    if hasattr(engine_config, "runner"):
-        logger.debug(f"Using runner={engine_config.runner} from engine args")
+    logger.debug(f"Using runner={engine_config.runner} from engine args")
 
     kv_cfg = create_kv_events_config(engine_config)
     defaults["kv_events_config"] = kv_cfg

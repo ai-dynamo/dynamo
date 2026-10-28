@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from importlib.metadata import version
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,7 +10,6 @@ import pytest
 import pytest_asyncio
 import zmq
 import zmq.asyncio
-from packaging.version import Version
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("vllm.v1.core.kv_cache_manager")
@@ -54,9 +52,6 @@ async def runtime(monkeypatch):
 @pytest.mark.timeout(30)
 async def test_dcp_events_match_configured_block_size(monkeypatch, runtime):
     """Check DCP events use effective block sizes without changing the cache config."""
-    if Version(version("vllm")).release < (0, 31):
-        pytest.skip("Native effective cache-group metadata requires vLLM 0.31+")
-
     from vllm.distributed.kv_events import KVEventBatch
     from vllm.sampling_params import SamplingParams
     from vllm.utils.hashing import sha256
