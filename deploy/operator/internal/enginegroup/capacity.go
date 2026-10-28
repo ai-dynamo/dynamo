@@ -25,8 +25,22 @@ import (
 	"strings"
 )
 
-// ErrRecoveryRequired means committed membership no longer has its exact physical or runtime incarnation.
-var ErrRecoveryRequired = errors.New("engine group capacity recovery required")
+// ErrRecoveryRequired means normal effects cannot safely continue without explicit recovery or a fenced world restart.
+var ErrRecoveryRequired = errors.New("engine group recovery required")
+
+// ErrObservationPending means a known asynchronous prerequisite or cache projection has not caught up yet.
+// Transport failures and confirmed identity/topology faults must not be classified as pending.
+var ErrObservationPending = errors.New("engine group observation pending")
+
+const recoveryRequiredReason = "RecoveryRequired"
+
+// RequiresRecovery reports a durable invocation fault. Only a validated recovery plan or fenced new world clears it.
+// Observation faults are re-established from fresh authority instead of becoming an irreversible latch.
+// A nil transition means there is no retained invocation fault.
+func (t *TransitionStatus) RequiresRecovery() bool {
+	return t != nil && t.Outcome == TransitionOutcomeBlocked &&
+		t.Failure != nil && t.Failure.Reason == recoveryRequiredReason
+}
 
 func (c *Coordinator) reconcileReplicaReservations(
 	status *GroupStatus,

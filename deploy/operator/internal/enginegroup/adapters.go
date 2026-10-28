@@ -76,11 +76,22 @@ const (
 	AllocationHealthUnknown  AllocationHealth = "Unknown"
 )
 
+// CapacityReleaseMode describes the configured physical release mechanism, not engine retirement eligibility.
+type CapacityReleaseMode string
+
+const (
+	CapacityReleaseUnknown          CapacityReleaseMode = ""
+	CapacityReleaseUnsupported      CapacityReleaseMode = "Unsupported"
+	CapacityReleaseReadinessSteered CapacityReleaseMode = "ReadinessSteered"
+	CapacityReleaseExactUID         CapacityReleaseMode = "ExactUID"
+)
+
 // CapacityObservation is the workload manager's current allocation state.
 type CapacityObservation struct {
 	// AppliedRevision is the last target revision durably accepted by the adapter, whether or not it has converged.
 	AppliedRevision int64
 	Allocations     []CapacityAllocation
+	ReleaseMode     CapacityReleaseMode
 
 	// ReleaseFences are adapter-owned durable acknowledgments of applied exact release fences.
 	// Physical absence is observed separately; unapplied controller targets are not release evidence.
