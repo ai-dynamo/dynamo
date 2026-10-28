@@ -59,8 +59,8 @@ func hardwareSpecV1beta2(hardware *nvidiacomv1beta2.HardwareSpec) *nvidiacomv1be
 func TestResolveHardwareV1beta2(t *testing.T) {
 	str := func(s string) *string { return &s }
 	num := func(n int32) *int32 { return &n }
-	h200x8 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8}
-	h200x64 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 8, TotalGPUs: 64}
+	h200x8 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8, SelectedShapeGPUs: 8}
+	h200x64 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 8, TotalGPUs: 64, SelectedShapeGPUs: 64}
 	completeH100 := hardwareOfV1beta2(str("h100_sxm"), num(4))
 	tests := []struct {
 		name              string
@@ -84,9 +84,9 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 		{name: "omitted hardware discovers the SKU and the budget", op: admissionv1.Create, found: h200x8, wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1, wantMinTimeout: time.Millisecond, wantMaxTimeout: defaultHardwareDiscoveryTimeout},
 		{name: "an empty hardware object is automatic discovery", op: admissionv1.Create, hardware: &nvidiacomv1beta2.HardwareSpec{}, found: h200x8, wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1},
 		{
-			name: "same-SKU nodes with different GPU counts use the aggregate", op: admissionv1.Create,
-			found:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 2, TotalGPUs: 12},
-			wantSKU: "h200_sxm", wantBudget: 12, wantCalls: 1,
+			name: "same-SKU nodes with different GPU counts use the selected node shape", op: admissionv1.Create,
+			found:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 2, TotalGPUs: 12, SelectedShapeGPUs: 8},
+			wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1,
 		},
 		{
 			name: "an empty gpu object is automatic discovery", op: admissionv1.Create,

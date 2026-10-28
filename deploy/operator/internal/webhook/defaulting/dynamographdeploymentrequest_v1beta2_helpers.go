@@ -146,7 +146,7 @@ func (o DGDRV1beta2Options) resolveHardware(
 	}
 
 	// The cluster facts are mapped into the v1beta2 API here: the AISimulate catalog name of
-	// the GPU model (empty when the catalog does not know it) and the total GPU count.
+	// the GPU model (empty when the catalog does not know it) and the selected node-shape capacity.
 	var defaults hardwareDefaultsV1beta2
 	if sku == "" {
 		if found != nil && len(found.OtherModels) > 0 {
@@ -168,7 +168,7 @@ func (o DGDRV1beta2Options) resolveHardware(
 	// Discovery is needed only for an omitted budget at this point.
 	var gpus int
 	if found != nil {
-		gpus = found.TotalGPUs
+		gpus = found.SelectedShapeGPUs
 	}
 	if !hasBudget {
 		if gpus <= 0 {

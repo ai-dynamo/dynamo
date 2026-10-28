@@ -31,7 +31,7 @@ const admissionBypassUsername = "operatorenv-controller-admission-bypass"
 type fixedHardwareDiscoverer struct{}
 
 func (fixedHardwareDiscoverer) Discover(context.Context, nvidiacomv1beta1.GPUSKUType) (*gpu.GPUInfo, error) {
-	return &gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8}, nil
+	return &gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8, SelectedShapeGPUs: 8}, nil
 }
 
 var (

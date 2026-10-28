@@ -304,7 +304,7 @@ func TestDynamoGraphDeploymentRequestV1beta1DefaultingAdmission(t *testing.T) {
 }
 
 func TestDynamoGraphDeploymentRequestV1beta2DefaultingAdmission(t *testing.T) {
-	discoveredH200 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8}
+	discoveredH200 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8, SelectedShapeGPUs: 8}
 	v1beta2Tests := []struct {
 		name          string
 		request       *nvidiacomv1beta2.DynamoGraphDeploymentRequest
@@ -323,6 +323,15 @@ func TestDynamoGraphDeploymentRequestV1beta2DefaultingAdmission(t *testing.T) {
 			discovered: discoveredH200,
 			check:      expectV1beta2ModelOnlyDefaults,
 			idempotent: true,
+		},
+		{
+			name:    "v1beta2 heterogeneous nodes default the selected-shape budget",
+			request: v1beta2DefaultingRequest(),
+			discovered: gpu.GPUInfo{
+				System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 2,
+				TotalGPUs: 12, SelectedShapeGPUs: 8,
+			},
+			check: expectV1beta2H200x8Hardware,
 		},
 		{
 			name: "v1beta2 explicit empty static workload and SLA opt out",
