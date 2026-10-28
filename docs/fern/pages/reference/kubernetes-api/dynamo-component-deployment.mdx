@@ -288,7 +288,7 @@ Upgrading the operator can roll existing sidecar workers whose backend was previ
 
 This mode supports `worker`, `prefill`, and `decode` components. SGLang multinode is supported as described below. Other multinode backends, enabled checkpoint, GPU memory service, and failover remain unsupported. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
 
-    LPX components may declare it in a role template instead, as described under `roles[].podTemplate`.
+LPX components may declare it in a role template instead, as described under `roles[].podTemplate`.
 
 The same convention applies to `v1alpha1` through `spec.extraPodSpec.initContainers[name=runtime]`. Conversion preserves the live init-container list. Adding, renaming, or removing `spec.podTemplate.spec.initContainers[name=runtime]` changes the mode and can trigger a worker rollout. Reserve this name for the Dynamo runtime; rename unrelated init containers before upgrading the operator.
 

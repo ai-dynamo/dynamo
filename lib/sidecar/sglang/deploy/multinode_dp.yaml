@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# EXPERIMENTAL: engine-primary aggregated SGLang behind Dynamo's KV-aware router
+# EXPERIMENTAL: multinode SGLang attention-DP with explicit leader and worker templates
+# Multinode attention-DP requires SGLang v0.5.22 or later and a matching Dynamo sidecar.
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -22,89 +23,147 @@ spec:
             value: kv
   - name: SGLangWorker
     type: worker
-    replicas: 2
-    podTemplate:
-      spec:
-        initContainers:
-        - name: runtime
-          image: <your-registry>/dynamo-sidecar:1.6.0
-          command:
-          - dynamo-sglang-sidecar
-          args:
-          - --grpc-endpoint
-          - 127.0.0.1:30001
-          restartPolicy: Always
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
-              optional: true
-        containers:
-        - name: main
-          # Multinode DP-attention requires SGLang v0.5.22 or later.
-          image: lmsysorg/sglang:v0.5.22
-          # All probes pass only for HealthCheckResponse.healthy=true;
-          # its raw protobuf encoding is 0x08 0x01.
-          startupProbe:
-            exec:
-              command:
-              - python3
-              - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 180
-          readinessProbe:
-            exec:
-              command:
-              - python3
-              - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
-            periodSeconds: 5
-            timeoutSeconds: 5
-            failureThreshold: 3
-          livenessProbe:
-            exec:
-              command:
-              - python3
-              - -c
-              # HealthCheckResponse has one bool field: healthy=true encodes as
-              # 0x08 0x01. Fail when the RPC succeeds but reports unhealthy.
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 6
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
-              optional: true
-          resources:
-            limits:
-              nvidia.com/gpu: '1'
-            requests:
-              ephemeral-storage: 2Gi
-          command:
-          - python3
-          - -m
-          - sglang.launch_server
-          args:
-          - --model-path
-          - Qwen/Qwen3-0.6B
-          - --host
-          - 0.0.0.0
-          - --port
-          - '30000'
-          - --grpc-port
-          - '30001'
-          - --incremental-streaming-output
-          - --page-size
-          - '16'
-          - --kv-events-config
-          - '{"publisher":"zmq","endpoint":"tcp://*:5557","topic":""}'
-          - --tp-size
-          - '2'
-          - --enable-dp-attention
-          - --dp-size
-          - '2'
+    replicas: 1
     multinode:
       nodeCount: 2
+    roles:
+    - name: leader
+      podTemplate:
+        spec:
+          initContainers:
+          - name: runtime
+            image: <your-registry>/dynamo-sidecar:1.6.0
+            command:
+            - dynamo-sglang-sidecar
+            args:
+            - --grpc-endpoint
+            - 127.0.0.1:30001
+            restartPolicy: Always
+            envFrom:
+            - secretRef:
+                name: hf-token-secret
+                optional: true
+          containers:
+          - name: main
+            image: lmsysorg/sglang:v0.5.22
+            startupProbe:
+              exec:
+                command:
+                - python3
+                - -c
+                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 180
+            readinessProbe:
+              exec:
+                command:
+                - python3
+                - -c
+                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              periodSeconds: 5
+              timeoutSeconds: 5
+              failureThreshold: 3
+            livenessProbe:
+              exec:
+                command:
+                - python3
+                - -c
+                - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 6
+            envFrom:
+            - secretRef:
+                name: hf-token-secret
+                optional: true
+            resources:
+              limits:
+                nvidia.com/gpu: '1'
+              requests:
+                ephemeral-storage: 2Gi
+            command:
+            - python3
+            - -m
+            - sglang.launch_server
+            args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --host
+            - 0.0.0.0
+            - --port
+            - '30000'
+            - --grpc-port
+            - '30001'
+            - --incremental-streaming-output
+            - --page-size
+            - '16'
+            - --kv-events-config
+            - '{"publisher":"zmq","endpoint":"tcp://*:5557","topic":""}'
+            - --tp-size
+            - '2'
+            - --attn-dp-size
+            - '2'
+            - --nnodes
+            - '2'
+            - --node-rank
+            - $(DYNAMO_RANK)
+            - --dist-init-addr
+            - $(DYNAMO_LEADER_ADDRESS):29500
+    - name: worker
+      podTemplate:
+        spec:
+          initContainers:
+          - name: runtime
+            image: <your-registry>/dynamo-sidecar:1.6.0
+            command:
+            - dynamo-sglang-sidecar
+            args:
+            - --grpc-endpoint
+            - 127.0.0.1:30001
+            restartPolicy: Always
+            envFrom:
+            - secretRef:
+                name: hf-token-secret
+                optional: true
+          containers:
+          - name: main
+            image: lmsysorg/sglang:v0.5.22
+            envFrom:
+            - secretRef:
+                name: hf-token-secret
+                optional: true
+            resources:
+              limits:
+                nvidia.com/gpu: '1'
+              requests:
+                ephemeral-storage: 2Gi
+            command:
+            - python3
+            - -m
+            - sglang.launch_server
+            args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --host
+            - 0.0.0.0
+            - --port
+            - '30000'
+            - --grpc-port
+            - '30001'
+            - --incremental-streaming-output
+            - --page-size
+            - '16'
+            - --kv-events-config
+            - '{"publisher":"zmq","endpoint":"tcp://*:5557","topic":""}'
+            - --tp-size
+            - '2'
+            - --attn-dp-size
+            - '2'
+            - --nnodes
+            - '2'
+            - --node-rank
+            - $(DYNAMO_RANK)
+            - --dist-init-addr
+            - $(DYNAMO_LEADER_ADDRESS):29500
   backendFramework: sglang
