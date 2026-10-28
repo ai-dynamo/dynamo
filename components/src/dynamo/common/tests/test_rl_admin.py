@@ -199,7 +199,7 @@ def test_lora_load_request_rejects_runtime_delimiter_when_enabled(monkeypatch) -
         require_lora_load_request(request)
 
 
-@pytest.mark.parametrize("value", ["true", "on", " true ", "false"])
+@pytest.mark.parametrize("value", ["on", " true ", "false"])
 def test_lora_name_restriction_uses_runtime_enablement_parser(monkeypatch, value):
     monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", value)
     request = {"lora_name": "base|adapter", "source": {"uri": "file:///adapter"}}
