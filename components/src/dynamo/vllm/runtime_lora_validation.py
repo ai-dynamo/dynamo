@@ -117,7 +117,7 @@ def _safetensors_byte_size(shape: list[int], dtype_bytes: int) -> int:
 def _validate_safetensors(
     weights_path: Path,
     max_lora_rank: int | None = None,
-    num_experts: int | None = None,
+    num_experts: int | tuple[int, ...] | None = None,
 ) -> frozenset[str]:
     try:
         file_size = weights_path.stat().st_size
@@ -202,7 +202,8 @@ def _validate_safetensors(
                 ):
                     # PEFT packs expert ranks along this axis. Only the base
                     # model's trusted expert count can disambiguate the rank.
-                    tensor_rank, remainder = divmod(tensor_rank, num_experts)
+                    experts = _experts_for_tensor(name, num_experts)
+                    tensor_rank, remainder = divmod(tensor_rank, experts)
                     if remainder:
                         raise _runtime_error(422, "invalid_lora_adapter")
                 if tensor_rank > max_lora_rank:
@@ -233,6 +234,23 @@ def _validate_safetensors(
     return frozenset(tensor_names)
 
 
+def _experts_for_tensor(name: str, num_experts: int | tuple[int, ...]) -> int:
+    if isinstance(num_experts, int):
+        return num_experts
+    indices = []
+    for component in name.split("."):
+        try:
+            indices.append(int(component))
+        except ValueError:
+            continue
+    if len(indices) != 1 or not 0 <= indices[0] < len(num_experts):
+        raise _runtime_error(422, "invalid_lora_adapter")
+    experts = num_experts[indices[0]]
+    if experts == 0:
+        raise _runtime_error(422, "invalid_lora_adapter")
+    return experts
+
+
 def validate_snapshot(
     snapshot: Path,
     cache_root: Path,
@@ -240,15 +258,17 @@ def validate_snapshot(
     max_lora_rank: int | None,
     compatible_base_names: Iterable[str | None],
     *,
-    num_experts: int | None = None,
+    num_experts: int | tuple[int, ...] | None = None,
 ) -> Path:
     try:
-        if num_experts is not None and (
-            isinstance(num_experts, bool)
-            or not isinstance(num_experts, int)
-            or num_experts <= 0
-        ):
-            raise _runtime_error(422, "invalid_lora_adapter")
+        if num_experts is not None:
+            counts = num_experts if isinstance(num_experts, tuple) else (num_experts,)
+            minimum = 0 if isinstance(num_experts, tuple) else 1
+            if not counts or any(
+                isinstance(count, bool) or not isinstance(count, int) or count < minimum
+                for count in counts
+            ):
+                raise _runtime_error(422, "invalid_lora_adapter")
         return _validate_snapshot(
             snapshot,
             cache_root,
@@ -267,7 +287,7 @@ def _validate_snapshot(
     max_snapshot_bytes: int,
     max_lora_rank: int | None,
     compatible_base_names: Iterable[str | None],
-    num_experts: int | None,
+    num_experts: int | tuple[int, ...] | None,
 ) -> Path:
     raw_snapshot = Path(snapshot)
     if raw_snapshot.is_symlink():

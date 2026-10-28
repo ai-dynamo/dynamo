@@ -650,7 +650,9 @@ def test_snapshot_does_not_infer_packed_rank_from_untrusted_config(
     assert error.value.message == "invalid_lora_adapter"
 
 
-@pytest.mark.parametrize("experts", [True, 0, -1, 2.0, "2"])
+@pytest.mark.parametrize(
+    "experts", [True, 0, -1, 2.0, "2", (), (2, True), (2, -1), [2, 4]]
+)
 def test_snapshot_rejects_invalid_trusted_expert_count(tmp_path, experts):
     snapshot = _snapshot(tmp_path)
 
@@ -682,3 +684,53 @@ def test_snapshot_accepts_supported_config_rank_pattern(tmp_path, rank_pattern):
     snapshot = _snapshot(tmp_path, rank_pattern=rank_pattern)
 
     assert validate_snapshot(snapshot, tmp_path, 1024, 64, ("base",)) == snapshot
+
+
+@pytest.mark.parametrize(
+    "layer,experts,packed_rank,accepted",
+    [
+        ("0", (2, 4), 32, True),
+        ("1", (2, 4), 64, True),
+        ("0", (2, 4), 64, False),
+        ("1", (2, 4), 128, False),
+        ("0", (0, 4), 32, False),
+        ("2", (2, 4), 32, False),
+        ("-1", (2, 4), 32, False),
+        ("0.sub.1", (2, 4), 32, False),
+        ("missing", (2, 4), 32, False),
+        ("0", 4, 64, True),
+        ("0", 4, 128, False),
+    ],
+)
+@pytest.mark.parametrize("suffix", ["A", "B"])
+def test_snapshot_uses_trusted_physical_experts_for_each_layer(
+    tmp_path, layer, experts, packed_rank, accepted, suffix
+):
+    snapshot = _snapshot(tmp_path, r=16, target_modules=["experts"])
+    shape = [packed_rank, 2] if suffix == "A" else [2, packed_rank]
+    size = prod(shape) * 4
+    header = {
+        f"base_model.model.layers.{layer}.mlp.experts.lora_{suffix}.weight": {
+            "dtype": "F32",
+            "shape": shape,
+            "data_offsets": [0, size],
+        }
+    }
+    (snapshot / "adapter_model.safetensors").write_bytes(
+        _safetensors_blob(header, bytes(size))
+    )
+
+    if accepted:
+        assert (
+            validate_snapshot(
+                snapshot, tmp_path, 16384, 16, ("base",), num_experts=experts
+            )
+            == snapshot
+        )
+    else:
+        with pytest.raises(HttpError) as error:
+            validate_snapshot(
+                snapshot, tmp_path, 16384, 16, ("base",), num_experts=experts
+            )
+        assert error.value.code == 422
+        assert error.value.message == "invalid_lora_adapter"
