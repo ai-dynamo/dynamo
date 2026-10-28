@@ -1300,7 +1300,7 @@ def test_ordered_cancellation_rejects_native_batch():
     )
 
 
-def test_build_sampling_params_forwards_repetition_controls_for_token_requests():
+def test_build_sampling_params_forwards_sampling_options_for_token_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
     sampling_params = handler._build_sampling_params(
@@ -1313,6 +1313,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
                 "top_p": 0.95,
                 "top_k": 40,
                 "min_p": 0.01,
+                "logit_bias": {"18": -10.0},
                 "seed": 1234,
             },
             "stop_conditions": {"max_tokens": 8},
@@ -1326,6 +1327,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
     assert sampling_params["top_p"] == 0.95
     assert sampling_params["top_k"] == 40
     assert sampling_params["min_p"] == 0.01
+    assert sampling_params["logit_bias"] == {"18": -10.0}
     assert sampling_params["sampling_seed"] == 1234
     assert "seed" not in sampling_params
 
@@ -1699,7 +1701,7 @@ def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
     assert sampling_params["stop_token_ids"] == [32, 34]
 
 
-def test_build_sampling_params_forwards_repetition_controls_for_openai_requests():
+def test_build_sampling_params_forwards_sampling_options_for_openai_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=True)
 
     sampling_params = handler._build_sampling_params(
@@ -1711,6 +1713,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_openai_requests(
             "top_p": 0.95,
             "top_k": 40,
             "min_p": 0.01,
+            "logit_bias": {"18": -10.0},
             "seed": 1234,
             "max_tokens": 8,
         }
@@ -1723,6 +1726,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_openai_requests(
     assert sampling_params["top_p"] == 0.95
     assert sampling_params["top_k"] == 40
     assert sampling_params["min_p"] == 0.01
+    assert sampling_params["logit_bias"] == {"18": -10.0}
     assert sampling_params["sampling_seed"] == 1234
     assert "seed" not in sampling_params
 
