@@ -161,6 +161,37 @@ def test_latched_failure_raises_fresh_exceptions(monkeypatch) -> None:
     assert str(first.value) == str(second.value)
 
 
+def test_first_slab_failure_releases_the_arena(monkeypatch) -> None:
+    class _Session:
+        identity = ("nonce", "GPU-0")
+        lock_type = GrantedLockType.RW
+
+        def allocate(self, *_args) -> None:
+            pass
+
+        def export(self, _allocation_id) -> int:
+            raise ConnectionError("export failed")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(device_identity, "invalidate_device_uuid_cache", lambda: None)
+    monkeypatch.setattr(device_identity, "get_device_uuid", lambda _device: "GPU-0")
+    vmm = FakeVMM(granularity=64)
+    manager = GMSClientMemoryManager(
+        "/unused.sock",
+        vmm,
+        0,
+        session_factory=lambda *_args: _Session(),
+        slab_size=384,
+    )
+    manager.connect(RequestedLockType.RW)
+
+    with pytest.raises(RuntimeError, match="export failed"):
+        manager.create_mapping(65)
+    assert vmm.reservations == {}
+
+
 @contextmanager
 def _connected_client(tmp_path, monkeypatch, *, slab_size: int):
     path = str(tmp_path / "weights.sock")
