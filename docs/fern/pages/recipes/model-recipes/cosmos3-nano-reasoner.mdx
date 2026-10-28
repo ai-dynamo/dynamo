@@ -65,7 +65,7 @@ reach a worker that has already processed that video.
 <Note>
 
 In a matched eight-H200 benchmark, per-video session affinity improved
-throughput at every tested concurrency (39% to 83% more requests/s) and
+throughput at every tested concurrency (36% to 76% more requests/s) and
 latency at higher concurrency. See
 [Measured performance](#measured-performance).
 
@@ -76,8 +76,6 @@ latency at higher concurrency. See
 - A Kubernetes cluster with the [Dynamo platform](../../kubernetes/getting-started/quickstart.mdx) installed.
 - Eight available H200 GPUs and a ReadWriteMany model-cache volume.
 - An NGC API key with access to the Cosmos3 model artifacts.
-- A read-only Hugging Face token with access to the private
-  `jkiczka/cosmos3-benchmark-videos` dataset for the smoke test and benchmark.
 
 Run commands from the repository root:
 
@@ -88,8 +86,6 @@ export NAMESPACE="<your-namespace>"
 kubectl --context "$CONTEXT" create namespace "$NAMESPACE"
 kubectl --context "$CONTEXT" -n "$NAMESPACE" create secret generic ngc-api-secret \
   --from-literal=NGC_API_KEY="$NGC_API_KEY"
-kubectl --context "$CONTEXT" -n "$NAMESPACE" create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="$HF_TOKEN"
 ```
 
 ### Cluster-specific settings
@@ -204,8 +200,9 @@ Run `curl` in a second terminal. The response lists
 
 ## Smoke test
 
-The smoke test downloads one real 30-second video, exposes it to the workers
-through an in-cluster Service, and validates a non-empty multimodal completion:
+The smoke test generates one synthetic 30-second video with FFmpeg, exposes it
+to the workers through an in-cluster Service, and validates a non-empty
+multimodal completion:
 
 ```bash
 kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
@@ -224,12 +221,12 @@ description of the video.
 ## Benchmark
 
 The [AIPerf workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/cosmos3-nano-reasoner/perf/README.md)
-downloads the pinned dataset snapshot outside measured request latency. It
-then sends 20 questions for each of 200 30-second, 2 FPS videos at every
-concurrency level: 4,000 requests with exactly 128 output tokens each. For
-session affinity, AIPerf sends
-`X-Dynamo-Session-ID: 2fps-30s:<video-filename>` on all 20 questions; pure
-round robin sends no session-affinity header.
+generates 200 synthetic 30-second, 2 FPS videos with FFmpeg before the
+measured sweep, so no external dataset or credentials are needed. It then sends
+20 questions for each video at every concurrency level: 4,000 requests with
+exactly 128 output tokens each. For session affinity, AIPerf sends
+`X-Dynamo-Session-ID: synthetic-2fps-30s:<video-filename>` on all 20
+questions; pure round robin sends no session-affinity header.
 
 ```bash
 kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
@@ -243,27 +240,27 @@ kubectl --context "$CONTEXT" -n "$NAMESPACE" logs -f \
 ```
 
 On eight H200 workers, the full sweep takes about 70 minutes for round robin
-and about 50 minutes for session affinity. Each concurrency level prints its
+and about 55 minutes for session affinity. Each concurrency level prints its
 AIPerf summary to the log when it finishes.
 
 ## Measured performance
 
 These are single-run AIPerf measurements from the eight-H200 deployments in
 this recipe. Each row represents 4,000 successful requests with no errors.
-Both profiles used the same 200 videos, 20 questions per video, and 128 output
-tokens.
+Both profiles used the same 200 synthetic videos, 20 questions per video, and
+128 output tokens.
 
 | Concurrency | Round-robin req/s | Affinity req/s | Throughput gain | Round-robin TTFT p50 | Affinity TTFT p50 |
 |---:|---:|---:|---:|---:|---:|
-| 1 | 1.95 | 2.74 | +41% | 61 ms | 57 ms |
-| 2 | 4.10 | 5.69 | +39% | 60 ms | 58 ms |
-| 4 | 7.98 | 11.37 | +43% | 61 ms | 58 ms |
-| 8 | 14.60 | 22.49 | +54% | 99 ms | 58 ms |
-| 16 | 21.43 | 39.18 | +83% | 333 ms | 62 ms |
+| 1 | 1.91 | 2.60 | +36% | 61 ms | 58 ms |
+| 2 | 3.90 | 5.46 | +40% | 61 ms | 58 ms |
+| 4 | 7.71 | 10.86 | +41% | 61 ms | 57 ms |
+| 8 | 14.38 | 21.44 | +49% | 90 ms | 58 ms |
+| 16 | 21.39 | 37.68 | +76% | 303 ms | 62 ms |
 
-At concurrency 16, session affinity produced 5,016 output tokens/s versus
-2,743 for round robin. Request-latency p50 fell from 686 ms to 395 ms, and
-TTFT p95 fell from 803 ms to 135 ms. Each worker processes a video the first
+At concurrency 16, session affinity produced 4,822 output tokens/s versus
+2,738 for round robin. Request-latency p50 fell from 674 ms to 409 ms, and
+TTFT p95 fell from 760 ms to 134 ms. Each worker processes a video the first
 time it sees it and reuses it for later questions. Round robin spreads a
 video's 20 questions across up to eight workers, so the video is processed on
 each of them, while session affinity processes it once.

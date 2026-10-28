@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# End-to-end smoke test using one real video from the private benchmark dataset.
+# End-to-end smoke test using one synthetic video generated with FFmpeg.
 apiVersion: v1
 kind: Service
 metadata:
@@ -46,22 +46,16 @@ spec:
           args:
             - |
               set -euo pipefail
-              pip install --no-cache-dir "huggingface_hub==1.33.0"
+              apt-get update
+              apt-get install -y --no-install-recommends ffmpeg
+              apt-get clean
 
-              python3 - <<'PY'
-              import os
-              from huggingface_hub import hf_hub_download
-
-              path = hf_hub_download(
-                  repo_id=os.environ["HF_DATASET_REPO"],
-                  repo_type="dataset",
-                  filename=os.environ["VIDEO_PATH"],
-                  revision=os.environ["HF_DATASET_REVISION"],
-                  token=os.environ["HF_TOKEN"],
-                  local_dir="/video",
-              )
-              print(f"Downloaded smoke-test video to {path}")
-              PY
+              mkdir -p "/video/$(dirname "$VIDEO_PATH")"
+              ffmpeg -hide_banner -loglevel error -y -f lavfi \
+                -i "life=s=640x640:r=2:seed=0:ratio=0.3:mold=10:life_color=#4caf50:death_color=#202020:mold_color=#e0a030" \
+                -t 30 -c:v libx264 -b:v 1200k -maxrate 1200k -bufsize 2400k \
+                -pix_fmt yuv420p -movflags +faststart "/video/$VIDEO_PATH"
+              echo "Generated smoke-test video /video/$VIDEO_PATH"
 
               python3 -m http.server 8080 --bind 0.0.0.0 --directory /video &
               video_server_pid=$!
@@ -151,19 +145,10 @@ spec:
               value: nvidia/cosmos3-nano-reasoner
             - name: VIDEO_SERVICE
               value: cosmos3-nano-reasoner-smoke-video
-            - name: HF_DATASET_REPO
-              value: jkiczka/cosmos3-benchmark-videos
-            - name: HF_DATASET_REVISION
-              value: ce4b687c7736e29a13e00385cc8b6a6d28f355fd
             - name: DATASET_SUBDIR
-              value: 2fps-30s
+              value: synthetic-2fps-30s
             - name: VIDEO_PATH
-              value: 2fps-30s/vid-0000.mp4
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: hf-token-secret
-                  key: HF_TOKEN
+              value: synthetic-2fps-30s/vid-0000.mp4
           resources:
             requests:
               cpu: "1"

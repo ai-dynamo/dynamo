@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # AIPerf video benchmark for the Cosmos3 Nano Reasoner recipe.
-# The private Hugging Face dataset requires a namespace-local Secret named
-# hf-token-secret with an HF_TOKEN key.
+# The Job generates deterministic synthetic videos with FFmpeg; no external
+# dataset or credentials are required.
 apiVersion: v1
 kind: Service
 metadata:
@@ -53,61 +53,33 @@ spec:
             - |
               set -euo pipefail
               apt-get update
-              apt-get install -y --no-install-recommends build-essential curl jq
+              apt-get install -y --no-install-recommends build-essential curl ffmpeg jq
               apt-get clean
-              pip install --no-cache-dir "aiperf==0.12.0" "huggingface_hub==1.33.0"
+              pip install --no-cache-dir "aiperf==0.12.0"
 
               export COLUMNS=200
               epoch="$(date +%s)"
               run_root="${ARTIFACT_ROOT}/${BENCHMARK_VARIANT}/${epoch}_${JOB_NAME}"
               input_file="${run_root}/video_requests.jsonl"
-              mkdir -p "$run_root" "$DATASET_CACHE_ROOT"
-              export ARTIFACT_ROOT_CURRENT="$run_root"
+              dataset_dir=/workspace/videos
+              mkdir -p "$run_root" "$dataset_dir/$DATASET_SUBDIR"
               {
                 python3 --version
                 pip freeze
+                ffmpeg -version | head -n 1
               } >"$run_root/runtime_versions.txt"
 
-              python3 - <<'PY'
-              import os
-              from pathlib import Path
+              # Seeded Game of Life frames give every video distinct, reproducible
+              # content; the bitrate cap keeps file size close to real 640x640 clips.
+              for ((i = 0; i < VIDEO_POOL_SIZE; i++)); do
+                ffmpeg -hide_banner -loglevel error -y -f lavfi \
+                  -i "life=s=${VIDEO_SIZE}:r=${VIDEO_FPS}:seed=${i}:ratio=0.3:mold=10:life_color=#4caf50:death_color=#202020:mold_color=#e0a030" \
+                  -t "$VIDEO_DURATION_SECONDS" -c:v libx264 -b:v 1200k -maxrate 1200k \
+                  -bufsize 2400k -pix_fmt yuv420p -movflags +faststart \
+                  "$(printf '%s/%s/vid-%04d.mp4' "$dataset_dir" "$DATASET_SUBDIR" "$i")"
+              done
+              echo "Generated $VIDEO_POOL_SIZE synthetic videos in $dataset_dir/$DATASET_SUBDIR"
 
-              from huggingface_hub import HfApi, snapshot_download
-
-              repo = os.environ["HF_DATASET_REPO"]
-              requested_revision = os.environ["HF_DATASET_REVISION"]
-              token = os.environ["HF_TOKEN"]
-              info = HfApi().dataset_info(
-                  repo_id=repo,
-                  revision=requested_revision,
-                  token=token,
-              )
-              resolved_revision = info.sha
-              destination = (
-                  Path(os.environ["DATASET_CACHE_ROOT"])
-                  / repo.replace("/", "--")
-                  / resolved_revision
-              )
-              snapshot_download(
-                  repo_id=repo,
-                  repo_type="dataset",
-                  revision=resolved_revision,
-                  token=token,
-                  local_dir=destination,
-              )
-              provenance = Path(os.environ["ARTIFACT_ROOT_CURRENT"]) / "dataset_revision.txt"
-              provenance.write_text(
-                  f"repo={repo}\n"
-                  f"requested_revision={requested_revision}\n"
-                  f"resolved_revision={resolved_revision}\n"
-              )
-              (Path(os.environ["ARTIFACT_ROOT_CURRENT"]) / "dataset_path.txt").write_text(
-                  f"{destination}\n"
-              )
-              print(f"Dataset resolved to {resolved_revision}")
-              PY
-
-              dataset_dir="$(<"$run_root/dataset_path.txt")"
               DATASET_DIR="$dataset_dir" INPUT_FILE="$input_file" python3 - <<'PY'
               import json
               import os
@@ -199,9 +171,10 @@ spec:
                 "serving_image": "nvcr.io/nim/nvidia/cosmos3:2.1.0@sha256:2add946b316a0baf72a15be4da85132d127c34da22d2fe4e9c4bd146ad8c4020",
                 "target_model": "$TARGET_MODEL",
                 "endpoint": "$ENDPOINT",
-                "dataset_repo": "$HF_DATASET_REPO",
-                "dataset_revision": "$HF_DATASET_REVISION",
                 "dataset_subdir": "$DATASET_SUBDIR",
+                "video_size": "$VIDEO_SIZE",
+                "video_fps": $VIDEO_FPS,
+                "video_duration_seconds": $VIDEO_DURATION_SECONDS,
                 "video_pool_size": $VIDEO_POOL_SIZE,
                 "questions_per_video": $QUESTIONS_PER_VIDEO,
                 "conversation_count": $VIDEO_POOL_SIZE,
@@ -249,14 +222,14 @@ spec:
           env:
             - name: TARGET_MODEL
               value: nvidia/cosmos3-nano-reasoner
-            - name: HF_DATASET_REPO
-              value: jkiczka/cosmos3-benchmark-videos
-            - name: HF_DATASET_REVISION
-              value: ce4b687c7736e29a13e00385cc8b6a6d28f355fd
             - name: DATASET_SUBDIR
-              value: 2fps-30s
-            - name: DATASET_CACHE_ROOT
-              value: /shared-model-cache/perf-datasets
+              value: synthetic-2fps-30s
+            - name: VIDEO_SIZE
+              value: 640x640
+            - name: VIDEO_FPS
+              value: "2"
+            - name: VIDEO_DURATION_SECONDS
+              value: "30"
             - name: ARTIFACT_ROOT
               value: /shared-model-cache/perf/cosmos3-nano-reasoner
             - name: VIDEO_SERVER_URL
@@ -273,11 +246,6 @@ spec:
               value: "4"
             - name: OUTPUT_TOKENS
               value: "128"
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: hf-token-secret
-                  key: HF_TOKEN
             - name: JOB_NAME
               valueFrom:
                 fieldRef:
