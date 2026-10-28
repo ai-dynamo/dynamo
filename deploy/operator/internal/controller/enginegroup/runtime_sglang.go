@@ -21,7 +21,6 @@ import (
 	sglangruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/sglang"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/workload"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -153,10 +152,10 @@ func (p *sglangRuntimeResolver) Resolve(
 		Membership: membership,
 		Traffic:    traffic,
 		Verifier:   verifier,
-		Planner: sglangScalePlanner{
-			profileFingerprint: profile.Fingerprint,
-			worldUID:           world.ID,
-			membersPerReplica:  resolved.NativeMembersPerReplica,
+		Planner: sglangruntime.ScalePlanner{
+			ProfileFingerprint: profile.Fingerprint,
+			WorldID:            string(world.ID),
+			MembersPerReplica:  resolved.NativeMembersPerReplica,
 		},
 	}, nil
 }
@@ -182,71 +181,6 @@ func (p *sglangRuntimeResolver) primaryPod(
 		return primary, allocation.TemplateRevision, nil
 	}
 	return nil, "", fmt.Errorf("SGLang Engine Group primary allocation is missing")
-}
-
-type sglangScalePlanner struct {
-	profileFingerprint string
-	worldUID           types.UID
-	membersPerReplica  int32
-}
-
-func (p sglangScalePlanner) ResolveScalePlan(
-	_ context.Context,
-	_ domain.GroupID,
-	targetReplicas int32,
-	status domain.GroupStatus,
-) (ScalePlanResolution, error) {
-	// An unresolved operation owns the collective; newer targets wait behind it.
-	if status.Transition != nil && status.Transition.Outcome != domain.TransitionOutcomeCompleted &&
-		status.Transition.Outcome != domain.TransitionOutcomeRolledBack {
-		return ScalePlanResolution{}, nil
-	}
-
-	base := status.Membership.Observed.CommittedTopology
-	current := base.ReplicaCount()
-	if targetReplicas == current {
-		return ScalePlanResolution{}, nil
-	}
-
-	// Growth does not establish safe whole-world drain or retirement.
-	if targetReplicas == 0 {
-		return ScalePlanResolution{Rejection: &domain.Failure{
-			Classification: domain.FailureClassificationTerminal,
-			Reason:         "SGLangRetirementUnsupported",
-			Message:        "the growth-only SGLang adapter cannot safely retire a live engine world",
-		}}, nil
-	}
-	if targetReplicas < current {
-		return ScalePlanResolution{Rejection: &domain.Failure{
-			Classification: domain.FailureClassificationTerminal,
-			Reason:         "SGLangShrinkUnsupported",
-			Message:        "the merged SGLang Elastic EP path currently supports growth only",
-		}}, nil
-	}
-	// Each native append admits one complete allocation; larger absolute targets converge through separate commits.
-	joining := domain.ReplicaTarget{
-		ReplicaID: domain.ReplicaID(fmt.Sprintf("replica-%d", current)),
-		SlotID:    domain.CapacitySlotID(fmt.Sprintf("slot-%d", current)),
-		Bootstrap: domain.BootstrapModeJoin,
-	}
-	width := p.membersPerReplica
-	if width < 1 {
-		return ScalePlanResolution{}, fmt.Errorf("SGLang growth requires a resolved native-member width")
-	}
-	for local := range width {
-		joining.NativeMembers = append(joining.NativeMembers, domain.NativeMemberID(fmt.Sprintf("dp-%d", current*width+local)))
-	}
-	return ScalePlanResolution{Plan: &domain.ResolvedPlan{
-		ID:                      fmt.Sprintf("sglang-grow-%s-%d-%d", p.worldUID, base.Generation, current+1),
-		ProfileFingerprint:      p.profileFingerprint,
-		ProcessLifecycleOwner:   domain.ProcessLifecycleOwnerOrchestrator,
-		TrafficRequirement:      domain.TrafficRequirementKeepServing,
-		VerificationRequirement: domain.VerificationRequirementRequired,
-		Change: domain.ResolvedChange{
-			Kind: domain.PlanKindGrow,
-			Grow: &domain.GrowChange{Replicas: []domain.ReplicaTarget{joining}},
-		},
-	}}, nil
 }
 
 func engineGroupMainContainer(pod *corev1.Pod) (*corev1.Container, error) {
@@ -300,4 +234,4 @@ func argumentValue(args []string, names ...string) string {
 	return ""
 }
 
-var _ ScalePlanResolver = sglangScalePlanner{}
+var _ ScalePlanResolver = sglangruntime.ScalePlanner{}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/controlhttp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -132,6 +133,29 @@ func TestClientRejectsInvalidState(t *testing.T) {
 			if tc.recoveryRequired {
 				assert.ErrorIs(t, err, enginegroup.ErrRecoveryRequired)
 			}
+		})
+	}
+}
+
+func TestClientRejectsIncompleteJSONEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "trailing JSON", body: `{"effective_ep_size":2,"runtime_health":"healthy"} {}`},
+		{name: "oversized response", body: strings.Repeat(" ", controlhttp.MaximumResponseBytes+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("receive trailing or oversized evidence from an otherwise successful control request")
+			client, err := NewClient("http://sglang.test:9090", &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return jsonResponse(tc.body), nil
+			})})
+			require.NoError(t, err)
+
+			t.Log("refuse to turn partial decoding into membership authority")
+			state, err := client.Observe(t.Context())
+			require.Error(t, err)
+			assert.Equal(t, ScaleState{}, state)
 		})
 	}
 }

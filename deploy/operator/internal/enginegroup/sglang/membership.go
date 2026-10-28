@@ -359,7 +359,10 @@ func (a *MembershipAdapter) Apply(
 	} else if failure != nil {
 		return a.persistRejection(ctx, state, snapshot, target, failure.Reason, failure.Message)
 	}
-	targetSize := a.targetEPSize(target)
+	targetSize, err := a.targetEPSize(target)
+	if err != nil {
+		return err
+	}
 	joiningAllocationIDs, err := a.joiningAllocationIDs(ctx, groupID, target)
 	if err != nil {
 		return err
@@ -478,16 +481,11 @@ func (a *MembershipAdapter) validatePlan(
 	if a.MembersPerReplica < 1 {
 		return terminalFailure("InvalidProfile", "SGLang member width must be resolved before validating operations")
 	}
-	// Healthy resizing cannot reinterpret a partially active allocation as a smaller complete replica.
-	for rank := int32(0); rank < base.ReplicaCount(); rank++ {
-		id := enginegroup.ReplicaID(fmt.Sprintf("replica-%d", rank))
-		if !slices.ContainsFunc(base.Replicas, func(replica enginegroup.ReplicaMembership) bool {
-			return replica.ReplicaID == id && hasNativeMemberRange(replica.Members, rank*a.MembersPerReplica, a.MembersPerReplica)
-		}) {
-			return terminalFailure("PartialMembershipUnsupported", "SGLang planned resize requires healthy complete contiguous allocations")
-		}
+	// Planned resizing requires the complete fixed allocation layout, unlike survivor observation.
+	layout := ReplicaLayout{NativeMembersPerReplica: a.MembersPerReplica}
+	if err := layout.ValidateComplete(base); err != nil {
+		return terminalFailure("PartialMembershipUnsupported", err.Error())
 	}
-
 	// The native protocol admits one allocation per resize; it may contain several members.
 	if len(plan.Change.Grow.Replicas) != 1 {
 		return terminalFailure("UnsupportedJoiningSet", "SGLang supports one joining allocation per resize")
@@ -496,15 +494,16 @@ func (a *MembershipAdapter) validatePlan(
 		plan.VerificationRequirement != enginegroup.VerificationRequirementRequired {
 		return terminalFailure("UnsafePlan", "SGLang growth must keep the base serving and verify the committed result")
 	}
-	// Canonical string ordering must not change which fixed rank range an allocation owns.
-	rank := base.ReplicaCount()
+	// The same checked layout owns planning and exact native bootstrap validation.
+	expected, err := layout.Target(base.ReplicaCount())
+	if err != nil {
+		return terminalFailure("UnsupportedRankLayout", err.Error())
+	}
 	target := plan.Change.Grow.Replicas[0]
 	members := slices.Clone(target.NativeMembers)
 	slices.Sort(members)
-	if target.ReplicaID != enginegroup.ReplicaID(fmt.Sprintf("replica-%d", rank)) ||
-		target.SlotID != enginegroup.CapacitySlotID(fmt.Sprintf("slot-%d", rank)) ||
-		target.Bootstrap != enginegroup.BootstrapModeJoin ||
-		!slices.Equal(members, nativeMemberIDs(rank*a.MembersPerReplica, a.MembersPerReplica)) {
+	if target.ReplicaID != expected.ReplicaID || target.SlotID != expected.SlotID ||
+		target.Bootstrap != expected.Bootstrap || !slices.Equal(members, expected.NativeMembers) {
 		return terminalFailure("UnsupportedRankLayout", "SGLang growth requires contiguous replica-N, slot-N, and dp-N identities")
 	}
 	return nil
@@ -560,32 +559,9 @@ func (a *MembershipAdapter) validateBase(ctx context.Context, base enginegroup.M
 	return nil
 }
 
-func nativeMemberIDs(first, width int32) []enginegroup.NativeMemberID {
-	// Return the fixed numeric range in the domain's canonical string order.
-	members := make([]enginegroup.NativeMemberID, width)
-	for local := range members {
-		members[local] = enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", first+int32(local)))
-	}
-	slices.Sort(members)
-	return members
-}
-
-func hasNativeMemberRange(members []enginegroup.NativeMemberIncarnation, first, width int32) bool {
-	// Exact cardinality and every expected ID establish the complete rank range.
-	if int32(len(members)) != width {
-		return false
-	}
-	for offset := range width {
-		id := enginegroup.NativeMemberID(fmt.Sprintf("dp-%d", first+offset))
-		if !slices.ContainsFunc(members, func(member enginegroup.NativeMemberIncarnation) bool { return member.ID == id }) {
-			return false
-		}
-	}
-	return true
-}
-
-func (a *MembershipAdapter) targetEPSize(target enginegroup.MembershipTarget) int32 {
-	return (target.BaseTopology.ReplicaCount() + int32(len(target.Joining))) * a.MembersPerReplica
+func (a *MembershipAdapter) targetEPSize(target enginegroup.MembershipTarget) (int32, error) {
+	return (ReplicaLayout{NativeMembersPerReplica: a.MembersPerReplica}).NativeSize(
+		target.BaseTopology.ReplicaCount() + int32(len(target.Joining)))
 }
 
 func (a *MembershipAdapter) joiningAllocationIDs(ctx context.Context, groupID enginegroup.GroupID, target enginegroup.MembershipTarget) ([]string, error) {
@@ -621,16 +597,20 @@ func (a *MembershipAdapter) persistRejection(
 	reason string,
 	message string,
 ) error {
+	targetSize, err := a.targetEPSize(target)
+	if err != nil {
+		return err
+	}
 	state.Transition = &transitionJournal{
 		TransitionID:    target.TransitionID,
 		ControlRevision: target.ControlRevision,
 		TargetDigest:    target.TargetDigest,
 		BaseTopology:    target.BaseTopology,
-		TargetEPSize:    a.targetEPSize(target),
+		TargetEPSize:    targetSize,
 		Phase:           enginegroup.MembershipTransitionPhaseRejected,
 		Failure:         terminalFailure(reason, message),
 	}
-	_, err := a.Journal.Save(ctx, snapshot, state)
+	_, err = a.Journal.Save(ctx, snapshot, state)
 	return err
 }
 

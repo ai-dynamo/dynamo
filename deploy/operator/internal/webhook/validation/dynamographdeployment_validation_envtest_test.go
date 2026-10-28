@@ -375,6 +375,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaEngineGroupDGDForAdmission(nil),
 		},
 		{
+			name: "Grove Engine Groups reject inherited provider environment",
+			deployment: betaEngineGroupDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Env = []corev1.EnvVar{{Name: "GROVE_PCLQ_POD_INDEX", Value: "0"}}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: environment GROVE_PCLQ_POD_INDEX is supplied by Grove and cannot be shadowed in the Pod template"},
+		},
+		{
 			name:            "Engine Groups cannot silently use the non-Grove pathway",
 			groveDisabled:   true,
 			deployment:      betaEngineGroupDGDForAdmission(nil),
