@@ -91,7 +91,8 @@ type CapacityObservation struct {
 	// AppliedRevision is the last target revision durably accepted by the adapter, whether or not it has converged.
 	AppliedRevision int64
 	Allocations     []CapacityAllocation
-	ReleaseMode     CapacityReleaseMode
+	// ReleaseMode describes the configured mechanism for status consumers; it never authorizes release.
+	ReleaseMode CapacityReleaseMode
 
 	// ReleaseFences are adapter-owned durable acknowledgments of applied exact release fences.
 	// Physical absence is observed separately; unapplied controller targets are not release evidence.
@@ -215,6 +216,9 @@ type VerificationResult struct {
 }
 
 // CapacityAdapter converges physical capacity to revisioned absolute targets.
+// Observe must surface persistent identity or safety faults, including those discovered during Apply. Invocation
+// errors are retried from fresh observations, not retained as terminal transition failures. ErrRecoveryRequired pauses
+// unsafe effects while the evidence is invalid; only ApplyResult.Rejection definitively rejects a capacity target.
 type CapacityAdapter interface {
 	// Observe returns stable allocation identities, exact Pod UIDs, availability, and durable release fences.
 	// Incarnation.Members is allocation identity metadata, not a live-process inventory: an exited member's last
@@ -232,6 +236,8 @@ type CapacityAdapter interface {
 }
 
 // MembershipAdapter converges membership to one desired level while owning the serialized compare-and-apply protocol.
+// Persistent identity or safety faults must remain observable. Invocation errors, including ErrRecoveryRequired,
+// never reject a membership target or replace its native outcome; reconciliation observes before repeating it.
 type MembershipAdapter interface {
 	// ValidatePlan authoritatively checks complete resolved semantics before capacity or traffic prework. It is
 	// side-effect-free and returns evidence bound to the normalized plan and current adapter capabilities. It enforces
@@ -260,6 +266,8 @@ type MembershipAdapter interface {
 }
 
 // TrafficAdapter maintains withdrawal intent and observes native serving registration.
+// Persistent unsafe state must remain observable, and Apply revalidates safety on every invocation. Errors, including
+// ErrRecoveryRequired, are retried without inventing a terminal outcome; ApplyResult.Rejection is definitive.
 type TrafficAdapter interface {
 	// Observe returns exact admitted, draining, and durably drained replica incarnations.
 	Observe(ctx context.Context, groupID GroupID) (TrafficObservation, error)

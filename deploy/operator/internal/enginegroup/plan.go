@@ -726,6 +726,12 @@ func validateCapacityObservation(observation CapacityObservation) error {
 	if observation.AppliedRevision < 0 {
 		return errors.New("capacity applied revision must not be negative")
 	}
+	// A mechanism report describes configured release behavior, never deletion authority.
+	switch observation.ReleaseMode {
+	case CapacityReleaseUnknown, CapacityReleaseUnsupported, CapacityReleaseReadinessSteered, CapacityReleaseExactUID:
+	default:
+		return fmt.Errorf("invalid capacity release mode %q", observation.ReleaseMode)
+	}
 	seen := make(map[ReplicaID]struct{}, len(observation.Allocations))
 	slots := make(map[CapacitySlotID]ReplicaID, len(observation.Allocations))
 	runtimes := make(map[RuntimeIncarnationID]ReplicaID, len(observation.Allocations))

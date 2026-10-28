@@ -95,6 +95,10 @@ func (a *testCapacityAdapter) Apply(
 	allocations := make([]CapacityAllocation, 0, len(target.Replicas))
 	for _, replica := range target.Replicas {
 		if replica.Incarnation != nil {
+			allocation, found := allocationByID(a.observation, replica.ReplicaID)
+			if !found || !sameIncarnation(allocation.Incarnation, *replica.Incarnation) {
+				return rejected("MissingExactIncarnation", "exact capacity cannot recreate or adopt another incarnation"), nil
+			}
 			allocations = append(allocations, CapacityAllocation{
 				Incarnation: cloneReplicaIncarnation(*replica.Incarnation),
 				Available:   a.available,

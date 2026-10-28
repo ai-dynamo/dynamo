@@ -11,6 +11,42 @@ import (
 	"testing"
 )
 
+func TestCapacityReleaseModeValidation(t *testing.T) {
+	for _, mode := range []CapacityReleaseMode{CapacityReleaseUnknown, CapacityReleaseUnsupported, CapacityReleaseReadinessSteered, CapacityReleaseExactUID, "invalid"} {
+		t.Run(string(mode), func(t *testing.T) {
+			t.Log("validate the informational physical release mechanism without creating release authority")
+			observation := capacityForTopology(engineTopology(1, 1))
+			observation.ReleaseMode = mode
+			err := validateCapacityObservation(observation)
+			if (err == nil) != (mode != "invalid") {
+				t.Fatalf("release mode %q: %v", mode, err)
+			}
+			if len(observation.ReleaseFences) != 0 {
+				t.Fatal("release mechanism manufactured deletion authorization")
+			}
+		})
+	}
+}
+
+func TestTransitionBlockKindValidation(t *testing.T) {
+	for _, kind := range []TransitionBlockKind{TransitionBlockKindMembershipAuthority, TransitionBlockKindSubsystemFailure, "", "invalid"} {
+		t.Run(string(kind), func(t *testing.T) {
+			t.Log("persist a definitive preflight rejection with coordinator-owned block classification")
+			scenario := newCoordinatorScenario(t, engineTopology(1, 1))
+			plan := retirePlan("rejected-retirement", "replica-0", TrafficRequirementKeepServing, VerificationRequirementNone)
+			scenario.desired = &plan
+			scenario.membership.planRejection = &Failure{Classification: FailureClassificationTerminal, Reason: "UnsupportedPlan"}
+			scenario.mustReconcile("persist retirement plan")
+			scenario.mustReconcile("persist preflight rejection")
+			scenario.status.Transition.BlockKind = kind
+			valid := kind == TransitionBlockKindSubsystemFailure
+			if err := ValidateGroupStatus(scenario.status); (err == nil) != valid {
+				t.Fatalf("block kind %q: %v", kind, err)
+			}
+		})
+	}
+}
+
 func TestNewGroupStatusRequiresCoherentInitialObservations(t *testing.T) {
 	for _, name := range []string{
 		"coherent", "extra allocation", "missing allocation", "extra admitted process",

@@ -53,9 +53,6 @@ func (c *Coordinator) reconcileServingVerification(
 
 	result, verifyErr := c.verifier.Verify(ctx, groupID, committed)
 	if verifyErr != nil {
-		if errors.Is(verifyErr, ErrRecoveryRequired) {
-			return false, false, observationError(ObservationAuthorityVerification, verifyErr)
-		}
 		return false, false, fmt.Errorf("verify committed serving topology: %w", verifyErr)
 	}
 	if result.Proof != nil && result.Failure != nil {
