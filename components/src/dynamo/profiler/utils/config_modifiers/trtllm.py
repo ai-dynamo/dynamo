@@ -261,6 +261,18 @@ def enable_trtllm_chunked_prefill(config: dict) -> dict:
     return config
 
 
+# Flags that set KV-event publishing explicitly, including the deprecated
+# combined alias that dynamo.trtllm expands to --[no-]publish-kv-events.
+_KV_EVENT_FLAGS = frozenset(
+    (
+        "--publish-kv-events",
+        "--no-publish-kv-events",
+        "--publish-events-and-metrics",
+        "--no-publish-events-and-metrics",
+    )
+)
+
+
 def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[str]:
     """Restore the Dynamo runtime arguments omitted by AIC engine tuning."""
     # dynamo.trtllm defaults to aggregated serving, so each worker needs its role.
@@ -268,9 +280,9 @@ def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[s
         break_arguments(args), "--disaggregation-mode", role.value
     )
     # The disagg blueprint publishes prefill KV events for the KV router; an
-    # explicit --no-publish-kv-events stays authoritative.
+    # explicit choice stays authoritative.
     if role == SubComponentType.PREFILL and not any(
-        arg in ("--publish-kv-events", "--no-publish-kv-events") for arg in finalized
+        arg.split("=", 1)[0] in _KV_EVENT_FLAGS for arg in finalized
     ):
         finalized = append_argument(finalized, "--publish-kv-events")
     return finalized

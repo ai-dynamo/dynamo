@@ -370,7 +370,6 @@ def test_build_dgd_config_disagg_sets_canonical_worker_roles(backend: str) -> No
 
 
 def test_build_dgd_config_trtllm_disagg_restores_runtime_args() -> None:
-    """TRT-LLM workers keep the disagg blueprint's role and prefill KV events."""
     modifier = CONFIG_MODIFIERS["trtllm"]
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
@@ -391,27 +390,35 @@ def test_build_dgd_config_trtllm_disagg_restores_runtime_args() -> None:
     assert "--publish-kv-events" not in decode_args
 
 
-def test_build_dgd_config_trtllm_disagg_preserves_explicit_kv_events() -> None:
-    """An explicit KV-event choice stays authoritative for TRT-LLM prefill."""
+@pytest.mark.parametrize(
+    "prefill_kv_event_flag",
+    [
+        "--no-publish-kv-events",
+        "--no-publish-events-and-metrics",
+        "--publish-events-and-metrics",
+    ],
+)
+def test_build_dgd_config_trtllm_disagg_preserves_explicit_kv_events(
+    prefill_kv_event_flag: str,
+) -> None:
     modifier = CONFIG_MODIFIERS["trtllm"]
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
         model_name="test/model",
         image="example/trtllm:test",
-        prefill_cli_args=["--no-publish-kv-events"],
+        prefill_cli_args=[prefill_kv_event_flag],
         decode_cli_args=["--publish-kv-events"],
     )
 
     prefill_args = _main_container(_component_by_type(dgd_config, "prefill"))["args"]
     decode_args = _main_container(_component_by_type(dgd_config, "decode"))["args"]
 
-    assert "--no-publish-kv-events" in prefill_args
+    assert prefill_kv_event_flag in prefill_args
     assert "--publish-kv-events" not in prefill_args
     assert decode_args.count("--publish-kv-events") == 1
 
 
 def test_build_dgd_config_sglang_disagg_restores_runtime_args() -> None:
-    """SGLang workers keep the disagg blueprint's role, transfer, and bind args."""
     modifier = CONFIG_MODIFIERS["sglang"]
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
@@ -433,7 +440,6 @@ def test_build_dgd_config_sglang_disagg_restores_runtime_args() -> None:
 
 
 def test_build_dgd_config_sglang_disagg_preserves_explicit_runtime_args() -> None:
-    """Explicit SGLang transfer and bind args win over the blueprint defaults."""
     modifier = CONFIG_MODIFIERS["sglang"]
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
