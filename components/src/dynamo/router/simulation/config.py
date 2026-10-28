@@ -312,7 +312,6 @@ class RouterSearchSpace(BaseModel):
 
     prefill_load_model_type: list[str] = Field(default_factory=lambda: ["none"])
     active_decode_blocks_threshold: int | None = None
-    active_prefill_tokens_threshold: int | None = None
     active_prefill_tokens_threshold_frac: float | None = None
     no_admission_control: bool = False
     public_schema: bool = False
@@ -390,7 +389,6 @@ class RouterSearchSpace(BaseModel):
             return self
         admission_pins = {
             "active_decode_blocks_threshold": self.active_decode_blocks_threshold,
-            "active_prefill_tokens_threshold": self.active_prefill_tokens_threshold,
             "active_prefill_tokens_threshold_frac": self.active_prefill_tokens_threshold_frac,
         }
         enabled = [name for name, value in admission_pins.items() if value is not None]

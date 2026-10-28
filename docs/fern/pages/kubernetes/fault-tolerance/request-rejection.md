@@ -26,10 +26,9 @@ Use the signals that match the workers you want to protect:
 
 - Set `--active-decode-blocks-threshold` for decode workers. The value is the fraction of available
   KV cache blocks in use, from `0.0` through `1.0`.
-- Set `--active-prefill-tokens-threshold` for an absolute prefill-token limit. This flag is deprecated
-  and will be removed in v1.7; use `--active-prefill-tokens-threshold-frac`.
-- Set `--active-prefill-tokens-threshold-frac` when the prefill limit should scale with the worker's
-  `max_num_batched_tokens` value.
+- Set `--active-prefill-tokens-threshold-frac` for a prefill limit. The value is a fraction of the
+  worker's `max_num_batched_tokens` value. It replaces the removed absolute
+  `--active-prefill-tokens-threshold`; choose a fraction from your workers' `max_num_batched_tokens`.
 
 The checks use OR logic. If you configure more than one threshold, exceeding any configured threshold
 marks that data-parallel rank as busy. A worker is rejected only after all of its ranks are busy, and a
@@ -65,15 +64,15 @@ output-block tracking so generated tokens contribute to the observed KV cache lo
             - --active-decode-blocks-threshold
             - "0.85"
             - --router-track-output-blocks
-            - --active-prefill-tokens-threshold
-            - "10000"
+            - --active-prefill-tokens-threshold-frac
+            - "0.8"
 ```
 
 `--router-track-output-blocks` is especially important for long generations. Without it, a workload
 can fill KV cache with generated tokens without crossing the load value observed by the router.
 
 You can configure just one signal. For example, a prefill-only deployment can omit the decode-block
-threshold and KV-specific options. To disable rejection, remove all three threshold settings or set
+threshold and KV-specific options. To disable rejection, remove both threshold settings or set
 their environment-variable values to `None`.
 
 See [Frontend Configuration](../../reference/components/frontend-configuration.mdx#fault-tolerance)
@@ -99,7 +98,7 @@ curl -X POST http://localhost:8000/busy_threshold \
   -d '{
     "model": "Qwen/Qwen3-0.6B",
     "active_decode_blocks_threshold": 0.85,
-    "active_prefill_tokens_threshold": 10000
+    "active_prefill_tokens_threshold_frac": 0.8
   }'
 ```
 
@@ -109,7 +108,9 @@ Read the stored thresholds:
 curl http://localhost:8000/busy_threshold
 ```
 
-A numeric value enables only its corresponding check. The router applies the new configuration when
+A numeric value enables only its corresponding check. With `--router-mode kv`, the router checks the
+new values against the load it has booked at its next worker selection. Checks of worker-reported load,
+which other router modes use for every threshold and KV mode uses for the decode threshold, apply when
 the next worker-load or runtime-configuration update arrives, so the change might not affect a routing
 decision immediately. This endpoint does not enable `--router-mode kv` or
 `--router-track-output-blocks`; set those when the Frontend starts.

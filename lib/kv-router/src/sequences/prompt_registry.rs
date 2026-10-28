@@ -355,7 +355,7 @@ impl PromptRegistry {
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
         projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
-        full_ranks: Option<&mut FullRankCounts>,
+        mut full_ranks: Option<&mut FullRankCounts>,
     ) {
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
@@ -373,52 +373,44 @@ impl PromptRegistry {
         // A reused map usually still holds the previous request's projection over the same
         // workers. Overwriting values in place avoids re-inserting every worker; any key-set
         // mismatch falls back to a rebuild. Equal lengths plus every worker found means the
-        // key sets are equal because worker keys are unique.
-        let Some(full_ranks) = full_ranks else {
-            if projections.len() == loads.len()
-                && loads.iter().all(|(worker, load)| {
+        // key sets are equal because worker keys are unique. With `full_ranks`, each rank is
+        // judged as its projection is written.
+        if projections.len() == loads.len() {
+            let refreshed = match full_ranks.as_deref_mut() {
+                None => loads.iter().all(|(worker, load)| {
                     projections
                         .get_mut(&worker)
                         .map(|projection| *projection = project(worker, load))
                         .is_some()
-                })
-            {
-                return;
-            }
-
-            projections.clear();
-            projections.reserve(loads.len());
-            projections.extend(
-                loads
-                    .iter()
-                    .map(|(worker, load)| (worker, project(worker, load))),
-            );
-            return;
-        };
-
-        // The same two shapes, judging each rank as its projection is written.
-        if projections.len() == loads.len() {
-            let refreshed = loads.iter_indexed().all(|(index, worker, load)| {
-                projections
-                    .get_mut(&worker)
-                    .map(|projection| {
-                        *projection = project(worker, load);
-                        full_ranks.record(worker, loads.capacity_at(index), projection);
-                    })
-                    .is_some()
-            });
+                }),
+                Some(full_ranks) => loads.iter_indexed().all(|(index, worker, load)| {
+                    projections
+                        .get_mut(&worker)
+                        .map(|projection| {
+                            *projection = project(worker, load);
+                            full_ranks.record(worker, loads.capacity_at(index), projection);
+                        })
+                        .is_some()
+                }),
+            };
             if refreshed {
                 return;
             }
             // The in-place pass counted a prefix before the key sets diverged.
-            full_ranks.clear();
+            if let Some(full_ranks) = full_ranks.as_deref_mut() {
+                full_ranks.clear();
+            }
         }
 
+        // One map insert site serves both passes: with a second, the compiler stopped inlining
+        // the insert, doubling the cost of a rebuild.
         projections.clear();
         projections.reserve(loads.len());
         projections.extend(loads.iter_indexed().map(|(index, worker, load)| {
             let projection = project(worker, load);
-            full_ranks.record(worker, loads.capacity_at(index), &projection);
+            if let Some(full_ranks) = full_ranks.as_deref_mut() {
+                full_ranks.record(worker, loads.capacity_at(index), &projection);
+            }
             (worker, projection)
         }));
     }

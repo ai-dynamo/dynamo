@@ -466,18 +466,11 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
   Environment variable: `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD`
 </ParamField>
 
-<ParamField path="--active-prefill-tokens-threshold" type="integer" default="null">
-  Deprecated; will be removed in v1.7. Use `--active-prefill-tokens-threshold-frac`.
-
-  Absolute active-prefill-token threshold. A numeric value greater than or equal to `0` independently
-  enables this check. Uses OR logic with the fractional prefill threshold.
-
-  Environment variable: `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD`
-</ParamField>
-
 <ParamField path="--active-prefill-tokens-threshold-frac" type="float" default="null">
   Non-negative fraction of `max_num_batched_tokens` used as the active-prefill-token threshold. A
-  numeric value independently enables this check. Uses OR logic with the absolute prefill threshold.
+  numeric value independently enables this check. It replaces the removed absolute
+  `--active-prefill-tokens-threshold` and `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD`; the Frontend
+  rejects the removed flag at startup.
 
   Environment variable: `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC`
 </ParamField>
@@ -866,9 +859,9 @@ accepted fields, limits, errors, and rolling upgrades.
 | `POST` | `/busy_threshold` | Set independently enabled busy thresholds for a discovered model (disabled when `DYN_DISABLE_FRONTEND_ADMIN_API` is truthy) |
 | `GET` | `/busy_threshold` | Get stored busy thresholds (disabled when `DYN_DISABLE_FRONTEND_ADMIN_API` is truthy) |
 
-`POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,
-`active_prefill_tokens_threshold`, and `active_prefill_tokens_threshold_frac`. A numeric field enables
-only that check. The router reevaluates workers on the next worker-load or runtime-configuration
+`POST /busy_threshold` accepts `model` plus either or both of `active_decode_blocks_threshold` and
+`active_prefill_tokens_threshold_frac`. A numeric field enables only that check. A request that sets
+the removed absolute `active_prefill_tokens_threshold` returns 400. The router reevaluates workers on the next worker-load or runtime-configuration
 update, or with `--router-mode kv` at the next worker selection; the call does not synchronously
 recompute the busy set and does not change startup-only router options such as `--router-mode kv` or
 `--router-track-output-blocks`.

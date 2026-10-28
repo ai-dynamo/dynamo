@@ -17,9 +17,9 @@
 //! **Set thresholds:**
 //! ```json
 //! // Request
-//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000, "active_prefill_tokens_threshold_frac": 0.8}
+//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold_frac": 0.8}
 //! // Response
-//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000, "active_prefill_tokens_threshold_frac": 0.8}
+//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold_frac": 0.8}
 //! ```
 //!
 //! **Get thresholds (omit thresholds):**
@@ -27,10 +27,13 @@
 //! // Request
 //! {"model": "llama-3-70b"}
 //! // Response (if configured)
-//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000, "active_prefill_tokens_threshold_frac": 0.8}
+//! {"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold_frac": 0.8}
 //! // Response (if not configured)
-//! {"model": "llama-3-70b", "active_decode_blocks_threshold": null, "active_prefill_tokens_threshold": null, "active_prefill_tokens_threshold_frac": null}
+//! {"model": "llama-3-70b", "active_decode_blocks_threshold": null, "active_prefill_tokens_threshold_frac": null}
 //! ```
+//!
+//! A request that sets the removed absolute `active_prefill_tokens_threshold` is rejected
+//! with 400.
 //!
 //! ### GET /busy_threshold
 //!
@@ -38,7 +41,7 @@
 //!
 //! ```json
 //! // Response
-//! {"thresholds": [{"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000, "active_prefill_tokens_threshold_frac": 0.8}]}
+//! {"thresholds": [{"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold_frac": 0.8}]}
 //! ```
 
 use super::{RouteDoc, service_v2};
@@ -64,11 +67,17 @@ pub struct BusyThresholdRequest {
     pub model: String,
     /// The active decode blocks threshold value (0.0 to 1.0), or null to just get the current value
     pub active_decode_blocks_threshold: Option<f64>,
-    /// The active prefill tokens threshold value (literal token count), or null to just get the current value
-    pub active_prefill_tokens_threshold: Option<u64>,
     /// The active prefill tokens threshold as fraction of max_num_batched_tokens, or null to just get the current value
     pub active_prefill_tokens_threshold_frac: Option<f64>,
+    /// The removed absolute prefill threshold, read only so that a request setting it is
+    /// rejected rather than answered as a successful read.
+    // TODO(v1.9): Remove once v1.6, the last release that accepted it, is outside the N-2 window.
+    #[serde(default)]
+    active_prefill_tokens_threshold: Option<serde::de::IgnoredAny>,
 }
+
+const REMOVED_ABSOLUTE_PREFILL_THRESHOLD: &str = "active_prefill_tokens_threshold was removed; \
+     set active_prefill_tokens_threshold_frac, a fraction of each worker's max_num_batched_tokens";
 
 /// Response for a threshold operation
 #[derive(Debug, Serialize)]
@@ -77,8 +86,6 @@ pub struct BusyThresholdResponse {
     pub model: String,
     /// The active decode blocks threshold value (null if no threshold is configured)
     pub active_decode_blocks_threshold: Option<f64>,
-    /// The active prefill tokens threshold value (null if no threshold is configured)
-    pub active_prefill_tokens_threshold: Option<u64>,
     /// The active prefill tokens threshold as fraction of max_num_batched_tokens
     pub active_prefill_tokens_threshold_frac: Option<f64>,
 }
@@ -148,9 +155,16 @@ async fn busy_threshold_handler(
     axum::extract::State(manager): axum::extract::State<Arc<ModelManager>>,
     Json(request): Json<BusyThresholdRequest>,
 ) -> impl IntoResponse {
+    if request.active_prefill_tokens_threshold.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!(ErrorResponse {
+                error: REMOVED_ABSOLUTE_PREFILL_THRESHOLD.to_string(),
+            })),
+        );
+    }
     let requested_config = LoadThresholdConfig {
         active_decode_blocks_threshold: request.active_decode_blocks_threshold,
-        active_prefill_tokens_threshold: request.active_prefill_tokens_threshold,
         active_prefill_tokens_threshold_frac: request.active_prefill_tokens_threshold_frac,
     };
     if let Err(error) = requested_config.validate() {
@@ -188,24 +202,19 @@ async fn busy_threshold_handler(
         );
     }
 
-    let (
-        active_decode_blocks_threshold,
-        active_prefill_tokens_threshold,
-        active_prefill_tokens_threshold_frac,
-    ) = config.map_or((None, None, None), |c| {
-        (
-            c.active_decode_blocks_threshold,
-            c.active_prefill_tokens_threshold,
-            c.active_prefill_tokens_threshold_frac,
-        )
-    });
+    let (active_decode_blocks_threshold, active_prefill_tokens_threshold_frac) =
+        config.map_or((None, None), |c| {
+            (
+                c.active_decode_blocks_threshold,
+                c.active_prefill_tokens_threshold_frac,
+            )
+        });
 
     (
         StatusCode::OK,
         Json(serde_json::json!(BusyThresholdResponse {
             model: request.model,
             active_decode_blocks_threshold,
-            active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
         })),
     )
@@ -222,7 +231,6 @@ async fn list_busy_thresholds_handler(
             .map(|(model, config)| BusyThresholdResponse {
                 model,
                 active_decode_blocks_threshold: config.active_decode_blocks_threshold,
-                active_prefill_tokens_threshold: config.active_prefill_tokens_threshold,
                 active_prefill_tokens_threshold_frac: config.active_prefill_tokens_threshold_frac,
             })
             .collect(),

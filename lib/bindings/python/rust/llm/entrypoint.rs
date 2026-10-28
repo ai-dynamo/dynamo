@@ -415,8 +415,6 @@ pub struct RouterConfig {
 
     /// Threshold for active decode blocks utilization (0.0-1.0)
     active_decode_blocks_threshold: Option<f64>,
-    /// Threshold for active prefill tokens utilization (literal token count)
-    active_prefill_tokens_threshold: Option<u64>,
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
     session_affinity_ttl_secs: Option<u64>,
@@ -427,12 +425,13 @@ pub struct RouterConfig {
 impl RouterConfig {
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, session_affinity_mode="hard"))]
+    // The removed absolute prefill threshold was the fourth positional argument. Arguments
+    // after the decode threshold are keyword-only, so no other value takes its position.
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, *, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, session_affinity_mode="hard"))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
         active_decode_blocks_threshold: Option<f64>,
-        active_prefill_tokens_threshold: Option<u64>,
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
@@ -449,7 +448,6 @@ impl RouterConfig {
         super::kv::check_session_affinity_ttl_secs(session_affinity_ttl_secs)?;
         RsLoadThresholdConfig {
             active_decode_blocks_threshold,
-            active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
         }
         .validate()
@@ -461,7 +459,6 @@ impl RouterConfig {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
             active_decode_blocks_threshold,
-            active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
             session_affinity_ttl_secs,
             session_affinity_mode,
@@ -476,7 +473,6 @@ impl From<RouterConfig> for RsRouterConfig {
             kv_router_config: rc.kv_router_config.inner,
             load_threshold_config: RsLoadThresholdConfig {
                 active_decode_blocks_threshold: rc.active_decode_blocks_threshold,
-                active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
                 active_prefill_tokens_threshold_frac: rc.active_prefill_tokens_threshold_frac,
             },
             enforce_disagg: false,

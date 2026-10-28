@@ -16,7 +16,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
-from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.configuration.groups.router_args import parse_worker_router_config
 from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
@@ -25,7 +25,6 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 def _clear_rejection_threshold_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
-        "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
         "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
         "DYN_ADMISSION_CONTROL",
         "DYN_ROUTER_QUEUE_THRESHOLD",
@@ -634,13 +633,12 @@ def test_frontend_rejection_thresholds_default_to_none(
     config.validate()
 
     assert not hasattr(config, "admission_control")
+    assert not hasattr(config, "active_prefill_tokens_threshold")
     assert config.active_decode_blocks_threshold is None
-    assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
     assert config.router_queue_threshold is None
     assert config.router_kwargs() == {
         "active_decode_blocks_threshold": None,
-        "active_prefill_tokens_threshold": None,
         "active_prefill_tokens_threshold_frac": None,
         "session_affinity_ttl_secs": None,
         "session_affinity_mode": "hard",
@@ -656,12 +654,6 @@ def test_frontend_rejection_thresholds_default_to_none(
             "0.5",
             "active_decode_blocks_threshold",
             0.5,
-        ),
-        (
-            "--active-prefill-tokens-threshold",
-            "1000",
-            "active_prefill_tokens_threshold",
-            1000,
         ),
         (
             "--active-prefill-tokens-threshold-frac",
@@ -689,20 +681,11 @@ def test_each_cli_rejection_threshold_is_independently_opt_in(
 
     thresholds = {
         "active_decode_blocks_threshold": config.active_decode_blocks_threshold,
-        "active_prefill_tokens_threshold": config.active_prefill_tokens_threshold,
         "active_prefill_tokens_threshold_frac": config.active_prefill_tokens_threshold_frac,
     }
     assert thresholds[field] == expected
     assert all(value is None for name, value in thresholds.items() if name != field)
     assert f"{flag}={expected}" in caplog.text
-
-    # The deprecation notice is emitted where the frontend forwards the value,
-    # the same path worker advertisements take, and exactly once per process.
-    build_router_config(config)
-    deprecated = field == "active_prefill_tokens_threshold"
-    assert caplog.text.count("--active-prefill-tokens-threshold is deprecated") == int(
-        deprecated
-    )
 
 
 @pytest.mark.parametrize(
@@ -712,11 +695,6 @@ def test_each_cli_rejection_threshold_is_independently_opt_in(
             "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
             "active_decode_blocks_threshold",
             0.6,
-        ),
-        (
-            "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
-            "active_prefill_tokens_threshold",
-            2000,
         ),
         (
             "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
@@ -741,11 +719,52 @@ def test_each_environment_rejection_threshold_is_independently_opt_in(
 
     thresholds = {
         "active_decode_blocks_threshold": config.active_decode_blocks_threshold,
-        "active_prefill_tokens_threshold": config.active_prefill_tokens_threshold,
         "active_prefill_tokens_threshold_frac": config.active_prefill_tokens_threshold_frac,
     }
     assert thresholds[field] == expected
     assert all(value is None for name, value in thresholds.items() if name != field)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--active-prefill-tokens-threshold", "1000"],
+        ["--active-prefill-tokens-threshold=1000"],
+    ],
+)
+def test_removed_absolute_prefill_threshold_flag_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+) -> None:
+    # The removed flag must not be read as an abbreviation of the fractional flag.
+    _clear_rejection_threshold_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    with pytest.raises(SystemExit):
+        parser.parse_args(argv)
+    assert "--active-prefill-tokens-threshold was removed" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit):
+        parse_worker_router_config(["--router-mode", "kv", *argv])
+    assert "--active-prefill-tokens-threshold was removed" in capsys.readouterr().err
+
+
+def test_removed_absolute_prefill_threshold_environment_is_not_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_rejection_threshold_env(monkeypatch)
+    monkeypatch.setenv("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD", "1000")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    frontend = FrontendConfig.from_cli_args(parser.parse_args([]))
+    frontend.validate()
+    worker, _ = parse_worker_router_config(["--router-mode", "kv"])
+
+    for config in (frontend, worker):
+        assert not hasattr(config, "active_prefill_tokens_threshold")
+        assert config.active_prefill_tokens_threshold_frac is None
+        assert "active_prefill_tokens_threshold" not in config.router_kwargs()
 
 
 def test_all_rejection_thresholds_and_queue_override_are_forwarded(
@@ -761,8 +780,6 @@ def test_all_rejection_thresholds_and_queue_override_are_forwarded(
                 [
                     "--active-decode-blocks-threshold",
                     "0.5",
-                    "--active-prefill-tokens-threshold",
-                    "1000",
                     "--active-prefill-tokens-threshold-frac",
                     "2.0",
                     "--router-queue-threshold",
@@ -773,12 +790,10 @@ def test_all_rejection_thresholds_and_queue_override_are_forwarded(
     config.validate()
 
     assert config.active_decode_blocks_threshold == 0.5
-    assert config.active_prefill_tokens_threshold == 1000
     assert config.active_prefill_tokens_threshold_frac == 2.0
     assert config.router_queue_threshold == 32.0
     assert config.router_kwargs() == {
         "active_decode_blocks_threshold": 0.5,
-        "active_prefill_tokens_threshold": 1000,
         "active_prefill_tokens_threshold_frac": 2.0,
         "session_affinity_ttl_secs": None,
         "session_affinity_mode": "hard",
@@ -848,7 +863,6 @@ def test_admission_control_cli_flag_warns_and_is_ignored(
 
     assert not hasattr(config, "admission_control")
     assert config.active_decode_blocks_threshold is None
-    assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
     assert "--admission-control is no longer supported and is ignored" in caplog.text
 
@@ -870,7 +884,6 @@ def test_removed_admission_control_environment_warns_and_is_ignored(
 
     assert not hasattr(config, "admission_control")
     assert config.active_decode_blocks_threshold is None
-    assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
     assert "DYN_ADMISSION_CONTROL is no longer supported and is ignored" in caplog.text
 
@@ -879,7 +892,6 @@ def test_removed_admission_control_environment_warns_and_is_ignored(
     "flag",
     [
         "--active-decode-blocks-threshold",
-        "--active-prefill-tokens-threshold",
         "--active-prefill-tokens-threshold-frac",
     ],
 )
@@ -895,7 +907,6 @@ def test_explicit_none_keeps_rejection_threshold_disabled(
     config.validate()
 
     assert config.active_decode_blocks_threshold is None
-    assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
 
 
@@ -905,7 +916,6 @@ def test_explicit_none_keeps_rejection_threshold_disabled(
         ("--active-decode-blocks-threshold", "-0.1"),
         ("--active-decode-blocks-threshold", "1.1"),
         ("--active-decode-blocks-threshold", "nan"),
-        ("--active-prefill-tokens-threshold", "-1"),
         ("--active-prefill-tokens-threshold-frac", "-0.1"),
         ("--active-prefill-tokens-threshold-frac", "inf"),
     ],

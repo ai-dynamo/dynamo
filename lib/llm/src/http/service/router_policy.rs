@@ -263,10 +263,16 @@ mod tests {
         let app =
             app.merge(super::super::busy_threshold::router(manager.clone(), "/busy_threshold").1);
         let path = "/router_policy/busy_threshold";
-        let (status, updated) = call(&app, Method::POST, path, serde_json::json!({
-            "model": "first", "active_decode_blocks_threshold": 0.85,
-            "active_prefill_tokens_threshold": 1000, "active_prefill_tokens_threshold_frac": 0.8,
-        })).await;
+        let (status, updated) = call(
+            &app,
+            Method::POST,
+            path,
+            serde_json::json!({
+                "model": "first", "active_decode_blocks_threshold": 0.85,
+                "active_prefill_tokens_threshold_frac": 0.8,
+            }),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{updated}");
         let (status, legacy) = call(
             &app,
@@ -280,7 +286,6 @@ mod tests {
         for handle in &first_handles {
             let config = handle.get();
             assert_eq!(config.active_decode_blocks_threshold, Some(0.85));
-            assert_eq!(config.active_prefill_tokens_threshold, Some(1000));
             assert_eq!(config.active_prefill_tokens_threshold_frac, Some(0.8));
         }
         assert!(
@@ -295,8 +300,8 @@ mod tests {
             Method::POST,
             "/busy_threshold",
             serde_json::json!({
-                "model": "first", "active_prefill_tokens_threshold": 2000,
-                "active_prefill_tokens_threshold_frac": null,
+                "model": "first", "active_prefill_tokens_threshold_frac": 0.6,
+                "active_decode_blocks_threshold": null,
             }),
         )
         .await;
@@ -310,8 +315,17 @@ mod tests {
         .await;
         assert_eq!(current, legacy);
         assert_eq!(current["active_decode_blocks_threshold"], 0.85);
-        assert_eq!(current["active_prefill_tokens_threshold"], 2000);
-        assert_eq!(current["active_prefill_tokens_threshold_frac"], 0.8);
+        assert_eq!(current["active_prefill_tokens_threshold_frac"], 0.6);
+        assert!(current.get("active_prefill_tokens_threshold").is_none());
+        // A null for the removed field, or a field the endpoint does not know, still reads.
+        for body in [
+            serde_json::json!({"model": "first", "active_prefill_tokens_threshold": null}),
+            serde_json::json!({"model": "first", "unrelated_field": 1}),
+        ] {
+            let (status, read) = call(&app, Method::POST, path, body).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(read, current);
+        }
         let (status, listing) = call(&app, Method::GET, path, Value::Null).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(listing["thresholds"].as_array().unwrap().len(), 2);
@@ -320,11 +334,15 @@ mod tests {
 
         for (body, expected) in [
             (
-                serde_json::json!({"model": "first", "active_decode_blocks_threshold": 1.1, "active_prefill_tokens_threshold": 10}),
+                serde_json::json!({"model": "first", "active_decode_blocks_threshold": 1.1, "active_prefill_tokens_threshold_frac": 0.1}),
                 StatusCode::BAD_REQUEST,
             ),
             (
-                serde_json::json!({"model": "first", "active_prefill_tokens_threshold": -1}),
+                serde_json::json!({"model": "first", "active_prefill_tokens_threshold": 1000, "active_prefill_tokens_threshold_frac": 0.1}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"model": "first", "active_prefill_tokens_threshold_frac": "high"}),
                 StatusCode::UNPROCESSABLE_ENTITY,
             ),
             (
@@ -336,10 +354,24 @@ mod tests {
             assert_eq!(status, expected, "{response}");
             assert!(response["error"].is_string());
             for handle in &first_handles {
-                assert_eq!(handle.get().active_prefill_tokens_threshold, Some(2000));
+                assert_eq!(handle.get().active_prefill_tokens_threshold_frac, Some(0.6));
                 assert_eq!(handle.get().active_decode_blocks_threshold, Some(0.85));
             }
         }
+        let (_, removed) = call(
+            &app,
+            Method::POST,
+            "/busy_threshold",
+            serde_json::json!({"model": "first", "active_prefill_tokens_threshold": 1000}),
+        )
+        .await;
+        assert!(
+            removed["error"]
+                .as_str()
+                .unwrap()
+                .contains("active_prefill_tokens_threshold was removed"),
+            "{removed}"
+        );
         let (_, policy) = call(&app, Method::GET, "/router_policy?model=first", Value::Null).await;
         assert_eq!(policy["routers"][0]["router_id"], first.to_string());
         assert_eq!(policy["routers"][0]["configuration"]["revision"], 0);

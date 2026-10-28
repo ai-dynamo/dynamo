@@ -93,18 +93,18 @@ fn publish_overloaded_instances_if_needed(
 ///
 /// All thresholds are opt-in. An unset (`None`) field means the corresponding
 /// check is skipped entirely — it never contributes to a worker being marked
-/// overloaded. If all three are `None`, overload-based rejection is fully disabled.
+/// overloaded. If both are `None`, overload-based rejection is fully disabled.
+///
+/// Worker model cards carry this config. Cards from v1.5 and v1.6 workers may still
+/// include the removed absolute `active_prefill_tokens_threshold`; decoding ignores it
+/// as an unknown field, so keep unknown fields accepted while those versions are within
+/// the N-2 window.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct LoadThresholdConfig {
     /// KV cache block utilization threshold (0.0-1.0).
     /// Worker is overloaded when `active_decode_blocks / total_blocks > threshold`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_decode_blocks_threshold: Option<f64>,
-
-    /// Absolute prefill token count threshold.
-    /// Worker is overloaded when `active_prefill_tokens > threshold`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_prefill_tokens_threshold: Option<u64>,
 
     /// Fraction of max_num_batched_tokens.
     /// Worker is overloaded when `active_prefill_tokens > frac * max_num_batched_tokens`.
@@ -116,7 +116,6 @@ impl LoadThresholdConfig {
     /// Returns true if any threshold is configured.
     pub fn is_configured(&self) -> bool {
         self.active_decode_blocks_threshold.is_some()
-            || self.active_prefill_tokens_threshold.is_some()
             || self.active_prefill_tokens_threshold_frac.is_some()
     }
 
@@ -166,9 +165,6 @@ impl LoadThresholdHandle {
             let mut next = LoadThresholdConfig::clone(current);
             if let Some(value) = config.active_decode_blocks_threshold {
                 next.active_decode_blocks_threshold = Some(value);
-            }
-            if let Some(value) = config.active_prefill_tokens_threshold {
-                next.active_prefill_tokens_threshold = Some(value);
             }
             if let Some(value) = config.active_prefill_tokens_threshold_frac {
                 next.active_prefill_tokens_threshold_frac = Some(value);
@@ -481,24 +477,21 @@ impl WorkerLoadState {
     /// Returns true if ALL dp_ranks are overloaded based on the threshold logic.
     ///
     /// Each threshold is `Option<T>`. A `None` threshold means that check is
-    /// skipped entirely — it cannot contribute to a dp_rank being overloaded. If all
-    /// three thresholds are `None`, no dp_rank is ever overloaded.
+    /// skipped entirely — it cannot contribute to a dp_rank being overloaded. If both
+    /// thresholds are `None`, no dp_rank is ever overloaded.
     ///
     /// For each dp_rank, a dp_rank is overloaded if ANY of these conditions is met (OR logic):
-    /// 1. `active_prefill_tokens > active_prefill_tokens_threshold` (absolute, if set)
-    /// 2. `active_prefill_tokens > frac * max_num_batched_tokens` (fractional, if set)
-    /// 3. decode overload latch set by either `kv_used_blocks` or `active_decode_blocks` (if set)
+    /// 1. `active_prefill_tokens > frac * max_num_batched_tokens` (fractional, if set)
+    /// 2. decode overload latch set by either `kv_used_blocks` or `active_decode_blocks` (if set)
     ///
     /// The worker is overloaded only if ALL dp_ranks are overloaded.
     pub fn is_overloaded(
         &self,
         active_decode_blocks_threshold: Option<f64>,
-        active_prefill_tokens_threshold: Option<u64>,
         active_prefill_tokens_threshold_frac: Option<f64>,
     ) -> bool {
         // Short-circuit if all thresholds are unset (i.e. no overload check can fire)
         if active_decode_blocks_threshold.is_none()
-            && active_prefill_tokens_threshold.is_none()
             && active_prefill_tokens_threshold_frac.is_none()
         {
             return false;
@@ -530,29 +523,22 @@ impl WorkerLoadState {
 
         // Check if ALL dp_ranks are overloaded
         all_dp_ranks.iter().all(|&dp_rank| {
-            // Check 1: prefill tokens threshold (absolute token count)
-            if let Some(&active_tokens) = self.active_prefill_tokens.get(&dp_rank) {
-                if let Some(abs_threshold) = active_prefill_tokens_threshold
-                    && active_tokens > abs_threshold
-                {
-                    return true; // This dp_rank is overloaded due to absolute token threshold
-                }
-
-                // Check 2: prefill tokens threshold (fraction of max_num_batched_tokens)
-                if let Some(frac) = active_prefill_tokens_threshold_frac {
-                    let max_batched = self
-                        .max_num_batched_tokens
-                        .get(&dp_rank)
-                        .copied()
-                        .unwrap_or(DEFAULT_MAX_TOKENS);
-                    let frac_threshold = (frac * max_batched as f64) as u64;
-                    if active_tokens > frac_threshold {
-                        return true;
-                    }
+            // Check 1: prefill tokens threshold (fraction of max_num_batched_tokens)
+            if let Some(&active_tokens) = self.active_prefill_tokens.get(&dp_rank)
+                && let Some(frac) = active_prefill_tokens_threshold_frac
+            {
+                let max_batched = self
+                    .max_num_batched_tokens
+                    .get(&dp_rank)
+                    .copied()
+                    .unwrap_or(DEFAULT_MAX_TOKENS);
+                let frac_threshold = (frac * max_batched as f64) as u64;
+                if active_tokens > frac_threshold {
+                    return true;
                 }
             }
 
-            // Check 3: decode overload latch (OR-ed from kv_used_blocks and active_decode_blocks)
+            // Check 2: decode overload latch (OR-ed from kv_used_blocks and active_decode_blocks)
             if let Some(decode_threshold) = active_decode_blocks_threshold {
                 let is_overloaded = self
                     .decode_overload_latches
@@ -572,7 +558,6 @@ impl WorkerLoadState {
     fn is_overloaded_for_config(&self, config: &LoadThresholdConfig) -> bool {
         self.is_overloaded(
             config.active_decode_blocks_threshold,
-            config.active_prefill_tokens_threshold,
             config.active_prefill_tokens_threshold_frac,
         )
     }
@@ -695,13 +680,10 @@ impl RoutableThresholds {
 }
 
 impl From<LoadThresholdConfig> for BusyThresholds {
-    /// The queue's vocabulary for the `/busy_threshold` config: token counts narrow to
-    /// `usize` saturating, fractions pass through.
+    /// The queue's vocabulary for the `/busy_threshold` config: the fractions pass through.
     fn from(config: LoadThresholdConfig) -> Self {
         BusyThresholds {
-            prefill_busy_threshold: config
-                .active_prefill_tokens_threshold
-                .map(|tokens| usize::try_from(tokens).unwrap_or(usize::MAX)),
+            prefill_busy_threshold: None,
             prefill_busy_threshold_frac: config.active_prefill_tokens_threshold_frac,
             decode_busy_threshold_frac: config.active_decode_blocks_threshold,
         }
@@ -724,7 +706,7 @@ pub struct KvWorkerMonitor {
     scheduler_load_rx: Arc<tokio::sync::Mutex<Option<SchedulerLoadReceiver>>>,
     worker_load_states: Arc<DashMap<u64, WorkerLoadState>>,
     /// Load thresholds for overload detection. Each field is `Option<T>` — unset
-    /// means the corresponding check in `is_overloaded` is skipped. If all three are
+    /// means the corresponding check in `is_overloaded` is skipped. If both are
     /// `None`, rejection is fully disabled.
     thresholds: RoutableThresholds,
     /// Guard to ensure start_monitoring() only runs once across clones
@@ -777,7 +759,7 @@ impl KvWorkerMonitor {
 
     /// Returns true iff the user explicitly configured at least one threshold.
     ///
-    /// When false, all three per-field checks are skipped in `is_overloaded` and
+    /// When false, both per-field checks are skipped in `is_overloaded` and
     /// rejection is fully disabled. Callers that gate 529 responses on overload
     /// detection should check this before enabling the gate.
     pub fn is_configured(&self) -> bool {
@@ -796,22 +778,6 @@ impl KvWorkerMonitor {
     pub fn set_active_decode_blocks_threshold(&self, threshold: f64) {
         self.thresholds.handle().update(&LoadThresholdConfig {
             active_decode_blocks_threshold: Some(threshold),
-            ..Default::default()
-        });
-    }
-
-    /// Get the current active prefill tokens threshold, if configured.
-    pub fn active_prefill_tokens_threshold(&self) -> Option<u64> {
-        self.thresholds
-            .handle()
-            .get()
-            .active_prefill_tokens_threshold
-    }
-
-    /// Set the active prefill tokens threshold.
-    pub fn set_active_prefill_tokens_threshold(&self, threshold: u64) {
-        self.thresholds.handle().update(&LoadThresholdConfig {
-            active_prefill_tokens_threshold: Some(threshold),
             ..Default::default()
         });
     }
@@ -1114,7 +1080,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 observation = ?observation,
                                 total_blocks = ?total_blocks,
                                 active_decode_blocks_threshold = ?cfg.active_decode_blocks_threshold,
-                                active_prefill_tokens_threshold = ?cfg.active_prefill_tokens_threshold,
                                 active_prefill_tokens_threshold_frac = ?cfg.active_prefill_tokens_threshold_frac,
                                 worker_overloaded,
                                 "processed active load update"
@@ -1425,15 +1390,6 @@ mod tests {
     }
 
     #[test]
-    fn load_threshold_config_prefill_tokens_only_is_configured() {
-        let config = LoadThresholdConfig {
-            active_prefill_tokens_threshold: Some(10_000),
-            ..Default::default()
-        };
-        assert!(config.is_configured());
-    }
-
-    #[test]
     fn load_threshold_config_prefill_frac_only_is_configured() {
         let config = LoadThresholdConfig {
             active_prefill_tokens_threshold_frac: Some(0.9),
@@ -1446,7 +1402,6 @@ mod tests {
     fn load_threshold_config_all_set_is_configured() {
         let config = LoadThresholdConfig {
             active_decode_blocks_threshold: Some(0.85),
-            active_prefill_tokens_threshold: Some(10_000),
             active_prefill_tokens_threshold_frac: Some(0.9),
         };
         assert!(config.is_configured());
@@ -1459,7 +1414,7 @@ mod tests {
         state.kv_used_blocks.insert(0, 90);
         state.kv_total_blocks.insert(0, 100);
 
-        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+        assert!(state.is_overloaded(Some(0.6), Some(2.0)));
     }
 
     #[test]
@@ -1468,7 +1423,7 @@ mod tests {
         state.active_decode_blocks.insert(0, 90);
         state.kv_total_blocks.insert(0, 100);
 
-        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+        assert!(state.is_overloaded(Some(0.6), Some(2.0)));
     }
 
     #[test]
@@ -1477,7 +1432,7 @@ mod tests {
         state.kv_used_blocks.insert(0, 90);
         state.kv_total_blocks.insert(0, 100);
 
-        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+        assert!(state.is_overloaded(Some(0.6), Some(2.0)));
     }
 
     #[test]
@@ -1495,7 +1450,7 @@ mod tests {
             },
             Some(0.6),
         );
-        assert!(!state.is_overloaded(Some(0.6), None, None));
+        assert!(!state.is_overloaded(Some(0.6), None));
 
         state.update_from_active_load(
             &ActiveLoad {
@@ -1507,7 +1462,7 @@ mod tests {
             },
             Some(0.6),
         );
-        assert!(state.is_overloaded(Some(0.6), None, None));
+        assert!(state.is_overloaded(Some(0.6), None));
     }
 
     #[test]
@@ -1527,7 +1482,7 @@ mod tests {
                 Some(0.6),
             );
         }
-        assert!(state.is_overloaded(Some(0.6), None, Some(0.5)));
+        assert!(state.is_overloaded(Some(0.6), Some(0.5)));
 
         let declared = state.reconcile_runtime_config(3..4, None, None, Some(0.6));
         assert_eq!(declared, HashSet::from([3]));
@@ -1537,7 +1492,7 @@ mod tests {
         assert!(state.kv_total_blocks.is_empty());
         assert!(state.max_num_batched_tokens.is_empty());
         assert!(state.decode_overload_latches.is_empty());
-        assert!(!state.is_overloaded(Some(0.6), None, Some(0.5)));
+        assert!(!state.is_overloaded(Some(0.6), Some(0.5)));
 
         assert!(!state.apply_load_observation(
             LoadObservation::Remote(RemoteActiveLoadSnapshot {
@@ -1555,7 +1510,7 @@ mod tests {
         assert!(state.active_decode_blocks.is_empty());
         assert!(state.kv_used_blocks.is_empty());
         assert!(state.active_prefill_tokens.is_empty());
-        assert!(!state.is_overloaded(Some(0.6), None, Some(0.5)));
+        assert!(!state.is_overloaded(Some(0.6), Some(0.5)));
     }
 
     #[test]
@@ -1573,7 +1528,7 @@ mod tests {
             Some(0.6),
         );
 
-        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+        assert!(state.is_overloaded(Some(0.6), Some(2.0)));
     }
 
     #[test]
@@ -1591,7 +1546,7 @@ mod tests {
             },
             Some(0.6),
         );
-        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+        assert!(state.is_overloaded(Some(0.6), Some(2.0)));
 
         state.update_from_active_load(
             &ActiveLoad {
@@ -1603,7 +1558,7 @@ mod tests {
             },
             Some(0.6),
         );
-        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+        assert!(state.is_overloaded(Some(0.6), Some(2.0)));
 
         state.update_from_active_load(
             &ActiveLoad {
@@ -1615,7 +1570,7 @@ mod tests {
             },
             Some(0.6),
         );
-        assert!(!state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+        assert!(!state.is_overloaded(Some(0.6), Some(2.0)));
     }
 
     #[test]
@@ -1633,7 +1588,7 @@ mod tests {
             },
             Some(0.6),
         );
-        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+        assert!(state.is_overloaded(Some(0.6), Some(2.0)));
 
         state.update_from_active_load(
             &ActiveLoad {
@@ -1645,7 +1600,7 @@ mod tests {
             },
             Some(0.6),
         );
-        assert!(!state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+        assert!(!state.is_overloaded(Some(0.6), Some(2.0)));
     }
 
     #[test]
@@ -1663,7 +1618,7 @@ mod tests {
             },
             Some(0.6),
         );
-        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+        assert!(state.is_overloaded(Some(0.6), Some(2.0)));
 
         state.update_from_active_load(
             &ActiveLoad {
@@ -1675,7 +1630,7 @@ mod tests {
             },
             Some(0.6),
         );
-        assert!(!state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+        assert!(!state.is_overloaded(Some(0.6), Some(2.0)));
     }
 
     #[test]
@@ -1693,7 +1648,7 @@ mod tests {
             },
             Some(0.6),
         );
-        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+        assert!(state.is_overloaded(Some(0.6), Some(2.0)));
 
         state.update_from_active_load(
             &ActiveLoad {
@@ -1705,14 +1660,13 @@ mod tests {
             },
             Some(0.6),
         );
-        assert!(!state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+        assert!(!state.is_overloaded(Some(0.6), Some(2.0)));
     }
 
     #[test]
     fn routed_monitor_keeps_only_the_engine_decode_check() {
         let handle = LoadThresholdHandle::new(LoadThresholdConfig {
             active_decode_blocks_threshold: Some(0.8),
-            active_prefill_tokens_threshold: Some(100),
             active_prefill_tokens_threshold_frac: Some(0.5),
         });
         let thresholds = RoutableThresholds::new(handle.clone());
@@ -1780,12 +1734,12 @@ mod tests {
         // Before routing, a scheduler snapshot of booked blocks marks the worker.
         let mut unrouted = fresh();
         unrouted.apply_load_observation(booked(90), Some(0.6), DecodeSignals::All);
-        assert!(unrouted.is_overloaded(Some(0.6), None, None));
+        assert!(unrouted.is_overloaded(Some(0.6), None));
 
         // Once routed, the same snapshot is the queue's to judge: it is not even recorded.
         let mut routed = fresh();
         routed.apply_load_observation(booked(90), Some(0.6), DecodeSignals::EngineOnly);
-        assert!(!routed.is_overloaded(Some(0.6), None, None));
+        assert!(!routed.is_overloaded(Some(0.6), None));
         assert!(routed.active_decode_blocks.is_empty());
 
         // Worker-published load still marks the worker when routed, whichever field it uses.
@@ -1795,14 +1749,14 @@ mod tests {
             Some(0.6),
             DecodeSignals::EngineOnly,
         );
-        assert!(routed.is_overloaded(Some(0.6), None, None));
+        assert!(routed.is_overloaded(Some(0.6), None));
         let mut routed = fresh();
         routed.apply_load_observation(
             published(Some(90), None),
             Some(0.6),
             DecodeSignals::EngineOnly,
         );
-        assert!(routed.is_overloaded(Some(0.6), None, None));
+        assert!(routed.is_overloaded(Some(0.6), None));
     }
 
     #[test]
@@ -1829,19 +1783,19 @@ mod tests {
         });
 
         state.apply_load_observation(used(90), Some(0.6), DecodeSignals::EngineOnly);
-        assert!(state.is_overloaded(Some(0.6), None, None));
+        assert!(state.is_overloaded(Some(0.6), None));
         // A stale-high scheduler snapshot neither sets nor holds the latch...
         state.apply_load_observation(booked, Some(0.6), DecodeSignals::EngineOnly);
-        assert!(state.is_overloaded(Some(0.6), None, None));
+        assert!(state.is_overloaded(Some(0.6), None));
         // ...so the engine reporting the KV drained releases it.
         state.apply_load_observation(used(10), Some(0.6), DecodeSignals::EngineOnly);
-        assert!(!state.is_overloaded(Some(0.6), None, None));
+        assert!(!state.is_overloaded(Some(0.6), None));
     }
 
     #[test]
     fn load_threshold_handle_merges_updates_and_shares_state() {
         let handle = LoadThresholdHandle::new(LoadThresholdConfig {
-            active_prefill_tokens_threshold: Some(10),
+            active_prefill_tokens_threshold_frac: Some(0.25),
             ..Default::default()
         });
         let reader = handle.clone();
@@ -1856,19 +1810,16 @@ mod tests {
             reader.get(),
             LoadThresholdConfig {
                 active_decode_blocks_threshold: Some(0.9),
-                active_prefill_tokens_threshold: Some(10),
-                active_prefill_tokens_threshold_frac: None,
+                active_prefill_tokens_threshold_frac: Some(0.25),
             }
         );
 
         // Updates compose in order.
         handle.update(&LoadThresholdConfig {
-            active_prefill_tokens_threshold: Some(20),
             active_prefill_tokens_threshold_frac: Some(0.5),
             ..Default::default()
         });
         let current = reader.get();
-        assert_eq!(current.active_prefill_tokens_threshold, Some(20));
         assert_eq!(current.active_prefill_tokens_threshold_frac, Some(0.5));
         assert_eq!(current.active_decode_blocks_threshold, Some(0.9));
     }
@@ -1877,12 +1828,11 @@ mod tests {
     fn busy_thresholds_from_load_threshold_config() {
         let config = LoadThresholdConfig {
             active_decode_blocks_threshold: Some(0.9),
-            active_prefill_tokens_threshold: Some(u64::MAX),
             active_prefill_tokens_threshold_frac: Some(0.5),
         };
         let thresholds = BusyThresholds::from(config);
         assert_eq!(thresholds.decode_busy_threshold_frac, Some(0.9));
-        assert_eq!(thresholds.prefill_busy_threshold, Some(usize::MAX));
+        assert_eq!(thresholds.prefill_busy_threshold, None);
         assert_eq!(thresholds.prefill_busy_threshold_frac, Some(0.5));
         assert_eq!(
             BusyThresholds::from(LoadThresholdConfig::default()),
@@ -1899,7 +1849,7 @@ mod tests {
         state.active_prefill_tokens.insert(0, u64::MAX / 2);
         state.max_num_batched_tokens.insert(0, 1_000);
 
-        assert!(!state.is_overloaded(None, None, None));
+        assert!(!state.is_overloaded(None, None));
     }
 
     #[test]
@@ -1908,25 +1858,7 @@ mod tests {
         state.max_num_batched_tokens.insert(0, 1_000);
         state.active_prefill_tokens.insert(0, 5_000);
 
-        assert!(!state.is_overloaded(Some(0.6), None, None));
-    }
-
-    #[test]
-    fn is_overloaded_with_only_prefill_abs_ignores_decode_latch() {
-        let mut state = WorkerLoadState::default();
-        state.kv_total_blocks.insert(0, 100);
-        state.update_from_active_load(
-            &ActiveLoad {
-                worker_id: 1,
-                dp_rank: 0,
-                active_decode_blocks: Some(90),
-                active_prefill_tokens: None,
-                kv_used_blocks: Some(90),
-            },
-            Some(0.6),
-        );
-
-        assert!(!state.is_overloaded(None, Some(u64::MAX), None));
+        assert!(!state.is_overloaded(Some(0.6), None));
     }
 
     #[test]
@@ -1944,15 +1876,7 @@ mod tests {
             Some(0.6),
         );
 
-        assert!(!state.is_overloaded(None, None, Some(2.0)));
-    }
-
-    #[test]
-    fn is_overloaded_with_only_prefill_abs_fires_when_tokens_exceed_threshold() {
-        let mut state = WorkerLoadState::default();
-        state.active_prefill_tokens.insert(0, 5_000);
-
-        assert!(state.is_overloaded(None, Some(1_000), None));
+        assert!(!state.is_overloaded(None, Some(2.0)));
     }
 
     #[test]
@@ -1961,7 +1885,7 @@ mod tests {
         state.max_num_batched_tokens.insert(0, 1_000);
         state.active_prefill_tokens.insert(0, 2_500);
 
-        assert!(state.is_overloaded(None, None, Some(2.0)));
+        assert!(state.is_overloaded(None, Some(2.0)));
     }
 
     #[test]
@@ -1973,16 +1897,19 @@ mod tests {
 
         // Prefill worker far over the prefill-token threshold.
         let mut prefill = WorkerLoadState::default();
+        prefill.max_num_batched_tokens.insert(0, 10_000);
         prefill.active_prefill_tokens.insert(0, 300_000);
         states.insert(1u64, prefill);
 
         // Prefill worker under the threshold — must not be flagged.
         let mut quiet = WorkerLoadState::default();
+        quiet.max_num_batched_tokens.insert(0, 10_000);
         quiet.active_prefill_tokens.insert(0, 100);
         states.insert(2u64, quiet);
 
+        // Half of each worker's 10,000-token budget: 5,000 tokens.
         let cfg = LoadThresholdConfig {
-            active_prefill_tokens_threshold: Some(5_000),
+            active_prefill_tokens_threshold_frac: Some(0.5),
             ..Default::default()
         };
 

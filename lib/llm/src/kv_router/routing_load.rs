@@ -545,7 +545,6 @@ mod tests {
             LoadThresholdConfig {
                 active_decode_blocks_threshold: Some(0.9),
                 active_prefill_tokens_threshold_frac: Some(0.5),
-                ..Default::default()
             }
         );
 

@@ -1820,7 +1820,7 @@ class RouterConfig:
         mode: RouterMode,
         config: Optional[KvRouterConfig] = None,
         active_decode_blocks_threshold: Optional[float] = None,
-        active_prefill_tokens_threshold: Optional[int] = None,
+        *,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
         enforce_disagg: bool = False,
         session_affinity_ttl_secs: Optional[int] = None,
@@ -1829,11 +1829,15 @@ class RouterConfig:
         """
         Create a RouterConfig.
 
+        Arguments after ``active_decode_blocks_threshold`` are keyword-only. The
+        absolute ``active_prefill_tokens_threshold``, formerly the fourth positional
+        argument, has been removed; pass ``active_prefill_tokens_threshold_frac`` by
+        name instead.
+
         Args:
             mode: The router mode (RoundRobin, Random, KV, Direct, LeastLoaded, or DeviceAwareWeighted)
             config: Optional KV router configuration (used when mode is KV)
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
-            active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
             enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
             session_affinity_ttl_secs: Router-local session-affinity idle TTL in seconds.
@@ -1845,14 +1849,12 @@ class LoadThresholdConfig:
     """Overload-admission thresholds shared by all policies in one routing load context."""
 
     active_decode_blocks_threshold: Optional[float]
-    active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
 
     def __init__(
         self,
         *,
         active_decode_blocks_threshold: Optional[float] = None,
-        active_prefill_tokens_threshold: Optional[int] = None,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
     ) -> None:
         ...

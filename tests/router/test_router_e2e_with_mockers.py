@@ -22,6 +22,7 @@ import pytest
 
 from tests.router.common import (
     _test_busy_threshold_endpoint,
+    _test_busy_threshold_live_rejection,
     _test_disagg_direct_mode,
     _test_disagg_per_role_router_modes,
     _test_disagg_per_role_session_affinity,
@@ -114,8 +115,7 @@ ROUTER_OVERLOAD_529_CASES = (
     pytest.param(
         {
             "blocks_threshold": "None",
-            "tokens_threshold": 1,
-            "tokens_threshold_frac": "None",
+            "tokens_threshold_frac": 0.0,
             "router_queue_threshold": "None",
             "max_tokens": 1,
         },
@@ -144,8 +144,7 @@ ROUTER_DISAGG_OVERLOAD_529_CASES = (
             "decode_speedup": _FAST_SPEEDUP,
             "thresholds": {
                 "blocks_threshold": "None",
-                "tokens_threshold": 1,
-                "tokens_threshold_frac": "None",
+                "tokens_threshold_frac": 0.0,
                 "router_queue_threshold": "None",
             },
         },
@@ -162,7 +161,6 @@ ROUTER_DISAGG_OVERLOAD_529_CASES = (
             "decode_speedup": _SLOW_SPEEDUP,
             "thresholds": {
                 "blocks_threshold": 0.2,
-                "tokens_threshold": "None",
                 "tokens_threshold_frac": "None",
             },
         },
@@ -1259,8 +1257,8 @@ def test_mocker_disagg_router_overload_529(
 ):
     """Disaggregated load shedding: clients get 529 when the gated pool is busy.
 
-    - prefill-tokens: a low ``--active-prefill-tokens-threshold`` must gate the
-      PREFILL pool. This was previously a silent no-op in disagg (the
+    - prefill-tokens: a zero ``--active-prefill-tokens-threshold-frac`` must gate
+      the PREFILL pool. This was previously a silent no-op in disagg (the
       overloaded set landed on the decode pool and the prefill router never saw
       it), so this case is the regression guard for that fix.
     - decode-blocks: a low ``--active-decode-blocks-threshold`` must gate the
@@ -1582,12 +1580,8 @@ def test_busy_threshold_endpoint(
 ):
     """Test that the /busy_threshold endpoint can be hit and responds correctly.
 
-    TODO: This doesn't actually test any e2e rejection for now. A proper test would:
-    1. Set a very low threshold
-    2. Send enough requests to exceed the threshold
-    3. Verify that subsequent requests are rejected with 529
-
-    For now, this test only verifies the endpoint is accessible and returns valid responses.
+    test_busy_threshold_live_rejection checks that updates change which requests
+    the router rejects.
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
@@ -1617,6 +1611,30 @@ def test_busy_threshold_endpoint(
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
             request_plane=request_plane,
+        )
+
+
+@pytest.mark.timeout(60)
+def test_busy_threshold_live_rejection(
+    request, runtime_services_dynamic_ports, predownload_tokenizers, monkeypatch
+):
+    """Test that POST /busy_threshold changes which requests the KV router rejects."""
+    monkeypatch.setenv("DYN_LOG", ROUTER_OVERLOAD_DEBUG_DYN_LOG)
+    mocker_args = {
+        "speedup_ratio": 0.01,
+        "block_size": 4,
+        "num_gpu_blocks": 64,
+    }
+
+    with MockerProcess(request, mocker_args=mocker_args, num_mockers=1) as mockers:
+        frontend_port = allocate_frontend_ports(request, 1)[0]
+
+        _test_busy_threshold_live_rejection(
+            engine_workers=mockers,
+            block_size=4,
+            request=request,
+            frontend_port=frontend_port,
+            test_payload=TEST_PAYLOAD,
         )
 
 

@@ -49,23 +49,21 @@ out-of-range values fall back to 529. The value is read and cached on first use.
 
 ## Independently Enabled Signals
 
-All three busy thresholds are `None` by default. Setting a numeric value activates only that signal;
+Both busy thresholds are `None` by default. Setting a numeric value activates only that signal;
 there is no master admission-control switch.
 
 For each data-parallel rank, the monitor evaluates the configured checks with OR logic:
 
 ```text
 decode_busy = active_decode_blocks / kv_total_blocks > decode_threshold
-absolute_prefill_busy = active_prefill_tokens > absolute_prefill_threshold
-fractional_prefill_busy =
-    active_prefill_tokens > fractional_prefill_threshold * max_num_batched_tokens
+prefill_busy =
+    active_prefill_tokens > prefill_threshold_frac * max_num_batched_tokens
 
 rank_busy = any(configured check is true)
 worker_busy = all(data-parallel ranks are busy)
 ```
 
-The fractional and absolute prefill checks can be enabled separately or together. The absolute check,
-`--active-prefill-tokens-threshold`, is deprecated and will be removed in v1.7; use
+The absolute prefill check, `--active-prefill-tokens-threshold`, has been removed; use
 `--active-prefill-tokens-threshold-frac`. A worker is not excluded until all of its data-parallel ranks
 are busy, which avoids discarding capacity on ranks that can still admit work.
 

@@ -269,9 +269,13 @@ exact-worker lane heads. Absolute and fractional busy thresholds use OR
 semantics. The absolute `prefill_busy_threshold` is deprecated and will be
 removed in v1.7; use `prefill_busy_threshold_frac`.
 `decode_busy_threshold_frac` also marks a worker busy when the KV
-blocks its active requests hold exceed that fraction of its `total_kv_blocks`,
-so a worker filled by long-running decodes stops taking new work even after
-their prefill completes. Held blocks come from the router's active-block tracking: with `--no-router-track-active-blocks` the router tracks no held blocks and the decode threshold never fires, and the prefill KV router always runs that way. By default held blocks cover each request's prompt; `--router-track-output-blocks` (experimental, off by default) also counts the blocks generation adds, which a threshold aimed at long decodes needs. A worker that does
+blocks its active requests hold exceed that fraction of its `total_kv_blocks`.
+Those blocks stay held after a request's prefill completes, so long-running
+decodes still count toward the class's limits once their prefill load is gone.
+Class thresholds decide only whether a class waits, which it does while no
+eligible worker rank has room. They do not filter selection: a request
+dispatched while one rank has room can still be placed on a rank that is past
+them. Held blocks come from the router's active-block tracking: with `--no-router-track-active-blocks` the router tracks no held blocks and the decode threshold never fires, and the prefill KV router always runs that way. By default held blocks cover each request's prompt; `--router-track-output-blocks` (experimental, off by default) also counts the blocks generation adds, which a threshold aimed at long decodes needs. A worker that does
 not report `total_kv_blocks` skips the decode threshold. Some adapters advertise an aggregate or representative-rank value rather than each rank's own capacity; vLLM with data parallelism publishes the process total divided by the rank count, so on those workers the decode threshold is approximate. A class queues only
 when at least one threshold is configured and every eligible worker is busy
 for that class, but a new arrival cannot bypass an existing backlog in the
@@ -685,19 +689,19 @@ one or more threshold fields with `POST /router_policy/busy_threshold` to update
 ```bash
 curl -X POST http://localhost:8000/router_policy/busy_threshold \
   -H 'Content-Type: application/json' \
-  -d '{"model":"qwen","active_decode_blocks_threshold":0.85,"active_prefill_tokens_threshold":1000,"active_prefill_tokens_threshold_frac":0.8}'
+  -d '{"model":"qwen","active_decode_blocks_threshold":0.85,"active_prefill_tokens_threshold_frac":0.8}'
 ```
 
 | Field | Meaning |
 | --- | --- |
 | `active_decode_blocks_threshold` | KV block utilization threshold, from 0 to 1 |
-| `active_prefill_tokens_threshold` | Absolute active-prefill token threshold, a non-negative integer |
 | `active_prefill_tokens_threshold_frac` | Active-prefill threshold as a finite, non-negative fraction of `max_num_batched_tokens` |
 
-The response returns the model name and current values of all three fields. Omitted or null
+The response returns the model name and current values of both fields. Omitted or null
 fields retain their current values; a body containing only `model` queries that model. A write
 to an undiscovered model returns 404. Invalid threshold ranges return 400, and invalid field
-types return 422, without changing the thresholds.
+types return 422, without changing the thresholds. A request that sets the removed absolute
+`active_prefill_tokens_threshold` also returns 400 without changing them.
 
 The legacy `GET` and `POST /busy_threshold` routes remain compatibility aliases with the same
 handlers and state. Writes through either path are visible through the other. These updates

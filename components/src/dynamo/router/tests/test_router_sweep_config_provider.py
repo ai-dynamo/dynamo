@@ -129,15 +129,54 @@ def test_kv_router_materializes_current_router_config_without_kvbm() -> None:
     assert "disk_cache_hit_weight" not in hook.config["router_config"]
 
 
-def test_kv_router_rejects_admission_pins_until_replay_supports_them() -> None:
+@pytest.mark.parametrize(
+    "pin",
+    [
+        {"active_decode_blocks_threshold": 16},
+        {"active_prefill_tokens_threshold_frac": 0.5},
+    ],
+)
+def test_kv_router_rejects_admission_pins_until_replay_supports_them(
+    pin: dict[str, object],
+) -> None:
     with pytest.raises(ValueError, match="admission-control"):
         create_provider().generate_search_space(
-            {
-                "mode": ["kv_router"],
-                "active_decode_blocks_threshold": 16,
-            },
+            {"mode": ["kv_router"], **pin},
             _sweep_context(),
         )
+
+
+@pytest.mark.parametrize(
+    "search_spec",
+    [
+        {"mode": ["round_robin"], "active_prefill_tokens_threshold": 1000},
+        {"mode": ["kv_router"], "active_prefill_tokens_threshold": 1000},
+        {"policy": "round_robin", "active_prefill_tokens_threshold": 1000},
+        {"policy": "kv_router", "active_prefill_tokens_threshold": 1000},
+    ],
+    ids=[
+        "legacy-round-robin",
+        "legacy-kv-router",
+        "public-round-robin",
+        "public-kv-router",
+    ],
+)
+def test_removed_absolute_prefill_threshold_is_rejected(
+    search_spec: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="active_prefill_tokens_threshold"):
+        create_provider().generate_search_space(search_spec, _sweep_context())
+
+
+def test_round_robin_search_state_omits_removed_absolute_prefill_threshold() -> None:
+    plan = create_provider().generate_search_space(
+        {"mode": ["round_robin"], "active_prefill_tokens_threshold_frac": 0.5},
+        _sweep_context(),
+    )
+
+    state = plan.state["search_space"]
+    assert state["active_prefill_tokens_threshold_frac"] == 0.5
+    assert "active_prefill_tokens_threshold" not in state
 
 
 def test_provider_owns_its_adapter_and_hook_abi_versions() -> None:

@@ -24,10 +24,9 @@ These checks are centralized in the router's routing eligibility path so selecti
 Busy thresholds are worker filters. They are configured separately from the queue threshold:
 
 - `--active-decode-blocks-threshold`
-- `--active-prefill-tokens-threshold`
 - `--active-prefill-tokens-threshold-frac`
 
-When a threshold is exceeded, worker monitoring reports that worker as overloaded. The scheduler then excludes that worker from normal candidate selection. The thresholds can be updated at runtime through the `/busy_threshold` HTTP endpoint.
+The KV router checks both thresholds when it selects a worker: it compares the load it has booked on each DP rank with the capacity that rank reports, and skips a worker whose ranks are all past a threshold. Worker monitoring keeps checking the decode threshold against the KV usage that workers report, which includes load the router did not book, such as generated tokens and requests from other frontends. In other router modes, worker monitoring applies both thresholds to worker-reported load. A worker that either check marks busy is excluded from normal candidate selection. The thresholds can be updated at runtime through the `/busy_threshold` HTTP endpoint; the KV router's selection check uses a new value at its next selection.
 
 Busy filtering preserves error classification:
 

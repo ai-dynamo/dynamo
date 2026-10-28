@@ -18,7 +18,6 @@ def clear_batch_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "DYN_KSERVE_GRPC_SERVER",
         "DYN_FRONTEND_ROUTE_EXTENSIONS",
         "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
-        "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
         "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
     ):
         monkeypatch.delenv(name, raising=False)

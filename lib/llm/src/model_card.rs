@@ -3538,6 +3538,42 @@ mod ownership_tests {
     }
 
     #[test]
+    fn removed_absolute_prefill_threshold_keeps_cards_decodable() {
+        use crate::discovery::LoadThresholdConfig;
+        use crate::entrypoint::RouterConfig;
+        use dynamo_runtime::pipeline::RouterMode;
+
+        // Unset thresholds serialize to an empty object, the same bytes v1.5 and v1.6 emit.
+        let mut card = ModelDeploymentCard::with_name_only("wire-compat-thresholds");
+        card.router_config = Some(RouterConfig {
+            router_mode: RouterMode::KV,
+            ..Default::default()
+        });
+        let emitted: serde_json::Value = serde_json::from_str(&card.to_json().unwrap()).unwrap();
+        assert_eq!(
+            emitted["router_config"]["load_threshold_config"],
+            serde_json::json!({})
+        );
+
+        // A v1.5 or v1.6 worker started with --active-prefill-tokens-threshold still
+        // advertises the removed field; its card decodes with the remaining thresholds.
+        let mut legacy = emitted;
+        legacy["router_config"]["load_threshold_config"] = serde_json::json!({
+            "active_decode_blocks_threshold": 0.9,
+            "active_prefill_tokens_threshold": 1000,
+            "active_prefill_tokens_threshold_frac": 0.5,
+        });
+        let parsed = ModelDeploymentCard::load_from_json_str(&legacy.to_string()).unwrap();
+        assert_eq!(
+            parsed.router_config.unwrap().load_threshold_config,
+            LoadThresholdConfig {
+                active_decode_blocks_threshold: Some(0.9),
+                active_prefill_tokens_threshold_frac: Some(0.5),
+            }
+        );
+    }
+
+    #[test]
     fn context_length_wire_compatibility() {
         let card = ModelDeploymentCard::with_name_only("model");
         let mut legacy_value = serde_json::to_value(&card).unwrap();

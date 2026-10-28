@@ -28,7 +28,6 @@ pytestmark = [
 # set in the ambient environment would otherwise decide the outcome here.
 _ENV_VARS_READ_BY_THESE_TESTS = (
     "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
-    "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
     "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
     "DYN_FRONTEND_ROUTE_EXTENSIONS",
     "DYN_INTERACTIVE",

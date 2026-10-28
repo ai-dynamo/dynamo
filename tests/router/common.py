@@ -1549,7 +1549,6 @@ def _test_router_overload_529(
     frontend_port: int,
     test_payload: dict,
     blocks_threshold: float | str | None = 0.2,
-    tokens_threshold: int | str | None = None,
     tokens_threshold_frac: float | str | None = None,
     router_queue_threshold: float | str | None = None,
     max_tokens: int = 50,
@@ -1571,7 +1570,6 @@ def _test_router_overload_529(
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload to send to /v1/chat/completions
         blocks_threshold: Active decode blocks threshold for the router (default 0.2)
-        tokens_threshold: Active prefill tokens threshold for the router
         tokens_threshold_frac: Fractional active prefill tokens threshold for the router
         router_queue_threshold: Router queue threshold, or "None" to disable queueing
         max_tokens: Output token count for generated overload requests
@@ -1589,7 +1587,6 @@ def _test_router_overload_529(
         frontend_port=frontend_port,
         namespace=engine_workers.namespace,
         blocks_threshold=blocks_threshold,
-        tokens_threshold=tokens_threshold,
         tokens_threshold_frac=tokens_threshold_frac,
         router_queue_threshold=router_queue_threshold,
     ):
@@ -1616,7 +1613,6 @@ def _test_disagg_router_overload_529(
     frontend_port: int,
     test_payload: dict,
     blocks_threshold: float | str | None = None,
-    tokens_threshold: int | str | None = None,
     tokens_threshold_frac: float | str | None = None,
     router_queue_threshold: float | str | None = None,
     max_tokens: int = 50,
@@ -1633,9 +1629,9 @@ def _test_disagg_router_overload_529(
 
     Two configurations exercise the two pools (driven by the thresholds the
     caller passes):
-    - Prefill rejection: low ``tokens_threshold`` (active-prefill-tokens),
-      decode threshold disabled. Gates the prefill pool — the path that was
-      previously a silent no-op.
+    - Prefill rejection: zero ``tokens_threshold_frac`` (active-prefill-tokens
+      fraction), decode threshold disabled. Gates the prefill pool — the path
+      that was previously a silent no-op.
     - Decode rejection: low ``blocks_threshold`` (active-decode-blocks), prefill
       threshold disabled. Gates the decode pool.
 
@@ -1653,7 +1649,6 @@ def _test_disagg_router_overload_529(
         namespace=decode_workers.namespace,
         store_backend=store_backend,
         blocks_threshold=blocks_threshold,
-        tokens_threshold=tokens_threshold,
         tokens_threshold_frac=tokens_threshold_frac,
         router_queue_threshold=router_queue_threshold,
         request_plane=request_plane,
@@ -1695,7 +1690,7 @@ def _test_router_threshold_none_disables_rejection(
     """Test that explicit CLI "None" thresholds disable busy-based rejection end to end.
 
     Assumes engine_workers are already initialized. This function manages router lifecycle.
-    Starts the frontend with literal CLI "None" values for all three threshold knobs,
+    Starts the frontend with literal CLI "None" values for both threshold knobs,
     verifies the /busy_threshold API reports nulls, then sends overload-shaped traffic and
     confirms no request is rejected with 529 and the frontend rejection metric stays at 0.
 
@@ -1721,17 +1716,11 @@ def _test_router_threshold_none_disables_rejection(
         frontend_port=frontend_port,
         namespace=engine_workers.namespace,
         blocks_threshold="None",
-        tokens_threshold="None",
         tokens_threshold_frac="None",
     ):
         frontend_url = f"http://localhost:{frontend_port}"
-        chat_url = f"{frontend_url}/v1/chat/completions"
         busy_threshold_url = f"{frontend_url}/busy_threshold"
         model_name = test_payload.get("model", "test-model")
-        load_payload = {
-            **test_payload,
-            "max_tokens": 50,
-        }
 
         logger.info("Waiting for frontend readiness before explicit-None test...")
         asyncio.run(
@@ -1743,7 +1732,7 @@ def _test_router_threshold_none_disables_rejection(
             )
         )
 
-        async def verify_thresholds_and_send_load():
+        async def verify_thresholds():
             async with aiohttp.ClientSession() as session:
                 logger.info(
                     "Checking /busy_threshold reports nulls for explicit CLI None thresholds"
@@ -1760,9 +1749,6 @@ def _test_router_threshold_none_disables_rejection(
                         data.get("active_decode_blocks_threshold") is None
                     ), f"Expected active_decode_blocks_threshold=None: {data}"
                     assert (
-                        data.get("active_prefill_tokens_threshold") is None
-                    ), f"Expected active_prefill_tokens_threshold=None: {data}"
-                    assert (
                         data.get("active_prefill_tokens_threshold_frac") is None
                     ), f"Expected active_prefill_tokens_threshold_frac=None: {data}"
                     logger.info(
@@ -1770,105 +1756,123 @@ def _test_router_threshold_none_disables_rejection(
                         data,
                     )
 
-            logger.info(
-                "Launching overload-shaped traffic with explicit None thresholds..."
-            )
-            stop_event = asyncio.Event()
-            response_statuses = asyncio.Queue()
+        asyncio.run(verify_thresholds())
 
-            async with aiohttp.ClientSession() as session:
+        logger.info(
+            "Launching overload-shaped traffic with explicit None thresholds..."
+        )
+        _send_load_and_assert_no_rejection(
+            frontend_port, test_payload, num_requests, expected_rejection_total=0
+        )
+        logger.info("Explicit CLI None thresholds disabled busy rejection as expected")
 
-                async def send_request(req_id: int, payload: dict) -> int:
-                    try:
-                        async with session.post(chat_url, json=payload) as response:
-                            if response.status == 200:
-                                logger.info(
-                                    "Request %s accepted without rejection", req_id
-                                )
-                                await response_statuses.put(response.status)
-                                await stop_event.wait()
-                                return response.status
 
-                            body = await response.text()
-                            logger.info(
-                                "Request %s got unexpected status %s: %s",
-                                req_id,
-                                response.status,
-                                body,
-                            )
-                            await response_statuses.put(response.status)
-                            return response.status
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        logger.info("Request %s failed with error: %s", req_id, exc)
-                        await response_statuses.put(exc)
-                        raise
+def _send_load_and_assert_no_rejection(
+    frontend_port: int,
+    test_payload: dict,
+    num_requests: int,
+    expected_rejection_total: int,
+):
+    """Hold overload-shaped streams open together and assert that every one is admitted.
 
-                tasks = []
+    Sends ``num_requests`` unique prompts 0.1s apart and keeps each accepted stream open
+    until all of them have a status. Asserts that every request got 200 and that the
+    frontend ``model_rejection_total`` metric equals ``expected_rejection_total``.
+    """
+    chat_url = f"http://localhost:{frontend_port}/v1/chat/completions"
+    model_name = test_payload.get("model", "test-model")
+    load_payload = {
+        **test_payload,
+        "max_tokens": 50,
+    }
+
+    async def send_load():
+        stop_event = asyncio.Event()
+        response_statuses = asyncio.Queue()
+
+        async with aiohttp.ClientSession() as session:
+
+            async def send_request(req_id: int, payload: dict) -> int:
                 try:
-                    for i in range(num_requests):
-                        content_words = test_payload["messages"][0]["content"].split()
-                        random.shuffle(content_words)
-                        unique_payload = {
-                            **load_payload,
-                            "messages": [
-                                {
-                                    **test_payload["messages"][0],
-                                    "content": " ".join(content_words),
-                                }
-                            ],
-                        }
-                        tasks.append(
-                            asyncio.create_task(send_request(i, unique_payload))
+                    async with session.post(chat_url, json=payload) as response:
+                        if response.status == 200:
+                            logger.info("Request %s accepted without rejection", req_id)
+                            await response_statuses.put(response.status)
+                            await stop_event.wait()
+                            return response.status
+
+                        body = await response.text()
+                        logger.info(
+                            "Request %s got unexpected status %s: %s",
+                            req_id,
+                            response.status,
+                            body,
                         )
-                        await asyncio.sleep(0.1)
-                finally:
-                    initial_results = [
-                        await response_statuses.get() for _ in range(num_requests)
-                    ]
-                    stop_event.set()
-                    done = await asyncio.gather(*tasks, return_exceptions=True)
+                        await response_statuses.put(response.status)
+                        return response.status
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.info("Request %s failed with error: %s", req_id, exc)
+                    await response_statuses.put(exc)
+                    raise
 
-                for result in initial_results + done:
-                    if isinstance(result, Exception):
-                        raise result
+            tasks = []
+            try:
+                for i in range(num_requests):
+                    content_words = test_payload["messages"][0]["content"].split()
+                    random.shuffle(content_words)
+                    unique_payload = {
+                        **load_payload,
+                        "messages": [
+                            {
+                                **test_payload["messages"][0],
+                                "content": " ".join(content_words),
+                            }
+                        ],
+                    }
+                    tasks.append(asyncio.create_task(send_request(i, unique_payload)))
+                    await asyncio.sleep(0.1)
+            finally:
+                initial_results = [
+                    await response_statuses.get() for _ in range(num_requests)
+                ]
+                stop_event.set()
+                done = await asyncio.gather(*tasks, return_exceptions=True)
 
-                return done
+            for result in initial_results + done:
+                if isinstance(result, Exception):
+                    raise result
 
-        results = asyncio.run(verify_thresholds_and_send_load())
+            return done
 
-        num_succeeded = sum(1 for status in results if status == 200)
-        num_rejected = sum(1 for status in results if status == 529)
-        num_other = sum(1 for status in results if status not in (200, 529))
+    results = asyncio.run(send_load())
 
-        logger.info(
-            "Results with explicit None thresholds: %s succeeded, %s rejected (529), %s other",
-            num_succeeded,
-            num_rejected,
-            num_other,
-        )
+    num_succeeded = sum(1 for status in results if status == 200)
+    num_rejected = sum(1 for status in results if status == 529)
+    num_other = sum(1 for status in results if status not in (200, 529))
 
-        assert num_rejected == 0, f"Expected 0 rejections, but got {num_rejected}"
-        assert (
-            num_other == 0
-        ), f"Expected only 200 or 529 responses, but got {num_other} other"
-        assert num_succeeded > 0, "Expected at least one successful request"
-        assert (
-            num_succeeded == num_requests
-        ), f"Expected {num_requests} successful requests, got {num_succeeded}"
+    logger.info(
+        "Results: %s succeeded, %s rejected (529), %s other",
+        num_succeeded,
+        num_rejected,
+        num_other,
+    )
 
-        _verify_frontend_rejection_metrics(
-            frontend_port,
-            model_name,
-            "chat_completions",
-            0,
-        )
+    assert num_rejected == 0, f"Expected 0 rejections, but got {num_rejected}"
+    assert (
+        num_other == 0
+    ), f"Expected only 200 or 529 responses, but got {num_other} other"
+    assert (
+        num_succeeded == num_requests
+    ), f"Expected {num_requests} successful requests, got {num_succeeded}"
 
-        logger.info(
-            "Explicit CLI None thresholds disabled busy rejection as expected: %s successes, metrics clean",
-            num_succeeded,
-        )
+    _verify_frontend_rejection_metrics(
+        frontend_port,
+        model_name,
+        "chat_completions",
+        expected_rejection_total,
+    )
 
 
 async def _zmq_replay_cycle(
@@ -3332,12 +3336,10 @@ def _test_busy_threshold_endpoint(
 ):
     """Test that the /busy_threshold endpoint can be hit and responds correctly.
 
-    TODO: This doesn't actually test any e2e rejection for now. A proper test would:
-    1. Set a very low threshold
-    2. Send enough requests to exceed the threshold
-    3. Verify that subsequent requests are rejected with 529
-
-    For now, this test only verifies the endpoint is accessible and returns valid responses.
+    This checks the endpoint's responses and stored values, including that a request
+    setting the removed absolute ``active_prefill_tokens_threshold`` is rejected without
+    changing them. ``_test_busy_threshold_live_rejection`` checks that updates change
+    which requests the router rejects.
 
     Args:
         engine_workers: MockerProcess instance (already initialized with __enter__())
@@ -3351,9 +3353,8 @@ def _test_busy_threshold_endpoint(
     Raises:
         AssertionError: If endpoint responses are incorrect
     """
-    # Initial thresholds - we need to start with these so the monitor is created
     initial_active_decode_blocks_threshold = 0.9
-    initial_active_prefill_tokens_threshold = 1000  # Literal token count threshold
+    initial_active_prefill_tokens_threshold_frac = 0.95
 
     with KVRouterProcess(
         request,
@@ -3362,10 +3363,9 @@ def _test_busy_threshold_endpoint(
         engine_workers.namespace,
         store_backend,
         blocks_threshold=initial_active_decode_blocks_threshold,
-        tokens_threshold=initial_active_prefill_tokens_threshold,
+        tokens_threshold_frac=initial_active_prefill_tokens_threshold_frac,
         request_plane=request_plane,
     ):
-        # Start KV router frontend with initial thresholds to create monitor
         logger.info(f"Starting KV router frontend on port {frontend_port}")
 
         frontend_url = f"http://localhost:{frontend_port}"
@@ -3417,9 +3417,12 @@ def _test_busy_threshold_endpoint(
                         == initial_active_decode_blocks_threshold
                     ), f"Expected initial active_decode_blocks_threshold={initial_active_decode_blocks_threshold}: {data}"
                     assert (
-                        data.get("active_prefill_tokens_threshold")
-                        == initial_active_prefill_tokens_threshold
-                    ), f"Expected initial active_prefill_tokens_threshold={initial_active_prefill_tokens_threshold}: {data}"
+                        data.get("active_prefill_tokens_threshold_frac")
+                        == initial_active_prefill_tokens_threshold_frac
+                    ), f"Expected initial active_prefill_tokens_threshold_frac={initial_active_prefill_tokens_threshold_frac}: {data}"
+                    assert (
+                        "active_prefill_tokens_threshold" not in data
+                    ), f"Unexpected removed absolute threshold: {data}"
                     logger.info(
                         f"POST /busy_threshold (get) response: status={response.status}, data={data}"
                     )
@@ -3449,45 +3452,53 @@ def _test_busy_threshold_endpoint(
                     ), f"Expected active_decode_blocks_threshold={test_active_decode_blocks_threshold}: {data}"
                     logger.info(f"POST /busy_threshold (set blocks) response: {data}")
 
-                # Test 4: POST /busy_threshold to set active_prefill_tokens_threshold only
-                test_active_prefill_tokens_threshold = (
-                    2000  # Literal token count threshold
-                )
+                # Test 4: Setting the removed absolute threshold is rejected and changes nothing
                 logger.info(
-                    f"Testing POST /busy_threshold to set active_prefill_tokens_threshold={test_active_prefill_tokens_threshold}"
+                    "Testing POST /busy_threshold with the removed active_prefill_tokens_threshold"
                 )
                 async with session.post(
                     busy_threshold_url,
                     json={
                         "model": model_name,
-                        "active_prefill_tokens_threshold": test_active_prefill_tokens_threshold,
+                        "active_prefill_tokens_threshold": 2000,
+                        "active_prefill_tokens_threshold_frac": 0.1,
                     },
                 ) as response:
                     assert (
-                        response.status == 200
-                    ), f"POST /busy_threshold (set tokens) failed with status {response.status}"
+                        response.status == 400
+                    ), f"Expected 400 for removed active_prefill_tokens_threshold, got {response.status}"
+                    data = await response.json()
+                    assert "active_prefill_tokens_threshold was removed" in data.get(
+                        "error", ""
+                    ), f"Expected removal error: {data}"
+                    logger.info(
+                        f"POST /busy_threshold (removed field) response: {data}"
+                    )
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name},
+                ) as response:
                     data = await response.json()
                     assert (
-                        data.get("active_prefill_tokens_threshold")
-                        == test_active_prefill_tokens_threshold
-                    ), f"Expected active_prefill_tokens_threshold={test_active_prefill_tokens_threshold}: {data}"
-                    logger.info(f"POST /busy_threshold (set tokens) response: {data}")
+                        data.get("active_decode_blocks_threshold")
+                        == test_active_decode_blocks_threshold
+                        and data.get("active_prefill_tokens_threshold_frac")
+                        == initial_active_prefill_tokens_threshold_frac
+                    ), f"Rejected request changed thresholds: {data}"
 
                 # Test 5: POST /busy_threshold to set both thresholds
                 new_active_decode_blocks_threshold = 0.5
-                new_active_prefill_tokens_threshold = (
-                    1200  # Literal token count threshold
-                )
+                new_active_prefill_tokens_threshold_frac = 0.6
                 logger.info(
                     f"Testing POST /busy_threshold to set both thresholds: "
-                    f"active_decode_blocks={new_active_decode_blocks_threshold}, active_prefill_tokens={new_active_prefill_tokens_threshold}"
+                    f"active_decode_blocks={new_active_decode_blocks_threshold}, active_prefill_tokens_frac={new_active_prefill_tokens_threshold_frac}"
                 )
                 async with session.post(
                     busy_threshold_url,
                     json={
                         "model": model_name,
                         "active_decode_blocks_threshold": new_active_decode_blocks_threshold,
-                        "active_prefill_tokens_threshold": new_active_prefill_tokens_threshold,
+                        "active_prefill_tokens_threshold_frac": new_active_prefill_tokens_threshold_frac,
                     },
                 ) as response:
                     assert (
@@ -3499,9 +3510,9 @@ def _test_busy_threshold_endpoint(
                         == new_active_decode_blocks_threshold
                     ), f"Expected active_decode_blocks_threshold={new_active_decode_blocks_threshold}: {data}"
                     assert (
-                        data.get("active_prefill_tokens_threshold")
-                        == new_active_prefill_tokens_threshold
-                    ), f"Expected active_prefill_tokens_threshold={new_active_prefill_tokens_threshold}: {data}"
+                        data.get("active_prefill_tokens_threshold_frac")
+                        == new_active_prefill_tokens_threshold_frac
+                    ), f"Expected active_prefill_tokens_threshold_frac={new_active_prefill_tokens_threshold_frac}: {data}"
                     logger.info(f"POST /busy_threshold (set both) response: {data}")
 
                 # Test 6: GET /busy_threshold - verify thresholds appear in list
@@ -3523,9 +3534,9 @@ def _test_busy_threshold_endpoint(
                         == new_active_decode_blocks_threshold
                     ), f"Expected active_decode_blocks_threshold={new_active_decode_blocks_threshold}: {data}"
                     assert (
-                        model_entry.get("active_prefill_tokens_threshold")
-                        == new_active_prefill_tokens_threshold
-                    ), f"Expected active_prefill_tokens_threshold={new_active_prefill_tokens_threshold}: {data}"
+                        model_entry.get("active_prefill_tokens_threshold_frac")
+                        == new_active_prefill_tokens_threshold_frac
+                    ), f"Expected active_prefill_tokens_threshold_frac={new_active_prefill_tokens_threshold_frac}: {data}"
                     logger.info(f"GET /busy_threshold (after set) response: {data}")
 
                 # Test 7: Invalid active_decode_blocks_threshold value (should fail validation)
@@ -3544,42 +3555,44 @@ def _test_busy_threshold_endpoint(
                         f"POST /busy_threshold (invalid blocks) response: {data}"
                     )
 
-                # Test 8: active_prefill_tokens_threshold accepts large values (should be valid)
+                # Test 8: active_prefill_tokens_threshold_frac accepts values above 1.0
                 logger.info(
-                    "Testing POST /busy_threshold with large active_prefill_tokens_threshold (valid)"
+                    "Testing POST /busy_threshold with active_prefill_tokens_threshold_frac above 1.0 (valid)"
                 )
                 async with session.post(
                     busy_threshold_url,
-                    json={"model": model_name, "active_prefill_tokens_threshold": 5000},
+                    json={
+                        "model": model_name,
+                        "active_prefill_tokens_threshold_frac": 2.5,
+                    },
                 ) as response:
                     assert (
                         response.status == 200
-                    ), f"Expected 200 for large active_prefill_tokens_threshold, got {response.status}"
+                    ), f"Expected 200 for active_prefill_tokens_threshold_frac=2.5, got {response.status}"
                     data = await response.json()
                     assert (
-                        data.get("active_prefill_tokens_threshold") == 5000
-                    ), f"Expected active_prefill_tokens_threshold=5000: {data}"
+                        data.get("active_prefill_tokens_threshold_frac") == 2.5
+                    ), f"Expected active_prefill_tokens_threshold_frac=2.5: {data}"
                     logger.info(
-                        f"POST /busy_threshold (large tokens threshold) response: {data}"
+                        f"POST /busy_threshold (frac above 1.0) response: {data}"
                     )
 
-                # Test 9: Invalid active_prefill_tokens_threshold value (should fail validation for < 0)
-                # Note: Returns 422 because -1.0 can't be deserialized into u64 (type validation)
-                # vs Test 7 which returns 400 because 1.5 is a valid f64 but fails range validation
+                # Test 9: Negative active_prefill_tokens_threshold_frac fails range validation
                 logger.info(
-                    "Testing POST /busy_threshold with invalid active_prefill_tokens_threshold (< 0)"
+                    "Testing POST /busy_threshold with invalid active_prefill_tokens_threshold_frac (< 0)"
                 )
                 async with session.post(
                     busy_threshold_url,
-                    json={"model": model_name, "active_prefill_tokens_threshold": -1.0},
+                    json={
+                        "model": model_name,
+                        "active_prefill_tokens_threshold_frac": -0.1,
+                    },
                 ) as response:
                     assert (
-                        response.status == 422
-                    ), f"Expected 422 for negative active_prefill_tokens_threshold, got {response.status}"
+                        response.status == 400
+                    ), f"Expected 400 for negative active_prefill_tokens_threshold_frac, got {response.status}"
                     data = await response.json()
-                    logger.info(
-                        f"POST /busy_threshold (invalid tokens) response: {data}"
-                    )
+                    logger.info(f"POST /busy_threshold (invalid frac) response: {data}")
 
                 # Test 10: Set active_prefill_tokens_threshold_frac (fraction of max_num_batched_tokens)
                 test_frac_threshold = 0.8
@@ -3630,6 +3643,93 @@ def _test_busy_threshold_endpoint(
                 logger.info("All busy_threshold endpoint tests passed!")
 
         asyncio.run(test_busy_threshold_api())
+
+
+def _test_busy_threshold_live_rejection(
+    engine_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    request_plane: str = "nats",
+):
+    """Test that POST /busy_threshold changes which requests a running KV router rejects.
+
+    The frontend starts with no busy thresholds, so a 529 can only come from a value set
+    through the endpoint. Setting ``active_prefill_tokens_threshold_frac`` to 0.0 makes a
+    worker with any booked prefill tokens full, and overload-shaped traffic must then be
+    rejected with 529. In KV mode the router checks the prefill threshold against the
+    load it booked when it selects a worker; the worker monitor does not apply it.
+    Raising the fraction again must admit the same traffic without another rejection.
+
+    Args:
+        engine_workers: MockerProcess instance (already initialized with __enter__())
+        block_size: Block size for KV cache
+        request: Pytest request fixture for managing resources
+        frontend_port: Port for the frontend HTTP server
+        test_payload: Base test payload to send to /v1/chat/completions
+        request_plane: Request plane to use ("nats" or "tcp"). Defaults to "nats".
+
+    Raises:
+        AssertionError: If an update is not applied to later requests
+    """
+    with KVRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        engine_workers.namespace,
+        request_plane=request_plane,
+    ):
+        frontend_url = f"http://localhost:{frontend_port}"
+        busy_threshold_url = f"{frontend_url}/busy_threshold"
+        model_name = test_payload.get("model", "test-model")
+
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=engine_workers.num_workers,
+                timeout=60,
+                engine_workers=engine_workers,
+                request_plane=request_plane,
+            )
+        )
+
+        async def set_prefill_threshold_frac(value: float):
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    busy_threshold_url,
+                    json={
+                        "model": model_name,
+                        "active_prefill_tokens_threshold_frac": value,
+                    },
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("active_prefill_tokens_threshold_frac") == value
+                    ), f"Expected active_prefill_tokens_threshold_frac={value}: {data}"
+                    assert (
+                        data.get("active_decode_blocks_threshold") is None
+                    ), f"Expected no decode threshold: {data}"
+
+        logger.info("Setting active_prefill_tokens_threshold_frac=0.0 at runtime")
+        asyncio.run(set_prefill_threshold_frac(0.0))
+        _probe_overload_529_and_assert(frontend_port, test_payload, max_tokens=1)
+
+        rejected_total = _get_frontend_rejection_metric(
+            frontend_port, model_name, "chat_completions"
+        )
+        logger.info("Raising active_prefill_tokens_threshold_frac=1000.0 at runtime")
+        asyncio.run(set_prefill_threshold_frac(1000.0))
+        _send_load_and_assert_no_rejection(
+            frontend_port,
+            test_payload,
+            num_requests=4,
+            expected_rejection_total=rejected_total,
+        )
+        logger.info("Runtime busy-threshold updates applied to later requests")
 
 
 def _test_disagg_direct_mode(

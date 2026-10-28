@@ -49,7 +49,6 @@ class FrontendRouterProcess(ManagedProcess):
         namespace: str,
         store_backend: str = "etcd",
         blocks_threshold: float | str | None = None,
-        tokens_threshold: int | str | None = None,
         tokens_threshold_frac: float | str | None = None,
         router_queue_threshold: float | str | None = None,
         request_plane: str = "nats",
@@ -81,9 +80,6 @@ class FrontendRouterProcess(ManagedProcess):
 
         if blocks_threshold is not None:
             command.extend(["--active-decode-blocks-threshold", str(blocks_threshold)])
-
-        if tokens_threshold is not None:
-            command.extend(["--active-prefill-tokens-threshold", str(tokens_threshold)])
 
         if tokens_threshold_frac is not None:
             command.extend(
