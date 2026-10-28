@@ -44,7 +44,10 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use xxhash_rust::xxh3::xxh3_64;
 
-use super::{ConnectionInfo, RegisteredStream, StreamPrologueError, StreamReceiver};
+use super::{
+    ConnectionInfo, RegisteredStream, ResponseStreamPrologue, StreamPrologueError, StreamReceiver,
+    tombstones::InstanceTombstones,
+};
 use crate::{
     config::environment_names::quic_response, discovery::EndpointInstanceId,
     engine::AsyncEngineContext, pipeline::PipelineError,
@@ -84,7 +87,6 @@ const RESPONSE_BUFFER_CAPACITY: usize = 16_384;
 const MAX_RESPONSE_BUFFER_CAPACITY: usize = 65_536;
 const MAX_DEFERRED_RESPONSE_FRAMES: usize = 1_024;
 const MAX_DEFERRED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 const CLOSE_CODE_INVARIANT: quinn::VarInt = quinn::VarInt::from_u32(1);
 
 #[derive(Debug, Clone, Copy)]
@@ -178,6 +180,7 @@ impl TryFrom<ConnectionInfo> for QuicResponseConnectionInfo {
 enum FrameKind {
     Prologue = 1,
     Data = 2,
+    /// Terminal pre-stream failure. Payload layout is [`QUIC_TYPED_ERROR_KIND`].
     Error = 3,
     End = 4,
     Stop = 5,
@@ -235,6 +238,65 @@ impl Frame {
         header.put_u32(self.payload.len() as u32);
         header.freeze()
     }
+}
+
+/// Typed [`FrameKind::Error`] payloads are JSON tagged with this `kind`.
+///
+/// Untyped errors stay raw UTF-8 so a mixed-version frontend still sees the
+/// worker's text. A current frontend accepts only this discriminant and
+/// recovers [`ResponseStreamPrologue`]. An older frontend reads the payload as
+/// UTF-8 and treats the object as the message. Untagged JSON, including a
+/// decoy `{"error","code"}` object, stays that message. The protocol version
+/// stays 3 because those bytes are already valid UTF-8 for an old decoder.
+const QUIC_TYPED_ERROR_KIND: &str = "dynamo.quic.typed_error";
+
+/// JSON object carrying [`QUIC_TYPED_ERROR_KIND`] and a [`ResponseStreamPrologue`].
+#[derive(Serialize, Deserialize)]
+struct QuicTypedErrorWire {
+    kind: String,
+    #[serde(flatten)]
+    prologue: ResponseStreamPrologue,
+}
+
+/// Encode a pre-stream error for [`FrameKind::Error`].
+fn encode_error_payload(error: StreamPrologueError) -> Bytes {
+    let Some(typed_error) = error.typed_error else {
+        return Bytes::from(error.message);
+    };
+    let wire = QuicTypedErrorWire {
+        kind: QUIC_TYPED_ERROR_KIND.to_string(),
+        prologue: ResponseStreamPrologue {
+            error: Some(error.message),
+            typed_error: Some(typed_error),
+        },
+    };
+    match serde_json::to_vec(&wire) {
+        Ok(bytes) => Bytes::from(bytes),
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "QUIC error prologue did not serialize; sending untyped text"
+            );
+            Bytes::from(wire.prologue.error.unwrap_or_default())
+        }
+    }
+}
+
+/// Decode a [`FrameKind::Error`] payload.
+fn decode_error_payload(payload: &[u8]) -> Result<StreamPrologueError> {
+    if payload.first() == Some(&b'{')
+        && let Ok(wire) = serde_json::from_slice::<QuicTypedErrorWire>(payload)
+        && wire.kind == QUIC_TYPED_ERROR_KIND
+        && let Some(message) = wire.prologue.error
+    {
+        return Ok(StreamPrologueError {
+            message,
+            typed_error: wire.prologue.typed_error,
+        });
+    }
+    let message = String::from_utf8(payload.to_vec())
+        .context("QUIC response terminal error was not UTF-8")?;
+    Ok(StreamPrologueError::from_message(message))
 }
 
 async fn read_frame<R>(recv: &mut R) -> Result<Frame>
@@ -489,7 +551,7 @@ struct RegistrationShard {
 struct ServerIndexes {
     registration_instance: HashMap<Uuid, EndpointInstanceId>,
     instance_registrations: HashMap<EndpointInstanceId, Vec<Uuid>>,
-    removed_instances: HashMap<EndpointInstanceId, Instant>,
+    removed_instances: InstanceTombstones,
     connection_bundles: HashMap<usize, Uuid>,
     bundle_connections: HashMap<Uuid, HashMap<usize, quinn::Connection>>,
 }
@@ -556,12 +618,6 @@ struct ActiveResponse {
     priority_ready: bool,
     priority_draining: bool,
     deferred: DeferredResponse,
-}
-
-fn prune_tombstones(indexes: &mut ServerIndexes, now: Instant) {
-    indexes
-        .removed_instances
-        .retain(|_, inserted| now.saturating_duration_since(*inserted) < TOMBSTONE_TTL);
 }
 
 pub struct QuicResponseServer {
@@ -783,9 +839,7 @@ impl QuicResponseServer {
 
     pub async fn associate_instance(&self, registration_id: Uuid, id: &EndpointInstanceId) -> bool {
         let mut indexes = self.state.indexes.lock();
-        let now = Instant::now();
-        prune_tombstones(&mut indexes, now);
-        if indexes.removed_instances.contains_key(id) {
+        if indexes.removed_instances.contains(id) {
             drop(indexes);
             remove_registration(&self.state, registration_id);
             return false;
@@ -808,9 +862,7 @@ impl QuicResponseServer {
     pub async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
         let registrations = {
             let mut indexes = self.state.indexes.lock();
-            let now = Instant::now();
-            prune_tombstones(&mut indexes, now);
-            indexes.removed_instances.insert(id.clone(), now);
+            indexes.removed_instances.insert(id);
             let registrations = indexes
                 .instance_registrations
                 .remove(id)
@@ -829,6 +881,33 @@ impl QuicResponseServer {
 
     pub async fn clear_instance_tombstone(&self, id: &EndpointInstanceId) {
         self.state.indexes.lock().removed_instances.remove(id);
+    }
+}
+
+#[async_trait::async_trait]
+impl super::RegisteredResponsePlane for QuicResponseServer {
+    fn register_stream(
+        self: Arc<Self>,
+        context: Arc<dyn AsyncEngineContext>,
+        _defer_cancellation_until_prologue: bool,
+    ) -> anyhow::Result<RegisteredStream<StreamReceiver>> {
+        Ok(QuicResponseServer::register_response(&self, context))
+    }
+
+    async fn associate_instance(&self, registration_id: Uuid, id: &EndpointInstanceId) -> bool {
+        QuicResponseServer::associate_instance(self, registration_id, id).await
+    }
+
+    async fn cancel_response(&self, registration_id: Uuid) {
+        QuicResponseServer::cancel_response(self, registration_id).await;
+    }
+
+    async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
+        QuicResponseServer::cancel_instance_streams(self, id).await
+    }
+
+    async fn clear_instance_tombstone(&self, id: &EndpointInstanceId) {
+        QuicResponseServer::clear_instance_tombstone(self, id).await;
     }
 }
 
@@ -1195,7 +1274,9 @@ async fn process_server_frame(
             };
             let _ = monitor_response.send(response_tx.clone());
             if pending_connection
-                .send(Ok(StreamReceiver { rx: response_rx }))
+                .send(Ok(StreamReceiver {
+                    rx: response_rx.into(),
+                }))
                 .is_err()
             {
                 remove_registration(state, frame.registration_id);
@@ -1204,8 +1285,7 @@ async fn process_server_frame(
             }
         }
         FrameKind::Error => {
-            let error = String::from_utf8(frame.payload.to_vec())
-                .context("QUIC response terminal error was not UTF-8")?;
+            let error = decode_error_payload(&frame.payload)?;
             let pending = state
                 .registration(frame.registration_id)
                 .lock()
@@ -1222,7 +1302,7 @@ async fn process_server_frame(
                         bundle_id
                     );
                 }
-                let _ = pending.connection.send(Err(error.into()));
+                let _ = pending.connection.send(Err(error));
                 remove_registration(state, frame.registration_id);
             } else {
                 send_control(control_tx, FrameKind::Reset, frame.registration_id)?;
@@ -2038,11 +2118,19 @@ impl QuicResponseSender {
     }
 
     pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
+        self.send_prologue_typed(error.map(StreamPrologueError::from_message))
+            .await
+    }
+
+    pub async fn send_prologue_typed(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> Result<(), String> {
         if self.prologue_sent {
             return Err("QUIC response prologue already sent".to_string());
         }
         let (kind, payload, terminal) = match error {
-            Some(error) => (FrameKind::Error, Bytes::from(error), true),
+            Some(error) => (FrameKind::Error, encode_error_payload(error), true),
             None => (FrameKind::Prologue, Bytes::new(), false),
         };
         self.enqueue_on(
@@ -2284,7 +2372,11 @@ fn decode_hex_digit(value: u8) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{engine::AsyncEngineContextProvider, pipeline::Context as PipelineContext};
+    use crate::{
+        engine::AsyncEngineContextProvider,
+        error::{BackendError, DynamoError, ErrorType},
+        pipeline::Context as PipelineContext,
+    };
 
     fn frame(index: usize) -> Frame {
         Frame::new(FrameKind::Data, Uuid::nil(), Bytes::from(index.to_string()))
@@ -2780,6 +2872,96 @@ mod tests {
             .unwrap();
         match provider.await.unwrap() {
             Err(error) => assert_eq!(&*error, "generate failed"),
+            Ok(_) => panic!("terminal error unexpectedly opened a response stream"),
+        }
+        shutdown.cancel();
+    }
+
+    #[test]
+    fn error_payload_legacy_utf8_stays_untyped() {
+        let decoded = decode_error_payload(b"generate failed").unwrap();
+        assert_eq!(&*decoded, "generate failed");
+        assert!(decoded.typed_error.is_none());
+    }
+
+    #[test]
+    fn error_payload_round_trips_typed_refusal() {
+        let original = StreamPrologueError::new(
+            "Generate Error: multimodal input is not supported by this backend",
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("multimodal input is not supported by this backend")
+                .build(),
+        );
+        let payload = encode_error_payload(original.clone());
+        assert_eq!(payload.first(), Some(&b'{'));
+        let encoded = std::str::from_utf8(&payload).expect("typed payload is JSON UTF-8");
+        assert!(
+            encoded.contains(QUIC_TYPED_ERROR_KIND),
+            "typed payload must carry the wire discriminant; got {encoded}"
+        );
+
+        let decoded = decode_error_payload(&payload).unwrap();
+        assert_eq!(decoded, original);
+        assert_eq!(
+            decoded.typed_error.map(|e| e.error_type()),
+            Some(ErrorType::Backend(BackendError::InvalidArgument))
+        );
+    }
+
+    #[test]
+    fn error_payload_python_envelope_is_not_a_prologue() {
+        let envelope = br#"{"message":"unsupported media type","code":415}"#;
+        let decoded = decode_error_payload(envelope).unwrap();
+        assert_eq!(decoded.message.as_bytes(), envelope);
+        assert!(
+            decoded.typed_error.is_none(),
+            "a Python HTTP envelope must stay the untyped message, not a prologue"
+        );
+    }
+
+    #[test]
+    fn error_payload_legacy_json_with_decoy_error_field_is_preserved() {
+        let envelope = br#"{"error":"failed","code":500}"#;
+        let decoded = decode_error_payload(envelope).unwrap();
+        assert_eq!(
+            decoded.message.as_bytes(),
+            envelope,
+            "untagged legacy JSON must be preserved byte-for-byte"
+        );
+        assert!(
+            decoded.typed_error.is_none(),
+            "a decoy error field must not be classified as a typed prologue"
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_generate_error_survives_the_quic_error_frame() {
+        let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
+        let pool = test_pool();
+        let context = PipelineContext::new(());
+        let registered = server.register_response(context.context());
+        let (info, provider) = registered.into_parts();
+        let mut sender = pool.sender(context.context(), info).await.unwrap();
+        sender
+            .send_prologue_typed(Some(StreamPrologueError::new(
+                "Generate Error: multimodal input is not supported by this backend",
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("multimodal input is not supported by this backend")
+                    .build(),
+            )))
+            .await
+            .unwrap();
+        match provider.await.unwrap() {
+            Err(error) => {
+                assert!(error.contains("multimodal input is not supported"));
+                assert_eq!(
+                    error.typed_error.as_ref().map(|e| e.error_type()),
+                    Some(ErrorType::Backend(BackendError::InvalidArgument)),
+                    "the worker's error type must survive the QUIC error frame"
+                );
+            }
             Ok(_) => panic!("terminal error unexpectedly opened a response stream"),
         }
         shutdown.cancel();

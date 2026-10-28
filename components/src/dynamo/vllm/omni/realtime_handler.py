@@ -52,8 +52,8 @@ from dynamo._core import Context
 
 from ..realtime import events as realtime_events
 from ..realtime.connection import RealtimeConnection, RealtimeTurn, drain_queue
-from ..realtime.handler import MAX_AUDIO_CHUNK_BYTES
-from ..realtime.serving import StreamingInputFactory
+from ..realtime.factories import StreamingInputFactory
+from ..realtime.handlers.transcription import MAX_AUDIO_CHUNK_BYTES
 
 logger = logging.getLogger(__name__)
 

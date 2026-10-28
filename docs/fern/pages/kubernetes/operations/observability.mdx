@@ -16,7 +16,7 @@ Dynamo provides four core signals for running deployments:
 - **Health status** is available through `/live` and `/health`. The operator uses these signals for
   Kubernetes health probes.
 
-The monitoring stack must already be installed. See [Install Observability](../installation/observability.md)
+The monitoring stack must already be installed. See [Install Observability](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/observability.md)
 for the Prometheus, Grafana, DCGM exporter, Loki, and Alloy setup.
 
 Use this page to:
@@ -383,8 +383,17 @@ A ready pod has passed the readiness probe configured by the operator.
 </Step>
 <Step title="Review the operator defaults" id="review-health-probe-defaults">
 
-The frontend uses an exec readiness probe that calls `/health`. Workers use the system port, which
-defaults to `9090`:
+The frontend uses HTTP probes on the `http` port, which defaults to `8000`:
+
+| Probe | Path | Initial delay | Period | Timeout | Failure threshold |
+| --- | --- | --- | --- | --- | --- |
+| Liveness | `/live` | 15 seconds | 10 seconds | 1 second | 3 |
+| Readiness | `/health` | 10 seconds | 10 seconds | 3 seconds | 3 |
+| Startup (runtime 1.6.0 and later) | `/live` | 0 seconds | 10 seconds | 1 second | 30 |
+
+The frontend startup probe allows five minutes for the sequential NATS and etcd connection waits and initialization. The operator generates this default for DGDs and standalone DynamoComponentDeployments (DCDs) created by operator 1.7.0 or later when the frontend runtime is 1.6.0 or later. A standalone DCD records its immutable operator origin on creation; existing DCDs are not backfilled on update. DGD-managed DCDs inherit the parent graph origin, including when a child is created by a newer operator. Frontend sidecars use the same workload origin and resolve their own image version. Existing workloads created by operator 1.6.x or earlier, and resources without a resolvable operator origin, retain their previous defaults during operator upgrades. To enable startup protection on those workloads, configure a complete `startupProbe` explicitly; applying it updates the affected Pod template. Older runtimes and images whose runtime version cannot be resolved keep the defaults without a generated startup probe. If you raise `NATS_STARTUP_CONNECT_TIMEOUT_SECONDS` or `ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS`, raise the startup probe allowance to cover the combined connection windows and initialization. See [Runtime Configuration](../../reference/components/runtime-configuration.mdx) for these timeouts.
+
+Workers use the system port, which defaults to `9090`:
 
 | Probe | Path | Period | Timeout | Failure threshold |
 | --- | --- | --- | --- | --- |
@@ -455,6 +464,46 @@ For a startup budget, calculate `failureThreshold` as the expected startup time 
 Multinode deployments adjust probes by backend and node role. Review
 [Multinode Orchestration](../installation/multinode-orchestration.md) before overriding probes on a
 multinode worker.
+
+### Use Model-Specific Frontend Readiness
+
+For a runtime that supports serving-aware model readiness, set the frontend's readiness probe to
+`/v1/models/<model>/ready`. Replace `org/model-name` below with the exact served model name; model
+names containing slashes are supported. Apply this override to the frontend component of your DGD:
+
+```yaml
+spec:
+  components:
+  - name: frontend
+    type: frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          readinessProbe:
+            httpGet:
+              path: /v1/models/org/model-name/ready
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+```
+
+Keep the existing startup and liveness probes independent of model readiness. The model probe
+returns `503` until the known model's required worker topology, serving engine, and HTTP routes are
+ready; it returns `404` before the frontend knows the model. Kubernetes keeps the frontend out of
+Ready Service endpoints while those probes fail. It does not gate inference requests arriving over
+existing connections.
+
+To inspect the endpoint manually, retain the response body on non-success statuses:
+
+```bash
+curl -i 'http://<frontend-service>:8000/v1/models/org/model-name/ready'
+```
+
+Diagnostic clients must read both `200` and `503` JSON responses. See
+[Model-Specific Serving Readiness](../../reference/observability/health-checks.mdx#model-specific-serving-readiness)
+for the status-code migration and the distinction between discovering a worker and being ready to serve.
 
 See [Health Checks](../../reference/observability/health-checks.mdx) for endpoint paths, responses,
 status codes, and active worker checks.

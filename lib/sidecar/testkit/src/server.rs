@@ -3,33 +3,54 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::Context;
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
+use tokio::sync::{oneshot, watch};
 
 pub struct TestServer {
     address: SocketAddr,
-    shutdown: Option<oneshot::Sender<()>>,
-    task: Option<JoinHandle<anyhow::Result<()>>>,
+    shutdown: watch::Sender<bool>,
+    completed: Option<oneshot::Receiver<anyhow::Result<()>>>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl TestServer {
     pub async fn start<F, Fut>(serve: F) -> anyhow::Result<Self>
     where
-        F: FnOnce(TcpListener, oneshot::Receiver<()>) -> Fut,
+        F: FnOnce(TcpListener, oneshot::Receiver<()>) -> Fut + Send + 'static,
         Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
     {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
-        let (shutdown, receiver) = oneshot::channel();
-        let task = tokio::spawn(serve(listener, receiver));
+        let (shutdown, mut stopping) = watch::channel(false);
+        let (completed_tx, completed) = oneshot::channel();
+        let thread = std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<()> {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                // The dedicated runtime owns tonic's connection tasks and RPC handlers too.
+                runtime.block_on(async move {
+                    let listener = TcpListener::from_std(listener)?;
+                    let (_graceful, receiver) = oneshot::channel();
+                    tokio::select! {
+                        biased;
+                        _ = stopping.wait_for(|stopped| *stopped) => Ok(()),
+                        result = serve(listener, receiver) => result,
+                    }
+                })
+            })();
+            let _ = completed_tx.send(result);
+        });
         Ok(Self {
             address,
-            shutdown: Some(shutdown),
-            task: Some(task),
+            shutdown,
+            completed: Some(completed),
+            thread: Some(thread),
         })
     }
 
@@ -38,15 +59,18 @@ impl TestServer {
     }
 
     pub async fn shutdown(&mut self) -> anyhow::Result<()> {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        if let Some(task) = self.task.as_mut() {
-            let result = tokio::time::timeout(Duration::from_secs(10), task)
+        self.shutdown.send_replace(true);
+        if let Some(completed) = self.completed.as_mut() {
+            tokio::time::timeout(Duration::from_secs(10), completed)
                 .await
-                .context("test server did not shut down")?;
-            self.task.take();
-            result.context("test server task failed")??;
+                .context("test server did not shut down")?
+                .context("test server thread failed")??;
+            self.completed.take();
+            self.thread
+                .take()
+                .unwrap()
+                .join()
+                .map_err(|_| anyhow::anyhow!("test server panicked"))?;
         }
         Ok(())
     }
@@ -54,11 +78,6 @@ impl TestServer {
 
 impl Drop for TestServer {
     fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
+        self.shutdown.send_replace(true);
     }
 }

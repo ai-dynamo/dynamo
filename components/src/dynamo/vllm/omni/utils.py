@@ -369,9 +369,13 @@ def build_image_generation_prompt(
 
 def build_original_prompt(request: dict, nvext: dict, height: int, width: int) -> Any:
     """Build the rich prompt dict that processor functions (ar2diffusion etc.) read."""
+    negative_prompt = request.get("negative_prompt")
+    if negative_prompt is None:
+        # /v1/videos has no top-level negative_prompt; it arrives in nvext.
+        negative_prompt = nvext.get("negative_prompt")
     prompt = OmniTextPrompt(
         prompt=request.get("prompt", ""),
-        negative_prompt=request.get("negative_prompt", None),
+        negative_prompt=negative_prompt,
     )
     if request.get("multi_modal_data"):
         prompt["multi_modal_data"] = request["multi_modal_data"]
@@ -429,8 +433,13 @@ async def parse_omni_request(
                 fps=nvext.get("fps"),
                 default_fps=default_video_fps,
             )
-            engine_inputs = OmniTextPrompt(prompt=request.get("prompt", ""))
             original_prompt = build_original_prompt(request, nvext, height, width)
+            engine_inputs = OmniTextPrompt(prompt=request.get("prompt", ""))
+            # A diffusion stage 0 reads the negative prompt from its engine
+            # prompt; original_prompt only reaches the stages after it.
+            negative_prompt = original_prompt.get("negative_prompt")
+            if negative_prompt is not None:
+                engine_inputs["negative_prompt"] = negative_prompt
         else:
             engine_inputs = build_image_generation_prompt(
                 request.get("prompt", ""),

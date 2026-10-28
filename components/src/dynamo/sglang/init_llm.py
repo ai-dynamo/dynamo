@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import gc
 import logging
 import os
 import time
@@ -26,6 +27,7 @@ from dynamo.sglang.health_check import (
     SglangPrefillHealthCheckPayload,
 )
 from dynamo.sglang.publisher import (
+    finish_worker_teardown,
     handle_non_leader_node,
     set_forward_pass_metrics_worker_id,
     setup_sgl_metrics,
@@ -34,16 +36,37 @@ from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
 
 
-async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
-    """Perform warmup request for prefill engine to reduce initial TTFT.
+async def _warmup_prefill_engine(
+    engine: sgl.Engine, server_args, metrics_task: asyncio.Task
+) -> None:
+    """Warm the prefill engine and stop metrics if warmup fails.
 
-    Raises on failure so the caller can prevent the worker from registering
-    with a broken engine (silent request drops). Delegates to
-    `_disagg.warmup_prefill_engine`.
+    Raises on failure so the worker never registers with a broken engine.
     """
     from dynamo.sglang._disagg import warmup_prefill_engine
 
-    await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
+    try:
+        await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
+    except asyncio.CancelledError:
+        await finish_worker_teardown(metrics_task, lambda: None, body_failed=True)
+        raise
+    except asyncio.TimeoutError as exc:
+        await finish_worker_teardown(metrics_task, lambda: None, body_failed=True)
+        logging.error("Prefill warmup timed out after 1800s — aborting worker startup")
+        raise RuntimeError(
+            "Prefill warmup timed out; worker cannot serve requests"
+        ) from exc
+    except Exception as exc:
+        await finish_worker_teardown(metrics_task, lambda: None, body_failed=True)
+        logging.error("Prefill warmup failed: %s — aborting worker startup", exc)
+        raise RuntimeError(f"Prefill warmup failed: {exc}") from exc
+
+
+def _freeze_gc_after_init(enabled: bool) -> None:
+    if enabled:
+        collected = gc.collect()
+        gc.freeze()
+        logging.info("Froze SGLang worker GC objects after collecting %d", collected)
 
 
 async def init_decode(
@@ -94,6 +117,7 @@ async def init_decode(
         # engine.tokenizer_manager is SGLang's MultiTokenizerRouter here and cannot
         # serve requests; gateway children do, this process keeps the engine alive.
         try:
+            _freeze_gc_after_init(dynamo_args.freeze_gc_after_init)
             await serve_via_gateway_children(
                 engine, gateway_count, shutdown_event, load_time=load_time
             )
@@ -167,6 +191,8 @@ async def init_decode(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
         ).to_dict()
 
+    _freeze_gc_after_init(dynamo_args.freeze_gc_after_init)
+
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
         logging.warning(
@@ -174,6 +200,7 @@ async def init_decode(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
+    body_failed = True
     try:
         gather_tasks = [
             generate_endpoint.serve_endpoint(
@@ -209,23 +236,22 @@ async def init_decode(
                 needs=decode_needs,
                 # Decode workers serve the LoRA load endpoints, so they may advertise capacity.
                 serves_lora_load=True,
+                forwards_kv_hints=True,
             ),
         ]
         await asyncio.gather(*gather_tasks)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
+    else:
+        body_failed = False
     finally:
-        metrics_task.cancel()
-        try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled")
-            pass
-        handler.cleanup()
-        if run_deferred_handlers is not None:
-            logging.info("Running deferred handlers")
-            await run_deferred_handlers()
+        await finish_worker_teardown(
+            metrics_task,
+            handler.cleanup,
+            run_deferred_handlers,
+            body_failed=body_failed,
+        )
 
 
 async def init_prefill(
@@ -314,16 +340,7 @@ async def init_prefill(
         await handle_non_leader_node(engine, publisher, metrics_task)
         return
 
-    try:
-        await _warmup_prefill_engine(engine, server_args)
-    except asyncio.TimeoutError as e:
-        logging.error("Prefill warmup timed out after 1800s — aborting worker startup")
-        raise RuntimeError(
-            "Prefill warmup timed out; worker cannot serve requests"
-        ) from e
-    except Exception as e:
-        logging.error(f"Prefill warmup failed: {e} — aborting worker startup")
-        raise RuntimeError(f"Prefill warmup failed: {e}") from e
+    await _warmup_prefill_engine(engine, server_args, metrics_task)
 
     handler = PrefillWorkerHandler(
         engine, config, publisher, generate_endpoint, shutdown_event
@@ -336,6 +353,7 @@ async def init_prefill(
 
     ready_event = asyncio.Event()
 
+    body_failed = True
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -379,19 +397,18 @@ async def init_prefill(
                 # Prefill workers also serve the LoRA load endpoints (init_prefill), so they may
                 # advertise capacity.
                 serves_lora_load=True,
+                forwards_kv_hints=True,
             ),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
+    else:
+        body_failed = False
     finally:
-        metrics_task.cancel()
-        try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled")
-            pass
-        handler.cleanup()
-        if run_deferred_handlers is not None:
-            logging.info("Running deferred handlers")
-            await run_deferred_handlers()
+        await finish_worker_teardown(
+            metrics_task,
+            handler.cleanup,
+            run_deferred_handlers,
+            body_failed=body_failed,
+        )

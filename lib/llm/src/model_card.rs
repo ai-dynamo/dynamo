@@ -23,6 +23,7 @@ use crate::local_model::runtime_config::{
 };
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
+use crate::utils::json::canonicalize_json_object_keys;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_kv_router::identity::{ExplicitIdentityMap, IndexerIdentitySpec};
@@ -33,7 +34,11 @@ use tokenizers::Tokenizer as HfTokenizer;
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
-const DEFAULT_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const FALLBACK_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DEFAULT_TOKENIZER_CACHE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+// Cache RSS measures 1.3-3.3x the token-ID budget once per-entry metadata is included.
+const TOKENIZER_CACHE_MEMORY_FRACTION: u64 = 16;
+static TOKENIZER_CACHE: OnceLock<crate::tokenizers::SharedTokenizerCache> = OnceLock::new();
 
 fn append_runtime_contract_checksum(
     bytes: &mut Vec<u8>,
@@ -55,19 +60,6 @@ fn append_runtime_contract_checksum(
     bytes.extend_from_slice(key.as_bytes());
     bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
     bytes.extend_from_slice(&value);
-}
-
-fn canonicalize_json_object_keys(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Array(values) => {
-            values.iter_mut().for_each(canonicalize_json_object_keys);
-        }
-        serde_json::Value::Object(map) => {
-            map.values_mut().for_each(canonicalize_json_object_keys);
-            map.sort_keys();
-        }
-        _ => {}
-    }
 }
 
 fn append_indexer_identity_checksum(bytes: &mut Vec<u8>, spec: &IndexerIdentitySpec) {
@@ -99,23 +91,117 @@ fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
     !matches!(value, Some("0"))
 }
 
-fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
-    match value {
-        Some(value) => match value.parse::<usize>() {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::warn!(
-                    env_var = "DYN_TOKENIZER_CACHE_BYTES",
-                    value,
-                    default = DEFAULT_TOKENIZER_CACHE_BYTES,
-                    %error,
-                    "Failed to parse tokenizer cache byte budget; using default"
-                );
-                DEFAULT_TOKENIZER_CACHE_BYTES
-            }
-        },
-        None => DEFAULT_TOKENIZER_CACHE_BYTES,
+#[cfg(target_os = "linux")]
+fn tokenizer_cache_memory_limit() -> Option<u64> {
+    // sysinfo's first process refresh raises the soft RLIMIT_NOFILE to the hard limit.
+    // Restore it so the frontend's DYN_FRONTEND_FD_LIMIT_TARGET still applies.
+    let mut nofile = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit only writes the current limits into the provided struct.
+    let saved = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut nofile) } == 0;
+    let limit = read_cgroup_memory_limit();
+    // SAFETY: restores the limits read above; lowering the soft limit needs no privileges.
+    if saved && unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &nofile) } != 0 {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            "Failed to restore RLIMIT_NOFILE after memory limit detection"
+        );
     }
+    limit
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tokenizer_cache_memory_limit() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn read_cgroup_memory_limit() -> Option<u64> {
+    let pid = sysinfo::get_current_pid().ok()?;
+    let mut system = sysinfo::System::new();
+    system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().without_tasks(),
+    );
+    // TODO: sysinfo 0.40 adds mountinfo path resolution, hybrid cgroup fixes, and read-failure
+    // propagation (https://github.com/GuillaumeGomez/sysinfo/pull/1723,
+    // https://github.com/GuillaumeGomez/sysinfo/pull/1753). It returns `None` when no finite
+    // limit exists, and `System::new` returns a `Result`.
+    let cgroup_total = system.process(pid)?.cgroup_limits()?.total_memory;
+    finite_memory_limit(cgroup_total, system.total_memory())
+}
+
+/// sysinfo reports host `MemTotal` when no cgroup on the path sets a lower limit. Limits
+/// within 10% of host memory, such as Kubernetes node allocatable on `kubepods.slice`, are
+/// treated as no limit too.
+#[cfg(target_os = "linux")]
+fn finite_memory_limit(cgroup_total: u64, mem_total: u64) -> Option<u64> {
+    (cgroup_total < mem_total - mem_total / 10).then_some(cgroup_total)
+}
+
+fn tokenizer_cache_budget(
+    value: Option<&str>,
+    memory_limit: impl FnOnce() -> Option<u64>,
+) -> (usize, &'static str) {
+    let Some(value) = value else {
+        return match memory_limit() {
+            Some(limit) => (
+                usize::try_from(
+                    (limit / TOKENIZER_CACHE_MEMORY_FRACTION)
+                        .min(MAX_DEFAULT_TOKENIZER_CACHE_BYTES),
+                )
+                .unwrap_or(usize::MAX),
+                "cgroup_limit",
+            ),
+            None => (FALLBACK_TOKENIZER_CACHE_BYTES, "fallback"),
+        };
+    };
+
+    match value.trim().parse::<usize>() {
+        Ok(bytes) => (bytes, "DYN_TOKENIZER_CACHE_BYTES"),
+        Err(error) => {
+            tracing::warn!(
+                env_var = "DYN_TOKENIZER_CACHE_BYTES",
+                value,
+                default = FALLBACK_TOKENIZER_CACHE_BYTES,
+                %error,
+                "Failed to parse tokenizer cache byte budget; using default"
+            );
+            (FALLBACK_TOKENIZER_CACHE_BYTES, "fallback")
+        }
+    }
+}
+
+fn shared_tokenizer_cache() -> &'static crate::tokenizers::SharedTokenizerCache {
+    TOKENIZER_CACHE.get_or_init(|| {
+        // Lossy conversion lets non-UTF-8 values reach the parse warning.
+        let value = std::env::var_os("DYN_TOKENIZER_CACHE_BYTES")
+            .map(|value| value.to_string_lossy().into_owned());
+        let mut memory_limit = None;
+        let (cache_bytes, source) = tokenizer_cache_budget(value.as_deref(), || {
+            memory_limit = tokenizer_cache_memory_limit();
+            memory_limit
+        });
+        tracing::info!(
+            cache_bytes,
+            source,
+            memory_limit = ?memory_limit,
+            "initializing process-wide tokenizer cache"
+        );
+        crate::tokenizers::SharedTokenizerCache::new(cache_bytes)
+    })
+}
+
+fn tokenizer_cache_namespace(checksum: &str, backend: &str) -> Vec<u8> {
+    let mut namespace = Vec::with_capacity(8 + checksum.len() + backend.len());
+    namespace.extend_from_slice(&(checksum.len() as u64).to_le_bytes());
+    namespace.extend_from_slice(checksum.as_bytes());
+    namespace.extend_from_slice(backend.as_bytes());
+    namespace
 }
 
 fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenUsageFn {
@@ -134,12 +220,18 @@ fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenU
 fn instrumented_tokenizer_cache(
     raw: Arc<dyn crate::tokenizers::traits::Tokenizer>,
     special_tokens: Vec<String>,
-    cache_bytes: usize,
+    shared_cache: &crate::tokenizers::SharedTokenizerCache,
     cache_extend: bool,
     model: &str,
+    namespace: &[u8],
 ) -> Result<Arc<dyn crate::tokenizers::traits::Tokenizer>> {
-    let cached = crate::tokenizers::CachedTokenizer::new(raw, special_tokens, cache_bytes)
-        .context("failed to initialize tokenizer prefix cache")?;
+    let cached = crate::tokenizers::CachedTokenizer::new_with_cache(
+        raw,
+        special_tokens,
+        shared_cache.clone(),
+        namespace,
+    )
+    .context("failed to initialize tokenizer prefix cache")?;
 
     Ok(Arc::new(
         cached
@@ -174,6 +266,15 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Exclusive bound for client token ids: the largest id plus one, added tokens
+/// included. Ids can have gaps, so the token count is not a bound.
+fn hf_token_id_bound(hf: &HfTokenizer) -> Option<usize> {
+    hf.get_vocab(true)
+        .into_values()
+        .max()
+        .map(|id| id as usize + 1)
 }
 
 /// serde `deserialize_with` that maps an explicitly-present value -- *including
@@ -775,12 +876,14 @@ fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
     Ok((repo.to_string(), filename.to_string()))
 }
 
+// Some(uri) selects a file location; None asks the caller to resolve the NGC
+// artifact. The file is still required, and its MDC checksum is unchanged.
 fn checked_file_uri(
     cf: &CheckedFile,
     source: &str,
     local_model_path: Option<&Path>,
     is_custom: bool,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Option<String>> {
     use std::borrow::Cow;
 
     // Coerce path-only into a synthetic file:// URL up front so the
@@ -800,10 +903,10 @@ fn checked_file_uri(
     };
 
     match url.scheme() {
-        "http" | "https" | "hf" => Ok(url.to_string()),
+        "http" | "https" | "hf" => Ok(Some(url.to_string())),
         "file" => {
-            // worker location → --model-path → hf://. Basename + checksum preserved.
-            // is_custom slots aren't published on HF, so rung 4 errors instead.
+            // Prefer the worker location, then the frontend's --model-path.
+            // Only model-provided files can fall back to the original HF/NGC source.
             let path = url
                 .to_file_path()
                 .map_err(|()| anyhow::anyhow!("invalid file uri: {url}"))?;
@@ -812,12 +915,12 @@ fn checked_file_uri(
                 .and_then(|f| f.to_str())
                 .with_context(|| format!("no filename in file uri: {url}"))?;
             if path.exists() {
-                return Ok(url.to_string());
+                return Ok(Some(url.to_string()));
             }
             if let Some(prefix) = local_model_path {
                 let local = prefix.join(filename);
                 if local.exists() {
-                    return file_uri_for(&local);
+                    return file_uri_for(&local).map(Some);
                 }
             }
             if is_custom {
@@ -830,9 +933,12 @@ fn checked_file_uri(
                     path.display()
                 );
             }
-            Ok(format!("hf://{source}/{filename}"))
+            if source.starts_with("ngc://") {
+                return Ok(None);
+            }
+            Ok(Some(format!("hf://{source}/{filename}")))
         }
-        _ => Ok(url.to_string()),
+        _ => Ok(Some(url.to_string())),
     }
 }
 
@@ -875,7 +981,7 @@ pub struct ModelDeploymentCard {
     // Cache the Slugified display_name so we can share references to it
     slug: Slug,
 
-    /// Original HuggingFace repository path for downloading model files.
+    /// Original Hugging Face repository, NGC URI, or local model path.
     /// When `display_name` is customized (e.g., via `--served-model-name`),
     /// this field preserves the original repository path needed for downloads.
     /// Falls back to `display_name` if not set.
@@ -1013,6 +1119,10 @@ pub struct ModelDeploymentCard {
 
     #[serde(skip, default)]
     checksum: OnceLock<String>,
+
+    /// Set when this card loads its tokenizer. See `hf_token_id_bound`.
+    #[serde(skip, default)]
+    tokenizer_id_bound: OnceLock<Option<usize>>,
 }
 
 /// LoRA adapter information for routing decisions
@@ -1117,6 +1227,7 @@ impl ModelDeploymentCard {
     pub(crate) fn for_mdc_wire(&self) -> Self {
         let mut card = self.clone();
         card.legacy_context_length = Some(self.effective_context_length());
+        card.runtime_config.normalize_structural_tag_compatibility();
         card
     }
 
@@ -1298,7 +1409,16 @@ impl ModelDeploymentCard {
     /// - `DYN_TOKENIZER_FALLBACK=0` — fallback control for callers without explicit runtime config
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
-    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 64 MiB)
+    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — combined token-ID byte budget for all models
+    ///   in this process. On Linux, the default is 1/16 of this process's cgroup memory
+    ///   limit, capped at 8 GiB. Without a cgroup limit below 90% of host memory, or on
+    ///   other platforms, the default is 64 MiB. Valid overrides, including zero, bypass
+    ///   detection; surrounding whitespace is ignored and unparseable values use 64 MiB.
+    ///   The budget is read once when the first eligible tokenizer creates the shared
+    ///   cache and is not resized if the limit changes later. Models compete for
+    ///   capacity without reserved shares.
+    ///   Cache metadata and tokenizer objects are excluded, so resident memory is
+    ///   typically 1.3-3.3x the budget; eviction is deferred.
     /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
     ///   (when the cache is enabled) a partial hit also caches the new suffix so each
     ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
@@ -1306,6 +1426,12 @@ impl ModelDeploymentCard {
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         self.tokenizer_with_options(Default::default(), false)
+    }
+
+    /// `None` until this card loads its tokenizer, then `Some` of the
+    /// tokenizer's token id bound. That bound is `None` if unknown (tiktoken).
+    pub(crate) fn tokenizer_id_bound(&self) -> Option<Option<usize>> {
+        self.tokenizer_id_bound.get().copied()
     }
 
     pub(crate) fn embedding_tokenizer_with_options(
@@ -1329,8 +1455,6 @@ impl ModelDeploymentCard {
 
         let cache_enabled =
             tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
-        let cache_bytes =
-            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
         // Partial-hit extension is on by default; disable with DYN_TOKENIZER_CACHE_EXTEND=0.
         let cache_extend = !matches!(
             std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
@@ -1367,6 +1491,8 @@ impl ModelDeploymentCard {
                 if let Some(model_dir) = p.parent() {
                     crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
                 }
+                self.tokenizer_id_bound
+                    .get_or_init(|| hf_token_id_bound(&hf));
 
                 // Disable any truncation baked into `tokenizer.json`: the HF
                 // `tokenizers` crate honors it on `encode()`, silently clipping every
@@ -1410,14 +1536,17 @@ impl ModelDeploymentCard {
                 };
 
                 // Pick the inner backend.
-                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = match tokenizer_backend {
-                    TokenizerBackend::Default => Arc::new(wrap_hf(hf)),
+                let (raw, cache_backend): (
+                    Arc<dyn crate::tokenizers::traits::Tokenizer>,
+                    TokenizerBackend,
+                ) = match tokenizer_backend {
+                    TokenizerBackend::Default => (Arc::new(wrap_hf(hf)), TokenizerBackend::Default),
                     TokenizerBackend::Fastokens => {
                         if let Some(path_str) = p.to_str() {
                             match crate::tokenizers::FastTokenizer::from_file(path_str) {
                                 Ok(fast) => {
                                     tracing::info!("Using fastokens tokenizer backend");
-                                    Arc::new(fast)
+                                    (Arc::new(fast), TokenizerBackend::Fastokens)
                                 }
                                 Err(e) => {
                                     if !is_fallback_enabled {
@@ -1429,7 +1558,7 @@ impl ModelDeploymentCard {
                                         %e,
                                         "Failed to load fastokens, falling back to HuggingFace"
                                     );
-                                    Arc::new(wrap_hf(hf))
+                                    (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
                                 }
                             }
                         } else {
@@ -1443,7 +1572,7 @@ impl ModelDeploymentCard {
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
                             );
-                            Arc::new(wrap_hf(hf))
+                            (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
                         }
                     }
                     TokenizerBackend::Basetenkenizer => {
@@ -1451,7 +1580,7 @@ impl ModelDeploymentCard {
                             match crate::tokenizers::BasetenTokenizer::from_file(path_str) {
                                 Ok(baseten) => {
                                     tracing::info!("Using basetenkenizer tokenizer backend");
-                                    Arc::new(baseten)
+                                    (Arc::new(baseten), TokenizerBackend::Basetenkenizer)
                                 }
                                 Err(e) => {
                                     if !is_fallback_enabled {
@@ -1463,7 +1592,7 @@ impl ModelDeploymentCard {
                                         %e,
                                         "Failed to load basetenkenizer, falling back to HuggingFace"
                                     );
-                                    Arc::new(wrap_hf(hf))
+                                    (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
                                 }
                             }
                         } else {
@@ -1477,14 +1606,17 @@ impl ModelDeploymentCard {
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping basetenkenizer; falling back to HuggingFace"
                             );
-                            Arc::new(wrap_hf(hf))
+                            (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
                         }
                     }
                 };
 
                 if cache_enabled && !options.add_special_tokens {
+                    let shared_cache = shared_tokenizer_cache();
+                    let namespace =
+                        tokenizer_cache_namespace(self.mdcsum(), cache_backend.as_str());
                     tracing::info!(
-                        cache_bytes,
+                        cache_bytes = shared_cache.max_memory_bytes(),
                         cache_extend,
                         specials = specials.len(),
                         "wrapping tokenizer in L1 prefix cache",
@@ -1492,9 +1624,10 @@ impl ModelDeploymentCard {
                     instrumented_tokenizer_cache(
                         raw,
                         specials,
-                        cache_bytes,
+                        shared_cache,
                         cache_extend,
                         self.name(),
+                        &namespace,
                     )?
                 } else {
                     // The prefix cache encodes text in boundary-delimited
@@ -1515,12 +1648,16 @@ impl ModelDeploymentCard {
                     .with_context(|| {
                         format!("Failed to load tiktoken tokenizer from {}", p.display())
                     })?;
+                // tiktoken does not expose its ids.
+                self.tokenizer_id_bound.get_or_init(|| None);
 
                 let specials = tokenizer.special_tokens().to_vec();
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
                 if cache_enabled {
+                    let shared_cache = shared_tokenizer_cache();
+                    let namespace = tokenizer_cache_namespace(self.mdcsum(), "tiktoken");
                     tracing::info!(
-                        cache_bytes,
+                        cache_bytes = shared_cache.max_memory_bytes(),
                         cache_extend,
                         boundaries = specials.len(),
                         "wrapping tiktoken tokenizer in L1 prefix cache",
@@ -1528,9 +1665,10 @@ impl ModelDeploymentCard {
                     instrumented_tokenizer_cache(
                         raw,
                         specials,
-                        cache_bytes,
+                        shared_cache,
                         cache_extend,
                         self.name(),
+                        &namespace,
                     )?
                 } else {
                     raw
@@ -1655,16 +1793,27 @@ impl ModelDeploymentCard {
         let blobs = mdc_blobs_dir()?;
         let local_dir = mdc_local_dir(&self.slug, &mdcsum)?;
 
-        let entries: Vec<(String, CheckedFile)> = self
-            .iter_metadata_files()
-            .into_iter()
-            .map(|(cf, is_custom)| {
-                Ok((
-                    checked_file_uri(cf, &source, local_model_path, is_custom)?,
-                    cf.clone(),
-                ))
-            })
-            .collect::<anyhow::Result<_>>()?;
+        let mut entries = Vec::new();
+        let mut ngc_snapshot = None;
+        for (cf, is_custom) in self.iter_metadata_files() {
+            let uri = match checked_file_uri(cf, &source, local_model_path, is_custom)? {
+                Some(uri) => uri,
+                None => {
+                    let snapshot = match &ngc_snapshot {
+                        Some(snapshot) => snapshot,
+                        None => ngc_snapshot.insert(
+                            crate::hub::from_hf(&source, /* ignore_weights = */ true).await?,
+                        ),
+                    };
+                    // The MDC supplies the filename and expected checksum. Retry
+                    // in the resolved directory; a still-missing file is an error.
+                    checked_file_uri(cf, &source, Some(snapshot), is_custom)?.with_context(
+                        || format!("NGC metadata file missing after fetching {source}: {cf}"),
+                    )?
+                }
+            };
+            entries.push((uri, cf.clone()));
+        }
 
         // Pre-resolve hf:// repos once per unique repo; otherwise the
         // resolve loop would call hub::from_hf N times for one model.
@@ -1926,6 +2075,7 @@ impl ModelDeploymentCard {
             indexer_identity: None,
             extra_files: Vec::new(),
             checksum: OnceLock::new(),
+            tokenizer_id_bound: OnceLock::new(),
         })
     }
 }
@@ -2495,16 +2645,105 @@ mod tests {
     }
 
     #[test]
-    fn tokenizer_cache_bytes_defaults_to_64_mib_and_accepts_valid_overrides() {
+    fn tokenizer_cache_budget_scales_with_memory_limit() {
+        const MIB: usize = 1024 * 1024;
+        const GIB: u64 = 1024 * 1024 * 1024;
+        for (limit, expected) in [
+            (Some(4 * GIB), (256 * MIB, "cgroup_limit")),
+            (Some(u64::MAX), (8192 * MIB, "cgroup_limit")),
+            (None, (64 * MIB, "fallback")),
+        ] {
+            assert_eq!(
+                super::tokenizer_cache_budget(None, || limit),
+                expected,
+                "limit={limit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tokenizer_cache_budget_overrides_bypass_memory_detection() {
+        const FALLBACK: usize = super::FALLBACK_TOKENIZER_CACHE_BYTES;
+        for (value, expected) in [
+            ("0", (0, "DYN_TOKENIZER_CACHE_BYTES")),
+            (" 1024\n", (1024, "DYN_TOKENIZER_CACHE_BYTES")),
+            ("512MiB", (FALLBACK, "fallback")),
+            ("", (FALLBACK, "fallback")),
+        ] {
+            assert_eq!(
+                super::tokenizer_cache_budget(Some(value), || panic!("unexpected detection")),
+                expected,
+                "value={value:?}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tokenizer_cache_finite_memory_limit_ignores_host_memory_total() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        for (limit, mem_total, expected) in [
+            (89 * GIB, 100 * GIB, Some(89 * GIB)),
+            (90 * GIB, 100 * GIB, None),
+            (100 * GIB, 100 * GIB, None),
+        ] {
+            assert_eq!(
+                super::finite_memory_limit(limit, mem_total),
+                expected,
+                "limit={limit}, mem_total={mem_total}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tokenizer_cache_memory_limit_preserves_nofile_soft_limit() {
+        const CHILD: &str = "DYNAMO_TOKENIZER_CACHE_NOFILE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // sysinfo changes RLIMIT_NOFILE only on its first process refresh, so detect
+            // in a fresh process.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "model_card::tests::tokenizer_cache_memory_limit_preserves_nofile_soft_limit",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        // Stays below the hard limit even when a container sets it to 1024.
+        const SOFT: libc::rlim_t = 64;
+        let mut nofile = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit only writes the current limits into the provided struct.
         assert_eq!(
-            super::tokenizer_cache_bytes(None),
-            super::DEFAULT_TOKENIZER_CACHE_BYTES
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut nofile) },
+            0
         );
-        assert_eq!(super::tokenizer_cache_bytes(Some("1024")), 1024);
+        assert!(nofile.rlim_max > SOFT);
+        nofile.rlim_cur = SOFT;
+        // SAFETY: lowering the soft limit below the hard limit needs no privileges.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &nofile) }, 0);
+
+        super::tokenizer_cache_memory_limit();
+
+        // SAFETY: getrlimit only writes the current limits into the provided struct.
         assert_eq!(
-            super::tokenizer_cache_bytes(Some("invalid")),
-            super::DEFAULT_TOKENIZER_CACHE_BYTES
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut nofile) },
+            0
         );
+        assert_eq!(nofile.rlim_cur, SOFT);
     }
 
     #[test]
@@ -2812,6 +3051,70 @@ mod tests {
         .await
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn ngc_identity_survives_cache_relocation() -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let source = "ngc://example/team/model:1";
+        let worker_a = hf_cache_fixture(&workspace.path().join("worker-a"))?;
+        let worker_b = hf_cache_fixture(&workspace.path().join("worker-b"))?;
+        let cache_root = workspace.path().join("ngc-cache");
+        let snapshot = cache_root.join("ngc/example/team/models/model/1");
+        std::fs::create_dir_all(&snapshot)?;
+        for entry in std::fs::read_dir(&worker_a)? {
+            let entry = entry?;
+            std::fs::copy(entry.path(), snapshot.join(entry.file_name()))?;
+        }
+
+        let overlay = workspace.path().join("overlay");
+        std::fs::create_dir(&overlay)?;
+        std::fs::copy(worker_a.join("config.json"), overlay.join("config.json"))?;
+        // The explicit overlay must win even when another file needs the NGC cache.
+        std::fs::write(snapshot.join("config.json"), b"{}")?;
+
+        temp_env::async_with_vars(
+            [
+                ("HOME", Some(workspace.path())),
+                ("MODEL_EXPRESS_CACHE_DIRECTORY", Some(cache_root.as_path())),
+            ],
+            async {
+                let mut cards = Vec::new();
+                for path in [&worker_a, &worker_b] {
+                    let model = crate::local_model::LocalModelBuilder::default()
+                        .model_path(path.clone())
+                        .source_path(source.into())
+                        .model_name(Some("public-model".to_string()))
+                        .build()
+                        .await?;
+                    cards.push(model.into_card());
+                }
+                assert_eq!(cards[0].source_path(), source);
+                assert_eq!(cards[0].mdcsum(), cards[1].mdcsum());
+                let expected_sum = cards[1].mdcsum().to_string();
+                std::fs::remove_dir_all(workspace.path().join("worker-a"))?;
+
+                cards[0].download_config(Some(&overlay)).await?;
+                // Deserialization clears the cached mdcsum so the next check recomputes it.
+                let resolved: ModelDeploymentCard = serde_json::from_str(&cards[0].to_json()?)?;
+                assert_eq!(resolved.source_path(), source);
+                assert_eq!(resolved.mdcsum(), expected_sum);
+                assert_eq!(
+                    std::fs::read(resolved.local_dir().join("config.json"))?,
+                    std::fs::read(overlay.join("config.json"))?
+                );
+                assert!(resolved.local_dir().join("tokenizer.json").exists());
+                assert!(
+                    resolved
+                        .local_dir()
+                        .join("special_tokens_map.json")
+                        .exists()
+                );
+                Ok::<_, anyhow::Error>(())
+            },
+        )
+        .await
+    }
+
     /// Build a `CheckedFile` whose wire `path` field is `repr` — parses
     /// as a URL when `repr` has a scheme, otherwise as a `PathBuf`.
     fn cf_for(repr: &str) -> super::CheckedFile {
@@ -2863,7 +3166,7 @@ mod tests {
             let got =
                 super::checked_file_uri(&cf_for(url), "Qwen/Qwen3-0.6B", Some(tmp.path()), false)
                     .unwrap();
-            assert_eq!(got, url);
+            assert_eq!(got.as_deref(), Some(url));
         }
     }
 
@@ -2877,7 +3180,7 @@ mod tests {
             super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path()), false).unwrap();
         assert_eq!(
             got,
-            url::Url::from_file_path(&local_cfg).unwrap().to_string()
+            Some(url::Url::from_file_path(&local_cfg).unwrap().to_string())
         );
     }
 
@@ -2902,7 +3205,7 @@ mod tests {
         let cf = cf_for("/nonexistent/worker/path/template.jinja");
 
         let got = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, false).unwrap();
-        assert_eq!(got, "hf://Qwen/Qwen3-0.6B/template.jinja");
+        assert_eq!(got.as_deref(), Some("hf://Qwen/Qwen3-0.6B/template.jinja"));
 
         let err = super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", None, true)
             .expect_err("custom slot must error instead of falling back to HF");
@@ -2913,6 +3216,14 @@ mod tests {
             msg.contains("--model-path") || msg.contains("shared mount"),
             "wrong error: {msg}"
         );
+
+        let source = "ngc://example/team/model:1";
+        assert!(
+            super::checked_file_uri(&cf, source, None, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(super::checked_file_uri(&cf, source, None, true).is_err());
     }
 
     /// Dropping `stage_and_rename`'s future mid-await (caller cancellation)
@@ -3033,6 +3344,9 @@ mod tests {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+    use crate::local_model::runtime_config::{
+        StructuralTagConfig, StructuralTagSchemaMode, StructuralTagScope,
+    };
 
     #[test]
     fn architectural_context_prefers_config_then_text_config_then_tokenizer() -> anyhow::Result<()>
@@ -3239,6 +3553,24 @@ mod ownership_tests {
     }
 
     #[test]
+    fn structural_tag_wire_includes_fields_for_older_frontends() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.runtime_config.structural_tag = Some(StructuralTagConfig {
+            scope: StructuralTagScope::Always,
+            schema: StructuralTagSchemaMode::Strict,
+            ..Default::default()
+        });
+
+        let wire: serde_json::Value = serde_json::from_str(&card.to_json().unwrap()).unwrap();
+        let runtime = &wire["runtime_config"];
+        assert_eq!(runtime["structural_tag_mode"], "on");
+        assert_eq!(runtime["structural_tag_scope"], "always");
+        assert_eq!(runtime["structural_tag_schema"], "strict");
+        assert_eq!(runtime["structural_tag"]["scope"], "always");
+        assert_eq!(runtime["structural_tag"]["schema"], "strict");
+    }
+
+    #[test]
     fn tensor_config_serializes_at_card_top_level() {
         let mut card = ModelDeploymentCard::with_name_only("tensor");
         card.tensor_model_config = Some(TensorModelConfig {
@@ -3429,12 +3761,32 @@ mod ownership_tests {
         );
         let nemotron = card_with_contract(
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"video_pruning_rate": 0.5}),
+            serde_json::json!({
+                "video_pruning_rate": 0.5,
+                "sampling": {"max_frames": 64, "fps": 2.0, "frames": [{"z": 1, "a": 2}, {"y": [3, 1, 2]}]},
+                "enabled": true,
+                "note": null,
+            }),
+        );
+        let same_nemotron = card_with_contract(
+            VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "note": null,
+                "enabled": true,
+                "sampling": {"frames": [{"a": 2, "z": 1}, {"y": [3, 1, 2]}], "fps": 2.0, "max_frames": 64},
+                "video_pruning_rate": 0.5,
+            }),
         );
         let different_nemotron = card_with_contract(
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"video_pruning_rate": 0.25}),
+            serde_json::json!({
+                "video_pruning_rate": 0.5,
+                "sampling": {"max_frames": 64, "fps": 2.0, "frames": [{"z": 1, "a": 3}, {"y": [3, 1, 2]}]},
+                "enabled": true,
+                "note": null,
+            }),
         );
+
         let unrelated = card_with_contract("unrelated_runtime_metadata", serde_json::json!(true));
 
         assert_eq!(missing.mdcsum(), unrelated.mdcsum());
@@ -3446,6 +3798,12 @@ mod ownership_tests {
         assert_ne!(missing.mdcsum(), nemotron.mdcsum());
         assert_ne!(nemotron.mdcsum(), different_nemotron.mdcsum());
         assert_ne!(qwen.mdcsum(), nemotron.mdcsum());
+        assert_eq!(nemotron.mdcsum(), same_nemotron.mdcsum());
+        // Pins the separator, length framing, and canonical bytes of the contract.
+        assert_eq!(
+            nemotron.mdcsum(),
+            "88381ff5b5f10389bacc63e1e2bac947a76ffc5b32c4864b7499f0d10928a96e"
+        );
     }
 }
 

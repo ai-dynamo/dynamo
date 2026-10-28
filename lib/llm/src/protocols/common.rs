@@ -58,6 +58,7 @@ pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Erro
 pub mod extensions;
 pub mod input_trigger;
 pub mod llm_backend;
+pub mod metadata_upload;
 pub mod metrics;
 pub mod postprocessor;
 pub mod preprocessor;
@@ -458,6 +459,8 @@ pub struct SamplingOptions {
     /// Whether to include the stop string in the output.
     pub include_stop_str_in_output: Option<bool>,
 
+    pub logit_bias: Option<std::collections::HashMap<u32, f32>>,
+
     /// Guided Decoding Options
     pub guided_decoding: Option<GuidedDecodingOptions>,
 }
@@ -659,6 +662,11 @@ impl SamplingOptions {
 /// Collection of options that control what information the inference engine returns in the response.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct OutputOptions {
+    /// Preserve matched stop strings and stop/EOS token text during decoding.
+    /// Omitted by older frontends; stop-token visibility is frontend-owned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_stop_trim: Option<bool>,
+
     /// Number of log probabilities to return per output token.
     /// Note that the implementation follows the OpenAI API: The return
     /// result includes the log probabilities on the `logprobs` most likely

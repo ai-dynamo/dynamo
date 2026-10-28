@@ -33,4 +33,8 @@ pub use transport::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, format_error_chain, startup_deadline,
 };
 
-pub use run::run;
+pub use run::{EngineBootstrapResult, run, run_task, run_with_drt};
+
+#[cfg(test)]
+#[path = "transport/tests.rs"]
+mod transport_tests;

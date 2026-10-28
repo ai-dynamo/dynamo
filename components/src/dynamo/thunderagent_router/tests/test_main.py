@@ -105,6 +105,7 @@ class FakeScheduler:
             admission_epoch=admission_epoch,
         )
         self.back_fills: list[tuple[Optional[ReplicaKey], int]] = []
+        self.completed_requests: list[tuple[str, int, int]] = []
 
     async def before_request(self, program_id, estimated_prompt_tokens=0):
         return self._decision
@@ -117,32 +118,41 @@ class FakeScheduler:
         pass
 
     async def after_request(self, program_id, prompt_tokens, completion_tokens):
-        pass
+        self.completed_requests.append((program_id, prompt_tokens, completion_tokens))
 
 
 class FakeKvRouter:
     """Captures the outgoing request and replays fixed chunks."""
 
-    def __init__(self, chunks: Optional[list[dict[str, Any]]] = None) -> None:
+    def __init__(
+        self, chunks: Optional[list[dict[str, Any]]] = None, *, error=None
+    ) -> None:
         self.chunks = chunks if chunks is not None else []
+        self.error = error
         self.sent: Optional[dict[str, Any]] = None
+        self.context: Any = None
 
-    async def generate_from_request(self, preprocessed):
+    async def generate_from_request(
+        self, preprocessed, response_buffer_size=100, context=None
+    ):
         self.sent = preprocessed
+        self.context = context
 
         async def stream():
             for chunk in self.chunks:
                 yield chunk
+            if self.error is not None:
+                raise self.error
 
         return stream()
 
 
-async def drive(handler: ThunderAgentRouterHandler) -> None:
+async def drive(handler: ThunderAgentRouterHandler, context=None) -> None:
     request = {
         "token_ids": [1, 2, 3],
         "agent_context": {"session_id": "p1"},
     }
-    async for _ in handler.generate(request):
+    async for _ in handler.generate(request, context=context):
         pass
 
 
@@ -154,7 +164,9 @@ async def test_a_placed_program_pins_both_backend_id_and_dp_rank():
     handler._scheduler = FakeScheduler(replica_hint=(7, 3))  # type: ignore[assignment]
     handler._kv_router = FakeKvRouter()  # type: ignore[assignment]
 
-    await drive(handler)
+    context = object()
+    await drive(handler, context=context)
+    assert handler._kv_router.context is context
 
     sent = handler._kv_router.sent
     assert sent is not None
@@ -223,3 +235,46 @@ async def test_a_placed_program_does_not_consult_the_first_chunk():
     await drive(handler)
 
     assert scheduler.back_fills == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["finish", "disconnect", "error"])
+async def test_sparse_usage_counts_tokens_until_a_terminal_report(ending):
+    handler = make_handler()
+    scheduler = FakeScheduler(replica_hint=(7, 0))
+    handler._scheduler = scheduler
+    chunks = [
+        {
+            "token_ids": [101],
+            "completion_usage": {"prompt_tokens": 3, "completion_tokens": 1},
+        },
+        {"token_ids": [102, 103]},
+    ]
+    if ending == "finish":
+        chunks.append(
+            {
+                "token_ids": [104],
+                "finish_reason": "stop",
+                "completion_usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 9,
+                },
+            }
+        )
+    handler._kv_router = FakeKvRouter(
+        chunks,
+        error=RuntimeError("engine stream failed") if ending == "error" else None,
+    )
+    stream = handler.generate(
+        {"token_ids": [1, 2, 3], "agent_context": {"session_id": "p1"}}
+    )
+    await anext(stream)
+    await anext(stream)
+    if ending == "disconnect":
+        await stream.aclose()
+    elif ending == "error":
+        with pytest.raises(RuntimeError, match="engine stream failed"):
+            await anext(stream)
+    else:
+        assert len([chunk async for chunk in stream]) == 1
+    assert scheduler.completed_requests == [("p1", 3, 9 if ending == "finish" else 3)]

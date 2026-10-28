@@ -543,6 +543,14 @@ impl RoutingHost {
         }
     }
 
+    pub(crate) fn available_worker_ids(&self) -> HashSet<u64> {
+        self.inner
+            .client
+            .available_instance_ids()
+            .map(|ids| ids.as_ref().clone())
+            .unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub(crate) fn occupancy_for_test(&self, worker_id: u64) -> u64 {
         self.inner.occupancy_for_test(worker_id)
@@ -584,25 +592,30 @@ impl RoutingHost {
     }
 
     /// The group key for a subagent: a request that carries a parent session id binds under the
-    /// parent's group instead of its own session, so siblings share a worker while the parent
-    /// keeps its own binding. An explicit per-request target stays on the request's own session so
+    /// parent's group for decode, while prefill uses the parent's own binding to reuse its cache.
+    /// An explicit per-request target stays on the request's own session so
     /// it cannot be rejected against, or rebind, the group.
     fn group_binding_id(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         explicit: Option<AffinityTarget>,
+        phase: RequestPhase,
     ) -> Option<Arc<SessionAffinityId>> {
         if explicit.is_some() {
             return None;
         }
-        let parent_session_id = request
-            .content()
-            .agent_context
-            .as_ref()
-            .and_then(|context| context.parent_session_id.as_deref())?;
-        Some(Arc::new(SessionAffinityId::new(
-            subagent_group_affinity_id(parent_session_id),
-        )))
+        let agent = request.content().agent_context.as_ref()?;
+        let parent_session_id = agent.parent_session_id.as_deref()?;
+        let binding_id = if phase == RequestPhase::Prefill {
+            let parent = parent_session_id.trim();
+            if parent.is_empty() || parent == agent.session_id.trim() {
+                return None;
+            }
+            parent.to_owned()
+        } else {
+            subagent_group_affinity_id(parent_session_id)
+        };
+        Some(Arc::new(SessionAffinityId::new(binding_id)))
     }
 
     /// Commit a held session to the dispatched worker; a request without a
@@ -732,7 +745,7 @@ impl RoutingHost {
         };
         let explicit = explicit_target(request.content(), phase)?;
         let session_id = self
-            .group_binding_id(request, explicit)
+            .group_binding_id(request, explicit, phase)
             .unwrap_or(session_id);
         if is_query_only {
             let target = affinity.query_target(&session_id, explicit)?;
@@ -740,7 +753,18 @@ impl RoutingHost {
         }
 
         let request_context = request.context();
-        let operation = self
+        let reacquire = || {
+            self.acquire_affinity_slot(
+                affinity,
+                &session_id,
+                None,
+                request_context.as_ref(),
+                phase,
+                staged_kv,
+                budget,
+            )
+        };
+        let mut operation = self
             .acquire_affinity_slot(
                 affinity,
                 &session_id,
@@ -751,6 +775,19 @@ impl RoutingHost {
                 budget,
             )
             .await?;
+        if self.session_affinity_mode == SessionAffinityMode::Soft
+            && explicit.is_none()
+            && matches!(
+                &self.policy,
+                RoutingPolicy::Builtin(_) | RoutingPolicy::DeviceAwareWeighted
+            )
+            && operation
+                .target()
+                .is_some_and(|target| !self.inner.client.is_instance_discovered(target.worker_id))
+        {
+            operation.invalidate();
+            operation = reacquire().await?;
+        }
         let target = operation.target().map(from_table);
         match select(target).await {
             Ok(selection) => Ok((selection, Some(operation))),
@@ -761,17 +798,7 @@ impl RoutingHost {
                     && target.is_some_and(|target| !self.affinity_target_is_valid(target)) =>
             {
                 operation.invalidate();
-                let retry = self
-                    .acquire_affinity_slot(
-                        affinity,
-                        &session_id,
-                        None,
-                        request_context.as_ref(),
-                        phase,
-                        staged_kv,
-                        budget,
-                    )
-                    .await?;
+                let retry = reacquire().await?;
                 let selection = select(retry.target().map(from_table)).await?;
                 Ok((selection, Some(retry)))
             }
@@ -833,11 +860,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // One cleanup budget for this request's whole route through the host.
         let budget = CleanupBudget::default();
         if !matches!(&self.policy, RoutingPolicy::Kv(_)) {
-            let phase = request
-                .tracker
-                .as_ref()
-                .map(|tracker| tracker.phase())
-                .unwrap_or(RequestPhase::Aggregated);
+            let phase = request.phase();
             return self
                 .select_and_dispatch_builtin(request, phase, |_, _| Ok(()))
                 .await
@@ -845,11 +868,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-        let phase = request
-            .tracker
-            .as_ref()
-            .map(|tracker| tracker.phase())
-            .unwrap_or(RequestPhase::Aggregated);
+        let phase = request.phase();
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let (mut selection, mut operation) = self
@@ -871,9 +890,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 );
                 tracker.record_router_queue_depth(self.kv_router().pending_count());
             }
-            self.request_metrics
-                .input_sequence_tokens
-                .observe(request.token_ids.len() as f64);
             let stream_context = request.context().clone();
             let worker_id_info = request
                 .tracker

@@ -131,6 +131,8 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_load_reason_decode: Optional[str] = None
         self._diag_throughput_reason_prefill: Optional[str] = None
         self._diag_throughput_reason_decode: Optional[str] = None
+        self._diag_load_metadata_available: dict[str, bool] = {}
+        self._diag_throughput_metadata_available: dict[str, bool] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -386,6 +388,8 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_load_reason_decode = None
         self._diag_throughput_reason_prefill = None
         self._diag_throughput_reason_decode = None
+        self._diag_load_metadata_available = {}
+        self._diag_throughput_metadata_available = {}
 
     def _build_diagnostics(self) -> TickDiagnostics:
         return TickDiagnostics(
@@ -405,6 +409,10 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             load_decision_reason_decode=self._diag_load_reason_decode,
             throughput_decision_reason_prefill=self._diag_throughput_reason_prefill,
             throughput_decision_reason_decode=self._diag_throughput_reason_decode,
+            load_metadata_available=dict(self._diag_load_metadata_available),
+            throughput_metadata_available=dict(
+                self._diag_throughput_metadata_available
+            ),
         )
 
     # ------------------------------------------------------------------

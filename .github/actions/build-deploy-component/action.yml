@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: 'Build Deploy Component'
-description: 'Build and push a deploy component container (operator, checkpoint-placeholder, or power-agent)'
+description: 'Build and push a deploy component container (operator or power-agent)'
 
 inputs:
   component:
-    description: 'Component to build: operator, checkpoint-placeholder, or power-agent'
+    description: 'Component to build: operator or power-agent'
     required: true
   image_tag:
     description: 'Image tag to apply to built images'
@@ -69,7 +69,7 @@ inputs:
       as a workflow artifact. Off by default — top-level callers opt in
       (post-merge-ci.yml sets true for push to main / release branches).
       Applies to the inline-compliance component (operator); no effect for
-      checkpoint-placeholder or power-agent.
+      power-agent.
     required: false
     default: 'false'
   diff_event_context:
@@ -124,13 +124,12 @@ runs:
         # -${TARGETARCH}.cdx.json to subtract each arch's own floor.
         #
         # run_compliance gates the extract/upload steps: it is true only for the
-        # shipped, /legal-bearing stage. checkpoint-placeholder and power-agent
-        # have no baseline.
+        # shipped, /legal-bearing stage. power-agent has no baseline.
         BASELINE_STEM=""
         RUN_COMPLIANCE=""
         case "${{ inputs.component }}" in
           operator)
-            BASELINE_STEM="go@66dcc593"
+            BASELINE_STEM="go@9ef7b9ac"
             [[ -z "${{ inputs.target }}" ]] && RUN_COMPLIANCE="true" ;;
         esac
         echo "baseline_stem=${BASELINE_STEM}" >> $GITHUB_OUTPUT
@@ -287,9 +286,14 @@ runs:
         # The build checkout is shallow with no tags. Make the refs each baseline
         # rule needs reachable (all best-effort; a miss just yields an empty
         # base_sha and a baseline_unavailable diff). Depth 30 gives the
-        # first-parent baseline walks enough history to find an artifact:
-        git fetch --deepen=30 --quiet || true                                     # HEAD~N (main post-merge walk)
-        git fetch --tags --quiet || true                                          # vX.Y.Z tags (release branch)
+        # first-parent baseline walks enough history to find an artifact. Fetch
+        # HEAD by SHA with an explicit depth; `--deepen` is far slower here.
+        git fetch --no-tags --depth=31 origin "$(git rev-parse HEAD)" --quiet || true # HEAD~N (main post-merge walk)
+        # Only the release rule reads tags. With no refspec, this fetch also
+        # downloads every branch on origin, so run it only for release builds.
+        if [[ "${DIFF_BASE_BRANCH}" == release/* || "${DIFF_CURRENT_BRANCH}" == release/* ]]; then
+          git fetch --tags --quiet || true                                        # vX.Y.Z tags (release branch)
+        fi
         if [ "${DIFF_BASE_BRANCH}" = "main" ] && [ -n "${DIFF_MERGE_BASE_SHA}" ]; then
           git fetch --no-tags --depth=30 origin "${DIFF_MERGE_BASE_SHA}" --quiet || true # stable PR fork-point walk
         fi

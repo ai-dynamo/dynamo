@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	lpxcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/lpx"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
@@ -30,13 +31,11 @@ type DynamoComponentDeploymentSetupOptions struct {
 type DynamoGraphDeploymentSetupOptions struct {
 	SetupOptions
 	DockerSecretRetriever DockerSecretRetriever
-	RBACManager           RBACManager
 	SSHKeyManager         *secret.SSHKeyManager
 }
 
 type DynamoGraphDeploymentRequestSetupOptions struct {
 	SetupOptions
-	RBACManager             RBACManager
 	GPUDiscoveryCache       *gpu.GPUDiscoveryCache
 	GPUDiscovery            *gpu.GPUDiscovery
 	OperatorImage           string
@@ -83,6 +82,9 @@ func SetupDynamoComponentDeployment(mgr ctrl.Manager, opts DynamoComponentDeploy
 }
 
 func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetupOptions) error {
+	if err := lpxcontroller.Setup(mgr, opts.Config, opts.RuntimeConfig, opts.DockerSecretRetriever); err != nil {
+		return err
+	}
 	if err := (&DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorder("dynamographdeployment"),
@@ -91,7 +93,6 @@ func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetu
 		RestConfig:            mgr.GetConfig(),
 		DockerSecretRetriever: opts.DockerSecretRetriever,
 		SSHKeyManager:         opts.SSHKeyManager,
-		RBACManager:           opts.RBACManager,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeployment controller: %w", err)
 	}
@@ -122,7 +123,6 @@ func SetupDynamoGraphDeploymentRequest(mgr ctrl.Manager, opts DynamoGraphDeploym
 		GPUDiscovery:            opts.gpuDiscovery(),
 		OperatorImage:           opts.OperatorImage,
 		OperatorImagePullPolicy: opts.OperatorImagePullPolicy,
-		RBACManager:             opts.RBACManager,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest controller: %w", err)
 	}
