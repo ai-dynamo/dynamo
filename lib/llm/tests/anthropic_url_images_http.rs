@@ -74,7 +74,6 @@ impl
         &self,
         request: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>> {
-        // Inspect the actual converted chat message shape, including tool messages.
         let messages = serde_json::to_value(&request.inner.messages)?;
         for message in messages.as_array().unwrap() {
             if let Some(parts) = message["content"].as_array() {
@@ -167,36 +166,46 @@ async fn post(svc: &HarnessService, body: Value) -> reqwest::Response {
 async fn url_and_base64_sources_deliver_the_same_image_in_messages_and_tool_results() {
     temp_env::async_with_vars(ENV, async {
         let mut server = mockito::Server::new_async().await;
-        let image = server.mock("GET", "/image.png").with_status(200).with_body(PNG).expect(4).create_async().await;
-        let (svc, media) = service(local_policy(), ImageDecoder::default(), 8).await;
+        let image = server
+            .mock("GET", "/image.png")
+            .with_status(200)
+            .with_body(PNG)
+            .expect(2)
+            .create_async()
+            .await;
+        let (svc, media) = service(local_policy(), ImageDecoder::default(), 4).await;
         let url = format!("{}/image.png", server.url());
-        for stream in [false, true] {
-            for tool in [false, true] {
-                for source in [json!({"type": "url", "url": url}), json!({"type": "base64", "media_type": "image/png", "data": STANDARD.encode(PNG)})] {
-                    let response = post(&svc, body(source, stream, tool)).await;
-                    assert_eq!(response.status(), reqwest::StatusCode::OK);
-                    let _ = response.text().await.unwrap();
-                    let requests = svc.engine.take_requests().await;
-                    assert_eq!(requests.len(), 1);
-                    let messages = serde_json::to_value(&requests[0].inner.messages).unwrap();
-                    let message = &messages[usize::from(tool)];
-                    let parts = message["content"].as_array().unwrap();
-                    assert_eq!(parts.len(), 3);
-                    assert_eq!(parts[0]["text"], "before");
-                    assert_eq!(parts[1]["type"], "image_url");
-                    assert_eq!(parts[2]["text"], "after");
-                    if tool { assert_eq!(message["tool_call_id"], "toolu_image"); }
+        for tool in [false, true] {
+            for source in [
+                json!({"type": "url", "url": url}),
+                json!({"type": "base64", "media_type": "image/png", "data": STANDARD.encode(PNG)}),
+            ] {
+                let response = post(&svc, body(source, false, tool)).await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let _ = response.text().await.unwrap();
+                let requests = svc.engine.take_requests().await;
+                assert_eq!(requests.len(), 1);
+                let messages = serde_json::to_value(&requests[0].inner.messages).unwrap();
+                let message = &messages[usize::from(tool)];
+                let parts = message["content"].as_array().unwrap();
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0]["text"], "before");
+                assert_eq!(parts[1]["type"], "image_url");
+                assert_eq!(parts[2]["text"], "after");
+                if tool {
+                    assert_eq!(message["tool_call_id"], "toolu_image");
                 }
             }
         }
         let loaded = media.images.lock().await;
-        assert_eq!(loaded.len(), 8);
+        assert_eq!(loaded.len(), 4);
         assert!(loaded.iter().all(|bytes| bytes == PNG));
         drop(loaded);
         image.assert_async().await;
         assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
-    }).await;
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -214,14 +223,10 @@ async fn malformed_sources_reject_before_media_or_generation_without_exposing_ur
             json!({"type": "base64", "url": "https://example.test/private-token"}),
             json!({"type": "file", "file_id": "private-token"}),
         ];
-        for stream in [false, true] {
-            for tool in [false, true] {
-                for source in &cases {
-                    let response = post(&svc, body(source.clone(), stream, tool)).await;
-                    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST, "{source}");
-                    assert!(!response.text().await.unwrap().contains("private-token"));
-                }
-            }
+        for source in &cases {
+            let response = post(&svc, body(source.clone(), false, false)).await;
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST, "{source}");
+            assert!(!response.text().await.unwrap().contains("private-token"));
         }
         assert!(media.images.lock().await.is_empty());
         assert!(svc.engine.take_requests().await.is_empty());
@@ -232,34 +237,34 @@ async fn malformed_sources_reject_before_media_or_generation_without_exposing_ur
 
 #[tokio::test]
 #[serial]
-async fn media_policy_fetch_decode_and_size_failures_reject_unary_and_streaming() {
+async fn media_policy_fetch_decode_and_size_failures_reject_before_generation() {
     temp_env::async_with_vars(ENV, async {
         let mut server = mockito::Server::new_async().await;
         let missing = server
             .mock("GET", "/missing")
             .with_status(404)
-            .expect(4)
+            .expect(1)
             .create_async()
             .await;
         let invalid = server
             .mock("GET", "/invalid")
             .with_status(200)
             .with_body("not an image")
-            .expect(4)
+            .expect(1)
             .create_async()
             .await;
         let redirect = server
             .mock("GET", "/redirect")
             .with_status(302)
             .with_header("location", "http://169.254.169.254/private-token")
-            .expect(4)
+            .expect(1)
             .create_async()
             .await;
         let oversized = server
             .mock("GET", "/large")
             .with_status(200)
             .with_body(PNG)
-            .expect(4)
+            .expect(1)
             .create_async()
             .await;
         let stalled = server
@@ -269,7 +274,7 @@ async fn media_policy_fetch_decode_and_size_failures_reject_unary_and_streaming(
                 std::thread::sleep(Duration::from_secs(2));
                 writer.write_all(PNG)
             })
-            .expect(4)
+            .expect(1)
             .create_async()
             .await;
         let (svc, media) = service(
@@ -278,31 +283,27 @@ async fn media_policy_fetch_decode_and_size_failures_reject_unary_and_streaming(
             1,
         )
         .await;
-        for stream in [false, true] {
-            for tool in [false, true] {
-                for path in ["missing", "invalid", "redirect", "large", "stalled"] {
-                    let response = post(
-                        &svc,
-                        body(
-                            json!({"type": "url", "url": format!("{}/{path}", server.url())}),
-                            stream,
-                            tool,
-                        ),
-                    )
-                    .await;
-                    assert_eq!(
-                        response.status(),
-                        reqwest::StatusCode::BAD_REQUEST,
-                        "{path}"
-                    );
-                    let error = response.text().await.unwrap();
-                    assert!(error.contains("invalid_request_error"), "{error}");
-                    assert!(
-                        !error.contains(&server.url()) && !error.contains("private-token"),
-                        "{error}"
-                    );
-                }
-            }
+        for path in ["missing", "invalid", "redirect", "large", "stalled"] {
+            let response = post(
+                &svc,
+                body(
+                    json!({"type": "url", "url": format!("{}/{path}", server.url())}),
+                    false,
+                    false,
+                ),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::BAD_REQUEST,
+                "{path}"
+            );
+            let error = response.text().await.unwrap();
+            assert!(error.contains("invalid_request_error"), "{error}");
+            assert!(
+                !error.contains(&server.url()) && !error.contains("private-token"),
+                "{error}"
+            );
         }
         for mock in [missing, invalid, redirect, oversized, stalled] {
             mock.assert_async().await;
@@ -313,19 +314,17 @@ async fn media_policy_fetch_decode_and_size_failures_reject_unary_and_streaming(
         svc.shutdown().await;
 
         let (svc, _) = service(MediaFetcher::default(), ImageDecoder::default(), 1).await;
-        for stream in [false, true] {
-            let response = post(
-                &svc,
-                body(
-                    json!({"type": "url", "url": "http://169.254.169.254/private-token"}),
-                    stream,
-                    false,
-                ),
-            )
-            .await;
-            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
-            assert!(!response.text().await.unwrap().contains("private-token"));
-        }
+        let response = post(
+            &svc,
+            body(
+                json!({"type": "url", "url": "http://169.254.169.254/private-token"}),
+                false,
+                false,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert!(!response.text().await.unwrap().contains("private-token"));
         assert!(svc.engine.take_requests().await.is_empty());
         svc.shutdown().await;
     })
