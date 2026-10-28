@@ -9,12 +9,8 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
-
-	"capnproto.org/go/capnp/v3"
 
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
@@ -463,69 +459,16 @@ func writeLPXCheckpointTestBuild(
 	model, revision string,
 ) {
 	t.Helper()
-	partitionIDs := []int{7, 8}
-
-	t.Log("Encode a deployment.v1 build with one prop-sync chain and a checkpoint")
-	_, segment := capnp.NewSingleSegmentMessage(nil)
-	deployment, err := deploymentcapnpv1.NewRootDeployment(segment)
-	require.NoError(t, err)
-	deployment.SetContractRevision(deploymentcapnpv1.CurrentContractRevision)
-	config, err := deployment.NewConfig()
-	require.NoError(t, err)
-	config.SetCompilationMode(mode)
-	config.SetNumLpuNodes(uint32(len(partitionIDs) * 2))
-	program, err := config.NewProgram()
-	require.NoError(t, err)
-	program.SetBatchSize(1)
-	runtimeIO, err := config.NewRuntimeIo()
-	require.NoError(t, err)
-	runtimeIO.SetProtocol(deploymentcapnpv1.RuntimeIoProtocol_fpgaRoce)
-	runtimeIO.SetIoFpgaCount(1)
-	runtimeIO.SetFanoutFactor(1)
-	chains, err := config.NewSelectedPropSyncChains(1)
-	require.NoError(t, err)
-	chainIDs, err := chains.At(0).NewPartitionIds(int32(len(partitionIDs)))
-	require.NoError(t, err)
-	for index, partitionID := range partitionIDs {
-		chainIDs.Set(index, uint32(partitionID))
-	}
-	checkpoint, err := deployment.NewCheckpoint()
-	require.NoError(t, err)
-	checkpoint.SetProvider(deploymentcapnpv1.CheckpointProvider_huggingface)
-	require.NoError(t, checkpoint.SetModel(model))
-	require.NoError(t, checkpoint.SetRevision(revision))
-
-	partitionCount := len(partitionIDs)
-	if mode == deploymentcapnpv1.CompilationMode_lpx {
-		partitionCount++
-	}
-	partitions, err := deployment.NewPartitions(int32(partitionCount))
-	require.NoError(t, err)
-	for index, partitionID := range partitionIDs {
-		ref, err := partitions.At(index).NewPartition()
-		require.NoError(t, err)
-		ref.SetDeviceType(commoncapnpv1.DeviceType_lpu)
-		ref.SetPartitionId(uint32(partitionID))
-		detail, err := partitions.At(index).Detail().NewLpu()
-		require.NoError(t, err)
-		require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", partitionID)))
-		require.NoError(t, detail.SetTopology("test-topology"))
-		detail.SetArchitecture(deploymentcapnpv1.LpuArchitecture_lp20)
-		detail.SetNumChips(16)
-		detail.SetDevicesPerNode(8)
+	t.Log("Publish a build whose one unit chains partitions 7 and 8 and that names a checkpoint")
+	fixture := testLPXBuildFixture{
+		partitionIDs: []uint32{7, 8}, numChips: 16, devicesPerNode: 8, chains: [][]uint32{{7, 8}},
+		checkpoint: &lpx.Checkpoint{Model: model, Revision: revision},
 	}
 	if mode == deploymentcapnpv1.CompilationMode_lpx {
-		ref, err := partitions.At(len(partitionIDs)).NewPartition()
-		require.NoError(t, err)
-		ref.SetDeviceType(commoncapnpv1.DeviceType_cuda)
-		ref.SetPartitionId(uint32(len(partitionIDs)))
+		fixture.lpx = true
+		fixture.nonLPUDeviceTypes = []commoncapnpv1.DeviceType{commoncapnpv1.DeviceType_cuda}
 	}
-
-	t.Log("Publish the build in the file registry")
-	payload, err := deployment.Message().Marshal()
-	require.NoError(t, err)
-	require.NoError(t, os.Mkdir(filepath.Join(root, buildID), 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(root, buildID, "deployment.v1.capnp.bin"), payload, 0o600))
+	writeTestDeploymentBuild(t, root, buildID, testLPXBuildCapnp(t, fixture))
 }
 
 func newLPXCheckpointTestReconciler(

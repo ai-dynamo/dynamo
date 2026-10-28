@@ -3,6 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Package lpx implements LPU build normalization, workload projection,
-// runtime configuration, and node-local LPX materialization.
+// Package lpx implements LPU build normalization, workload projection from
+// compiler-owned placement units, and node-local LPX materialization.
 package lpx

@@ -18,8 +18,11 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// legacyConfigVolumeName is the volume through which older operators supplied
+// the /configs runtime ConfigMap.
+const legacyConfigVolumeName = "config"
 
 // MaxRenderedPodCliqueSetBytes keeps headroom below the API server's request-size ceiling for
 // admission metadata and transport overhead.
@@ -39,17 +42,17 @@ type RenderInput struct {
 	Cyborg *grovev1alpha1.PodCliqueTemplateSpec
 }
 
-// WorkloadTemplates contains only the templates and resources contributed by one workload.
+// WorkloadTemplates contains only the templates contributed by one workload.
 type WorkloadTemplates struct {
 	Cliques      []*grovev1alpha1.PodCliqueTemplateSpec
 	ScalingGroup grovev1alpha1.PodCliqueScalingGroupConfig
-	Resources    []client.Object
 }
 
 // RenderNodeLocal renders a workload without constructing a PCS. workload
 // and plan must be non-nil and are read without mutation. The function may mutate
 // the reference-backed templates in input; callers must pass fresh owned values.
-// The caller assigns namespaces to the returned resources.
+// Runtimes read placement from the build's lpuUnits and the environment that
+// rendering publishes, so the workload contributes no other resources.
 //
 //nolint:gocyclo // Rendering is one transactional validation-and-materialization pass.
 func RenderNodeLocal(
@@ -108,41 +111,10 @@ func RenderNodeLocal(
 		return nil, err
 	}
 
-	// Runtimes place builds without compiler-owned LPU units from the /configs
-	// ConfigMaps. A workload whose every build records units reads placement from
-	// the builds and the environment instead, so it gets no ConfigMap.
-	var (
-		configMap        *corev1.ConfigMap
-		configHash       string
-		cyborgConfigMap  *corev1.ConfigMap
-		cyborgConfigHash string
-		extraResources   []client.Object
-	)
-	if !workload.placesLPUUnits() {
-		configMap, configHash, err = renderRuntimeConfigMap(plan.ResourcePrefix+"-lpu", resolvedPartitionData(projections))
-		if err != nil {
-			return nil, err
-		}
-		extraResources = []client.Object{configMap}
-	}
-
-	// Every legacy hybrid Cyborg reads its remote Agent addresses, independently
-	// of the LPU family. Preserve the legacy order: Cyborg config first, LPU config last.
-	if hybrid && configMap != nil {
-		cyborgConfigMap, cyborgConfigHash, err = workload.renderCyborgConfigMap(plan)
-		if err != nil {
-			return nil, err
-		}
-		extraResources = []client.Object{cyborgConfigMap, configMap}
-	}
-
 	// Consume the independently rendered conductor without copying Agent startup or placement.
 	var conductor *grovev1alpha1.PodCliqueTemplateSpec
 	if conductorTemplateName != "" {
 		annotations := roleAnnotations(conductorTemplate.Annotations, lpxv1alpha1.PodRoleConductor, workloadDigest)
-		if configMap != nil {
-			annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
-		}
 		conductor = &grovev1alpha1.PodCliqueTemplateSpec{
 			Name:        conductorTemplateName,
 			Labels:      conductorTemplate.Labels,
@@ -175,19 +147,16 @@ func RenderNodeLocal(
 			// Agent template needs no placement or storage validation.
 			if agent.Replicas == 0 {
 				if conductorSpec != nil {
-					configureLPUConductorPod(conductorSpec, configMap, allocation)
+					configureNodeLocalConductorRuntime(conductorSpec, allocation)
 				}
 				continue
 			}
 
-			// Unit placement publishes the GPU-local units to hybrid Agents.
-			// Otherwise, Agent and conductor storage must agree on the published
-			// model paths.
+			// Hybrid Agents learn which units run on the GPU. LPU-only Agent and
+			// conductor storage must agree on the published model paths.
 			if hybrid {
-				if projection.placesLPUUnits() {
-					container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
-					applyLocalPartitionIDs(container, projection)
-				}
+				container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
+				applyLocalPartitionIDs(container, projection)
 			} else {
 				storagePath, err := lpuModelStoragePath(template.Spec)
 				if err != nil {
@@ -198,8 +167,11 @@ func RenderNodeLocal(
 				}
 			}
 
-			// Bind the LPX configuration and scheduling to the Agent and any conductor.
-			configureLPURolePods(&template.Spec, conductorSpec, projection, configMap, allocation)
+			// Bind LPX scheduling to the Agent and the allocation to any conductor.
+			configureAgentScheduling(&template.Spec, projection.configuredBuild.family, projection.partitions[0].devicesPerNode)
+			if conductorSpec != nil {
+				configureNodeLocalConductorRuntime(conductorSpec, allocation)
+			}
 		}
 		if agent.Replicas == 0 {
 			continue
@@ -210,9 +182,6 @@ func RenderNodeLocal(
 		}
 
 		annotations := roleAnnotations(maps.Clone(template.Annotations), lpxv1alpha1.PodRoleAgent, projection.Digest().String())
-		if configMap != nil {
-			annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
-		}
 		annotations[lpxv1alpha1.PodModelAnnotation] = projection.model
 		annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = projection.CompilerSnapshotDigest()
 		annotations[WorkloadModeAnnotation] = string(projection.schedulerWorkloadMode())
@@ -248,8 +217,6 @@ func RenderNodeLocal(
 			modelStoragePath,
 			plan.Agents[0].TemplateName,
 			agentTemplateNames,
-			cyborgConfigMap,
-			cyborgConfigHash,
 		); err != nil {
 			return nil, fmt.Errorf("stage %s conductor: %w", projections[0].stage, err)
 		}
@@ -271,7 +238,7 @@ func RenderNodeLocal(
 	}
 
 	// Keep every LPX role in one backend gang, including the KAI fallback roles,
-	// and refuse a config mount that no rendered volume backs.
+	// and refuse a leftover /configs mount that no volume backs.
 	for _, clique := range rendered.Cliques {
 		clique.Spec.PodSpec.SchedulerName = v1alpha1.LPXSchedulerName
 		if err := requireDeclaredConfigVolume(clique); err != nil {
@@ -279,55 +246,24 @@ func RenderNodeLocal(
 		}
 	}
 
-	rendered.Resources = extraResources
 	return rendered, nil
 }
 
-// configureLPURolePods consumes fresh, independently owned Agent and conductor
-// specs. Agent and projection are nonnil, and projection has validated partitions;
-// nil conductor means no emitted launcher. A nil configMap means the workload's
-// runtimes read placement from LPU units, so no config volume is added.
-func configureLPURolePods(
-	agentPodSpec, conductorPodSpec *corev1.PodSpec,
-	projection *ModelProjection,
-	configMap *corev1.ConfigMap,
-	allocation string,
-) {
-	family := projection.configuredBuild.family
-	if configMap != nil {
-		ensureLPUConfigVolume(agentPodSpec, configMap.Name)
-	}
-	configureAgentScheduling(agentPodSpec, family, projection.partitions[0].devicesPerNode)
-	if conductorPodSpec != nil {
-		configureLPUConductorPod(conductorPodSpec, configMap, allocation)
-	}
-}
-
-// configureLPUConductorPod shapes the conductor's LPX-owned fields. Placement is
-// already resolved. A nil configMap means no config volume, as for
-// configureLPURolePods.
-func configureLPUConductorPod(conductorPodSpec *corev1.PodSpec, configMap *corev1.ConfigMap, allocation string) {
-	if configMap != nil {
-		ensureLPUConfigVolume(conductorPodSpec, configMap.Name)
-	}
-	configureNodeLocalConductorRuntime(conductorPodSpec, allocation)
-}
-
 // requireDeclaredConfigVolume rejects a nonnil clique whose containers mount a
-// config volume that its PodSpec lacks. Kubernetes would reject every Pod of the
-// clique; rendering fails instead, so the controller keeps the published PCS.
-// The operator adds that volume only for workloads that read /configs.
+// config volume that its PodSpec lacks. Older operators supplied that volume as
+// the /configs runtime ConfigMap; Kubernetes would reject every Pod of the
+// clique, so rendering fails instead and the controller keeps the published PCS.
 func requireDeclaredConfigVolume(clique *grovev1alpha1.PodCliqueTemplateSpec) error {
 	spec := &clique.Spec.PodSpec
-	if slices.ContainsFunc(spec.Volumes, func(volume corev1.Volume) bool { return volume.Name == lpuConfigVolumeName }) {
+	if slices.ContainsFunc(spec.Volumes, func(volume corev1.Volume) bool { return volume.Name == legacyConfigVolumeName }) {
 		return nil
 	}
 	for _, container := range slices.Concat(spec.InitContainers, spec.Containers) {
-		if slices.ContainsFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool { return mount.Name == lpuConfigVolumeName }) {
+		if slices.ContainsFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool { return mount.Name == legacyConfigVolumeName }) {
 			return fmt.Errorf(
 				"LPX role %s container %s mounts volume %q, which its pod template does not declare; "+
-					"the operator provides /configs only for builds without lpuUnits",
-				clique.Name, container.Name, lpuConfigVolumeName,
+					"the operator no longer provides /configs, because runtimes read placement from the build's lpuUnits",
+				clique.Name, container.Name, legacyConfigVolumeName,
 			)
 		}
 	}
@@ -361,4 +297,26 @@ func workloadAnnotations(base map[string]string, digest string) map[string]strin
 	}
 	base[WorkloadDigestAnnotation] = digest
 	return base
+}
+
+func lpuModelStoragePath(spec corev1.PodSpec) (string, error) {
+	container := common.FindContainerByName(spec.Containers, commonconsts.MainContainerName)
+	mountIndex := slices.IndexFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool {
+		return mount.Name == v1alpha1.ModelStorageVolumeName
+	})
+	if mountIndex < 0 {
+		return "", fmt.Errorf(
+			"selected LPX main container requires model storage volume mount %q",
+			v1alpha1.ModelStorageVolumeName,
+		)
+	}
+	mount := container.VolumeMounts[mountIndex]
+	if strings.TrimSpace(mount.MountPath) == "" {
+		return "", fmt.Errorf("model storage volume %q has no mount path", mount.Name)
+	}
+	volumeIndex := slices.IndexFunc(spec.Volumes, func(volume corev1.Volume) bool { return volume.Name == mount.Name })
+	if volumeIndex < 0 {
+		return "", fmt.Errorf("selected LPX podTemplate has no model storage volume %q", mount.Name)
+	}
+	return mount.MountPath, nil
 }

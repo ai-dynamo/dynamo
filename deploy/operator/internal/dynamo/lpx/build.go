@@ -26,25 +26,20 @@ const (
 
 // Build is the registry's source-independent view of an LPU build.
 //
-// The validated compiler contract populates this shape before deployment code
-// derives placement and replica counts.
+// The validated compiler contract populates this shape, including the
+// compiler-owned placement units that projection forwards to LPX.
 type Build struct {
 	// contentID identifies the exact compiler contract used to acquire this build.
-	contentID      string
-	contractFormat buildContractFormat
+	contentID string
 	// path is the absolute file or GCS reference of the build payload.
 	path string
 	// family is the physical LPU target family.
 	family BuildFamily
 	// hasCUDAPartitions retains GPU requirements excluded from the LPU partition projection.
 	hasCUDAPartitions bool
-	// partitions contains the normalized physical compiler partitions.
+	// partitions contains the normalized physical compiler partitions in ID order.
 	partitions []buildPartition
-	// selectedPropSyncChains contains source partition IDs grouped into selected prop-sync chains.
-	selectedPropSyncChains [][]int
-	// lpuUnits is the validated compiler-owned LPU placement in Agent order. Nil
-	// means the compiler predates units, so projection derives placement from
-	// partitions and selectedPropSyncChains.
+	// lpuUnits is the validated, nonempty compiler-owned LPU placement in Agent order.
 	lpuUnits []lpuUnit
 	// standaloneTokenEmbeddings reports whether token embeddings occupy a standalone partition.
 	standaloneTokenEmbeddings bool
@@ -61,25 +56,21 @@ type Build struct {
 	checkpointErr error
 }
 
-// buildPartition describes one normalized physical compiler partition.
+// buildPartition describes one LPU partition: a normalized compiler partition
+// of the build, or the LPX partition request that projection derives from one
+// reservation.
 type buildPartition struct {
 	// sourcePartitionID is the compiler partition id used in artifacts and
-	// selected prop-sync chains. It is not the slice index after sorting/filtering.
+	// lpuUnits. It is not the slice index after sorting/filtering.
 	sourcePartitionID int
-	// partPath is the nonempty relative gas-dir fragment under the build payload.
-	partPath string
-	// numChips is the chip count declared by the compiler manifest.
+	// numChips is the chip count declared by the compiler manifest; for a
+	// request, the devices of its reservation's hosts.
 	numChips int
-	// topology identifies compatible subnode stages for PropSync packing.
-	topology string
 	// devicesPerNode is the number of chips per physical node in the compiler manifest.
 	devicesPerNode int
-	// hxExtent is the scheduler-facing four-dimensional HX allocation.
+	// hxExtent is the scheduler-facing four-dimensional HX allocation of a
+	// request. Nil for compiler partitions and LP20 requests.
 	hxExtent []int64
-
-	// runtimeNodeCount sums physical endpoints for a collapsed hybrid chain;
-	// numChips retains the original root stage.
-	runtimeNodeCount int
 }
 
 // lpuUnit is one compiler-owned runtime group: a selected prop-sync chain or a
@@ -117,16 +108,6 @@ func (u lpuUnit) partitionIDs() []int {
 		ids = append(ids, reservation.PartitionIDs...)
 	}
 	return ids
-}
-
-// effectiveNodeCount returns the number of Agent endpoints assigned to the
-// partition. Source partitions derive it from topology; collapsed runtime
-// partitions preserve the sum of their physical scheduler endpoints.
-func (p buildPartition) effectiveNodeCount() int {
-	if p.runtimeNodeCount > 0 {
-		return p.runtimeNodeCount
-	}
-	return max(1, p.numChips/p.devicesPerNode)
 }
 
 // buildRuntimePath resolves a snapshot reference to its runtime filesystem path.

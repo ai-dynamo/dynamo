@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
+	"strings"
 
 	"capnproto.org/go/capnp/v3"
 	commoncapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/common/v1"
@@ -22,43 +24,6 @@ const gbuildDeploymentV1CapnpFile = "deployment.v1.capnp.bin"
 // GBuild compiles a prop-sync boundary at unless its preset names another: trays
 // of one hemisphere, the only tray-to-tray links with four lanes.
 const hxDefaultPropSyncTopologyDimension = 1
-
-// buildContractFormat selects a supported compiler contract and runtime entry file.
-type buildContractFormat uint8
-
-const (
-	buildContractUnknown buildContractFormat = iota
-	buildContractManifestV2
-	buildContractDeploymentV1
-)
-
-// selectBuildContract selects exactly one entry point from a normalized inventory.
-func selectBuildContract(inventory []string) (buildContractFormat, error) {
-	legacy := slices.Contains(inventory, gbuildManifestV2CapnpFile)
-	split := slices.Contains(inventory, gbuildDeploymentV1CapnpFile)
-	switch {
-	case legacy && split:
-		return buildContractUnknown, fmt.Errorf("ambiguous build contracts: both %s and %s", gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile)
-	case legacy:
-		return buildContractManifestV2, nil
-	case split:
-		return buildContractDeploymentV1, nil
-	default:
-		return buildContractUnknown, fmt.Errorf("missing build contract: require %s or %s", gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile)
-	}
-}
-
-// filename returns the selected runtime entry point; unknown formats are invalid.
-func (format buildContractFormat) filename() (string, error) {
-	switch format {
-	case buildContractManifestV2:
-		return gbuildManifestV2CapnpFile, nil
-	case buildContractDeploymentV1:
-		return gbuildDeploymentV1CapnpFile, nil
-	default:
-		return "", fmt.Errorf("unsupported build contract format %d", format)
-	}
-}
 
 // decodeGbuildDeploymentV1 reads the scheduler contract without execution/report schemas.
 func decodeGbuildDeploymentV1(data []byte) (deploymentcapnpv1.Deployment, error) {
@@ -97,10 +62,6 @@ func buildFromGbuildDeploymentV1(buildRef string, manifest deploymentcapnpv1.Dep
 	if err != nil {
 		return nil, fmt.Errorf("reading %s config.program: %w", gbuildDeploymentV1CapnpFile, err)
 	}
-	chains, err := selectedPropSyncChainsFromDeploymentV1(deployment)
-	if err != nil {
-		return nil, err
-	}
 	ioFPGACount, ioFanoutFactor, err := runtimeIOFromDeploymentV1(deployment)
 	if err != nil {
 		return nil, err
@@ -110,7 +71,6 @@ func buildFromGbuildDeploymentV1(buildRef string, manifest deploymentcapnpv1.Dep
 
 	build := &Build{
 		path:                      buildRef,
-		selectedPropSyncChains:    chains,
 		standaloneTokenEmbeddings: program.StandaloneTokenEmbeddings(),
 		supportsCPUEmbeddings:     program.SupportsCpuEmbeddings(),
 		ioFPGACount:               ioFPGACount,
@@ -125,32 +85,32 @@ func buildFromGbuildDeploymentV1(buildRef string, manifest deploymentcapnpv1.Dep
 	}
 
 	// Validate compiler-owned placement against the normalized LPU partitions.
+	// Units list exactly the packaged partitions, so partSelect builds need no
+	// separate handling.
 	build.lpuUnits, err = lpuUnitsFromDeploymentV1(deployment, build)
 	if err != nil {
 		return nil, err
-	}
-
-	// A partial LP30 selection deploys only through units, which list exactly the
-	// packaged partitions; the legacy HX projection requires the whole build.
-	if build.family == BuildFamilyHX && manifest.HasPartSelect() && build.lpuUnits == nil {
-		return nil, fmt.Errorf("V3 %s partSelect builds are not supported", gbuildDeploymentV1CapnpFile)
 	}
 	return build, nil
 }
 
 // lpuUnitsFromDeploymentV1 decodes and validates the compiler-owned placement
-// units of a build whose LPU partitions and chains are already normalized. An
-// absent or empty list returns nil: its writer predates units. build is not mutated.
+// units of a build whose LPU partitions are already normalized. The compiler
+// owns placement, so a build without units has none the operator can deploy.
+// build is not mutated.
 func lpuUnitsFromDeploymentV1(deployment deploymentcapnpv1.DeploymentInfo, build *Build) ([]lpuUnit, error) {
-	if !deployment.HasLpuUnits() {
-		return nil, nil
-	}
-	rawUnits, err := deployment.LpuUnits()
-	if err != nil {
-		return nil, fmt.Errorf("reading %s config.lpuUnits: %w", gbuildDeploymentV1CapnpFile, err)
+	var rawUnits deploymentcapnpv1.LpuUnit_List
+	if deployment.HasLpuUnits() {
+		var err error
+		rawUnits, err = deployment.LpuUnits()
+		if err != nil {
+			return nil, fmt.Errorf("reading %s config.lpuUnits: %w", gbuildDeploymentV1CapnpFile, err)
+		}
 	}
 	if rawUnits.Len() == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("%w: %s records no config.lpuUnits; the operator deploys only builds whose compiler "+
+			"records LPU placement units, so recompile the build with a GBuild that writes them",
+			ErrUnsupportedRuntime, gbuildDeploymentV1CapnpFile)
 	}
 
 	// Index the deployed LPU partitions that reservations may name.
@@ -192,10 +152,6 @@ func lpuUnitsFromDeploymentV1(deployment deploymentcapnpv1.DeploymentInfo, build
 		}
 	}
 
-	// Units restate the selected chains while both fields exist.
-	if err := validateLPUUnitChains(units, build.selectedPropSyncChains); err != nil {
-		return nil, err
-	}
 	return units, nil
 }
 
@@ -203,9 +159,7 @@ func lpuUnitsFromDeploymentV1(deployment deploymentcapnpv1.DeploymentInfo, build
 // its partitions in placed. partitions indexes the build's LPU partitions by ID.
 // packing reports whether the bundle may pack a chain into one reservation: only
 // LPU-only bundles without CUDA partitions do. The compiler sizes reservations;
-// decoding checks only that each holds its partitions' chips and, until the
-// partition topologyMetadata leaves the contract, that a reservation of one LP30
-// partition requests that partition's own compiled extent.
+// decoding checks only that each holds its partitions' chips.
 func lpuUnitFromDeploymentV1(
 	raw deploymentcapnpv1.LpuUnit,
 	subject string,
@@ -275,17 +229,6 @@ func lpuUnitFromDeploymentV1(
 		// The compiler sizes the reservation; it must hold its partitions' chips.
 		if devices := reservation.Hosts * devicesPerNode; chips > devices {
 			return lpuUnit{}, fmt.Errorf("%s reserves %d devices for %d chips", reservationSubject, devices, chips)
-		}
-
-		// While partitions still record their compiled HX extent, a reservation of
-		// one LP30 partition must request that extent. Packed reservations take
-		// their extent from the compiler alone.
-		if family == BuildFamilyHX && len(reservation.PartitionIDs) == 1 {
-			own := partitions[reservation.PartitionIDs[0]].hxExtent
-			if !slices.Equal(reservation.HXExtent, own) {
-				return lpuUnit{}, fmt.Errorf("%s.size requests HX extent %v, but partition %d was compiled for %v",
-					reservationSubject, reservation.HXExtent, reservation.PartitionIDs[0], own)
-			}
 		}
 		unit.Reservations = append(unit.Reservations, reservation)
 	}
@@ -480,35 +423,6 @@ func hxPropSyncRequirementFromDeploymentV1(
 	}, nil
 }
 
-// validateLPUUnitChains requires every selected chain to equal exactly one
-// unit's partitions and every multi-partition unit to be a selected chain.
-func validateLPUUnitChains(units []lpuUnit, chains [][]int) error {
-	unitByRoot := make(map[int]int, len(units))
-	for index, unit := range units {
-		unitByRoot[unit.root()] = index
-	}
-	matched := make([]bool, len(units))
-	for chainIndex, chain := range chains {
-		index, found := unitByRoot[chain[0]]
-		if !found || !slices.Equal(units[index].partitionIDs(), chain) {
-			return fmt.Errorf("%s config.selectedPropSyncChains[%d] %s does not equal the partitions of one lpuUnits entry",
-				gbuildDeploymentV1CapnpFile, chainIndex, formatPropSyncChain(chain))
-		}
-		if matched[index] {
-			return fmt.Errorf("%s config.selectedPropSyncChains[%d] %s repeats an earlier chain",
-				gbuildDeploymentV1CapnpFile, chainIndex, formatPropSyncChain(chain))
-		}
-		matched[index] = true
-	}
-	for index, unit := range units {
-		if ids := unit.partitionIDs(); len(ids) > 1 && !matched[index] {
-			return fmt.Errorf("%s config.lpuUnits[%d] groups partitions %s, which is not a selected prop-sync chain",
-				gbuildDeploymentV1CapnpFile, index, formatPropSyncChain(ids))
-		}
-	}
-	return nil
-}
-
 func runtimeIOFromDeploymentV1(deployment deploymentcapnpv1.DeploymentInfo) (int32, int32, error) {
 	if !deployment.HasRuntimeIo() {
 		return 0, 0, fmt.Errorf("%s config.runtimeIo is missing", gbuildDeploymentV1CapnpFile)
@@ -530,35 +444,8 @@ func runtimeIOFromDeploymentV1(deployment deploymentcapnpv1.DeploymentInfo) (int
 	return int32(count), int32(fanoutFactor), nil
 }
 
-func selectedPropSyncChainsFromDeploymentV1(deployment deploymentcapnpv1.DeploymentInfo) ([][]int, error) {
-	if !deployment.HasSelectedPropSyncChains() {
-		return nil, nil
-	}
-	rawChains, err := deployment.SelectedPropSyncChains()
-	if err != nil {
-		return nil, fmt.Errorf("reading %s config.selectedPropSyncChains: %w", gbuildDeploymentV1CapnpFile, err)
-	}
-	chains := make([][]int, 0, rawChains.Len())
-	for chainIndex := 0; chainIndex < rawChains.Len(); chainIndex++ {
-		rawChain := rawChains.At(chainIndex)
-		if !rawChain.HasPartitionIds() {
-			return nil, fmt.Errorf("%s config.selectedPropSyncChains[%d].partitionIds is missing", gbuildDeploymentV1CapnpFile, chainIndex)
-		}
-		rawIDs, err := rawChain.PartitionIds()
-		if err != nil {
-			return nil, fmt.Errorf("reading %s config.selectedPropSyncChains[%d].partitionIds: %w", gbuildDeploymentV1CapnpFile, chainIndex, err)
-		}
-
-		chainPath := fmt.Sprintf("%s config.selectedPropSyncChains[%d]", gbuildDeploymentV1CapnpFile, chainIndex)
-		chain, err := decodePropSyncChain(rawIDs, chainPath)
-		if err != nil {
-			return nil, err
-		}
-		chains = append(chains, chain)
-	}
-	return chains, nil
-}
-
+// addLPUArtifactsFromDeploymentV1 normalizes the build's LPU partitions into
+// build, in ID order, and records whether it also requires CUDA partitions.
 func addLPUArtifactsFromDeploymentV1(
 	artifacts deploymentcapnpv1.Deployment,
 	build *Build,
@@ -568,66 +455,115 @@ func addLPUArtifactsFromDeploymentV1(
 		return fmt.Errorf("reading %s partitions: %w", gbuildDeploymentV1CapnpFile, err)
 	}
 	partitions := make([]buildPartition, 0, rawPartitions.Len())
+	seen := make(map[int]bool, rawPartitions.Len())
 	for index := 0; index < rawPartitions.Len(); index++ {
-		partition, err := buildPartitionFromDeploymentV1(rawPartitions.At(index))
+		raw := rawPartitions.At(index)
+		if !raw.HasPartition() {
+			return fmt.Errorf("%s artifact partition is missing partition ref", gbuildDeploymentV1CapnpFile)
+		}
+		ref, err := raw.Partition()
+		if err != nil {
+			return fmt.Errorf("reading %s artifact partition ref: %w", gbuildDeploymentV1CapnpFile, err)
+		}
+
+		// Project LPU artifacts while retaining whether the build also requires CUDA.
+		switch ref.DeviceType() {
+		case commoncapnpv1.DeviceType_cuda:
+			build.hasCUDAPartitions = true
+			continue
+		case commoncapnpv1.DeviceType_cpu:
+			continue
+		case commoncapnpv1.DeviceType_lpu:
+		default:
+			return fmt.Errorf("partition %d has unsupported deviceType %d", ref.PartitionId(), ref.DeviceType())
+		}
+		partition, family, err := buildPartitionFromDeploymentV1(raw, ref.PartitionId())
 		if err != nil {
 			return err
 		}
-		// Project LPU artifacts while retaining whether the build also requires CUDA.
-		if partition.partPath != "" {
-			partitions = append(partitions, partition)
-		} else {
-			ref, err := rawPartitions.At(index).Partition()
-			if err != nil {
-				return fmt.Errorf("reading %s artifact partition ref: %w", gbuildDeploymentV1CapnpFile, err)
-			}
-			build.hasCUDAPartitions = build.hasCUDAPartitions || ref.DeviceType() == commoncapnpv1.DeviceType_cuda
+
+		// One Agent template serves the build, so every LPU partition shares one
+		// family and node width.
+		if len(partitions) == 0 {
+			build.family = family
+		} else if family != build.family {
+			return fmt.Errorf("%s mixes XT and HX LPU partitions", gbuildDeploymentV1CapnpFile)
 		}
+		if seen[partition.sourcePartitionID] {
+			return fmt.Errorf("%s has duplicate LPU partition id %d", gbuildDeploymentV1CapnpFile, partition.sourcePartitionID)
+		}
+		seen[partition.sourcePartitionID] = true
+		if len(partitions) > 0 && partition.devicesPerNode != partitions[0].devicesPerNode {
+			return fmt.Errorf("%s LPU partition %d has devicesPerNode %d, want %d; all LPU partitions must use the same devicesPerNode",
+				gbuildDeploymentV1CapnpFile, partition.sourcePartitionID, partition.devicesPerNode, partitions[0].devicesPerNode)
+		}
+		partitions = append(partitions, partition)
 	}
 	if len(partitions) == 0 {
 		return fmt.Errorf("%s artifacts contain no LPU partitions", gbuildDeploymentV1CapnpFile)
 	}
-	// buildFromGbuildDeploymentV1 checks partSelect once it knows whether units place the build.
-	family, err := classifyManifestPartitions(gbuildDeploymentV1CapnpFile, partitions, false)
-	if err != nil {
-		return err
-	}
-
-	// Publish the scheduler-facing artifact projection.
+	slices.SortFunc(partitions, func(a, b buildPartition) int { return a.sourcePartitionID - b.sourcePartitionID })
 	build.partitions = partitions
-	build.family = family
-
 	return nil
 }
 
-func buildPartitionFromDeploymentV1(raw deploymentcapnpv1.PartitionDeployment) (buildPartition, error) {
-	if !raw.HasPartition() {
-		return buildPartition{}, fmt.Errorf("%s artifact partition is missing partition ref", gbuildDeploymentV1CapnpFile)
-	}
-	ref, err := raw.Partition()
-	if err != nil {
-		return buildPartition{}, fmt.Errorf("reading %s artifact partition ref: %w", gbuildDeploymentV1CapnpFile, err)
-	}
-	switch ref.DeviceType() {
-	case commoncapnpv1.DeviceType_cuda, commoncapnpv1.DeviceType_cpu:
-		return buildPartition{}, nil
-	case commoncapnpv1.DeviceType_lpu:
-		if raw.Detail().Which() != deploymentcapnpv1.PartitionDeployment_detail_Which_lpu || !raw.Detail().HasLpu() {
-			return buildPartition{}, fmt.Errorf("LPU partition %d has mismatched detail", ref.PartitionId())
-		}
-	default:
-		return buildPartition{}, fmt.Errorf("partition %d has unsupported deviceType %d", ref.PartitionId(), ref.DeviceType())
+// buildPartitionFromDeploymentV1 decodes the chip geometry of one LPU partition
+// and the family its architecture selects. Placement comes from lpuUnits, so the
+// partition's topology and compiled extent are not read.
+func buildPartitionFromDeploymentV1(raw deploymentcapnpv1.PartitionDeployment, partitionID uint32) (buildPartition, BuildFamily, error) {
+	if raw.Detail().Which() != deploymentcapnpv1.PartitionDeployment_detail_Which_lpu || !raw.Detail().HasLpu() {
+		return buildPartition{}, "", fmt.Errorf("LPU partition %d has mismatched detail", partitionID)
 	}
 	detail, err := raw.Detail().Lpu()
 	if err != nil {
-		return buildPartition{}, fmt.Errorf("reading %s LPU partition %d detail: %w", gbuildDeploymentV1CapnpFile, ref.PartitionId(), err)
+		return buildPartition{}, "", fmt.Errorf("reading %s LPU partition %d detail: %w", gbuildDeploymentV1CapnpFile, partitionID, err)
 	}
+
+	// Each partition selects the hardware family from its explicit architecture.
+	var family BuildFamily
 	switch detail.Architecture() {
 	case deploymentcapnpv1.LpuArchitecture_lp20:
-		return buildLPUArtifact(gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail, BuildFamilyXT)
+		family = BuildFamilyXT
 	case deploymentcapnpv1.LpuArchitecture_lp30:
-		return buildLPUArtifact(gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail, BuildFamilyHX)
+		family = BuildFamilyHX
 	default:
-		return buildPartition{}, fmt.Errorf("%s LPU partition %d unsupported chip architecture %d", gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail.Architecture())
+		return buildPartition{}, "", fmt.Errorf("%s LPU partition %d unsupported chip architecture %d",
+			gbuildDeploymentV1CapnpFile, partitionID, detail.Architecture())
 	}
+
+	subject := fmt.Sprintf("%s LPU partition %d", gbuildDeploymentV1CapnpFile, partitionID)
+	numChips, err := positiveManifestUInt32ToInt(subject+" numChips", detail.NumChips())
+	if err != nil {
+		return buildPartition{}, "", err
+	}
+	devicesPerNode, err := positiveManifestUInt32ToInt(subject+" devicesPerNode", detail.DevicesPerNode())
+	if err != nil {
+		return buildPartition{}, "", err
+	}
+	return buildPartition{sourcePartitionID: int(partitionID), numChips: numChips, devicesPerNode: devicesPerNode}, family, nil
+}
+
+func positiveManifestUInt32ToInt(field string, value uint32) (int, error) {
+	if value == 0 {
+		return 0, fmt.Errorf("%s must be >= 1, got 0", field)
+	}
+	return int(value), nil
+}
+
+// supportedHXExtent reports whether whole-node HX dimensions name a scheduler
+// shape: up to eight trays in one or two hemispheres of one rack, or two full racks.
+func supportedHXExtent(traysPerHemisphere, hemispheres, racks int64) bool {
+	if traysPerHemisphere < 1 || traysPerHemisphere > 8 {
+		return false
+	}
+	return ((hemispheres == 1 || hemispheres == 2) && racks == 1) ||
+		(traysPerHemisphere == 8 && hemispheres == 2 && racks == 2)
+}
+
+func formatPropSyncChain(chain []int) string {
+	ids := make([]string, 0, len(chain))
+	for _, partitionID := range chain {
+		ids = append(ids, strconv.Itoa(partitionID))
+	}
+	return "[" + strings.Join(ids, ",") + "]"
 }

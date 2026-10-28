@@ -36,7 +36,7 @@ SPDX-License-Identifier: Apache-2.0
 # Ownership and Identity
 
 - The DynamoGraphDeployment (DGD) owns the LPXGraphDeployment (LPXGD). The LPXGD
-  owns its PodCliqueSet (PCS), runtime ConfigMaps, and Services. The PCS owns the
+  owns its PodCliqueSet (PCS) and Services. The PCS owns the
   LPUPipelineRequests (LPRs) and Grove hierarchy. Each independent workload has one
   PodCliqueScalingGroup (PCSG). A shared draft/target runtime remains one workload.
 - LPRs have a controlling PCS owner reference with `blockOwnerDeletion: true`.
@@ -248,18 +248,11 @@ SPDX-License-Identifier: Apache-2.0
   Reuse fresh successful observations by build URL across revisions, without
   renewing `LastCheckedAt`. Check new or expired builds. Only a Ready deployment
   whose generation has been observed may ignore a failed periodic refresh.
-- Runtime ConfigMaps are immutable, content-addressed, LPXGD-owned, and labeled
-  with its UID. Render them and inject the `config` volume only for workloads
-  with a build that lacks `lpuUnits`; other workloads reject an undeclared
-  `config` mount. Find obsolete maps by label, verify ownership before deletion,
-  and retain desired names. Delete obsolete maps only after readiness, not during
-  PCS replacement, so existing pods keep their configuration.
-- The per-workload ConfigMap rendering is a bridge for builds without
-  `lpuUnits` (manifest.v2, deployment.v1 from GBuild before units, and the
-  legacy build of a mixed speculative workload). Remove the rendering, the
-  `config` volume injection and the units-derived rows once the operator
-  refuses builds without `lpuUnits`; keep the obsolete-map cleanup until
-  upgraded deployments no longer own such maps.
+- Runtimes read placement from the build's `lpuUnits` and the environment the
+  operator publishes; the controller renders no runtime ConfigMap and adds no
+  `config` volume. Rendering rejects a role that mounts `config` without
+  declaring it. Runtime ConfigMaps rendered by older operators stay LPXGD-owned
+  until the LPXGD is deleted.
 
 # Tests
 

@@ -13,19 +13,16 @@ import (
 	"path/filepath"
 	"testing"
 
-	"capnproto.org/go/capnp/v3"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
+	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 )
 
 const (
-	otherFixtureValue  = "other"
-	v2TestBuildName    = "v2-test-build"
-	v3HXTopologyFamily = "HX16x8x2"
-	v3OpaqueTopology   = "opaque-v3-topology"
+	otherFixtureValue = "other"
+	v2TestBuildName   = "v2-test-build"
 )
 
 type staticModelRegistry map[string]*Build
@@ -97,21 +94,32 @@ func projectTestBuild(t *testing.T, snapshot *Build, pipeline Pipeline) *ModelPr
 	return projectionBatch[0]
 }
 
+// testCompilerFixture describes a published deployment.v1 build directory.
+type testCompilerFixture struct {
+	// buildDirectoryName names a subdirectory for the build; empty publishes
+	// the build in the temporary directory itself.
+	buildDirectoryName string
+	testUnitBundle
+}
+
 func writeV2CompilerFixture(t *testing.T) string {
 	t.Helper()
 	return writeCompilerFixture(t, newV2CompilerFixture())
 }
 
-func newV2CompilerFixture() testV3CapnpFixture {
-	fixture := newV3CompilerFixture()
-	fixture.architecture = "polaris"
-	fixture.buildDirectoryName = v2TestBuildName
-	fixture.selectedPropSyncChains = [][]uint32{{7, 8}}
-	fixture.partitions = []testV3CapnpPartition{
-		{id: 7, deviceType: manifestcapnp.DeviceType_lpu, topology: registryTestTopology, numChips: 16, devicesPerNode: 8},
-		{id: 8, deviceType: manifestcapnp.DeviceType_lpu, topology: registryTestTopology, numChips: 16, devicesPerNode: 8},
+// newV2CompilerFixture returns an LPU-only LP20 build whose two 16-chip
+// partitions form one prop-sync chain on two hosts each.
+func newV2CompilerFixture() testCompilerFixture {
+	return testCompilerFixture{
+		buildDirectoryName: v2TestBuildName,
+		architecture:       deploymentcapnpv1.LpuArchitecture_lp20,
+		devicesPerNode:     8,
+		partitions:         testUnitPartitions(16, 7, 8),
+		units: []testLPUUnit{{
+			reservations: []testLPUReservation{testNodesReservation(2, 7), testNodesReservation(2, 8)},
+			connectors:   []testLPUConnector{{}},
+		}},
 	}
-	return fixture
 }
 
 func writeV3CompilerFixture(t *testing.T) string {
@@ -119,45 +127,18 @@ func writeV3CompilerFixture(t *testing.T) string {
 	return writeCompilerFixture(t, newV3CompilerFixture())
 }
 
-type testV3CapnpFixture struct {
-	buildDirectoryName     string
-	contractRevision       uint32
-	pipelineName           string
-	compilationMode        manifestcapnp.CompilationMode
-	architecture           string
-	selectedPropSyncChains [][]uint32
-	partSelect             bool
-	cpuEmbeddings          bool
-	partitions             []testV3CapnpPartition
-}
-
-type testV3CapnpPartition struct {
-	id             uint32
-	deviceType     manifestcapnp.DeviceType
-	topology       string
-	numChips       uint32
-	devicesPerNode uint32
-	topologyFamily string
-	partitionShape []uint32
-}
-
-func newV3CompilerFixture() testV3CapnpFixture {
-	return testV3CapnpFixture{
-		contractRevision: manifestcapnp.CurrentContractRevision,
-		pipelineName:     "default",
-		compilationMode:  manifestcapnp.CompilationMode_lpuOnly,
-		architecture:     "polarisB0",
-		partitions: []testV3CapnpPartition{{
-			id:             1,
-			deviceType:     manifestcapnp.DeviceType_lpu,
-			topology:       v3OpaqueTopology,
-			numChips:       16,
-			devicesPerNode: 16,
-		}},
+// newV3CompilerFixture returns an LPU-only LP30 build with one 16-chip
+// partition on one tray.
+func newV3CompilerFixture() testCompilerFixture {
+	return testCompilerFixture{
+		architecture:   deploymentcapnpv1.LpuArchitecture_lp30,
+		devicesPerNode: 16,
+		partitions:     testUnitPartitions(16, 1),
+		units:          testSingleUnits(testHXReservation(1, 1, 1, 1)),
 	}
 }
 
-func writeCompilerFixture(t *testing.T, fixture testV3CapnpFixture) string {
+func writeCompilerFixture(t *testing.T, fixture testCompilerFixture) string {
 	t.Helper()
 
 	t.Log("Create the selected compiler fixture directory")
@@ -167,131 +148,7 @@ func writeCompilerFixture(t *testing.T, fixture testV3CapnpFixture) string {
 		require.NoError(t, os.Mkdir(buildDir, 0o700))
 	}
 
-	t.Log("Write the revision-2 compiler manifest fixture")
-	writeTestV3CapnpManifest(t, buildDir, fixture)
+	t.Log("Publish the deployment contract")
+	require.NoError(t, os.WriteFile(filepath.Join(buildDir, gbuildDeploymentV1CapnpFile), encodeTestUnitBundle(t, fixture.testUnitBundle), 0o600))
 	return buildDir
-}
-
-func writeTestV3CapnpManifest(t *testing.T, buildDir string, fixture testV3CapnpFixture) {
-	t.Helper()
-
-	t.Log("Encode the revision-2 manifest header and model metadata")
-	message, segment := capnp.NewSingleSegmentMessage(nil)
-	manifest, err := manifestcapnp.NewRootManifest(segment)
-	require.NoError(t, err)
-	manifest.SetContractRevision(fixture.contractRevision)
-	model, err := manifest.NewModel()
-	require.NoError(t, err)
-	tokenizer, err := model.NewTokenizer()
-	require.NoError(t, err)
-	require.NoError(t, tokenizer.SetPath("tokenizer"))
-	stopTokens, err := tokenizer.NewStopTokens(1)
-	require.NoError(t, err)
-	stopTokens.Set(0, 1)
-
-	t.Log("Encode the deployment program, runtime I/O, and selected prop-sync chains")
-	deployment, err := manifest.NewDeployment()
-	require.NoError(t, err)
-	deployment.SetCompilationMode(fixture.compilationMode)
-	program, err := deployment.NewProgram()
-	require.NoError(t, err)
-	require.NoError(t, program.SetProgramName(fixture.pipelineName))
-	program.SetSequenceLength(8192)
-	program.SetInputSize(1)
-	program.SetOutputSize(1)
-	program.SetNumKvCaches(1)
-	program.SetSupportsCpuEmbeddings(fixture.cpuEmbeddings)
-	program.SetStandaloneTokenEmbeddings(fixture.cpuEmbeddings)
-	runtimeIO, err := deployment.NewRuntimeIo()
-	require.NoError(t, err)
-	runtimeIO.SetReserved1(0)
-	runtimeIO.SetIoFpgaCount(1)
-	runtimeIO.SetFanoutFactor(1)
-	if fixture.selectedPropSyncChains != nil {
-		chains, err := deployment.NewSelectedPropSyncChains(int32(len(fixture.selectedPropSyncChains)))
-		require.NoError(t, err)
-		for chainIndex, partitionIDs := range fixture.selectedPropSyncChains {
-			chain := chains.At(chainIndex)
-			ids, err := chain.NewPartitionIds(int32(len(partitionIDs)))
-			require.NoError(t, err)
-			for idIndex, partitionID := range partitionIDs {
-				ids.Set(idIndex, partitionID)
-			}
-		}
-	}
-
-	t.Log("Encode the flat revision-2 artifact inventory")
-	artifacts, err := manifest.NewArtifacts()
-	require.NoError(t, err)
-	if fixture.cpuEmbeddings {
-		assets, err := artifacts.NewRuntimeAssets()
-		require.NoError(t, err)
-		require.NoError(t, assets.SetTokenEmbeddingsPath("part-0/text_embeddings.npz"))
-	}
-	if fixture.partSelect {
-		partSelect, err := artifacts.NewPartSelect()
-		require.NoError(t, err)
-		selected, err := partSelect.NewPartitions(1)
-		require.NoError(t, err)
-		selected.At(0).SetDeviceType(manifestcapnp.DeviceType_lpu)
-		selected.At(0).SetPartitionId(fixture.partitions[0].id)
-	}
-	partitions, err := artifacts.NewPartitions(int32(len(fixture.partitions)))
-	require.NoError(t, err)
-	for index, fixturePartition := range fixture.partitions {
-		partition := partitions.At(index)
-		ref, err := partition.NewPartition()
-		require.NoError(t, err)
-		ref.SetDeviceType(fixturePartition.deviceType)
-		ref.SetPartitionId(fixturePartition.id)
-		switch fixturePartition.deviceType {
-		case manifestcapnp.DeviceType_lpu:
-			detail, err := partition.Detail().NewLpu()
-			require.NoError(t, err)
-			require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", fixturePartition.id)))
-			require.NoError(t, detail.SetTopology(fixturePartition.topology))
-			detail.SetNumChips(fixturePartition.numChips)
-			detail.SetDevicesPerNode(fixturePartition.devicesPerNode)
-			setManifestChipArchitectures(t, detail, []string{fixture.architecture})
-			if fixturePartition.topologyFamily != "" || fixturePartition.partitionShape != nil {
-				metadata, err := detail.NewTopologyMetadata()
-				require.NoError(t, err)
-				require.NoError(t, metadata.SetTopologyFamily(fixturePartition.topologyFamily))
-				shape, err := metadata.NewPartitionShape(int32(len(fixturePartition.partitionShape)))
-				require.NoError(t, err)
-				for dimension, extent := range fixturePartition.partitionShape {
-					shape.Set(dimension, extent)
-				}
-			}
-		case manifestcapnp.DeviceType_cuda:
-			_, err := partition.Detail().NewCuda()
-			require.NoError(t, err)
-		case manifestcapnp.DeviceType_cpu:
-			_, err := partition.Detail().NewCpu()
-			require.NoError(t, err)
-		default:
-			t.Fatalf("unsupported test device type %q", fixturePartition.deviceType)
-		}
-	}
-
-	t.Log("Publish the revision-2 compiler manifest")
-	data, err := message.Marshal()
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(buildDir, gbuildManifestV2CapnpFile), data, 0o600))
-}
-
-func setManifestChipArchitectures(t *testing.T, detail manifestcapnp.LpuPartitionArtifact, architectures ...[]string) {
-	t.Helper()
-
-	programs, err := capnp.NewCompositeList(detail.Segment(), capnp.ObjectSize{PointerCount: 2}, int32(len(architectures)))
-	require.NoError(t, err)
-	require.NoError(t, detail.SetReserved4(programs.ToPtr()))
-	for index, values := range architectures {
-		chips, err := capnp.NewCompositeList(programs.Struct(index).Segment(), capnp.ObjectSize{DataSize: 8, PointerCount: 2}, int32(len(values)))
-		require.NoError(t, err)
-		require.NoError(t, programs.Struct(index).SetPtr(1, chips.ToPtr()))
-		for chip, architecture := range values {
-			require.NoError(t, chips.Struct(chip).SetText(1, architecture))
-		}
-	}
 }

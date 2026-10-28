@@ -13,14 +13,12 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
-	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -30,20 +28,19 @@ const (
 	testTargetStageName     = "target"
 )
 
-// renderSelectedForTest renders projections into pcs and returns it with the
-// workload's runtime resources.
+// renderSelectedForTest renders projections into pcs and returns it.
 func renderSelectedForTest(
 	pcs *grovev1alpha1.PodCliqueSet,
 	projections []*ModelProjection,
 	input RenderInput,
-) (*grovev1alpha1.PodCliqueSet, []client.Object, error) {
+) (*grovev1alpha1.PodCliqueSet, error) {
 	// Attach test projections to their authored stage without inventing templates.
 	for _, projection := range projections {
 		projection.stage = testRenderComponentName
 	}
 	digest, err := workloadSetDigest(projections)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Projection-only fixtures model a workload with an authored conductor.
@@ -57,18 +54,18 @@ func renderSelectedForTest(
 	}
 	plan, err := workload.PlanNodeLocalMaterialization(pcs.Name, serving)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if workload.Pipeline() == PipelineHybrid {
 		input.Cyborg = pcs.Spec.Template.Cliques[0]
 	}
 	templates, err := RenderNodeLocal(workload, plan, input)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	pcs.Spec.Template.Cliques = templates.Cliques
 	pcs.Spec.Template.PodCliqueScalingGroupConfigs = []grovev1alpha1.PodCliqueScalingGroupConfig{templates.ScalingGroup}
-	return pcs, templates.Resources, nil
+	return pcs, nil
 }
 
 func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
@@ -76,7 +73,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 
 	t.Log("Cover shared configuration overrides and HX hybrid model-storage paths")
 	hybrid := newV3CompilerFixture()
-	hybrid.compilationMode = manifestcapnp.CompilationMode_lpx
+	hybrid.hybrid = true
 	xtSnapshot := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	hxSnapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
 	tests := []struct {
@@ -131,25 +128,25 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			}
 			if test.configPath != "" {
 				template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
-					Name: lpuConfigVolumeName,
+					Name: legacyConfigVolumeName,
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						Name: "authored-config", DefaultMode: ptr.To[int32](0440),
 					},
 				})
 			}
 			template.Spec.Containers[0].VolumeMounts = slices.DeleteFunc(template.Spec.Containers[0].VolumeMounts,
-				func(mount corev1.VolumeMount) bool { return mount.Name == lpuConfigVolumeName })
+				func(mount corev1.VolumeMount) bool { return mount.Name == legacyConfigVolumeName })
 			if test.configPath != "" {
 				template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts,
-					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: test.configPath})
+					corev1.VolumeMount{Name: legacyConfigVolumeName, MountPath: test.configPath})
 			}
 			if test.pipeline == PipelineHybrid {
 				template.Spec.Containers[0].VolumeMounts[0].MountPath = "/model-cache"
-				pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = "/model-cache"
+				pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts[0].MountPath = "/model-cache"
 			}
 
 			t.Log("Render into the fresh PCS without retaining stale runtime identity")
-			rendered, _, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
+			rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
 				Stages:    map[string]corev1.PodTemplateSpec{testRenderComponentName: template},
 				Conductor: template.DeepCopy(),
 			})
@@ -185,7 +182,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				cyborg := namedClique(t, rendered, "cond").Spec.PodSpec.Containers[0]
 				require.Contains(t, cyborg.VolumeMounts, corev1.VolumeMount{Name: "model-storage", MountPath: "/model-cache"})
 				require.Contains(t, cyborg.Env, corev1.EnvVar{
-					Name: "GBUILD_MANIFEST_PATH", Value: "/model-cache/model-build/manifest.v2.capnp.bin",
+					Name: "GBUILD_MANIFEST_PATH", Value: "/model-cache/model-build/deployment.v1.capnp.bin",
 				})
 			}
 		})
@@ -217,7 +214,7 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 	conductorPodSpec.Containers[0].Env = []corev1.EnvVar{{Name: "LPU_MODEL_NAME", ValueFrom: modelAnnotationSource}}
 
 	t.Log("Render conductor and Agent roles from the base PodSpec")
-	rendered, _, err := renderSelectedForTest(renderTestPCS(false), []*ModelProjection{projection}, RenderInput{
+	rendered, err := renderSelectedForTest(renderTestPCS(false), []*ModelProjection{projection}, RenderInput{
 		Stages:    map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: conductorPodSpec}},
 		Conductor: &corev1.PodTemplateSpec{Spec: *conductorPodSpec.DeepCopy()},
 	})
@@ -386,21 +383,16 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	require.Equal(t, secondAgentBefore, &secondAgent.Spec.PodSpec)
 	require.Equal(t, conductorBefore, &conductor.Spec.PodSpec)
 
-	t.Log("Preserve runtime settings in the conductor template and share only partition data")
+	t.Log("Preserve runtime settings in the conductor template")
 	require.Equal(t, conductorTemplate.Spec.Containers[0].Resources, conductor.Spec.PodSpec.Containers[0].Resources)
-	configMap, ok := templates.Resources[0].(*corev1.ConfigMap)
-	require.True(t, ok)
-	require.NotContains(t, configMap.Data, "model_config.toml")
 	for _, env := range conductorTemplate.Spec.Containers[0].Env {
 		require.Contains(t, conductor.Spec.PodSpec.Containers[0].Env, env)
 	}
-	require.Equal(t, "draft0\ndraft1\ntarget", configMap.Data["partition_models"])
 	require.Equal(t, before, source)
 
 	t.Log("Bind conductor allocation and Nova hostnames to the renamed Agent cliques")
 	require.Equal(t, "agt0:agt1:agt2", testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, allocationEnvVar))
 	require.Equal(t, []string{"agt0", "agt1", "agt2"}, conductor.Spec.StartsAfter)
-	require.NotContains(t, configMap.Data, "datacenter.toml")
 	nodeNameTemplate := testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, "NOVA_NODE_NAME_TEMPLATE")
 	for _, agent := range plan.ForReplica(0).Agents {
 		hostname := strings.NewReplacer(
@@ -444,9 +436,8 @@ func renderTestPCS(hybrid bool) *grovev1alpha1.PodCliqueSet {
 					{Name: "model-storage", PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}},
 				},
 				Containers: []corev1.Container{{Name: "main", Image: "cyborg", Env: []corev1.EnvVar{
-					{Name: "SERVER_HOSTS_FILE", Value: "/tmp/lpu_servers"},
+					{Name: "RDMA_PORT", Value: "12345"},
 				}, VolumeMounts: []corev1.VolumeMount{
-					{Name: lpuConfigVolumeName, MountPath: "/configs"},
 					{Name: "model-storage", MountPath: "/models"},
 				}}},
 				ResourceClaims: []corev1.PodResourceClaim{{
@@ -476,7 +467,6 @@ func renderTestPodSpec() corev1.PodSpec {
 			Name: "main", Image: "runtime",
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: "model-storage", MountPath: "/models"},
-				{Name: lpuConfigVolumeName, MountPath: "/configs"},
 				{Name: "single-v2-ssh-key", MountPath: "/tmp/dynamo-lpu-ssh"},
 				{Name: "ssh-secret", MountPath: "/ssh-pk", ReadOnly: true},
 			},
@@ -501,20 +491,19 @@ func namedClique(t *testing.T, pcs *grovev1alpha1.PodCliqueSet, name string) *gr
 func TestRenderHybridUnitRuntimeEnvironment(t *testing.T) {
 	t.Parallel()
 	bundle := testUnitBundle{
-		architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8, hybrid: true, chains: [][]uint32{{1, 2}},
-		partitions: testUnitPartitions(16, nil, 0, 1, 2, 3),
+		architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8, hybrid: true,
+		partitions: testUnitPartitions(16, 0, 1, 2, 3),
 		units: []testLPUUnit{
 			{reservations: []testLPUReservation{testNodesReservation(2, 0)}},
 			{reservations: []testLPUReservation{testNodesReservation(2, 1), testNodesReservation(2, 2)}, connectors: []testLPUConnector{{}}},
 			{reservations: []testLPUReservation{testNodesReservation(2, 3)}},
 		},
 	}
-	authoredConfig := corev1.Volume{Name: lpuConfigVolumeName, EmptyDir: &corev1.EmptyDirVolumeSource{}}
+	authoredConfig := corev1.Volume{Name: legacyConfigVolumeName, EmptyDir: &corev1.EmptyDirVolumeSource{}}
 	undeclaredConfig := "container main mounts volume \"config\", which its pod template does not declare; " +
-		"the operator provides /configs only for builds without lpuUnits"
+		"the operator no longer provides /configs, because runtimes read placement from the build's lpuUnits"
 	for _, test := range []struct {
 		name      string
-		legacy    bool
 		selection *v1beta1.LPXLocalPartitions
 		// agentConfig and cyborgConfig mount config at /configs in that role;
 		// a non-nil volume also declares it.
@@ -523,53 +512,36 @@ func TestRenderHybridUnitRuntimeEnvironment(t *testing.T) {
 		wantErr                   string
 		wantAgentEnv              []corev1.EnvVar
 		wantCyborgEnv             []corev1.EnvVar
-		// wantConfigMaps lists the rendered runtime ConfigMaps' name prefixes.
-		wantConfigMaps []string
 	}{
 		{
-			name:   "legacy placement keeps the selection on Cyborg only",
-			legacy: true, agentConfig: true, cyborgConfig: true,
-			selection:      &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{0}},
-			wantAgentEnv:   []corev1.EnvVar{},
-			wantCyborgEnv:  []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "0"}},
-			wantConfigMaps: []string{"test-pcs-decode-", "test-pcs-lpu-"},
-		},
-		{
-			name:   "legacy placement omits an empty selection",
-			legacy: true, agentConfig: true, cyborgConfig: true,
-			wantAgentEnv:   []corev1.EnvVar{},
-			wantCyborgEnv:  []corev1.EnvVar{},
-			wantConfigMaps: []string{"test-pcs-decode-", "test-pcs-lpu-"},
-		},
-		{
-			name:          "unit placement publishes an empty selection and the Agent template",
+			name:          "an empty selection and the Agent template",
 			wantAgentEnv:  []corev1.EnvVar{{Name: localPartitionIDsEnv}},
 			wantCyborgEnv: []corev1.EnvVar{{Name: allocationEnvVar, Value: testAgentTemplateName}, {Name: localPartitionIDsEnv}},
 		},
 		{
-			name:          "unit placement publishes local unit roots",
+			name:          "local unit roots",
 			selection:     &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{0}},
 			wantAgentEnv:  []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: "0"}},
 			wantCyborgEnv: []corev1.EnvVar{{Name: allocationEnvVar, Value: testAgentTemplateName}, {Name: localPartitionIDsEnv, Value: "0"}},
 		},
 		{
-			name:          "unit placement names the Agent template without Agents",
+			name:          "the Agent template without Agents",
 			selection:     &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeAll},
 			wantCyborgEnv: []corev1.EnvVar{{Name: allocationEnvVar, Value: testAgentTemplateName}, {Name: localPartitionIDsEnv, Value: "0,1,3"}},
 		},
 		{
-			name:        "unit placement keeps an authored config volume",
+			name:        "an authored config volume is kept",
 			agentConfig: true, agentVolume: &authoredConfig,
 			wantAgentEnv:  []corev1.EnvVar{{Name: localPartitionIDsEnv}},
 			wantCyborgEnv: []corev1.EnvVar{{Name: allocationEnvVar, Value: testAgentTemplateName}, {Name: localPartitionIDsEnv}},
 		},
 		{
-			name:        "unit placement rejects an Agent config mount without a volume",
+			name:        "an Agent config mount without a volume is rejected",
 			agentConfig: true,
 			wantErr:     "LPX role " + testAgentTemplateName + " " + undeclaredConfig,
 		},
 		{
-			name:         "unit placement rejects a Cyborg config mount without a volume",
+			name:         "a Cyborg config mount without a volume is rejected",
 			cyborgConfig: true,
 			wantErr:      "LPX role cond " + undeclaredConfig,
 		},
@@ -577,27 +549,24 @@ func TestRenderHybridUnitRuntimeEnvironment(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			t.Log("Project the hybrid bundle through its units or the legacy derivation")
+			t.Log("Project the hybrid bundle through its units")
 			build, err := acquireTestUnitBundle(t, bundle)
 			require.NoError(t, err)
-			if test.legacy {
-				build.lpuUnits = nil
-			}
 			projections, err := projectTestUnits(build, test.selection)
 			require.NoError(t, err)
 
 			t.Log("Mount /configs only in the roles that the case names")
 			agentSpec := renderTestPodSpec()
-			agentSpec.Containers[0].VolumeMounts = withoutConfigMount(agentSpec.Containers[0].VolumeMounts, test.agentConfig)
+			agentSpec.Containers[0].VolumeMounts = withConfigMount(agentSpec.Containers[0].VolumeMounts, test.agentConfig)
 			if test.agentVolume != nil {
 				agentSpec.Volumes = append(agentSpec.Volumes, *test.agentVolume)
 			}
 			pcs := renderTestPCS(true)
 			cyborgContainer := &pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0]
-			cyborgContainer.VolumeMounts = withoutConfigMount(cyborgContainer.VolumeMounts, test.cyborgConfig)
+			cyborgContainer.VolumeMounts = withConfigMount(cyborgContainer.VolumeMounts, test.cyborgConfig)
 
 			t.Log("Render the hybrid workload")
-			rendered, resources, err := renderSelectedForTest(pcs, projections, RenderInput{
+			rendered, err := renderSelectedForTest(pcs, projections, RenderInput{
 				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: agentSpec}},
 			})
 			if test.wantErr != "" {
@@ -617,86 +586,51 @@ func TestRenderHybridUnitRuntimeEnvironment(t *testing.T) {
 				require.Equal(t, test.wantAgentEnv, placementEnv(rendered.Spec.Template.Cliques[agentIndex].Spec.PodSpec.Containers[0].Env))
 			}
 
-			t.Log("Render /configs and bind every role to it only for legacy placement")
-			require.Len(t, resources, len(test.wantConfigMaps))
-			configMapNames := make([]string, 0, len(resources))
-			for index, resource := range resources {
-				configMap, ok := resource.(*corev1.ConfigMap)
-				require.True(t, ok)
-				require.True(t, strings.HasPrefix(configMap.Name, test.wantConfigMaps[index]), configMap.Name)
-				configMapNames = append(configMapNames, configMap.Name)
-			}
+			t.Log("Add no config volume; keep only an authored volume")
 			for _, clique := range rendered.Spec.Template.Cliques {
 				volumes := clique.Spec.PodSpec.Volumes
-				configIndex := slices.IndexFunc(volumes, func(volume corev1.Volume) bool { return volume.Name == lpuConfigVolumeName })
-				switch {
-				case test.legacy:
-					require.GreaterOrEqual(t, configIndex, 0, clique.Name)
-					require.Contains(t, configMapNames, volumes[configIndex].ConfigMap.Name)
-					require.NotEmpty(t, clique.Annotations[v1alpha1.AnnotationExtraResourcesHash], clique.Name)
-				case clique.Name == testAgentTemplateName && test.agentVolume != nil:
+				configIndex := slices.IndexFunc(volumes, func(volume corev1.Volume) bool { return volume.Name == legacyConfigVolumeName })
+				if clique.Name == testAgentTemplateName && test.agentVolume != nil {
 					require.Equal(t, *test.agentVolume, volumes[configIndex])
-					require.NotContains(t, clique.Annotations, v1alpha1.AnnotationExtraResourcesHash)
-				default:
+				} else {
 					require.Equal(t, -1, configIndex, clique.Name)
-					require.NotContains(t, clique.Annotations, v1alpha1.AnnotationExtraResourcesHash)
 				}
 			}
 		})
 	}
 }
 
-func TestRenderSpecDecodeRuntimeConfigFollowsBuildPlacement(t *testing.T) {
+func TestRenderSpecDecodeReadsNoRuntimeConfig(t *testing.T) {
 	t.Parallel()
 	bundle := testUnitBundle{
-		architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8, chains: [][]uint32{{1, 2}},
-		partitions: testUnitPartitions(8, nil, 1, 2),
+		architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8,
+		partitions: testUnitPartitions(8, 1, 2),
 		units: []testLPUUnit{{
 			reservations: []testLPUReservation{testNodesReservation(1, 1), testNodesReservation(1, 2)},
 			connectors:   []testLPUConnector{{}},
 		}},
 	}
 	for _, test := range []struct {
-		name string
-		// legacyTarget drops the target build's units; the draft keeps them.
-		legacyTarget bool
-		configMount  bool
-		wantErr      string
-		wantData     map[string]string
+		name        string
+		configMount bool
+		wantErr     string
 	}{
+		{name: "no role reads /configs"},
 		{
-			name: "builds that all record units read no /configs",
-		},
-		{
-			name:         "a target without units reads /configs rows for both builds",
-			legacyTarget: true, configMount: true,
-			wantData: map[string]string{
-				"nodes_per_partition":    "1\n1\n1\n1",
-				"partition_ids":          "1\n2\n1\n2",
-				"partition_indices":      "0\n1\n0\n1",
-				"partition_models":       "draft0\ndraft0\ntarget\ntarget",
-				"partition_node_offsets": "0\n1\n0\n1",
-				"partition_paths":        "part-1\npart-2\npart-1\npart-2",
-			},
-		},
-		{
-			name:        "builds that all record units reject a conductor config mount without a volume",
+			name:        "a conductor config mount without a volume is rejected",
 			configMount: true,
 			wantErr: "LPX role cond container main mounts volume \"config\", which its pod template does not declare; " +
-				"the operator provides /configs only for builds without lpuUnits",
+				"the operator no longer provides /configs, because runtimes read placement from the build's lpuUnits",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			t.Log("Project a draft through its units and a target with or without them")
+			t.Log("Project a draft and a target through their units")
 			draft, err := acquireTestUnitBundle(t, bundle)
 			require.NoError(t, err)
 			target, err := acquireTestUnitBundle(t, bundle)
 			require.NoError(t, err)
-			if test.legacyTarget {
-				target.lpuUnits = nil
-			}
 			projections, err := appendModelProjections(nil, ModelProjectionInput{
 				Pipeline: PipelineSpecDecode, Models: []string{"draft0"}, RuntimeBuildRef: "draft-build", Build: draft,
 			})
@@ -708,8 +642,8 @@ func TestRenderSpecDecodeRuntimeConfigFollowsBuildPlacement(t *testing.T) {
 
 			t.Log("Render the conductor and Agents from templates that mount /configs only when the case says so")
 			spec := renderTestPodSpec()
-			spec.Containers[0].VolumeMounts = withoutConfigMount(spec.Containers[0].VolumeMounts, test.configMount)
-			rendered, resources, err := renderSelectedForTest(renderTestPCS(false), projections, RenderInput{
+			spec.Containers[0].VolumeMounts = withConfigMount(spec.Containers[0].VolumeMounts, test.configMount)
+			rendered, err := renderSelectedForTest(renderTestPCS(false), projections, RenderInput{
 				Stages:    map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: spec}},
 				Conductor: &corev1.PodTemplateSpec{Spec: *spec.DeepCopy()},
 			})
@@ -719,38 +653,23 @@ func TestRenderSpecDecodeRuntimeConfigFollowsBuildPlacement(t *testing.T) {
 			}
 			require.NoError(t, err)
 
-			t.Log("Render the shared rows and bind the conductor and every Agent to them only when a build lacks units")
-			if test.wantData == nil {
-				require.Empty(t, resources)
-			} else {
-				require.Len(t, resources, 1)
-				configMap, ok := resources[0].(*corev1.ConfigMap)
-				require.True(t, ok)
-				require.Equal(t, test.wantData, configMap.Data)
-			}
+			t.Log("Bind no role to a config volume")
 			require.Len(t, rendered.Spec.Template.Cliques, 3)
 			for _, clique := range rendered.Spec.Template.Cliques {
-				volumes := clique.Spec.PodSpec.Volumes
-				configIndex := slices.IndexFunc(volumes, func(volume corev1.Volume) bool { return volume.Name == lpuConfigVolumeName })
-				if test.wantData == nil {
-					require.Equal(t, -1, configIndex, clique.Name)
-					require.NotContains(t, clique.Annotations, v1alpha1.AnnotationExtraResourcesHash)
-					continue
-				}
-				require.GreaterOrEqual(t, configIndex, 0, clique.Name)
-				require.Equal(t, resources[0].GetName(), volumes[configIndex].ConfigMap.Name)
-				require.NotEmpty(t, clique.Annotations[v1alpha1.AnnotationExtraResourcesHash], clique.Name)
+				require.False(t, slices.ContainsFunc(clique.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool {
+					return volume.Name == legacyConfigVolumeName
+				}), clique.Name)
 			}
 		})
 	}
 }
 
-// withoutConfigMount returns mounts without the config mount unless keep is set,
-// in which case it keeps or adds a mount at /configs.
-func withoutConfigMount(mounts []corev1.VolumeMount, keep bool) []corev1.VolumeMount {
-	mounts = slices.DeleteFunc(slices.Clone(mounts), func(mount corev1.VolumeMount) bool { return mount.Name == lpuConfigVolumeName })
-	if keep {
-		mounts = append(mounts, corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: "/configs"})
+// withConfigMount returns mounts with a config mount at /configs added when
+// mount is set.
+func withConfigMount(mounts []corev1.VolumeMount, mount bool) []corev1.VolumeMount {
+	mounts = slices.Clone(mounts)
+	if mount {
+		mounts = append(mounts, corev1.VolumeMount{Name: legacyConfigVolumeName, MountPath: "/configs"})
 	}
 	return mounts
 }

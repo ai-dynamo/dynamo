@@ -12,10 +12,7 @@ import (
 	"net/url"
 	"testing"
 
-	"capnproto.org/go/capnp/v3"
-	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
-	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -171,46 +168,4 @@ func defaultTestString(value string, fallback string) string {
 		return fallback
 	}
 	return value
-}
-
-func newManifestV2ContractFixture(t *testing.T) manifestcapnpv2.Manifest {
-	t.Helper()
-
-	_, seg := capnp.NewSingleSegmentMessage(nil)
-	manifest, err := manifestcapnpv2.NewRootManifest(seg)
-	require.NoError(t, err)
-	manifest.SetContractRevision(manifestcapnpv2.CurrentContractRevision)
-	deployment, err := manifest.NewDeployment()
-	require.NoError(t, err)
-	deployment.SetCompilationMode(manifestcapnpv2.CompilationMode_lpx)
-	_, err = deployment.NewProgram()
-	require.NoError(t, err)
-	runtimeIO, err := deployment.NewRuntimeIo()
-	require.NoError(t, err)
-	runtimeIO.SetReserved1(2)
-	runtimeIO.SetIoFpgaCount(4)
-	runtimeIO.SetFanoutFactor(2)
-	artifacts, err := manifest.NewArtifacts()
-	require.NoError(t, err)
-	partitions, err := artifacts.NewPartitions(1)
-	require.NoError(t, err)
-	setManifestV2LPUArtifact(t, partitions.At(0), 0)
-
-	return manifest
-}
-
-func setManifestV2LPUArtifact(t *testing.T, partition manifestcapnpv2.PartitionInfo, id uint32) {
-	t.Helper()
-
-	ref, err := partition.NewPartition()
-	require.NoError(t, err)
-	ref.SetPartitionId(id)
-	ref.SetDeviceType(manifestcapnpv2.DeviceType_lpu)
-	detail, err := partition.Detail().NewLpu()
-	require.NoError(t, err)
-	require.NoError(t, detail.SetPath("part-0"))
-	require.NoError(t, detail.SetTopology(registryTestTopology))
-	detail.SetNumChips(8)
-	detail.SetDevicesPerNode(8)
-	setManifestChipArchitectures(t, detail, []string{"polaris"})
 }

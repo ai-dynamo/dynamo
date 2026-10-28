@@ -396,32 +396,16 @@ func (r *defaultModelRegistry) AcquireBuild(ctx context.Context, id string) (*Bu
 		return nil, err
 	}
 
-	format, manifestData, err := r.readBuildContract(ctx, refURL)
-	if err != nil {
-		return nil, err
-	}
-	manifestPath, err := format.filename()
+	manifestData, err := r.readBuildContract(ctx, refURL)
 	if err != nil {
 		return nil, err
 	}
 
-	// Validate the selected contract exactly once, without fallback on invalid split bytes.
+	// Validate the contract exactly once.
+	deployment, err := decodeGbuildDeploymentV1(manifestData)
 	var build *Build
-	switch format {
-	case buildContractManifestV2:
-		manifest, decodeErr := decodeGbuildManifestV2(manifestData)
-		if decodeErr != nil {
-			err = decodeErr
-		} else {
-			build, err = buildFromGbuildManifestV2(refURL.String(), manifest)
-		}
-	case buildContractDeploymentV1:
-		deployment, decodeErr := decodeGbuildDeploymentV1(manifestData)
-		if decodeErr != nil {
-			err = decodeErr
-		} else {
-			build, err = buildFromGbuildDeploymentV1(refURL.String(), deployment)
-		}
+	if err == nil {
+		build, err = buildFromGbuildDeploymentV1(refURL.String(), deployment)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%w for %q: %w", errInvalidBuildManifest, refURL.String(), err)
@@ -430,58 +414,18 @@ func (r *defaultModelRegistry) AcquireBuild(ctx context.Context, id string) (*Bu
 	// Hash the exact manifest bytes in their own domain, bound to the schema filename and independent of the locator.
 	hash := sha256.New()
 	_, _ = hash.Write([]byte(buildSnapshotIdentityVersion + "\x00"))
-	_, _ = hash.Write([]byte(manifestPath + "\x00"))
+	_, _ = hash.Write([]byte(gbuildDeploymentV1CapnpFile + "\x00"))
 	_, _ = hash.Write(manifestData)
 	build.contentID = fmt.Sprintf("sha256:%x", hash.Sum(nil))
-	build.contractFormat = format
 	return build, nil
 }
 
-// readBuildContract selects one supported entry point and returns its bounded bytes.
-// The receiver and buildURL must be non-nil.
-func (r *defaultModelRegistry) readBuildContract(ctx context.Context, buildURL *url.URL) (buildContractFormat, []byte, error) {
-	candidates := []string{gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile}
-	paths := make([]string, 0, len(candidates))
-	var manifestData []byte
-	for _, name := range candidates {
-		if buildURL.Scheme == BuildSchemeFile {
-			// Inspect local entries first so broken symlinks still count as published contracts.
-			if err := ctx.Err(); err != nil {
-				return buildContractUnknown, nil, err
-			}
-			_, err := os.Lstat(buildURL.JoinPath(name).Path)
-			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
-				continue
-			}
-			if err != nil {
-				return buildContractUnknown, nil, err
-			}
-		} else {
-			// Read alternatives separately because Model Express requires every selected path to exist.
-			data, err := r.readBuildFileBounded(ctx, buildURL, name, maxBuildSnapshotMetadataBytes)
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				return buildContractUnknown, nil, err
-			}
-			manifestData = data
-		}
-		paths = append(paths, name)
+// readBuildContract returns the bounded bytes of the build's deployment.v1
+// contract. The receiver and buildURL must be non-nil.
+func (r *defaultModelRegistry) readBuildContract(ctx context.Context, buildURL *url.URL) ([]byte, error) {
+	data, err := r.readBuildFileBounded(ctx, buildURL, gbuildDeploymentV1CapnpFile, maxBuildSnapshotMetadataBytes)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		return nil, fmt.Errorf("%w: missing build contract: require %s: %w", os.ErrNotExist, gbuildDeploymentV1CapnpFile, err)
 	}
-
-	if len(paths) == 0 {
-		return buildContractUnknown, nil, fmt.Errorf("%w: missing build contract: require %s or %s", os.ErrNotExist, gbuildManifestV2CapnpFile, gbuildDeploymentV1CapnpFile)
-	}
-	format, err := selectBuildContract(paths)
-	if err != nil {
-		return buildContractUnknown, nil, fmt.Errorf("%w: %w", errInvalidBuildManifest, err)
-	}
-	if buildURL.Scheme == BuildSchemeFile {
-		manifestData, err = r.readBuildFileBounded(ctx, buildURL, paths[0], maxBuildSnapshotMetadataBytes)
-		if err != nil {
-			return buildContractUnknown, nil, err
-		}
-	}
-	return format, manifestData, nil
+	return data, err
 }

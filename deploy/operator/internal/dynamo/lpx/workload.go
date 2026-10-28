@@ -5,8 +5,6 @@
 
 package lpx
 
-import "slices"
-
 // Workload is the immutable result of resolving one LPX component group
 // for scheduling and runtime materialization.
 // Its methods require a successfully resolved, non-nil workload with projections.
@@ -47,13 +45,4 @@ func (w *Workload) ComponentNames() []string {
 // ServingComponentName returns the conductor owner, placed last by ResolveWorkload.
 func (w *Workload) ServingComponentName() string {
 	return w.modelProjections[len(w.modelProjections)-1].stage
-}
-
-// placesLPUUnits reports whether every model projection placed its build's
-// compiler-owned LPU units. Only a speculative workload can mix builds with and
-// without units; it then still reads /configs for the builds that lack them.
-func (w *Workload) placesLPUUnits() bool {
-	return !slices.ContainsFunc(w.modelProjections, func(projection *ModelProjection) bool {
-		return !projection.placesLPUUnits()
-	})
 }

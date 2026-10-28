@@ -18,45 +18,6 @@ import (
 
 const localPartitionIDsEnv = "LPX_LOCAL_PARTITION_IDS"
 
-// selectRemotePartitions filters partitions, the scheduler reservations derived
-// from build, to those that remain on LPUs and returns the sorted runtime
-// partition IDs that run on the Cyborg GPU. build is a nonnil physical build that
-// has not collapsed its selected prop-sync chains. A nil selection returns
-// partitions unchanged. No input is mutated.
-func selectRemotePartitions(
-	selection *dynamov1beta1.LPXLocalPartitions,
-	pipeline Pipeline,
-	build *Build,
-	partitions []buildPartition,
-) ([]buildPartition, []int, error) {
-	if selection == nil {
-		return partitions, nil, nil
-	}
-
-	// A selected prop-sync chain is one runtime partition owned by its first member.
-	runtimeOwner := make(map[int]int, len(build.partitions))
-	for _, partition := range build.partitions {
-		runtimeOwner[partition.sourcePartitionID] = partition.sourcePartitionID
-	}
-	for _, chain := range build.selectedPropSyncChains {
-		for _, member := range chain {
-			runtimeOwner[member] = chain[0]
-		}
-	}
-	local, err := selectLocalRuntimePartitions(selection, pipeline, runtimeOwner)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	remote := make([]buildPartition, 0, len(partitions))
-	for _, partition := range partitions {
-		if !local[runtimeOwner[partition.sourcePartitionID]] {
-			remote = append(remote, partition)
-		}
-	}
-	return remote, slices.Sorted(maps.Keys(local)), nil
-}
-
 // selectRemoteUnits returns the units that remain on LPUs, in Agent order, and
 // the sorted roots of the units that run on the Cyborg GPU. A unit is one runtime
 // partition named by its root. A nil selection returns units unchanged. No input
@@ -133,23 +94,17 @@ func selectLocalRuntimePartitions(
 
 // applyLocalPartitionIDs publishes the projection's GPU-local partitions into one
 // Cyborg or hybrid Agent container. The operator owns the variable: it removes any
-// authored value and sets it when the projection has local partitions. Without
-// local partitions, it sets an empty value only when envFrom sources could
-// otherwise supply one, or when the projection places compiler-owned LPU units:
-// there the variable's presence tells runtimes that the operator projected units.
-// Cyborg treats an empty value as no selection.
+// authored value and always sets it, empty when every unit stays on LPUs, so
+// runtimes can tell which units run on the GPU.
 func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjection) {
 	ids := make([]string, len(projection.localPartitionIDs))
 	for index, id := range projection.localPartitionIDs {
 		ids[index] = strconv.Itoa(id)
 	}
-	publish := len(ids) > 0 || len(container.EnvFrom) > 0 || projection.placesLPUUnits()
 
 	// Kubernetes expands environment references in order; publish the selection before authored bindings.
 	env := make([]corev1.EnvVar, 0, len(container.Env)+1)
-	if publish {
-		env = append(env, corev1.EnvVar{Name: localPartitionIDsEnv, Value: strings.Join(ids, ",")})
-	}
+	env = append(env, corev1.EnvVar{Name: localPartitionIDsEnv, Value: strings.Join(ids, ",")})
 	for _, variable := range container.Env {
 		if variable.Name != localPartitionIDsEnv {
 			env = append(env, variable)
