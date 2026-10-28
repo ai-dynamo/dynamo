@@ -143,12 +143,11 @@ export DYN_STRUCTURAL_TAG=false
 
 Rust preprocessing, including the native sidecars, still applies native tags to
 Kimi K2 `required`/named choices and Kimi K3 named choices when optional
-structural tags are disabled.
-A lookahead pattern can still be rejected by XGrammar
-0.2.1 or 0.2.7 unless the tool sets `strict: false` under schema mode `auto`.
-Global schema mode `strict` overrides that workaround. Kimi K2/K3 automatic
-choices and Kimi K3 `required` do not use this exception. Python vLLM and SGLang
-preprocessing respect the opt-out for all tool choices.
+structural tags are disabled. Kimi K2/K3 automatic choices and Kimi K3
+`required` do not use this exception. Python vLLM and SGLang preprocessing
+respect the opt-out for all tool choices. These native tags follow the same
+schema-mode rules as optional tags, including the handling of argument schemas
+the backend cannot compile described in [Schema Modes](#schema-modes).
 
 To keep structural tags enabled but preserve the previous conditional activation
 policy, set the scope to `auto`:
@@ -265,8 +264,10 @@ tool arguments inside the structural tag:
 
 ### `auto` (default)
 
-- Tools with omitted `strict` or `strict: true` — their declared parameter
-  schema is used.
+- Tools with `strict: true` — their declared parameter schema is used.
+- Tools with omitted `strict` — their declared parameter schema is used. A
+  regex in it that the backend's XGrammar cannot compile is left out; see
+  [Regex constructs the backend cannot compile](#regex-constructs-the-backend-cannot-compile).
 - Tools with `strict: false` — argument content is schema-relaxed when the
   parser builds a structural tag.
 
@@ -281,14 +282,41 @@ builder cannot produce an automatically added tool-call tag, Dynamo uses the exi
 compatibility path rather than introducing a new request error; automatic tool
 choice may therefore remain unconstrained for that parser/schema combination.
 
-> [!WARNING]
-> Valid tool schemas containing constructs unsupported by the backend's
-> XGrammar version, such as regex lookahead, can cause request rejection.
-> Backend compilation errors do not trigger Dynamo's builder fallback.
-> With XGrammar 0.2.1 or 0.2.7 and schema mode `auto`, setting the tool
-> function's `strict: false` avoids this lookahead rejection by disabling
-> argument-schema enforcement. This workaround is not guaranteed on older
-> versions. The deployment opt-out still retains Rust Kimi K3 named-call tags.
+### Regex constructs the backend cannot compile
+
+A valid JSON Schema `pattern` can use regex syntax that XGrammar rejects, and a
+rejected grammar fails the whole request. Backend compilation errors do not
+trigger Dynamo's builder fallback, so Dynamo checks `pattern` values and
+`patternProperties` keys before building the tag. The checked constructs are
+those XGrammar 0.2.7 rejects in at least one tag format:
+
+- lookahead `(?=` `(?!` and lookbehind `(?<=` `(?<!`
+- backreferences `\1`–`\9` and `\k<name>`
+- group modifiers other than `(?:` and `(?<name>`, such as `(?i)`, `(?>`, and
+  `(?P<name>`
+- word boundaries `\b` `\B` and Unicode property escapes `\p{…}` `\P{…}`
+  outside a character class
+- the empty class `[]`, a `{` that does not open `{n}`, `{n,}`, or `{n,m}`
+  with counts up to 10^15, and a quantifier followed by another quantifier
+  other than one lazy `?`
+
+Under schema mode `auto`, when a tool that omits `strict` has a `pattern` with
+one of these, that `pattern` is left out of the tool's argument grammar. The
+rest of the schema, such as `type`, `required`, and `enum`, stays enforced, and
+so do the tool-call envelope and tool name. When a `patternProperties` key has
+one, leaving it out would change which property names are allowed, so that tool
+is built as if it set `strict: false` and its arguments go unconstrained. A tool
+with `strict: true`, and every tool under schema mode `strict`, keeps its
+schema, and the backend reports the rejection. This also applies to the Kimi K3
+named-call tags that the deployment opt-out retains. The adjustment is logged
+at debug level.
+
+The list is measured against XGrammar 0.2.7 for valid patterns. Older versions
+reject more: 0.2.1 also rejects lookahead in the JSON format, which this check
+covers, but other differences are not checked. The JSON format of 0.2.7 accepts
+lookahead (ignoring it), `(?P<name>`, `(?i)`, and possessive quantifiers, so for
+parsers that use it these patterns are left out although the backend would
+accept them.
 
 In vLLM 0.30.0, pinned by Dynamo's CUDA image, `tool_choice="auto"` returns no
 structural tag when every tool is explicitly `strict: false`. The `always`

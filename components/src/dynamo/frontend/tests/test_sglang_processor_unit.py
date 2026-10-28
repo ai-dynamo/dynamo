@@ -954,6 +954,30 @@ class TestConvertTools:  # FRONTEND.3 — OpenAI tool schema → SGLang Tool/Fun
         assert dumped["function"]["name"] == "search"
         assert "properties" in dumped["function"]["parameters"]
 
+    def test_guidance_copy_leaves_out_patterns_the_backend_cannot_compile(self):
+        parameters = {
+            "type": "object",
+            "properties": {"value": {"type": "string", "pattern": r"^(?!\s*$).+"}},
+            "required": ["value"],
+        }
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": "record_value", "parameters": parameters},
+            }
+        ]
+
+        guided = convert_tools(tools, structural_tag_schema="auto")
+
+        assert guided[0].function.parameters == {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+        }
+        assert guided[0].function.strict is True
+        # Prompt and parser copies keep the client's schema.
+        assert convert_tools(tools)[0].function.parameters == parameters
+
 
 # ---------------------------------------------------------------------------
 # create_parsers

@@ -38,7 +38,7 @@ from dynamo.llm.exceptions import InvalidArgument
 
 from .structural_tag_policy import (
     ToolChoiceKind,
-    effective_tool_strict,
+    guidance_tool_schema,
     should_attempt_structural_tag,
 )
 from .thinking import apply_default_thinking_mode_to_template_kwargs
@@ -254,20 +254,23 @@ def _request_for_vllm_structural_tag(
     *,
     structural_tag_schema: str,
 ) -> ChatCompletionRequest:
-    tools = [
-        tool.model_copy(
-            update={
-                "function": tool.function.model_copy(
-                    update={
-                        "strict": effective_tool_strict(
-                            tool.function.strict, structural_tag_schema
-                        ),
-                    }
-                )
-            }
+    tools = []
+    for tool in request.tools or []:
+        parameters, strict = guidance_tool_schema(
+            tool.function.strict,
+            structural_tag_schema,
+            tool.function.parameters,
+            tool_name=tool.function.name,
         )
-        for tool in request.tools or []
-    ]
+        tools.append(
+            tool.model_copy(
+                update={
+                    "function": tool.function.model_copy(
+                        update={"strict": strict, "parameters": parameters}
+                    )
+                }
+            )
+        )
     return request.model_copy(update={"tools": tools})
 
 

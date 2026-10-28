@@ -155,6 +155,320 @@ fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolCh
     exclude_tools_when_none && matches!(tool_choice, ToolChoice::None)
 }
 
+/// Name the first regex construct in `pattern` that XGrammar cannot compile.
+///
+/// Mirrored by `unsupported_regex_construct` in
+/// `components/src/dynamo/frontend/structural_tag_policy.py`; keep the two in
+/// step. `pattern` is ECMA-262 syntax, as JSON Schema specifies, so `[]` is an
+/// empty class and `[^]` matches any character.
+///
+/// The list is XGrammar 0.2.7's, measured per tag format (#15687). A construct
+/// is listed when any format rejects it: the JSON format accepts lookahead
+/// (ignoring it), `(?P<name>`, `(?i)`, and possessive quantifiers, while the
+/// XML-parameter formats used by `qwen3_coder` and `kimi_k3` reject them.
+/// Inside a character class, escapes such as `\b` and `\p{L}` compile. Every
+/// `{` must open `{n}`, `{n,}`, or `{n,m}`, and a quantifier may only be
+/// followed by one lazy `?`.
+///
+/// Runs per request, so it scans bytes without allocating. Every syntax
+/// character is ASCII, and UTF-8 continuation bytes never are.
+fn unsupported_regex_construct(pattern: &str) -> Option<&'static str> {
+    let bytes = pattern.as_bytes();
+    let at = |i: usize| bytes.get(i).copied();
+    let mut i = 0;
+    let mut in_class = false;
+    // Whether the previous token can take a quantifier.
+    let mut can_repeat = false;
+    // After a quantifier: 1 while a lazy `?` may follow, 2 once it has.
+    let mut quantified = 0;
+    while let Some(c) = at(i) {
+        let following = at(i + 1);
+        if in_class {
+            match c {
+                b'\\' => i += 1,
+                b']' => in_class = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        if matches!(c, b'*' | b'+' | b'?' | b'{') {
+            if c == b'?' && quantified == 1 {
+                quantified = 2;
+                i += 1;
+                continue;
+            }
+            if quantified != 0 {
+                return Some("consecutive quantifiers");
+            }
+            if c == b'{' {
+                match repetition_end(bytes, i) {
+                    Some(end) => i = end,
+                    None => return Some("malformed repetition"),
+                }
+            }
+            if !can_repeat {
+                return Some("quantifier without an element");
+            }
+            can_repeat = false;
+            quantified = 1;
+            i += 1;
+            continue;
+        }
+        quantified = 0;
+        can_repeat = true;
+        match c {
+            b'\\' => {
+                match following {
+                    Some(b'1'..=b'9' | b'k') => return Some("backreference"),
+                    Some(b'b' | b'B') => return Some("word boundary"),
+                    Some(b'p' | b'P') => return Some("Unicode property escape"),
+                    _ => {}
+                }
+                // `\u{...}` is one escape; its braces are not a repetition.
+                i = unicode_escape_end(bytes, i).unwrap_or(i + 1);
+            }
+            b'[' => {
+                if following == Some(b']') {
+                    return Some("empty character class");
+                }
+                in_class = true;
+                if following == Some(b'^') {
+                    i += 1;
+                }
+            }
+            b'(' => {
+                can_repeat = false;
+                if following == Some(b'?') {
+                    match (at(i + 2), at(i + 3)) {
+                        (Some(b'<'), Some(b'=' | b'!')) => return Some("lookbehind"),
+                        (Some(b'=' | b'!'), _) => return Some("lookahead"),
+                        // `(?:` opens a group; `(?<` continues with a name.
+                        (Some(b':'), _) => i += 2,
+                        (Some(b'<'), _) => i += 1,
+                        _ => return Some("group modifier"),
+                    }
+                }
+            }
+            b'|' | b'^' | b'$' => can_repeat = false,
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// XGrammar rejects repetition counts above this.
+const MAX_REPETITION: u64 = 1_000_000_000_000_000;
+
+/// Index of the `}` closing a well-formed `{n}`, `{n,}`, or `{n,m}` at `start`.
+fn repetition_end(bytes: &[u8], start: usize) -> Option<usize> {
+    // `None` for a count above the limit; `Some(None)` when there are no digits.
+    let number = |from: usize| {
+        let digits = bytes.get(from..).unwrap_or_default();
+        let len = digits.iter().take_while(|c| c.is_ascii_digit()).count();
+        // Over 16 digits is always above the limit; up to 16 cannot overflow.
+        let value = match len {
+            0 => Some(None),
+            1..=16 => std::str::from_utf8(&digits[..len])
+                .ok()
+                .and_then(|digits| digits.parse::<u64>().ok())
+                .filter(|&count| count <= MAX_REPETITION)
+                .map(Some),
+            _ => None,
+        };
+        value.map(|value| (from + len, value))
+    };
+    let (end, min) = number(start + 1)?;
+    let min = min?;
+    match bytes.get(end) {
+        Some(b'}') => Some(end),
+        Some(b',') => {
+            let (end, max) = number(end + 1)?;
+            (bytes.get(end) == Some(&b'}') && max.is_none_or(|max| max >= min)).then_some(end)
+        }
+        _ => None,
+    }
+}
+
+/// Index of the `}` closing a `\u{hex}` escape at `start`.
+fn unicode_escape_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start + 1..start + 3) != Some(b"u{".as_slice()) {
+        return None;
+    }
+    let hex = &bytes[start + 3..];
+    let len = hex.iter().take_while(|b| b.is_ascii_hexdigit()).count();
+    (len > 0 && hex.get(len) == Some(&b'}')).then_some(start + 3 + len)
+}
+
+/// Instance values are data, not schemas, so they are not searched.
+const INSTANCE_KEYWORDS: [&str; 4] = ["const", "default", "enum", "examples"];
+/// Maps of named subschemas, searched by value only, so a property that happens
+/// to be called `default` is still checked.
+const SUBSCHEMA_MAPS: [&str; 6] = [
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+    "dependencies",
+];
+
+/// Name the first regex construct in a JSON Schema that XGrammar cannot compile.
+///
+/// Checks `pattern` values and `patternProperties` keys.
+fn unsupported_schema_construct(schema: &serde_json::Value) -> Option<&'static str> {
+    match schema {
+        serde_json::Value::Array(items) => items.iter().find_map(unsupported_schema_construct),
+        serde_json::Value::Object(map) => {
+            let own = map
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .and_then(unsupported_regex_construct)
+                .or_else(|| {
+                    map.get("patternProperties")
+                        .and_then(serde_json::Value::as_object)
+                        .and_then(|patterns| {
+                            patterns
+                                .keys()
+                                .find_map(|pattern| unsupported_regex_construct(pattern))
+                        })
+                });
+            if own.is_some() {
+                return own;
+            }
+            map.iter()
+                .find_map(|(key, value)| match (key.as_str(), value) {
+                    (key, _) if INSTANCE_KEYWORDS.contains(&key) => None,
+                    (key, serde_json::Value::Object(subschemas))
+                        if SUBSCHEMA_MAPS.contains(&key) =>
+                    {
+                        subschemas.values().find_map(unsupported_schema_construct)
+                    }
+                    _ => unsupported_schema_construct(value),
+                })
+        }
+        _ => None,
+    }
+}
+
+/// Remove `pattern` values XGrammar cannot compile, in place.
+///
+/// Returns the construct of a `patternProperties` key XGrammar cannot compile.
+/// Such a key is not removed, since that would change which property names
+/// are allowed. Mirrored by `_strip_unsupported_patterns` in
+/// `components/src/dynamo/frontend/structural_tag_policy.py`.
+fn strip_unsupported_patterns(schema: &mut serde_json::Value) -> Result<(), &'static str> {
+    match schema {
+        serde_json::Value::Array(items) => {
+            items.iter_mut().try_for_each(strip_unsupported_patterns)
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(construct) = map
+                .get("patternProperties")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|patterns| {
+                    patterns
+                        .keys()
+                        .find_map(|pattern| unsupported_regex_construct(pattern))
+                })
+            {
+                return Err(construct);
+            }
+            if map
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|pattern| unsupported_regex_construct(pattern).is_some())
+            {
+                map.remove("pattern");
+            }
+            map.iter_mut()
+                .try_for_each(|(key, value)| match (key.as_str(), value) {
+                    (key, _) if INSTANCE_KEYWORDS.contains(&key) => Ok(()),
+                    (key, serde_json::Value::Object(subschemas))
+                        if SUBSCHEMA_MAPS.contains(&key) =>
+                    {
+                        subschemas
+                            .values_mut()
+                            .try_for_each(strip_unsupported_patterns)
+                    }
+                    (_, value) => strip_unsupported_patterns(value),
+                })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Adapt argument enforcement that Dynamo added to what the backend can compile.
+///
+/// Under schema mode `auto`, Dynamo enforces the argument schema of a tool that
+/// omits `strict`; that enforcement is Dynamo's own addition, since the OpenAI
+/// contract treats omitted `strict` as non-strict. A `pattern` XGrammar cannot
+/// compile would fail the whole request, so it is left out of the grammar and
+/// the rest of the schema stays enforced. A `patternProperties` key it cannot
+/// compile cannot be left out without changing which names are allowed, so
+/// that tool is built as `strict: false`. An explicit `strict` and global schema
+/// mode `strict` are client and operator constraints and are left alone, so the
+/// backend still reports what it cannot compile.
+fn adapt_unsupported_auto_schemas<'a>(
+    parser_name: &str,
+    tools: &'a [ToolDefinition],
+    schema_mode: StructuralTagSchemaMode,
+) -> Cow<'a, [ToolDefinition]> {
+    if !matches!(schema_mode, StructuralTagSchemaMode::Auto) {
+        return Cow::Borrowed(tools);
+    }
+    let unsupported = |tool: &ToolDefinition| {
+        tool.strict
+            .is_none()
+            .then(|| {
+                tool.parameters
+                    .as_ref()
+                    .and_then(unsupported_schema_construct)
+            })
+            .flatten()
+    };
+    if !tools.iter().any(|tool| unsupported(tool).is_some()) {
+        return Cow::Borrowed(tools);
+    }
+    Cow::Owned(
+        tools
+            .iter()
+            .map(|tool| {
+                let mut parameters = tool.parameters.clone();
+                let mut strict = tool.strict;
+                if let Some(construct) = unsupported(tool) {
+                    match parameters.as_mut().map(strip_unsupported_patterns) {
+                        Some(Err(construct)) => {
+                            tracing::debug!(
+                                parser = parser_name,
+                                tool = %tool.name,
+                                construct,
+                                "patternProperties uses a regex the grammar backend cannot \
+                                 compile; not enforcing the tool's arguments"
+                            );
+                            parameters = tool.parameters.clone();
+                            strict = Some(false);
+                        }
+                        _ => tracing::debug!(
+                            parser = parser_name,
+                            tool = %tool.name,
+                            construct,
+                            "Leaving a pattern the grammar backend cannot compile out of \
+                             the tool's argument grammar"
+                        ),
+                    }
+                }
+                ToolDefinition {
+                    name: tool.name.clone(),
+                    parameters,
+                    strict,
+                }
+            })
+            .collect(),
+    )
+}
+
 pub(super) fn uses_gpt_oss_required_array(
     (parser_name, reasoning_parser): (Option<&str>, Option<&str>),
     tool_choice: &ToolChoice,
@@ -390,9 +704,11 @@ impl OpenAIPreprocessor {
             None
         };
 
+        // After the decision: activation still follows the client's own `strict`.
+        let tools = adapt_unsupported_auto_schemas(parser_name, tools, config.schema);
         let request = StructuralTagBuildRequest {
             tool_choice,
-            tools,
+            tools: &tools,
             parallel_tool_calls,
             schema_mode: config.schema,
             exclude_special_tokens: config.exclude_special_tokens,
@@ -1516,5 +1832,308 @@ mod tests {
             &tools,
             None,
         ));
+    }
+
+    // Verdicts from XGrammar 0.2.7 for each pattern (#15687). The Python
+    // frontend test of the same name uses this table.
+    #[test]
+    fn unsupported_regex_constructs_match_the_grammar_compiler() {
+        for (pattern, expected) in [
+            (r"^(?!\s*$).+", Some("lookahead")),
+            (r"^(?=.*\d).+$", Some("lookahead")),
+            (r"\\(?=x)", Some("lookahead")),
+            (r"(?<=a)b", Some("lookbehind")),
+            (r"(?<!a)b", Some("lookbehind")),
+            (r"(a)\1", Some("backreference")),
+            (r"\8", Some("backreference")),
+            (r"(?<n>a)\k<n>", Some("backreference")),
+            (r"[^]\1]x", Some("backreference")),
+            (r"(?>ab)", Some("group modifier")),
+            (r"(?i)abc", Some("group modifier")),
+            (r"(?i:a)", Some("group modifier")),
+            (r"(?P<year>\d{4})", Some("group modifier")),
+            (r"(?#note)a", Some("group modifier")),
+            (r"a\b", Some("word boundary")),
+            (r"\Ba", Some("word boundary")),
+            (r"\p{L}+", Some("Unicode property escape")),
+            (r"[]a", Some("empty character class")),
+            (r"a++", Some("consecutive quantifiers")),
+            (r"a{2}*", Some("consecutive quantifiers")),
+            (r"a+??", Some("consecutive quantifiers")),
+            (r"a{,3}", Some("malformed repetition")),
+            (r"a{x}", Some("malformed repetition")),
+            (r"a{ 2}", Some("malformed repetition")),
+            (r"a{3,2}", Some("malformed repetition")),
+            (r"x{", Some("malformed repetition")),
+            (r"{2}a", Some("quantifier without an element")),
+            (r"a{1000000000000001}", Some("malformed repetition")),
+            (r"a{1,1000000000000001}", Some("malformed repetition")),
+            (r"a{99999999999999999}", Some("malformed repetition")),
+            (r"é+(?=ø)", Some("lookahead")),
+            (r"^[a-z]+$", None),
+            (r"(?<year>\d{4})", None),
+            (r"(?:ab)+", None),
+            (r"\(\?=x\)", None),
+            (r"[(?=]+", None),
+            (r"[\b\p{L}]", None),
+            (r"[^]a", None),
+            (r"a+?b*?c??d{2}?", None),
+            (r"a{2}b{2,}c{2,3}d{02}", None),
+            (r"a{1000000000000000}b{1,1000000000000000}", None),
+            (r"\u{1F600}+", None),
+            (r"a}", None),
+            (r"[ä-ö]+ø{2}\é", None),
+            (r"\{2}", None),
+            (r"\0\cA\x41\u0041", None),
+        ] {
+            assert_eq!(unsupported_regex_construct(pattern), expected, "{pattern}");
+        }
+    }
+
+    #[test]
+    fn client_sized_repetition_counts_are_rejected_without_parsing() {
+        let pattern = format!("a{{1,{}}}", "9".repeat(5000));
+        assert_eq!(
+            unsupported_regex_construct(&pattern),
+            Some("malformed repetition")
+        );
+    }
+
+    #[test]
+    fn unsupported_schema_constructs_are_found_in_subschemas_only() {
+        let lookahead = r"^(?!\s*$).+";
+        for schema in [
+            serde_json::json!({"properties": {"a": {"items": {"pattern": lookahead}}}}),
+            serde_json::json!({"anyOf": [{"type": "integer"}, {"pattern": lookahead}]}),
+            serde_json::json!({"patternProperties": {lookahead: {"type": "string"}}}),
+            serde_json::json!({"$defs": {"name": {"pattern": lookahead}}}),
+            serde_json::json!({"properties": {"default": {"pattern": lookahead}}}),
+            serde_json::json!({"dependencies": {"enum": {"pattern": lookahead}}}),
+        ] {
+            assert_eq!(
+                unsupported_schema_construct(&schema),
+                Some("lookahead"),
+                "{schema}"
+            );
+        }
+        for schema in [
+            serde_json::json!({"properties": {"a": {"type": "string", "pattern": "^[a-z]+$"}}}),
+            serde_json::json!({"properties": {"pattern": {"type": "string"}}}),
+            serde_json::json!({"const": {"pattern": lookahead}}),
+            serde_json::json!({"default": {"pattern": lookahead}}),
+            serde_json::json!({"enum": [{"pattern": lookahead}]}),
+            serde_json::json!({"examples": [{"pattern": lookahead}]}),
+        ] {
+            assert_eq!(unsupported_schema_construct(&schema), None, "{schema}");
+        }
+    }
+
+    fn record_value_tool(pattern: &str, strict: Option<bool>) -> ToolDefinition {
+        ToolDefinition {
+            name: "record_value".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"value": {"type": "string", "pattern": pattern}},
+                "required": ["value"],
+                "additionalProperties": false
+            })),
+            strict,
+        }
+    }
+
+    fn record_value_tool_with_named_properties(pattern: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: "record_value".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "patternProperties": {pattern: {"type": "string"}},
+                "additionalProperties": false
+            })),
+            strict: None,
+        }
+    }
+
+    /// The named `record_value` call in a structural tag: the tag whose `begin`
+    /// names the tool.
+    fn record_value_call(
+        preprocessor: &OpenAIPreprocessor,
+        tool: ToolDefinition,
+    ) -> serde_json::Value {
+        fn call(value: &serde_json::Value) -> Option<&serde_json::Value> {
+            match value {
+                serde_json::Value::Object(map)
+                    if map
+                        .get("begin")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|begin| begin.contains("record_value")) =>
+                {
+                    Some(value)
+                }
+                serde_json::Value::Object(map) => map.values().find_map(call),
+                serde_json::Value::Array(items) => items.iter().find_map(call),
+                _ => None,
+            }
+        }
+
+        let mut request = preprocessed_request();
+        assert!(
+            preprocessor
+                .apply_tool_choice_structural_tag(
+                    &ToolChoice::Named("record_value".to_string()),
+                    &[tool],
+                    None,
+                    false,
+                    None,
+                    &mut request,
+                )
+                .unwrap()
+        );
+        let tag = request
+            .sampling_options
+            .guided_decoding
+            .unwrap()
+            .structural_tag
+            .unwrap();
+        call(&tag)
+            .unwrap_or_else(|| panic!("no tag begins with the tool name: {tag}"))
+            .clone()
+    }
+
+    /// The JSON-schema argument grammar of the named `record_value` call.
+    fn record_value_arguments(
+        preprocessor: &OpenAIPreprocessor,
+        tool: ToolDefinition,
+    ) -> serde_json::Value {
+        fn find<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+            match value {
+                serde_json::Value::Object(map) => map
+                    .get(key)
+                    .or_else(|| map.values().find_map(|value| find(value, key))),
+                serde_json::Value::Array(items) => items.iter().find_map(|value| find(value, key)),
+                _ => None,
+            }
+        }
+        let call = record_value_call(preprocessor, tool);
+        find(&call, "json_schema")
+            .unwrap_or_else(|| panic!("no argument grammar: {call}"))
+            .clone()
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Arguments {
+        /// The client's schema, pattern included.
+        Enforced,
+        /// The client's schema without the pattern.
+        PatternLeftOut,
+        /// Any arguments.
+        Unconstrained,
+    }
+
+    fn arguments_kind(arguments: &serde_json::Value) -> Arguments {
+        if arguments == &serde_json::Value::Bool(true) {
+            return Arguments::Unconstrained;
+        }
+        let value = &arguments["properties"]["value"];
+        assert_eq!(value["type"], "string", "{arguments}");
+        assert_eq!(
+            arguments["required"],
+            serde_json::json!(["value"]),
+            "{arguments}"
+        );
+        if value.get("pattern").is_some() {
+            Arguments::Enforced
+        } else {
+            Arguments::PatternLeftOut
+        }
+    }
+
+    fn qwen3_coder_preprocessor(schema: StructuralTagSchemaMode) -> Arc<OpenAIPreprocessor> {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.structural_tag = Some(StructuralTagConfig {
+            schema,
+            ..Default::default()
+        });
+        mdc.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
+        OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    // #15687: an omitted `strict` is Dynamo's own enforcement, so a pattern the
+    // backend cannot compile is left out of it instead of failing the request.
+    // Explicit `strict` and global strict mode still reach the backend.
+    #[test]
+    fn automatic_argument_enforcement_leaves_out_patterns_the_backend_cannot_compile() {
+        let lookahead = r"^(?!\s*$).+";
+        let auto = qwen3_coder_preprocessor(StructuralTagSchemaMode::Auto);
+        let strict = qwen3_coder_preprocessor(StructuralTagSchemaMode::Strict);
+        for (case, preprocessor, tool, expected) in [
+            (
+                "omitted strict",
+                &auto,
+                record_value_tool(lookahead, None),
+                Arguments::PatternLeftOut,
+            ),
+            (
+                "explicit strict",
+                &auto,
+                record_value_tool(lookahead, Some(true)),
+                Arguments::Enforced,
+            ),
+            (
+                "explicit non-strict",
+                &auto,
+                record_value_tool(lookahead, Some(false)),
+                Arguments::Unconstrained,
+            ),
+            (
+                "global strict mode",
+                &strict,
+                record_value_tool(lookahead, None),
+                Arguments::Enforced,
+            ),
+            (
+                "supported pattern",
+                &auto,
+                record_value_tool("^[a-z]+$", None),
+                Arguments::Enforced,
+            ),
+        ] {
+            let arguments = record_value_arguments(preprocessor, tool);
+            assert_eq!(arguments_kind(&arguments), expected, "{case}: {arguments}");
+        }
+    }
+
+    // Leaving out a `patternProperties` key would change which names are
+    // allowed, so that tool's arguments go unconstrained instead.
+    #[test]
+    fn unsupported_property_name_patterns_leave_the_arguments_unconstrained() {
+        let arguments = record_value_arguments(
+            &qwen3_coder_preprocessor(StructuralTagSchemaMode::Auto),
+            record_value_tool_with_named_properties(r"^(?!x)"),
+        );
+        assert_eq!(arguments_kind(&arguments), Arguments::Unconstrained);
+    }
+
+    // Kimi K3 named tags are built even with optional structural tags disabled,
+    // so the deployment opt-out cannot avoid the rejection on its own. K3 splices
+    // each argument's pattern into its own grammar instead of a JSON schema.
+    #[test]
+    fn kimi_k3_named_tag_leaves_out_patterns_the_backend_cannot_compile_when_global_mode_is_off() {
+        // Without anchors, which K3 strips when it splices a pattern in.
+        for (pattern, kept) in [(r"(?<=a)b", false), ("[a-z]+", true)] {
+            let call = record_value_call(&kimi_k3_preprocessor(), record_value_tool(pattern, None))
+                .to_string();
+            assert!(
+                call.contains(r#"argument key=\"value\" type=\"string\""#),
+                "{call}"
+            );
+            let pattern = serde_json::to_string(pattern).unwrap();
+            assert_eq!(
+                call.contains(pattern.trim_matches('"')),
+                kept,
+                "{pattern}: {call}"
+            );
+        }
     }
 }

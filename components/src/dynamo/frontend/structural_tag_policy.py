@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import copy
 import logging
+import re
 from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
@@ -92,6 +94,183 @@ def should_attempt_structural_tag(
     return any_explicit_strict or parallel_tool_calls_explicitly_false
 
 
+def unsupported_regex_construct(pattern: str) -> str | None:
+    """Name the first regex construct in ``pattern`` XGrammar cannot compile.
+
+    Mirrors ``unsupported_regex_construct`` in the Rust preprocessor
+    (lib/llm/src/preprocessor/structural_tag.rs); keep the two in step.
+    ``pattern`` is ECMA-262 syntax, as JSON Schema specifies, so ``[]`` is an
+    empty class and ``[^]`` matches any character.
+
+    The list is XGrammar 0.2.7's, measured per tag format (#15687). A construct
+    is listed when any format rejects it: the JSON format accepts lookahead
+    (ignoring it), ``(?P<name>``, ``(?i)``, and possessive quantifiers, while the
+    XML-parameter formats used by ``qwen3_coder`` and ``kimi_k3`` reject them.
+    Inside a character class, escapes such as ``\\b`` and ``\\p{L}`` compile.
+    Every ``{`` must open ``{n}``, ``{n,}``, or ``{n,m}``, and a quantifier may
+    only be followed by one lazy ``?``.
+    """
+    i = 0
+    in_class = False
+    # Whether the previous token can take a quantifier.
+    can_repeat = False
+    # After a quantifier: 1 while a lazy `?` may follow, 2 once it has.
+    quantified = 0
+    while i < len(pattern):
+        char = pattern[i]
+        following = pattern[i + 1 : i + 2]
+        if in_class:
+            if char == "\\":
+                i += 1
+            elif char == "]":
+                in_class = False
+            i += 1
+            continue
+        if char in "*+?{":
+            if char == "?" and quantified == 1:
+                quantified = 2
+                i += 1
+                continue
+            if quantified:
+                return "consecutive quantifiers"
+            if char == "{":
+                repetition = _REPETITION.match(pattern, i)
+                if repetition is None or not _repetition_in_range(repetition):
+                    return "malformed repetition"
+                i = repetition.end() - 1
+            if not can_repeat:
+                return "quantifier without an element"
+            can_repeat = False
+            quantified = 1
+            i += 1
+            continue
+        quantified = 0
+        can_repeat = True
+        if char == "\\":
+            if following and following in "123456789k":
+                return "backreference"
+            if following in ("b", "B"):
+                return "word boundary"
+            if following in ("p", "P"):
+                return "Unicode property escape"
+            # `\u{...}` is one escape; its braces are not a repetition.
+            escape = _UNICODE_ESCAPE.match(pattern, i)
+            i = escape.end() - 1 if escape else i + 1
+        elif char == "[":
+            if following == "]":
+                return "empty character class"
+            in_class = True
+            if following == "^":
+                i += 1
+        elif char == "(":
+            can_repeat = False
+            if following == "?":
+                group = pattern[i + 2 : i + 4]
+                if group in ("<=", "<!"):
+                    return "lookbehind"
+                if group[:1] in ("=", "!"):
+                    return "lookahead"
+                if group[:1] not in (":", "<"):
+                    return "group modifier"
+                # `(?:` opens a group; `(?<` continues with a name.
+                i += 2 if group[:1] == ":" else 1
+        elif char in "|^$":
+            can_repeat = False
+        i += 1
+    return None
+
+
+# XGrammar rejects repetition counts above 10**15, which have at most 16 digits.
+# Bounding the digits here also keeps `int()` away from client-sized strings.
+_REPETITION = re.compile(r"\{(?P<min>[0-9]{1,16})(?:,(?P<max>[0-9]{0,16}))?\}")
+_MAX_REPETITION = 10**15
+_UNICODE_ESCAPE = re.compile(r"\\u\{[0-9A-Fa-f]+\}")
+
+
+def _repetition_in_range(repetition: re.Match[str]) -> bool:
+    low = int(repetition["min"])
+    high = int(repetition["max"]) if repetition["max"] else None
+    return low <= _MAX_REPETITION and (high is None or low <= high <= _MAX_REPETITION)
+
+
+_INSTANCE_KEYWORDS = frozenset({"const", "default", "enum", "examples"})
+_SUBSCHEMA_MAPS = frozenset(
+    {
+        "properties",
+        "patternProperties",
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+        "dependencies",
+    }
+)
+
+
+def unsupported_schema_construct(schema: Any) -> str | None:
+    """Name the first regex construct in a JSON Schema XGrammar cannot compile.
+
+    Checks ``pattern`` values and ``patternProperties`` keys. Instance values
+    (``const``, ``default``, ``enum``, ``examples``) are data and are not
+    searched; maps of named subschemas are searched by value only, so a
+    property that happens to be called ``default`` is still checked.
+    """
+    if isinstance(schema, list):
+        for item in schema:
+            if construct := unsupported_schema_construct(item):
+                return construct
+        return None
+    if not isinstance(schema, dict):
+        return None
+    pattern = schema.get("pattern")
+    if isinstance(pattern, str) and (construct := unsupported_regex_construct(pattern)):
+        return construct
+    pattern_properties = schema.get("patternProperties")
+    if isinstance(pattern_properties, dict):
+        for key in pattern_properties:
+            if construct := unsupported_regex_construct(key):
+                return construct
+    for key, value in schema.items():
+        if key in _INSTANCE_KEYWORDS:
+            continue
+        if key in _SUBSCHEMA_MAPS and isinstance(value, dict):
+            value = list(value.values())
+        if construct := unsupported_schema_construct(value):
+            return construct
+    return None
+
+
+def _strip_unsupported_patterns(schema: Any) -> str | None:
+    """Remove ``pattern`` values XGrammar cannot compile, in place.
+
+    Mirrors ``strip_unsupported_patterns`` in the Rust preprocessor. Returns the
+    construct of a ``patternProperties`` key XGrammar cannot compile. Such a key
+    is not removed, since that would change which property names are allowed.
+    """
+    if isinstance(schema, list):
+        for item in schema:
+            if construct := _strip_unsupported_patterns(item):
+                return construct
+        return None
+    if not isinstance(schema, dict):
+        return None
+    pattern_properties = schema.get("patternProperties")
+    if isinstance(pattern_properties, dict):
+        for key in pattern_properties:
+            if construct := unsupported_regex_construct(key):
+                return construct
+    pattern = schema.get("pattern")
+    if isinstance(pattern, str) and unsupported_regex_construct(pattern):
+        del schema["pattern"]
+    for key, value in schema.items():
+        if key in _INSTANCE_KEYWORDS:
+            continue
+        if key in _SUBSCHEMA_MAPS and isinstance(value, dict):
+            value = list(value.values())
+        if construct := _strip_unsupported_patterns(value):
+            return construct
+    return None
+
+
 def effective_tool_strict(request_strict: bool | None, schema_mode: str) -> bool:
     """Resolve request strictness for grammar construction.
 
@@ -100,3 +279,44 @@ def effective_tool_strict(request_strict: bool | None, schema_mode: str) -> bool
     request-level opt-out.
     """
     return schema_mode == "strict" or request_strict is not False
+
+
+def guidance_tool_schema(
+    request_strict: bool | None,
+    schema_mode: str,
+    parameters: Any,
+    *,
+    tool_name: str | None = None,
+) -> tuple[Any, bool]:
+    """Return the argument schema and strictness to build a tool's grammar from.
+
+    Enforcing an omitted ``strict`` is Dynamo's own addition: the OpenAI
+    contract treats it as non-strict. A ``pattern`` XGrammar cannot compile
+    would fail the whole request, so it is left out of the grammar and the rest
+    of the schema stays enforced. A ``patternProperties`` key it cannot compile
+    cannot be left out without changing which names are allowed, so that tool
+    is built as ``strict: false``. An explicit ``strict`` and ``strict`` schema
+    mode are left alone, and the backend still reports what it cannot compile.
+    """
+    strict = effective_tool_strict(request_strict, schema_mode)
+    if schema_mode == "strict" or request_strict is not None:
+        return parameters, strict
+    construct = unsupported_schema_construct(parameters)
+    if construct is None:
+        return parameters, strict
+    stripped = copy.deepcopy(parameters)
+    if property_name_construct := _strip_unsupported_patterns(stripped):
+        logger.debug(
+            "Tool %r: patternProperties uses a regex %s the grammar backend "
+            "cannot compile; not enforcing its arguments",
+            tool_name,
+            property_name_construct,
+        )
+        return parameters, False
+    logger.debug(
+        "Tool %r: leaving a pattern with a regex %s the grammar backend cannot "
+        "compile out of its argument grammar",
+        tool_name,
+        construct,
+    )
+    return stripped, strict
