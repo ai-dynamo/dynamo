@@ -685,7 +685,7 @@ fn response_error(status: StatusCode, detail: String) -> DynamoError {
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, fmt, time::Duration};
+    use std::{error::Error, time::Duration};
 
     use dynamo_backend_common::engine::RoutingHints;
     use dynamo_backend_common::{
@@ -703,45 +703,30 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::{
-        NativeHttp, NativeRequest, authentication_error, build_http_client, error_chain, output,
-        request, response_error, response_has_output,
+        NativeHttp, NativeRequest, authentication_error, build_http_client, output, request,
+        request_error, response_error, response_has_output,
     };
     use crate::client::Discovery;
 
     const MAX_EVENT_BYTES: usize = crate::args::DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES.get();
 
-    #[derive(Debug)]
-    struct TestCause(&'static str);
+    #[tokio::test]
+    async fn request_error_diagnostics_include_the_reqwest_source() {
+        let error = reqwest::Client::new()
+            .get("http://[")
+            .send()
+            .await
+            .expect_err("an invalid URL must fail before connecting");
+        let cause = error
+            .source()
+            .expect("reqwest should expose the underlying URL parse error")
+            .to_string();
 
-    impl fmt::Display for TestCause {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str(self.0)
-        }
-    }
+        let diagnostic = request_error(error).to_string();
 
-    impl Error for TestCause {}
-
-    #[derive(Debug)]
-    struct TestRequestError(TestCause);
-
-    impl fmt::Display for TestRequestError {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("request failed")
-        }
-    }
-
-    impl Error for TestRequestError {
-        fn source(&self) -> Option<&(dyn Error + 'static)> {
-            Some(&self.0)
-        }
-    }
-
-    #[test]
-    fn request_error_diagnostics_include_the_full_cause_chain() {
-        let error = TestRequestError(TestCause("connection reset by peer"));
-        assert_eq!(
-            error_chain(&error),
-            "request failed: connection reset by peer"
+        assert!(
+            diagnostic.contains(&cause),
+            "request diagnostic {diagnostic:?} omitted reqwest cause {cause:?}"
         );
     }
 
