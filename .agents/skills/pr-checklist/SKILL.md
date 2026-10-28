@@ -46,6 +46,8 @@ Use this skill when making a pull request to Dynamo or reviewing one. Run the re
 
 Exclude tests, documentation, comments, and whitespace from this count, as they typically do not contribute significantly to the complexity of the main change.
 
+**Modularity.** Dynamo is moving toward smaller, modular crates. Put new functionality in a focused crate rather than growing a large one such as `lib/llm`. Add as few dependencies as possible, and justify every new package, such as an added Rust crate, in the PR description.
+
 **Correctness and compatibility.** The change must stay correct for every path that shares the changed code: each backend (vLLM, SGLang, TensorRT-LLM), aggregated and disaggregated serving, and Python callers through the bindings. State what the change makes worse, such as performance on another configuration or a feature it no longer supports, and justify any breaking change to a user-facing contract (request fields, CLI flags, environment variables, metrics, CRD fields) in the PR description.
 
 **Area review guidance.** Apply the review guidance for each area the change touches:
