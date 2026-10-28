@@ -178,7 +178,6 @@ def test_a_missing_score_input_fails_the_candidate(objective, update, match):
 
 
 def test_only_goodput_objectives_need_the_sla_and_gpu_hours():
-    # A latency replay without goodput (no SLA) or GPU accounting scores.
     summary = {"mean_ttft_ms": 250.0, "num_ttft_samples": 10}
 
     assert score_summary(summary, 1_500.0, "TTFT")[0] == 250.0
