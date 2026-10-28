@@ -384,6 +384,47 @@ class ChatPayload(BasePayload):
         )
 
 
+@dataclass
+class StopStringChatPayload(ChatPayload):
+    """End a chat completion on its single stop string.
+
+    Checks the finish reason and that the output ends at the stop string,
+    keeping it only with include_stop_str_in_output. With metrics, also
+    requires the engine to stop at the match instead of running to max_tokens.
+    """
+
+    metrics: EngineMetrics | None = field(default=None, kw_only=True)
+    _before: float | None = field(default=None, init=False, repr=False)
+    _completion_progress: float = field(default=0, init=False, repr=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        if self.metrics is not None:
+            self.metrics.bind_environment(env)
+
+    def before_request(self) -> None:
+        if self.metrics is not None:
+            self._completion_progress = self.metrics.completion_progress(
+                self.body["max_tokens"]
+            )
+            self.metrics.wait_for_scheduler()
+            self._before = self.metrics.progress()
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        (stop,) = self.body["stop"]
+        choice = response.json()["choices"][0]
+        assert choice["finish_reason"] == "stop", choice
+        if self.body.get("include_stop_str_in_output") is True:
+            assert content.endswith(stop), f"Expected output to end with {stop!r}"
+        else:
+            assert stop not in content, f"Expected {stop!r} trimmed from output"
+        if self.metrics is not None:
+            assert self._before is not None, "before_request must run first"
+            self.metrics.assert_cancelled(
+                before=self._before, completion_progress=self._completion_progress
+            )
+
+
 def _validate_chat_token_usage(result: Dict[str, Any]) -> None:
     usage = result.get("usage")
     assert isinstance(usage, dict), f"Missing usage: {result!r}"
@@ -523,7 +564,7 @@ class _KvRoutingPayload(ChatPayload):
         while time.monotonic() < deadline:
             try:
                 response = requests.get(
-                    f"http://{self.host}:{self.port}/health", timeout=5
+                    f"http://{self.host}:{self.port}/health?instances=true", timeout=5
                 )
                 if response.status_code == 200:
                     health = response.json()
@@ -1685,6 +1726,35 @@ class ImagesPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return ImagesPayload.extract_image(response)
+
+
+@dataclass
+class ImagesAccountingPayload(ImagesPayload):
+    """Image-generation payload that also checks the accounting the sample
+    diffusion engine reports: every requested image in ``data``, null token
+    ``usage``, and ``nvext.usage`` counting the images returned and echoing
+    the step count the request asked for."""
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        result = response.json()
+        requested = int(self.body.get("n", 1))
+        assert (
+            len(result["data"]) == requested
+        ), f"Expected {requested} images in 'data': {len(result['data'])}"
+        assert (
+            result.get("usage") is None
+        ), f"Token usage must stay null without backend token counts: {result['usage']!r}"
+        assert result.get("size") == "1x1", f"Unexpected size: {result.get('size')!r}"
+        assert (
+            result.get("output_format") == "png"
+        ), f"Unexpected output_format: {result.get('output_format')!r}"
+        expected = {"output_images": requested, "input_images": 0}
+        requested_steps = (self.body.get("nvext") or {}).get("num_inference_steps")
+        if requested_steps is not None:
+            expected["num_inference_steps"] = requested_steps
+        accounting = (result.get("nvext") or {}).get("usage")
+        assert accounting == expected, f"Unexpected nvext.usage: {accounting!r}"
 
 
 @dataclass

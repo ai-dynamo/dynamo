@@ -30,7 +30,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const dgdrOutputCopierContainerName = "output-copier"
@@ -39,13 +38,11 @@ func TestBugDGDRStaleHubDeployedPhaseRequiresDGDNameMatch(t *testing.T) {
 	const newDGDName = "new-deployed-dgd"
 
 	src := &DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				annDGDRStatus: mustDGDRHubStatusAnnotation(t, v1beta1.DynamoGraphDeploymentRequestStatus{
-					Phase:   v1beta1.DGDRPhaseDeployed,
-					DGDName: "old-dgd",
-				}),
-			},
+		Annotations: map[string]string{
+			annDGDRStatus: mustDGDRHubStatusAnnotation(t, v1beta1.DynamoGraphDeploymentRequestStatus{
+				Phase:   v1beta1.DGDRPhaseDeployed,
+				DGDName: "old-dgd",
+			}),
 		},
 		Status: DynamoGraphDeploymentRequestStatus{
 			State: DGDRStateReady,
@@ -70,13 +67,11 @@ func TestBugDGDRStaleHubDeployedPhaseRequiresDGDNameMatch(t *testing.T) {
 
 func TestBugDGDRStaleHubProfilingSubstatusRequiresProfilingPhase(t *testing.T) {
 	src := &DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				annDGDRStatus: mustDGDRHubStatusAnnotation(t, v1beta1.DynamoGraphDeploymentRequestStatus{
-					ProfilingPhase:   v1beta1.ProfilingPhaseSweepingDecode,
-					ProfilingJobName: "old-profiling-job",
-				}),
-			},
+		Annotations: map[string]string{
+			annDGDRStatus: mustDGDRHubStatusAnnotation(t, v1beta1.DynamoGraphDeploymentRequestStatus{
+				ProfilingPhase:   v1beta1.ProfilingPhaseSweepingDecode,
+				ProfilingJobName: "old-profiling-job",
+			}),
 		},
 		Status: DynamoGraphDeploymentRequestStatus{
 			State: DGDRStateReady,
@@ -105,16 +100,14 @@ func TestBugDGDRStaleHubDeploymentInfoRequiresDGDNameMatch(t *testing.T) {
 	replicas := int32(3)
 	availableReplicas := int32(2)
 	src := &DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				annDGDRStatus: mustDGDRHubStatusAnnotation(t, v1beta1.DynamoGraphDeploymentRequestStatus{
-					DGDName: "old-dgd",
-					DeploymentInfo: &v1beta1.DeploymentInfoStatus{
-						Replicas:          &replicas,
-						AvailableReplicas: &availableReplicas,
-					},
-				}),
-			},
+		Annotations: map[string]string{
+			annDGDRStatus: mustDGDRHubStatusAnnotation(t, v1beta1.DynamoGraphDeploymentRequestStatus{
+				DGDName: "old-dgd",
+				DeploymentInfo: &v1beta1.DeploymentInfoStatus{
+					Replicas:          &replicas,
+					AvailableReplicas: &availableReplicas,
+				},
+			}),
 		},
 		Status: DynamoGraphDeploymentRequestStatus{
 			State: DGDRStateReady,
@@ -141,16 +134,14 @@ func TestBugDGDRStaleAlphaDeploymentDeletedRequiresDGDNameMatch(t *testing.T) {
 	const newDGDName = "new-deleted-dgd"
 
 	src := &v1beta1.DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				annDGDRStatus: mustDGDRAlphaStatusAnnotation(t, DynamoGraphDeploymentRequestStatus{
-					State: DGDRStateDeploymentDeleted,
-					Deployment: &DeploymentStatus{
-						Name:    "old-dgd",
-						Created: true,
-					},
-				}),
-			},
+		Annotations: map[string]string{
+			annDGDRStatus: mustDGDRAlphaStatusAnnotation(t, DynamoGraphDeploymentRequestStatus{
+				State: DGDRStateDeploymentDeleted,
+				Deployment: &DeploymentStatus{
+					Name:    "old-dgd",
+					Created: true,
+				},
+			}),
 		},
 		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
 			Phase:   v1beta1.DGDRPhaseReady,
@@ -494,23 +485,21 @@ func TestBugDGDRLegacyUnnamedAnnotationMigratesInPlace(t *testing.T) {
 
 	t.Log("Seed a spoke object with a legacy unnamed profiler annotation")
 	spoke := &DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				annDGDRSpec: mustDGDRHubSpecAnnotation(t, v1beta1.DynamoGraphDeploymentRequestSpec{
-					Overrides: &v1beta1.OverridesSpec{
-						ProfilingJob: &batchv1.JobSpec{
-							Template: corev1.PodTemplateSpec{
-								Spec: corev1.PodSpec{
-									Containers: []corev1.Container{
-										{Name: "", Image: "custom-profiler:1"},
-										{Name: dgdrOutputCopierContainerName, Image: sidecarImage},
-									},
+		Annotations: map[string]string{
+			annDGDRSpec: mustDGDRHubSpecAnnotation(t, v1beta1.DynamoGraphDeploymentRequestSpec{
+				Overrides: &v1beta1.OverridesSpec{
+					ProfilingJob: &batchv1.JobSpec{
+						Template: corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "", Image: "custom-profiler:1"},
+									{Name: dgdrOutputCopierContainerName, Image: sidecarImage},
 								},
 							},
 						},
 					},
-				}),
-			},
+				},
+			}),
 		},
 		Spec: DynamoGraphDeploymentRequestSpec{
 			ProfilingConfig: &ProfilingConfigSpec{
@@ -537,15 +526,13 @@ func TestBugDGDRLegacyUnnamedAnnotationMigratesInPlace(t *testing.T) {
 func TestBugDGDRLiveAlphaRepresentationOverridesStaleV1Beta2Annotations(t *testing.T) {
 	t.Log("Seed live v1alpha1 fields alongside stale annotation-backed v1beta2 envelopes")
 	spoke := &DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				annDGDRSpec: mustDGDRHubSpecAnnotation(t, v1beta1.DynamoGraphDeploymentRequestSpec{
-					V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"model":{"name":"stale-model"}}`)},
-				}),
-				annDGDRStatus: mustDGDRHubStatusAnnotation(t, v1beta1.DynamoGraphDeploymentRequestStatus{
-					V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"observedGeneration":99}`)},
-				}),
-			},
+		Annotations: map[string]string{
+			annDGDRSpec: mustDGDRHubSpecAnnotation(t, v1beta1.DynamoGraphDeploymentRequestSpec{
+				V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"model":{"name":"stale-model"}}`)},
+			}),
+			annDGDRStatus: mustDGDRHubStatusAnnotation(t, v1beta1.DynamoGraphDeploymentRequestStatus{
+				V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"observedGeneration":99}`)},
+			}),
 		},
 		Spec: DynamoGraphDeploymentRequestSpec{
 			Model:   "live-model",
@@ -583,12 +570,10 @@ func TestBugDGDRLiveAlphaRepresentationOverridesStaleV1Beta2Annotations(t *testi
 func TestBugDGDREmptyLiveAlphaStatusOverridesStaleV1Beta2Annotation(t *testing.T) {
 	t.Log("Seed a native v1alpha1 spec with an intentionally empty status and stale carrier annotation")
 	spoke := &DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				annDGDRStatus: mustDGDRHubStatusAnnotation(t, v1beta1.DynamoGraphDeploymentRequestStatus{
-					V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"observedGeneration":99}`)},
-				}),
-			},
+		Annotations: map[string]string{
+			annDGDRStatus: mustDGDRHubStatusAnnotation(t, v1beta1.DynamoGraphDeploymentRequestStatus{
+				V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"observedGeneration":99}`)},
+			}),
 		},
 		Spec: DynamoGraphDeploymentRequestSpec{
 			Model:           "live-model",
@@ -686,24 +671,22 @@ func TestBugDGDRLiveHubUnnamedProfilerMigratesOnRoundTrip(t *testing.T) {
 func TestBugDGDRLegacyUnnamedKeptDistinctWhenProfilerExists(t *testing.T) {
 	t.Log("Seed a spoke object with both a named profiler and a leftover unnamed annotation entry")
 	spoke := &DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				annDGDRSpec: mustDGDRHubSpecAnnotation(t, v1beta1.DynamoGraphDeploymentRequestSpec{
-					Overrides: &v1beta1.OverridesSpec{
-						ProfilingJob: &batchv1.JobSpec{
-							Template: corev1.PodTemplateSpec{
-								Spec: corev1.PodSpec{
-									Containers: []corev1.Container{
-										{Name: dgdrProfilerContainerName, Image: "named-profiler:1"},
-										{Name: "", Image: "unnamed-extra:1"},
-										{Name: dgdrOutputCopierContainerName, Image: "sidecar:1"},
-									},
+		Annotations: map[string]string{
+			annDGDRSpec: mustDGDRHubSpecAnnotation(t, v1beta1.DynamoGraphDeploymentRequestSpec{
+				Overrides: &v1beta1.OverridesSpec{
+					ProfilingJob: &batchv1.JobSpec{
+						Template: corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: dgdrProfilerContainerName, Image: "named-profiler:1"},
+									{Name: "", Image: "unnamed-extra:1"},
+									{Name: dgdrOutputCopierContainerName, Image: "sidecar:1"},
 								},
 							},
 						},
 					},
-				}),
-			},
+				},
+			}),
 		},
 	}
 

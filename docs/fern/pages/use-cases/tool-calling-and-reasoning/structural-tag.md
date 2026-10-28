@@ -195,7 +195,7 @@ Currently tested and supported:
 - `glm47` with parsers v2
 
 The parsers-v2 builders for `qwen3_coder`, `deepseek_v4`, and `glm47` require
-`DYN_PARSER_VERSION=2` in the worker and frontend processes.
+a compatible V2 parser route in the worker and frontend processes. Unset `DYN_PARSER_VERSION` and `auto` select V2 when the configured tool and reasoning parsers resolve to a compatible family; explicit `DYN_PARSER_VERSION=2` requires V2.
 
 Contributions adding structural tag support for new parsers are welcome.
 
@@ -227,7 +227,9 @@ based on the request's `tool_choice`:
 
 ## Request Validation
 
-Dynamo validates supplied function parameter schemas with explicit `strict: true` before inference on `/v1/chat/completions` and `/v1/responses`. Invalid schemas now return HTTP 400 where earlier versions could accept them. This validation runs even when structural tags are disabled or `tool_choice` is `none`. Responses checks all submitted functions, including namespace members and functions excluded by `allowed_tools`.
+By default, Dynamo validates supplied function parameter schemas with explicit `strict: true` before inference on `/v1/chat/completions` and `/v1/responses`. Strict client tools converted from `/v1/messages` use the same check. Invalid schemas now return HTTP 400 where earlier versions could accept them. This validation runs even when structural tags are disabled or `tool_choice` is `none`. Responses checks all submitted functions, including namespace members and functions excluded by `allowed_tools`.
+
+To retain legacy request admission during an upgrade, set `DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION=1` on the frontend. This skips strict function-schema preflight without requiring client changes, including definitions with optional properties, open objects, or `oneOf`. It applies to every model in the frontend process, including strict tools converted from `/v1/messages`, and preserves the submitted schema and `strict` declaration. Schema reference and complexity preflight checks are also skipped; basic tool validation, HTTP body limits, and downstream processor and backend checks remain active. This mode does not guarantee that a backend can enforce or compile the schema. See [Frontend Configuration](../../reference/components/frontend-configuration.mdx#frontend-feature-switches).
 
 Use an object-only root. Close each object with `additionalProperties: false` and include every named property in `required`. These object checks also apply to nullable nested objects and schemas that declare `properties` or `patternProperties`. For example:
 
