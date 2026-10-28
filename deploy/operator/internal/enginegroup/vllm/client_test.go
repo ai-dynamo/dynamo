@@ -99,13 +99,14 @@ func TestNativeAndWorkerRoutesPreserveTheSameProtocol(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				assert.Equal(t, http.MethodPost, r.Method)
 				var received ScaleRequest
-				if r.URL.Path == test.prefix+scalePath {
+				if r.URL.Path == test.prefix+submitPath {
 					assert.NoError(t, json.NewDecoder(r.Body).Decode(&received))
+					assert.NoError(t, json.NewEncoder(w).Encode(SubmissionReceipt{Request: received, LocalSize: 1, Started: true}))
 				} else {
 					assert.Equal(t, test.prefix+statusPath, r.URL.Path)
+					_, _ = io.WriteString(w, `{"instance_id":"api-0","operation_id":"grow-1","epoch":"epoch-1","phase":"completed","requested_data_parallel_size":3,"effective_data_parallel_size":3,"topology_known":true,"error":null}`)
 				}
 				requests <- receivedRequest{path: r.URL.Path, target: received}
-				_, _ = io.WriteString(w, `{"instance_id":"api-0","operation_id":"grow-1","epoch":"epoch-1","phase":"completed","requested_data_parallel_size":3,"effective_data_parallel_size":3,"topology_known":true,"error":null}`)
 			}))
 			t.Cleanup(server.Close)
 
@@ -118,29 +119,31 @@ func TestNativeAndWorkerRoutesPreserveTheSameProtocol(t *testing.T) {
 				control, err = NewWorkerClient(server.URL, server.Client())
 			}
 			require.NoError(t, err)
-			target := ScaleRequest{OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120}
+			target := ScaleRequest{OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120, BaseTopologyToken: "base-1"}
 
 			t.Log("retain exact identity and operation correlation for both mutation and observation")
-			scaled, err := control.Scale(t.Context(), target)
+			scaled, err := control.Submit(t.Context(), target)
 			require.NoError(t, err)
 			observed, err := control.Observe(t.Context())
 			require.NoError(t, err)
 			scaleRequest, statusRequest := <-requests, <-requests
 			assert.Equal(t, target, scaleRequest.target)
-			assert.Equal(t, scaled, observed)
-			assert.Equal(t, test.prefix+scalePath, scaleRequest.path)
+			assert.Equal(t, target, scaled.Request)
+			assert.Equal(t, target.OperationID, *observed.OperationID)
+			assert.Equal(t, target.ExpectedInstanceID, observed.InstanceID)
+			assert.Equal(t, test.prefix+submitPath, scaleRequest.path)
 			assert.Equal(t, test.prefix+statusPath, statusRequest.path)
 		})
 	}
 }
 
-func TestScalePreservesCorrelatedRequestAcrossRetry(t *testing.T) {
+func TestSubmitPreservesCorrelatedRequestAcrossRetry(t *testing.T) {
 	t.Log("record the exact payload while the first reply is lost after native acceptance")
 	requests := make(chan ScaleRequest, 2)
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, scalePath, r.URL.Path)
+		assert.Equal(t, submitPath, r.URL.Path)
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		var request ScaleRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); !assert.NoError(t, err) {
@@ -154,15 +157,15 @@ func TestScalePreservesCorrelatedRequestAcrossRetry(t *testing.T) {
 			}
 			return
 		}
-		_, _ = io.WriteString(w, `{"instance_id":"api-0","operation_id":"grow-1","epoch":"epoch-1","phase":"completed","requested_data_parallel_size":3,"effective_data_parallel_size":3,"topology_known":true,"error":null}`)
+		assert.NoError(t, json.NewEncoder(w).Encode(SubmissionReceipt{Request: request, LocalSize: 1, Started: true}))
 	}))
 	t.Cleanup(server.Close)
 	control, err := NewClient(server.URL, server.Client())
 	require.NoError(t, err)
-	request := ScaleRequest{OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120}
+	request := ScaleRequest{OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120, BaseTopologyToken: "base-1"}
 
 	t.Log("return an ambiguous transport error without manufacturing a terminal rejection")
-	_, err = control.Scale(t.Context(), request)
+	_, err = control.Submit(t.Context(), request)
 	require.ErrorContains(t, err, "call vLLM")
 	var responseErr *HTTPError
 	assert.False(t, errors.As(err, &responseErr))
@@ -170,42 +173,50 @@ func TestScalePreservesCorrelatedRequestAcrossRetry(t *testing.T) {
 	t.Log("a restarted client can replay the identical operation and instance precondition")
 	restarted, err := NewClient(server.URL, server.Client())
 	require.NoError(t, err)
-	status, err := restarted.Scale(t.Context(), request)
+	status, err := restarted.Submit(t.Context(), request)
 	require.NoError(t, err)
-	assert.Equal(t, PhaseCompleted, status.Phase)
+	assert.Equal(t, request, status.Request)
 	assert.Equal(t, request, <-requests)
 	assert.Equal(t, request, <-requests)
 	assert.Equal(t, int32(2), calls.Load())
 }
 
-func TestScaleChecksResponseCorrelation(t *testing.T) {
+func TestSubmitChecksResponseCorrelation(t *testing.T) {
+	target := ScaleRequest{OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120, BaseTopologyToken: "base-1"}
 	tests := []struct {
 		name    string
+		receipt SubmissionReceipt
 		payload string
 		wantErr string
 	}{
-		{name: "pending replay", payload: `{"instance_id":"api-0","operation_id":"grow-1","epoch":"epoch-1","phase":"preparing","requested_data_parallel_size":3,"effective_data_parallel_size":2,"topology_known":true}`},
-		{name: "failed commit remains native evidence not rejection", payload: `{"instance_id":"api-0","operation_id":"grow-1","epoch":"epoch-1","phase":"failed","requested_data_parallel_size":3,"effective_data_parallel_size":2,"topology_known":false,"error":"collective failed"}`},
-		{name: "different operation", payload: `{"instance_id":"api-0","operation_id":"other-grow","epoch":"epoch-1","phase":"completed","requested_data_parallel_size":3,"effective_data_parallel_size":3,"topology_known":true}`, wantErr: "does not match"},
-		{name: "different target", payload: `{"instance_id":"api-0","operation_id":"grow-1","epoch":"epoch-1","phase":"preparing","requested_data_parallel_size":4,"effective_data_parallel_size":2,"topology_known":true}`, wantErr: "does not match"},
-		{name: "different process", payload: `{"instance_id":"replacement-api","operation_id":"grow-1","epoch":"epoch-1","phase":"preparing","requested_data_parallel_size":3,"effective_data_parallel_size":2,"topology_known":true}`, wantErr: "does not match"},
-		{name: "same count without recorded operation", payload: `{"instance_id":"api-0","phase":"idle","effective_data_parallel_size":3,"topology_known":true}`, wantErr: "does not match"},
-		{name: "legacy success payload", payload: `{"message":"Scaled to 3 data parallel engines"}`, wantErr: "operation-status API is required"},
+		{name: "pending acceptance", receipt: SubmissionReceipt{Request: target, LocalSize: 1}},
+		{name: "finished participation is not collective commit", receipt: SubmissionReceipt{Request: target, LocalSize: 1, Started: true, Finished: true}},
+		{name: "unrelated request", receipt: SubmissionReceipt{Request: ScaleRequest{OperationID: "other"}, LocalSize: 1}, wantErr: "does not match"},
+		{name: "different process", receipt: SubmissionReceipt{Request: ScaleRequest{OperationID: "grow-1", ExpectedInstanceID: "other-api", NewDataParallelSize: 3, DrainTimeout: 120, BaseTopologyToken: "base-1"}, LocalSize: 1}, wantErr: "does not match"},
+		{name: "different target", receipt: SubmissionReceipt{Request: ScaleRequest{OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 4, DrainTimeout: 120, BaseTopologyToken: "base-1"}, LocalSize: 1}, wantErr: "does not match"},
+		{name: "different base token", receipt: SubmissionReceipt{Request: ScaleRequest{OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120, BaseTopologyToken: "later-base"}, LocalSize: 1}, wantErr: "does not match"},
+		{name: "missing receipt", wantErr: "does not match"},
+		{name: "malformed receipt", payload: "{", wantErr: "decode vLLM acceptance receipt"},
+		{name: "invalid local rank", receipt: SubmissionReceipt{Request: target, FirstRank: -1, LocalSize: 1}, wantErr: "does not match"},
+		{name: "invalid local width", receipt: SubmissionReceipt{Request: target}, wantErr: "does not match"},
+		{name: "local failure remains inconclusive", receipt: SubmissionReceipt{Request: target, LocalSize: 1, Error: new("collective failed")}, wantErr: "local participation failed"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("answer one correlated request with native status")
+			t.Log("answer one correlated request with a native acceptance receipt")
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = io.WriteString(w, test.payload)
+				if test.payload != "" {
+					_, _ = io.WriteString(w, test.payload)
+					return
+				}
+				assert.NoError(t, json.NewEncoder(w).Encode(test.receipt))
 			}))
 			t.Cleanup(server.Close)
 			control, err := NewClient(server.URL, server.Client())
 			require.NoError(t, err)
 
 			t.Log("never infer this operation's success from a matching count alone")
-			_, err = control.Scale(t.Context(), ScaleRequest{
-				OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120,
-			})
+			_, err = control.Submit(t.Context(), target)
 			if test.wantErr != "" {
 				require.ErrorContains(t, err, test.wantErr)
 			} else {
@@ -227,13 +238,13 @@ func TestHTTPFailuresStayInconclusive(t *testing.T) {
 			require.NoError(t, err)
 
 			t.Log("preserve the HTTP evidence without classifying the entire collective as rejected")
-			_, err = control.Scale(t.Context(), ScaleRequest{
-				OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120,
+			_, err = control.Submit(t.Context(), ScaleRequest{
+				OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120, BaseTopologyToken: "base-1",
 			})
 			var responseErr *HTTPError
 			require.ErrorAs(t, err, &responseErr)
 			assert.Equal(t, code, responseErr.StatusCode)
-			assert.Equal(t, scalePath, responseErr.Path)
+			assert.Equal(t, submitPath, responseErr.Path)
 		})
 	}
 }
@@ -254,6 +265,14 @@ func TestClientBudgetsAndCancellation(t *testing.T) {
 				deadline, exists := r.Context().Deadline()
 				assert.True(t, exists)
 				deadlines[r.URL.Path] = deadline
+				if r.URL.Path == submitPath {
+					var target ScaleRequest
+					if err := json.NewDecoder(r.Body).Decode(&target); err != nil {
+						return nil, err
+					}
+					payload, err := json.Marshal(SubmissionReceipt{Request: target, LocalSize: 1})
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(payload)))}, err
+				}
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(
 					`{"instance_id":"api-0","operation_id":"grow-1","epoch":"epoch-1","phase":"completed","requested_data_parallel_size":3,"effective_data_parallel_size":3,"topology_known":true}`,
 				))}, nil
@@ -270,17 +289,17 @@ func TestClientBudgetsAndCancellation(t *testing.T) {
 			started := time.Now()
 			_, err = control.Observe(ctx)
 			require.NoError(t, err)
-			_, err = control.Scale(ctx, ScaleRequest{
-				OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120,
+			_, err = control.Submit(ctx, ScaleRequest{
+				OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120, BaseTopologyToken: "base-1",
 			})
 			require.NoError(t, err)
 			if test.budget > 0 {
 				deadline, _ := ctx.Deadline()
 				assert.Equal(t, deadline, deadlines[statusPath])
-				assert.Equal(t, deadline, deadlines[scalePath])
+				assert.Equal(t, deadline, deadlines[submitPath])
 			} else {
 				assert.WithinDuration(t, started.Add(defaultObservationTimeout), deadlines[statusPath], time.Second)
-				assert.WithinDuration(t, started.Add(defaultScaleTimeout), deadlines[scalePath], time.Second)
+				assert.WithinDuration(t, started.Add(defaultSubmissionTimeout), deadlines[submitPath], time.Second)
 			}
 		})
 	}
@@ -299,16 +318,17 @@ func TestCancelledNativeCallsRemainInconclusive(t *testing.T) {
 			cancel()
 
 			t.Log("preserve context cancellation without converting it into a native rejection")
-			var status Status
 			if scaling {
-				status, err = control.Scale(ctx, ScaleRequest{
-					OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120,
+				receipt, submitErr := control.Submit(ctx, ScaleRequest{
+					OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120, BaseTopologyToken: "base-1",
 				})
+				require.ErrorIs(t, submitErr, context.Canceled)
+				assert.Equal(t, SubmissionReceipt{}, receipt)
 			} else {
-				status, err = control.Observe(ctx)
+				status, observeErr := control.Observe(ctx)
+				require.ErrorIs(t, observeErr, context.Canceled)
+				assert.Equal(t, Status{}, status)
 			}
-			require.ErrorIs(t, err, context.Canceled)
-			assert.Equal(t, Status{}, status)
 		})
 	}
 }
@@ -332,8 +352,8 @@ func TestControlURLAndRedirectSafety(t *testing.T) {
 	t.Cleanup(server.Close)
 	control, err := NewClient(server.URL, server.Client())
 	require.NoError(t, err)
-	_, err = control.Scale(t.Context(), ScaleRequest{
-		OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120,
+	_, err = control.Submit(t.Context(), ScaleRequest{
+		OperationID: "grow-1", ExpectedInstanceID: "api-0", NewDataParallelSize: 3, DrainTimeout: 120, BaseTopologyToken: "base-1",
 	})
 	var responseErr *HTTPError
 	require.ErrorAs(t, err, &responseErr)
@@ -341,13 +361,14 @@ func TestControlURLAndRedirectSafety(t *testing.T) {
 	assert.Zero(t, redirected.Load())
 }
 
-func TestInvalidScaleRequestsHaveNoEffects(t *testing.T) {
+func TestInvalidSubmissionRequestsHaveNoEffects(t *testing.T) {
 	tests := []struct {
 		name      string
 		operation string
 		instance  string
 		target    int32
 		drain     int32
+		token     string
 	}{
 		{name: "missing operation", instance: "api-0", target: 3, drain: 120},
 		{name: "blank operation", operation: "  ", instance: "api-0", target: 3, drain: 120},
@@ -356,6 +377,8 @@ func TestInvalidScaleRequestsHaveNoEffects(t *testing.T) {
 		{name: "zero target", operation: "grow-1", instance: "api-0", drain: 120},
 		{name: "negative target", operation: "grow-1", instance: "api-0", target: -1, drain: 120},
 		{name: "zero drain budget", operation: "grow-1", instance: "api-0", target: 3},
+		{name: "missing topology fence", operation: "grow-1", instance: "api-0", target: 3, drain: 120},
+		{name: "blank topology fence", operation: "grow-1", instance: "api-0", target: 3, drain: 120, token: " "},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -366,9 +389,9 @@ func TestInvalidScaleRequestsHaveNoEffects(t *testing.T) {
 				return nil, errors.New("must not be called")
 			})})
 			require.NoError(t, err)
-			_, err = control.Scale(t.Context(), ScaleRequest{
+			_, err = control.Submit(t.Context(), ScaleRequest{
 				OperationID: test.operation, ExpectedInstanceID: test.instance,
-				NewDataParallelSize: test.target, DrainTimeout: test.drain,
+				NewDataParallelSize: test.target, DrainTimeout: test.drain, BaseTopologyToken: test.token,
 			})
 			require.Error(t, err)
 			assert.Zero(t, calls.Load())

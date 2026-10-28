@@ -27,6 +27,9 @@ func (r *Reconciler) reconcileEngineGroupRetirement(
 	// Deletion changes the workflow target, not spec.replicas or its positive scaling bounds.
 	before := group.Status.DeepCopy()
 	plan, rejection, planningErr := resolveEngineGroupRetirement(ctx, engineGroupID(group), runtime, checkpoint.State)
+	if errors.Is(planningErr, domain.ErrRecoveryRequired) {
+		return r.reconcileUnavailableRuntime(ctx, group, planningErr)
+	}
 
 	// An accepted collective cannot be canceled by deletion. Finish or observe it before starting retirement.
 	// A nil plan on inconclusive/unsupported resolution still maintains existing fail-closed accepted targets.
@@ -34,7 +37,8 @@ func (r *Reconciler) reconcileEngineGroupRetirement(
 	result, reconcileErr := coordinator.Reconcile(ctx, engineGroupID(group), plan, checkpoint.State)
 	var observationErr *domain.ObservationError
 	errors.As(reconcileErr, &observationErr)
-	next, err := checkpoint.advance(group, runtime.Profile, result.Status, plan, false, observationErr == nil)
+	recoveryRequired := errors.Is(reconcileErr, domain.ErrRecoveryRequired) || result.Status.Transition.RequiresRecovery()
+	next, err := checkpoint.advance(group, runtime.Profile, result.Status, plan, false, observationErr == nil && !recoveryRequired)
 	if err != nil {
 		return r.reconcileCheckpointFailure(ctx, group, err)
 	}
@@ -46,7 +50,6 @@ func (r *Reconciler) reconcileEngineGroupRetirement(
 	}
 	next.projectHistory(group)
 	r.projectEngineGroupStatus(group, runtime.Profile, result.Status, observationErr, planningErr)
-	projectEngineGroupReleaseMode(group, runtime)
 
 	// Surface unsupported or inconclusive retirement without changing the scale target's validation.
 	if planningErr != nil {
@@ -57,11 +60,15 @@ func (r *Reconciler) reconcileEngineGroupRetirement(
 		setEngineGroupCondition(group, engineGroupConditionProgressing, metav1.ConditionTrue, "RetirementPending",
 			"Retirement must converge to accepted empty capacity, traffic, and membership before finalization")
 	}
+	projectEngineGroupRecovery(group, reconcileErr)
 
 	if err := r.updateEngineGroupStatus(ctx, group, before); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, errors.Join(planningErr, reconcileErr)
+	if err := errors.Join(planningErr, reconcileErr); err != nil {
+		return engineGroupErrorResult(err)
+	}
+	return ctrl.Result{RequeueAfter: engineGroupRequeueAfter}, nil
 }
 
 func resolveEngineGroupRetirement(

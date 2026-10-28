@@ -47,6 +47,8 @@ const (
 	ObservationAuthorityMembership ObservationAuthority = "membership"
 	// ObservationAuthorityCorrelation validates a complete observation set against the durable journal.
 	ObservationAuthorityCorrelation ObservationAuthority = "correlation"
+	// ObservationAuthorityVerification owns serving-progress evidence for an exact topology.
+	ObservationAuthorityVerification ObservationAuthority = "verification"
 )
 
 // ObservationError means reconciliation could not establish fresh authoritative external state. Callers may retain
@@ -94,7 +96,21 @@ func (c *Coordinator) Reconcile(
 	groupID GroupID,
 	desiredPlan *ResolvedPlan,
 	status GroupStatus,
-) (ReconcileResult, error) {
+) (result ReconcileResult, reconcileErr error) {
+	// Retain invocation-only faults before returning. Do not turn an inconclusive observation into a durable rejection,
+	// and never rewrite the membership target or its independently owned Pending/Unknown/terminal result.
+	defer func() {
+		var observationErr *ObservationError
+		if errors.Is(reconcileErr, ErrRecoveryRequired) && !errors.As(reconcileErr, &observationErr) &&
+			result.Status.Transition != nil && !result.Status.Transition.RequiresRecovery() {
+			c.blockTransition(&result.Status, Failure{Classification: FailureClassificationTerminal,
+				Reason: recoveryRequiredReason, Message: reconcileErr.Error()})
+		}
+		if result.Status.Transition.RequiresRecovery() && !errors.Is(reconcileErr, ErrRecoveryRequired) {
+			reconcileErr = errors.Join(reconcileErr, fmt.Errorf("%w: %s", ErrRecoveryRequired, result.Status.Transition.Failure.Message))
+		}
+	}()
+
 	next := cloneStatus(status)
 	if groupID == "" {
 		return ReconcileResult{Status: next}, errors.New("group ID must not be empty")
@@ -234,6 +250,18 @@ func (c *Coordinator) reconcileDesiredPlan(
 	desiredPlan *ResolvedPlan,
 	observedTopology MembershipTopology,
 ) (handled bool, result ReconcileResult, err error) {
+	// Fresh observations alone cannot clear a fault seen only during Apply. A new semantic recovery plan must pass
+	// the usual topology/identity checks; ordinary growth, retirement and replay cannot bypass this fence.
+	if status.Transition.RequiresRecovery() {
+		recoveryPlan := desiredPlan != nil && desiredPlan.ID != status.Transition.Spec.Plan.ID &&
+			(desiredPlan.Change.Kind == PlanKindReduceToSurvivors || desiredPlan.Change.Kind == PlanKindRestore ||
+				desiredPlan.Change.Kind == PlanKindRemap)
+		if !recoveryPlan || !canReplaceBlockedTransition(status) {
+			return true, ReconcileResult{Status: status, Requeue: true}, fmt.Errorf("%w: %s",
+				ErrRecoveryRequired, status.Transition.Failure.Message)
+		}
+	}
+
 	// Finish interpreting a recovered membership result before considering a replacement plan. In particular, a
 	// correlated rejection must restore preparatory capacity and traffic state even when a newer plan is already desired.
 	if recovered, recoveredStatus := c.recoverMembershipAuthority(status, observedTopology); recovered {

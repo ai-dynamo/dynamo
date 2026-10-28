@@ -23,10 +23,8 @@ import (
 
 const (
 	statusPath                = "/is_scaling_elastic_ep"
-	scalePath                 = "/scale_elastic_ep"
 	submitPath                = "/submit_elastic_ep"
 	defaultObservationTimeout = 5 * time.Second
-	defaultScaleTimeout       = 12 * time.Minute
 	defaultSubmissionTimeout  = 10 * time.Second
 	maximumResponseBytes      = 1 << 20
 )
@@ -106,7 +104,6 @@ type Client struct {
 	httpClient         *http.Client
 	routePrefix        string
 	ObservationTimeout time.Duration
-	ScaleTimeout       time.Duration
 	SubmissionTimeout  time.Duration
 }
 
@@ -131,8 +128,8 @@ func NewClient(rawBaseURL string, httpClient *http.Client) (*Client, error) {
 	}
 	return &Client{
 		baseURL: *parsed, httpClient: &transport,
-		ObservationTimeout: defaultObservationTimeout, ScaleTimeout: defaultScaleTimeout,
-		SubmissionTimeout: defaultSubmissionTimeout,
+		ObservationTimeout: defaultObservationTimeout,
+		SubmissionTimeout:  defaultSubmissionTimeout,
 	}, nil
 }
 
@@ -159,34 +156,6 @@ func (c *Client) Observe(ctx context.Context) (Status, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.ObservationTimeout)
 	defer cancel()
 	return c.call(ctx, statusPath, nil)
-}
-
-// Scale invokes one rank's absolute operation and checks correlation on a successful response.
-// A transport, HTTP, or response-validation error leaves the outcome inconclusive: observe before replaying.
-// Replays must use the same request, including the originally observed instance ID.
-func (c *Client) Scale(ctx context.Context, target ScaleRequest) (Status, error) {
-	// Validate the complete target before issuing any native mutation.
-	if err := target.validate(); err != nil {
-		return Status{}, err
-	}
-	if c.ScaleTimeout <= 0 {
-		return Status{}, fmt.Errorf("vLLM scale timeout must be positive")
-	}
-	ctx, cancel := context.WithTimeout(ctx, c.ScaleTimeout)
-	defer cancel()
-	status, err := c.call(ctx, scalePath, target)
-	if err != nil {
-		return Status{}, err
-	}
-
-	// A target already equal to the current size is a no-op and may return the previous operation.
-	// It is not evidence that this operation committed, even when the effective count happens to match.
-	if status.InstanceID != target.ExpectedInstanceID || status.OperationID == nil ||
-		*status.OperationID != target.OperationID || status.RequestedDataParallelSize == nil ||
-		*status.RequestedDataParallelSize != target.NewDataParallelSize {
-		return Status{}, fmt.Errorf("vLLM scale response does not match the requested operation, target, and process instance")
-	}
-	return status, nil
 }
 
 // Submit requests bounded native acceptance, independently of the long-running collective.
