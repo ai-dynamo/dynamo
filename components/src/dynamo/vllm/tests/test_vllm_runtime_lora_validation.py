@@ -114,6 +114,53 @@ def test_snapshot_enforces_download_byte_limit(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "artifact",
+    ["adapter_config.json", "adapter_model.safetensors", "new_embeddings.safetensors"],
+)
+@pytest.mark.parametrize("replacement_kind", ["symlink", "hardlink", "fifo", "regular"])
+@pytest.mark.timeout(5)
+def test_snapshot_rejects_file_replaced_after_scan(
+    tmp_path, monkeypatch, artifact, replacement_kind
+):
+    snapshot = _snapshot(tmp_path)
+    if artifact == "new_embeddings.safetensors":
+        (snapshot / artifact).write_bytes(_safetensors_blob())
+    path = snapshot / artifact
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(path.read_bytes())
+    original_is_file = Path.is_file
+    original_open = Path.open
+    swapped = False
+
+    def swap_after_required_file_check(candidate):
+        nonlocal swapped
+        result = original_is_file(candidate)
+        if candidate == snapshot / "adapter_model.safetensors" and not swapped:
+            swapped = True
+            path.unlink()
+            if replacement_kind == "symlink":
+                path.symlink_to(replacement)
+            elif replacement_kind == "hardlink":
+                os.link(replacement, path)
+            elif replacement_kind == "fifo":
+                os.mkfifo(path)
+            else:
+                replacement.replace(path)
+        return result
+
+    def fail_before_blocking_fifo_open(candidate, *args, **kwargs):
+        if candidate == path and replacement_kind == "fifo":
+            pytest.fail("unsafe pathname open would block on the replaced FIFO")
+        return original_open(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_file", swap_after_required_file_check)
+    monkeypatch.setattr(Path, "open", fail_before_blocking_fifo_open)
+
+    _assert_invalid(snapshot, tmp_path)
+    assert swapped
+
+
+@pytest.mark.parametrize(
     "missing_name", ["adapter_config.json", "adapter_model.safetensors"]
 )
 def test_snapshot_requires_config_and_weights(tmp_path, missing_name):
