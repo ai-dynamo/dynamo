@@ -12,7 +12,7 @@ import stat
 import sys
 from collections.abc import Iterable
 from pathlib import Path
-from typing import NoReturn
+from typing import BinaryIO, NoReturn
 
 from dynamo.llm import HttpError
 
@@ -100,6 +100,33 @@ def _scan_error(error: OSError) -> None:
     raise error
 
 
+def _open_snapshot_file(path: Path, expected: os.stat_result | None) -> BinaryIO:
+    if expected is None:
+        raise _runtime_error(422, "invalid_lora_adapter")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or any(
+                getattr(metadata, field) != getattr(expected, field)
+                for field in (
+                    "st_dev",
+                    "st_ino",
+                    "st_size",
+                    "st_mtime_ns",
+                    "st_ctime_ns",
+                )
+            )
+        ):
+            raise _runtime_error(422, "invalid_lora_adapter")
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def _safetensors_byte_size(shape: list[int], dtype_bytes: int) -> int:
     elements = 1
     for dimension in shape:
@@ -118,10 +145,12 @@ def _validate_safetensors(
     weights_path: Path,
     max_lora_rank: int | None = None,
     num_experts: int | tuple[int, ...] | None = None,
+    *,
+    expected_metadata: os.stat_result | None,
 ) -> frozenset[str]:
     try:
-        file_size = weights_path.stat().st_size
-        with weights_path.open("rb") as weights:
+        with _open_snapshot_file(weights_path, expected_metadata) as weights:
+            file_size = os.fstat(weights.fileno()).st_size
             raw_header_length = weights.read(8)
             if len(raw_header_length) != 8:
                 raise _runtime_error(422, "invalid_lora_adapter")
@@ -260,6 +289,7 @@ def validate_snapshot(
     *,
     num_experts: int | tuple[int, ...] | None = None,
 ) -> Path:
+    """Validate a worker-owned immutable snapshot from a worker thread."""
     try:
         if num_experts is not None:
             counts = num_experts if isinstance(num_experts, tuple) else (num_experts,)
@@ -306,6 +336,7 @@ def _validate_snapshot(
 
     total_bytes = 0
     file_count = 0
+    scanned_files: dict[Path, os.stat_result] = {}
     for root, directories, files in os.walk(
         canonical_snapshot, followlinks=False, onerror=_scan_error
     ):
@@ -324,6 +355,7 @@ def _validate_snapshot(
             if stat.S_ISREG(mode):
                 if metadata.st_nlink != 1:
                     raise _runtime_error(422, "invalid_lora_adapter")
+                scanned_files[path] = metadata
                 file_count += 1
                 total_bytes += metadata.st_size
                 if file_count > _MAX_FILES or total_bytes > max_snapshot_bytes:
@@ -334,7 +366,9 @@ def _validate_snapshot(
     if not config_path.is_file() or not weights_path.is_file():
         raise _runtime_error(422, "invalid_lora_adapter")
     try:
-        with config_path.open("rb") as config_file:
+        with _open_snapshot_file(
+            config_path, scanned_files.get(config_path)
+        ) as config_file:
             encoded_config = config_file.read(_MAX_CONFIG_BYTES + 1)
         if len(encoded_config) > _MAX_CONFIG_BYTES:
             raise _runtime_error(422, "invalid_lora_adapter")
@@ -395,10 +429,17 @@ def _validate_snapshot(
             raise _runtime_error(422, "invalid_lora_adapter")
     else:
         raise _runtime_error(422, "invalid_lora_adapter")
-    tensor_names = _validate_safetensors(weights_path, max_lora_rank, num_experts)
+    tensor_names = _validate_safetensors(
+        weights_path,
+        max_lora_rank,
+        num_experts,
+        expected_metadata=scanned_files.get(weights_path),
+    )
     embeddings_path = canonical_snapshot / "new_embeddings.safetensors"
     if embeddings_path.exists():
-        _validate_safetensors(embeddings_path)
+        _validate_safetensors(
+            embeddings_path, expected_metadata=scanned_files.get(embeddings_path)
+        )
     if targets is not None and any(
         not any(target in name for name in tensor_names) for target in targets
     ):
