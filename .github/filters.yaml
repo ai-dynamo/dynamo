@@ -147,6 +147,10 @@ ignore:
   - 'scripts/validate_agent_instructions.py'
   - 'scripts/validate_skills.py'
   - 'scripts/check_action_pins.py'
+  # Pre-commit generator for the Python media protocol models. Its outputs are
+  # covered by `core` and `frontend`; the generate-media-protocols hook
+  # validates the script itself.
+  - 'scripts/generate_media_protocols.py'
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
@@ -173,13 +177,14 @@ core:
   - 'container/templates/dynamo_*'
   - 'container/templates/wheel_builder.Dockerfile'
   - 'container/templates/compliance.Dockerfile'
+  - 'container/templates/verify_ca_certificates.Dockerfile'
   - '.dockerignore'
   - 'container/deps/*'
   - 'container/compliance/**'
   - '.cargo/config.toml'
   - 'lib/**'
   - 'tests/**'
-  - 'components/src/dynamo/kv_dc_relay/**'
+  - 'components/src/dynamo/pool_relay/**'
   - 'components/src/dynamo/kv_state_agent/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'
@@ -395,6 +400,7 @@ vllm:
   - 'components/src/dynamo/vllm/**'
   - 'components/src/dynamo/artifacts/vllm/**'
   - 'container/templates/vllm_*'
+  - 'container/templates/ffmpeg_encoder_guard.Dockerfile'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -403,6 +409,7 @@ sglang:
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang*/**'
   - 'container/templates/sglang_*'
+  - 'container/templates/ffmpeg_encoder_guard.Dockerfile'
   - 'container/deps/sglang/**'
   - '!**/*.md'
   - '!**/*.rst'
@@ -412,6 +419,7 @@ trtllm:
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/templates/trtllm_*'
+  - 'container/templates/ffmpeg_encoder_guard.Dockerfile'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -439,7 +447,7 @@ frontend:
   - '*.lock'
   - 'container/deps/*'
   - 'container/compliance/**'
-  - 'components/src/dynamo/kv_dc_relay/**'
+  - 'components/src/dynamo/pool_relay/**'
   - 'components/src/dynamo/kv_state_agent/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'
@@ -451,6 +459,7 @@ frontend:
   - 'tests/frontend/router_ais_image_smoke.py'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
+  - 'container/templates/verify_ca_certificates.Dockerfile'
   # The frontend image is rendered from these two: render.py generates its
   # Dockerfile, and context.yaml supplies EPP_IMAGE -- the `FROM` that the
   # compliance stages read /sbom-rust-epp.cdx.json and /rust-licenses out of.

@@ -334,6 +334,18 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 
 	// Keep authored role sources available so the shared renderer preserves launch ownership.
 	componentForRendering := dcd.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
+
+	// Standalone defaults use immutable DCD origin; graph children keep their inherited origin.
+	if dcd.GetParentGraphDeploymentName() == "" {
+		origin, exists := dcd.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]
+		for _, template := range dynamo.EnsureComponentPodTemplates(componentForRendering) {
+			delete(template.Annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
+			if exists {
+				template.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = origin
+			}
+		}
+	}
+
 	if workerHash := dynamo.GetDCDEffectiveWorkerHash(dcd); workerHash != "" && dynamo.IsWorkerComponent(componentType) {
 		for _, podTemplate := range dynamo.EnsureComponentPodTemplates(componentForRendering) {
 			podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
@@ -438,7 +450,7 @@ func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
 		}
 	}
 
-	return &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: podLabels, Annotations: podAnnotations}, Spec: *podSpec}, nil
+	return &corev1.PodTemplateSpec{Labels: podLabels, Annotations: podAnnotations, Spec: *podSpec}, nil
 }
 
 func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
@@ -566,10 +578,8 @@ func (r *dcdWorkloadRenderer) generateService(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) (*corev1.Service, bool, error) {
 	deleteStub := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      dynamo.NormalizeKubeResourceName(dcd.Name),
-			Namespace: dcd.Namespace,
-		},
+		Name:      dynamo.NormalizeKubeResourceName(dcd.Name),
+		Namespace: dcd.Namespace,
 	}
 
 	annotations := dynamo.GetDCDKubeAnnotations(dcd)
@@ -625,7 +635,7 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 	isK8sDiscovery := commonController.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, annotations)
 	componentType := string(component.ComponentType)
 	if !isK8sDiscovery && componentType != commonconsts.ComponentTypeFrontend {
-		return &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: dynamo.NormalizeKubeResourceName(serviceName), Namespace: dgd.Namespace}}, true, nil
+		return &corev1.Service{Name: dynamo.NormalizeKubeResourceName(serviceName), Namespace: dgd.Namespace}, true, nil
 	}
 	dynamoNamespace := dynamo.GetDynamoNamespace(dgd, component)
 	if dynamoNamespace == "" {

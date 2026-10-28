@@ -24,7 +24,7 @@ use tonic::{Request, Response, Status};
 
 use super::{
     FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture, SidecarFixture, WireFixture,
-    fast_engine_args, sidecar_command, wait_scheduler_idle,
+    fast_engine_args, sidecar_command, wait_scheduler_active, wait_scheduler_idle,
 };
 
 pub struct Fixture {
@@ -240,18 +240,7 @@ impl WireFixture for Fixture {
     }
 
     async fn scheduler_active(&self) {
-        let mut metrics = self.service.metrics_receiver();
-        dynamo_sidecar_testkit::bounded("Mocker active scheduler work", async {
-            loop {
-                let snapshot = metrics.borrow_and_update().clone();
-                if snapshot.running_requests + snapshot.waiting_requests > 0 {
-                    assert!(self.service.active_request_count() > 0);
-                    return;
-                }
-                metrics.changed().await.unwrap();
-            }
-        })
-        .await;
+        wait_scheduler_active(self, self.service.metrics_receiver()).await;
     }
 }
 
@@ -346,11 +335,10 @@ impl ProcessFixture for Fixture {
     }
 
     fn assert_registration(card: &ModelDeploymentCard) {
-        // The sidecar does not consume GetServerInfo capacity yet; 16 is the
-        // registration default, not the Mocker's reported block size of 4.
+        // Registration must preserve the Mocker's advertised cache capacity.
         assert_eq!(card.effective_context_length(), 32_768);
-        assert_eq!(card.kv_cache_block_size, 16);
-        assert!(card.runtime_config.total_kv_blocks.is_none());
+        assert_eq!(card.kv_cache_block_size, 4);
+        assert_eq!(card.runtime_config.total_kv_blocks, Some(4_096));
         assert!(card.runtime_config.tool_call_parser.is_none());
         assert!(card.runtime_config.reasoning_parser.is_none());
     }
@@ -358,8 +346,7 @@ impl ProcessFixture for Fixture {
 
 impl HandoffFixture for Fixture {
     const HAS_BOOTSTRAP: bool = false;
-    // Registration default until the sidecar consumes GetServerInfo capacity.
-    const KV_BLOCK_SIZE: u32 = 16;
+    const KV_BLOCK_SIZE: u32 = 4;
 
     fn assert_handoff(prefill: &RequestHandle<Adapter>, decode: &RequestHandle<Adapter>, id: &str) {
         let prefill_wire = prefill.native_request().unwrap();

@@ -255,6 +255,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        ca-certificates \
         dirmngr \
         gnupg \
         gnupg-utils \
@@ -267,6 +268,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         keyboxd \
         libssl3t64 \
         openssl
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
+
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
 # One COPY pulls nats-server, etcd/, uv, uvx into their final paths.
 COPY --from=dynamo_base_export / /
@@ -346,15 +351,7 @@ ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 # NOT expose any H.264/H.265/AAC/NVENC encoder. A missing/broken copy (no VP9)
 # or a codec regression fails the build here rather than at runtime — closing the
 # gap where an image with no working encoder passed every PR gate.
-RUN set -eu; \
-    ff="${IMAGEIO_FFMPEG_EXE:-ffmpeg}"; \
-    "$ff" -hide_banner -encoders 2>/dev/null | grep -qiE 'libvpx[-_]vp9' \
-      || { echo "ERROR: shipped ffmpeg ($ff) has no VP9 encoder" >&2; exit 1; }; \
-    if "$ff" -hide_banner -encoders 2>/dev/null \
-         | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
-        echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
-        exit 1; \
-    fi
+{% include "templates/ffmpeg_encoder_guard.Dockerfile" %}
 
 # Drop upstream's preinstalled opencv-python-headless (and the libav*/ffmpeg
 # copies its wheel vendors under opencv_python_headless.libs/). TRT-LLM made
@@ -369,77 +366,23 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     [ ! -e /usr/local/lib/python3.12/dist-packages/opencv_python_headless.libs ]
 
-# Hold DALI at a version that carries its own media-codec cleanup. Upstream
-# restricted DALI's vendored ffmpeg build to drop the software h264/hevc/aac
-# decoders (NVIDIA/DALI_deps#162, NVIDIA/DALI#6352), first released in 2.1.1.
-# The base image carried 2.1.0 through 1.3.0rc26, which predates it, and carries
-# 2.2.0 from 1.3.0rc27, which does not. So on this base the install below is a
-# no-op and what the block still buys is the two checks around it: the version
-# tripwire and the decoder enumeration.
+# DALI comes from the base image. Its vendored ffmpeg must not register the
+# software h264/hevc/aac decoders (dropped upstream from 2.1.1 by
+# NVIDIA/DALI_deps#162, NVIDIA/DALI#6352). The vendored libav*/libsw* set is
+# DT_NEEDED by libdali.so and its siblings, so it cannot be trimmed on its own.
 #
-# Pin rather than remove. The vendored libav*/libsw* set cannot be trimmed
-# on its own -- every one of them is DT_NEEDED by libdali.so and its siblings, so
-# deleting the codec libraries breaks `import nvidia.dali` outright -- and while
-# nothing in this image imports DALI today, it belongs to TensorRT-LLM rather
-# than to us. A version bump removes the codec surface without taking a package
-# out of someone else's image.
+# Enumerate what each bundled libavcodec actually registers rather than trusting
+# the version string, so a base image that reintroduces a decoder fails the
+# build. A loop over an empty glob checks nothing, so an empty match fails too:
+# a release that links the codec into a differently named library has to be
+# looked at. tests/dependencies/test_no_software_video_codecs.py repeats this
+# against the shipped image.
 #
-# Measured on the shipped image: 2.1.0 registers 446 decoders including h264,
-# hevc, aac, aac_fixed and aac_latm; 2.1.1 and 2.2.0 each register 440 with all
-# five absent and vp8/vp9/mjpeg/av1 retained. 2.2.0 measured again on
-# tensorrt-llm/release:1.3.0rc27 itself, now that DALI arrives with the base.
-#
-# Pinned exactly, not a floor. `>=2.1.1` resolves to whatever is newest, which is
-# a jump into a component this repo does not own, taken silently at build time.
-# The pin names the version that was measured, so moving it means measuring the
-# new one.
-#
-# The pin can go stale in the one direction that matters: if TensorRT-LLM later
-# ships a base image with a newer DALI, installing 2.2.0 over it is a downgrade.
-# The check below turns that into a build failure with instructions rather than a
-# silent regression. The pin now equals the base version, so the next base image
-# that moves DALI past 2.2.0 stops the build, which is the point: a human
-# re-measures and moves the pin, or deletes this RUN and lets the base version
-# stand. A base that moves DALI back below 2.2.0 passes that check and the
-# install below puts the measured version back, which is what it is there for.
-#
-# THIS BLOCK IS TRANSITIONAL, and on this base it is already down to its checks.
-# The guards after it and the bundled-libavcodec assertion in
-# tests/dependencies/test_no_software_video_codecs.py are NOT transitional: they
-# are the permanent statement of what this image may contain, and they must
-# outlive the workaround.
-#
-# System interpreter for the same reason as the opencv removal above: with
-# VIRTUAL_ENV set, plain pip targets the venv and leaves the system-site copy in
-# place. The guard enumerates what the library actually registers rather than
-# trusting the version string, so a wheel that reintroduces a decoder fails the
-# build. It finds that library by filename, and a loop over an empty glob checks
-# nothing and exits 0, so it fails on an empty match as well: a release that
-# links the codec into a differently named library has to be looked at, not
-# waved through.
-#
-# Mirrored by the pre_runtime whiteout below, which is inert while the install is
-# a no-op and load-bearing again the moment it is not: DALI's libraries are
-# hash-named, so an upgrade RENAMES them and the squash COPY would otherwise
-# leave the old codec-carrying copy in place beside the new one.
+# System interpreter for the same reason as the opencv removal above.
 RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
     set -eu; \
-    before=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
-    echo "DALI in base image: $before"; \
-    newest=$(printf '%s\n2.2.0\n' "$before" | sort -V | tail -1); \
-    if [ "$newest" != "2.2.0" ]; then \
-        echo "ERROR: base image already carries DALI $before, so pinning 2.2.0 would" >&2; \
-        echo "       downgrade it. Upstream has caught up -- delete this RUN and let" >&2; \
-        echo "       the base version stand. Keep the guards below and the bundled-" >&2; \
-        echo "       libavcodec assertion in tests/dependencies/, which are what stop" >&2; \
-        echo "       this from regressing." >&2; \
-        exit 1; \
-    fi; \
-    /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
-        --extra-index-url https://pypi.nvidia.com 'nvidia-dali-cuda130==2.2.0'; \
     v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
     echo "DALI version: $v"; \
-    [ "$v" = "2.2.0" ] || { echo "ERROR: wanted DALI 2.2.0, got $v" >&2; exit 1; }; \
     libs=$(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*'); \
     if [ -z "$libs" ]; then \
         echo "ERROR: DALI $v ships no libavcodec under .libs, so the enumeration" >&2; \
@@ -543,7 +486,7 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # future version whose libavcodec is not, disarming the check that just fired.
 # Removing the file keeps the narrow waivers, and the tripwire, intact.
 #
-# Pinned exactly, like DALI above: requirements.trtllm.txt installs
+# Pinned exactly: requirements.trtllm.txt installs
 # PyNvVideoCodec==2.2.3 into /opt/dynamo/venv and this stage pins the system copy
 # to the same version, so the guard below is a plain equality and the venv
 # cross-check compares the two copies to each other. tests/dependencies/
@@ -683,8 +626,23 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
 # one, in range, so a surviving old copy beside the new one fails the build.
 # Version-compared rather than glob-matched: a glob range silently stops matching
 # at the end of the series it was written for.
-RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "aiohttp>=3.14.3,<4.0" && \
-    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/aiohttp-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("aiohttp dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (3, 14, 3) <= tv(vs[0]) < (4, 0, 0) else 1)'
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade pip==26.2.2 "aiohttp>=3.14.4,<4.0" && \
+    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/aiohttp-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("aiohttp dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (3, 14, 4) <= tv(vs[0]) < (4, 0, 0) else 1)'
+
+# Refresh the base image's certifi CA bundle in system site, for the same
+# inventory reason as aiohttp above. certifi has no dependencies, so this moves
+# exactly one distribution. Mirrored by the pre_runtime whiteout below: the
+# upgrade renames the version-stamped dist-info directory.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade certifi==2026.10.23 && \
+    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/certifi-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("certifi dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and tv(vs[0]) >= (2026, 10, 23) else 1)'
+
+# Raise the base image's Pillow in system site, for the same inventory reason as
+# aiohttp above; requirements.trtllm.txt only reaches the venv. Pillow has no
+# required dependencies, so this moves exactly one distribution. Mirrored by the
+# pre_runtime whiteout below: the upgrade renames the dist-info directory and the
+# hash-named libraries vendored in pillow.libs.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade "pillow>=13.0.0,<14" && \
+    /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info in system site:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
 
 # Pin the upstream developer stack in system site, where the image inventory
 # reads it. The rc29 baseline on both architectures satisfies all transitive
@@ -730,6 +688,9 @@ CMD ["/bin/bash"]
 # (ENV/WORKDIR/USER/CMD) and then overlay runtime_full's filesystem as a
 # single layer. Only Dynamo-specific env needs redeclaring below.
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
+# The filesystem overlay does not carry runtime_full's image environment.
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
+
 # Remove the upstream runtime's Git LFS package without pruning shared dependencies.
 RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 
@@ -739,12 +700,10 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # opencv_python_headless.libs/ + dist-info) would leak alongside our content.
 # Keep this list in sync with any deletion RUNs in the stages above.
 #
-# DALI is here for a different reason: runtime_full UPGRADES it rather than
-# removing it, and its vendored libraries are hash-named
-# (libavcodec-847b0373.so.62 -> libavcodec-7e11e4e3.so.62). An overlay COPY only
-# replaces paths that match, so without dropping the old tree first, the base
-# image's 2.1.0 libraries — the ones carrying h264/hevc/aac — would ship
-# alongside the upgraded ones and the upgrade would buy nothing.
+# DALI is here for a different reason: its vendored libraries are hash-named
+# (libavcodec-847b0373.so.62 -> libavcodec-7e11e4e3.so.62), and an overlay COPY
+# only replaces paths that match. Dropping the tree first means the image ships
+# exactly runtime_full's copy, even if a later stage changes the DALI version.
 #
 # aiohttp is here for the DALI reason, not the opencv one: runtime_full upgrades
 # it in system site, and the version-stamped metadata directory is renamed by the
@@ -799,7 +758,12 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # has the same doubling problem. Dropping them here is free: the overlay restores
 # whatever runtime_full holds, so listing one that did not move costs nothing and
 # omitting one that did would leave stale metadata behind.
+# Remove old trust-store files and Python metadata before restoring the updated overlay.
 RUN rm -rf /workspace /home/ubuntu \
+    /etc/ssl/certs \
+    /usr/share/ca-certificates \
+    /usr/local/lib/python3.12/dist-packages/pip \
+    /usr/local/lib/python3.12/dist-packages/pip-*.dist-info \
     /usr/local/bin/etcd \
     /usr/local/bin/etcdctl \
     /usr/local/bin/etcdutl \
@@ -839,7 +803,12 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/aiohappyeyeballs-* \
     /usr/local/lib/python3.12/dist-packages/attr \
     /usr/local/lib/python3.12/dist-packages/attrs \
-    /usr/local/lib/python3.12/dist-packages/attrs-* && \
+    /usr/local/lib/python3.12/dist-packages/attrs-* \
+    /usr/local/lib/python3.12/dist-packages/certifi \
+    /usr/local/lib/python3.12/dist-packages/certifi-* \
+    /usr/local/lib/python3.12/dist-packages/PIL \
+    /usr/local/lib/python3.12/dist-packages/pillow-* \
+    /usr/local/lib/python3.12/dist-packages/pillow.libs && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
@@ -847,6 +816,8 @@ COPY --from=runtime_full / /
 # Package trees and shared JupyterLab assets are whiteouted before the overlay.
 # Validate after the overlay so stale base metadata cannot survive the refresh.
 RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3'
+RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/certifi-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("certifi dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and tv(vs[0]) >= (2026, 10, 23) else 1)'
+RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
 
 {% if target not in ("dev", "local-dev") %}
 RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'
@@ -873,11 +844,8 @@ RUN conf=/opt/dynamo/mpi/etc/openmpi-mca-params.conf && \
 # Post-overlay guard for the DALI whiteout above. This is the only stage where
 # the failure can appear: runtime_full holds exactly one DALI, and the whiteout
 # is what keeps the overlay from re-adding the base image's copy beside it.
-# Because those libraries are hash-named, a missed whiteout leaves TWO -- the
-# upgraded one and the 2.1.0 one that registers h264/hevc/aac -- and the image
-# then reports version 2.1.0 while carrying both. Verified by building this
-# stage with and without the rm -rf: without it, two copies and the codecs are
-# back; with it, one copy and clean.
+# Because those libraries are hash-named, a missed whiteout after a version change
+# leaves TWO copies side by side, and the older one may register h264/hevc/aac.
 #
 # Every match is checked, not just the first: the whole point is catching the
 # case where more than one exists. Zero matches is a failure too, for the reason

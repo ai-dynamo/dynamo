@@ -18,7 +18,6 @@ from typing import Any
 
 from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
-from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.exceptions import VLLMClientError
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -41,7 +40,7 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import HttpError, WorkerUnavailable
+from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
 from dynamo.vllm.errors import vllm_client_error_to_http_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
@@ -62,6 +61,7 @@ from .utils import (
     random_uuid,
     resolve_chat_template,
 )
+from .vllm_protocol import load_chat_template
 
 logger = logging.getLogger(__name__)
 
@@ -1260,6 +1260,7 @@ class VllmProcessor:
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
         usage_metadata: dict[str, Any] = {}
+        locally_finished = False
         # Per-request reasoning-token usage (NVBug 6678449b); see
         # _ReasoningUsageAnnotator. Must be per-request, never module-level.
         # The counts live on the post-processors, which are per-request too.
@@ -1281,9 +1282,15 @@ class VllmProcessor:
         locally_stopped_requests: set[str] = set()
 
         def attach_usage(output: dict[str, Any], *, finished: bool) -> None:
+            # Local completion may precede every backend usage report. Preserve
+            # sparse metadata when available, and use the same usage projection
+            # for synthesized terminal counts and normal backend reports.
+            metadata = usage_metadata
+            if locally_finished and not metadata:
+                metadata = {"prompt_tokens": input_tokens}
             if usage := response_usage(
                 request,
-                usage_metadata,
+                metadata,
                 prompt_tokens=input_tokens,
                 completion_tokens=cumulative_output_tokens,
                 finished=finished,
@@ -1386,11 +1393,17 @@ class VllmProcessor:
                         yield {"_dynamo_annotated": True, "data": terminal}
 
                 if output_request_id in locally_stopped_requests:
+                    if locally_finished and not pending_terminals:
+                        break
                     continue
 
-                # Count before any choice gate — tool/reasoning parsers may
-                # consume tokens without emitting a visible delta.
-                chunk_tokens = len(engine_response.get("token_ids") or [])
+                # Count active choices before processing: tool/reasoning
+                # parsers may consume tokens without emitting a visible delta.
+                chunk_tokens = (
+                    len(engine_response.get("token_ids") or [])
+                    if output_request_id in self.output_processor.request_states
+                    else 0
+                )
                 cumulative_output_tokens += chunk_tokens
 
                 if choice_top_logprobs is not None:
@@ -1423,6 +1436,12 @@ class VllmProcessor:
                 )
 
                 locally_stopped_requests.update(vllm_out.reqs_to_abort)
+                # Choices share a routed stream; a local stop on one must not
+                # cancel siblings that are still generating.
+                locally_finished = bool(locally_stopped_requests) and not any(
+                    child_id in self.output_processor.request_states
+                    for child_id in registered_request_ids
+                )
 
                 choices = []
                 postprocess_error = False
@@ -1513,6 +1532,8 @@ class VllmProcessor:
                     envelope["comment"] = [json.dumps(metrics)]
 
                 yield envelope
+                if locally_finished and not pending_terminals:
+                    break
             else:
                 for terminal in pending_terminals.values():
                     attach_usage(terminal, finished=True)
@@ -1527,6 +1548,8 @@ class VllmProcessor:
             # The routed pipeline rejected the request as retryable (for example,
             # prefill routing is still activating). An error envelope would turn
             # that 503 into a 500; let the binding restore the class instead.
+            raise
+        except InvalidArgument:
             raise
         except Exception as e:
             backend_error = backend_invalid_argument_to_http_error(e)
