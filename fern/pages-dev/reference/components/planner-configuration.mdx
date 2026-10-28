@@ -121,15 +121,33 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
   Role-indexed AISimulate forward-pass configurations. Constructs each model through
   `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
   interpolation sweep. Configure model identity and estimator controls through
-  `ais_perf_model.roles`; the retired `aic_perf_model` and `hf_id` / pick shape
+  `ais_perf_model.roles`, or select local dataset manifests with `dataset_profiles`;
+  the retired `aic_perf_model` and `hf_id` / pick shape
   are rejected.
 </ParamField>
 
 <Indent>
-  <ParamField path="roles" type="object" required={true}>
+  <ParamField path="roles" type="object" default="{}">
     Maps deployment roles to complete upstream `ForwardPassPerfModelConfig` objects.
     Supply `prefill` and `decode` for `disagg`, the matching single role for `prefill`
     or `decode`, and `aggregated` for `agg`. Each key must match `worker_type`.
+    Each required role must appear in exactly one of `roles` and `dataset_profiles`.
+  </ParamField>
+  <ParamField path="dataset_profiles" type="object" default="{}">
+    Maps `prefill`, `decode`, or `aggregated` to an execution-profile manifest in a
+    local AISimulate dataset. The manifest supplies the complete
+    canonical configuration; Planner does not override its model, runtime, or pin.
+  </ParamField>
+  <ParamField path="dataset_profiles.&lt;role&gt;.root" type="string">
+    Required absolute path to the dataset snapshot already installed in the container.
+    Planner performs no downloads and needs no Hugging Face credentials.
+  </ParamField>
+  <ParamField path="dataset_profiles.&lt;role&gt;.manifest" type="string">
+    Required path relative to `root`, selecting an execution-profile manifest for that
+    role. AISimulate validates artifact hashes, the compiled graph, and retained inputs.
+    Planner prepares a private temporary directory once per role/source and retains it
+    across worker-limit changes. Provide writable temporary storage and bundled or
+    existing local model metadata. Restart Planner to adopt changed dataset contents.
   </ParamField>
   <ParamField path="roles.&lt;role&gt;.model / system / backend" type="string" required={true}>
     Model identifier, AISimulate system identifier, and inference backend
@@ -159,6 +177,40 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
     AISimulate. See the [AISimulate core API](https://github.com/ai-dynamo/aisimulate/blob/main/docs/core-api.md).
   </ParamField>
 </Indent>
+
+### Local execution-profile datasets
+
+Download the AISimulate dataset snapshot into the container image during the image
+build, or mount a local copy before starting Planner. Use the
+generic AISimulate wheel; measurements do not belong inside the wheel. Use matching
+AISimulate Python and Rust releases that support execution profiles through the
+common forward-pass query API. This integration pins Python
+`0.13.0.dev202610280000000086` and Rust `0.13.0-dev.202610280000000086`,
+which include that support. Use version-2 execution profiles; version 1 retains
+its legacy direct-phase queries and must be explicitly migrated and repinned.
+
+The following configuration illustrates the paths to supply for a prefill role:
+
+```yaml
+mode: prefill
+pre_deployment_sweeping_mode: none
+ais_perf_model:
+  dataset_profiles:
+    prefill:
+      root: /opt/aisim-data
+      manifest: metadata/prefill-manifest.json
+```
+
+Set the paths to the installed snapshot and its selected manifest. For disaggregated
+serving, supply separate `prefill` and `decode` sources. For `mode: agg`, use an
+`aggregated` source whose profile contains both phase graphs. Canonical prepared configs
+containing `estimator_config.op_level.execution_profile` also work through `roles`.
+
+Planner applies its existing workload estimates, including queue scaling,
+prefix-cache discounts, and next-request estimates, before calling AISimulate's
+common forward-pass query API. The prediction path is the same for built-in and
+external inputs, including mixed steps. If it cannot estimate the resulting shape, Planner skips scaling decisions that
+depend on that estimate.
 
 <ParamField path="aic_interpolation" type="AICInterpolationSpec" default="null">
   AIConfigurator interpolation spec. Populated by the profiler in rapid mode and written onto the Planner ConfigMap; you do not normally set this by hand. When present, the Planner runs the AIC sweep in-process at bootstrap to seed the performance model. See [AICInterpolationSpec](#aicinterpolationspec).
