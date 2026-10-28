@@ -720,8 +720,9 @@ impl ErrorMessage {
         )
     }
 
-    /// Unsupported multimodal content is a client error: no retry can make the
-    /// request succeed, and infrastructure above the frontend counts 5xx as a
+    /// Unsupported multimodal content or a deprecated request field such as
+    /// `function_call` is a client error: no retry can make the request
+    /// succeed, and infrastructure above the frontend counts 5xx as a
     /// server-side fault. Answered 400 where `not_implemented_error` answers 501.
     /// The legacy request metric remains `NotImplemented` to distinguish an
     /// unsupported feature from malformed input.
@@ -3552,10 +3553,10 @@ async fn chat_completions(
         return Err(err_response);
     }
 
-    // Handle unsupported fields - if Some(resp) is returned by
+    // Handle unsupported fields - if Err(resp) is returned by
     // validate_chat_completion_unsupported_fields,
-    // then a field was used that is unsupported. We will log an error message
-    // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
+    // then a field was used that is unsupported. We early return a
+    // 400 BAD_REQUEST status code. Otherwise, proceed.
     if let Err(err_response) = validate_chat_completion_unsupported_fields(&request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -3900,7 +3901,7 @@ async fn chat_completions(
 }
 
 /// Checks for unsupported fields in the request.
-/// Returns Some(response) if unsupported fields are present.
+/// Returns an error response if unsupported fields are present.
 #[allow(deprecated)]
 pub fn validate_chat_completion_unsupported_fields(
     request: &NvCreateChatCompletionRequest,
@@ -3908,14 +3909,14 @@ pub fn validate_chat_completion_unsupported_fields(
     let inner = &request.inner;
 
     if inner.function_call.is_some() {
-        return Err(ErrorMessage::not_implemented_error(
+        return Err(ErrorMessage::unsupported_content_error(
             VALIDATION_PREFIX.to_string()
                 + "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
         ));
     }
 
     if inner.functions.is_some() {
-        return Err(ErrorMessage::not_implemented_error(
+        return Err(ErrorMessage::unsupported_content_error(
             VALIDATION_PREFIX.to_string()
                 + "`functions` is deprecated. Please migrate to use `tools` instead.",
         ));
