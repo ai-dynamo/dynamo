@@ -8,6 +8,7 @@ import random
 from pathlib import Path
 
 import numpy as np
+from pool_sampling import sample_pool_slots
 
 
 def _synthetic_video_key(
@@ -151,23 +152,7 @@ def sample_video_slots(
             f"--videos-per-request, or reduce --videos-pool."
         )
 
-    # Round-robin every pool video into requests so each appears at least once
-    shuffled = list(pool)
-    py_rng.shuffle(shuffled)
-    requests: list[list[str]] = [[] for _ in range(num_requests)]
-    for i, video in enumerate(shuffled):
-        requests[i % num_requests].append(video)
-
-    # Fill remaining slots with random pool samples (no intra-request duplicates)
-    for req in requests:
-        remaining = videos_per_request - len(req)
-        if remaining > 0:
-            used = set(req)
-            available = [video for video in pool if video not in used]
-            req.extend(py_rng.sample(available, remaining))
-        py_rng.shuffle(req)
-
-    slot_refs = [video for req in requests for video in req]
+    slot_refs = sample_pool_slots(py_rng, pool, num_requests, videos_per_request)
     num_unique = len(set(slot_refs))
     print(
         f"Generated {total_slots} video slots from pool of {pool_size}: "

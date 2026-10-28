@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from pool_sampling import sample_pool_slots
 
 
 def compute_image_uuid(ref: str) -> str:
@@ -91,23 +92,7 @@ def sample_slots(
         f"or reduce --images-pool."
     )
 
-    # Round-robin every pool image into requests so each appears at least once
-    shuffled = list(pool)
-    py_rng.shuffle(shuffled)
-    requests: list[list[str]] = [[] for _ in range(num_requests)]
-    for i, img in enumerate(shuffled):
-        requests[i % num_requests].append(img)
-
-    # Fill remaining slots with random pool samples (no intra-request duplicates)
-    for req in requests:
-        remaining = images_per_request - len(req)
-        if remaining > 0:
-            used = set(req)
-            available = [img for img in pool if img not in used]
-            req.extend(py_rng.sample(available, remaining))
-        py_rng.shuffle(req)
-
-    slot_refs = [img for req in requests for img in req]
+    slot_refs = sample_pool_slots(py_rng, pool, num_requests, images_per_request)
     num_unique = len(set(slot_refs))
     print(
         f"Generated {total_slots} image slots from pool of {pool_size}: "
