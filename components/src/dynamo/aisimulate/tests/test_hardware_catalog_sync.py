@@ -66,9 +66,17 @@ def _documented_hardware_skus() -> list[str]:
     return sorted(re.findall(r"`([^`]+)`", match.group(1)))
 
 
+def _operator_hardware_skus() -> list[str]:
+    return sorted(
+        line.strip()
+        for line in CATALOG_PATH.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+
+
 def test_dgdr_hardware_catalog_matches_pinned_aisimulate() -> None:
     assert metadata.version("aisimulate") == _pinned_version()
 
     expected = _packaged_hardware_skus()
-    assert CATALOG_PATH.read_text().split() == expected
+    assert _operator_hardware_skus() == expected
     assert _documented_hardware_skus() == expected
