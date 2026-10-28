@@ -47,20 +47,11 @@ func NewDynamoGraphDeploymentRequestValidator() *DynamoGraphDeploymentRequestVal
 // dynamoGraphDeploymentRequestValidation carries DGDR-specific request state.
 // API values, paths, and accumulated errors remain explicit validator arguments.
 type dynamoGraphDeploymentRequestValidation struct {
-	ctx context.Context
+	sharedValidation
 	// requestVersion is the API version the client used, resolved once from the admission
 	// request. Every object delivered to the webhook is a converted v1beta1 object;
 	// spec.v1beta2 says which represented spec it carries.
 	requestVersion string
-	warnings       admission.Warnings
-}
-
-func (v *dynamoGraphDeploymentRequestValidation) warn(message string) {
-	v.warnings = append(v.warnings, message)
-}
-
-func (v *dynamoGraphDeploymentRequestValidation) warnf(format string, args ...any) {
-	v.warn(fmt.Sprintf(format, args...))
 }
 
 // Validate performs stateless validation on request. ctx must carry the admission request and
@@ -74,8 +65,8 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate(
 		return nil, fmt.Errorf("get admission request: %w", err)
 	}
 	validation := &dynamoGraphDeploymentRequestValidation{
-		ctx:            ctx,
-		requestVersion: internalwebhook.RequestedVersion(req),
+		sharedValidation: sharedValidation{ctx: ctx},
+		requestVersion:   internalwebhook.RequestedVersion(req),
 	}
 	allErrs := validation.validateDynamoGraphDeploymentRequest(request)
 	return validation.warnings, invalidDynamoGraphDeploymentRequestError(request, allErrs)
@@ -93,8 +84,8 @@ func (v *DynamoGraphDeploymentRequestValidator) ValidateUpdate(
 		return nil, fmt.Errorf("get admission request: %w", err)
 	}
 	validation := &dynamoGraphDeploymentRequestValidation{
-		ctx:            ctx,
-		requestVersion: internalwebhook.RequestedVersion(req),
+		sharedValidation: sharedValidation{ctx: ctx},
+		requestVersion:   internalwebhook.RequestedVersion(req),
 	}
 	allErrs := validation.validateDynamoGraphDeploymentRequestUpdate(newRequest, oldRequest)
 	validation.warnDeprecatedDGDOverrideTargets(&newRequest.Spec)
@@ -127,7 +118,11 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	// A v1beta2 Request reaches this webhook as a v1beta1 object carrying spec.v1beta2;
 	// the v1beta1 rules below do not apply to it.
 	if spec.V1Beta2 != nil {
-		return v.validateDynamoGraphDeploymentRequestEnvelopeV1beta2(spec.V1Beta2, nil, fldPath.Child("v1beta2"))
+		typedSpec, err := decodeDynamoGraphDeploymentRequestSpecV1beta2(spec.V1Beta2)
+		if err != nil {
+			return field.ErrorList{field.Invalid(fldPath.Child("v1beta2"), "<redacted>", "must be a valid v1beta2 spec: "+err.Error())}
+		}
+		return v.validateDynamoGraphDeploymentRequestSpecV1beta2(typedSpec, field.NewPath("spec"))
 	}
 
 	allErrs := field.ErrorList{}
@@ -294,7 +289,20 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	// spec runs on every CREATE and UPDATE. Only the generated AISimulate schema check is
 	// ratcheted when the complete spec stays unchanged.
 	if newSpec.V1Beta2 != nil {
-		return v.validateDynamoGraphDeploymentRequestEnvelopeV1beta2(newSpec.V1Beta2, oldSpec.V1Beta2, fldPath.Child("v1beta2"))
+		typedSpec, err := decodeDynamoGraphDeploymentRequestSpecV1beta2(newSpec.V1Beta2)
+		if err != nil {
+			return field.ErrorList{field.Invalid(fldPath.Child("v1beta2"), "<redacted>", "must be a valid v1beta2 spec: "+err.Error())}
+		}
+		if oldSpec.V1Beta2 == nil {
+			return v.validateDynamoGraphDeploymentRequestSpecV1beta2(typedSpec, field.NewPath("spec"))
+		}
+
+		// Decode both represented specs before applying the typed update rules.
+		oldTypedSpec, err := decodeDynamoGraphDeploymentRequestSpecV1beta2(oldSpec.V1Beta2)
+		if err != nil {
+			return field.ErrorList{field.InternalError(fldPath.Child("v1beta2"), fmt.Errorf("decode previous v1beta2 spec: %w", err))}
+		}
+		return v.validateDynamoGraphDeploymentRequestSpecUpdateV1beta2(typedSpec, oldTypedSpec, field.NewPath("spec"))
 	}
 
 	allErrs := field.ErrorList{}

@@ -590,6 +590,15 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name:       "v1beta2 structural and generated input errors are aggregated",
+			request:    beta2SchemaDGDRForAdmission(`{"dgdr_run":{"namespace":"other"},"optimizer":{"max_trials":-1}}`, nil),
+			discovered: discoveredH100,
+			wantWebhook: []string{
+				"spec.aisimulate.inputOverrides.dgdr_run.namespace: Forbidden: is managed by the operator and cannot be overridden",
+				`spec: Invalid value: "<redacted>": generated AISimulate input at /optimizer/max_trials violates JSON Schema keyword exclusiveMinimum`,
+			},
+		},
+		{
 			name:       "v1beta2 valid merged input may override typed model and load",
 			request:    beta2SchemaDGDRForAdmission(`{"engine":{"model":"org/override-model"},"traffic":{"load":{"concurrency":3}}}`, nil),
 			discovered: discoveredH100,
@@ -611,6 +620,18 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				if result.GetGeneration() != 1 {
 					t.Fatalf("generation = %d, want 1 for unchanged spec", result.GetGeneration())
 				}
+			},
+		},
+		{
+			name:               "v1beta2 unchanged spec ratchets only upstream schema errors",
+			seedWithoutWebhook: true,
+			oldRequest:         beta2SchemaDGDRForAdmission(`{"dgdr_run":{"namespace":"other"},"optimizer":{"max_trials":-1}}`, nil),
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"namespace":"other"},"optimizer":{"max_trials":-1}}`, func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+			discovered: discoveredH100,
+			wantWebhook: []string{
+				"spec.aisimulate.inputOverrides.dgdr_run.namespace: Forbidden: is managed by the operator and cannot be overridden",
 			},
 		},
 		{
