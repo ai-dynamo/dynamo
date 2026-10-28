@@ -42,6 +42,70 @@ logger = logging.getLogger(__name__)
 _MAX_RUNTIME_IDENTITIES = 4096
 
 
+def _expert_count(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeLoRAConfigurationError(
+            "base model expert count must be a nonnegative integer"
+        )
+    return value
+
+
+def _model_expert_counts(model_config: Any) -> tuple[int, ...] | None:
+    architecture: Any = getattr(model_config, "model_arch_config", None)
+    text_config = getattr(model_config, "hf_text_config", None)
+    get_layer = getattr(text_config, "get_nemotron_h_config_for_layer", None)
+    if get_layer is not None and not callable(get_layer):
+        raise RuntimeLoRAConfigurationError(
+            "base model expert count getter must be callable"
+        )
+    has_blocks = getattr(text_config, "block_configs", None) is not None
+    has_overrides = getattr(architecture, "per_layer_overrides", None) is not None
+    needs_layers = has_blocks or getattr(text_config, "is_heterogeneous", False)
+    if get_layer is not None or callable(getattr(architecture, "__getitem__", None)):
+        if needs_layers and get_layer is None and not has_overrides:
+            return None
+        layer_count = getattr(architecture, "total_num_hidden_layers", None)
+        if layer_count is None:
+            return None
+        layer_count = _expert_count(layer_count)
+        return tuple(
+            _expert_count(
+                getattr(get_layer(layer), "n_routed_experts", 0)
+                if get_layer is not None
+                else architecture[layer].num_experts
+            )
+            for layer in range(layer_count)
+        )
+    if needs_layers or has_overrides:
+        return None
+    get_num_experts = getattr(model_config, "get_num_experts", None)
+    if get_num_experts is None:
+        return None
+    if not callable(get_num_experts):
+        raise RuntimeLoRAConfigurationError(
+            "base model expert count getter must be callable"
+        )
+    return (_expert_count(get_num_experts()),)
+
+
+def _base_model_num_experts(handler: Any) -> int | tuple[int, ...] | None:
+    counts = _model_expert_counts(getattr(handler, "model_config", None))
+    if not counts:
+        return None
+    vllm_config = getattr(handler.engine_client, "vllm_config", None)
+    redundant = 0
+    if vllm_config is not None:
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        eplb_config = getattr(parallel_config, "eplb_config", None)
+        if eplb_config is None:
+            return None
+        redundant = _expert_count(getattr(eplb_config, "num_redundant_experts", None))
+    physical = tuple(count + redundant if count else 0 for count in counts)
+    if all(count == physical[0] for count in physical):
+        return physical[0] or None
+    return physical
+
+
 def _lora_request(record: RuntimeLoRAInfo) -> LoRARequest:
     return LoRARequest(
         lora_name=record.adapter_key,
@@ -57,6 +121,9 @@ class RuntimeLoRACoordinator:
         self._handler = handler
         self._runtime_enabled = env_bool("DYN_LORA_ENABLED") and env_bool(
             "DYN_LORA_RUNTIME_LOAD_ENABLED"
+        )
+        self._num_experts = (
+            _base_model_num_experts(handler) if self._runtime_enabled else None
         )
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
@@ -582,6 +649,7 @@ class RuntimeLoRACoordinator:
                             getattr(self._handler.engine_args, "model", None),
                             *getattr(self._handler, "_served_model_aliases", ()),
                         ),
+                        num_experts=self._num_experts,
                     )
                 except HttpError:
                     raise

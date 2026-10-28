@@ -108,7 +108,7 @@ async def test_unexpected_validation_failures_are_redacted(
         monkeypatch, tmp_path, ResolvedLoRA(snapshot, "digest:immutable")
     )
 
-    def validate(*_args):
+    def validate(*_args, **_kwargs):
         raise failure("provider-secret/cache/path")
 
     monkeypatch.setattr(runtime_mod, "validate_snapshot", validate)
