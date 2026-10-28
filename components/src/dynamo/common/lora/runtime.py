@@ -290,6 +290,7 @@ class RuntimeLoRAResolverChain:
                 isinstance(result.size_bytes, bool)
                 or not isinstance(result.size_bytes, int)
                 or result.size_bytes < 0
+                or result.size_bytes > context.max_download_bytes
             ):
                 raise RuntimeLoRAPluginError(
                     "runtime LoRA resolver returned an invalid size_bytes"

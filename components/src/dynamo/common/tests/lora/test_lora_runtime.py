@@ -324,3 +324,34 @@ async def test_invalid_resolver_result_is_rejected(result, tmp_path):
             source_uri="wandb-artifact:///entity/project/adapter:v1",
             context=context,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size_bytes", [None, 1023, 1024, 1025])
+async def test_reported_snapshot_size_respects_download_limit(tmp_path, size_bytes):
+    result = ResolvedLoRA(tmp_path / "adapter", "immutable", size_bytes=size_bytes)
+    chain = RuntimeLoRAResolverChain([Resolver(result)], {"wandb-artifact"})
+    context = ResolveContext(
+        adapter_key="dyn-lora-0123456789abcdef0123456789abcdef",
+        base_model_name="base",
+        cache_root=tmp_path,
+        deadline_monotonic=asyncio.get_running_loop().time() + 1,
+        max_download_bytes=1024,
+        request_id="request-id",
+    )
+
+    if size_bytes == 1025:
+        with pytest.raises(RuntimeLoRAPluginError) as error:
+            await chain.resolve(
+                source_uri="wandb-artifact:///adapter:v1", context=context
+            )
+        assert (
+            str(error.value) == "runtime LoRA resolver returned an invalid size_bytes"
+        )
+    else:
+        assert (
+            await chain.resolve(
+                source_uri="wandb-artifact:///adapter:v1", context=context
+            )
+            is result
+        )
