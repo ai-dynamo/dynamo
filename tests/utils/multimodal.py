@@ -7,12 +7,11 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, Type
+from typing import Any, Optional, Protocol, Type
 from unittest.mock import patch
 
 import pytest
 
-from dynamo.common.multimodal.nvdec_decoder import DISABLE_ENV, nvdec_available
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.conftest import (
     MULTIMODAL_IMG_URL,
@@ -40,14 +39,24 @@ AUDIO_TEST_URL = (
 )
 
 
-def nvdec_unavailable() -> bool:
+class _NvdecAvailabilityProbe(Protocol):
+    def __call__(self) -> bool:
+        ...
+
+    def cache_clear(self) -> None:
+        ...
+
+def nvdec_unavailable(probe: _NvdecAvailabilityProbe | None = None) -> bool:
     """Probe NVDEC with the setting passed to NVDEC serve-test workers."""
-    nvdec_available.cache_clear()
+    if probe is None:
+        from dynamo.common.multimodal.nvdec_decoder import nvdec_available
+        probe = nvdec_available
+    probe.cache_clear()
     try:
-        with patch.dict(os.environ, {DISABLE_ENV: "0"}):
-            return not nvdec_available()
+        with patch.dict(os.environ, {"DYN_DISABLE_NVDEC": "0"}):
+            return not probe()
     finally:
-        nvdec_available.cache_clear()
+        probe.cache_clear()
 
 
 # ---------------------------------------------------------------------------

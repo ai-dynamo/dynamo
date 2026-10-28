@@ -38,10 +38,9 @@ def test_nvdec_probe_restores_setting_and_cache(monkeypatch, disable_value, avai
     def nvdec_available():
         return os.environ.get("DYN_DISABLE_NVDEC") == "0" and available
 
-    monkeypatch.setattr(multimodal, "nvdec_available", nvdec_available)
     nvdec_available()  # An earlier collection probe may have cached the default.
 
-    assert multimodal.nvdec_unavailable() is not available
+    assert multimodal.nvdec_unavailable(nvdec_available) is not available
     assert os.environ.get("DYN_DISABLE_NVDEC") == disable_value
     assert nvdec_available.cache_info().currsize == 0
     assert nvdec_available() is (disable_value == "0" and available)
@@ -55,9 +54,8 @@ def test_nvdec_probe_restores_setting_on_failure(monkeypatch):
         assert os.environ["DYN_DISABLE_NVDEC"] == "0"
         raise RuntimeError("probe failed")
 
-    monkeypatch.setattr(multimodal, "nvdec_available", nvdec_available)
     with pytest.raises(RuntimeError, match="probe failed"):
-        multimodal.nvdec_unavailable()
+        multimodal.nvdec_unavailable(nvdec_available)
     assert "DYN_DISABLE_NVDEC" not in os.environ
     assert nvdec_available.cache_info().currsize == 0
 
