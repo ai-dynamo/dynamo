@@ -82,7 +82,7 @@ func TestLocalModelRegistrySnapshot_DanglingGbuildCapnpSymlinkFailsClosed(t *tes
 	registryDir := t.TempDir()
 	buildDir := filepath.Join(registryDir, "build-id")
 	require.NoError(t, os.MkdirAll(buildDir, 0o700))
-	require.NoError(t, os.Symlink("missing-manifest.v2.capnp.bin", filepath.Join(buildDir, gbuildManifestV2CapnpFile)))
+	require.NoError(t, os.Symlink("missing-deployment.v1.capnp.bin", filepath.Join(buildDir, gbuildDeploymentV1CapnpFile)))
 
 	t.Log("Normalize the local registry build")
 	registry, err := NewModelRegistry(registryDir, nil)
@@ -90,7 +90,7 @@ func TestLocalModelRegistrySnapshot_DanglingGbuildCapnpSymlinkFailsClosed(t *tes
 	_, err = normalizeRegistryFixtureBuild(t.Context(), registry, "build-id")
 
 	t.Log("Fail closed while preserving the missing manifest identity")
-	require.ErrorContains(t, err, gbuildManifestV2CapnpFile)
+	require.ErrorContains(t, err, gbuildDeploymentV1CapnpFile)
 }
 
 func TestLocalModelRegistrySnapshot_ReportsMetadataDirectories(t *testing.T) {
@@ -101,7 +101,7 @@ func TestLocalModelRegistrySnapshot_ReportsMetadataDirectories(t *testing.T) {
 	buildDir := filepath.Join(registryDir, "build-id")
 	require.NoError(t, os.MkdirAll(buildDir, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(buildDir, gbuildManifestJSONFile), []byte(`{}`), 0o600))
-	require.NoError(t, os.Mkdir(filepath.Join(buildDir, gbuildManifestV2CapnpFile), 0o755))
+	require.NoError(t, os.Mkdir(filepath.Join(buildDir, gbuildDeploymentV1CapnpFile), 0o755))
 
 	t.Log("Normalize the invalid local registry build")
 	registry, err := NewModelRegistry(registryDir, nil)
@@ -110,7 +110,7 @@ func TestLocalModelRegistrySnapshot_ReportsMetadataDirectories(t *testing.T) {
 
 	t.Log("Report the invalid metadata path")
 	require.Error(t, err)
-	require.ErrorContains(t, err, gbuildManifestV2CapnpFile)
+	require.ErrorContains(t, err, gbuildDeploymentV1CapnpFile)
 }
 
 func TestAcquireLocalBuildSnapshotCancellation(t *testing.T) {
@@ -127,7 +127,7 @@ func TestAcquireLocalBuildSnapshotCancellation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Create a valid local build with an already canceled or expired acquisition context")
 			buildDir := t.TempDir()
-			writeManifestV2Payload(t, buildDir, manifestV2Payload(t))
+			writeDeploymentV1Payload(t, buildDir, deploymentV1Payload(t))
 			ctx, cancel := context.WithTimeout(t.Context(), tt.timeout)
 			defer cancel()
 			if tt.wantErr == context.Canceled {
@@ -153,7 +153,7 @@ func TestAcquireLocalBuildSnapshotRejectsFIFOManifest(t *testing.T) {
 		defer cancel()
 		snapshot, err := (&defaultModelRegistry{}).AcquireBuild(ctx, buildDir)
 		require.ErrorContains(t, err, "not a regular file")
-		require.ErrorContains(t, err, gbuildManifestV2CapnpFile)
+		require.ErrorContains(t, err, gbuildDeploymentV1CapnpFile)
 		require.Nil(t, snapshot)
 		require.NoError(t, ctx.Err())
 		return
@@ -161,7 +161,7 @@ func TestAcquireLocalBuildSnapshotRejectsFIFOManifest(t *testing.T) {
 
 	t.Log("Create a valid build directory containing a FIFO manifest with no writer")
 	buildDir := t.TempDir()
-	require.NoError(t, syscall.Mkfifo(filepath.Join(buildDir, gbuildManifestV2CapnpFile), 0o600))
+	require.NoError(t, syscall.Mkfifo(filepath.Join(buildDir, gbuildDeploymentV1CapnpFile), 0o600))
 
 	t.Log("Bound the subprocess so a regressed FIFO open cannot hang or leak a goroutine")
 	executable, err := os.Executable()
@@ -284,16 +284,16 @@ func TestGCSModelRegistrySnapshot_StreamFailures(t *testing.T) {
 			wantErrContains: `unexpected file "other.json"`,
 		},
 		{
-			name: "out of order chunk", chunkPath: gbuildManifestV2CapnpFile, chunkData: "{}",
+			name: "out of order chunk", chunkPath: gbuildDeploymentV1CapnpFile, chunkData: "{}",
 			chunkOffset: 1, chunkSize: 2, lastChunk: true,
 			wantErrContains: "out-of-order chunk",
 		},
 		{
-			name: "missing final chunk", chunkPath: gbuildManifestV2CapnpFile, chunkData: `{"topologies":[]}`,
+			name: "missing final chunk", chunkPath: gbuildDeploymentV1CapnpFile, chunkData: `{"topologies":[]}`,
 			wantErrContains: "ended before final chunk",
 		},
 		{
-			name: "final size mismatch", chunkPath: gbuildManifestV2CapnpFile, chunkData: "{}",
+			name: "final size mismatch", chunkPath: gbuildDeploymentV1CapnpFile, chunkData: "{}",
 			chunkSize: 3, lastChunk: true,
 			wantErrContains: "incomplete",
 		},

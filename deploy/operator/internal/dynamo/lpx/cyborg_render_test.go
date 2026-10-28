@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
+	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -23,7 +23,7 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 
 	t.Log("Project a hybrid workload at the combined name limit and maximum scheduling replica count")
 	fixture := newV3CompilerFixture()
-	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
+	fixture.hybrid = true
 	projection := projectRenderFixture(t, PipelineHybrid, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
 	projection.stage = testRenderComponentName
 	projection.configuredBuild.ioFPGACount = 1
@@ -82,12 +82,11 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Project a split-I/O selected workload")
-	fixture := newV3CompilerFixture()
-	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	fixture.partitions[0].topology = registryTestTopology
-	fixture.partitions[0].numChips = 8
-	fixture.partitions[0].devicesPerNode = 8
-	fixture.architecture = "polaris"
+	fixture := testCompilerFixture{
+		architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8, hybrid: true,
+		partitions: testUnitPartitions(8, 1),
+		units:      testSingleUnits(testNodesReservation(1, 1)),
+	}
 	normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 	build := normalized
 	build.ioFPGACount = 2
@@ -126,18 +125,20 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	t.Log("Use independently provisioned Cyborg model storage at the shared runtime path")
 	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ClaimName = "cyborg-models"
 	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ReadOnly = true
-	decode.Spec.PodSpec.Containers[0].VolumeMounts[1].SubPath = "cyborg"
-	decode.Spec.PodSpec.Containers[0].VolumeMounts[1].ReadOnly = true
+	decode.Spec.PodSpec.Containers[0].VolumeMounts[0].SubPath = "cyborg"
+	decode.Spec.PodSpec.Containers[0].VolumeMounts[0].ReadOnly = true
 	input := RenderInput{
 		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 	}
-	rendered, _, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, input)
+	rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, input)
 	require.NoError(t, err)
 	cyborg := namedClique(t, rendered, "cond")
 
-	t.Log("Keep runtime environment opaque while supplying its manifest before authored references")
+	t.Log("Keep runtime environment opaque while supplying placement and its manifest before authored references")
 	modelEnv := []corev1.EnvVar{
-		{Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin"},
+		{Name: allocationEnvVar, Value: testAgentTemplateName},
+		{Name: localPartitionIDsEnv},
+		{Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/deployment.v1.capnp.bin"},
 		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
 	}
 	require.Equal(t, append(modelEnv, authoredEnv...), cyborg.Spec.PodSpec.Containers[0].Env)
@@ -158,7 +159,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 
 	t.Log("Leave the image ENTRYPOINT selected when command is omitted")
 	input.Stages = map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}
-	_, _, err = renderSelectedForTest(imageEntrypointPCS, []*ModelProjection{projection}, input)
+	_, err = renderSelectedForTest(imageEntrypointPCS, []*ModelProjection{projection}, input)
 	require.NoError(t, err)
 	require.Nil(t, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Command)
 	require.Equal(t, []string{"serve"}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args)
@@ -184,8 +185,8 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 			cyborg.Spec.Replicas = test.replicas
 			cyborg.Spec.MinAvailable = new(test.replicas)
 			cyborg.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
-			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = test.mountPath
-			_, _, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
+			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[0].MountPath = test.mountPath
+			_, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
 				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 			})
 			require.ErrorContains(t, err, test.wantError)

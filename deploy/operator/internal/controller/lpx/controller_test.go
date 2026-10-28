@@ -22,7 +22,7 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
-	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
+	commoncapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/common/v1"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
@@ -462,12 +462,10 @@ func TestLPXExternalCyborgCapacityValidation(t *testing.T) {
 	t.Log("Use two explicitly managed backbones with externally managed workers in groups of four")
 	root := t.TempDir()
 	const buildID = "split-io"
-	writeTestGraphBuild(t, root, buildID, testV2GraphManifestCapnp(t, testV2GraphManifestFixture{
-		topology:       "test-topology",
-		partitionCount: 1, numChips: 8, devicesPerNode: 8,
-		compilationMode:   manifestcapnpv2.CompilationMode_lpx,
-		nonLPUDeviceTypes: []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
-		ioFPGACount:       2, ioFanoutFactor: 2,
+	writeTestDeploymentBuild(t, root, buildID, testLPXBuildCapnp(t, testLPXBuildFixture{
+		partitionIDs: []uint32{0}, numChips: 8, devicesPerNode: 8,
+		lpx: true, nonLPUDeviceTypes: []commoncapnpv1.DeviceType{commoncapnpv1.DeviceType_cuda},
+		ioFPGACount: 2, ioFanoutFactor: 2,
 	}))
 	registry, err := lpx.NewModelRegistry(root, nil)
 	require.NoError(t, err)
@@ -582,6 +580,7 @@ func TestLPXWorkloadErrorDoesNotAcknowledgeGeneration(t *testing.T) {
 			t.Log("Retain a pending request while processing a new child generation")
 			ctx := t.Context()
 			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
 			child.Generation, child.Status.ObservedGeneration = 2, 1
 			if tc.deadline {
 				dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](60)}
@@ -596,12 +595,12 @@ func TestLPXWorkloadErrorDoesNotAcknowledgeGeneration(t *testing.T) {
 			require.NoError(t, r.Update(ctx, pending))
 
 			t.Log("Fail runtime synchronization after the scheduling deadline is derived")
-			readErr, statusErr := errors.New("ConfigMap read unavailable"), errors.New("status write unavailable")
+			readErr, statusErr := errors.New("Service read unavailable"), errors.New("status write unavailable")
 			failReads, failStatus := !tc.workloadSucceeds, tc.failStatus
 			reads := 0
 			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
 				Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
-					if _, ok := object.(*corev1.ConfigMap); ok && failReads {
+					if _, ok := object.(*corev1.Service); ok && failReads {
 						reads++
 						return readErr
 					}
@@ -947,37 +946,6 @@ func TestPipelineRequestDeadlineHoleWaitsForSchedulingChange(t *testing.T) {
 	current, err := r.getPipelineRequests(ctx, pcs)
 	require.NoError(t, err)
 	require.Empty(t, current)
-}
-
-func TestLPXDeletesOnlyStaleOwnedRuntimeConfigMaps(t *testing.T) {
-	t.Log("Create current, stale, and foreign runtime ConfigMaps")
-	dgd := loadTestDGD(t, lpx.PipelineSingle, "test-build")
-	child := newLPXTestDeployment(t, dgd)
-	owner := []metav1.OwnerReference{*metav1.NewControllerRef(child, v1alpha1.LPXGraphDeploymentGVK)}
-	current := &corev1.ConfigMap{
-		Name: "runtime-current", Namespace: child.Namespace, UID: "current",
-		Labels: map[string]string{deploymentUIDLabel: string(child.UID)}, OwnerReferences: owner}
-	stale := &corev1.ConfigMap{
-		Name: "runtime-stale", Namespace: child.Namespace, UID: "stale",
-		Labels: map[string]string{deploymentUIDLabel: string(child.UID)}, OwnerReferences: owner}
-	foreign := &corev1.ConfigMap{
-		Name: "runtime-foreign", Namespace: child.Namespace, UID: "foreign",
-		Labels:          map[string]string{deploymentUIDLabel: string(child.UID)},
-		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}}
-	r := newLPXTestReconciler(t, nil, child, dgd, current, stale, foreign)
-
-	t.Log("Keep the previous runtime configuration while the replacement is not Ready")
-	require.NoError(t, r.deleteUnusedConfigMaps(t.Context(), child, []client.Object{current}))
-	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(stale), &corev1.ConfigMap{}))
-
-	t.Log("Delete only the stale ConfigMap owned by the current LPX child")
-	setReadyCondition(child, v1beta1.DGDStateSuccessful, "Replacement is Ready")
-	require.NoError(t, r.deleteUnusedConfigMaps(t.Context(), child, []client.Object{current}))
-
-	t.Log("Preserve the current and foreign ConfigMaps")
-	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(current), &corev1.ConfigMap{}))
-	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(stale), &corev1.ConfigMap{})))
-	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(foreign), &corev1.ConfigMap{}))
 }
 
 func TestLPXDownloadsBeforePublication(t *testing.T) {
@@ -1850,14 +1818,13 @@ func TestLPXMaterializationUsesDGDAndChildIdentity(t *testing.T) {
 		require.Equal(t, []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(child)}}, mapChildToLPXGraphDeployment(t.Context(), object))
 	}
 
-	t.Log("Publish the runtime configuration and endpoint under the exact LGD owner")
+	t.Log("Publish the endpoint under the exact LGD owner")
 	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
 	require.NoError(t, err)
 
 	root := dynamo.PCSNameForLPX(child)
 	for _, object := range []client.Object{
 		&grovev1alpha1.PodCliqueSet{Name: root, Namespace: child.Namespace},
-		&corev1.ConfigMap{Name: fmt.Sprintf("%s-lpu-%.16s", root, pcs.Spec.Template.Cliques[0].Annotations[v1alpha1.AnnotationExtraResourcesHash]), Namespace: child.Namespace},
 		&corev1.Service{Name: root + "-serve", Namespace: child.Namespace},
 	} {
 		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(object), object))
@@ -3103,7 +3070,7 @@ func TestLPXDisabledPreservesPublishedWorkloadUntilReenabled(t *testing.T) {
 				require.NoError(t, err)
 			}
 			before := []client.ObjectList{
-				&grovev1alpha1.PodCliqueSetList{}, &corev1.ConfigMapList{},
+				&grovev1alpha1.PodCliqueSetList{},
 				&corev1.ServiceList{}, &lpxv1alpha1.LPUPipelineRequestList{},
 			}
 			for _, list := range before {
@@ -3208,12 +3175,8 @@ func findLPXTestPodCliqueSet(t *testing.T, objects []client.Object) *grovev1alph
 
 func newLPXTestDGD(t *testing.T, pipeline lpx.Pipeline) (*v1alpha1.LPXGraphDeployment, *v1beta1.DynamoGraphDeployment, lpx.ModelRegistry) {
 	t.Helper()
-	compilationMode := manifestcapnpv2.CompilationMode_lpuOnly
-	if pipeline == lpx.PipelineHybrid {
-		compilationMode = manifestcapnpv2.CompilationMode_lpx
-	}
 	const buildID = "build-v2"
-	registry := newLPXTestRegistryWithPartitionsAndMode(t, buildID, []int{7, 8}, compilationMode)
+	registry := newLPXTestRegistryWithPartitionsAndMode(t, buildID, []uint32{7, 8}, pipeline == lpx.PipelineHybrid)
 	dgd := loadTestDGD(t, pipeline, buildID)
 	return newLPXTestDeployment(t, dgd), dgd, registry
 }
@@ -3254,10 +3217,10 @@ func newLPXSpecDecodeTestDGD(t *testing.T) (*v1alpha1.LPXGraphDeployment, *v1bet
 	t.Helper()
 	dgd := loadTestSpecDecodeDGD(t)
 	root := t.TempDir()
-	writeLPXTestBuild(t, root, "draft-build", []int{7, 8}, manifestcapnpv2.CompilationMode_lpuOnly)
-	writeLPXTestBuild(t, root, "draft-weights", []int{7, 8}, manifestcapnpv2.CompilationMode_lpuOnly)
-	writeLPXTestBuild(t, root, "draft-wide", []int{7, 8, 9}, manifestcapnpv2.CompilationMode_lpuOnly)
-	writeLPXTestBuild(t, root, "target-build", []int{9, 10}, manifestcapnpv2.CompilationMode_lpuOnly)
+	writeLPXTestBuild(t, root, "draft-build", []uint32{7, 8}, false)
+	writeLPXTestBuild(t, root, "draft-weights", []uint32{7, 8}, false)
+	writeLPXTestBuild(t, root, "draft-wide", []uint32{7, 8, 9}, false)
+	writeLPXTestBuild(t, root, "target-build", []uint32{9, 10}, false)
 	registryURL := (&url.URL{Scheme: lpx.BuildSchemeFile, Path: root}).String()
 	registry, err := lpx.NewModelRegistry(registryURL, nil)
 	require.NoError(t, err)

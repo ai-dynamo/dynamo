@@ -14,10 +14,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func writeManifestV2Payload(t *testing.T, buildDir string, payload []byte) {
+func writeDeploymentV1Payload(t *testing.T, buildDir string, payload []byte) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(buildDir, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(buildDir, gbuildManifestV2CapnpFile), payload, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(buildDir, gbuildDeploymentV1CapnpFile), payload, 0o600))
 }
 
 func TestAcquireBuildTracksOnlyManifestContent(t *testing.T) {
@@ -26,10 +26,10 @@ func TestAcquireBuildTracksOnlyManifestContent(t *testing.T) {
 	t.Log("Write the compiler manifest beside invalid publication JSON and unrelated payloads")
 	registryDir := t.TempDir()
 	buildDir := filepath.Join(registryDir, "build-id")
-	manifest := newManifestV2ContractFixture(t)
+	manifest := newDeploymentV1ContractFixture(t)
 	payload, err := manifest.Message().Marshal()
 	require.NoError(t, err)
-	writeManifestV2Payload(t, buildDir, payload)
+	writeDeploymentV1Payload(t, buildDir, payload)
 	require.NoError(t, os.WriteFile(filepath.Join(buildDir, gbuildManifestJSONFile), []byte(`not valid json`), 0o600))
 	for _, path := range []string{"extra-metadata.json", "part-0/chip-0.gas", "weights.bin"} {
 		fullPath := filepath.Join(buildDir, filepath.FromSlash(path))
@@ -64,14 +64,14 @@ func TestAcquireBuildTracksOnlyManifestContent(t *testing.T) {
 	require.Equal(t, first, second)
 
 	t.Log("Change valid manifest bytes and observe a new digest and decoded build")
-	deployment, err := manifest.Deployment()
+	config, err := manifest.Config()
 	require.NoError(t, err)
-	runtimeIO, err := deployment.RuntimeIo()
+	runtimeIO, err := config.RuntimeIo()
 	require.NoError(t, err)
 	runtimeIO.SetFanoutFactor(1)
 	updated, err := manifest.Message().Marshal()
 	require.NoError(t, err)
-	writeManifestV2Payload(t, buildDir, updated)
+	writeDeploymentV1Payload(t, buildDir, updated)
 	third, err := registry.AcquireBuild(t.Context(), ref)
 	require.NoError(t, err)
 	require.NotEqual(t, second.contentID, third.contentID)
@@ -82,10 +82,10 @@ func TestAcquireBuildTracksOnlyManifestContent(t *testing.T) {
 func TestAcquireBuildRejectsLegacyCompilerMetadata(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Write a build containing only unsupported revision-1 and JSON compiler metadata")
+	t.Log("Write a build containing only unsupported manifest.v2, revision-1 and JSON compiler metadata")
 	buildDir := t.TempDir()
 	for _, path := range []string{
-		"manifest.capnp.bin", "allocation_metadata.json", "compile_summary.json",
+		"manifest.v2.capnp.bin", "manifest.capnp.bin", "allocation_metadata.json", "compile_summary.json",
 		"gas_program_layout.json", gbuildManifestJSONFile,
 	} {
 		require.NoError(t, os.WriteFile(filepath.Join(buildDir, path), []byte(`{}`), 0o600))
@@ -96,7 +96,7 @@ func TestAcquireBuildRejectsLegacyCompilerMetadata(t *testing.T) {
 	t.Log("Require a supported binary compiler contract without JSON fallback")
 	_, err = registry.AcquireBuild(t.Context(), buildDir)
 	require.ErrorIs(t, err, os.ErrNotExist)
-	require.ErrorContains(t, err, "missing build contract: require manifest.v2.capnp.bin or deployment.v1.capnp.bin")
+	require.ErrorContains(t, err, "missing build contract: require deployment.v1.capnp.bin")
 }
 
 func TestAcquireBuildRejectsMalformedManifest(t *testing.T) {
@@ -104,12 +104,12 @@ func TestAcquireBuildRejectsMalformedManifest(t *testing.T) {
 
 	t.Log("Write malformed compiler bytes at the required manifest path")
 	buildDir := t.TempDir()
-	writeManifestV2Payload(t, buildDir, []byte("invalid"))
+	writeDeploymentV1Payload(t, buildDir, []byte("invalid"))
 	registry := &defaultModelRegistry{}
 
 	t.Log("Reject malformed input during acquisition without publishing a snapshot")
 	snapshot, err := registry.AcquireBuild(t.Context(), buildDir)
 	require.ErrorIs(t, err, errInvalidBuildManifest)
-	require.ErrorContains(t, err, "parsing manifest.v2.capnp.bin")
+	require.ErrorContains(t, err, "parsing deployment.v1.capnp.bin")
 	require.Nil(t, snapshot)
 }

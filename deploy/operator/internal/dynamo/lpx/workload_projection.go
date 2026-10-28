@@ -26,19 +26,7 @@ const (
 // and Pipeline is selected by the validated resolver. Source inputs are not mutated;
 // discard error results.
 func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
-	var projections []*ModelProjection
-	var err error
-	switch {
-	case intent.Build.lpuUnits != nil:
-		// Compiler-owned units replace the family-specific placement derivation.
-		projections, err = appendUnitModelProjections(dst, intent)
-	case intent.Build.family == BuildFamilyXT:
-		projections, err = appendV2ModelProjections(dst, intent)
-	case intent.Build.family == BuildFamilyHX:
-		projections, err = appendV3ModelProjections(dst, intent)
-	default:
-		return nil, fmt.Errorf("unsupported LPX target family %q", intent.Build.family)
-	}
+	projections, err := appendUnitModelProjections(dst, intent)
 	if err != nil {
 		return nil, err
 	}
@@ -151,12 +139,6 @@ type digestTranscript struct {
 func (t *digestTranscript) field(tag string, value []byte) {
 	writeLengthDelimited(t.hash, []byte(tag))
 	writeLengthDelimited(t.hash, value)
-}
-
-func (t *digestTranscript) uint32Field(tag string, value uint32) {
-	var encoded [4]byte
-	binary.BigEndian.PutUint32(encoded[:], value)
-	t.field(tag, encoded[:])
 }
 
 func (t *digestTranscript) intField(tag string, value int64) {

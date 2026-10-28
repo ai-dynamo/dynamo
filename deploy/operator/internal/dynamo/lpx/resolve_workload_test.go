@@ -13,7 +13,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
+	commoncapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/common/v1"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -30,9 +30,13 @@ func TestResolveWorkloadClassifiesSnapshotFailures(t *testing.T) {
 
 	t.Log("Distinguish missing manifests from malformed bytes and invalid compiler contracts")
 	reader := fake.NewClientBuilder().Build()
-	manifest := newManifestV2ContractFixture(t)
+	manifest := newDeploymentV1ContractFixture(t)
 	manifest.SetContractRevision(0)
 	payload, err := manifest.Message().Marshal()
+	require.NoError(t, err)
+	withoutUnits := newDeploymentV1ContractFixture(t)
+	setTestUnits(t, withoutUnits, []testLPUUnit{})
+	withoutUnitsPayload, err := withoutUnits.Message().Marshal()
 	require.NoError(t, err)
 	tests := []struct {
 		name        string
@@ -40,9 +44,10 @@ func TestResolveWorkloadClassifiesSnapshotFailures(t *testing.T) {
 		wantInvalid bool
 		wantErr     string
 	}{
-		{name: "missing", wantErr: gbuildManifestV2CapnpFile},
-		{name: "malformed", manifest: []byte("invalid"), wantInvalid: true, wantErr: "parsing manifest.v2.capnp.bin"},
+		{name: "missing", wantErr: gbuildDeploymentV1CapnpFile},
+		{name: "malformed", manifest: []byte("invalid"), wantInvalid: true, wantErr: "parsing deployment.v1.capnp.bin"},
 		{name: "invalid contract", manifest: payload, wantInvalid: true, wantErr: "contractRevision"},
+		{name: "no units", manifest: withoutUnitsPayload, wantInvalid: true, wantErr: "records no config.lpuUnits"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -51,7 +56,7 @@ func TestResolveWorkloadClassifiesSnapshotFailures(t *testing.T) {
 			buildDir := filepath.Join(registryDir, "build")
 			require.NoError(t, os.MkdirAll(buildDir, 0o700))
 			if test.manifest != nil {
-				writeManifestV2Payload(t, buildDir, test.manifest)
+				writeDeploymentV1Payload(t, buildDir, test.manifest)
 			}
 			registry, err := NewModelRegistry(registryDir, nil)
 			require.NoError(t, err)
@@ -108,10 +113,9 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	dgd.Spec.Components[0].Replicas = nil
 
 	t.Log("Run LPX-ingested LP20 and LP30 builds with CPU preparation without a GPU")
-	for _, fixture := range []testV3CapnpFixture{newV2CompilerFixture(), newV3CompilerFixture()} {
-		fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-		fixture.selectedPropSyncChains = nil
-		fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 0, deviceType: manifestcapnp.DeviceType_cpu})
+	for _, fixture := range []testCompilerFixture{newV2CompilerFixture(), newV3CompilerFixture()} {
+		fixture.lpx = true
+		fixture.extraPartitions = []testNonLPUPartition{{id: 0, deviceType: commoncapnpv1.DeviceType_cpu}}
 		snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 		source := staticModelRegistry{"build": snapshot}
 		workload, err := ResolveWorkload(t.Context(), reader, dgd, singleGroupComponents(t, dgd), source)
@@ -296,7 +300,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 }
 
 func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
-	t.Log("Define revision-specific SpecDecode compiler snapshots")
+	t.Log("Define family-specific SpecDecode compiler snapshots")
 	reader := fake.NewClientBuilder().Build()
 	tests := []struct {
 		name     string
@@ -324,10 +328,14 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 					agentCounts[index], requestCounts[index] = 1, 1
 				}
 				if packed {
-					fixture.partitions[0].numChips = fixture.partitions[0].devicesPerNode / 2
-					fixture.partitions = []testV3CapnpPartition{fixture.partitions[0], fixture.partitions[0]}
-					fixture.partitions[1].id++
-					fixture.selectedPropSyncChains = [][]uint32{{fixture.partitions[0].id, fixture.partitions[1].id}}
+					// Two half-node stages share one host as one packed reservation.
+					first := fixture.partitions[0].id
+					fixture.partitions = testUnitPartitions(fixture.devicesPerNode/2, first, first+1)
+					reservation := testNodesReservation(1, first, first+1)
+					if test.family == BuildFamilyHX {
+						reservation = testHXReservation(1, 1, 1, first, first+1)
+					}
+					fixture.units = testSingleUnits(reservation)
 					agentCounts[index], requestCounts[index] = 1, 1
 				}
 				snapshots[index] = acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
@@ -501,10 +509,11 @@ func TestResolveWorkloadPreservesAuthoredLaunch(t *testing.T) {
 func TestResolveWorkloadPlacesRuntimeSidecarWithTheEngine(t *testing.T) {
 	t.Log("Acquire single-Pod HX, two-Pod HX, four-Pod XT and hybrid builds")
 	multiPodHX := newV3CompilerFixture()
-	multiPodHX.selectedPropSyncChains = [][]uint32{{1, 2}}
-	multiPodHX.partitions = append(multiPodHX.partitions, testV3CapnpPartition{
-		id: 2, deviceType: manifestcapnp.DeviceType_lpu, topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 16,
-	})
+	multiPodHX.partitions = testUnitPartitions(16, 1, 2)
+	multiPodHX.units = []testLPUUnit{{
+		reservations: []testLPUReservation{testHXReservation(1, 1, 1, 1), testHXReservation(1, 1, 1, 2)},
+		connectors:   []testLPUConnector{testHXConventionConnector(16)},
+	}}
 	snapshots := map[string]*Build{
 		"hx":           acquireTestSnapshot(t, writeV3CompilerFixture(t)),
 		"multi-pod-hx": acquireTestSnapshot(t, writeCompilerFixture(t, multiPodHX)),
@@ -608,12 +617,12 @@ func TestExpandedModelNames(t *testing.T) {
 	require.Equal(t, []string{"default"}, expandedModelNames(1, true, 2))
 }
 
-// acquireHybridTestSnapshot acquires a revision-2 build whose CUDA partition selects a Cyborg conductor.
+// acquireHybridTestSnapshot acquires an LP20 build whose CUDA partition selects a Cyborg conductor.
 func acquireHybridTestSnapshot(t *testing.T) *Build {
 	t.Helper()
 	fixture := newV2CompilerFixture()
-	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	fixture.selectedPropSyncChains = nil
-	fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 11, deviceType: manifestcapnp.DeviceType_cuda})
+	fixture.lpx = true
+	fixture.units = testSingleUnits(testNodesReservation(2, 7), testNodesReservation(2, 8))
+	fixture.extraPartitions = []testNonLPUPartition{{id: 11, deviceType: commoncapnpv1.DeviceType_cuda}}
 	return acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 }

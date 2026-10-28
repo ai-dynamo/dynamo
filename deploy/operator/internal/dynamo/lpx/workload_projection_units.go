@@ -15,16 +15,15 @@ import (
 
 const unitsProjectionVersion = "lpu-units-node-local/v1"
 
-// appendUnitModelProjections projects a build whose compiler recorded lpuUnits.
+// appendUnitModelProjections projects a build from its compiler-owned lpuUnits.
 // The units supply reservations, sizes and connectors, so chains, packing and
-// extents are not derived here. intent.Build has units.
+// extents are not derived here.
 func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
 	build := intent.Build
 	hybrid := intent.Pipeline == PipelineHybrid
 
-	// An LPU-only conductor launches exactly one unit for each model. The legacy
-	// projection accepts several LP20 partitions without a chain, but LPX then
-	// rejects the incomplete LPU-only chain, so units refuse them here.
+	// An LPU-only conductor launches exactly one unit for each model; LPX rejects
+	// an LPU-only request whose partitions do not form one chain.
 	if !hybrid && len(build.lpuUnits) != 1 {
 		return nil, fmt.Errorf("%w: LPU-only workloads require exactly one lpuUnits entry per model; this bundle has %d",
 			ErrUnsupportedRuntime, len(build.lpuUnits))
@@ -77,9 +76,6 @@ func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionIn
 		}
 	}
 
-	// The scheduler reads placement from partitions and connectors alone.
-	allocationMetadata := json.RawMessage(`{}`)
-
 	// Bind the compiler's units and the local selection into each model's identity.
 	encodedUnits, _ := json.Marshal(build.lpuUnits)
 	transcripts := newModelProjectionTranscripts(intent, unitsProjectionVersion)
@@ -90,18 +86,15 @@ func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionIn
 			encoded, _ := json.Marshal(localPartitionIDs)
 			transcript.field("local-partition-ids", encoded)
 		}
-		transcript.field("allocation-metadata", allocationMetadata)
 		bindHybridRuntimeIO(transcript, intent.Pipeline, build.ioFPGACount, build.ioFanoutFactor)
 
 		dst = append(dst, &ModelProjection{
 			digest:                 transcript.sum(),
 			compilerSnapshotDigest: build.contentID,
-			contractFormat:         build.contractFormat,
 			runtimeBuildRef:        intent.RuntimeBuildRef,
 			model:                  intent.Models[index],
 			pipeline:               intent.Pipeline,
 			configuredBuild:        *build,
-			allocationMetadata:     allocationMetadata,
 			partitions:             partitions,
 			connectors:             connectors,
 			agentReplicas:          agentReplicas,
@@ -109,4 +102,16 @@ func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionIn
 		})
 	}
 	return dst, nil
+}
+
+// xtShape names the registered XT shape of an LP20 request partition.
+func xtShape(partition buildPartition) (lpxv1alpha1.Xt8888PartitionShape, error) {
+	// These chip capacities name registered XT shapes; node width comes from the manifest.
+	chips := max(partition.numChips, partition.devicesPerNode)
+	switch chips {
+	case 8, 16, 24, 32, 40, 48, 56, 64, 96, 128:
+		return lpxv1alpha1.Xt8888PartitionShape(fmt.Sprintf("c%d", chips)), nil
+	default:
+		return "", fmt.Errorf("partition %d has unregistered XT shape c%d", uint32(partition.sourcePartitionID), chips)
+	}
 }

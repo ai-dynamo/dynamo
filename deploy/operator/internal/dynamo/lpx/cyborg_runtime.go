@@ -38,16 +38,11 @@ func applyCyborgManifestPath(container *corev1.Container, projection *ModelProje
 		return fmt.Errorf("resolve GBuild manifest path: %w", err)
 	}
 
-	manifestPath, err := projection.contractFormat.filename()
-	if err != nil {
-		return err
-	}
-
 	// Kubernetes expands environment references in order; publish the manifest before authored bindings.
 	env := make([]corev1.EnvVar, 0, len(container.Env)+1)
 	env = append(env, corev1.EnvVar{
 		Name:  gbuildManifestPathEnv,
-		Value: filepath.Join(buildRoot, manifestPath),
+		Value: filepath.Join(buildRoot, gbuildDeploymentV1CapnpFile),
 	})
 	for _, variable := range container.Env {
 		if variable.Name != gbuildManifestPathEnv {

@@ -13,7 +13,6 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -27,7 +26,7 @@ func TestPlanMaterializationBounds(t *testing.T) {
 	}
 	snapshot := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	hybrid := newV2CompilerFixture()
-	hybrid.compilationMode = manifestcapnp.CompilationMode_lpx
+	hybrid.hybrid = true
 	hybridProjection := projectRenderFixture(t, PipelineHybrid, acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)))
 	lpuOnlyProjection := projectRenderFixture(t, PipelineSingle, snapshot)
 
