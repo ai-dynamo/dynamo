@@ -1487,11 +1487,11 @@ fn drain_timeout_secs() -> f64 {
 
 /// Read the post-signal shutdown deadline from
 /// `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` (matching `dynamo_runtime::Worker`).
-/// On expiry the worker hard-exits with code 911 — same contract as the
+/// On expiry `Worker` hard-exits with code 911 — same contract as the
 /// upstream `worker.execute` flow we bypass. Defaults are imported from
 /// `dynamo_runtime::worker` so a default change there propagates here
 /// without manual sync.
-fn graceful_shutdown_timeout() -> Duration {
+pub fn graceful_shutdown_timeout() -> Duration {
     use dynamo_runtime::config::environment_names::worker as env_worker;
     use dynamo_runtime::worker::{
         DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG, DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE,
@@ -1589,7 +1589,7 @@ fn load_health_check_payload(raw: Option<&str>) -> Option<serde_json::Value> {
 
 /// Read the grace-period seconds from `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`,
 /// matching the Python helper. Negative values clamp to 0.
-fn grace_period_secs() -> f64 {
+pub fn grace_period_secs() -> f64 {
     let value = std::env::var(GRACE_PERIOD_ENV).ok();
     grace_period_secs_from(value.as_deref())
 }

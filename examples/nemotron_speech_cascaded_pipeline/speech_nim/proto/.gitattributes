@@ -13,4 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Nemotron Speech audio synthesis adapter and worker."""
+# Preserve the pinned upstream bytes, including whitespace, for checksum checks.
+riva/proto/*.proto -text diff linguist-vendored whitespace=-blank-at-eol,-blank-at-eof
