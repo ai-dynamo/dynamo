@@ -420,6 +420,35 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			require.Equal(t, int32(1), completedRun.Status.Progress.Candidates.Published)
 			require.Len(t, completedRun.Status.CandidateRefs, 1)
 
+			t.Log("Verify the Job consumed the immutable input recorded in Run status")
+			require.NotNil(t, completedRun.Status.JobRef, "completed Run has no Job reference")
+			require.NotNil(t, completedRun.Status.AISimulate, "completed Run has no AISimulate status")
+			require.NotNil(t, completedRun.Status.AISimulate.Input, "completed Run has no effective AISimulate input")
+			key := types.NamespacedName{Namespace: env.Namespace(), Name: completedRun.Status.JobRef.Name}
+			var executionConfig corev1.ConfigMap
+			require.NoError(t, env.Client().Get(ctx, key, &executionConfig))
+			require.True(t, metav1.IsControlledBy(&executionConfig, &completedRun), "execution ConfigMap is not controlled by its Run")
+			var job batchv1.Job
+			require.NoError(t, env.Client().Get(ctx, key, &job))
+			require.True(t, metav1.IsControlledBy(&job, &completedRun), "AISimulate Job is not controlled by its Run")
+			var inputVolume *corev1.Volume
+			for i := range job.Spec.Template.Spec.Volumes {
+				if job.Spec.Template.Spec.Volumes[i].Name == dgdrRunInputVolume {
+					inputVolume = &job.Spec.Template.Spec.Volumes[i]
+				}
+			}
+			require.NotNil(t, inputVolume, "AISimulate Job has no input volume")
+			require.NotNil(t, inputVolume.ConfigMap, "AISimulate input volume is not a ConfigMap")
+			require.Equal(t, executionConfig.Name, inputVolume.ConfigMap.Name)
+			sweeper, found := dgdrRunContainer(job.Spec.Template.Spec.Containers, dgdrRunSweeperContainer)
+			require.True(t, found, "AISimulate Job has no sweeper container")
+			require.Contains(t, sweeper.VolumeMounts, corev1.VolumeMount{
+				Name: dgdrRunInputVolume, MountPath: dgdrRunInputMountPath, ReadOnly: true,
+			})
+			configInput, err := dgdrRunStatusInput(executionConfig.Data[dgdrRunInputKey])
+			require.NoError(t, err)
+			require.JSONEq(t, string(completedRun.Status.AISimulate.Input.Raw), string(configInput.Raw))
+
 			t.Log("Verify the Candidate is a real API object controlled by the immutable Run")
 			require.True(t, metav1.IsControlledBy(&completedRun, request), "Run is not controlled by its Request")
 			var candidates nvidiacomv1beta2.DynamoGraphDeploymentCandidateList
