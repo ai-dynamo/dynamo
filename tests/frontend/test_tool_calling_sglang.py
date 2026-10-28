@@ -906,6 +906,10 @@ class TestToolCallingMultiTurn:
             model,
             messages=[{"role": "user", "content": "What is the weather in London?"}],
             tools=TOOLS_WEATHER,
+            # Keep pinned: with sampling this 0.6B model sometimes answers in
+            # prose instead of calling get_weather, ending the stream with 'stop'.
+            temperature=0,
+            seed=0,
         )
         assert_finish_reason(first, {"tool_calls"})
         assert len(first.tool_calls) >= 1
@@ -928,6 +932,11 @@ class TestToolCallingMultiTurn:
                 },
             ],
             tools=TOOLS_WEATHER,
+            # Keep pinned: with sampling the model sometimes never closes its
+            # thinking block, leaving the answer in reasoning_content and
+            # content empty.
+            temperature=0,
+            seed=0,
         )
         assert_finish_reason(second, {"stop"})
         assert second.tool_calls == []
