@@ -208,27 +208,8 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
         let _write_notif = self.write_notif;
 
         // Validate layouts
-        let src_layout = src.layout();
-        let dst_layout = dst.layout();
-
-        if src_layout.num_layers() != dst_layout.num_layers() {
-            return Err(anyhow!(
-                "Layouts have incompatible layer counts: src={}, dst={}",
-                src_layout.num_layers(),
-                dst_layout.num_layers()
-            ));
-        }
-
-        if src_layout.outer_dim() != dst_layout.outer_dim() {
-            return Err(anyhow!(
-                "Layouts have incompatible outer dimensions: src={}, dst={}",
-                src_layout.outer_dim(),
-                dst_layout.outer_dim()
-            ));
-        }
-
-        // Validate layout compatibility (errors if transform would be needed)
         validate_layout_compatibility(src, dst)?;
+        let src_layout = src.layout();
 
         // Get NIXL agent
         let nixl_agent = ctx.nixl_agent();
