@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Publishing the engine's load.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -72,7 +70,6 @@ async fn an_engine_without_get_load_publishes_no_load() {
     engine.cleanup().await.expect("cleanup");
 }
 
-/// Each poll is published.
 #[tokio::test]
 async fn reported_load_is_polled_into_the_publisher() {
     let (server, engine, config, metrics, bindings) = sidecar(Load::Used(64)).await;
