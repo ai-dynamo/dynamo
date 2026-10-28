@@ -200,7 +200,11 @@ jobs:
         run: |
           # Fetch HEAD by SHA with an explicit depth; `--deepen` is far slower here.
           git fetch --no-tags --depth=31 origin "$(git rev-parse HEAD)" --quiet || true
-          git fetch --tags --quiet || true
+          # Only the release rule reads tags. With no refspec, this fetch also
+          # downloads every branch on origin, so run it only for release builds.
+          if [[ "${DIFF_BASE_BRANCH}" == release/* || "${DIFF_CURRENT_BRANCH}" == release/* ]]; then
+            git fetch --tags --quiet || true
+          fi
           if [ "${DIFF_BASE_BRANCH}" = "main" ] \
             && [ -n "${DIFF_MERGE_BASE_SHA}" ]; then
             git fetch --no-tags --depth=30 origin "${DIFF_MERGE_BASE_SHA}" --quiet || true

@@ -20,7 +20,6 @@ from dynamo._core import FrontendRoute as FrontendRoute
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpService as HttpService
 from dynamo._core import KserveGrpcService as KserveGrpcService
-from dynamo._core import KvDcRelay as KvDcRelay
 from dynamo._core import KvEventPublisher as KvEventPublisher
 from dynamo._core import KvRouter as KvRouter
 from dynamo._core import KvRouterConfig as KvRouterConfig
@@ -38,6 +37,7 @@ from dynamo._core import (
     MultimodalEmbeddingCachePublisher as MultimodalEmbeddingCachePublisher,
 )
 from dynamo._core import OverlapScores as OverlapScores
+from dynamo._core import PoolRelay as PoolRelay
 from dynamo._core import PythonAsyncEngine as PythonAsyncEngine
 from dynamo._core import RadixTree as RadixTree
 from dynamo._core import RouterConfig as RouterConfig

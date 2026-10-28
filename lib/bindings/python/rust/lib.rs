@@ -423,7 +423,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelInput>()?;
     m.add_class::<WorkerType>()?;
     m.add_class::<llm::kv::KvRouter>()?;
-    m.add_class::<llm::kv_dc_relay::KvDcRelay>()?;
+    m.add_class::<llm::pool_relay::PoolRelay>()?;
     m.add_class::<llm::kv_state_agent::KvStateAgentHost>()?;
     m.add_class::<llm::kv_state_agent::KvStateAttachmentOwner>()?;
     m.add_class::<llm::routed_engine::RoutedEngine>()?;
@@ -1418,7 +1418,6 @@ impl DistributedRuntime {
         };
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
         let response_plane = resolve_response_plane_mode(response_plane.as_deref())?;
-        let explicit_event_plane = event_plane.as_deref().filter(|value| !value.is_empty());
         let event_transport_kind =
             resolve_event_transport_kind(&discovery_backend_config, event_plane.as_deref())?;
 
@@ -1450,9 +1449,7 @@ impl DistributedRuntime {
             || matches!(
                 event_transport_kind,
                 dynamo_runtime::discovery::EventTransportKind::Nats
-            )
-            || (explicit_event_plane.is_none()
-                && std::env::var(config::environment_names::nats::NATS_SERVER).is_ok());
+            );
 
         let runtime_config = DistributedConfig {
             discovery_backend: discovery_backend_config,
