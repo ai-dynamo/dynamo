@@ -28,6 +28,7 @@ which carries the latest gRPC server updates: [`lmsysorg/sglang:dev`](https://hu
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Kubernetes multinode TP and attention-DP | Experimental; explicit leader and worker PodTemplates |
 
 ## Launch Locally
 
@@ -62,6 +63,53 @@ kubectl create secret generic hf-token-secret -n <namespace> \
 kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
+
+Multinode deployments require `backendFramework: sglang` and complete `leader` and
+`worker` role PodTemplates. The templates own the native engine commands and
+sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and
+[attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). Attention-DP requires SGLang 0.5.22 or later and a Dynamo sidecar
+with matching attention-DP metadata support. Engine-failure KV recovery remains
+incomplete and is tracked in [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
+
+### Migrate an existing DGD to multinode sidecars
+
+The multinode examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`. The operator
+injects these variables only into DGDs originally created by operator 1.6.0 or
+later. Upgrading the operator or switching to sidecar mode does not enable them
+for older DGDs.
+
+For a DGD created before operator 1.6.0, choose one of these options:
+
+- Delete and recreate the DGD after upgrading the operator, then use the examples
+  with their existing topology arguments.
+- Keep the DGD and replace the `--node-rank` and `--dist-init-addr` arguments in
+  the `main` container of both the leader and worker role templates with the
+  provider-specific arguments below.
+
+For Grove, use these arguments. The group-wide pod index requires Grove
+`v0.1.0-alpha.15` or later and matching CRDs.
+
+```yaml
+- --node-rank
+- $(GROVE_PCSG_POD_INDEX)
+- --dist-init-addr
+- $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-sglangworker-ldr-0.$(GROVE_HEADLESS_SERVICE):29500
+```
+
+Here, `sglangworker` is the example component name, `SGLangWorker`, in lowercase.
+Replace it with your component name in lowercase if you rename the component.
+
+For LeaderWorkerSet, use these arguments:
+
+```yaml
+- --node-rank
+- $(LWS_WORKER_INDEX)
+- --dist-init-addr
+- $(LWS_LEADER_ADDRESS):29500
+```
+
+Kubernetes expands these variable references in container arguments. No shell
+wrapper is needed.
 
 ## Topologies
 
