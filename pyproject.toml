@@ -54,7 +54,7 @@ artifact-delivery = [
 
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.4.0rc0",
+    "tensorrt-llm==1.4.0rc1",
     # tensorrt-llm declares an uncapped `mpmath>=1.3.0`; under `--pre` the resolver
     # picks mpmath 1.5.0a0 (mpmath.libmp.bitcount removed) and backtracks sympy to
     # the uncapped 1.14.0rc1, which still imports bitcount -> torch._dynamo dies at
@@ -254,6 +254,9 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
     "error",
+    # pytest 9.2.0 started raising errors for warnings from pytest_configure hooks.
+    # pytest-asyncio warns there while asyncio_default_fixture_loop_scope is unset.
+    'ignore:The configuration option "asyncio_default_fixture_loop_scope" is unset:pytest.PytestDeprecationWarning',
     # kr8s 0.20.13 predates Kubernetes 1.36; keep its version warning visible
     # without aborting deploy tests. Remove when the pinned release supports 1.36.
     # Upstream coverage: https://github.com/kr8s-org/kr8s/pull/744

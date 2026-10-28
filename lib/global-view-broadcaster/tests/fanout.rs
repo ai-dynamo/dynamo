@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use dynamo_global_view_broadcaster::{Frame, GlobalViewBroadcaster};
+use dynamo_global_view_broadcaster::{Frame, PoolViewBroadcaster};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
@@ -21,7 +21,7 @@ async fn next(stream: &mut Stream) -> Frame<&'static str, u64> {
 
 #[tokio::test]
 async fn broadcasts_to_all_routers_and_recovers_a_disconnected_replica() {
-    let broadcaster = GlobalViewBroadcaster::new();
+    let broadcaster = PoolViewBroadcaster::new();
     broadcaster.upsert("blue", 10);
 
     let (directory_tx, directory_rx) = tokio::sync::watch::channel(HashSet::from(["a", "b"]));
@@ -141,7 +141,7 @@ async fn broadcasts_to_all_routers_and_recovers_a_disconnected_replica() {
 
 #[tokio::test]
 async fn update_during_connection_is_included_in_the_initial_snapshot() {
-    let broadcaster = GlobalViewBroadcaster::new();
+    let broadcaster = PoolViewBroadcaster::new();
     broadcaster.upsert("blue", 10);
     let (directory_tx, directory_rx) = tokio::sync::watch::channel(HashSet::from(["a"]));
     let (connecting_tx, connecting_rx) = oneshot::channel();
@@ -208,7 +208,7 @@ async fn update_during_connection_is_included_in_the_initial_snapshot() {
 
 #[tokio::test]
 async fn retries_a_failed_router_attachment() {
-    let broadcaster = GlobalViewBroadcaster::new();
+    let broadcaster = PoolViewBroadcaster::new();
     broadcaster.upsert("blue", 10);
     let (directory_tx, directory_rx) = tokio::sync::watch::channel(HashSet::from(["a"]));
     let (connections_tx, mut connections_rx) = mpsc::unbounded_channel();
@@ -256,7 +256,7 @@ async fn retries_a_failed_router_attachment() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn lagging_router_receives_a_fresh_snapshot_on_the_same_connection() {
-    let broadcaster = GlobalViewBroadcaster::new();
+    let broadcaster = PoolViewBroadcaster::new();
     let (directory_tx, directory_rx) = tokio::sync::watch::channel(HashSet::from(["a"]));
     let (connections_tx, mut connections_rx) = mpsc::unbounded_channel();
     let running = broadcaster.clone();
@@ -318,7 +318,7 @@ async fn lagging_router_receives_a_fresh_snapshot_on_the_same_connection() {
 
 #[tokio::test]
 async fn stalled_router_resnapshots_without_draining_its_old_channel() {
-    let broadcaster = GlobalViewBroadcaster::new();
+    let broadcaster = PoolViewBroadcaster::new();
     let (directory_tx, directory_rx) = tokio::sync::watch::channel(HashSet::from(["a"]));
     let (connections_tx, mut connections_rx) = mpsc::unbounded_channel();
     let running = broadcaster.clone();

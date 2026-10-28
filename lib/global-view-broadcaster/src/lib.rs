@@ -52,11 +52,11 @@ struct Inner<P: Eq + Hash, V> {
     updates: broadcast::Sender<Frame<P, V>>,
 }
 
-pub struct GlobalViewBroadcaster<P: Eq + Hash, V> {
+pub struct PoolViewBroadcaster<P: Eq + Hash, V> {
     inner: Arc<Inner<P, V>>,
 }
 
-impl<P: Eq + Hash, V> Clone for GlobalViewBroadcaster<P, V> {
+impl<P: Eq + Hash, V> Clone for PoolViewBroadcaster<P, V> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -64,7 +64,7 @@ impl<P: Eq + Hash, V> Clone for GlobalViewBroadcaster<P, V> {
     }
 }
 
-impl<P, V> Default for GlobalViewBroadcaster<P, V>
+impl<P, V> Default for PoolViewBroadcaster<P, V>
 where
     P: Clone + Eq + Hash + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
@@ -74,7 +74,7 @@ where
     }
 }
 
-impl<P, V> GlobalViewBroadcaster<P, V>
+impl<P, V> PoolViewBroadcaster<P, V>
 where
     P: Clone + Eq + Hash + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
