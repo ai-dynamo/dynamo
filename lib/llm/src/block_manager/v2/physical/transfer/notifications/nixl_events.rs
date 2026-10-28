@@ -36,7 +36,6 @@ fn check_and_warn_slow_transfer(
     arrived_at: Instant,
     last_warned_at: Option<Instant>,
 ) -> Option<Instant> {
-    // The warn! stays in this file so the event keeps this module's tracing target.
     let Some(elapsed) = super::slow_transfer_warning_due(arrived_at, last_warned_at) else {
         return last_warned_at;
     };

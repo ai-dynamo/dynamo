@@ -47,13 +47,9 @@ struct OutstandingPollingTransfer<C: CompletionChecker> {
     last_warned_at: Option<Instant>,
 }
 
-/// How long a transfer may stay pending before it is reported as slow.
 const SLOW_TRANSFER_WARN_AFTER: Duration = Duration::from_secs(60);
-/// Minimum time between two slow-transfer warnings for the same transfer.
 const SLOW_TRANSFER_WARN_REPEAT: Duration = Duration::from_secs(30);
 
-/// Returns how long the transfer has been pending when a slow-transfer warning is due.
-///
 /// Shared by the completion handlers. Each handler emits the warning itself so
 /// that the event keeps that handler's module as its tracing target.
 fn slow_transfer_warning_due(
@@ -199,7 +195,6 @@ mod tests {
             .expect("monotonic clock is too close to its start for this test")
     }
 
-    /// Warn after 60 s pending, then at most once per 30 s.
     #[test]
     fn slow_transfer_warning_waits_and_throttles() {
         assert!(slow_transfer_warning_due(ago(59), None).is_none());
