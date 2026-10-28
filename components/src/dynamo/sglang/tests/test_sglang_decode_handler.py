@@ -676,6 +676,8 @@ async def test_ordered_cancellation_skips_stopped_chunk_processing(processor_nam
 def test_native_generate_uses_only_router_hints(
     monkeypatch, router_hint, supports_hints
 ):
+    if supports_hints and "kv_hints" not in GenerateReqInput.__dataclass_fields__:
+        pytest.skip("installed SGLang does not support kv_hints")
     payload = {"kv_hints": {"caller_controlled": True}}
     if not supports_hints:
         monkeypatch.delitem(
