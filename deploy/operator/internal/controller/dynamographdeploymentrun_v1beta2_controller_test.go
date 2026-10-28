@@ -742,6 +742,9 @@ func assertDGDRRunJobIsolation(
 			t.Fatalf("container %q security context = %+v, want restricted defaults", container.Name, security)
 		}
 	}
+	if sweeper.SecurityContext.RunAsUser == nil || *sweeper.SecurityContext.RunAsUser != 1000 {
+		t.Fatalf("sweeper runAsUser = %v, want planner image UID 1000", sweeper.SecurityContext.RunAsUser)
+	}
 	if sweeper.Image != plannerImage {
 		t.Fatalf("sweeper image = %q, want operator-configured planner image %q", sweeper.Image, plannerImage)
 	}

@@ -782,6 +782,10 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 	name string,
 	execution dgdrRunExecution,
 ) *batchv1.Job {
+	// Pin the named planner-image user to its numeric UID so kubelet can enforce runAsNonRoot.
+	sweeperSecurityContext := dgdrRunContainerSecurityContext()
+	sweeperSecurityContext.RunAsUser = ptr.To[int64](1000)
+
 	job := &batchv1.Job{
 		Name:      name,
 		Namespace: run.Namespace,
@@ -817,7 +821,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 								"--output-dir", execution.SnapshotPath,
 								"--overwrite",
 							},
-							SecurityContext: dgdrRunContainerSecurityContext(),
+							SecurityContext: sweeperSecurityContext,
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: dgdrRunInputVolume, MountPath: dgdrRunInputMountPath, ReadOnly: true},
 								{Name: dgdrRunSnapshotVolume, MountPath: execution.SnapshotPath},
