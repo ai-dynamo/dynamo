@@ -38,6 +38,12 @@ kubectl -n "$NAMESPACE" wait \
   --timeout=14400s
 ```
 
+On eight H200 workers, the full sweep took about 70 minutes for round robin and
+about 50 minutes for session affinity, including dataset download. Concurrency
+1 accounts for about half of that time, and each level prints its AIPerf
+summary to the log when it finishes. The 14,400-second timeout leaves headroom
+for slower clusters.
+
 The log ends with the artifact directory. It has one subdirectory per
 concurrency level, including AIPerf JSON, CSV, per-request, and server-metric
 exports:
@@ -65,8 +71,9 @@ video has 20 self-contained questions sharing one session ID. This gives the
 router repeated requests for the same video within every concurrency level,
 rather than relying only on cache state carried over from an earlier level.
 
-Both profiles use the same deterministic JSONL rows. Every row has a stable
-session ID in the same form as the earlier Cosmos benchmark:
+Both profiles use the same deterministic JSONL rows, one row per request. All
+20 rows for a video share a session ID made of the dataset folder and the video
+filename, for example:
 
 ```text
 2fps-30s:<video-filename>
@@ -99,9 +106,7 @@ kubectl -n "$NAMESPACE" logs -f job/cosmos3-nano-reasoner-smoke
 
 Deploy and benchmark one profile at a time so both runs use exactly eight H200
 workers. Compare request throughput, output tokens/s, TTFT, request latency,
-and ITL at each concurrency level. In pure round robin, the 20
-questions can land on different workers. With session affinity, all 20 are
-pinned to the worker selected for that video.
+and ITL at each concurrency level.
 
 ## Measured results
 

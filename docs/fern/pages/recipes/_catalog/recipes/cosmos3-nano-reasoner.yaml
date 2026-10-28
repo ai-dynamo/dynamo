@@ -14,7 +14,7 @@ targets:
   recommended: false
   hardware:
     gpu: H200
-    count: 4
+    count: 8
   runtime:
     framework: vllm
     image: nvcr.io/nim/nvidia/cosmos3:2.1.0@sha256:2add946b316a0baf72a15be4da85132d127c34da22d2fe4e9c4bd146ad8c4020
@@ -25,7 +25,7 @@ targets:
   - prompt-caching
   workload:
     type: video-understanding
-    traffic: 200 30-second videos at 2 FPS, five questions per video, 128 output tokens, concurrency 1/2/4/8/16
+    traffic: 200 30-second videos at 2 FPS, 20 questions per video, 128 output tokens, concurrency 1/2/4/8/16
   deploy:
     asset: recipes/cosmos3-nano-reasoner/vllm/agg-h200-round-robin/deploy.yaml
   benchmark:
@@ -33,12 +33,12 @@ targets:
     asset: recipes/cosmos3-nano-reasoner/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 12.69 requests/s and 1,625 output tokens/s at concurrency 16; TTFT p50 794 ms
+    summary: 21.43 requests/s and 2,743 output tokens/s at concurrency 16; TTFT p50 333 ms
 - id: agg-h200-session-affinity
   recommended: true
   hardware:
     gpu: H200
-    count: 4
+    count: 8
   runtime:
     framework: vllm
     image: nvcr.io/nim/nvidia/cosmos3:2.1.0@sha256:2add946b316a0baf72a15be4da85132d127c34da22d2fe4e9c4bd146ad8c4020
@@ -50,7 +50,7 @@ targets:
   - prompt-caching
   workload:
     type: video-understanding
-    traffic: 200 30-second videos at 2 FPS with five questions and a stable session ID per video, 128 output tokens, concurrency 1/2/4/8/16
+    traffic: 200 30-second videos at 2 FPS with 20 questions and a stable session ID per video, 128 output tokens, concurrency 1/2/4/8/16
   deploy:
     asset: recipes/cosmos3-nano-reasoner/vllm/agg-h200-session-affinity/deploy.yaml
   benchmark:
@@ -58,7 +58,7 @@ targets:
     asset: recipes/cosmos3-nano-reasoner/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 20.64 requests/s and 2,642 output tokens/s at concurrency 16; 63% more throughput than round robin
+    summary: 39.18 requests/s and 5,016 output tokens/s at concurrency 16; TTFT p50 62 ms; 83% more throughput than round robin
 related_benchmarks: []
 maintainer: null
 gaps:

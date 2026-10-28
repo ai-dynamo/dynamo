@@ -15,16 +15,15 @@ spec:
   components:
     - name: Frontend
       type: frontend
-      runtimeVersionOverride: "1.5.0"
+      runtimeVersionOverride: "1.6.1"
       replicas: 1
       podTemplate:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nim/nvidia/cosmos3:2.1.0@sha256:2add946b316a0baf72a15be4da85132d127c34da22d2fe4e9c4bd146ad8c4020
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.1@sha256:7b86a3dc0dd8a5d352896174e1621c3f87abfd669372e02bc3b140a62ce25bc3
               imagePullPolicy: IfNotPresent
-              workingDir: /opt/nim
-              command: ["/opt/nim/.venv/bin/python"]
+              command: ["python3"]
               args:
                 - -m
                 - dynamo.frontend

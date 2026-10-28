@@ -9,9 +9,18 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Deploy NVIDIA Cosmos3 Nano Reasoner as eight FP8 aggregate workers. Two
+Deploy NVIDIA Cosmos3 Nano Reasoner as eight FP8 aggregated workers. Two
 matched targets isolate routing behavior: pure round robin and round robin
 with a 300-second per-video session-affinity TTL.
+
+Each worker starts through the Cosmos3 NIM entrypoint. NIM profile selection
+reads `NIM_MODEL_TYPE=reasoner`, `NIM_MODEL_SIZE=nano`, and
+`NIM_PRECISION=fp8`, picks the matching model profile for the detected GPU,
+and then launches `dynamo.vllm` because `NIM_DYNAMO_WORKER=true`. The FP8 Nano
+model fits on one H200, so every GPU runs an independent replica. Each replica
+keeps its own multimodal processor cache, which makes routing the only
+difference between the two targets: it decides whether a video's questions
+reach a worker that has already processed that video.
 
 <div className="dynamo-target-picker">
 
@@ -56,7 +65,8 @@ with a 300-second per-video session-affinity TTL.
 <Note>
 
 In a matched eight-H200 benchmark, per-video session affinity improved
-throughput and latency at every tested concurrency. See
+throughput at every tested concurrency (39% to 83% more requests/s) and
+latency at higher concurrency. See
 [Measured performance](#measured-performance).
 
 </Note>
@@ -65,7 +75,7 @@ throughput and latency at every tested concurrency. See
 
 - A Kubernetes cluster with the [Dynamo platform](../../kubernetes/getting-started/quickstart.mdx) installed.
 - Eight available H200 GPUs and a ReadWriteMany model-cache volume.
-- An NGC API key with access to `nvcr.io/nim/nvidia/cosmos3:2.1.0`.
+- An NGC API key with access to the Cosmos3 model artifacts.
 - A read-only Hugging Face token with access to the private
   `jkiczka/cosmos3-benchmark-videos` dataset for the smoke test and benchmark.
 
@@ -82,9 +92,62 @@ kubectl --context "$CONTEXT" -n "$NAMESPACE" create secret generic hf-token-secr
   --from-literal=HF_TOKEN="$HF_TOKEN"
 ```
 
-If your cluster requires registry authentication or cluster-specific H200
-scheduling, inject those settings through a private Kustomize overlay rather
-than editing the portable manifest.
+### Cluster-specific settings
+
+The manifests contain no credentials or node placement, and most clusters need
+no changes. Add a private Kustomize overlay only when you see one of these
+symptoms after deploying:
+
+| Symptom | Missing setting |
+| --- | --- |
+| Worker pods stuck in `ImagePullBackOff` with `unauthorized` from a private registry mirror | Image-pull Secret for the mirror |
+| Worker logs show NGC authentication errors during NIM startup | `NGC_API_KEY` in the Worker |
+| Worker pods `Pending` with `Insufficient nvidia.com/gpu`, or scheduled on non-H200 nodes | H200 node selector |
+
+Both images are public on `nvcr.io`, so an image-pull Secret is only needed when
+the cluster pulls through a private registry mirror. In that case, create it
+for the mirror:
+
+```bash
+kubectl --context "$CONTEXT" -n "$NAMESPACE" create secret docker-registry \
+  registry-pull-secret --docker-server=<your-registry-mirror> \
+  --docker-username=<user> --docker-password=<password>
+```
+
+Copy the profile's `deploy.yaml` into a directory outside the repository and
+add a `kustomization.yaml` next to it. The patches apply only to the Worker
+(`spec.components[1]`); keep only the ones you need:
+
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deploy.yaml
+patches:
+  - target:
+      group: nvidia.com
+      kind: DynamoGraphDeployment
+    patch: |-
+      - op: add
+        path: /spec/components/1/podTemplate/spec/imagePullSecrets
+        value:
+          - name: registry-pull-secret
+      - op: add
+        path: /spec/components/1/podTemplate/spec/containers/0/env/-
+        value:
+          name: NGC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ngc-api-secret
+              key: NGC_API_KEY
+      - op: add
+        path: /spec/components/1/podTemplate/spec/nodeSelector
+        value:
+          nvidia.com/gpu.product: NVIDIA-H200
+```
+
+Use your cluster's GPU node label if it differs. In the deploy step, apply the
+overlay with `apply -k <overlay-dir>` instead of `apply -f .../deploy.yaml`.
 
 ## Populate the model cache
 
@@ -108,7 +171,9 @@ kubectl --context "$CONTEXT" -n "$NAMESPACE" wait \
 
 ## Deploy
 
-Choose one profile and deploy it:
+Choose one profile and deploy it. If you created an overlay in
+[Cluster-specific settings](#cluster-specific-settings), use `apply -k` instead
+of `apply -f`:
 
 ```bash
 export PROFILE=round-robin # or: session-affinity
@@ -122,8 +187,20 @@ kubectl --context "$CONTEXT" -n "$NAMESPACE" wait \
 ```
 
 The round-robin manifest does not set a session-affinity flag. The
-session-affinity manifest sets a 300-second TTL, and its benchmark profile
-sends a stable `X-Dynamo-Session-ID` derived from each video filename.
+session-affinity manifest sets a 300-second TTL.
+
+## Verify
+
+Forward the frontend Service and check that it serves the model:
+
+```bash
+kubectl --context "$CONTEXT" -n "$NAMESPACE" port-forward \
+  "service/${DGD}-frontend" 8000:8000
+curl -fsS http://localhost:8000/v1/models
+```
+
+Run `curl` in a second terminal. The response lists
+`nvidia/cosmos3-nano-reasoner`.
 
 ## Smoke test
 
@@ -165,6 +242,10 @@ kubectl --context "$CONTEXT" -n "$NAMESPACE" logs -f \
   job/cosmos3-nano-reasoner-perf
 ```
 
+On eight H200 workers, the full sweep takes about 70 minutes for round robin
+and about 50 minutes for session affinity. Each concurrency level prints its
+AIPerf summary to the log when it finishes.
+
 ## Measured performance
 
 These are single-run AIPerf measurements from the eight-H200 deployments in
@@ -190,15 +271,6 @@ each of them, while session affinity processes it once.
 The complete TTFT, request-latency, ITL, and throughput sweep is
 available in the
 [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/cosmos3-nano-reasoner/perf/README.md).
-
-<Note>
-
-Each video has 20 self-contained questions. Pure round robin may distribute
-those questions across workers, while session affinity pins all 20 to the
-same worker. Deploy and benchmark one profile at a time to compare equal
-eight-worker setups.
-
-</Note>
 
 ## Source
 
