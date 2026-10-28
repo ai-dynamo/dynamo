@@ -14,6 +14,7 @@ use dynamo_global_discovery_client::{
     PoolRegistration, ReplicaEndpoint, ReplicaId,
 };
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use url::Url;
 
@@ -150,7 +151,32 @@ async fn reports_a_non_2xx_status() {
 
     let error = client.routers().await.unwrap_err();
     assert!(
-        matches!(&error, DiscoveryClientError::Status { status, .. } if status.as_u16() == 503),
+        matches!(&error, DiscoveryClientError::Status { status, body, .. } if status.as_u16() == 503 && body == "not synced"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_cut_off_body_is_a_request_error() {
+    // The body ends before its Content-Length. That is a transport failure,
+    // not a change in the JSON shape, so it must not be reported as `Decode`.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request).await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n{\"routers\": [")
+            .await
+            .unwrap();
+    });
+    let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+    let client = GlobalDiscoveryClient::new(base_url, Duration::from_secs(2)).unwrap();
+
+    let error = client.routers().await.unwrap_err();
+    assert!(
+        matches!(error, DiscoveryClientError::Request { .. }),
         "{error:?}"
     );
 }
