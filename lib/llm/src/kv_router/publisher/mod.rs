@@ -223,10 +223,8 @@ impl KvEventSource {
 #[derive(Debug)]
 pub(super) enum PublisherInput {
     Events(Vec<PlacementEvent>),
-    Recovery(
-        Vec<PlacementEvent>,
-        tokio::sync::oneshot::Sender<anyhow::Result<()>>,
-    ),
+    /// Replies once the processor and local index have finished every earlier input.
+    Barrier(tokio::sync::oneshot::Sender<anyhow::Result<()>>),
 }
 
 impl From<Vec<PlacementEvent>> for PublisherInput {
@@ -239,7 +237,7 @@ impl PublisherInput {
     fn into_events(self) -> Vec<PlacementEvent> {
         match self {
             Self::Events(events) => events,
-            Self::Recovery(..) => unreachable!("event send returned a recovery batch"),
+            Self::Barrier(..) => unreachable!("event send returned a barrier"),
         }
     }
 }
@@ -395,6 +393,17 @@ impl KvEventPublisher {
 
         let next_event_id = Arc::new(AtomicU64::new(0));
 
+        anyhow::ensure!(
+            enable_local_indexer
+                || !matches!(
+                    &source_config,
+                    Some(KvEventSourceConfig::Zmq {
+                        recovery: Some(_),
+                        ..
+                    })
+                ),
+            "KV replay recovery requires the local indexer"
+        );
         let mut source = None;
         if let Some(config) = source_config {
             source = Some(KvEventSource::start(

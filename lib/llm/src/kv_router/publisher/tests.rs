@@ -2548,7 +2548,7 @@ mod event_processor_tests {
     }
 
     #[tokio::test]
-    async fn recovery_ack_waits_for_the_index_like_live_ingestion() {
+    async fn recovery_barrier_waits_for_the_index_like_live_ingestion() {
         use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer};
         for (is_rejected, is_offline) in [(false, false), (true, false), (false, true)] {
             let indexer_cancel = CancellationToken::new();
@@ -2576,11 +2576,9 @@ mod event_processor_tests {
             let (done, ack) = tokio::sync::oneshot::channel();
             // A missing parent reaches the index and is rejected there, as on the live path.
             let parent = is_rejected.then_some(999);
-            tx.send(PublisherInput::Recovery(
-                local_gpu_batch(vec![stored_event(0, parent, 10, 0)]),
-                done,
-            ))
-            .unwrap();
+            tx.send(local_gpu_batch(vec![stored_event(0, parent, 10, 0)]).into())
+                .unwrap();
+            tx.send(PublisherInput::Barrier(done)).unwrap();
             let result = tokio::time::timeout(Duration::from_secs(5), ack)
                 .await
                 .unwrap()
@@ -2591,7 +2589,7 @@ mod event_processor_tests {
                 assert!(!cancel.is_cancelled());
             } else {
                 result.unwrap();
-                // No flush/sleep: acknowledgement means the index finished the batch,
+                // No flush/sleep: the barrier means the index finished the batch,
                 // even with an otherwise long publisher batching timeout.
                 let matches = indexer
                     .find_matches(vec![LocalBlockHash(10)])

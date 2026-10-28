@@ -71,14 +71,17 @@ pub(super) async fn start_zmq_listener(
         .with_image_token_id(image_token_id)
         .with_video_token_id(video_token_id);
     if let Some(recovery) = recovery {
-        super::zmq_recovery::recovering_listener(
-            &zmq_endpoint,
-            &zmq_topic,
+        let ingest = super::zmq_recovery::RecoveryIngest::new(
             &mut normalizer,
             &tx,
             &next_event_id,
-            worker_id,
+            WorkerWithDpRank::new(worker_id, recovery.dp_rank),
             expected_rank,
+        );
+        super::zmq_recovery::recovering_listener(
+            &zmq_endpoint,
+            &zmq_topic,
+            ingest,
             recovery,
             cancellation_token,
         )

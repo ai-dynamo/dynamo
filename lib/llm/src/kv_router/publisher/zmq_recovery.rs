@@ -4,7 +4,7 @@
 //! Opt-in replay recovery for a rank's ZMQ KV event listener.
 
 use super::PublisherInput;
-use super::zmq_listener::{decode_zmq_kv_batch, is_mismatched_rank, normalize_batch};
+use super::zmq_listener::{is_mismatched_rank, normalize_batch};
 use crate::utils::zmq::multipart_message;
 use dynamo_kv_router::{protocols::*, zmq_wire::*};
 use dynamo_runtime::transports::zmq::ipv6_option_for;
@@ -23,24 +23,24 @@ enum ReplayFrame {
     End,
 }
 
-fn decode_replay(frames: Vec<Vec<u8>>) -> Result<ReplayFrame> {
+fn decode_replay(mut frames: Vec<Vec<u8>>) -> Result<ReplayFrame> {
     // DEALER removes identity; SGLang omits the topic included by vLLM.
-    let (sequence, payload) = match frames.as_slice() {
-        [delimiter, sequence, payload] if delimiter.is_empty() => (sequence, payload),
-        [delimiter, _, sequence, payload] if delimiter.is_empty() => (sequence, payload),
-        _ => bail!("invalid KV replay envelope"),
-    };
-    let sequence: [u8; 8] = sequence.as_slice().try_into()?;
+    if !matches!(frames.len(), 3 | 4) || !frames[0].is_empty() {
+        bail!("invalid KV replay envelope");
+    }
+    let payload = frames.pop().expect("envelope has a payload frame");
+    let sequence: [u8; 8] = frames
+        .pop()
+        .expect("envelope has a sequence frame")
+        .as_slice()
+        .try_into()?;
     if sequence == (-1_i64).to_be_bytes() && payload.is_empty() {
         return Ok(ReplayFrame::End);
     }
     if payload.is_empty() || sequence == (-1_i64).to_be_bytes() {
         bail!("invalid KV replay end marker");
     }
-    Ok(ReplayFrame::Batch(
-        u64::from_be_bytes(sequence),
-        payload.clone(),
-    ))
+    Ok(ReplayFrame::Batch(u64::from_be_bytes(sequence), payload))
 }
 
 /// Per-rank sequence cursor; history loss is inferred only from replay, never from a timeout.
@@ -65,10 +65,21 @@ impl ReplayCursor {
         self.next
     }
     fn insert(&mut self, sequence: u64, payload: Vec<u8>) -> Result<()> {
-        if sequence < self.next || self.pending.contains_key(&sequence) {
+        if sequence < self.next {
+            // Live overlap with replay, or every batch of an engine restarted at the same address.
+            tracing::debug!(
+                sequence,
+                next = self.next,
+                "Ignoring KV batch below the replay cursor"
+            );
             return Ok(());
         }
-        if self.pending.len() >= 4096 || payload.len() > self.limit.saturating_sub(self.bytes) {
+        if self.pending.contains_key(&sequence) {
+            return Ok(());
+        }
+        if self.pending.len() >= MAX_PENDING_BATCHES
+            || payload.len() > self.limit.saturating_sub(self.bytes)
+        {
             bail!("KV replay/live merge buffer exhausted");
         }
         self.bytes += payload.len();
@@ -101,7 +112,9 @@ pub struct ZmqRecoveryConfig {
     pub commands: mpsc::Receiver<KvStreamCommand>,
 }
 
-/// Only a `Failed` round that ran out of transport retries accepts `Restart`.
+/// `Success` describes whichever engine answers at the endpoints, so the owner verifies the
+/// engine's identity before acting on it. Only a `Failed` round that ran out of transport
+/// retries accepts `Restart`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KvStreamStatus {
     Recovering,
@@ -119,20 +132,35 @@ pub enum KvStreamCommand {
     },
 }
 
+/// Each failure site chooses whether a retry within the round can help.
 #[derive(Debug, thiserror::Error)]
-#[error("missing KV sequence {expected}; next available sequence is {got}")]
-struct MissingHistory {
-    expected: u64,
-    got: u64,
+enum RecoveryError {
+    #[error("{0}")]
+    Retry(anyhow::Error),
+    #[error("{0}")]
+    Fatal(anyhow::Error),
+    #[error("missing KV sequence {expected}; next available sequence is {got}")]
+    MissingHistory { expected: u64, got: u64 },
 }
 
-const LIMIT: usize = 32 * 1024 * 1024;
+fn retry(error: impl Into<anyhow::Error>) -> RecoveryError {
+    RecoveryError::Retry(error.into())
+}
+
+fn fatal(error: impl Into<anyhow::Error>) -> RecoveryError {
+    RecoveryError::Fatal(error.into())
+}
+
+/// Caps both the live/replay merge buffer and one replay message.
+const MAX_REPLAY_BYTES: usize = 32 * 1024 * 1024;
+const MAX_PENDING_BATCHES: usize = 4096;
+const MAX_LIVE_DRAIN: usize = 4096;
 const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 const ROUND_TIMEOUT: Duration = Duration::from_secs(120);
 const INDEX_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
-async fn connected(monitor: &mut tmq::pair::Pair) -> Result<()> {
+async fn wait_for_handshake(monitor: &mut tmq::pair::Pair) -> Result<()> {
     let event = monitor
         .next()
         .await
@@ -166,24 +194,14 @@ fn live_batch(message: tmq::Multipart) -> Option<(u64, Vec<u8>)> {
     decoded
 }
 
-async fn apply(
-    tx: &mpsc::UnboundedSender<PublisherInput>,
-    events: Vec<PlacementEvent>,
-) -> Result<()> {
+/// Waits until the processor and index have finished every batch sent before it.
+async fn barrier(tx: &mpsc::UnboundedSender<PublisherInput>) -> Result<()> {
     let (done, result) = tokio::sync::oneshot::channel();
-    tx.send(PublisherInput::Recovery(events, done))
+    tx.send(PublisherInput::Barrier(done))
         .map_err(|_| anyhow::anyhow!("KV publisher stopped"))?;
     result
         .await
-        .map_err(|_| anyhow::anyhow!("KV application acknowledgement dropped"))?
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-struct TerminalRecovery(anyhow::Error);
-
-fn terminal(error: anyhow::Error) -> anyhow::Error {
-    TerminalRecovery(error).into()
+        .map_err(|_| anyhow::anyhow!("KV index barrier dropped"))?
 }
 
 fn set_status(status: &tokio::sync::watch::Sender<KvStreamStatus>, value: KvStreamStatus) {
@@ -198,19 +216,74 @@ fn round_deadline(cap: Instant) -> Instant {
     (Instant::now() + ROUND_TIMEOUT).min(cap)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Applies batches in sequence order through the live path's normalizer and event processor.
+pub(super) struct RecoveryIngest<'a> {
+    cursor: ReplayCursor,
+    normalizer: &'a mut ZmqEventNormalizer,
+    tx: &'a mpsc::UnboundedSender<PublisherInput>,
+    next_event_id: &'a AtomicU64,
+    worker: WorkerWithDpRank,
+    expected_rank: Option<u32>,
+}
+
+impl<'a> RecoveryIngest<'a> {
+    pub(super) fn new(
+        normalizer: &'a mut ZmqEventNormalizer,
+        tx: &'a mpsc::UnboundedSender<PublisherInput>,
+        next_event_id: &'a AtomicU64,
+        worker: WorkerWithDpRank,
+        expected_rank: Option<u32>,
+    ) -> Self {
+        Self {
+            cursor: ReplayCursor::new(MAX_REPLAY_BYTES),
+            normalizer,
+            tx,
+            next_event_id,
+            worker,
+            expected_rank,
+        }
+    }
+
+    /// Handles bad events as ordinary live ingestion does.
+    fn apply(&mut self, sequence: u64, payload: Vec<u8>) -> Result<(), RecoveryError> {
+        self.cursor.insert(sequence, payload).map_err(retry)?;
+        while let Some(payload) = self.cursor.pending.remove(&self.cursor.next) {
+            self.cursor.bytes -= payload.len();
+            let sequence = self.cursor.next;
+            match decode_event_batch(&payload) {
+                Err(error) => tracing::warn!(%error, sequence, "Failed to decode ZMQ KV batch"),
+                Ok(batch) if is_mismatched_rank(batch.data_parallel_rank, self.expected_rank) => {
+                    tracing::warn!(
+                        sequence,
+                        expected_rank = ?self.expected_rank,
+                        "Ignoring mismatched KV source rank"
+                    );
+                }
+                Ok(batch) => {
+                    let events =
+                        normalize_batch(batch, self.normalizer, self.worker, self.next_event_id);
+                    if !events.is_empty() {
+                        self.tx
+                            .send(PublisherInput::Events(events))
+                            .map_err(|_| fatal(anyhow::anyhow!("KV publisher stopped")))?;
+                    }
+                }
+            }
+            self.cursor.next = sequence
+                .checked_add(1)
+                .ok_or_else(|| fatal(anyhow::anyhow!("KV sequence exhausted")))?;
+        }
+        Ok(())
+    }
+}
+
 pub(super) async fn recovering_listener(
     endpoint: &str,
     topic: &str,
-    normalizer: &mut ZmqEventNormalizer,
-    tx: &mpsc::UnboundedSender<PublisherInput>,
-    next_event_id: &AtomicU64,
-    worker_id: WorkerId,
-    expected_rank: Option<u32>,
+    mut ingest: RecoveryIngest<'_>,
     mut config: ZmqRecoveryConfig,
     cancel: tokio_util::sync::CancellationToken,
 ) {
-    let mut cursor = ReplayCursor::new(LIMIT);
     // `None` while recovery has succeeded; otherwise the current round's deadline.
     let mut deadline = Some(round_deadline(config.deadline));
     let outcome = loop {
@@ -218,24 +291,27 @@ pub(super) async fn recovering_listener(
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => return,
-            result = recovery_session(
-                endpoint, topic, &config, &mut cursor, &mut deadline, normalizer, tx, next_event_id, worker_id, expected_rank,
-            ) => result,
+            result = recovery_session(endpoint, topic, &config, &mut ingest, &mut deadline) => result,
         };
         let Err(error) = result;
-        if let Some(missing) = error.downcast_ref::<MissingHistory>() {
-            tracing::warn!(dp_rank = config.dp_rank, %error, "KV replay confirms missing history");
-            break KvStreamStatus::MissingHistory {
-                expected: missing.expected,
-                got: missing.got,
-            };
-        }
-        if error.is::<TerminalRecovery>() {
-            tracing::warn!(dp_rank = config.dp_rank, %error, "KV recovery failed");
-            break KvStreamStatus::Failed {
-                reason: error.to_string(),
-            };
-        }
+        let error = match error {
+            RecoveryError::MissingHistory { expected, got } => {
+                tracing::warn!(
+                    dp_rank = config.dp_rank,
+                    expected,
+                    got,
+                    "KV replay confirms missing history"
+                );
+                break KvStreamStatus::MissingHistory { expected, got };
+            }
+            RecoveryError::Fatal(error) => {
+                tracing::warn!(dp_rank = config.dp_rank, %error, "KV recovery failed");
+                break KvStreamStatus::Failed {
+                    reason: error.to_string(),
+                };
+            }
+            RecoveryError::Retry(error) => error,
+        };
         // A transient failure after success starts a new round; within a round it keeps the deadline.
         let round_end = *deadline.get_or_insert_with(|| Instant::now() + ROUND_TIMEOUT);
         set_status(&config.status, KvStreamStatus::Recovering);
@@ -289,21 +365,15 @@ fn revoke(status: &tokio::sync::watch::Sender<KvStreamStatus>, deadline: &mut Op
     set_status(status, KvStreamStatus::Recovering);
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn recovery_session(
     endpoint: &str,
     topic: &str,
     config: &ZmqRecoveryConfig,
-    cursor: &mut ReplayCursor,
+    ingest: &mut RecoveryIngest<'_>,
     deadline: &mut Option<Instant>,
-    normalizer: &mut ZmqEventNormalizer,
-    tx: &mpsc::UnboundedSender<PublisherInput>,
-    next_event_id: &AtomicU64,
-    worker_id: WorkerId,
-    expected_rank: Option<u32>,
-) -> Result<std::convert::Infallible> {
+) -> Result<std::convert::Infallible, RecoveryError> {
     // Replay from the cursor refills anything buffered by an earlier connection.
-    cursor.clear_pending();
+    ingest.cursor.clear_pending();
     let connect = async {
         let (live, mut live_monitor) =
             crate::utils::zmq::connect_sub_socket_with_monitor(endpoint, topic).await?;
@@ -315,22 +385,24 @@ async fn recovery_session(
             .set_linger(0)
             .set_ipv6(ipv6_option_for(&config.replay_endpoint)?)
             .set_rcvhwm(0)
-            .set_maxmsgsize(LIMIT as i64)
+            .set_maxmsgsize(MAX_REPLAY_BYTES as i64)
             .monitor(
                 "inproc://replay-monitor",
                 zmq::SocketEvent::HANDSHAKE_SUCCEEDED as i32
                     | zmq::SocketEvent::DISCONNECTED as i32,
             )
             .connect(&config.replay_endpoint)?;
-        tokio::try_join!(connected(&mut live_monitor), connected(&mut replay_monitor))?;
+        tokio::try_join!(
+            wait_for_handshake(&mut live_monitor),
+            wait_for_handshake(&mut replay_monitor)
+        )?;
         Ok::<_, anyhow::Error>((live, live_monitor, replay, replay_monitor))
     };
     let (mut live, mut live_monitor, mut replay, mut replay_monitor) = tokio::select! {
         biased;
-        _ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => bail!("KV recovery deadline exceeded while connecting"),
-        result = tokio::time::timeout(INACTIVITY_TIMEOUT, connect) => result??,
+        _ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => return Err(retry(anyhow::anyhow!("KV recovery deadline exceeded while connecting"))),
+        result = tokio::time::timeout(INACTIVITY_TIMEOUT, connect) => result.map_err(retry)?.map_err(retry)?,
     };
-    let worker = WorkerWithDpRank::new(worker_id, config.dp_rank);
     let mut is_success = false;
     let mut is_replaying = false;
     let mut requested = 0;
@@ -342,135 +414,83 @@ async fn recovery_session(
     loop {
         tokio::select! {
             biased;
-            _ = live_monitor.next() => bail!("KV live connection lost"),
-            _ = replay_monitor.next() => bail!("KV replay connection lost"),
-            _ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => bail!("KV recovery deadline exceeded"),
-            _ = tokio::time::sleep_until(replay_deadline), if is_replaying => bail!("KV replay timed out"),
+            _ = live_monitor.next() => return Err(retry(anyhow::anyhow!("KV live connection lost"))),
+            _ = replay_monitor.next() => return Err(retry(anyhow::anyhow!("KV replay connection lost"))),
+            _ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => return Err(retry(anyhow::anyhow!("KV recovery deadline exceeded"))),
+            _ = tokio::time::sleep_until(replay_deadline), if is_replaying => return Err(retry(anyhow::anyhow!("KV replay timed out"))),
             _ = tokio::time::sleep_until(next_replay.unwrap_or_else(Instant::now)), if !is_replaying && next_replay.is_some() => {
                 tokio::time::timeout(INACTIVITY_TIMEOUT, replay.send(tmq::Multipart::from(vec![
-                    Vec::new(), cursor.next().to_be_bytes().to_vec(),
-                ]))).await??;
+                    Vec::new(), ingest.cursor.next().to_be_bytes().to_vec(),
+                ]))).await.map_err(retry)?.map_err(retry)?;
                 is_replaying = true;
                 next_replay = None;
-                requested = cursor.next();
+                requested = ingest.cursor.next();
                 replay_first = None;
                 replay_next = None;
                 is_reply_truncated = false;
                 replay_deadline = Instant::now() + INACTIVITY_TIMEOUT;
             },
             message = replay.next(), if is_replaying => {
-                let frames = multipart_message(message.ok_or_else(|| anyhow::anyhow!("KV replay socket ended"))??);
-                match decode_replay(frames)? {
+                let message = message.ok_or_else(|| retry(anyhow::anyhow!("KV replay socket ended")))?.map_err(retry)?;
+                replay_deadline = Instant::now() + INACTIVITY_TIMEOUT;
+                // A reply in an unknown format fails the same way on every attempt.
+                match decode_replay(multipart_message(message)).map_err(fatal)? {
                     ReplayFrame::Batch(sequence, payload) => {
                         // A hole inside one reply is a transport drop; the next round re-requests it.
                         is_reply_truncated |= replay_next.is_some_and(|next| next != sequence);
                         replay_first.get_or_insert(sequence);
                         replay_next = Some(sequence.saturating_add(1));
                         if !is_reply_truncated {
-                            if sequence > cursor.next() && is_success {
+                            if sequence > ingest.cursor.next() && is_success {
                                 is_success = false;
                                 revoke(&config.status, deadline);
                             }
-                            apply_in_order(cursor, sequence, payload, normalizer, tx, next_event_id, worker, expected_rank, true).await?;
+                            ingest.apply(sequence, payload)?;
                         }
-                        // Inactivity counts from here, so waiting for the index does not time out replay.
-                        replay_deadline = Instant::now() + INACTIVITY_TIMEOUT;
                     }
                     ReplayFrame::End => {
                         is_replaying = false;
                         // Bound each drain so a busy producer cannot starve cancellation or the round deadline.
-                        for _ in 0..4096 {
+                        for _ in 0..MAX_LIVE_DRAIN {
                             let Some(message) = live.next().now_or_never() else { break };
-                            let message = message.ok_or_else(|| anyhow::anyhow!("KV live socket ended"))??;
+                            let message = message.ok_or_else(|| retry(anyhow::anyhow!("KV live socket ended")))?.map_err(retry)?;
                             if let Some((sequence, payload)) = live_batch(message) {
-                                apply_in_order(cursor, sequence, payload, normalizer, tx, next_event_id, worker, expected_rank, !is_success).await?;
+                                ingest.apply(sequence, payload)?;
                             }
                         }
                         // Replay is contiguous, so only a late first batch proves loss.
-                        if let Some(got) = replay_first.filter(|first| *first > requested && cursor.next() == requested) {
-                            return Err(MissingHistory { expected: requested, got }.into());
+                        if let Some(got) = replay_first.filter(|first| *first > requested && ingest.cursor.next() == requested) {
+                            return Err(RecoveryError::MissingHistory { expected: requested, got });
                         }
-                        if cursor.gap().is_some() || is_reply_truncated {
+                        if ingest.cursor.gap().is_some() || is_reply_truncated {
                             if is_success {
                                 is_success = false;
                                 revoke(&config.status, deadline);
                             }
                             next_replay = Some(Instant::now());
-                        } else {
-                            if !is_success {
-                                // Report success only after the index has applied everything.
-                                tokio::time::timeout(INDEX_ACK_TIMEOUT, apply(tx, Vec::new())).await
-                                    .map_err(|error| terminal(error.into()))?.map_err(terminal)?;
-                                is_success = true;
-                                *deadline = None;
-                                set_status(&config.status, KvStreamStatus::Success);
-                            }
+                        } else if !is_success {
+                            // Report success only after the index has finished every batch.
+                            tokio::time::timeout(INDEX_ACK_TIMEOUT, barrier(ingest.tx)).await
+                                .map_err(fatal)?.map_err(fatal)?;
+                            is_success = true;
+                            *deadline = None;
+                            set_status(&config.status, KvStreamStatus::Success);
                         }
                     }
                 }
             },
             message = live.next() => {
-                let message = message.ok_or_else(|| anyhow::anyhow!("KV live socket ended"))??;
+                let message = message.ok_or_else(|| retry(anyhow::anyhow!("KV live socket ended")))?.map_err(retry)?;
                 let Some((sequence, payload)) = live_batch(message) else { continue };
-                if sequence > cursor.next() && is_success {
+                if sequence > ingest.cursor.next() && is_success {
                     is_success = false;
                     revoke(&config.status, deadline);
                     next_replay = Some(Instant::now());
                 }
-                let applying = Instant::now();
-                apply_in_order(cursor, sequence, payload, normalizer, tx, next_event_id, worker, expected_rank, !is_success).await?;
-                replay_deadline += applying.elapsed();
+                ingest.apply(sequence, payload)?;
             },
         }
     }
-}
-
-/// Applies batches in sequence order, handling bad events as ordinary live ingestion does.
-#[allow(clippy::too_many_arguments)]
-async fn apply_in_order(
-    cursor: &mut ReplayCursor,
-    sequence: u64,
-    payload: Vec<u8>,
-    normalizer: &mut ZmqEventNormalizer,
-    tx: &mpsc::UnboundedSender<PublisherInput>,
-    next_event_id: &AtomicU64,
-    worker: WorkerWithDpRank,
-    expected_rank: Option<u32>,
-    needs_ack: bool,
-) -> Result<()> {
-    cursor.insert(sequence, payload)?;
-    while let Some(payload) = cursor.pending.remove(&cursor.next) {
-        cursor.bytes -= payload.len();
-        let sequence = cursor.next;
-        match decode_zmq_kv_batch(vec![Vec::new(), sequence.to_be_bytes().to_vec(), payload]) {
-            Err(error) => tracing::warn!(%error, sequence, "Failed to decode ZMQ KV batch"),
-            Ok(decoded) if is_mismatched_rank(decoded.batch.data_parallel_rank, expected_rank) => {
-                tracing::warn!(
-                    sequence,
-                    ?expected_rank,
-                    "Ignoring mismatched KV source rank"
-                );
-            }
-            Ok(decoded) => {
-                let events = normalize_batch(decoded.batch, normalizer, worker, next_event_id);
-                if needs_ack {
-                    tokio::time::timeout(INDEX_ACK_TIMEOUT, apply(tx, events))
-                        .await
-                        .map_err(|_| {
-                            terminal(anyhow::anyhow!("KV index did not confirm batch {sequence}"))
-                        })?
-                        .map_err(terminal)?;
-                } else if !events.is_empty() {
-                    tx.send(PublisherInput::Events(events))
-                        .map_err(|_| terminal(anyhow::anyhow!("KV publisher stopped")))?;
-                }
-            }
-        }
-        cursor.next = sequence
-            .checked_add(1)
-            .ok_or_else(|| terminal(anyhow::anyhow!("KV sequence exhausted")))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -546,12 +566,17 @@ mod socket_tests {
                 .unwrap()
                 .unwrap()
         }
-        async fn ack(&mut self) -> Vec<PlacementEvent> {
-            let PublisherInput::Recovery(events, done) = self.input().await else {
-                panic!("expected acknowledged recovery input")
+        async fn events(&mut self) -> Vec<PlacementEvent> {
+            let PublisherInput::Events(events) = self.input().await else {
+                panic!("expected recovered events")
+            };
+            events
+        }
+        async fn barrier(&mut self) {
+            let PublisherInput::Barrier(done) = self.input().await else {
+                panic!("expected the index barrier")
             };
             done.send(Ok(())).unwrap();
-            events
         }
         async fn request(&mut self, expected: u64) -> Vec<u8> {
             let frames = tokio::time::timeout(Duration::from_secs(5), self.replay.next())
@@ -615,21 +640,20 @@ mod socket_tests {
         async fn succeed(&mut self) {
             let id = self.request(0).await;
             self.send(&id, 0, payload(0)).await;
-            self.ack().await;
+            self.events().await;
             self.send(&id, -1, vec![]).await;
-            self.ack().await;
+            self.barrier().await;
             self.status(KvStreamStatus::Success).await;
         }
-        async fn live_ack(&mut self, sequence: u64) -> Vec<PlacementEvent> {
+        async fn live_events(&mut self, sequence: u64) -> Vec<PlacementEvent> {
             tokio::time::timeout(Duration::from_secs(5), async {
                 let mut retry = tokio::time::interval(Duration::from_millis(20));
                 loop {
                     tokio::select! {
                         input = self.inputs.recv() => {
-                            let Some(PublisherInput::Recovery(events, done)) = input else {
-                                panic!("expected acknowledged live history")
+                            let Some(PublisherInput::Events(events)) = input else {
+                                panic!("expected live history")
                             };
-                            done.send(Ok(())).unwrap();
                             break events;
                         }
                         _ = retry.tick() => self.live(sequence).await,
@@ -676,10 +700,10 @@ mod socket_tests {
             let id = f.request(0).await;
             if !is_empty {
                 f.send(&id, 0, payload(0)).await;
-                f.ack().await;
+                f.events().await;
             }
             f.send(&id, -1, vec![]).await;
-            f.ack().await;
+            f.barrier().await;
             f.status(KvStreamStatus::Success).await;
         }
     }
@@ -701,9 +725,9 @@ mod socket_tests {
         f.send(&id, 1, payload(0)).await;
         f.send(&id, 2, payload(0)).await;
         f.send(&id, -1, vec![]).await;
-        assert_eq!(f.ack().await.len(), 1);
-        assert_eq!(f.ack().await.len(), 1);
-        assert!(f.ack().await.is_empty());
+        assert_eq!(f.events().await.len(), 1);
+        assert_eq!(f.events().await.len(), 1);
+        f.barrier().await;
         f.status(KvStreamStatus::Success).await;
     }
 
@@ -724,7 +748,7 @@ mod socket_tests {
         let mut f = Fixture::new(Duration::from_secs(1));
         let id = f.request(0).await;
         f.send(&id, 0, payload(0)).await;
-        f.ack().await;
+        f.events().await;
         // Without an end marker the round runs out; the cursor waits for a restart.
         let KvStreamStatus::Failed { reason } = f.final_status().await else {
             panic!("expected an exhausted round")
@@ -736,19 +760,19 @@ mod socket_tests {
         restart(&mut f).await.unwrap();
         let id = f.request(1).await;
         f.send(&id, -1, vec![]).await;
-        f.ack().await;
+        f.barrier().await;
         f.status(KvStreamStatus::Success).await;
         f.restart_replay().await;
         f.status(KvStreamStatus::Recovering).await;
         // The listener reconnects by itself and continues from its cursor.
         let id = f.request(1).await;
         f.send(&id, -1, vec![]).await;
-        f.ack().await;
+        f.barrier().await;
         f.status(KvStreamStatus::Success).await;
     }
 
     #[tokio::test]
-    async fn undecodable_and_wrong_rank_batches_are_skipped_while_failed_application_fails() {
+    async fn undecodable_and_wrong_rank_batches_are_skipped() {
         let unlabeled =
             rmp_serde::to_vec(&(0.0_f64, vec![vec!["AllBlocksCleared"]], None::<i32>)).unwrap();
         let mut f = Fixture::new(Duration::from_secs(5));
@@ -758,22 +782,33 @@ mod socket_tests {
         f.send(&id, 2, unlabeled).await;
         f.send(&id, 3, payload(0)).await;
         f.send(&id, -1, vec![]).await;
-        assert_eq!(f.ack().await.len(), 1);
-        f.ack().await;
+        assert_eq!(f.events().await.len(), 1);
+        f.barrier().await;
         f.status(KvStreamStatus::Success).await;
+    }
 
-        let mut f = Fixture::new(Duration::from_secs(5));
-        let id = f.request(0).await;
-        f.send(&id, 0, payload(0)).await;
-        let PublisherInput::Recovery(_, done) = f.input().await else {
-            panic!("expected recovery application")
-        };
-        done.send(Err(anyhow::anyhow!("index offline"))).unwrap();
-        assert!(matches!(
-            f.final_status().await,
-            KvStreamStatus::Failed { .. }
-        ));
-        assert!(restart(&mut f).await.is_err());
+    #[tokio::test]
+    async fn final_failures_refuse_restart() {
+        for is_malformed in [false, true] {
+            // A long round shows the failure is final, not an exhausted round.
+            let mut f = Fixture::new(Duration::from_secs(30));
+            let id = f.request(0).await;
+            if is_malformed {
+                // A batch frame without data is an invalid end marker.
+                f.send(&id, 0, vec![]).await;
+            } else {
+                f.send(&id, -1, vec![]).await;
+                let PublisherInput::Barrier(done) = f.input().await else {
+                    panic!("expected the index barrier")
+                };
+                done.send(Err(anyhow::anyhow!("index offline"))).unwrap();
+            }
+            assert!(matches!(
+                f.final_status().await,
+                KvStreamStatus::Failed { .. }
+            ));
+            assert!(restart(&mut f).await.is_err());
+        }
     }
 
     #[tokio::test]
@@ -803,27 +838,11 @@ mod socket_tests {
     }
 
     #[tokio::test]
-    async fn slow_index_acknowledgement_does_not_time_out_replay() {
-        let mut f = Fixture::new(Duration::from_secs(30));
-        let id = f.request(0).await;
-        f.send(&id, 0, payload(0)).await;
-        let PublisherInput::Recovery(_, done) = f.input().await else {
-            panic!("expected recovery application")
-        };
-        // Past the replay inactivity limit, within the index acknowledgement limit.
-        tokio::time::sleep(INACTIVITY_TIMEOUT + Duration::from_millis(500)).await;
-        done.send(Ok(())).unwrap();
-        f.send(&id, -1, vec![]).await;
-        f.ack().await;
-        f.status(KvStreamStatus::Success).await;
-    }
-
-    #[tokio::test]
     async fn teardown_does_not_wait_for_a_stalled_index() {
         let mut f = Fixture::new(Duration::from_secs(5));
         let id = f.request(0).await;
-        f.send(&id, 0, payload(0)).await;
-        // Hold the acknowledgement as an index blocked in application would.
+        f.send(&id, -1, vec![]).await;
+        // Hold the barrier as an index blocked in application would.
         let _stalled = f.input().await;
         f.cancel.cancel();
         tokio::time::timeout(Duration::from_secs(1), &mut f.listener)
@@ -839,10 +858,10 @@ mod socket_tests {
         f.send(&id, 1, payload(0)).await;
         // Let replay expose the hole before its live counterpart arrives.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(f.live_ack(0).await[0].event.event_id, 0);
-        assert_eq!(f.ack().await[0].event.event_id, 1);
+        assert_eq!(f.live_events(0).await[0].event.event_id, 0);
+        assert_eq!(f.events().await[0].event.event_id, 1);
         f.send(&id, -1, vec![]).await;
-        f.ack().await;
+        f.barrier().await;
         f.status(KvStreamStatus::Success).await;
     }
 
@@ -851,7 +870,7 @@ mod socket_tests {
         let mut f = Fixture::new(Duration::from_secs(5));
         let id = f.request(0).await;
         f.send(&id, 0, payload(0)).await;
-        assert_eq!(f.ack().await[0].event.event_id, 0);
+        assert_eq!(f.events().await[0].event.event_id, 0);
         f.send(&id, 2, payload(0)).await;
         f.send(&id, -1, vec![]).await;
         let id = f.request(1).await;
@@ -859,9 +878,9 @@ mod socket_tests {
         f.send(&id, 1, payload(0)).await;
         f.send(&id, 2, payload(0)).await;
         f.send(&id, -1, vec![]).await;
-        assert_eq!(f.ack().await[0].event.event_id, 1);
-        assert_eq!(f.ack().await[0].event.event_id, 2);
-        f.ack().await;
+        assert_eq!(f.events().await[0].event.event_id, 1);
+        assert_eq!(f.events().await[0].event.event_id, 2);
+        f.barrier().await;
         f.status(KvStreamStatus::Success).await;
     }
 }
