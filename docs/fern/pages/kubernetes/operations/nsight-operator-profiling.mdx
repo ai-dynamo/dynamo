@@ -163,11 +163,70 @@ spec:
 - **Patterns.** They match Dynamo's launch commands, `python -m dynamo.<module>` and `python3 -m dynamo.<module>`, so
   helper commands such as `python3 -c ...` are not wrapped. Write `[.]` rather than `\.`: on Nsight Operator 26.2, a
   backslash in a pattern silently disabled injection.
-- **Field names.** Nsight Operator 26.2 uses older names, such as `matchConditions` and `injectionIncludePatterns`, and
-  rejects the 26.3 names above. Nsight Operator 26.3 still accepts the 26.2 names.
+- **Field names.** Nsight Operator 26.2 rejects the 26.3 field names above. Use the config in
+  [Nsight Operator 26.2](#nsight-operator-26-2) instead.
 - **Fork tracing.** The config leaves out `--trace-fork-before-exec=true`, which Nsight's template sets. The
   [nsys documentation](https://docs.nvidia.com/nsight-systems/UserGuide/index.html#cli-profile-command-switch-options)
   warns that it can make the application crash or deadlock.
+
+### Nsight Operator 26.2
+
+Nsight Operator 26.2 uses older field names, and Nsight Operator 26.3 also accepts them. In 26.2 the tag and the process
+patterns belong to the tool config, so this config has one CPU tool config, for the frontend and the planner, and one
+GPU tool config, for the workers. Fill it in as above. For an aggregated DGD, replace the prefill and decode rules with
+one rule for type `worker`.
+
+```yaml
+apiVersion: nvidia.com/v1
+kind: NsightOperatorProfileConfig
+metadata:
+  name: nsys-my-dgd
+  namespace: my-namespace
+spec:
+  nsightToolConfigs:
+  - name: my-dgd-cpu
+    coordinator: true
+    nsightToolCommand: profile --start-later=true
+    nsightToolArgs: "-t nvtx,osrt --python-sampling=true"
+    nsightTag: my-dgd
+    injectionIncludePatterns: ['^(.*/)?python(3([.][0-9]+)?)? -m dynamo[.](frontend|planner)( .*)?$']
+    otlpMirroringEnabled: false
+  - name: my-dgd-gpu
+    coordinator: true
+    nsightToolCommand: profile --start-later=true
+    nsightToolArgs: "-t cuda,nvtx,osrt --cuda-graph-trace=node --python-sampling=true"
+    nsightTag: my-dgd
+    injectionIncludePatterns: ['^(.*/)?python(3([.][0-9]+)?)? -m dynamo[.](vllm|sglang|trtllm)( .*)?$']
+    otlpMirroringEnabled: false
+  injectionRules:
+  - name: my-dgd-frontend
+    nsightToolConfigRef: my-dgd-cpu
+    objectSelector:
+      matchLabels:
+        nvidia.com/dynamo-graph-deployment-name: my-dgd
+        nvidia.com/dynamo-component-type: frontend
+  - name: my-dgd-planner
+    nsightToolConfigRef: my-dgd-cpu
+    objectSelector:
+      matchLabels:
+        nvidia.com/dynamo-graph-deployment-name: my-dgd
+        nvidia.com/dynamo-component-type: planner
+  - name: my-dgd-prefill
+    nsightToolConfigRef: my-dgd-gpu
+    objectSelector:
+      matchLabels:
+        nvidia.com/dynamo-graph-deployment-name: my-dgd
+        nvidia.com/dynamo-component-type: prefill
+  - name: my-dgd-decode
+    nsightToolConfigRef: my-dgd-gpu
+    objectSelector:
+      matchLabels:
+        nvidia.com/dynamo-graph-deployment-name: my-dgd
+        nvidia.com/dynamo-component-type: decode
+```
+
+This config omits storage, so reports go to Nsight's in-cluster storage; to use S3, set `cloudStorageConfigRef` on
+each tool config. In 26.2, `objectSelector` accepts only `matchLabels`.
 
 ## Settings per Component
 
