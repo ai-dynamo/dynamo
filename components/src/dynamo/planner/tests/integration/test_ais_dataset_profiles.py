@@ -265,6 +265,7 @@ def test_profile_capacity_uses_existing_planner_workload(dataset_profile):
     assert cached.rps == pytest.approx(capacity.rps)
 
 
+@pytest.mark.parametrize("dataset_profile", ["prefill"], indirect=True)
 def test_dataset_role_mismatch_and_tampering_fail(dataset_profile):
     config, root, phase = dataset_profile
     wrong = "decode" if phase == "prefill" else "prefill"
