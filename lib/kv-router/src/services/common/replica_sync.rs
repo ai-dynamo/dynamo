@@ -1066,6 +1066,46 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "standalone-selection")]
+    #[test]
+    fn affinity_sink_warns_on_unexpected_close() {
+        let publish_to_closed_channel = |cancel_token: CancellationToken| {
+            let (tx, rx) = mpsc::channel(1);
+            drop(rx);
+            let sink =
+                AffinityMeshSink::new(RoutingPartitionId::new("model", "group"), tx, cancel_token);
+            sink.publish(
+                "session",
+                AffinityTarget::new(1, None),
+                AffinityVersion {
+                    sequence: 1,
+                    writer_id: 7,
+                },
+            );
+            sink
+        };
+
+        let unexpected = publish_to_closed_channel(CancellationToken::new());
+        assert_eq!(
+            unexpected
+                .unexpected_closed_drops
+                .lock()
+                .record(Instant::now()),
+            None
+        );
+
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+        let shutdown = publish_to_closed_channel(cancel_token);
+        assert_eq!(
+            shutdown
+                .unexpected_closed_drops
+                .lock()
+                .record(Instant::now()),
+            Some(1)
+        );
+    }
+
     #[tokio::test]
     async fn publisher_runs_until_every_source_closes() {
         let (outbound, affinity, mut publisher_task) =
