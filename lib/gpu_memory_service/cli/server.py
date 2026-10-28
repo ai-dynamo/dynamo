@@ -28,6 +28,7 @@ from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.v1 import landlock, ranks
 from gpu_memory_service.v1.client.session import _GMSClientSession as v1_session
+from gpu_memory_service.v1.device import Gpu
 from gpu_memory_service.v1.device import get_socket_path as v1_get_socket_path
 from gpu_memory_service.v1.device import node_gpus
 
@@ -38,6 +39,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _PROBE_TIMEOUT_SECONDS = 0.5
+
+
+def _v1_gpus() -> list[Gpu]:
+    gpus = node_gpus()
+    if not gpus:
+        raise SystemExit("GMS V1 found no GPU that this container can open")
+    return gpus
 
 
 def _terminate_all(processes: list[subprocess.Popen]) -> None:
@@ -98,7 +106,7 @@ def _run_v1_ranks(loader_argv: list[str] | None, confine: bool) -> int:
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
     try:
-        processes.extend(ranks.start_ranks(node_gpus(), command, confine=confine))
+        processes.extend(ranks.start_ranks(_v1_gpus(), command, confine=confine))
         return _supervise(processes)
     finally:
         _terminate_all(processes)
@@ -157,7 +165,7 @@ def main(argv: list[str] | None = None) -> None:
     if use_v1 and not args.probe_restore_ready:
         raise SystemExit(_run_v1_ranks(args.enable_loader, not args.no_isolation))
     if use_v1:
-        for gpu in node_gpus():
+        for gpu in _v1_gpus():
             with closing(
                 v1_session(
                     v1_get_socket_path(gpu.uuid, "weights"),
