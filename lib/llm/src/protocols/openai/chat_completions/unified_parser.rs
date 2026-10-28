@@ -71,6 +71,8 @@ pub(crate) const KIMI_K3_UNIFIED_FAMILY: &str = "kimi_k3";
 pub(crate) const DEEPSEEK_V41_UNIFIED_FAMILY: &str = "deepseek_v41";
 pub(crate) const DEEPSEEK_V4_UNIFIED_FAMILY: &str = "deepseek_v4";
 pub(crate) const GEMMA4_UNIFIED_FAMILY: &str = "gemma4";
+/// The empty thought channel Gemma 4 opens with thinking off.
+pub(crate) const GEMMA4_EMPTY_THOUGHT_CHANNEL: &str = "<|channel>thought\n<channel|>";
 pub(crate) const GLM47_UNIFIED_FAMILY: &str = "glm47";
 pub(crate) const MUSE_UNIFIED_FAMILY: &str = "muse_glimmer";
 

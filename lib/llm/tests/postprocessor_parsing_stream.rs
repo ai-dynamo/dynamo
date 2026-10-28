@@ -3817,29 +3817,70 @@ async fn all_unified_families_honor_normalized_request_controls_for_all_selector
 }
 
 /// Gemma 4 with thinking off. With only the reasoning selector, the parser stays gated
-/// off and channel markers are literal content. With the Gemma 4 tool-call parser it
-/// stays on, so the empty thought channel the model writes itself on the turn after a
-/// tool response leaves `content`, and a tool call after it still parses, on both the
-/// legacy and the unified route.
+/// off and channel markers are literal content. With the Gemma 4 tool-call parser, the
+/// empty thought channel the model writes itself on the turn after a tool response
+/// leaves `content` and a tool call after it still parses:
+/// - unified route: reasoning parsing stays on;
+/// - legacy split route: only a leading empty channel is stripped, because its reasoning
+///   parser runs before the tool-call jail and would eat markers inside tool arguments.
+///
+/// Channel markers inside a tool argument stay intact on both routes.
 async fn assert_gemma4_without_enable_thinking() {
-    let call = "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>";
-    let empty_then_call = format!("<|channel>thought\n<channel|>{call}");
-    // (raw output, reasoning and content when parsed, tool calls)
-    let cases = [
-        ("final answer", "", "final answer", 0),
+    #[derive(Debug)]
+    enum Mode {
+        /// Reasoning parsing off, output unchanged.
+        Literal,
+        /// Legacy route with the Gemma 4 tool-call parser: leading empty channel stripped.
+        StripEmptyChannel,
+        /// Unified route with the Gemma 4 tool-call parser: reasoning parsed.
+        Parse,
+    }
+    const EMPTY_CHANNEL: &str = "<|channel>thought\n<channel|>";
+    let weather = "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>}<tool_call|>";
+    let empty_then_call = format!("{EMPTY_CHANNEL}{weather}");
+    let marker_arg = "before<|channel>thought\nsecret<channel|>after";
+    let marker_call =
+        format!("<|tool_call>call:write_file{{content:<|\"|>{marker_arg}<|\"|>}}<tool_call|>");
+    let end_marker_arg = "before<channel|>after";
+    let end_marker_call =
+        format!("<|tool_call>call:write_file{{content:<|\"|>{end_marker_arg}<|\"|>}}<tool_call|>");
+    let weather_args = serde_json::json!({"city": "Paris"});
+    let marker_args = serde_json::json!({"content": marker_arg});
+    let end_marker_args = serde_json::json!({"content": end_marker_arg});
+    /// Raw output, reasoning and content when parsed, expected tool call.
+    type Case<'a> = (&'a str, &'a str, &'a str, Option<(&'a str, &'a Value)>);
+    let cases: [Case; 6] = [
+        (
+            marker_call.as_str(),
+            "",
+            "",
+            Some(("write_file", &marker_args)),
+        ),
+        (
+            end_marker_call.as_str(),
+            "",
+            "",
+            Some(("write_file", &end_marker_args)),
+        ),
+        ("final answer", "", "final answer", None),
         (
             "<|channel>thought\n<channel|>final answer",
             "",
             "final answer",
-            0,
+            None,
         ),
         (
             "<|channel>thought\nprivate<channel|>final answer",
             "private",
             "final answer",
-            0,
+            None,
         ),
-        (empty_then_call.as_str(), "", "", 1),
+        (
+            empty_then_call.as_str(),
+            "",
+            "",
+            Some(("get_weather", &weather_args)),
+        ),
     ];
     for (reasoning_selector, tool_selector) in [
         (Some("gemma4"), None),
@@ -3852,23 +3893,39 @@ async fn assert_gemma4_without_enable_thinking() {
             "model": "dummy-gemma4-model",
             "messages": [{"role": "user", "content": "answer plainly"}],
             "stream": true,
-            "tools": [{"type": "function", "function": {
-                "name": "get_weather",
-                "parameters": {"type": "object", "properties": {
-                    "city": {"type": "string"}
-                }, "required": ["city"]}
-            }}]
+            "tools": [
+                {"type": "function", "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {
+                        "city": {"type": "string"}
+                    }, "required": ["city"]}
+                }},
+                {"type": "function", "function": {
+                    "name": "write_file",
+                    "parameters": {"type": "object", "properties": {
+                        "content": {"type": "string"}
+                    }, "required": ["content"]}
+                }}
+            ]
         }))
         .unwrap();
         // The legacy split route (DYN_PARSER_VERSION=1) runs no reasoning parser for a
         // tool-only selector; the unified route owns both channels.
         let legacy = std::env::var(env_llm::DYN_PARSER_VERSION).as_deref() == Ok("1");
-        let parsed = tool_selector.is_some() && (reasoning_selector.is_some() || !legacy);
-        for (text, parsed_reasoning, parsed_content, expected_calls) in cases {
-            if expected_calls > 0 && tool_selector.is_none() {
+        let mode = match (legacy, reasoning_selector, tool_selector) {
+            (_, _, None) => Mode::Literal,
+            (false, _, Some(_)) => Mode::Parse,
+            (true, Some(_), Some(_)) => Mode::StripEmptyChannel,
+            (true, None, Some(_)) => Mode::Literal,
+        };
+        for (text, parsed_reasoning, parsed_content, expected_call) in cases {
+            if expected_call.is_some() && tool_selector.is_none() {
                 continue;
             }
             for split in 0..=text.len() {
+                if !text.is_char_boundary(split) {
+                    continue;
+                }
                 let input_stream = stream::iter(
                     vec![
                         mock_content_chunk(&text[..split]),
@@ -3887,30 +3944,33 @@ async fn assert_gemma4_without_enable_thinking() {
                     tool_calls,
                     ..
                 } = drain_stream(output_stream).await;
-                let label =
-                    format!("{text:?} {reasoning_selector:?} {tool_selector:?} split{split}");
-                assert_eq!(tool_calls.len(), expected_calls, "{label}: {tool_calls:?}");
-                if expected_calls > 0 {
+                let label = format!(
+                    "{text:?} {reasoning_selector:?} {tool_selector:?} {mode:?} split{split}"
+                );
+                if let Some((name, args)) = expected_call {
+                    assert_eq!(tool_calls.len(), 1, "{label}: {tool_calls:?}");
+                    assert_eq!(tool_calls[0].name.as_deref(), Some(name), "{label}");
                     assert_eq!(
-                        tool_calls[0].name.as_deref(),
-                        Some("get_weather"),
+                        &serde_json::from_str::<Value>(&tool_calls[0].arguments).unwrap(),
+                        args,
                         "{label}"
                     );
-                    assert_eq!(
-                        serde_json::from_str::<Value>(&tool_calls[0].arguments).unwrap(),
-                        serde_json::json!({"city": "Paris"}),
-                        "{label}"
-                    );
-                }
-                if parsed {
-                    assert_eq!(reasoning, parsed_reasoning, "{label}");
-                    assert_eq!(content, parsed_content, "{label}");
-                } else {
                     assert!(reasoning.is_empty(), "{label}: {reasoning:?}");
-                    if expected_calls == 0 {
-                        assert_eq!(content, text, "{label}");
+                    if !matches!(mode, Mode::Literal) {
+                        assert_eq!(content, "", "{label}");
                     }
+                    continue;
                 }
+                assert!(tool_calls.is_empty(), "{label}: {tool_calls:?}");
+                let (want_reasoning, want_content) = match mode {
+                    Mode::Literal => ("", text),
+                    Mode::StripEmptyChannel => {
+                        ("", text.strip_prefix(EMPTY_CHANNEL).unwrap_or(text))
+                    }
+                    Mode::Parse => (parsed_reasoning, parsed_content),
+                };
+                assert_eq!(reasoning, want_reasoning, "{label}");
+                assert_eq!(content, want_content, "{label}");
             }
         }
     }
