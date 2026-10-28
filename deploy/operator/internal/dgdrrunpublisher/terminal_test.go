@@ -47,6 +47,7 @@ func TestTerminalFailureDiagnosticsSurviveTheCompletionHandoff(t *testing.T) {
 	long := "backend vllm rejected the generated worker configuration " + strings.Repeat("x", 3*maxDiagnosticBytes)
 	f.publish(withRunDiagnostics(t, snapshotJSON(t, PhaseFailed, cand{id: "a"}), message, long))
 	f.mustReconcile()
+	f.mustReconcile()
 
 	err := f.r.Completion.Err()
 	var failure *RunFailedError

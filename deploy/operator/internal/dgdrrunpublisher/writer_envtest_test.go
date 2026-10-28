@@ -125,7 +125,7 @@ func envtestCandidate() dgdcreconcile.DesiredCandidate {
 
 func foreignCandidate(t *testing.T, namespace, name string, candidate dgdcreconcile.DesiredCandidate) *v1beta2.DynamoGraphDeploymentCandidate {
 	t.Helper()
-	spec, _, err := decodeManifest(candidate)
+	spec, _, err := decodeManifest(candidate.ID, candidate.Spec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +195,76 @@ func waitForReconcileQuiet(t *testing.T, recorder *reconcileRecorder, quiet, tim
 		}
 		return time.Since(stableSince) >= quiet
 	}, timeout, 10*time.Millisecond, "reconciliation count did not become stable")
+}
+
+func startPublisherController(t *testing.T, f *writerFixture, snapshot *Snapshot) (*reconcileRecorder, *Completion, *InputStore, chan event.GenericEvent) {
+	t.Helper()
+	podName := "publisher-pod"
+	pod := &corev1.Pod{
+		Namespace: f.run.Namespace, Name: podName,
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sweeper", Image: "example.invalid/sweeper"}}},
+	}
+	if err := f.client.Create(f.ctx, pod); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+
+	scheme, err := NewScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := ctrl.NewManager(f.config, ctrl.Options{
+		Scheme:         scheme,
+		Cache:          cacheOptions(Config{Namespace: f.run.Namespace, RunName: f.run.Name, RunUID: string(f.run.UID), PodName: podName}),
+		Metrics:        metricsserver.Options{BindAddress: "0"},
+		LeaderElection: false,
+	})
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+	store := &InputStore{}
+	store.accept(snapshot)
+	completion := NewCompletion()
+	reconciler := &Reconciler{
+		Client: manager.GetClient(),
+		Writer: &clientWriter{
+			Client:    manager.GetClient(),
+			Reader:    manager.GetAPIReader(),
+			Namespace: f.run.Namespace,
+			RunName:   f.run.Name,
+			RunUID:    string(f.run.UID),
+		},
+		Namespace:        f.run.Namespace,
+		RunName:          f.run.Name,
+		RunUID:           string(f.run.UID),
+		PodName:          podName,
+		SweeperContainer: "sweeper",
+		Store:            store,
+		Completion:       completion,
+	}
+	recorder := &reconcileRecorder{delegate: reconciler}
+	events := make(chan event.GenericEvent, 1)
+	key := types.NamespacedName{Namespace: f.run.Namespace, Name: f.run.Name}
+	if err := setupController(manager, recorder, key, events); err != nil {
+		t.Fatalf("setup controller: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.Start(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("publisher stopped: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("publisher did not stop")
+		}
+	})
+	return recorder, completion, store, events
 }
 
 func hasApplyManager(fields []metav1.ManagedFieldsEntry, subresource string) bool {
@@ -478,9 +548,8 @@ func TestEnvtestDeleteCandidateHonorsTheUIDPrecondition(t *testing.T) {
 	}
 }
 
-func TestEnvtestCandidateUpdateTriggersStatusRepair(t *testing.T) {
+func TestEnvtestProductionWatchesDriveRepairAndTerminalCompletion(t *testing.T) {
 	f := newWriterFixture(t)
-	podName := "publisher-pod"
 	candidate := envtestCandidate()
 	snapshot, err := ParseSnapshot(snapshotJSON(t, PhaseRunning, cand{id: "a", metrics: candidate.Metrics}))
 	if err != nil {
@@ -489,13 +558,6 @@ func TestEnvtestCandidateUpdateTriggersStatusRepair(t *testing.T) {
 	desired := Desire(f.run.Name, string(f.run.UID), snapshot)
 
 	t.Log("Arrange a fully converged Run and Candidate before starting the manager")
-	pod := &corev1.Pod{
-		Namespace: f.run.Namespace, Name: podName,
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sweeper", Image: "example.invalid/sweeper"}}},
-	}
-	if err := f.client.Create(f.ctx, pod); err != nil {
-		t.Fatalf("create pod: %v", err)
-	}
 	name := f.name("a")
 	stored, err := f.writer.CreateCandidate(f.ctx, f.run, name, candidate)
 	if err != nil {
@@ -509,63 +571,7 @@ func TestEnvtestCandidateUpdateTriggersStatusRepair(t *testing.T) {
 	}
 
 	t.Log("Start the production controller watches around an instrumented Reconciler")
-	scheme, err := NewScheme()
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager, err := ctrl.NewManager(f.config, ctrl.Options{
-		Scheme:         scheme,
-		Cache:          cacheOptions(Config{Namespace: f.run.Namespace, RunName: f.run.Name, RunUID: string(f.run.UID), PodName: podName}),
-		Metrics:        metricsserver.Options{BindAddress: "0"},
-		LeaderElection: false,
-	})
-	if err != nil {
-		t.Fatalf("create manager: %v", err)
-	}
-	store := &InputStore{}
-	store.accept(snapshot)
-	completion := NewCompletion()
-	reconciler := &Reconciler{
-		Client: manager.GetClient(),
-		Writer: &clientWriter{
-			Client:    manager.GetClient(),
-			Reader:    manager.GetAPIReader(),
-			Namespace: f.run.Namespace,
-			RunName:   f.run.Name,
-			RunUID:    string(f.run.UID),
-		},
-		Namespace:        f.run.Namespace,
-		RunName:          f.run.Name,
-		RunUID:           string(f.run.UID),
-		PodName:          podName,
-		SweeperContainer: "sweeper",
-		Store:            store,
-		Completion:       completion,
-	}
-	recorder := &reconcileRecorder{delegate: reconciler}
-	events := make(chan event.GenericEvent, 1)
-	key := types.NamespacedName{Namespace: f.run.Namespace, Name: f.run.Name}
-	if err := setupController(manager, recorder, key, events); err != nil {
-		t.Fatalf("setup controller: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- manager.Start(ctx)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case err := <-done:
-			if err != nil && !errors.Is(err, context.Canceled) {
-				t.Errorf("publisher stopped: %v", err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Error("publisher did not stop")
-		}
-	})
-
+	recorder, completion, store, events := startPublisherController(t, f, snapshot)
 	waitForReconcileQuiet(t, recorder, 250*time.Millisecond, 10*time.Second)
 	beforeUpdate := recorder.count.Load()
 
@@ -587,4 +593,41 @@ func TestEnvtestCandidateUpdateTriggersStatusRepair(t *testing.T) {
 		}
 		return repaired.Status.Metrics != nil
 	}, 10*time.Second, 25*time.Millisecond, "candidate status update did not trigger repair")
+	waitForReconcileQuiet(t, recorder, 250*time.Millisecond, 10*time.Second)
+
+	t.Log("Publish a terminal replacement and let write echoes drive completion")
+	terminal, err := ParseSnapshot(snapshotJSON(t, PhaseSucceeded, cand{id: "b", metrics: candidate.Metrics}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !store.accept(terminal) {
+		t.Fatal("terminal snapshot was not accepted")
+	}
+	beforeTerminal := recorder.count.Load()
+	events <- event.GenericEvent{Object: runKeyObject(types.NamespacedName{Namespace: f.run.Namespace, Name: f.run.Name})}
+	select {
+	case <-completion.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("terminal completion did not observe its replacement Candidate, Run status, and deletion through the cache")
+	}
+	if err := completion.Err(); err != nil {
+		t.Fatalf("terminal completion: %v", err)
+	}
+	if got := recorder.count.Load() - beforeTerminal; got < 2 {
+		t.Fatalf("terminal reconciliations = %d, want a write pass and a cache-observation pass", got)
+	}
+
+	t.Log("Verify the state acknowledged by the publisher is present in the API server")
+	if got := f.candidate(f.name("b")); got.Status.Metrics == nil {
+		t.Fatal("candidate metrics were not populated before completion")
+	}
+	run := f.currentRun()
+	if len(run.Status.CandidateRefs) != 1 || run.Status.CandidateRefs[0].Name != f.name("b") {
+		t.Fatalf("candidateRefs = %+v, want the terminal candidate", run.Status.CandidateRefs)
+	}
+	var removed v1beta2.DynamoGraphDeploymentCandidate
+	err = f.client.Get(f.ctx, types.NamespacedName{Namespace: f.run.Namespace, Name: f.name("a")}, &removed)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("obsolete candidate still exists after completion: %v", err)
+	}
 }

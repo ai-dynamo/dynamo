@@ -21,16 +21,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
+	"slices"
 
-	dgdv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -65,12 +61,11 @@ const (
 // Job pod names cannot be listed in resourceNames).
 //
 // Write echoes and cache lag: the publisher's own writes come back as watch events, and
-// the cache can trail them. The reconciler keeps no record of its writes. Every pass
-// decides from the current observations (the cached run and candidates, the latest input
-// snapshot), so a repeated pass while the cache catches up may repeat an idempotent
-// write, which is harmless, and an echo of a write finds nothing left to do. Anything
-// that changes behind the publisher's back (a deleted candidate, a modified run status)
-// is repaired on the next pass.
+// the cache can trail them. Every pass still decides from current cached observations,
+// so repeated idempotent writes are harmless. The reconciler remembers only writes that
+// have not yet appeared in the cache; this is a completion barrier, not desired state.
+// A terminal result is acknowledged only after those echoes arrive and a final pass
+// observes that the desired state needs no more writes.
 //
 // Stale reads: every status write is constrained to the resourceVersion the decision was
 // based on (the cached run, the cached candidate, or the version read back from the API
@@ -91,6 +86,24 @@ type Reconciler struct {
 	Observer   *Observer
 	Store      *InputStore
 	Completion *Completion
+
+	pendingCandidates map[string]candidateObservation
+	pendingRun        *runObservation
+}
+
+// candidateObservation describes the cache echo that proves a candidate write has
+// become visible. A deletion is observed when the written UID is absent; a create or
+// status write is observed only on the exact candidate incarnation.
+type candidateObservation struct {
+	UID       types.UID
+	ID        string
+	Present   bool
+	Populated bool
+}
+
+type runObservation struct {
+	BaseResourceVersion string
+	Status              RunStatus
 }
 
 func (r *Reconciler) key() types.NamespacedName {
@@ -146,8 +159,12 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	}
 
 	desired := Desire(r.RunName, r.RunUID, input.Snapshot)
-	if err := r.apply(ctx, &run, desired); err != nil {
+	quiescent, err := r.apply(ctx, &run, desired)
+	if err != nil {
 		return r.retryOrFail(err)
+	}
+	if !quiescent {
+		return nil
 	}
 	switch {
 	case desired.Terminal:
@@ -173,14 +190,16 @@ func (r *Reconciler) retryOrFail(err error) error {
 // apply drives the cluster toward the desired state: create missing candidates, finish
 // the status of candidates that lack it, update the run, then delete obsolete candidates.
 // It is idempotent and safe to retry; existing candidate specs are never touched.
-func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, desired DesiredState) error {
+func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, desired DesiredState) (bool, error) {
 	if desired.Failed > 0 {
 		ctrl.LoggerFrom(ctx).V(1).Info("candidates failed materialization and are not published", "count", desired.Failed)
 	}
 	var list v1beta2.DynamoGraphDeploymentCandidateList
 	if err := r.Client.List(ctx, &list, client.InNamespace(r.Namespace)); err != nil {
-		return fmt.Errorf("listing candidates: %w", err)
+		return false, fmt.Errorf("listing candidates: %w", err)
 	}
+	r.observeWrites(run, list.Items)
+	wrote := false
 	current := make([]dgdcreconcile.CurrentDGDC, 0, len(list.Items))
 	ownedObsolete := make([]string, 0, len(list.Items))
 	uids := make(map[string]types.UID, len(list.Items))
@@ -221,7 +240,7 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 	}
 	actions, err := dgdcreconcile.ComputeActions(desired.Candidates, current)
 	if err != nil {
-		return err
+		return false, err
 	}
 	actions.Deletes = append(actions.Deletes, ownedObsolete...)
 	// populated names the candidates whose status the API server already has; they are
@@ -231,8 +250,11 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 		name := desired.Names[candidate.ID]
 		stored, err := r.Writer.CreateCandidate(ctx, run, name, candidate)
 		if err != nil {
-			return fmt.Errorf("creating candidate %s: %w", candidate.ID, err)
+			return false, fmt.Errorf("creating candidate %s: %w", candidate.ID, err)
 		}
+		wrote = true
+		r.expectCandidate(name, candidateObservation{UID: stored.UID, ID: candidate.ID, Present: true, Populated: stored.Populated})
+		uids[name] = stored.UID
 		versions[name] = stored.ResourceVersion // a new candidate is not in the cache; use the version the API server returned
 		if stored.Populated {
 			populated[name] = struct{}{}
@@ -247,20 +269,26 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 			continue
 		}
 		if err := r.Writer.PopulateStatus(ctx, name, versions[name], candidate); err != nil {
-			return fmt.Errorf("populating status of candidate %s: %w", candidate.ID, err)
+			return false, fmt.Errorf("populating status of candidate %s: %w", candidate.ID, err)
 		}
+		wrote = true
+		r.expectCandidate(name, candidateObservation{UID: uids[name], ID: candidate.ID, Present: true, Populated: true})
 	}
 
-	if err := r.updateRunStatus(ctx, run, desired.Status); err != nil {
-		return err
+	updated, err := r.updateRunStatus(ctx, run, desired.Status)
+	if err != nil {
+		return false, err
 	}
+	wrote = wrote || updated
 
 	for _, name := range actions.Deletes {
 		if err := r.Writer.DeleteCandidate(ctx, name, uids[name]); err != nil {
-			return fmt.Errorf("deleting candidate %s: %w", name, err)
+			return false, fmt.Errorf("deleting candidate %s: %w", name, err)
 		}
+		wrote = true
+		r.expectCandidate(name, candidateObservation{UID: uids[name]})
 	}
-	return nil
+	return !wrote && len(r.pendingCandidates) == 0 && r.pendingRun == nil, nil
 }
 
 // updateRunStatus writes the run status when it differs from what the cache shows. A
@@ -268,16 +296,61 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 // because a server-side-apply payload that omits the field would remove it. The write is
 // constrained to the cached run's resourceVersion, so a decision made from a stale cache
 // fails with a conflict instead of overwriting newer status.
-func (r *Reconciler) updateRunStatus(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, desired RunStatus) error {
+func (r *Reconciler) updateRunStatus(ctx context.Context, run *v1beta2.DynamoGraphDeploymentRun, desired RunStatus) (bool, error) {
 	observed := observedStatus(run)
 	if !desired.NeedsUpdate(observed) {
-		return nil
+		return false, nil
 	}
 	write := desired.WithPreservedProgress(observed.LastProgress)
 	if err := r.Writer.UpdateRunStatus(ctx, run.ResourceVersion, write); err != nil {
-		return fmt.Errorf("updating run status: %w", err)
+		return false, fmt.Errorf("updating run status: %w", err)
 	}
-	return nil
+	r.pendingRun = &runObservation{BaseResourceVersion: run.ResourceVersion, Status: write}
+	return true, nil
+}
+
+func (r *Reconciler) expectCandidate(name string, observation candidateObservation) {
+	if r.pendingCandidates == nil {
+		r.pendingCandidates = map[string]candidateObservation{}
+	}
+	r.pendingCandidates[name] = observation
+}
+
+// observeWrites removes completion-barrier entries only when the corresponding write is
+// visible through the informer cache. API-server read-backs are deliberately insufficient:
+// completion stops the process, and therefore must not race the watch echoes that trigger
+// repairs for a later terminal snapshot.
+func (r *Reconciler) observeWrites(run *v1beta2.DynamoGraphDeploymentRun, candidates []v1beta2.DynamoGraphDeploymentCandidate) {
+	byName := make(map[string]*v1beta2.DynamoGraphDeploymentCandidate, len(candidates))
+	for i := range candidates {
+		byName[candidates[i].Name] = &candidates[i]
+	}
+	for name, expected := range r.pendingCandidates {
+		candidate := byName[name]
+		if !expected.Present {
+			if candidate == nil || candidate.UID != expected.UID {
+				delete(r.pendingCandidates, name)
+			}
+			continue
+		}
+		if candidate == nil || candidate.UID != expected.UID {
+			continue
+		}
+		owner := metav1.GetControllerOf(candidate)
+		if owner == nil || owner.UID != run.UID || candidate.Labels[LabelRunUID] != r.RunUID || candidate.Labels[LabelCandidateID] != expected.ID {
+			continue
+		}
+		if !expected.Populated || candidate.Status.Metrics != nil {
+			delete(r.pendingCandidates, name)
+		}
+	}
+	if r.pendingRun != nil && run.ResourceVersion != r.pendingRun.BaseResourceVersion && runStatusEqual(observedStatus(run), r.pendingRun.Status) {
+		r.pendingRun = nil
+	}
+}
+
+func runStatusEqual(left, right RunStatus) bool {
+	return left.Published == right.Published && left.LastProgress.Equal(right.LastProgress) && slices.Equal(left.CandidateNames, right.CandidateNames)
 }
 
 // observedStatus is the publisher-owned part of the run's current (cached) status.
@@ -315,33 +388,4 @@ func sweeperStateOf(pod *corev1.Pod, container string) SweeperState {
 		return SweeperState{}
 	}
 	return SweeperState{}
-}
-
-// decodeManifest extracts the DGD spec and the companion resources from a rendered
-// manifest. A DGD in either supported apiVersion is converted to v1beta1, the same way
-// the DGDR controller does it.
-func decodeManifest(candidate dgdcreconcile.DesiredCandidate) (*v1beta1.DynamoGraphDeploymentSpec, string, error) {
-	manifest, err := ParseManifest(candidate.Spec)
-	if err != nil {
-		return nil, "", fmt.Errorf("candidate %s: %w", candidate.ID, err)
-	}
-	obj := &unstructured.Unstructured{Object: manifest.DGD}
-	var beta v1beta1.DynamoGraphDeployment
-	switch obj.GetAPIVersion() {
-	case dgdv1alpha1.GroupVersion.String():
-		var alpha dgdv1alpha1.DynamoGraphDeployment
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &alpha); err != nil {
-			return nil, "", fmt.Errorf("candidate %s: %w", candidate.ID, err)
-		}
-		if err := alpha.ConvertTo(&beta); err != nil {
-			return nil, "", fmt.Errorf("candidate %s: %w", candidate.ID, err)
-		}
-	case v1beta1.GroupVersion.String():
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &beta); err != nil {
-			return nil, "", fmt.Errorf("candidate %s: %w", candidate.ID, err)
-		}
-	default:
-		return nil, "", fmt.Errorf("candidate %s: unsupported DynamoGraphDeployment apiVersion %q", candidate.ID, obj.GetAPIVersion())
-	}
-	return &beta.Spec, strings.Join(manifest.Companions, "\n---\n"), nil
 }
