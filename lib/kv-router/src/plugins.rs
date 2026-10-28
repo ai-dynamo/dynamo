@@ -3,12 +3,13 @@
 
 //! Public contracts, configuration, and registration for statically linked router plugins.
 //!
-//! Plugin authors implement [`worker_selection`] or [`request_classifier`] and register their
-//! providers with [`RouterPluginRegistry`]. Signal accessors and callback signatures are unchanged.
-//! Scheduling owns execution, eligibility, lifecycle synchronization, and capacity accounting.
+//! Plugin authors implement [`worker_selection`], [`request_classifier`], or [`kv_hint`] and
+//! register them with [`RouterPluginRegistry`]. Scheduling owns execution, eligibility,
+//! lifecycle synchronization, and capacity accounting.
 //!
 //! Legacy imports remain compatibility re-exports until v1.7; new plugins should use this module.
 
+pub mod kv_hint;
 mod registry;
 pub mod request_classifier;
 pub mod worker_selection;
@@ -20,6 +21,7 @@ pub use registry::{
     WorkerSelectionPolicyRegistryError,
 };
 
+use kv_hint::{ConfiguredKvHintPolicy, KvHintPolicyRegistryError};
 use request_classifier::{RequestClassifierFactory, RequestClassifierRegistryError};
 use worker_selection::WorkerSelectionPolicyFactory;
 
@@ -29,6 +31,7 @@ pub struct RouterPlugins {
     worker_selection: Option<WorkerSelectionPolicyFactory>,
     custom_worker_selection: bool,
     request_classifier: Option<RequestClassifierFactory>,
+    kv_hint_policy: Option<ConfiguredKvHintPolicy>,
 }
 
 impl RouterPlugins {
@@ -44,7 +47,9 @@ impl RouterPlugins {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.worker_selection.is_none() && self.request_classifier.is_none()
+        self.worker_selection.is_none()
+            && self.request_classifier.is_none()
+            && self.kv_hint_policy.is_none()
     }
 
     /// Whether worker selection was explicitly supplied, rather than filled by the host default.
@@ -55,7 +60,9 @@ impl RouterPlugins {
 
     /// Whether explicit policy or classifier choices require custom-plugin frontend support.
     pub fn has_custom_plugins(&self) -> bool {
-        self.custom_worker_selection || self.request_classifier.is_some()
+        self.custom_worker_selection
+            || self.request_classifier.is_some()
+            || self.kv_hint_policy.is_some()
     }
 
     pub fn worker_selection(&self) -> Option<&WorkerSelectionPolicyFactory> {
@@ -65,6 +72,22 @@ impl RouterPlugins {
     pub fn request_classifier(&self) -> Option<&RequestClassifierFactory> {
         self.request_classifier.as_ref()
     }
+
+    pub fn has_kv_hint_policy(&self) -> bool {
+        self.kv_hint_policy.is_some()
+    }
+
+    pub fn construct_kv_hint_policy(
+        &self,
+        config: &crate::KvRouterConfig,
+        worker_type: crate::WorkerType,
+        partition: crate::RoutingPartitionRef<'_>,
+    ) -> Result<Option<Box<dyn kv_hint::KvHintPolicy>>, KvHintPolicyRegistryError> {
+        self.kv_hint_policy
+            .as_ref()
+            .map(|policy| policy.construct(config, worker_type, partition))
+            .transpose()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -73,4 +96,6 @@ pub enum RouterPluginRegistryError {
     WorkerSelection(#[from] WorkerSelectionPolicyRegistryError),
     #[error(transparent)]
     RequestClassifier(#[from] RequestClassifierRegistryError),
+    #[error(transparent)]
+    KvHintPolicy(#[from] KvHintPolicyRegistryError),
 }
