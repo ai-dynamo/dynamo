@@ -167,7 +167,7 @@ mod tests {
     async fn deadline_returns_without_waiting_for_noncooperative_work() {
         let parent = Context::new(()).context();
         let (release_tx, release_rx) = oneshot::channel();
-        let task = tokio::spawn(async move { release_rx.await });
+        let task = tokio::spawn(release_rx);
         let start = tokio::time::Instant::now();
         let deadline = start + Duration::from_secs(2);
         let result = dispatch_with_deadline(task, deadline, parent.clone()).await;
