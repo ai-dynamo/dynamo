@@ -4,6 +4,7 @@
 """Unit tests for multinode placement derived from worker CLI arguments."""
 
 import pytest
+
 from dynamo.profiler.utils.config import Component, set_multinode_config
 from dynamo.profiler.utils.config_modifiers.sglang import SGLangConfigModifier
 
