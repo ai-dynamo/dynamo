@@ -30,9 +30,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// TestMultinodeShellWrappersPreserveArgv runs each single-layer `sh -c` wrapper
-// the operator renders for multinode vLLM and SGLang through a real shell and
-// checks that the user's argv reaches the engine unchanged.
 func TestMultinodeShellWrappersPreserveArgv(t *testing.T) {
 	t.Log("Stub python3 to print its argv NUL-delimited and ray to succeed, so the rendered wrapper can run locally")
 	binDir := t.TempDir()
@@ -42,8 +39,8 @@ func TestMultinodeShellWrappersPreserveArgv(t *testing.T) {
 	t.Setenv("GROVE_PCLQ_POD_INDEX", "0")
 
 	// Every value here is legal in a container args list and must survive the
-	// shell verbatim: a single quote, an empty string, whitespace, JSON, and
-	// characters the shell would otherwise expand.
+	// shell verbatim: a single quote, an empty string, whitespace, JSON,
+	// characters the shell would otherwise expand, and a kubelet $(VAR) reference.
 	userArgs := []string{
 		"--model", "models/it's a model", tensorParallelSizeFlag, "8",
 		"--served-model-name", "",
@@ -51,7 +48,9 @@ func TestMultinodeShellWrappersPreserveArgv(t *testing.T) {
 		"--kv-transfer-config", `{"kv_connector": "NixlConnector", "kv_role": "$ROLE"}`,
 		"--literal", `glob*?[x]`,
 		"--whitespace", "tab\tand\nnewline",
+		"--download-dir", "$(MODEL_CACHE)",
 	}
+	kubelet := strings.NewReplacer("$(MODEL_CACHE)", "/cache/models", "$(GROVE_PCSG_NAME)", "pcs", "$(GROVE_PCSG_INDEX)", "0", "$(GROVE_HEADLESS_SERVICE)", "svc")
 
 	tests := []struct {
 		name     string
@@ -79,14 +78,16 @@ func TestMultinodeShellWrappersPreserveArgv(t *testing.T) {
 			require.Equal(t, "-c", container.Command[len(container.Command)-1], "expected a sh -c wrapper, got %v", container.Command)
 
 			t.Log("Stand in for kubelet $(VAR) expansion, then execute the wrapper through the shell it targets")
-			kubelet := strings.NewReplacer("$(GROVE_PCSG_NAME)", "pcs", "$(GROVE_PCSG_INDEX)", "0", "$(GROVE_HEADLESS_SERVICE)", "svc")
 			script := kubelet.Replace(container.Args[0])
 			out, err := exec.Command(container.Command[0], append(container.Command[1:], script)...).CombinedOutput()
 			require.NoError(t, err, "shell wrapper failed:\n%s\n%s", script, out)
 			got := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
 
-			t.Log("The user's argv must lead the engine command unchanged, followed by the injected multinode flags")
-			want := append([]string{"-m", tt.module}, userArgs...)
+			t.Log("The user's argv, after kubelet expansion, must lead the engine command unchanged, followed by the injected multinode flags")
+			want := []string{"-m", tt.module}
+			for _, arg := range userArgs {
+				want = append(want, kubelet.Replace(arg))
+			}
 			require.GreaterOrEqual(t, len(got), len(want), "engine argv: %q", got)
 			require.Equal(t, want, got[:len(want)])
 			if tt.role == RoleWorker {
