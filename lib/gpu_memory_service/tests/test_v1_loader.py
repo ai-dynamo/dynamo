@@ -59,6 +59,25 @@ def test_device_n_loads_its_artifact_into_the_nth_gpu_in_bus_order(monkeypatch):
     )
 
 
+def test_confined_server_passes_its_gpu_instead_of_listing_gpus(monkeypatch):
+    monkeypatch.setenv("GMS_SOCKET_DIR", "/run/gms")
+    args = loader.parse_args(["--checkpoint-dir", "/ckpt", "--device", "1"])
+    args.gpu_uuid = "GPU-b"
+
+    def unlisted(_device):
+        raise AssertionError("a confined process cannot list the GPUs")
+
+    identity = loader.device_identity
+    with patch.object(loader, "init_vmm"), patch.object(
+        loader, "load_weights"
+    ) as load_weights, patch.object(identity, "gpu_uuid", unlisted), patch.object(
+        identity, "cuda_ordinal", _CUDA_ORDER.index
+    ):
+        loader.load(args)
+
+    assert load_weights.call_args.args[1] == "/run/gms/gms_GPU-b_weights.sock"
+
+
 def test_backend_config_carries_storage_backend_settings():
     assert _backend_config(
         [

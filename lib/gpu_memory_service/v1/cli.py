@@ -48,7 +48,9 @@ def run_servers(
                 server.shutdown()
 
 
-def _start_loader(loader_argv: list[str], device: int, failed: Event, stop: Event):
+def _start_loader(
+    loader_argv: list[str], device: int, gpu_uuid: str, failed: Event, stop: Event
+):
     """Fill this device's weights server from a thread of the server process.
 
     Sharing the server's process saves the loader its own CUDA start-up, and
@@ -57,6 +59,7 @@ def _start_loader(loader_argv: list[str], device: int, failed: Event, stop: Even
     from gpu_memory_service.v1.snapshot import loader
 
     args = loader.parse_args([*loader_argv, "--device", str(device)])
+    args.gpu_uuid = gpu_uuid
 
     def run() -> None:
         try:
@@ -77,6 +80,14 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument(
+        "--gpu-uuid",
+        help=(
+            "UUID of GMS device --device's GPU. The supervisor passes it because "
+            "a process confined to its GPU cannot list the others. Default: "
+            "look it up."
+        ),
+    )
+    parser.add_argument(
         "--enable-loader",
         nargs=argparse.REMAINDER,
         metavar="ARG",
@@ -88,14 +99,14 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
+    gpu_uuid = args.gpu_uuid or device_identity.gpu_uuid(args.device)
     stop = Event()
     loader_failed = Event()
     if args.enable_loader is not None:
-        _start_loader(args.enable_loader, args.device, loader_failed, stop)
+        _start_loader(args.enable_loader, args.device, gpu_uuid, loader_failed, stop)
 
     init_vmm(VMMDeviceType.CUDA)
     vmm = get_vmm()
-    gpu_uuid = device_identity.gpu_uuid(args.device)
     cuda_device = device_identity.cuda_ordinal(gpu_uuid)
     with ExitStack() as stack:
         checkpoint_lifecycle = GMSCheckpointLifecycle()
