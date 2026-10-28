@@ -25,7 +25,7 @@ use dynamo_runtime::error::{DynamoError, ErrorType};
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt, TryStreamExt};
-use reqwest::header::ACCEPT;
+use reqwest::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::watch;
@@ -139,12 +139,30 @@ impl PoolForwardingEngine {
         let target = self.select(body.model())?;
         let url = route_url(&target.frontend, R::ROUTE)?;
         body.request_stream();
+        // The prompt is most of a request, and the pool sends its response
+        // headers only once it has taken the request, which under load can
+        // take as long as its queue. So serialize once, drop the parsed
+        // request, and send the bytes as a stream: reqwest keeps a copy of a
+        // fixed body until the response, for redirects, but cannot copy a
+        // stream, which is freed as soon as it is written. A retry to another
+        // pool would have to keep these bytes instead.
+        let payload = serde_json::to_vec(&body).map_err(|error| {
+            DynamoError::builder()
+                .error_type(ErrorType::Internal)
+                .message(format!("serialize the forwarded request: {error}"))
+                .build()
+        })?;
+        drop(body);
 
         let mut pool_request = self
             .http
             .post(url.clone())
             .header(ACCEPT, "text/event-stream")
-            .json(&body);
+            .header(CONTENT_TYPE, "application/json")
+            .header(CONTENT_LENGTH, payload.len())
+            .body(reqwest::Body::wrap_stream(futures::stream::once(
+                futures::future::ready(Ok::<_, io::Error>(payload)),
+            )));
         if let Some(session) = session {
             pool_request = pool_request.header(HEADER_DYNAMO_SESSION_ID, session.as_str());
         }

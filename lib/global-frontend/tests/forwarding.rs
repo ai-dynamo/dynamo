@@ -248,6 +248,35 @@ async fn forwards_the_session_and_skips_pool_keep_alives() {
 }
 
 #[tokio::test]
+async fn sends_the_request_body_with_its_length() {
+    let sse = format!("data: {}\n\ndata: [DONE]\n\n", chat_chunk("ok"));
+    let (pool_frontend, seen) = scripted_pool_frontend(sse.leak()).await;
+    let global = global_frontend(vec![pool("blue", MODEL, &pool_frontend.url)]).await;
+
+    let response = post(
+        &global.server.url,
+        "v1/chat/completions",
+        &chat(MODEL, "hi", true),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The body goes as a stream, so the pool sees its declared length
+    // rather than chunked encoding.
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen[0]["content-length"]
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            > 0
+    );
+    assert!(!seen[0].contains_key("transfer-encoding"));
+    assert_eq!(seen[0]["content-type"], "application/json");
+}
+
+#[tokio::test]
 async fn a_pool_error_mid_stream_ends_the_client_stream_with_an_error() {
     let sse = format!(
         "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
