@@ -73,14 +73,6 @@ pub(crate) fn request_has_multimodal_input(request: &PreprocessedRequest) -> boo
     request_has_raw_media(request) || request_has_preprocessed_media(request)
 }
 
-fn requires_frontend_decode(request: &PreprocessedRequest) -> bool {
-    request
-        .stop_conditions
-        .stop_token_ids_visible
-        .as_ref()
-        .is_some_and(|ids| !ids.is_empty())
-}
-
 pub(crate) fn build_generate_request(
     request: PreprocessedRequest,
     request_id: String,
@@ -88,7 +80,6 @@ pub(crate) fn build_generate_request(
 ) -> Result<pb::GenerateRequest, DynamoError> {
     let mut request = normalize_response_options(request)?;
     validate_request(&request, mode)?;
-    let output_text = !requires_frontend_decode(&request);
     validate_multimodal_cache_uuids(&request)?;
     // Legacy envelopes may only carry controls preserved by the typed request.
     if !mode.is_prefill()
@@ -117,6 +108,7 @@ pub(crate) fn build_generate_request(
                     | "ignore_eos"
                     | "logprobs"
                     | "prompt_logprobs"
+                    // Accepted but unused: the frontend decodes output.
                     | "skip_special_tokens"
                     | "return_token_ids"
                     | "skip_reading_prefix_cache"
@@ -166,7 +158,6 @@ pub(crate) fn build_generate_request(
         // supplies the prompt KV.
         strip_multimodal_prompt_token_ids(&mut prefill_result);
     }
-    let skip_special_tokens = request.output_options.skip_special_tokens;
     let prompt_logprobs = request.output_options.prompt_logprobs;
     let output_logprobs = request.output_options.logprobs;
     let max_new_tokens = if mode.is_prefill() || mode.is_encode() {
@@ -268,8 +259,9 @@ pub(crate) fn build_generate_request(
                 stop_conditions.stop_token_ids_hidden,
                 stop_conditions.stop_token_ids_visible,
             ),
-            stop_strings: stop_conditions.stop.unwrap_or_default(),
-            include_stop_strings: sampling.include_stop_str_in_output.unwrap_or(false),
+            // Frontend matches stop strings; vLLM must not end output earlier.
+            stop_strings: Vec::new(),
+            include_stop_strings: false,
             ignore_eos: stop_conditions.ignore_eos.unwrap_or(false),
             thinking_token_budget: stop_conditions.max_thinking_tokens.map(i64::from),
         }),
@@ -277,11 +269,13 @@ pub(crate) fn build_generate_request(
             prompt_token_ids: prompt_logprobs.is_some() || (has_media && mode.is_prefill()),
             prompt_logprobs: prompt_logprobs.is_some(),
             prompt_candidates: prompt_logprobs.map(top_n_candidates).transpose()?,
-            output_text: Some(output_text),
+            output_text: Some(false),
             output_token_ids: true,
             output_logprobs: output_logprobs.is_some(),
             output_candidates: output_logprobs.map(top_n_candidates).transpose()?,
-            skip_special_tokens,
+            // Only vLLM's text uses this; the frontend applies the request's
+            // skip_special_tokens when it decodes.
+            skip_special_tokens: None,
         }),
         kv: Some(kv),
         truncate_prompt_tokens: 0,
@@ -377,9 +371,6 @@ pub(crate) fn normalize_response_options(
     if request.output_options.prompt_logprobs.is_none() {
         request.output_options.prompt_logprobs =
             legacy_logprob_count(&sampling, "prompt_logprobs")?;
-    }
-    if request.output_options.skip_special_tokens.is_none() {
-        request.output_options.skip_special_tokens = legacy_bool(&sampling, "skip_special_tokens")?;
     }
     if let Some(legacy_kv_transfer) = legacy_kv_transfer
         && let Some(extra) = request
@@ -683,17 +674,14 @@ fn take_sampling_extensions(
     struct Passthrough {
         bad_words_token_ids: Option<Vec<Vec<u32>>>,
         allowed_token_ids: Option<Vec<u32>>,
-        detokenize: Option<bool>,
+        // Ignored, as in-process: vLLM never decodes and the frontend does.
+        #[serde(rename = "detokenize")]
+        _detokenize: Option<bool>,
         logprob_token_ids: Option<serde_json::Value>,
     }
     let passthrough: Passthrough = serde_json::from_value(value).map_err(|error| {
         client::invalid_argument(format!("extra_args.sampling_options is invalid: {error}"))
     })?;
-    if passthrough.detokenize == Some(false) {
-        return Err(client::invalid_argument(
-            "detokenize=false is not supported by vLLM gRPC",
-        ));
-    }
     if passthrough.logprob_token_ids.is_some() {
         return Err(client::invalid_argument(
             "logprob_token_ids is not supported by vLLM gRPC",
@@ -1461,7 +1449,6 @@ pub(crate) struct ResponseState {
     prompt_info: Option<pb::PromptInfo>,
     user_stop_token_ids: Vec<u32>,
     hidden_stop_token_ids: Vec<u32>,
-    use_native_text: bool,
 }
 
 impl ResponseState {
@@ -1483,9 +1470,6 @@ impl ResponseState {
             output_logprobs: request.output_options.logprobs,
             expect_prompt_logprobs: request.output_options.prompt_logprobs.is_some(),
             prompt_info: None,
-            // Native text excludes terminal stop tokens, but token IDs retain
-            // them. Use Dynamo's existing decoder when a parser needs one.
-            use_native_text: !requires_frontend_decode(request),
             user_stop_token_ids: request
                 .stop_conditions
                 .stop_token_ids
@@ -1569,7 +1553,6 @@ impl ResponseState {
             None
         };
         let pb::SequenceOutput {
-            text,
             num_tokens,
             token_ids,
             finish_info,
@@ -1583,13 +1566,7 @@ impl ResponseState {
             } else {
                 token_ids
             },
-            text: if self.mode.is_prefill() || self.mode.is_encode() || !self.use_native_text {
-                None
-            } else {
-                // vLLM may buffer text while matching stop strings. Preserve an
-                // empty delta so the frontend does not detokenize its IDs again.
-                Some(text)
-            },
+            // `text` stays `None`: the frontend decodes `token_ids`.
             index: Some(0),
             ..Default::default()
         };
@@ -1599,11 +1576,14 @@ impl ResponseState {
         }
 
         let Some(finish) = finish_info else {
-            return if self.mode.is_prefill() || self.mode.is_encode() || num_tokens == 0 {
-                Ok(None)
-            } else {
-                Ok(Some(mapped))
-            };
+            if self.mode.is_prefill() || self.mode.is_encode() || num_tokens == 0 {
+                return Ok(None);
+            }
+            // Send prompt logprobs with the first token chunk, not the terminal: once
+            // the frontend matches a stop string it cancels the stream, and vLLM's
+            // terminal response never arrives.
+            self.attach_prompt_data(&mut mapped);
+            return Ok(Some(mapped));
         };
         if finish.num_output_tokens != self.completion_tokens {
             return Err(client::protocol_error(format!(

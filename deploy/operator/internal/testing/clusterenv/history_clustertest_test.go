@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/golden"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -101,10 +102,15 @@ func TestClusterHistoryStorage(t *testing.T) {
 				require.ErrorContains(t, prepareErr, "unresolved owner")
 			} else {
 				require.NoError(t, prepareErr)
-				require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(&record), &record))
-				_, found, err := unstructured.NestedString(record.Object, "spec", "removedHistoricalField")
-				require.NoError(t, err)
-				require.False(t, found, "candidate schema should now prune the historical field on reads")
+				t.Log("Wait for the API server to serve reads with the restored candidate schema")
+				require.EventuallyWithT(t, func(collect *assert.CollectT) {
+					if !assert.NoError(collect, c.Get(t.Context(), client.ObjectKeyFromObject(&record), &record)) {
+						return
+					}
+					_, found, err := unstructured.NestedString(record.Object, "spec", "removedHistoricalField")
+					assert.NoError(collect, err)
+					assert.False(collect, found, "candidate schema should now prune the historical field on reads")
+				}, 20*time.Second, 100*time.Millisecond)
 				require.Equal(t, map[string]any{"observed": "historical"}, record.Object["status"])
 				require.NotEqual(t, "old-parent", string(record.GetUID()))
 				require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(&child), &child))
