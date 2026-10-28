@@ -159,6 +159,6 @@ These recipes target Dynamo v1.0.0. To run on v0.9.1 containers, the following c
 
 ## Notes
 
-- **Disaggregated mode**: Supported with TRT-LLM via UCX (`trtllm/disagg`) and SGLang via nixl or mooncake (`sglang/disagg`). Not supported with vLLM due to hybrid KV cache incompatibilities. This TRT-LLM disagg recipe uses UCX with the C++ transceiver, whose NIXL/MOONCAKE backends cannot transfer Mamba SSM state.
+- **Disaggregated mode**: Supported with TRT-LLM via UCX (`trtllm/disagg`) and SGLang via nixl or mooncake (`sglang/disagg`). Not supported with vLLM due to hybrid KV cache incompatibilities. TRT-LLM disagg requires UCX because NIXL/MOONCAKE cannot transfer Mamba SSM state.
 - **Storage class**: Update `storageClassName` in `model-cache/model-cache.yaml` before deploying.
 - **Model size**: ~240GB download; expect 30-60 minutes depending on bandwidth.

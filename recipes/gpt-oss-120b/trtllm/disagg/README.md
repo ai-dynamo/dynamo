@@ -66,7 +66,7 @@ prefill and decode workers. Key differences:
 
 ### KV Transfer
 
-Uses the Python NIXL transceiver (`max_tokens_in_buffer=9216`) for KV cache
+Uses UCX-based cache transceiver (`max_tokens_in_buffer=9216`) for KV cache
 transfer between prefill and decode workers.
 
 ### Quantization

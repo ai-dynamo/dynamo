@@ -264,8 +264,6 @@ data:
     moe_config:
       backend: TRTLLM
     kv_cache_config:
-      # The C++ transceiver runs on KV cache manager v1.
-      use_kv_cache_manager_v2: false
       enable_block_reuse: true
       free_gpu_memory_fraction: 0.6
       host_cache_size: 107374182400  # 100 GiB host-memory KV offload
@@ -298,8 +296,6 @@ data:
       enable_padding: true
     enable_attention_dp: false
     kv_cache_config:
-      # The C++ transceiver runs on KV cache manager v1.
-      use_kv_cache_manager_v2: false
       dtype: fp8
       enable_block_reuse: false
       free_gpu_memory_fraction: 0.85

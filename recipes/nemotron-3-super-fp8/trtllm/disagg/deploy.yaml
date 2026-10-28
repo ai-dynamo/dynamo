@@ -7,8 +7,8 @@
 # Uses TP=2 per worker (prefill: 2 GPUs, decode: 2 GPUs) for a total of 4 GPUs.
 # KV cache (attention + Mamba SSM state) is transferred between workers via UCX.
 #
-# IMPORTANT: With the C++ transceiver, use the UCX backend, not NIXL. The C++
-# NIXL and MOONCAKE backends do not support hybrid models with Mamba SSM state:
+# IMPORTANT: Must use UCX backend, not NIXL. NIXL and MOONCAKE backends do not
+# support hybrid models with Mamba SSM state:
 #   ValueError: NIXL or MOONCAKE backend does not support hybrid models with
 #   RNN (Mamba) states. Please use UCX or MPI backend for cache transfer with
 #   hybrid models.
@@ -41,14 +41,12 @@ data:
       #   "mamba hybrid cache requires block reuse to be disabled"
       # Keep this explicit instead of relying on TRT-LLM's silent model default.
       enable_block_reuse: false
-      # The C++ transceiver required by UCX runs on KV cache manager v1.
-      use_kv_cache_manager_v2: false
     moe_config:
       backend: TRTLLM
     cache_transceiver_config:
-      # The C++ NIXL/MOONCAKE transceivers do not support Mamba SSM transfer.
+      # UCX is required for hybrid Mamba+Attention models.
+      # NIXL/MOONCAKE do not support Mamba SSM state transfer.
       backend: UCX
-      transceiver_runtime: CPP
     cuda_graph_config:
       enable_padding: true
       max_batch_size: 16
@@ -75,14 +73,12 @@ data:
       #   "mamba hybrid cache requires block reuse to be disabled"
       # Keep this explicit instead of relying on TRT-LLM's silent model default.
       enable_block_reuse: false
-      # The C++ transceiver required by UCX runs on KV cache manager v1.
-      use_kv_cache_manager_v2: false
     moe_config:
       backend: TRTLLM
     cache_transceiver_config:
-      # The C++ NIXL/MOONCAKE transceivers do not support Mamba SSM transfer.
+      # UCX is required for hybrid Mamba+Attention models.
+      # NIXL/MOONCAKE do not support Mamba SSM state transfer.
       backend: UCX
-      transceiver_runtime: CPP
     cuda_graph_config:
       enable_padding: true
       max_batch_size: 16

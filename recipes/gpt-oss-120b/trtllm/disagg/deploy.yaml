@@ -7,8 +7,7 @@ metadata:
 data:
   prefill.yaml: |
     cache_transceiver_config:
-      backend: NIXL
-      transceiver_runtime: PYTHON
+      backend: UCX
       max_tokens_in_buffer: 9216
     cuda_graph_config:
       enable_padding: true
@@ -35,8 +34,7 @@ data:
     attention_dp_config:
       enable_balance: true
     cache_transceiver_config:
-      backend: NIXL
-      transceiver_runtime: PYTHON
+      backend: UCX
       max_tokens_in_buffer: 9216
     cuda_graph_config:
       enable_padding: true
