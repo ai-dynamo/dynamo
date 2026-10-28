@@ -17,6 +17,7 @@ pub mod mm_routing;
 pub mod prompt;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
+pub use structural_tag::{supports_structural_tag_parser, validate_structural_tag_parser};
 pub(crate) mod tool_choice;
 pub mod tools;
 use anyhow::Context;

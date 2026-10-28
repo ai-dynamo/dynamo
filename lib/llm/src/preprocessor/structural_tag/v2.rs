@@ -109,4 +109,53 @@ mod tests {
             assert!(supports_family(alias), "unsupported alias: {alias}");
         }
     }
+
+    #[test]
+    fn deepseek_dialects_keep_their_framing_and_argument_styles() {
+        let tools = [ToolDefinition {
+            name: "get_weather".into(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"]
+            })),
+            strict: Some(true),
+        }];
+        let choice = ToolChoice::Named("get_weather".into());
+        let request = StructuralTagBuildRequest {
+            tool_choice: &choice,
+            tools: &tools,
+            parallel_tool_calls: Some(false),
+            schema_mode: dynamo_parsers::tool_calling::StructuralTagSchemaMode::Strict,
+            exclude_special_tokens: None,
+            reasoning_boundary: super::super::ResolvedReasoningBoundary::StructuralTag,
+            tool_arguments_any_order: false,
+            starts_in_reasoning: false,
+            structured_output_schema: None,
+        };
+        for (family, marker, style, other_marker) in [
+            (
+                "deepseek_v4",
+                "<｜DSML｜tool_calls>",
+                "deepseek_xml",
+                "<｜DSML｜ calls>",
+            ),
+            (
+                "deepseek_v41",
+                "<｜DSML｜ calls>",
+                "deepseek_v4_1_xml",
+                "<｜DSML｜tool_calls>",
+            ),
+        ] {
+            let tag = StructuralTagBuilder::for_parser(family)
+                .unwrap()
+                .build(&request)
+                .unwrap()
+                .unwrap();
+            let serialized = serde_json::to_string(&tag).unwrap();
+            assert!(serialized.contains(marker), "{family}: {serialized}");
+            assert!(serialized.contains(style), "{family}: {serialized}");
+            assert!(!serialized.contains(other_marker), "{family}: {serialized}");
+        }
+    }
 }

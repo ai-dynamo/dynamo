@@ -94,6 +94,32 @@ impl SelectedStructuralTagBuilder {
     }
 }
 
+/// Query the actual grammar lookup for a configured parser pair and parser generation.
+/// Backend support for the emitted XGrammar style requires separate qualification.
+pub fn supports_structural_tag_parser(
+    parser_name: &str,
+    reasoning_parser: Option<&str>,
+) -> anyhow::Result<bool> {
+    crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
+        Some(parser_name),
+        reasoning_parser,
+    )?;
+    Ok(SelectedStructuralTagBuilder::for_parser(parser_name, reasoning_parser).is_some())
+}
+
+/// Fail deployment preflight when guidance is explicitly required; default guidance
+/// remains opportunistic for parser families that have no structural-tag builder.
+pub fn validate_structural_tag_parser(
+    parser_name: &str,
+    reasoning_parser: Option<&str>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        supports_structural_tag_parser(parser_name, reasoning_parser)?,
+        "No structural-tag grammar is available for parser '{parser_name}'"
+    );
+    Ok(())
+}
+
 /// Validate a forced `tool_choice` against the request's actual `tools` list.
 ///
 /// `Required` with no tools, and a `Named` choice for a tool absent from `tools`,

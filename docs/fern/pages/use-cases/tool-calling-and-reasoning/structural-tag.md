@@ -204,6 +204,26 @@ frontend processors apply the same mode, scope, and schema policy through the
 tool parser supplied by their installed engine version. Parser availability can
 therefore differ by backend and engine version.
 
+### Checking Grammar Availability
+
+Output-parser availability does not guarantee that a structural-tag grammar is available. Before starting a deployment that requires grammar enforcement, check the actual builder selected by the configured parser generation:
+
+```python
+from dynamo._core import (
+    get_tool_parser_names,
+    supports_structural_tag_parser,
+    validate_structural_tag_parser,
+)
+
+assert "deepseek_v41" in get_tool_parser_names()
+assert supports_structural_tag_parser("deepseek_v41", "deepseek_v41")
+validate_structural_tag_parser("deepseek_v41", "deepseek_v41")
+```
+
+`supports_structural_tag_parser` returns a boolean. `validate_structural_tag_parser` raises `ValueError` when no builder is available. Both accept an optional reasoning-parser name and raise `ValueError` for an invalid parser-generation configuration or incompatible V2 parser pair. Set `DYN_PARSER_VERSION` before the first parser lookup; the process caches that selection.
+
+The `deepseek_v41` builder emits the V4.1 framing and `deepseek_v4_1_xml` argument style. `deepseek_v4` retains its own framing and `deepseek_xml` argument style. These checks report Dynamo's builder availability; they do not compile the grammar with the backend's installed XGrammar version. Qualify backend support separately before enabling enforcement. Existing best-effort serving behavior remains unchanged for parsers without a builder.
+
 ## Activation Scope
 
 The `scope` field controls when structural tags are used

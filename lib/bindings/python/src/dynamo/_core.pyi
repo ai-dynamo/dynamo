@@ -41,6 +41,21 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
+def supports_structural_tag_parser(
+    parser_name: str, reasoning_parser: str | None = None
+) -> bool:
+    """Query the selected generation's actual builder; invalid routing raises ValueError.
+
+    Output-parser availability and backend XGrammar support are separate capabilities.
+    """
+    ...
+
+def validate_structural_tag_parser(
+    parser_name: str, reasoning_parser: str | None = None
+) -> None:
+    """Raise ValueError if an explicitly required grammar is unavailable at deployment preflight."""
+    ...
+
 def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...
