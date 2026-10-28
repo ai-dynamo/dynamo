@@ -87,6 +87,7 @@ Select pods with the labels the Dynamo operator already sets on every pod. Alway
 |---|---|
 | Frontend, including its built-in KV router | `nvidia.com/dynamo-component-type: frontend` |
 | Aggregated worker | `nvidia.com/dynamo-component-type: worker` |
+| All workers of a disaggregated DGD | Two rules, one with `nvidia.com/dynamo-component-type: prefill` and one with `decode`, that use the same tool config. No disaggregated pod has type `worker`. |
 | Prefill or decode worker | `nvidia.com/dynamo-component-type: prefill` or `decode`. A worker generation that already served alpha-era selectors before an operator upgrade keeps type `worker`; for those pods, match `nvidia.com/dynamo-sub-component-type: prefill` or `decode` instead. |
 | Planner, or Endpoint Picker Plugin (EPP) | `nvidia.com/dynamo-component-type: planner` or `epp` |
 | Component without a `type`, such as a standalone router | `nvidia.com/dynamo-component: <component name>` |
@@ -113,7 +114,7 @@ metadata:
   namespace: my-namespace
 spec:
   nsightToolConfigs:
-  - name: my-dgd-cpu           # frontend: OS runtime calls, Python stacks, NVTX
+  - name: my-dgd-cpu           # frontend and planner: OS runtime calls, Python stacks, NVTX
     coordinator: true          # record only between profiler-start and its stop
     nsightToolCommand: profile --start-later=true
     nsightToolArgs: "-t nvtx,osrt --python-sampling=true"
@@ -133,6 +134,15 @@ spec:
         nvidia.com/dynamo-graph-deployment-name: my-dgd
         nvidia.com/dynamo-component-type: frontend
     processIncludePatterns: ['^(.*/)?python(3([.][0-9]+)?)? -m dynamo[.]frontend( .*)?$']
+  - name: my-dgd-planner
+    nsightToolConfigRef: my-dgd-cpu
+    nsightTags: [my-dgd]
+    cloudStorageConfigRef: team-s3
+    podObjectSelector:
+      matchLabels:
+        nvidia.com/dynamo-graph-deployment-name: my-dgd
+        nvidia.com/dynamo-component-type: planner
+    processIncludePatterns: ['^(.*/)?python(3([.][0-9]+)?)? -m dynamo[.]planner( .*)?$']
   - name: my-dgd-decode
     nsightToolConfigRef: my-dgd-gpu
     nsightTags: [my-dgd]
