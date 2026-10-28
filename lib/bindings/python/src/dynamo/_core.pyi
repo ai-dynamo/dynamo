@@ -783,11 +783,17 @@ class SelectionService:
         replica_sync_peers: Optional[list[str]] = None,
         selection_cache: Optional[SelectionCacheConfig] = None,
         session_affinity_ttl_secs: Optional[float] = None,
+        session_affinity_mode: Literal["hard", "soft"] = "hard",
+        session_replication_writer_id: Optional[int] = None,
     ) -> None:
         """Create a selection service. `indexer_threads` sizes the KV indexer pool.
 
         `session_affinity_ttl_secs` enables session affinity with an idle TTL
         between 1 and 31536000 seconds.
+        `session_affinity_mode`: hard rejects dispatch away from a live binding;
+        soft rebinds when the bound worker is excluded from the request's candidates.
+        `session_replication_writer_id` exports affinity updates for a host transport;
+        use an id unique to this replica incarnation.
         """
         ...
 
@@ -798,6 +804,27 @@ class SelectionService:
 
         The KV indexer thread pool is released when the handle is dropped.
         Idempotent, and also runs automatically on drop.
+        """
+        ...
+
+    async def shutdown_async(self) -> None:
+        """Await service shutdown without blocking the Python event loop."""
+        ...
+
+    def session_binding_updates(self) -> AsyncIterator[List[JsonLike]]:
+        """Stream session bindings this service commits or refreshes, for the
+        host to broadcast to its peers.
+
+        Each item is every binding queued since the last one (at least one).
+        Requires session_replication_writer_id. Ends on shutdown.
+        """
+        ...
+
+    def apply_session_binding(self, update: JsonLike) -> None:
+        """Merge a versioned peer binding without echoing it.
+
+        A binding this replica cannot place yet is dropped; the owner's next
+        refresh repairs it.
         """
         ...
 
