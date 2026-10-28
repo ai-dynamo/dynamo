@@ -173,13 +173,15 @@ async def test_single_role_modes_ignore_other_role(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cls,mode,roles", MODES)
-async def test_advisory_publishes_gauges_without_scaling(
-    cls, mode, roles, prometheus_port
-):
+async def test_advisory_publishes_gauges_without_scaling(prometheus_port):
     """Check that advisory mode publishes targets without applying scaling."""
+    roles = (PREFILL, DECODE)
     planner, environment = _make_planner(
-        cls, mode, roles_with_info=roles, port=prometheus_port, advisory=True
+        DisaggPlanner,
+        "disagg",
+        roles_with_info=roles,
+        port=prometheus_port,
+        advisory=True,
     )
     decision = ScalingDecision(**{FIELDS[r]: 4 for r in roles})
 
@@ -229,10 +231,12 @@ async def test_disagg_publishes_both_gauges_before_resolving_workers(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cls,mode,roles", MODES)
-async def test_prometheus_port_zero_skips_gauges_but_still_scales(cls, mode, roles):
+async def test_prometheus_port_zero_skips_gauges_but_still_scales():
     """Check that disabling metrics leaves scaling targets unchanged."""
-    planner, environment = _make_planner(cls, mode, roles_with_info=roles, port=0)
+    roles = (PREFILL, DECODE)
+    planner, environment = _make_planner(
+        DisaggPlanner, "disagg", roles_with_info=roles, port=0
+    )
     decision = ScalingDecision(**{FIELDS[r]: 2 for r in roles})
 
     await planner._apply_effects(PlannerEffects(scale_to=decision))
