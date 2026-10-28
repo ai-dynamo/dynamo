@@ -39,7 +39,7 @@ spec:
               if not (snapshot / "config.json").is_file():
                   return False
               if needs_tokenizer and not any(
-                  (snapshot / name).is_file() for name in ("tokenizer.json", "tokenizer.model")
+                  (snapshot / name).is_file() for name in ("tokenizer.json", "tokenizer.model", "tiktoken.model")
               ):
                   return False
               # A snapshot directory can exist while a download is incomplete.
@@ -51,8 +51,8 @@ spec:
                   except (OSError, ValueError, KeyError):
                       return False
               if not indexes:
-                  weights = [p.name for pattern in ("*.safetensors", "pytorch_model*.bin")
-                             for p in snapshot.glob(pattern)]
+                  weights = [name for name in ("model.safetensors", "pytorch_model.bin")
+                             if (snapshot / name).is_file()]
               return bool(weights) and all((snapshot / name).is_file() for name in weights)
 
           missing = []
