@@ -670,6 +670,31 @@ async def test_ordered_cancellation_skips_stopped_chunk_processing(processor_nam
 
 
 @pytest.mark.parametrize(
+    "router_hint", [None, {"protocol_version": "0.1", "actions": []}]
+)
+@pytest.mark.parametrize("supports_hints", [False, True])
+def test_native_generate_uses_only_router_hints(
+    monkeypatch, router_hint, supports_hints
+):
+    payload = {"kv_hints": {"caller_controlled": True}}
+    if not supports_hints:
+        monkeypatch.delitem(
+            GenerateReqInput.__dataclass_fields__, "kv_hints", raising=False
+        )
+    native = build_native_generate_request(
+        payload,
+        input_ids=[7],
+        request_id="internal",
+        priority=None,
+        kv_hint=router_hint,
+    )
+    assert getattr(native, "kv_hints", None) == (
+        router_hint if supports_hints else None
+    )
+    assert payload == {"kv_hints": {"caller_controlled": True}}
+
+
+@pytest.mark.parametrize(
     "body_salt,routing_salt,expected_salt",
     [
         (None, None, None),

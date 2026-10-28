@@ -657,6 +657,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prefill_dp_rank=routing.get("prefill_dp_rank"),
             lora_path=self._resolve_lora(request),
             cache_salt=request_cache_salt(request),
+            kv_hint=request.get("kv_hint"),
         )
         return native_generate_stream(self.engine, native_request)
 

@@ -221,6 +221,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 routed_dp_rank=dp_rank,
                 lora_path=lora_path,
                 cache_salt=request_cache_salt(inner_request),
+                kv_hint=inner_request.get("kv_hint"),
             )
             submitted_request_id = _ordered_cancellation_request_id(
                 sglang_request_id,
