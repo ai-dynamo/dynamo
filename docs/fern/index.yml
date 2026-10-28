@@ -92,6 +92,8 @@ navigation:
         contents:
         - page: Install Dynamo
           path: pages/kubernetes/installation/install-dynamo.md
+        - page: Install with AICR
+          path: pages/kubernetes/installation/install-with-aicr.md
         - page: Multinode Orchestration
           path: pages/kubernetes/installation/multinode-orchestration.md
         - page: Gateway API Inference Extension
@@ -1229,6 +1231,11 @@ navigation:
             contents:
               - page: API Reference (K8s)
                 path: pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
+
+      - page: Image Edits API
+        icon: image
+        path: pages/reference/api/image-edits.mdx
+        slug: api/image-edits
 
       - section: Components
         icon: sliders
