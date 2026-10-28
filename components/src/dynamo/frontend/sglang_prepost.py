@@ -1195,8 +1195,9 @@ def preprocess_chat_request(
     ``isolate_tool_call_markers`` tokenizes message content that contains the
     parser's tool-call delimiters without added-token matching, so the model
     cannot copy a delimiter token out of its input (see
-    :func:`encode_chat_prompt_isolating_markers`). It does not apply to the
-    DeepSeek-V4 encoder path.
+    :func:`encode_chat_prompt_isolating_markers`). Requests that take the
+    DeepSeek-V4 encoder path are rejected while it is enabled, because that
+    encoder cannot isolate delimiters yet.
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
@@ -1256,6 +1257,13 @@ def preprocess_chat_request(
         tool_call_parser_name=tool_call_parser_name,
         reasoning_parser_name=reasoning_parser_name,
     ):
+        if isolate_tool_call_markers:
+            # The DeepSeek-V4 encoder renders content itself; until it can
+            # isolate delimiters, reject rather than encode them unprotected.
+            raise PreprocessError(
+                "--isolate-tool-call-markers is not supported with the "
+                "DeepSeek-V4 prompt encoder"
+            )
         prompt_token_ids = _render_deepseek_v4_prompt_token_ids(
             request,
             messages=messages,
@@ -2073,7 +2081,6 @@ class SglangStreamingPostProcessor:
     def _merge_choices(
         acc: dict[str, Any] | None, choice: dict[str, Any] | None
     ) -> dict[str, Any] | None:
-        """Fold the choice of a later segment into the one emitted so far."""
         if choice is None:
             return acc
         if acc is None:

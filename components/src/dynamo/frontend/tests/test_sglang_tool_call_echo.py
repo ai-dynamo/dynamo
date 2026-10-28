@@ -511,3 +511,26 @@ class TestInputIsolation:  # FRONTEND.1
         messages = [{"role": "user", "content": INJECTED_CALL}]
         ids = _prompt_ids(tokenizer, messages, tools=None, parser=None)
         assert any(i in markers for i in ids)
+
+    def test_deepseek_v4_encoder_path_fails_closed(self):
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def apply_chat_template(self, *args, **kwargs):
+                raise AssertionError("apply_chat_template should not be called")
+
+            def encode(self, text, add_special_tokens=False):
+                raise AssertionError("the DeepSeek-V4 encoder must not run")
+
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        with pytest.raises(PreprocessError, match="DeepSeek-V4"):
+            preprocess_chat_request(
+                request,
+                tokenizer=NoTemplateTokenizer(),
+                tool_call_parser_name="deepseekv4",
+                reasoning_parser_name="deepseek-v4",
+                isolate_tool_call_markers=True,
+            )
