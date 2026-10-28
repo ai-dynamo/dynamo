@@ -23,8 +23,10 @@ matter. Accepting more lets a broken job through; accepting less fails a job
 the filters legitimately skipped. The allowlist is read only from an active
 `jq -e` call that the `needs` context is actually piped into, so a gate that
 has been commented out, quoted inside an `echo`, split from its input or given
-`-n` (which makes jq ignore that input) is reported as missing rather than
-trusted.
+`-n` (which makes jq ignore that input), or had its exit status swallowed by
+a trailing `|| true` or `continue-on-error` is reported as missing rather than
+trusted. A status-check job with no `needs` is rejected too: `all` over no
+results is vacuously true.
 
 Usage:
     python3 validate_ci_status_gates.py [repo_root]
@@ -64,7 +66,9 @@ def _commands(text):
 
     Newlines, `;`, `&&` and `||` separate commands, but only outside quotes: a
     jq program is single-quoted and routinely contains all of them. Yields
-    `(offset, command)` so callers can tell where each one started.
+    `(command, terminator)`, where the terminator is the separator that ended
+    the command (empty at the end of the block), so callers can tell a gate
+    whose exit status is swallowed by a trailing `||` from one that counts.
     """
     commands, start, quote, i = [], 0, None, 0
     while i < len(text):
@@ -82,14 +86,14 @@ def _commands(text):
         elif char in "'\"":
             quote = char
         elif char in "\n;":
-            commands.append((start, text[start:i]))
+            commands.append((text[start:i], char))
             start = i + 1
         elif text[i : i + 2] in ("&&", "||"):
-            commands.append((start, text[start:i]))
+            commands.append((text[start:i], text[i : i + 2]))
             i += 1
             start = i + 1
         i += 1
-    commands.append((start, text[start:]))
+    commands.append((text[start:], ""))
     return commands
 
 
@@ -124,10 +128,12 @@ def gate_allowlists(run):
     gates nothing and must not be mistaken for a gate that is missing.
     """
     allowlists = []
-    for _, command in _commands(COMMENT_LINE.sub("", run)):
+    for command, terminator in _commands(COMMENT_LINE.sub("", run)):
         context = NEEDS_CONTEXT.search(command)
         if not context:
             continue
+        if terminator == "||":
+            continue  # `gate || true` exits 0 whatever jq decided
         for call in JQ_CALL.finditer(command):
             if _quoted(command, call.start()):
                 continue  # printed, not run
@@ -165,8 +171,26 @@ def check_workflow(name, text, errors):
         if not job_id.endswith(STATUS_CHECK_SUFFIX) or not isinstance(job, dict):
             continue
         found += 1
+        # `all` over an empty array is true, so a gate with nothing in `needs`
+        # passes without checking a single job.
+        if not job.get("needs"):
+            errors.append(
+                f"{name}: job '{job_id}' has no needs; its gate is vacuously "
+                f"green because it aggregates no job results"
+            )
+            continue
         steps = job.get("steps") or []
-        runs = [s.get("run", "") for s in steps if isinstance(s, dict)]
+        if job.get("continue-on-error") is True:
+            errors.append(
+                f"{name}: job '{job_id}' sets continue-on-error, so a failed "
+                f"gate does not fail the required check"
+            )
+            continue
+        runs = [
+            s.get("run", "")
+            for s in steps
+            if isinstance(s, dict) and s.get("continue-on-error") is not True
+        ]
         allowlists = [m for run in runs for m in gate_allowlists(run)]
         if not allowlists:
             errors.append(
@@ -207,6 +231,7 @@ def run_tests():
 jobs:
   deploy-status-check:
     if: always()
+    needs: [deploy-test]
     steps:
       - name: Check all deploy test jobs
         run: |
@@ -230,6 +255,7 @@ jobs:
             """
 jobs:
   deploy-status-check:
+    needs: [deploy-test]
     steps:
       - run: echo ok
 """,
@@ -255,6 +281,7 @@ jobs:
             """
 jobs:
   deploy-status-check:
+    needs: [deploy-test]
     steps:
       - run: |
           # echo '${{ toJson(needs) }}' | jq -e 'all(. as $result | ["success", "skipped"] | any($result == .))'
@@ -267,6 +294,7 @@ jobs:
             """
 jobs:
   deploy-status-check:
+    needs: [deploy-test]
     steps:
       - run: echo 'would check ${{ toJson(needs) }} against ["success", "skipped"] | any($result == .)'
 """,
@@ -287,6 +315,7 @@ jobs:
             """
 jobs:
   deploy-status-check:
+    needs: [deploy-test]
     steps:
       - run: |
           echo '${{ toJson(needs) }}' >/dev/null
@@ -299,6 +328,7 @@ jobs:
             """
 jobs:
   deploy-status-check:
+    needs: [deploy-test]
     steps:
       - run: |
           echo "${{ toJson(needs) }} would be checked by jq -e 'all(. as $result | [\\"success\\", \\"skipped\\"] | any($result == .))'"
@@ -313,6 +343,37 @@ jobs:
                 "| any($result == .)'\n",
             ),
             [],
+        ),
+        (
+            "a gate with no needs is vacuously green",
+            good.replace("    needs: [deploy-test]\n", ""),
+            ["has no needs"],
+        ),
+        (
+            "|| true swallows the gate's exit status",
+            good.replace("any($result == .))'", "any($result == .))' || true"),
+            ["no parseable jq result allowlist"],
+        ),
+        (
+            "&& after the gate still counts",
+            good.replace("any($result == .))'", "any($result == .))' && echo ok"),
+            [],
+        ),
+        (
+            "continue-on-error on the gate step",
+            good.replace(
+                "      - name: Check all deploy test jobs\n",
+                "      - name: Check all deploy test jobs\n"
+                "        continue-on-error: true\n",
+            ),
+            ["no parseable jq result allowlist"],
+        ),
+        (
+            "continue-on-error on the gate job",
+            good.replace(
+                "    if: always()\n", "    if: always()\n    continue-on-error: true\n"
+            ),
+            ["sets continue-on-error"],
         ),
     ]
 
