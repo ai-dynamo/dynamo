@@ -18,6 +18,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/kubejournal"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/workload"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
@@ -45,23 +46,6 @@ type Adapter struct {
 	ReadinessScaleIn bool
 }
 
-// Allocation is one physical Pod in a stable Grove slot, independent of the members hosted there.
-type Allocation struct {
-	ReplicaID enginegroup.ReplicaID
-	SlotID    enginegroup.CapacitySlotID
-	Pod       enginegroup.CapacityRef
-	Ready     bool
-	Health    enginegroup.AllocationHealth
-}
-
-// Observation reports only physical capacity. Engine integrations add native-process bindings.
-type Observation struct {
-	AppliedRevision int64
-	Allocations     []Allocation
-	ReleaseFences   []enginegroup.ReleaseFence
-	ReleaseMode     enginegroup.CapacityReleaseMode
-}
-
 type journalState struct {
 	AppliedRevision int64                      `json:"appliedRevision"`
 	TargetDigest    string                     `json:"targetDigest"`
@@ -70,33 +54,33 @@ type journalState struct {
 }
 
 // Observe derives allocation identities from Grove's stable per-clique slots, not Pod names.
-func (a *Adapter) Observe(ctx context.Context, _ enginegroup.GroupID) (Observation, error) {
+func (a *Adapter) Observe(ctx context.Context, _ enginegroup.GroupID) (workload.Observation, error) {
 	// Refuse to reinterpret capacity after Grove recreates the bound clique.
 	clique, err := a.clique(ctx)
 	if err != nil {
-		return Observation{}, err
+		return workload.Observation{}, err
 	}
 	pods, err := a.pods(ctx)
 	if err != nil {
-		return Observation{}, err
+		return workload.Observation{}, err
 	}
 	state := journalState{}
 	_, err = a.Journal.Load(ctx, &state)
 	if err != nil {
-		return Observation{}, err
+		return workload.Observation{}, err
 	}
 	// Release proof is derived from durable acceptance and exact current UIDs without an observation-side write.
 	fences, err := observeReleaseFences(state, pods, clique.Spec.Replicas)
 	if err != nil {
-		return Observation{}, err
+		return workload.Observation{}, err
 	}
 
 	// Pod readiness is a physical input; the engine integration determines serving capacity and member health.
-	allocations := make([]Allocation, 0, len(pods))
+	allocations := make([]workload.Allocation, 0, len(pods))
 	for i := range pods {
 		allocation, err := a.allocation(&pods[i])
 		if err != nil {
-			return Observation{}, err
+			return workload.Observation{}, err
 		}
 		available := podAvailable(&pods[i])
 		health := enginegroup.AllocationHealthUnknown
@@ -106,6 +90,9 @@ func (a *Adapter) Observe(ctx context.Context, _ enginegroup.GroupID) (Observati
 			health = enginegroup.AllocationHealthHealthy
 		}
 		allocation.Ready, allocation.Health = available, health
+		if revision := pods[i].Labels[grovecommon.LabelPodTemplateHash]; revision != "" {
+			allocation.TemplateRevision = "grove-pod-template:" + revision
+		}
 		allocations = append(allocations, allocation)
 	}
 	sort.Slice(allocations, func(i, j int) bool {
@@ -115,8 +102,10 @@ func (a *Adapter) Observe(ctx context.Context, _ enginegroup.GroupID) (Observati
 	if a.ReadinessScaleIn {
 		mode = enginegroup.CapacityReleaseReadinessSteered
 	}
-	return Observation{AppliedRevision: state.AppliedRevision, Allocations: allocations, ReleaseFences: fences, ReleaseMode: mode}, nil
+	return workload.Observation{AppliedRevision: state.AppliedRevision, Allocations: allocations, ReleaseFences: fences, ReleaseMode: mode}, nil
 }
+
+var _ workload.Capacity = (*Adapter)(nil)
 
 // Apply accepts an absolute allocation target durably before writing the PodClique's Scale subresource.
 // Replays repair count drift without changing the template or creating Pods directly.
@@ -252,21 +241,21 @@ func (a *Adapter) pods(ctx context.Context) ([]corev1.Pod, error) {
 	return pods.Items, nil
 }
 
-func (a *Adapter) allocation(pod *corev1.Pod) (Allocation, error) {
+func (a *Adapter) allocation(pod *corev1.Pod) (workload.Allocation, error) {
 	// Only Grove's authoritative slot label and exact Pod UID establish identity.
 	owner := metav1.GetControllerOf(pod)
 	if owner == nil || owner.Kind != "PodClique" || owner.Name != a.Clique.Name ||
 		owner.UID != a.CliqueUID || owner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() || pod.UID == "" ||
 		pod.Labels[consts.KubeLabelDynamoEngineGroup] != a.GroupName ||
 		pod.Labels[consts.KubeLabelDynamoScaleRepresentative] != consts.KubeLabelDynamoScaleRepresentativeYes {
-		return Allocation{}, fmt.Errorf("Pod %s has an invalid Grove capacity binding", pod.Name)
+		return workload.Allocation{}, fmt.Errorf("Pod %s has an invalid Grove capacity binding", pod.Name)
 	}
 	literal := pod.Labels[grovecommon.LabelPodCliquePodIndex]
 	index, err := strconv.ParseInt(literal, 10, 32)
 	if err != nil || index < 0 || strconv.FormatInt(index, 10) != literal {
-		return Allocation{}, fmt.Errorf("Pod %s has an invalid Grove slot index %q", pod.Name, literal)
+		return workload.Allocation{}, fmt.Errorf("Pod %s has an invalid Grove slot index %q", pod.Name, literal)
 	}
-	return Allocation{
+	return workload.Allocation{
 		ReplicaID: enginegroup.ReplicaID("replica-" + literal),
 		SlotID:    enginegroup.CapacitySlotID("slot-" + literal),
 		Pod:       enginegroup.CapacityRef{Name: pod.Name, UID: enginegroup.PodUID(pod.UID)},

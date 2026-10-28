@@ -21,7 +21,7 @@ import (
 func TestReadinessReleaseWaitsForKubeletAndAcknowledgesOnlyExpectedUID(t *testing.T) {
 	t.Log("prepare two exact allocations and initialize missing retention gates through the compact cache")
 	fixture, victim, target := newReadinessReleaseFixture(t)
-	require.NoError(t, fixture.adapter.InitializeRetention(t.Context()))
+	require.NoError(t, fixture.adapter.Prepare(t.Context()))
 	require.NoError(t, fixture.client.Get(t.Context(), client.ObjectKeyFromObject(victim), victim))
 	assert.False(t, retentionClosed(victim))
 	projected := podcache.Project(victim.DeepCopy())
@@ -50,7 +50,7 @@ func TestReadinessReleaseWaitsForKubeletAndAcknowledgesOnlyExpectedUID(t *testin
 		return condition.Type == corev1.PodConditionType(consts.EngineGroupRetainedReadinessGate)
 	})
 	require.NoError(t, fixture.client.Status().Update(t.Context(), victim))
-	require.NoError(t, restarted.InitializeRetention(t.Context()))
+	require.NoError(t, restarted.Prepare(t.Context()))
 	require.NoError(t, fixture.client.Get(t.Context(), client.ObjectKeyFromObject(victim), victim))
 	require.True(t, retentionClosed(victim), "missing status must not reopen a durably accepted retirement")
 
@@ -85,7 +85,7 @@ func TestReadinessReleaseStopsOnAmbiguousOrUnexpectedVictims(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			t.Log("accept a UID-pinned release before introducing one unsafe selection condition")
 			fixture, victim, target := newReadinessReleaseFixture(t)
-			require.NoError(t, fixture.adapter.InitializeRetention(t.Context()))
+			require.NoError(t, fixture.adapter.Prepare(t.Context()))
 			result, err := fixture.adapter.Apply(t.Context(), "group", target)
 			require.NoError(t, err)
 			require.Nil(t, result.Rejection)
@@ -130,7 +130,7 @@ func TestReadinessReleaseStopsOnAmbiguousOrUnexpectedVictims(t *testing.T) {
 func TestReadinessReleaseRejectsLossOfRetainedCapacityAfterScale(t *testing.T) {
 	t.Log("write a scale-in only after the exact retired victim is observed NotReady")
 	fixture, victim, target := newReadinessReleaseFixture(t)
-	require.NoError(t, fixture.adapter.InitializeRetention(t.Context()))
+	require.NoError(t, fixture.adapter.Prepare(t.Context()))
 	_, err := fixture.adapter.Apply(t.Context(), "group", target)
 	require.NoError(t, err)
 	require.NoError(t, fixture.client.Get(t.Context(), client.ObjectKeyFromObject(victim), victim))

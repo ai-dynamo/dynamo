@@ -22,8 +22,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// InitializeRetention initializes only missing gates; it never reopens a gate closed for retirement.
-func (a *Adapter) InitializeRetention(ctx context.Context) error {
+// Prepare initializes only missing gates; it never reopens a gate closed for retirement.
+func (a *Adapter) Prepare(ctx context.Context) error {
 	// Only the explicitly selected readiness-steering realization owns this condition.
 	if !a.ReadinessScaleIn {
 		return nil
