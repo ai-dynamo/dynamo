@@ -27,11 +27,9 @@ async def run_lora_mutation(
     cancellation_requested = False
     while not task.done():
         try:
-            await asyncio.shield(task)
+            await asyncio.wait({task})
         except asyncio.CancelledError:
             cancellation_requested = True
-        except Exception:  # noqa: BLE001,S110 - inspect the task below
-            pass
     try:
         result = task.result()
     except (Exception, asyncio.CancelledError) as exc:  # mutation trust boundary
@@ -264,7 +262,7 @@ class AdminLoRALoadTransaction:
     async def _reserve_capacity(self) -> AdminLoRALoadResult | None:
         if self.old_info is not None:
             return None
-        lora_capacity = getattr(self.owner, "_lora_capacity", None)
+        lora_capacity = self.owner._lora_capacity
         reserved_id = await self.owner._reserve_admin_lora_slot(
             self.lora_name, lora_capacity
         )
