@@ -87,9 +87,9 @@ func TestVLLMComponentEngineGroupIdentity(t *testing.T) {
 func TestVLLMComponentEngineGroupRejectsUnsupportedDeclarations(t *testing.T) {
 	for _, scenario := range []string{
 		"multiple-worlds", "static-multinode", "legacy-scaler", "missing-main", "missing-command", "missing-image",
-		"missing-retention-gate", "automatic-restart", "host-network", "opaque-environment", "sidecar-gpus", "hidden-gpus",
+		"automatic-restart", "host-network", "opaque-environment", "sidecar-gpus", "hidden-gpus",
 		"fractional-gpus", "request-mismatch", "mismatched-initial-size", "policy-below-initial", "policy-above-reservation",
-		"missing-multiprocessing", "missing-drain-mode", "missing-frontend-mode", "missing-worker-identity", "Grove-shadow", "missing-restart-policy",
+		"missing-multiprocessing", "missing-drain-mode", "missing-frontend-mode", "missing-worker-identity", "missing-restart-policy",
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Log("introduce one unsupported property into a valid native declaration")
@@ -108,8 +108,6 @@ func TestVLLMComponentEngineGroupRejectsUnsupportedDeclarations(t *testing.T) {
 				main.Command = nil
 			case "missing-image":
 				main.Image = ""
-			case "missing-retention-gate":
-				component.PodTemplate.Spec.ReadinessGates = nil
 			case "automatic-restart":
 				component.PodTemplate.Spec.RestartPolicy = corev1.RestartPolicyAlways
 			case "host-network":
@@ -139,8 +137,6 @@ func TestVLLMComponentEngineGroupRejectsUnsupportedDeclarations(t *testing.T) {
 			case "missing-worker-identity":
 				main.Command = []string{"python3", "-m", "dynamo.vllm"}
 				main.Env[4] = corev1.EnvVar{Name: "DYNAMO_POD_UID", Value: "stale"}
-			case "Grove-shadow":
-				main.Env = append(main.Env, corev1.EnvVar{Name: "GROVE_PCLQ_POD_INDEX", Value: "0"})
 			case "missing-restart-policy":
 				component.PodTemplate.Spec.RestartPolicy = ""
 			}
@@ -179,6 +175,19 @@ func TestVLLMComponentEngineGroupRejectsUnsupportedControlEndpoints(t *testing.T
 			assert.Equal(t, before, component)
 		})
 	}
+}
+
+func TestVLLMNativeValidationDoesNotRequireGrove(t *testing.T) {
+	t.Log("declare native geometry without the Grove retention mechanism")
+	component := newVLLMComponentEngineGroupForTest()
+	component.PodTemplate.Spec.ReadinessGates = nil
+	before := component.DeepCopy()
+
+	t.Log("resolve the native profile but refuse the same declaration for readiness-steered Grove release")
+	_, _, err := ResolveVLLMComponentEngineGroup(component, nil)
+	require.NoError(t, err)
+	require.ErrorContains(t, RequireGroveEngineGroupRetentionGate(component.PodTemplate), "exactly one")
+	assert.Equal(t, before, component)
 }
 
 func TestVLLMWorkerInheritedEnvironmentMatchesRendering(t *testing.T) {

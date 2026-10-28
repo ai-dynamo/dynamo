@@ -59,13 +59,6 @@ const (
 // ErrRuntimeUnavailable means no production control-plane adapter can own this group.
 var ErrRuntimeUnavailable = errors.New("Engine Group runtime is unavailable")
 
-// ScalePlanResolution distinguishes executable work, a definitive target rejection, and no required operation.
-// An ordinary method error means resolution was inconclusive and none of these fields is authoritative.
-type ScalePlanResolution struct {
-	Plan      *domain.ResolvedPlan
-	Rejection *domain.Failure
-}
-
 // ScalePlanResolver resolves an absolute replica target into one immutable semantic plan.
 // Zero is reserved for deletion-driven whole-world retirement, never ordinary scaling.
 // Unsupported retirement must return a definitive rejection, not silently force capacity removal.
@@ -75,7 +68,7 @@ type ScalePlanResolver interface {
 		groupID domain.GroupID,
 		targetReplicas int32,
 		status domain.GroupStatus,
-	) (ScalePlanResolution, error)
+	) (domain.ScalePlanResolution, error)
 }
 
 // Runtime contains the typed adapters and immutable profile selected for one group.
@@ -762,7 +755,7 @@ func projectEngineGroupConditions(
 	setEngineGroupCondition(group, engineGroupConditionTargetReached, conditionStatus(targetReached),
 		chooseEngineGroupString(targetReached, "TargetReached", "TargetNotReached"),
 		chooseEngineGroupString(targetReached, "Engine membership reached the desired target", "Engine membership has not reached the desired target"))
-	allocationDegraded := engineGroupHasDegradedAllocation(group.Status.ReplicaStates)
+	allocationDegraded := engineGroupHasDegradedAllocation(status)
 	degraded := allocationDegraded ||
 		(engineGroupUnexpectedMembershipLoss(group, status) && !exactPlannedRetirementObserved(status))
 	setEngineGroupCondition(group, engineGroupConditionDegraded, conditionStatus(degraded),

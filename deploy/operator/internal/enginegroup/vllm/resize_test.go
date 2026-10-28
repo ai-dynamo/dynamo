@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/controlhttp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -122,7 +123,7 @@ func TestResizePreservesMixedFanoutEvidence(t *testing.T) {
 
 	t.Log("preserve successful peer evidence and the typed conflict without claiming rejection")
 	results, err := resize.Apply(t.Context())
-	var conflictErr *HTTPError
+	var conflictErr *controlhttp.HTTPError
 	require.ErrorAs(t, err, &conflictErr)
 	assert.Equal(t, http.StatusConflict, conflictErr.StatusCode)
 	require.Len(t, results, 2)

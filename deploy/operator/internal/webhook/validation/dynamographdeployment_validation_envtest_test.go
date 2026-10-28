@@ -375,7 +375,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).EngineGroup = &nvidiacomv1beta1.ComponentEngineGroupSpec{InitialSize: 2}
 			}),
-			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: Engine Groups require a supported SGLang or vLLM backend"},
+			wantWebhookErrs: []string{
+				"spec.components[1].engineGroup: Forbidden: Engine Groups require a supported SGLang or vLLM backend",
+				"spec.components[1].engineGroup: Forbidden: Engine Group podTemplate must declare exactly one dynamo.nvidia.com/retained readiness gate",
+			},
 		},
 		{
 			name: "initialSize must satisfy the template policy independently of world count",

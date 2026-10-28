@@ -7,7 +7,6 @@ package dynamo
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -21,9 +20,6 @@ func validateEngineGroupPodTemplate(template *corev1.PodTemplateSpec) error {
 	}
 	for _, container := range template.Spec.Containers {
 		for _, variable := range container.Env {
-			if strings.HasPrefix(variable.Name, "GROVE_") {
-				return fmt.Errorf("environment %s is supplied by Grove and cannot be shadowed in the Pod template", variable.Name)
-			}
 			if container.Name == consts.MainContainerName &&
 				(variable.Name == consts.DynamoRankEnvVar || variable.Name == consts.DynamoLeaderAddressEnvVar) {
 				return fmt.Errorf("environment %s is operator-owned topology and cannot be shadowed in the main container", variable.Name)
