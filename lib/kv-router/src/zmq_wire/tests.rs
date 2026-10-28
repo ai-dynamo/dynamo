@@ -25,7 +25,8 @@ fn trtllm_digest_first_images_match_frontend_hashes_across_blocks() {
     let event = serde_json::json!({
         "type": "BlockStored", "block_hashes": [100, 101], "parent_block_hash": null,
         "token_ids": [1, a, 1001, 1002, 1003, 9, b, 1001], "block_size": 4,
-        "trtllm_image_routing": {"version": 1, "token_id_offset": 1000, "keys": [[key_a.clone()], [key_a, key_b]]}
+        "mm_keys": [[key_a.clone()], [key_a, key_b]],
+        "trtllm_image_routing": {"version": 1, "token_id_offset": 1000}
     });
     let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
     let a = crate::protocols::pad_value_for_mm_hash(0x0123456789abcdef);
@@ -60,8 +61,8 @@ fn trtllm_invalid_image_metadata_fails_closed() {
     let digest = "a".repeat(64);
     let valid = serde_json::json!({
         "type": "BlockStored", "block_hashes": [100], "token_ids": [digest, 1001], "block_size": 2,
-        "trtllm_image_routing": {"version": 1, "token_id_offset": 1000,
-            "keys": [[{"hash": digest, "uuid": "dynamo-image-v1:0123456789abcdef"}]]}
+        "mm_keys": [[{"hash": digest, "uuid": "dynamo-image-v1:0123456789abcdef"}]],
+        "trtllm_image_routing": {"version": 1, "token_id_offset": 1000}
     });
     for (pointer, replacement) in [
         ("/trtllm_image_routing/version", serde_json::json!(2)),
@@ -73,17 +74,14 @@ fn trtllm_invalid_image_metadata_fails_closed() {
             "/trtllm_image_routing/token_id_offset",
             serde_json::json!("invalid"),
         ),
-        ("/trtllm_image_routing/keys", serde_json::json!([])),
+        ("/mm_keys", serde_json::json!([])),
+        ("/mm_keys", serde_json::json!(null)),
+        ("/mm_keys", serde_json::json!(17)),
+        ("/mm_keys", serde_json::json!([[{"hash": 17}]])),
+        ("/mm_keys/0/0/hash", serde_json::json!("b".repeat(64))),
+        ("/mm_keys/0/0/uuid", serde_json::json!("caller-identity")),
         (
-            "/trtllm_image_routing/keys/0/0/hash",
-            serde_json::json!("b".repeat(64)),
-        ),
-        (
-            "/trtllm_image_routing/keys/0/0/uuid",
-            serde_json::json!("caller-identity"),
-        ),
-        (
-            "/trtllm_image_routing/keys/0/0/uuid",
+            "/mm_keys/0/0/uuid",
             serde_json::json!("dynamo-image-v1:invalid"),
         ),
     ] {
@@ -100,15 +98,64 @@ fn trtllm_invalid_image_metadata_fails_closed() {
 }
 
 #[test]
-fn trtllm_unmapped_images_do_not_drop_subsequent_removals() {
+fn trtllm_unmapped_image_continuations_do_not_drop_subsequent_removals() {
     let event = serde_json::json!([0.0, [
-        {"type":"BlockStored", "block_hashes":[100], "token_ids":["a".repeat(64),1001], "block_size":2,
-         "trtllm_image_routing":{"version":1,"token_id_offset":1000,"keys":[[{"hash":"a".repeat(64),"uuid":null}]]}},
+        {"type":"BlockStored", "block_hashes":[100], "token_ids":[1003,1004], "block_size":2,
+         "mm_keys":[[{"hash":"a".repeat(64),"start_offset":3,"uuid":null}]],
+         "trtllm_image_routing":{"version":1,"token_id_offset":1000}},
         {"type":"BlockRemoved", "block_hashes":[100]}
     ], 0]);
     let batch = decode_event_batch(&to_vec_named(&event).unwrap()).unwrap();
     assert!(matches!(batch.events[0], RawKvEvent::Ignored));
     assert!(matches!(batch.events[1], RawKvEvent::BlockRemoved { .. }));
+}
+
+#[test]
+fn trtllm_routing_requires_sibling_keys_and_preserves_other_producers() {
+    for keys in [
+        serde_json::json!(null),
+        serde_json::json!(17),
+        serde_json::json!([]),
+    ] {
+        let mut event = serde_json::json!({
+            "type": "BlockStored", "block_hashes": [100],
+            "token_ids": [1003, 1004], "block_size": 2, "mm_keys": keys,
+        });
+        // Without the extension, mm_keys remains an unrelated producer field.
+        let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+        assert!(matches!(raw, RawKvEvent::BlockStored { .. }));
+        event["trtllm_image_routing"] = serde_json::json!({"version": 1, "token_id_offset": 1000});
+        let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+        assert!(matches!(raw, RawKvEvent::Ignored));
+        event.as_object_mut().unwrap().remove("mm_keys");
+        let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+        assert!(matches!(raw, RawKvEvent::Ignored));
+    }
+}
+
+#[test]
+fn trtllm_mapped_integer_continuation_uses_sibling_keys() {
+    let event = serde_json::json!({
+        "type": "BlockStored", "block_hashes": [101], "parent_block_hash": 100,
+        "token_ids": [1003, 1004], "block_size": 2,
+        "mm_keys": [[{"hash": "a".repeat(64), "start_offset": 3,
+            "uuid": "dynamo-image-v1:0123456789abcdef"}]],
+        "trtllm_image_routing": {"version": 1, "token_id_offset": 1000},
+    });
+    let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+    let RawKvEvent::BlockStored {
+        token_ids,
+        parent_block_hash,
+        ..
+    } = raw
+    else {
+        panic!("stored event expected");
+    };
+    assert!(parent_block_hash.is_some());
+    assert_eq!(
+        token_ids,
+        vec![crate::protocols::pad_value_for_mm_hash(0x0123456789abcdef); 2]
+    );
 }
 
 #[derive(Clone, Copy, Debug)]

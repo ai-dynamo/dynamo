@@ -58,6 +58,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut parent_block_hash: Option<Option<BlockHashValue>> = None;
         let mut token_ids: Option<MapTokenIds> = None;
         let mut trtllm_routing: Option<trtllm::RoutingMetadata> = None;
+        let mut mm_keys: Option<trtllm::RoutingKeys> = None;
         let mut block_size: Option<usize> = None;
         let mut medium: Option<Option<String>> = None;
         let mut lora_name: Option<Option<String>> = None;
@@ -82,6 +83,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 }
                 "token_ids" => {
                     token_ids = Some(map.next_value()?);
+                }
+                "mm_keys" => {
+                    mm_keys = map.next_value()?;
                 }
                 "trtllm_image_routing" => {
                     trtllm_routing = map.next_value()?;
@@ -153,10 +157,13 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                             MapTokenIds::DigestFirst(tokens) => tokens,
                             _ => return Ok(RawKvEvent::Ignored),
                         };
+                        let Some(trtllm::RoutingKeys::Fields(keys)) = mm_keys else {
+                            return Ok(RawKvEvent::Ignored);
+                        };
                         let Some(tokens) = trtllm::normalize(
                             tokens,
                             metadata.token_id_offset,
-                            metadata.keys,
+                            keys,
                             block_size,
                             block_hashes.len(),
                         ) else {

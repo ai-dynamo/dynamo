@@ -38,7 +38,13 @@ pub(super) enum RoutingMetadata {
 pub(super) struct RoutingFields {
     pub version: u32,
     pub token_id_offset: u32,
-    pub keys: Vec<Vec<MediaKey>>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(super) enum RoutingKeys {
+    Fields(Vec<Vec<MediaKey>>),
+    Ignored(serde::de::IgnoredAny),
 }
 
 /// Missing/evicted identities make only this stored event ineligible for indexing.
