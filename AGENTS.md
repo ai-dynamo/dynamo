@@ -63,6 +63,10 @@ When reviewing frontend or runtime changes, also read the corresponding
 [frontend review prompt](.github/review-prompts/frontend.md) or
 [runtime review prompt](.github/review-prompts/runtime.md) for additional CODEOWNERS guidance.
 
+Before adding or changing a metric, a log event, or a trace span, read
+[`.ai/metrics-guidelines.md`](.ai/metrics-guidelines.md). It decides between a metric, a log,
+and a trace, and sets the rules for names, labels, registration, stability, and documentation.
+
 Before changing request or response fields, validation, preprocessing, backend translation, or
 response projection, read the
 [protocol field handling contract](docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/protocol-field-handling.md).
@@ -182,7 +186,7 @@ Sibling repositories this repo integrates with:
 | `docs/fern/` | Fern docs site: `pages/` holds every page, the rest is site config (`index.yml`, `docs.yml`, `main.css`, `components/`, `scripts/`, `translations/`). Read [`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) before editing, and [`docs/fern/pages/AGENTS.md`](docs/fern/pages/AGENTS.md) before adding a page |
 | `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
-| `.ai/` | Agent topic guidelines: `ais-perf-model-guidelines.md` (canonical AISimulate interface), `bash-launch-guidelines.md`, `ci-guidelines.md`, `linear-ticket-refs.md`, `pytest-guidelines.md`, `python-guidelines.md`, `test-model-size-guardrails.md` |
+| `.ai/` | Agent topic guidelines: `ais-perf-model-guidelines.md` (canonical AISimulate interface), `bash-launch-guidelines.md`, `ci-guidelines.md`, `linear-ticket-refs.md`, `metrics-guidelines.md`, `pytest-guidelines.md`, `python-guidelines.md`, `test-model-size-guardrails.md` |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
 
 ## Build
