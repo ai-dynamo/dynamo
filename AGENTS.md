@@ -5,28 +5,15 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo — Agent Guide
 
-## Overview
-
-Dynamo is NVIDIA's open-source, datacenter-scale distributed inference framework. It is
-the orchestration layer **above** inference engines (SGLang, TensorRT-LLM, vLLM, TokenSpeed),
-not a replacement for them: it turns a cluster of GPUs into one coordinated inference system.
-Core capabilities are disaggregated prefill/decode serving, KV-aware routing, multi-tier
-KV cache management (KVBM: GPU → CPU → SSD → remote), SLA-driven autoscaling (Planner),
-in-flight fault tolerance, and a Kubernetes operator for deployment.
-
-The stack is deliberately layered and large. A **Rust core** (a Cargo workspace of
-twenty-plus crates, mostly under `lib/`) holds the runtime, LLM, routing, and
-KV-block-manager engines. A **Python
-extensibility layer** (the `ai-dynamo` wheel, bound to the Rust core through PyO3/maturin)
-holds the frontend, backends, planner, and profiler. A **Kubernetes layer** (`deploy/`)
-holds the operator, Helm charts, and gateway integration. Treat any change that crosses
-these boundaries as non-trivial.
+[`README.md`](README.md) explains what Dynamo is and what it supports. This guide covers
+working in the repo: where code lives, which skill fits a task, and how to build and test
+a change.
 
 ## Repository Map
 
 | Path | Contents |
 |------|----------|
-| `lib/` | Rust workspace crates: `runtime`, `llm`, `kv-router`, `kvbm-*`, `mocker`, `sidecar/*`, and more (see the root [`Cargo.toml`](Cargo.toml) `[workspace] members`), plus `bindings/python` — the PyO3 extension crate, built via maturin and deliberately excluded from the workspace |
+| `lib/` | Rust workspace crates: `runtime`, `llm`, `kv-router`, `kvbm-*`, `mocker`, `sidecar/*` (engine gRPC sidecars), and more (see the root [`Cargo.toml`](Cargo.toml) `[workspace] members`), plus `bindings/python` — the PyO3 extension crate, built via maturin and deliberately excluded from the workspace |
 | `components/src/dynamo/` | Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm`/`tokenspeed` backends, `mocker`, `profiler`, and more |
 | `deploy/` | Kubernetes `operator`, Helm charts, `inference-gateway` ext-proc, `observability` |
 | `container/` | Dockerfiles and build scripts for runtime and dev images |
@@ -43,10 +30,7 @@ Repositories this repo integrates with:
 
 | Repo | Role |
 |------|------|
-| [vLLM](https://github.com/vllm-project/vllm) | Inference engine; Dynamo backend in `components/src/dynamo/vllm/`, gRPC sidecar in `lib/sidecar/vllm/` |
-| [SGLang](https://github.com/sgl-project/sglang) | Inference engine; Dynamo backend in `components/src/dynamo/sglang/`, gRPC sidecar in `lib/sidecar/sglang/` |
-| [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) | Inference engine; Dynamo backend in `components/src/dynamo/trtllm/`, gRPC sidecar in `lib/sidecar/trtllm/` |
-| [TokenSpeed](https://github.com/lightseekorg/tokenspeed) | Inference engine; Dynamo backend in `components/src/dynamo/tokenspeed/` |
+| [vLLM](https://github.com/vllm-project/vllm), [SGLang](https://github.com/sgl-project/sglang), [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [TokenSpeed](https://github.com/lightseekorg/tokenspeed) | Inference engines that Dynamo serves |
 | [NIXL](https://github.com/ai-dynamo/nixl) | High-throughput inference data-transfer library (KV-cache transfer over RDMA/NVLink) that underpins disaggregated serving |
 | [AIPerf](https://github.com/ai-dynamo/aiperf) | Benchmarking and load-generation tool used by the benchmarking guides |
 | [AISimulate](https://pypi.org/project/aisimulate/) | Predicts serving behavior and searches deployment configurations offline without requiring a GPU cluster |
@@ -129,9 +113,9 @@ publishes the artifacts below; see
 
 | Artifact | Where |
 |----------|-------|
-| Runtime images | `nvcr.io/nvidia/ai-dynamo/{vllm,sglang,tensorrtllm}-runtime-nightly`, tag `latest` or `YYYYMMDD-<shortsha>`, plus a `-efa` variant of each |
+| Runtime images | `nvcr.io/nvidia/ai-dynamo/{vllm,sglang,tensorrtllm}-runtime-nightly`, tag `latest` or `YYYYMMDD-<shortsha>`; add `-efa` to either tag for the AWS EFA build |
 | Component images | `nvcr.io/nvidia/ai-dynamo/{kubernetes-operator,dynamo-frontend,dynamo-planner}-nightly` |
-| Python wheels | `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` on `https://pypi.nvidia.com/`: `uv pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo` |
+| Python wheels | `ai-dynamo` and `ai-dynamo-runtime` (Python 3.11+) on `https://pypi.nvidia.com/`: `uv pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo` |
 | Helm chart | `dynamo-platform-nightly` on NGC |
 | Stable and prerelease builds, Rust crates | [Release Artifacts](docs/fern/pages/reference/general/release-artifacts.mdx) |
 
@@ -140,22 +124,31 @@ version in an image, run `docker run --rm <image> pip show vllm`.
 
 ### Build from source
 
-System prerequisites (Rust toolchain, `uv`, system libraries) and the VS Code / Cursor
-devcontainer are covered in [the contribution guide](docs/fern/pages/community/contributing/overview.md).
+Install the system packages, Rust, and `uv` from
+[Building from Source](docs/fern/pages/developer-guide/advanced-customizations/building-from-source.md),
+plus:
+
+- **protoc 3.15 or newer.** Ubuntu 22.04's `protobuf-compiler` is 3.12, and the `dynamo-llm`
+  build fails on `relay.proto`. CI installs protoc 30.2 from the
+  [protobuf releases](https://github.com/protocolbuffers/protobuf/releases).
+- **Python 3.11 or newer.** `uv venv` finds or downloads one; Ubuntu 22.04's `python3` is 3.10.
 
 Python dev build (bindings + wheel, editable):
 
 ```bash
 uv venv .venv && source .venv/bin/activate
 uv pip install pip 'maturin[patchelf]'
-cd lib/bindings/python && maturin develop --uv && cd -
+cd lib/bindings/python
+maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3
+cd -
 uv pip install -e lib/gpu_memory_service
 uv pip install -e .
 python3 -m dynamo.frontend --help   # verify
 ```
 
-Python edits under `components/src/` take effect without a rebuild. After a Rust change
-that Python uses, rerun `maturin develop --uv` in `lib/bindings/python`.
+The features match the CI wheel. Without `kv-indexer`, router tests that start a standalone
+indexer fail. Python edits under `components/src/` take effect without a rebuild. After a
+Rust change that Python uses, rerun the `maturin develop` command.
 
 To work against an engine, build a `local-dev` image and mount your worktree into it.
 [`container/README.md`](container/README.md) describes every target.
@@ -171,17 +164,20 @@ container/run.sh --mount-workspace -it --image dynamo:latest-vllm-local-dev
 
 Most Rust builds wait on one serial chain of crates that ends in `dynamo-llm`. More
 cores, sccache, or a remote cache barely help; the cost is set by which crates you build
-and which test binaries you link. Approximate times on one workstation (October 2026),
-for relative cost:
+and which test binaries you link. Measured on a 24-core workstation (October 2026,
+rustc 1.96.1), for relative cost:
 
 | After you edit | Command | Time |
 |----------------|---------|------|
-| a sidecar | `cargo build -p dynamo-vllm-sidecar` | 7 s |
-| `dynamo-llm` | `cargo check -p dynamo-llm` | 16 s |
-| `dynamo-llm` | `cargo test -p dynamo-llm --test <name>` | 46 s |
-| `dynamo-llm` | `cargo test -p dynamo-llm --lib` | 61 s |
-| `dynamo-llm` | `cargo test -p dynamo-llm` (every target) | 75 s |
-| nothing, in a new worktree | the first sidecar build | 4 min |
+| `dynamo-kv-router` | `cargo check -p dynamo-kv-router` | 2 s |
+| `dynamo-kv-router` | `cargo test -p dynamo-kv-router --lib scheduling::` (277 tests) | 11 s |
+| a sidecar | `cargo build` with the sidecar `-p` set below | 10–15 s |
+| `dynamo-llm` | `cargo check -p dynamo-llm` | 17 s |
+| `dynamo-llm` | `cargo test -p dynamo-llm --test http-service`, build and run | 39 s |
+| `dynamo-llm` | `cargo test -p dynamo-llm --lib`: build, then run 3,731 tests | 70 s + 22 s |
+| `dynamo-llm` | `cargo test -p dynamo-llm`: build all 44 test targets, before running any | 97 s |
+| `dynamo-llm` | `maturin develop --uv` in `lib/bindings/python` | 94 s |
+| nothing, in a new worktree | first `dynamo-llm` test build / sidecar set / bindings | 4 / 5.5 / 5.6 min |
 
 The edit loop:
 
@@ -192,6 +188,7 @@ cargo check -p dynamo-kv-router
 # 2. Run only the tests you need: name one target, then filter by test path.
 cargo test -p dynamo-kv-router --lib scheduling::
 cargo test -p dynamo-llm --test http-service
+cargo test -p dynamo-llm --lib -- <name> <other_name>   # several filters at once
 
 # 3. Before you push, format and lint the crates you touched as CI does.
 cargo fmt --all
@@ -199,26 +196,28 @@ cargo clippy --locked --no-deps -p dynamo-kv-router --all-targets -- -D warnings
 ```
 
 - **Keep one `-p` set per area.** Cargo resolves features across the packages you name,
-  so switching between `-p a` and `-p a -p b` can recompile `dynamo-llm` with different
-  features. For the sidecars, always use
+  so each `-p` set gets its own build of the shared crates; the first build of a new set
+  costs a rebuild. For the sidecars, always use
   `-p dynamo-vllm-sidecar -p dynamo-sglang-sidecar -p dynamo-trtllm-sidecar -p dynamo-lpx-sidecar -p dynamo-sidecar-testkit`.
 - **Name the test target.** `cargo test -p dynamo-llm` with no target builds the unit-test
-  harness (a second compile of `dynamo-llm`), every integration-test binary, and the doc
-  tests. Use `--lib` or `--test <name>`.
+  harness (a second compile of `dynamo-llm`), all 44 test binaries, and the doc tests.
+  Use `--lib` or `--test <name>`.
 - **Keep build flags stable.** [`.cargo/config.toml`](.cargo/config.toml) sets the
-  `rustflags`. A `RUSTFLAGS` variable replaces them and recompiles every crate, and so
-  does a change to the dev profile or the toolchain. To make debug builds smaller, set
-  `CARGO_PROFILE_DEV_DEBUG=line-tables-only` once and leave it set.
+  `rustflags`. A `RUSTFLAGS` variable replaces them and recompiles every dependency, and
+  so does changing it back; a change to the dev profile or the toolchain does the same.
+  Set `CARGO_PROFILE_DEV_DEBUG=line-tables-only` once and leave it set: a cold
+  `dynamo-llm` test build took 4 min with it and 5.5 min with full debug info.
 - **Reuse your worktree.** A new worktree starts with an empty build cache; switching
   branches in an existing one rebuilds only the crates that changed.
 - **Measure performance on optimized builds.** Debug timings mean nothing. Use
   `--release` (`maturin develop --uv --release` for the bindings). To profile with perf or
   Nsight, build with `--profile profiling`, which is release with symbols;
   `-p dynamo-llm --features nvtx` adds NVTX ranges.
-- **Run the feature-gated lanes you touch.** CI also checks some crates with non-default
+- **Run only the feature lanes you touch.** CI also checks some crates with non-default
   features, such as `dynamo-llm --no-default-features` and
-  `dynamo-kv-router --features standalone-indexer`. The exact commands are in
-  [`.github/workflows/pre-merge.yml`](.github/workflows/pre-merge.yml).
+  `dynamo-kv-router --features standalone-indexer`; the exact commands are in
+  [`.github/workflows/pre-merge.yml`](.github/workflows/pre-merge.yml). Each feature set is
+  a separate build: `dynamo-llm --no-default-features` takes 4 min the first time.
 
 On macOS, run `dynamo-llm` checks and targeted tests with `--no-default-features` unless the
 target explicitly requires `block-manager`. The default feature enables Linux/CUDA-oriented NIXL,
@@ -226,26 +225,26 @@ NUMA, and `O_DIRECT` code that is not a valid general-purpose macOS validation p
 
 ### Python tests
 
+Run the tests that cover your change, by file or test ID; leave marker sweeps to CI.
+Use `python3 -m pytest` so the venv's pytest and packages are used.
+
 ```bash
-# Preview what a selection runs before you run it.
-pytest --collect-only -q -m "integration and pre_merge" tests/router
+# One test while you iterate, then the related tests in its file.
+python3 -m pytest "tests/router/test_router_e2e_with_mockers.py::test_router_decisions[local_indexer-tcp]" -q
+python3 -m pytest tests/router/test_router_e2e_with_mockers.py -k "test_router_decisions and not disagg" -q
 
-# No GPU: unit tests, then integration tests against dynamo.mocker workers.
-pytest -m "unit and pre_merge"
-pytest -m "integration and pre_merge"
+# GPU end to end: the same, on the backend's serve tests.
+python3 -m pytest tests/serve/test_vllm.py -k guided_decoding -s
 
-# Tests marked parallel-safe, spread across cores.
-pytest -m "pre_merge and parallel and gpu_0" -n auto --dist=loadscope
-
-# One test while you iterate.
-pytest tests/router/<file>.py -k <test_name>
-
-# GPU end to end, one backend at a time (also sglang, trtllm).
-pytest -m "vllm and e2e and gpu_1"
+# Before you push, list the pre-merge CPU tests in the area you changed.
+python3 -m pytest --collect-only -q -m "pre_merge and gpu_0" tests/router
 ```
 
 `dynamo.mocker` stands in for an engine, so router, planner, and frontend changes can be
-tested end to end without a GPU. Markers are strict (`--strict-markers`); the full marker
+tested end to end without a GPU. Outside the dev containers, install the test plugins with
+`uv pip install -r container/deps/requirements.test.txt`, and put `etcd` and `nats-server` on
+`PATH`: integration fixtures start their own instances. Tests download their Hugging Face
+model unless you pass `--models-dir`. Markers are strict (`--strict-markers`); the full marker
 list lives in [`pyproject.toml`](pyproject.toml) `[tool.pytest.ini_options]`, including GPU
 gating (`gpu_0` … `gpu_8`). Read [`tests/README.md`](tests/README.md),
 [`.ai/pytest-guidelines.md`](.ai/pytest-guidelines.md), and
