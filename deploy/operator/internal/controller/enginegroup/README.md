@@ -30,9 +30,9 @@ an adapter journal only when its external authority can retain and report the
 same evidence across the required restart boundary.
 
 `RecoveryRequired` pauses unsafe effects without rejecting or canceling the native
-operation. Observation faults are checked again on each pass. Invocation-only
-faults remain in the checkpoint's blocked transition until a validated recovery
-plan or fenced world restart replaces them. Fresh serving evidence is independent
+operation. Persistent faults are reported by fresh observations, and adapters
+revalidate safety before every effect. Invocation errors remain retryable without
+overwriting native results or blocking their interpretation. Fresh serving evidence is independent
 of that diagnosis; failed observations cannot refresh health or stability history.
 Known pending state uses bounded polling, while unexpected errors use controller
 backoff. Capacity observations, not engine flags, report the release mechanism.

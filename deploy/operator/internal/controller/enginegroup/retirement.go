@@ -37,7 +37,7 @@ func (r *Reconciler) reconcileEngineGroupRetirement(
 	result, reconcileErr := coordinator.Reconcile(ctx, engineGroupID(group), plan, checkpoint.State)
 	var observationErr *domain.ObservationError
 	errors.As(reconcileErr, &observationErr)
-	recoveryRequired := errors.Is(reconcileErr, domain.ErrRecoveryRequired) || result.Status.Transition.RequiresRecovery()
+	recoveryRequired := errors.Is(reconcileErr, domain.ErrRecoveryRequired)
 	next, err := checkpoint.advance(group, runtime.Profile, result.Status, plan, false, observationErr == nil && !recoveryRequired)
 	if err != nil {
 		return r.reconcileCheckpointFailure(ctx, group, err)
