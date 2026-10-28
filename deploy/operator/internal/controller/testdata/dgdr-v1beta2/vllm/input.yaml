@@ -10,10 +10,6 @@ spec:
     name: Qwen/Qwen3-32B
   backends:
     - vllm
-  hardware:
-    gpu:
-      sku: h200_sxm
-      budget: 2
   workload:
     static:
       inputTokens: 1024

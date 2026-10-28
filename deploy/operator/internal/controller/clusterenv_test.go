@@ -9,6 +9,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 	grovemock "github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/mocks/grove"
 	lwsmock "github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/mocks/lws"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorchart"
+	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
@@ -36,6 +38,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/rest"
@@ -47,6 +50,19 @@ import (
 )
 
 var clusterTestEnv *clusterenv.Env
+
+type clusterTestHardwareDiscoverer struct{}
+
+func (clusterTestHardwareDiscoverer) Discover(context.Context, nvidiacomv1beta1.GPUSKUType) (*gpu.GPUInfo, error) {
+	// Model two H200 node shapes where only the homogeneous 8-GPU shape is executable.
+	return &gpu.GPUInfo{
+		System:            nvidiacomv1beta1.GPUSKUTypeH200SXM,
+		GPUsPerNode:       8,
+		NodesWithGPUs:     2,
+		TotalGPUs:         12,
+		SelectedShapeGPUs: 8,
+	}, nil
+}
 
 func runClusterTests(m *testing.M, prepare func(context.Context, client.Client) (func(context.Context) error, error)) int {
 	if prepare != nil {
@@ -62,7 +78,7 @@ func runClusterTests(m *testing.M, prepare func(context.Context, client.Client) 
 	operatorConfig := &configv1alpha1.OperatorConfiguration{}
 	configv1alpha1.SetDefaultsOperatorConfiguration(operatorConfig)
 	operatorConfig.GPU.DiscoveryEnabled = ptr.To(false)
-	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true, DisaggregatedSet: true}}
+	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true, DisaggregatedSet: true, GPUDiscovery: true}}
 	additionalAdmission := lwsmock.Configurations()
 	groveAdmission := grovemock.Configurations()
 	additionalAdmission.Mutating = append(additionalAdmission.Mutating, groveAdmission.Mutating...)
@@ -89,6 +105,9 @@ func runClusterTests(m *testing.M, prepare func(context.Context, client.Client) 
 				RuntimeConfig:     runtimeConfig,
 				OperatorVersion:   operatorVersion,
 				OperatorPrincipal: "system:serviceaccount:dynamo-system:dynamo-operator",
+				DGDRV1beta2: webhookdefaulting.DGDRV1beta2Options{
+					Hardware: clusterTestHardwareDiscoverer{},
+				},
 			}); err != nil {
 				return err
 			}
@@ -357,6 +376,11 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			if err := env.Client().Get(ctx, client.ObjectKeyFromObject(&objects[0]), request); err != nil {
 				t.Fatalf("get admitted v1beta2 DGDR: %v", err)
 			}
+			require.NotNil(t, request.Spec.Hardware, "admitted Request has no hardware default")
+			require.NotNil(t, request.Spec.Hardware.GPU, "admitted Request has no GPU default")
+			require.Equal(t, "h200_sxm", ptr.Deref(request.Spec.Hardware.GPU.SKU, ""))
+			require.Equal(t, int32(8), ptr.Deref(request.Spec.Hardware.GPU.Budget, 0),
+				"admission must use the selected 8-GPU node shape, not the 12-GPU inventory")
 
 			t.Log("Watch every Run transition before starting the production controllers")
 			watchClient, err := client.NewWithWatch(env.RESTConfig(), client.Options{Scheme: newClusterTestScheme()})
@@ -365,13 +389,14 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			require.NoError(t, err)
 			defer runWatch.Stop()
 
-			t.Log("Provide the Run controller the discovered node shape represented by the explicit Request hardware")
+			t.Log("Provide the Run controller the same heterogeneous inventory resolved by Request admission")
 			hardwareCache := gpu.NewGPUDiscoveryCache()
 			hardwareCache.Set(nvidiacomv1beta1.GPUSKUTypeH200SXM, &gpu.GPUInfo{
-				System:        nvidiacomv1beta1.GPUSKUTypeH200SXM,
-				GPUsPerNode:   8,
-				NodesWithGPUs: 1,
-				TotalGPUs:     8,
+				System:            nvidiacomv1beta1.GPUSKUTypeH200SXM,
+				GPUsPerNode:       8,
+				NodesWithGPUs:     2,
+				TotalGPUs:         12,
+				SelectedShapeGPUs: 8,
 			}, time.Hour)
 
 			t.Log("Start the production Request, Run, AISimulate Job, and publisher chain")
@@ -419,6 +444,10 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			require.NotNil(t, completedRun.Status.Progress.Candidates, "completed Run has no candidate progress")
 			require.Equal(t, int32(1), completedRun.Status.Progress.Candidates.Published)
 			require.Len(t, completedRun.Status.CandidateRefs, 1)
+			require.NotNil(t, completedRun.Spec.Hardware)
+			require.NotNil(t, completedRun.Spec.Hardware.GPU)
+			require.Equal(t, int32(8), ptr.Deref(completedRun.Spec.Hardware.GPU.Budget, 0),
+				"immutable Run snapshot lost the admitted selected-shape budget")
 
 			t.Log("Verify the Job consumed the immutable input recorded in Run status")
 			require.NotNil(t, completedRun.Status.JobRef, "completed Run has no Job reference")
@@ -448,6 +477,8 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			configInput, err := dgdrRunStatusInput(executionConfig.Data[dgdrRunInputKey])
 			require.NoError(t, err)
 			require.JSONEq(t, string(completedRun.Status.AISimulate.Input.Raw), string(configInput.Raw))
+			require.Equal(t, int64(8), aisimulateHardwareBudget(t, completedRun.Status.AISimulate.Input.Raw),
+				"lowered AISimulate input lost the selected-shape budget")
 
 			t.Log("Verify the Candidate is a real API object controlled by the immutable Run")
 			require.True(t, metav1.IsControlledBy(&completedRun, request), "Run is not controlled by its Request")
@@ -457,11 +488,43 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			require.True(t, metav1.IsControlledBy(&candidates.Items[0], &completedRun), "Candidate is not controlled by its Run")
 			require.Equal(t, completedRun.Status.CandidateRefs[0].Name, candidates.Items[0].Name)
 			require.NotEmpty(t, candidates.Items[0].Spec.Components, "Candidate has no materialized DGD components")
+			require.LessOrEqual(t, candidateUsedGPUs(t, candidates.Items[0].Status.Metrics), int64(8),
+				"Candidate exceeds the selected-shape GPU budget")
 
 			t.Log("Match the published Candidate API contract against the reviewed golden")
 			golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
 		})
 	}
+}
+
+func aisimulateHardwareBudget(t *testing.T, raw []byte) int64 {
+	t.Helper()
+
+	// Decode only the effective-input field whose value this end-to-end test follows.
+	var input struct {
+		Optimization struct {
+			Constraints struct {
+				MaxCandidateGPUs int64 `json:"max_candidate_gpus"`
+			} `json:"constraints"`
+		} `json:"optimization"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &input))
+	require.Positive(t, input.Optimization.Constraints.MaxCandidateGPUs,
+		"effective AISimulate input has no positive max_candidate_gpus")
+	return input.Optimization.Constraints.MaxCandidateGPUs
+}
+
+func candidateUsedGPUs(t *testing.T, metrics *runtime.RawExtension) int64 {
+	t.Helper()
+	require.NotNil(t, metrics, "Candidate has no metrics")
+
+	// Decode only the Candidate resource accounting needed to enforce the selected budget.
+	var decoded struct {
+		UsedGPUs int64 `json:"usedGpus"`
+	}
+	require.NoError(t, json.Unmarshal(metrics.Raw, &decoded))
+	require.Positive(t, decoded.UsedGPUs, "Candidate metrics have no positive usedGpus")
+	return decoded.UsedGPUs
 }
 
 func getOnlyClusterDGD(t *testing.T, ctx context.Context, c client.Client, namespace string) *nvidiacomv1beta1.DynamoGraphDeployment {
