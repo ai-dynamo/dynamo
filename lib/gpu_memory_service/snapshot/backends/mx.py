@@ -19,7 +19,10 @@ agree on size. The checkpoint's shard files are not read.
 from __future__ import annotations
 
 import logging
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as pkg_version
 from typing import Any, Dict, Mapping, Sequence
 
 from gpu_memory_service.snapshot.transfer import (
@@ -46,9 +49,6 @@ def source_identity(source_key: str):
     were captured in, and the restore checks every allocation's size. So the
     key stands in for the model name and every other field keeps its default.
     """
-    from importlib.metadata import PackageNotFoundError
-    from importlib.metadata import version as pkg_version
-
     from modelexpress import p2p_pb2
 
     try:
@@ -94,8 +94,6 @@ def mx_load_context(
     **overrides,
 ):
     """A ModelExpress load context whose engine is a set of GMS allocations."""
-    import uuid
-
     import torch
     from modelexpress.adapter import EngineAdapter
     from modelexpress.load_strategy.context import LoadContext
