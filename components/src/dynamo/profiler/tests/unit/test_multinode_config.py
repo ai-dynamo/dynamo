@@ -4,8 +4,8 @@
 """Unit tests for multinode placement derived from worker CLI arguments."""
 
 import pytest
-
 from dynamo.profiler.utils.config import Component, set_multinode_config
+from dynamo.profiler.utils.config_modifiers.sglang import SGLangConfigModifier
 
 pytestmark = [
     pytest.mark.unit,
@@ -92,3 +92,65 @@ def test_no_parallelism_args_falls_back_to_supplied_gpu_count() -> None:
     set_multinode_config(component, gpu_count=16, num_gpus_per_node=8)
 
     assert _node_count(component) == 2
+
+
+def _config_with_worker_args(args: list[str], node_count: int = 2) -> dict:
+    return {
+        "metadata": {"name": "test"},
+        "spec": {
+            "components": [
+                {
+                    "name": "decode",
+                    "type": "decode",
+                    "multinode": {"nodeCount": node_count},
+                    "podTemplate": {
+                        "spec": {"containers": [{"name": "main", "args": args}]}
+                    },
+                }
+            ]
+        },
+    }
+
+
+def _decode_component(config: dict) -> dict:
+    return next(
+        component
+        for component in config["spec"]["components"]
+        if component.get("type") == "decode"
+    )
+
+
+def _decode_args(config: dict) -> list[str]:
+    containers = _decode_component(config)["podTemplate"]["spec"]["containers"]
+    return next(c["args"] for c in containers if c.get("name") == "main")
+
+
+def test_tp_size_modifier_places_for_the_rewritten_size() -> None:
+    """The SGLang TP modifier must place for the new size, not the old args."""
+    config = _config_with_worker_args(["--tp-size", "8"])
+
+    result = SGLangConfigModifier.set_config_tp_size(config, 16, num_gpus_per_node=8)
+
+    args = _decode_args(result)
+    assert args[args.index("--tp") + 1] == "16"
+    assert "--tp-size" not in args
+    # TP 16 needs two 8-GPU nodes; the old --tp-size 8 fit on one.
+    assert _decode_component(result).get("multinode") == {"nodeCount": 2}
+
+
+def test_tep_size_modifier_places_for_the_rewritten_size() -> None:
+    """The SGLang TEP modifier must place for the new size, not the old args."""
+    config = _config_with_worker_args(["--tp-size", "8"])
+
+    result = SGLangConfigModifier.set_config_tep_size(config, 16, 8)
+
+    assert _decode_component(result).get("multinode") == {"nodeCount": 2}
+
+
+def test_dep_size_modifier_places_for_the_rewritten_size() -> None:
+    """The SGLang DEP modifier must place for the new size, not the old args."""
+    config = _config_with_worker_args(["--tp-size", "8"])
+
+    result = SGLangConfigModifier.set_config_dep_size(config, 16, 8)
+
+    assert _decode_component(result).get("multinode") == {"nodeCount": 2}
