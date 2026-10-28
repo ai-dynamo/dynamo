@@ -336,6 +336,16 @@ const (
 	TransitionOutcomeCompleted TransitionOutcome = "Completed"
 )
 
+// TransitionBlockKind identifies coordinator-owned blocking semantics independently of diagnostic failure reasons.
+type TransitionBlockKind string
+
+const (
+	// TransitionBlockKindMembershipAuthority permits resumption when correlated membership authority returns.
+	TransitionBlockKindMembershipAuthority TransitionBlockKind = "MembershipAuthority"
+	// TransitionBlockKindSubsystemFailure retains a definitive preflight, capacity, traffic, or serving failure.
+	TransitionBlockKindSubsystemFailure TransitionBlockKind = "SubsystemFailure"
+)
+
 // TransitionStatus owns one immutable transition and its independent verification progress.
 type TransitionStatus struct {
 	Spec            TransitionSpec
@@ -343,6 +353,7 @@ type TransitionStatus struct {
 	TargetPreflight PreflightStatus
 	Verification    VerificationStatus
 	Outcome         TransitionOutcome
+	BlockKind       TransitionBlockKind
 	Failure         *Failure
 	StartedAt       time.Time
 	UpdatedAt       time.Time
