@@ -463,6 +463,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			allErrs = append(allErrs, v.validateComponentEngineGroupSpec(component.EngineGroup, componentPath.Child("engineGroup"), componentEngineGroupSpecValidationOptions{
 				component: component, backendFramework: spec.BackendFramework, parentEnv: spec.Env,
 				hasRootOverride: spec.ProviderOverride != nil,
+				grovePathway:    opts.grovePathway,
 			})...)
 		}
 
