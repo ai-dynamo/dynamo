@@ -1,15 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
-
 use anyhow::Result;
-use dynamo_kv_router::{
-    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    scheduling::queue::BookingHandle,
-};
+use dynamo_kv_router::protocols::{WorkerId, WorkerWithDpRank};
 
 use super::{PrefillError, PrefillLifecycleState, PrefillRouter};
+use crate::{
+    kv_router::{RouteBooking, RouteRequest},
+    protocols::common::timing::RequestPhase,
+};
 
 /// A prefill booking that owns cleanup of the exact scheduler attempt it admitted.
 ///
@@ -21,7 +20,7 @@ use super::{PrefillError, PrefillLifecycleState, PrefillRouter};
 pub struct PrefillReservation {
     worker: WorkerWithDpRank,
     dp_rank: Option<u32>,
-    booking: Option<BookingHandle>,
+    booking: Option<RouteBooking>,
 }
 
 impl PrefillReservation {
@@ -36,7 +35,7 @@ impl PrefillReservation {
     /// Release this booking and wait for the scheduler to acknowledge it.
     pub async fn release(mut self) -> Result<()> {
         if let Some(booking) = self.booking.take() {
-            booking.release().await?;
+            booking.release().await;
         }
         Ok(())
     }
@@ -45,27 +44,18 @@ impl PrefillReservation {
 impl PrefillRouter {
     /// Select a prefill worker and reserve it when KV routing is enabled.
     ///
-    /// If this future is dropped while queued, the scheduler retracts its
-    /// pending admission. After success, the returned reservation owns the
-    /// exact scheduler booking and enqueues cleanup when dropped; explicit
-    /// release waits for that cleanup to be acknowledged. Built-in modes retain
-    /// their existing advisory selection semantics and return an untracked
-    /// reservation.
-    #[expect(clippy::too_many_arguments)]
+    /// KV routing admits through the prefill host's `plan_kv_route`, the same
+    /// selection the frontend's prefill hop uses. If this future is dropped
+    /// while queued, the scheduler retracts its pending admission. After
+    /// success, the returned reservation owns the booking and enqueues cleanup
+    /// when dropped; explicit release waits for that cleanup to be
+    /// acknowledged. Built-in modes retain their existing advisory selection
+    /// semantics and return an untracked reservation.
     pub async fn reserve_prefill_worker(
         &self,
-        reservation_id: &str,
-        token_ids: &[u32],
-        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
-        lora_name: Option<String>,
-        cache_namespace: Option<String>,
-        priority_jump: f64,
-        strict_priority: u32,
-        policy_class: Option<String>,
-        allowed_worker_ids: Option<HashSet<WorkerId>>,
-        routing_constraints: RoutingConstraints,
+        request: &dyn RouteRequest,
     ) -> Result<PrefillReservation> {
-        if reservation_id.is_empty() {
+        if request.engine_context().id().is_empty() {
             anyhow::bail!("prefill reservation ID must not be empty");
         }
         if self.lifecycle_state() != PrefillLifecycleState::Active {
@@ -76,7 +66,7 @@ impl PrefillRouter {
             .load_full()
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
         let router = &binding.router;
-        let Some(chooser) = router.kv_router_if_enabled() else {
+        if router.kv_router_if_enabled().is_none() {
             let worker_id = router
                 .peek_next_worker()
                 .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
@@ -85,49 +75,14 @@ impl PrefillRouter {
                 dp_rank: None,
                 booking: None,
             });
-        };
-        let admitted = chooser
-            .find_best_match_details_with_policy_class_admitted(
-                Some(reservation_id),
-                token_ids,
-                block_mm_infos,
-                None,
-                true,
-                false,
-                lora_name,
-                cache_namespace,
-                priority_jump,
-                strict_priority,
-                policy_class,
-                None,
-                None,
-                None,
-                allowed_worker_ids,
-                routing_constraints,
-            )
-            .await?;
-        let (outcome, booking) = admitted.into_parts();
-        match outcome {
-            crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
-                let Some(booking) = booking else {
-                    anyhow::bail!("prefill reservation admission did not return a booking");
-                };
-                Ok(PrefillReservation {
-                    worker,
-                    dp_rank: Some(worker.dp_rank),
-                    booking: Some(booking),
-                })
-            }
-            crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
-                anyhow::bail!(
-                    "prefill router policy-class queue rejection: policy_class={}, limit_kind={}, current={}, limit={}",
-                    rejection.policy_class,
-                    rejection.limit_kind,
-                    rejection.current,
-                    rejection.limit,
-                )
-            }
         }
+        let plan = router.plan_kv_route(request, RequestPhase::Prefill).await?;
+        let worker = plan.worker();
+        Ok(PrefillReservation {
+            worker,
+            dp_rank: Some(worker.dp_rank),
+            booking: Some(plan.into_booking()),
+        })
     }
 }
 
@@ -158,7 +113,10 @@ mod tests {
     use futures::StreamExt;
     use tokio::sync::watch;
 
+    use std::collections::HashSet;
+
     use super::*;
+    use crate::kv_router::route_request::TestRouteRequest;
     use crate::{
         discovery::ModelManager,
         kv_router::prefill_router::PrefillBinding,
@@ -527,35 +485,13 @@ mod tests {
     async fn prefill_reservation_cleans_exact_bookings_after_rebind() {
         let (router, original_chooser) = tracked_prefill_router().await;
         let reservation = router
-            .reserve_prefill_worker(
-                "epp-prefill/rebind",
-                &[1u32; 64],
-                None,
-                None,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                RoutingConstraints::default(),
-            )
+            .reserve_prefill_worker(&TestRouteRequest::new("epp-prefill/rebind", &[1u32; 64]))
             .await
             .unwrap();
 
         assert!(reservation.dp_rank().is_some());
         let dropped_reservation = router
-            .reserve_prefill_worker(
-                "epp-prefill/drop",
-                &[1u32; 64],
-                None,
-                None,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                RoutingConstraints::default(),
-            )
+            .reserve_prefill_worker(&TestRouteRequest::new("epp-prefill/drop", &[1u32; 64]))
             .await
             .unwrap();
 
@@ -605,18 +541,7 @@ mod tests {
         .await;
 
         let reservation = prefill_router
-            .reserve_prefill_worker(
-                "non-kv-reservation",
-                &[1, 2, 3],
-                None,
-                None,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                RoutingConstraints::default(),
-            )
+            .reserve_prefill_worker(&TestRouteRequest::new("non-kv-reservation", &[1, 2, 3]))
             .await
             .unwrap();
         assert_eq!(reservation.worker_id(), expected_workers[0]);

@@ -65,6 +65,7 @@ pub mod plugins;
 pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
+pub mod route_request;
 mod routing_host;
 pub(crate) mod routing_load;
 pub mod sequence;
@@ -79,7 +80,8 @@ pub use plugins::{
     router_plugin_registry as worker_selection_policy_registry,
 };
 pub use prefill_router::PrefillRouter;
-pub use routing_host::{KvPushRouter, RoutingHost};
+pub use route_request::RouteRequest;
+pub use routing_host::{KvPushRouter, RouteBooking, RoutePlan, RoutingHost};
 pub use routing_load::{
     ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,
 };

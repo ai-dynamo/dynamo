@@ -163,7 +163,7 @@ fn is_migratable_for_request(
         return false;
     }
 
-    let allows_phase = |phase| match explicit_target(request, phase) {
+    let allows_phase = |phase| match explicit_target(request.routing.as_ref(), phase) {
         Ok(None) => true,
         Ok(Some(target)) => {
             tracing::debug!(

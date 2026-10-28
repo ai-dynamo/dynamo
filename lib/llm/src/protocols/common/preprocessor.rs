@@ -126,8 +126,9 @@ pub struct TraceLink {
 /// Frontend-local state shared by every attempt from one migration manager.
 /// The selected router records a failed worker before the error is exposed;
 /// later attempts use the accumulated set as an attempt-local exclusion.
+/// Opaque outside this crate; it is public only so `RouteRequest` can name it.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct MigrationState {
+pub struct MigrationState {
     inner: Arc<OnceLock<Mutex<MigrationStateInner>>>,
 }
 

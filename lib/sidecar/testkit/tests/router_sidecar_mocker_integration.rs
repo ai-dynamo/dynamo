@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, FinishReason, LLMEngine};
 use dynamo_llm::discovery::{LoadThresholdHandle, ModelManager};
-use dynamo_llm::kv_router::PrefillRouter;
+use dynamo_llm::kv_router::{PrefillRouter, RouteRequest};
 use dynamo_llm::model_card::TokenizerKind;
 use dynamo_llm::session_affinity::SessionAffinityMode;
 use dynamo_llm::worker_type::WorkerType;
@@ -673,22 +673,43 @@ async fn sigterm_withdraws_worker_and_releases_active_native_request<F: ProcessF
     peer.shutdown().await;
 }
 
+/// A route request made only of an id and prompt tokens.
+struct TokenRouteRequest {
+    context: Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
+    token_ids: Vec<u32>,
+}
+
+impl TokenRouteRequest {
+    fn new(id: &str, token_ids: &[u32]) -> Self {
+        Self {
+            context: Arc::new(dynamo_runtime::pipeline::context::Controller::new(
+                id.to_string(),
+            )),
+            token_ids: token_ids.to_vec(),
+        }
+    }
+}
+
+impl RouteRequest for TokenRouteRequest {
+    fn engine_context(&self) -> Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext> {
+        Arc::clone(&self.context)
+    }
+
+    fn routing_tokens(
+        &self,
+    ) -> (
+        &[u32],
+        Option<&[Option<dynamo_llm::kv_router::protocols::BlockExtraInfo>]>,
+    ) {
+        (&self.token_ids, None)
+    }
+}
+
 async fn ready(router: &PrefillRouter) {
     bounded("real PrefillRouter availability", async {
         loop {
             if let Ok(reservation) = router
-                .reserve_prefill_worker(
-                    "ready",
-                    &[11, 22, 33, 44],
-                    None,
-                    None,
-                    None,
-                    0.0,
-                    0,
-                    None,
-                    None,
-                    Default::default(),
-                )
+                .reserve_prefill_worker(&TokenRouteRequest::new("ready", &[11, 22, 33, 44]))
                 .await
             {
                 reservation.release().await.unwrap();
