@@ -2321,6 +2321,91 @@ class TestRoutedEnginePath:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "outputs",
+        [
+            # (text, worker finish reason) per choice: both stop locally.
+            (("hello STOP", None), ("world STOP", None)),
+            # The worker ends one choice before the other stops locally.
+            (("hello", "length"), ("world STOP", None)),
+        ],
+    )
+    async def test_local_stop_of_every_choice_stops_reading_worker(
+        self, tokenizer, outputs
+    ):
+        """Once every choice is done, a locally stopped one is not read to EOS."""
+        import dynamo.frontend.vllm_processor as module
+
+        request = {"model": MODEL, "messages": [{"role": "user", "content": "Hello"}]}
+        sampling_params = SamplingParams(
+            n=len(outputs),
+            max_tokens=16,
+            stop=["STOP"],
+            output_kind=module.RequestOutputKind.DELTA,
+        )
+        tokens = tokenizer.encode("Hello", add_special_tokens=False)
+        vllm_preproc = module.EngineCoreRequest(
+            request_id="internal",
+            external_req_id="external",
+            prompt_token_ids=tokens,
+            mm_features=None,
+            sampling_params=sampling_params,
+            pooling_params=None,
+            arrival_time=0.0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+        )
+        posts = {
+            index: StreamingPostProcessor(
+                tokenizer=tokenizer,
+                request_for_sampling=prepost_module.ChatCompletionRequest.model_validate(
+                    request
+                ),
+                sampling_params=sampling_params,
+                prompt_token_ids=tokens,
+                tool_parser=None,
+                reasoning_parser_class=None,
+                chat_template_kwargs={},
+            )
+            for index in range(len(outputs))
+        }
+        frames = [
+            {
+                "index": index,
+                "token_ids": tokenizer.encode(text, add_special_tokens=False),
+                **({"finish_reason": finish_reason} if finish_reason else {}),
+            }
+            for index, (text, finish_reason) in enumerate(outputs)
+        ]
+        # The worker never saw the stop string, so it keeps generating.
+        last = len(outputs) - 1
+        frames.append(
+            {
+                "index": last,
+                "token_ids": tokenizer.encode(" more", add_special_tokens=False),
+            }
+        )
+        frames.append({"index": last, "token_ids": [], "finish_reason": "length"})
+        engine = _FakeRoutedEngine(frames)
+        processor = _make_processor(module, engine)
+        processor.output_processor = module.OutputProcessor(tokenizer, log_stats=False)
+
+        envelopes = [
+            item
+            async for item in processor._generate_and_stream(
+                "external", request, _base_preproc(), tokens, vllm_preproc, posts
+            )
+        ]
+
+        assert engine.yielded == len(outputs)
+        choices = [c for e in envelopes if "data" in e for c in e["data"]["choices"]]
+        assert [c["finish_reason"] for c in choices if c["finish_reason"]] == [
+            finish_reason or "stop" for _, finish_reason in outputs
+        ]
+        assert not processor.output_processor.request_states
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("count", [None, 0])
     @pytest.mark.parametrize("include_nvext", [False, True])
     async def test_prompt_logprobs_survive_buffered_output(
