@@ -4,7 +4,8 @@
 use std::{borrow::Cow, fmt::Display, sync::LazyLock};
 
 use dynamo_protocols::types::{
-    ChatCompletionTool, ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
+    ChatCompletionRequestMessage, ChatCompletionTool, ChatCompletionToolType,
+    CreateChatCompletionRequest, FunctionObject,
 };
 use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
@@ -639,6 +640,25 @@ pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Err
     Ok(())
 }
 
+/// Rejects custom tools anywhere in a chat request: request tools, a custom named
+/// choice, custom calls in assistant history, and tools declared in system messages.
+/// dynamo-protocols parses these since 8.3, but they used to fail to parse and
+/// Dynamo's templates and parsers still serve only function tools.
+pub fn validate_no_custom_tools(
+    request: &CreateChatCompletionRequest,
+) -> Result<(), anyhow::Error> {
+    // System-message tools stay raw JSON until `validated_effective_tools` parses them.
+    let is_custom = |tool: &Value| tool.get("type").and_then(Value::as_str) == Some("custom");
+    let system_custom = request.messages.iter().any(|message| {
+        matches!(message, ChatCompletionRequestMessage::System(system)
+            if system.tools.iter().flatten().any(is_custom))
+    });
+    if request.has_custom_tools() || system_custom {
+        anyhow::bail!("Custom tools are not supported; use function tools");
+    }
+    Ok(())
+}
+
 /// Merges and validates request tools and tools declared in system messages.
 /// An explicitly empty request list is invalid unless system messages supply tools.
 pub(crate) fn validated_effective_tools(
@@ -728,7 +748,10 @@ fn normalize_dynamic_system_tool(
             description,
             parameters,
             strict,
+            defer_loading: None,
         },
+        custom: None,
+        defer_loading: None,
     })
 }
 
