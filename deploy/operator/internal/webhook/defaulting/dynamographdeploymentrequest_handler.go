@@ -105,20 +105,6 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	return nil
 }
 
-// PlannerImageFor returns explicitImage when set, else the planner image with a canonical
-// operator-version tag, or an empty string when the version cannot be parsed. The same resolved
-// image defaults v1beta1 Requests and executes v1beta2 Runs.
-func PlannerImageFor(operatorVersion, explicitImage string) string {
-	if explicitImage != "" {
-		return explicitImage
-	}
-	version, err := semver.NewVersion(operatorVersion)
-	if err != nil {
-		return ""
-	}
-	return fmt.Sprintf("%s:%s", defaultImage, version.String())
-}
-
 // RegisterWithManager registers the DGDR defaulting webhook with the manager.
 func (d *DGDRDefaulter) RegisterWithManager(mgr manager.Manager) error {
 	defaulter := internalwebhook.NewLeaseAwareDefaulter(d, internalwebhook.GetExcludedNamespaces())
