@@ -365,6 +365,35 @@ impl
         ManyOut<Annotated<LLMEngineOutput>>,
     > for PrefillRouter
 {
+    /// Runs one request through the prefill hop, then hands it to decode.
+    ///
+    /// Operation order:
+    ///
+    /// 1. Drop any client-supplied `x-bypass-remote-prefill` marker. Only the
+    ///    conditional-disagg policy below may add it.
+    /// 2. Query-only requests go straight to decode in every activation state.
+    /// 3. Activation gate: `Pending` fails closed with a migratable error,
+    ///    `Untargeted` passes through to decode unchanged, `Active` continues.
+    /// 4. Ensure the request has a `RequestTracker`.
+    /// 5. Conditional disagg, when enabled: if the plan keeps the request on
+    ///    its decode worker, set the Decode phase, add the bypass marker, and
+    ///    dispatch the plan without a prefill hop. Cancellation and invalid
+    ///    arguments fail the request. Other planning errors fall back to
+    ///    remote prefill.
+    /// 6. Set the Prefill phase and build the prefill request (`max_tokens = 1`,
+    ///    independent cancellation context, session affinity copied over).
+    /// 7. Load the binding. If the target was replaced since the gate, resolve
+    ///    it again with the same `Pending`/`Untargeted` rules.
+    /// 8. Direct routing mode requires a preselected prefill worker.
+    /// 9. Select and dispatch the prefill worker. With early bootstrap info,
+    ///    prefill continues in a background task. Otherwise, drain the prefill
+    ///    stream to a handoff or a terminal output.
+    /// 10. A terminal prefill output is the whole response, and decode is skipped.
+    /// 11. Set the Decode phase. On the bootstrap path, this waits until the
+    ///     prefill task has finished routing.
+    /// 12. Build the decode request (KV handoff, prefill topology constraints,
+    ///     decode router override) and dispatch it. When prefill is still
+    ///     running, merge its completion into the decode stream.
     async fn generate(
         &self,
         request: SingleIn<PreprocessedRequest>,
