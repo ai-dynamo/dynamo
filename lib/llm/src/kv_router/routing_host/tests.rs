@@ -4579,3 +4579,245 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
 
     runtime.shutdown();
 }
+
+struct QueueDeadlineClassifier(Duration);
+impl RequestClassifier for QueueDeadlineClassifier {
+    fn classify(&mut self, mut request: ClassifyRequest) -> ClassifyFuture {
+        request.set_due_at(tokio::time::Instant::now() + self.0);
+        Box::pin(async move { Ok(request) })
+    }
+}
+
+async fn queued_cancellation_host(
+    deadline: Option<Duration>,
+) -> (Arc<RoutingHost>, Arc<PendingThenCompletedDispatch>, Runtime) {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("queued-cancellation-regression".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    let workers = HashMap::from([(worker_id, ModelRuntimeConfig::default())]);
+    let (_workers_tx, workers) = watch::channel(workers);
+    let config = KvRouterConfig {
+        skip_initial_worker_wait: true,
+        use_kv_events: false,
+        router_track_active_blocks: false,
+        router_queue_threshold: Some(0.0),
+        ..Default::default()
+    };
+    let mut chooser = KvRouter::new(
+        endpoint,
+        client.clone(),
+        workers,
+        None,
+        16,
+        crate::kv_router::SelectionPolicySource::Registry,
+        Some(config),
+        None,
+        "decode",
+        None,
+        false,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    if let Some(deadline) = deadline {
+        chooser = chooser
+            .with_request_classifier(QueueDeadlineClassifier(deadline))
+            .unwrap();
+    }
+    let dispatch = Arc::new(PendingThenCompletedDispatch::default());
+    let inner = PushRouter::from_client_with_dispatch(
+        client,
+        RouterMode::KV,
+        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+    )
+    .await
+    .unwrap();
+    let router = RoutingHost::new(inner, Arc::new(chooser), None).unwrap();
+    (Arc::new(router), dispatch, runtime)
+}
+
+async fn hold_prefill_capacity(host: &RoutingHost) -> RequestGuard {
+    let input =
+        Context::with_id_and_metadata(request(), "capacity-holder".into(), Default::default());
+    let (mut selected, _) = host
+        .select_with_affinity(
+            &input,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+    host.track_selection(
+        &input,
+        &mut selected,
+        RequestPhase::Aggregated,
+        false,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn wait_for_pending(host: &RoutingHost, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while host.kv_router().pending_count() != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn queued_independent_prefill_observes_client_cancellation_before_dispatch() {
+    for kill in [false, true] {
+        let (host, dispatch, runtime) = queued_cancellation_host(None).await;
+        let mut holder = hold_prefill_capacity(&host).await;
+        let source = Context::new(());
+        let client = source.context();
+        let input =
+            Context::with_id_and_metadata(request(), source.id().into(), Default::default());
+        let independent = input.context();
+        let task = tokio::spawn({
+            let host = host.clone();
+            let client = client.clone();
+            async move {
+                host.select_and_dispatch_prefill(input, client, |_, _| Ok(()))
+                    .await
+            }
+        });
+        wait_for_pending(&host, 1).await;
+        if kill {
+            client.kill();
+        } else {
+            client.stop_generating();
+        }
+        let error = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .unwrap();
+        assert!(is_cancelled(&error));
+        wait_for_pending(&host, 0).await;
+        assert!(
+            !independent.is_stopped(),
+            "only queue ownership is cancelled before dispatch"
+        );
+        assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+        holder.abort().await;
+        let mut healthy = host.generate(SingleIn::new(request())).await.unwrap();
+        while healthy.next().await.is_some() {}
+        assert_eq!(dispatch.worker_ids.lock().unwrap().len(), 1);
+        drop(host);
+        runtime.shutdown();
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn queued_decode_cancellation_releases_prefill_without_worker_dispatch() {
+    for termination in ["cancel", "drop", "deadline"] {
+        let deadline = (termination == "deadline").then_some(Duration::from_millis(100));
+        let (host, dispatch, runtime) = queued_cancellation_host(deadline).await;
+        let mut holder = hold_prefill_capacity(&host).await;
+        let tracker = Arc::new(RequestTracker::new());
+        drop(tracker.set_phase(RequestPhase::Decode).await);
+        let mut input = request();
+        input.tracker = Some(tracker);
+        input.staged_kv_cleanup = true;
+        let mut input = SingleIn::new(input);
+        let client = input.context();
+        let prefill = Context::new(()).context();
+        PendingDecode::install(&mut input, prefill.clone());
+        let task = tokio::spawn({
+            let host = host.clone();
+            async move { host.generate(input).await }
+        });
+        wait_for_pending(&host, 1).await;
+        if termination == "drop" {
+            task.abort();
+            let _ = task.await;
+        } else {
+            if termination == "cancel" {
+                client.kill();
+            }
+            let error = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .err()
+                .unwrap();
+            assert!(match_error_chain(
+                error.as_ref(),
+                &[if termination == "deadline" {
+                    ErrorType::DeadlineExceeded
+                } else {
+                    ErrorType::Cancelled
+                }],
+                &[]
+            ));
+        }
+        wait_for_pending(&host, 0).await;
+        assert!(
+            prefill.is_stopped(),
+            "D never dispatched, so P must be aborted directly"
+        );
+        assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+        holder.abort().await;
+        let mut healthy = host.generate(SingleIn::new(request())).await.unwrap();
+        while healthy.next().await.is_some() {}
+        assert_eq!(dispatch.worker_ids.lock().unwrap().len(), 1);
+        drop(host);
+        runtime.shutdown();
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn predispatch_cancellation_rolls_back_booking_but_dispatched_decode_keeps_kv_cleanup() {
+    let (host, dispatch, runtime) = queued_cancellation_host(None).await;
+    let source = Context::new(());
+    let client = source.context();
+    let result = host
+        .select_and_dispatch_prefill(SingleIn::new(request()), client.clone(), |_, _| {
+            client.stop_generating();
+            Ok(())
+        })
+        .await;
+    assert!(is_cancelled(&result.err().unwrap()));
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+
+    let tracker = Arc::new(RequestTracker::new());
+    drop(tracker.set_phase(RequestPhase::Decode).await);
+    let mut input = request();
+    input.tracker = Some(tracker);
+    input.staged_kv_cleanup = true;
+    let mut input = SingleIn::new(input);
+    let client = input.context();
+    let prefill = Context::new(()).context();
+    PendingDecode::install(&mut input, prefill.clone());
+    let mut response = host.generate(input).await.unwrap();
+    client.stop_generating();
+    while response.next().await.is_some() {}
+    assert!(
+        !prefill.is_stopped(),
+        "D may own KV: preserve independent P after dispatch"
+    );
+    assert_eq!(dispatch.worker_ids.lock().unwrap().len(), 1);
+    drop(host);
+    runtime.shutdown();
+}

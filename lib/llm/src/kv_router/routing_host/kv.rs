@@ -20,7 +20,7 @@ impl RoutingHost {
         budget: &CleanupBudget,
     ) -> Result<SelectionOutcome, Error> {
         let context_id = request.context().id().to_string();
-        let staged_kv = StagedKv::for_request(request.content());
+        let staged_kv = StagedKv::for_selection(request);
         let policy_class = request.metadata().get("policy-class").cloned();
         let session_context = request
             .agent_context
@@ -403,7 +403,7 @@ impl RoutingHost {
         budget: &CleanupBudget,
     ) -> Result<RequestGuard, Error> {
         let context_id = request.context().id().to_string();
-        let staged_kv = StagedKv::for_request(request.content());
+        let staged_kv = StagedKv::for_selection(request);
         let request_context = request.context().clone();
         let routing_parts = RoutingRequestParts::new(request);
         let chooser = self.kv_router();
@@ -545,6 +545,10 @@ impl RoutingHost {
         let phase = request.phase();
         let staged_kv = StagedKv::for_request(request.content());
         let phase_label = phase.to_string();
+        if let Err(error) = PendingDecode::start_dispatch(&request) {
+            guard.abort_with_error(Some(error.as_ref())).await;
+            return Err(error);
+        }
         guard.start_dispatch(&phase_label);
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
@@ -651,6 +655,7 @@ impl RoutingHost {
     pub(super) async fn select_and_dispatch_kv_prefill<M, F>(
         &self,
         mut request: SingleIn<PreprocessedRequest>,
+        client_context: Arc<dyn AsyncEngineContext>,
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
     where
@@ -661,15 +666,18 @@ impl RoutingHost {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-        let (mut selection, mut operation) = self
-            .select_with_affinity(&request, phase, is_query_only, &budget)
-            .await?;
-        let mut guard = match self
-            .track_selection(&request, &mut selection, phase, is_query_only, &budget)
-            .await
-        {
-            Ok(guard) => guard,
-            Err(error) => return Err(error),
+        let (selection, mut operation, mut guard) = {
+            let selection = async {
+                let (mut selection, operation) = self
+                    .select_with_affinity(&request, phase, is_query_only, &budget)
+                    .await?;
+                let guard = self
+                    .track_selection(&request, &mut selection, phase, is_query_only, &budget)
+                    .await?;
+                Ok::<_, Error>((selection, operation, guard))
+            };
+            tokio::pin!(selection);
+            cancellation::cancel_on_stop(client_context.as_ref(), selection).await??
         };
         let selected_target = route_target(selection.worker);
         let metadata = match prepare(&mut request, selected_target) {
@@ -679,6 +687,13 @@ impl RoutingHost {
                 return Err(error);
             }
         };
+        // Once dispatch starts P must remain independent: an in-flight D may
+        // already own a receiver even if its response has not arrived yet.
+        if client_context.is_stopped() {
+            let error = cancellation::cancelled_error(client_context.id());
+            guard.abort_with_error(Some(error.as_ref())).await;
+            return Err(error);
+        }
         drop(route_guard);
         let stream = match self
             .dispatch_selection(request, selection, guard, &budget)

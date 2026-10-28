@@ -102,6 +102,7 @@ pub enum PrefillError {
 enum PrefillOutcome {
     Bootstrap {
         bootstrap_info: BootstrapInfo,
+        cancellation_supported: bool,
         worker_id: u64,
         /// The decode engine's KV receiver needs the prefill DP rank up front;
         /// without it SGLang parks the request and asks the prefill bootstrap
@@ -133,6 +134,7 @@ fn into_decode_request(
             bootstrap_info,
             worker_id,
             prefill_dp_rank,
+            cancellation_supported: _,
         } => {
             req.bootstrap_info = Some(bootstrap_info);
             let routing = req.routing_mut();
@@ -184,6 +186,7 @@ fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
 
 struct PreparedPrefill {
     worker_id: u64,
+    cancellation_supported: bool,
     prefill_dp_rank: Option<u32>,
     bootstrap_info: Option<BootstrapInfo>,
     topology_constraints: Option<RoutingConstraints>,
@@ -564,9 +567,13 @@ impl
         let mut prefill_completion = None;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
-                .select_and_dispatch_prefill(prefill_context, |request, target| {
-                    self.prepare_prefill_dispatch(request, target, endpoint_id)
-                })
+                .select_and_dispatch_prefill(
+                    prefill_context,
+                    engine_ctx.clone(),
+                    |request, target| {
+                        self.prepare_prefill_dispatch(request, target, endpoint_id, router)
+                    },
+                )
                 .await?;
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
@@ -574,6 +581,7 @@ impl
                     Some(self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier));
                 PrefillOutcome::Bootstrap {
                     bootstrap_info,
+                    cancellation_supported: prepared.cancellation_supported,
                     worker_id: prepared.worker_id,
                     prefill_dp_rank: prepared.prefill_dp_rank,
                 }
@@ -595,6 +603,7 @@ impl
                         {
                             PrefillOutcome::Bootstrap {
                                 bootstrap_info,
+                                cancellation_supported: prepared.cancellation_supported,
                                 worker_id: prepared.worker_id,
                                 prefill_dp_rank: prepared.prefill_dp_rank,
                             }
@@ -669,6 +678,13 @@ impl
             let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
         }
 
+        let cancellable_prefill = matches!(
+            outcome,
+            PrefillOutcome::Bootstrap {
+                cancellation_supported: true,
+                ..
+            }
+        ) && prefill_completion.is_some();
         let mut decode_req = into_decode_request(req, outcome);
 
         if let Some(topology_constraints) = topology_constraints {
@@ -694,7 +710,14 @@ impl
             (true, false) => PrefillNeed::BeforeLast,
             (true, true) => PrefillNeed::BeforeFirst,
         };
-        let decode = next.generate(context.map(|_| decode_req));
+        let mut decode_context = context.map(|_| decode_req);
+        if cancellable_prefill {
+            super::routing_host::cancellation::PendingDecode::install(
+                &mut decode_context,
+                prefill_engine_ctx.clone(),
+            );
+        }
+        let decode = next.generate(decode_context);
         match prefill_completion {
             Some(completion) => {
                 completion
@@ -745,6 +768,7 @@ impl PrefillRouter {
         request: &mut PreprocessedRequest,
         target: AffinityTarget,
         endpoint_id: &EndpointId,
+        router: &RoutingHost,
     ) -> anyhow::Result<PreparedPrefill> {
         let AffinityTarget { worker_id, dp_rank } = target;
         let topology_constraints =
@@ -774,8 +798,20 @@ impl PrefillRouter {
         routing.prefill_dp_rank = dp_rank;
         request.bootstrap_info = bootstrap_info.clone();
 
+        // Missing capability includes older workers: keep their D cleanup route,
+        // since stopping P before a response may not reach its backend request ID.
+        let cancellation_supported = router.kv_router_if_enabled().is_some_and(|chooser| {
+            chooser
+                .workers_with_configs
+                .borrow()
+                .get(&worker_id)
+                .is_some_and(|config| {
+                    config.supports_runtime_capability("disagg_prefill_cancel_anytime_v1")
+                })
+        });
         Ok(PreparedPrefill {
             worker_id,
+            cancellation_supported,
             prefill_dp_rank: dp_rank,
             bootstrap_info,
             topology_constraints,
@@ -1197,6 +1233,7 @@ mod tests {
     #[test]
     fn decode_leg_carries_the_staged_kv_cleanup_obligation() {
         let bootstrap = PrefillOutcome::Bootstrap {
+            cancellation_supported: false,
             bootstrap_info: BootstrapInfo {
                 bootstrap_host: "prefill-0".to_string(),
                 bootstrap_port: 4242,
