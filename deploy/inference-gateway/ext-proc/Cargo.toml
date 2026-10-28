@@ -15,6 +15,10 @@ description = "Envoy ext_proc gRPC server for Dynamo inference routing"
 name = "dynamo-ext-proc"
 path = "src/bin/dynamo-ext-proc.rs"
 
+[features]
+default = ["mm-routing"]
+mm-routing = ["dynamo-llm/mm-routing"]
+
 [dependencies]
 dynamo-custom-policy-builtin = { workspace = true }
 async-trait = { workspace = true }
