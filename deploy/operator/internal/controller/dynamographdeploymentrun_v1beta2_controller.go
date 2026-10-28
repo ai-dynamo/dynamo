@@ -106,6 +106,7 @@ type DynamoGraphDeploymentRunV1beta2Reconciler struct {
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentruns,verbs=get;list;watch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentruns/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentruns/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentcandidates,verbs=get;list;watch;create;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentcandidates/status,verbs=get;update;patch
@@ -221,6 +222,12 @@ func dgdrRunPublisherRules(runName string) []rbacv1.PolicyRule {
 			Resources:     []string{"dynamographdeploymentruns"},
 			ResourceNames: []string{runName},
 			Verbs:         []string{"get", "list", "watch"},
+		},
+		{
+			APIGroups:     []string{nvidiacomv1beta2.GroupVersion.Group},
+			Resources:     []string{"dynamographdeploymentruns/finalizers"},
+			ResourceNames: []string{runName},
+			Verbs:         []string{"update"},
 		},
 		{
 			APIGroups:     []string{nvidiacomv1beta2.GroupVersion.Group},

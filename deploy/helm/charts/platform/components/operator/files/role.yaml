@@ -303,6 +303,7 @@ rules:
   resources:
   - dynamocomponentdeployments/finalizers
   - dynamographdeploymentrequests/finalizers
+  - dynamographdeploymentruns/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
   - lpxgraphdeployments/finalizers
