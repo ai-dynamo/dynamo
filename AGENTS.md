@@ -62,6 +62,8 @@ to it — edit only the canonical copy. Reach for the right group first:
 When reviewing frontend or runtime changes, also read the corresponding
 [frontend review prompt](.github/review-prompts/frontend.md) or
 [runtime review prompt](.github/review-prompts/runtime.md) for additional CODEOWNERS guidance.
+When reviewing a change that adds or changes a metric, a log event, or a trace span, also apply
+the [metrics review prompt](.github/review-prompts/metrics.md).
 
 Before adding or changing a metric, a log event, or a trace span, read
 [`.ai/metrics-guidelines.md`](.ai/metrics-guidelines.md). It decides between a metric, a log,

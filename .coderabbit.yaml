@@ -37,9 +37,14 @@ reviews:
       instructions: "Review against .ai/bash-launch-guidelines.md"
     - path: "**/*.{py,rs,go,ts,tsx,js,mjs,cjs,sh,yaml,yml,toml}"
       instructions: "Flag internal Linear ticket references (e.g. DIS-XXXX, DYN-XXXX, OPS-XXXX, DEP-XXXX, or any <PROJECT>-NNNN ID) in the added lines; see .ai/linear-ticket-refs.md for what to recommend."
+    - path: "**/*.{rs,py,go}"
+      instructions: "If the change adds or modifies a metric, a log event, or a trace span, review it against .ai/metrics-guidelines.md, using the checks and finding format in .github/review-prompts/metrics.md."
+    - path: "docs/fern/pages/reference/observability/*.mdx"
+      instructions: "Review metric entries that the change adds, deprecates, or removes against the Stability and Documentation rules in .ai/metrics-guidelines.md."
 knowledge_base:
   code_guidelines:
     filePatterns:
       - ".ai/**/*.md"
+      - ".github/review-prompts/metrics.md"
 chat:
   auto_reply: true

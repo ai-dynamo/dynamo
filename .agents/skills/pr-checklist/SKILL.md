@@ -55,6 +55,7 @@ Exclude tests, documentation, comments, and whitespace from this count, as they 
 - Rust: the `graham-code-review` skill
 - Python: [Python guidelines](../../../.ai/python-guidelines.md)
 - Tests: [pytest guidelines](../../../.ai/pytest-guidelines.md) and [test model size guardrails](../../../.ai/test-model-size-guardrails.md)
+- Metrics, logs, and traces: [metrics guidelines](../../../.ai/metrics-guidelines.md) and the [metrics review prompt](../../../.github/review-prompts/metrics.md)
 - Docs, examples, and recipes: the `dynamo-docs` skill
 - Any directory: its nearest `AGENTS.md`
 
@@ -91,5 +92,7 @@ Fill in every section of `.github/pull_request_template.md`, and title the PR pe
 **Key Changes.** State the core-logic line count (see Complexity under Design Fit), then up to three changes that most need review, each with a shortened file link and one line on what changed.
 
 **Validation.** Back each claim with evidence, ideally a table with one row per behavior: the case, what happened before, and what happens now. For bug fixes, explain what caused the problem and why the fix addresses it. Include performance data when the change claims or risks a performance impact. Name each key test added and the regression it catches. Do not list routine test runs, clippy or linter checks, or unnecessary detail.
+
+**Metrics.** For each new metric, include the block that the [metrics guidelines](../../../.ai/metrics-guidelines.md#before-you-add-a-metric) ask for: its reader, labels, series count, why existing metrics or PromQL do not answer the question, and its catalog entry.
 
 **Issues and Ongoing Work.** Reference the GitHub or Linear issue the PR implements, for example `Closes #8480` or `Closes DYN-1234`. List any similar PRs, issues, or code on `main` that the Existing work check found, each with one line on how this PR differs; if the search found nothing, say so. As the final step, run the `dynamo-issue-first` skill to validate the issue and its reference.
