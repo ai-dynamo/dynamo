@@ -3585,26 +3585,6 @@ async fn chat_completions(
         return Err(err_response);
     }
 
-    // Beam route: a `strict` tool whose schema is outside OpenAI's strict subset is
-    // served as non-strict instead of rejected (see
-    // `tool_choice::relax_noncompliant_strict_tools_for_beam`). The model lookup is
-    // repeated below with its own error handling, so a missing model is reported there.
-    if let Ok((_, model_parsing)) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-    {
-        crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
-            &mut request,
-            model_parsing.tool_call_parser.as_deref(),
-            model_parsing.reasoning_parser.as_deref(),
-        );
-        crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
-            &mut request,
-            model_parsing.tool_call_parser.as_deref(),
-            model_parsing.reasoning_parser.as_deref(),
-        );
-    }
-
     // Handle Rest of Validation Errors
     if let Err(err_response) = validate_chat_completion_fields_generic(&request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -3629,6 +3609,22 @@ async fn chat_completions(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+
+    // Beam route: a `strict` tool whose schema is outside OpenAI's strict subset is
+    // served as non-strict instead of rejected (see
+    // `tool_choice::relax_noncompliant_strict_tools_for_beam`). This reads the parsing
+    // options of the engine selected above, so normalization and dispatch always agree
+    // on the worker set when one served name fronts Beam and non-Beam pools.
+    crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
+        &mut request,
+        parsing_options.tool_call_parser.as_deref(),
+        parsing_options.reasoning_parser.as_deref(),
+    );
+    crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
+        &mut request,
+        parsing_options.tool_call_parser.as_deref(),
+        parsing_options.reasoning_parser.as_deref(),
+    );
 
     // Request policy controls whether parser-produced tool calls may be exposed.
     // Assistant response/guided constraints are handled separately during
