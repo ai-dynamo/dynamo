@@ -8,18 +8,24 @@ subtitle: Choose where Dynamo makes cache-aware worker-selection decisions in a 
 
 Dynamo supports two KV-aware request-routing topologies on Kubernetes. They use the same routing
 concepts but place worker selection in different components. Choose based on how your platform accepts
-and governs traffic, not because one topology uses a different KV-routing algorithm.
+and governs traffic, not because one topology uses a different KV-routing algorithm:
+
+1. [Dynamo Frontend Routing](#dynamo-frontend-routing)
+2. [Gateway API Inference Extension (GAIE) Routing](#gaie-routing)
+
+GAIE follows the upstream
+[Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension).
 
 ## Recommendation
 
-Use **Dynamo Frontend routing**. It has fewer components, does not need GAIE, and works with a
-standard `DynamoGraphDeployment`.
+Use **Dynamo Frontend routing**. It has fewer components and requires neither an
+`InferencePool` nor an EPP.
 
 If traffic must enter through a Kubernetes Gateway, for example because a platform team
 standardizes ingress, authentication, rate limiting, traffic policy, or gateway-level telemetry
-through Gateway API, keep Dynamo Frontend routing and put the Frontend behind the Gateway. An
-`HTTPRoute` sends requests to the Frontend Service, with or without the Gateway API Inference
-Extension (GAIE) installed. See
+through Gateway API, use Dynamo Frontend routing with the Frontend Service as the Gateway's
+backend. An `HTTPRoute` can send requests to the Frontend Service, with or without GAIE
+installed. See
 [Expose the Frontend](../model-deployment/expose-the-frontend.md#option-3-a-gateway-api-httproute-to-the-frontend-service).
 
 For GAIE routing, in which the Gateway calls the Dynamo EPP through the `ext_proc` protocol to pick
@@ -30,11 +36,12 @@ have full feature parity with Dynamo Frontend routing. Before you choose it, rev
 | Choose | When it fits | Additional infrastructure | Where routing is configured |
 |---|---|---|---|
 | Using the Dynamo Frontend | Recommended for most deployments, whether clients call the Frontend Service directly or through a Kubernetes Gateway. | None beyond the normal Dynamo platform for direct calls. Behind a Gateway, also Gateway API and a compatible Gateway implementation, but not GAIE. | Frontend with `--router-mode kv`. |
-| Using GAIE with Dynamo | Traffic enters through a Gateway, and the Dynamo EPP picks the worker for each request. GAIE routing does not have [full feature parity](#features-not-supported-by-the-dynamo-epp) with Dynamo Frontend routing. | Gateway API, GAIE, a compatible Gateway implementation, and a Dynamo EPP. | EPP; worker Frontend sidecars use `--router-mode direct`. |
+| Using GAIE with Dynamo | You want the Gateway to manage worker-facing connections, including endpoint health, timeouts, and fallback, rather than the Dynamo Frontend. | Gateway API, GAIE, a compatible Gateway implementation, and a Dynamo EPP. | EPP; worker Frontend sidecars use `--router-mode direct`. |
 | Using GAIE with vanilla vLLM | You already run upstream vLLM pods and want to add Dynamo's advanced KV-aware routing without migrating the fleet to Dynamo workers. | Gateway API, GAIE, a compatible Gateway implementation, and standalone Dynamo EPP support. | EPP with direct vLLM worker discovery and vLLM token rendering. |
 
-The Frontend and GAIE topologies are alternatives for a request path. Do not configure the Frontend
-to select a worker after the EPP has already selected one.
+Frontend routing and GAIE routing are mutually exclusive for a given request path. After the EPP
+selects a worker, the worker's Frontend sidecar must use `--router-mode direct`, not
+`--router-mode kv`.
 
 ## Dynamo Frontend Routing
 
@@ -66,10 +73,13 @@ Teams often give these reasons for GAIE routing:
 - Multiple model routes should share a platform-managed address and listener.
 - A platform team manages the Gateway while an application team manages the DGD and `HTTPRoute`.
 
-These reasons alone do not call for this topology, because Dynamo Frontend routing also works
-behind a Gateway. Choose GAIE routing when your platform requires the Gateway to call the Dynamo EPP
-over `ext_proc` to pick the worker. GAIE routing does not have full feature parity with Dynamo
-Frontend routing; see
+These Gateway-level requirements apply to either topology. Choose GAIE routing when the Gateway must
+connect directly to the selected workers and manage worker-facing transport behavior, rather than
+delegate that hop to the Dynamo Frontend. The upstream
+[GAIE implementation guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/implementers/)
+defines the endpoint-selection contract. Health checking, fallback, and EPP reselection on retries
+depend on the Gateway implementation and its configuration. GAIE routing does not have full feature
+parity with Dynamo Frontend routing; see
 [Features Not Supported by the Dynamo EPP](#features-not-supported-by-the-dynamo-epp).
 
 GAIE routing requires a separate installation. See
