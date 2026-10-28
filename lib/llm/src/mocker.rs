@@ -27,11 +27,12 @@ use anyhow::{Context, Result, bail};
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_mocker::common::handoff::HandoffId;
 use dynamo_mocker::common::protocols::{
-    DirectRequest, EngineType, KvCacheEventSink, KvEventPublishers, MockerConfig, RawKvEvent,
-    RawKvEventSink, ReplayRequestContext,
+    DirectRequest, DpLoadBalanceMethod, EngineType, KvCacheEventSink, KvEventPublishers,
+    MockerConfig, RawKvEvent, RawKvEventSink, ReplayRequestContext,
 };
 use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, RequestOutputBuffering};
 use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
+use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_mocker::services::bootstrap::{
     BootstrapIdentity, BootstrapParticipantRole, BootstrapServer, BootstrapServerConfig,
     ParticipantRegistration, connect_to_prefill,
@@ -278,6 +279,7 @@ struct MockerExecutionContext {
     engine_args: MockerConfig,
     response_replay_table: Option<ResponseReplayTable>,
     unset_dp_rank_counter: AtomicU32,
+    dp_budget: parking_lot::Mutex<DpBudget>,
     /// Bootstrap server for prefill workers in disaggregated mode
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
     source_handoff_manager: OnceCell<SourceHandoffManager>,
@@ -290,6 +292,60 @@ struct MockerExecutionContext {
     _relay_publishers: OnceCell<Vec<Option<KvEventPublisher>>>,
     /// Forward pass metrics publisher (kept alive for the engine lifetime).
     _fpm_publisher: OnceCell<crate::fpm_publisher::FpmDirectPublisher>,
+}
+
+/// Per-rank load for the `total_requests` and `total_tokens` policies. Like SGLang's `DPBudget`,
+/// each scheduler snapshot replaces a rank's load, and every dispatch adds to the chosen rank
+/// until the next snapshot arrives.
+#[derive(Default)]
+struct DpBudget {
+    metrics_rxs: Vec<watch::Receiver<MockerMetrics>>,
+    total_requests: Vec<u64>,
+    total_tokens: Vec<u64>,
+}
+
+impl DpBudget {
+    fn dispatch(
+        &mut self,
+        method: DpLoadBalanceMethod,
+        engines: Option<&[LiveEngine]>,
+        dp_size: u32,
+        block_size: usize,
+        estimated_tokens: usize,
+    ) -> u32 {
+        let ranks = dp_size as usize;
+        self.total_requests.resize(ranks, 0);
+        self.total_tokens.resize(ranks, 0);
+        if self.metrics_rxs.is_empty()
+            && let Some(engines) = engines
+        {
+            self.metrics_rxs = engines.iter().map(LiveEngine::metrics_receiver).collect();
+        }
+        for metrics_rx in &mut self.metrics_rxs {
+            if !metrics_rx.has_changed().unwrap_or(false) {
+                continue;
+            }
+            let metrics = metrics_rx.borrow_and_update();
+            let rank = metrics.dp_rank as usize;
+            if rank < ranks {
+                self.total_requests[rank] = metrics.running_requests + metrics.waiting_requests;
+                self.total_tokens[rank] = metrics.active_decode_blocks * block_size as u64;
+            }
+        }
+
+        let target = if method == DpLoadBalanceMethod::TotalTokens {
+            (0..ranks)
+                .min_by_key(|&rank| (self.total_tokens[rank], self.total_requests[rank]))
+                .unwrap_or(0)
+        } else {
+            (0..ranks)
+                .min_by_key(|&rank| self.total_requests[rank])
+                .unwrap_or(0)
+        };
+        self.total_requests[target] += 1;
+        self.total_tokens[target] += estimated_tokens as u64;
+        target as u32
+    }
 }
 
 struct PreparedBootstrap {
@@ -361,6 +417,7 @@ impl MockerExecutionContext {
             engine_args,
             response_replay_table,
             unset_dp_rank_counter: AtomicU32::new(0),
+            dp_budget: parking_lot::Mutex::new(DpBudget::default()),
             bootstrap_server: Arc::new(OnceCell::new()),
             source_handoff_manager: OnceCell::new(),
             handoff_shutdown: CancellationToken::new(),
@@ -373,20 +430,58 @@ impl MockerExecutionContext {
         }
     }
 
-    fn resolve_dp_rank(&self, request: &PreprocessedRequest) -> u32 {
+    fn dp_load_balance_method(&self) -> DpLoadBalanceMethod {
+        match self.engine_args.runtime.dp_load_balance_method {
+            // SGLang's auto policy follows the bootstrap room on prefill workers.
+            DpLoadBalanceMethod::Auto
+                if self.engine_args.backend == EngineType::Sglang
+                    && self.engine_args.is_prefill() =>
+            {
+                DpLoadBalanceMethod::FollowBootstrapRoom
+            }
+            DpLoadBalanceMethod::Auto => DpLoadBalanceMethod::RoundRobin,
+            method => method,
+        }
+    }
+
+    fn resolve_dp_rank(&self, request: &PreprocessedRequest) -> Result<u32, String> {
         if let Some(dp_rank) = request.routing.as_ref().and_then(|routing| routing.dp_rank) {
-            return dp_rank;
+            return Ok(dp_rank);
+        }
+        let dp_size = self.engine_args.dp_size;
+        // SGLang only starts its data-parallel controller, and so its load-balance policy, for
+        // more than one rank.
+        if dp_size <= 1 {
+            return Ok(0);
         }
 
-        // SGLang's default auto policy follows the bootstrap room on prefill workers.
-        if self.engine_args.backend == EngineType::Sglang
-            && self.engine_args.is_prefill()
-            && let Some(bootstrap_info) = request.bootstrap_info.as_ref()
-        {
-            return (bootstrap_info.bootstrap_room % u64::from(self.engine_args.dp_size)) as u32;
+        let method = self.dp_load_balance_method();
+        match method {
+            DpLoadBalanceMethod::FollowBootstrapRoom => {
+                // SGLang asserts here rather than falling back to another rank.
+                let Some(bootstrap_info) = request.bootstrap_info.as_ref() else {
+                    return Err(
+                        "request has no bootstrap room, which the follow_bootstrap_room \
+                        load-balance method requires; send requests through the router, or set \
+                        --dp-load-balance-method round_robin to accept direct requests"
+                            .to_string(),
+                    );
+                };
+                Ok((bootstrap_info.bootstrap_room % u64::from(dp_size)) as u32)
+            }
+            DpLoadBalanceMethod::TotalRequests | DpLoadBalanceMethod::TotalTokens => {
+                Ok(self.dp_budget.lock().dispatch(
+                    method,
+                    self.engines.get().map(Vec::as_slice),
+                    dp_size,
+                    self.engine_args.block_size,
+                    request.token_ids.len(),
+                ))
+            }
+            DpLoadBalanceMethod::Auto | DpLoadBalanceMethod::RoundRobin => {
+                Ok(self.unset_dp_rank_counter.fetch_add(1, Ordering::Relaxed) % dp_size)
+            }
         }
-
-        self.unset_dp_rank_counter.fetch_add(1, Ordering::Relaxed) % self.engine_args.dp_size
     }
 
     async fn prepare_bootstrap(&self) -> Result<Option<PreparedBootstrap>> {
@@ -868,7 +963,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         };
         let native_sglang_terminal = native_sglang.is_some();
 
-        let dp_rank = self.resolve_dp_rank(&request);
+        let dp_rank = match self.resolve_dp_rank(&request) {
+            Ok(dp_rank) => dp_rank,
+            Err(message) => {
+                return Ok(error_stream(
+                    &ctx,
+                    invalid_argument(message.clone(), message),
+                ));
+            }
+        };
 
         // A client can pick dp_rank with `x-dynamo-dp-rank` plus an explicit worker.
         if dp_rank >= self.engine_args.dp_size {
@@ -1537,9 +1640,19 @@ mod tests {
         worker_type: WorkerType,
         dp_size: u32,
     ) -> MockerExecutionContext {
+        dp_rank_engine_with_method(backend, worker_type, dp_size, DpLoadBalanceMethod::Auto)
+    }
+
+    fn dp_rank_engine_with_method(
+        backend: EngineType,
+        worker_type: WorkerType,
+        dp_size: u32,
+        method: DpLoadBalanceMethod,
+    ) -> MockerExecutionContext {
         let args = MockerConfig::from_value(serde_json::json!({
             "dp_size": dp_size,
-            "engine": { "backend": backend, "worker_type": worker_type }
+            "engine": { "backend": backend, "worker_type": worker_type },
+            "dynamo": { "dp_load_balance_method": method }
         }))
         .unwrap();
         MockerExecutionContext::new(args)
@@ -1569,20 +1682,110 @@ mod tests {
         for (room, expected) in [(0, 0), ((1_u64 << 32) + 2, 0), (i64::MAX as u64, 1)] {
             assert_eq!(
                 engine.resolve_dp_rank(&dp_rank_request(Some(room), None)),
-                expected,
+                Ok(expected),
                 "room={room}"
             );
         }
     }
 
     #[test]
+    fn follow_bootstrap_room_rejects_requests_without_a_room() {
+        let auto = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 4);
+        let explicit = dp_rank_engine_with_method(
+            EngineType::Vllm,
+            WorkerType::Decode,
+            4,
+            DpLoadBalanceMethod::FollowBootstrapRoom,
+        );
+        for engine in [auto, explicit] {
+            let error = engine
+                .resolve_dp_rank(&dp_rank_request(None, None))
+                .unwrap_err();
+            assert!(error.contains("bootstrap room"), "{error}");
+            assert_eq!(
+                engine.resolve_dp_rank(&dp_rank_request(Some(6), None)),
+                Ok(2)
+            );
+        }
+    }
+
+    #[test]
+    fn single_rank_ignores_load_balance_method() {
+        // SGLang only runs its data-parallel controller for dp_size > 1.
+        let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 1);
+        assert_eq!(engine.resolve_dp_rank(&dp_rank_request(None, None)), Ok(0));
+    }
+
+    #[test]
     fn dp_rank_explicit_hint_takes_precedence_without_advancing_counter() {
         let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Prefill, 4);
         assert_eq!(
-            engine.resolve_dp_rank(&dp_rank_request(Some(10), Some(3))),
-            3
+            engine.resolve_dp_rank(&dp_rank_request(None, Some(3))),
+            Ok(3)
         );
-        assert_eq!(engine.resolve_dp_rank(&dp_rank_request(None, None)), 0);
+        let engine = dp_rank_engine(EngineType::Sglang, WorkerType::Decode, 4);
+        assert_eq!(
+            engine.resolve_dp_rank(&dp_rank_request(Some(10), Some(3))),
+            Ok(3)
+        );
+        assert_eq!(engine.resolve_dp_rank(&dp_rank_request(None, None)), Ok(0));
+    }
+
+    #[test]
+    fn sglang_prefill_round_robin_ignores_bootstrap_room() {
+        let engine = dp_rank_engine_with_method(
+            EngineType::Sglang,
+            WorkerType::Prefill,
+            4,
+            DpLoadBalanceMethod::RoundRobin,
+        );
+        let ranks: Vec<_> = [Some(6), None, Some(15), Some(19), None]
+            .into_iter()
+            .map(|room| {
+                engine
+                    .resolve_dp_rank(&dp_rank_request(room, None))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(ranks, [0, 1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn total_requests_places_on_least_loaded_rank() {
+        let engine = dp_rank_engine_with_method(
+            EngineType::Sglang,
+            WorkerType::Prefill,
+            3,
+            DpLoadBalanceMethod::TotalRequests,
+        );
+        let ranks: Vec<_> = (0..5)
+            .map(|_| {
+                engine
+                    .resolve_dp_rank(&dp_rank_request(None, None))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(ranks, [0, 1, 2, 0, 1]);
+    }
+
+    #[test]
+    fn total_tokens_places_on_rank_with_fewest_tokens() {
+        let engine = dp_rank_engine_with_method(
+            EngineType::Sglang,
+            WorkerType::Decode,
+            3,
+            DpLoadBalanceMethod::TotalTokens,
+        );
+        let ranks: Vec<_> = [8, 2, 4, 1, 1]
+            .into_iter()
+            .map(|len| {
+                let mut request = dp_rank_request(None, None);
+                request.token_ids = vec![1; len].into();
+                engine.resolve_dp_rank(&request).unwrap()
+            })
+            .collect();
+        // Loads after each step: [8,0,0] [8,2,0] [8,2,4] [8,3,4] then rank 1 again.
+        assert_eq!(ranks, [0, 1, 2, 1, 1]);
     }
 
     #[test]
@@ -1594,7 +1797,11 @@ mod tests {
             let engine = dp_rank_engine(backend, worker_type, 4);
             let ranks: Vec<_> = [6, 10, 15, 19, 6]
                 .into_iter()
-                .map(|room| engine.resolve_dp_rank(&dp_rank_request(Some(room), None)))
+                .map(|room| {
+                    engine
+                        .resolve_dp_rank(&dp_rank_request(Some(room), None))
+                        .unwrap()
+                })
                 .collect();
             assert_eq!(ranks, [0, 1, 2, 3, 0], "{backend:?} {worker_type:?}");
         }
