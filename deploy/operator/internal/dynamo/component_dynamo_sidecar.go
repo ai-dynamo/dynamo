@@ -22,7 +22,7 @@ import (
 // component and fldPath must not be nil.
 func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, backendFramework string) field.ErrorList {
 	var allErrs field.ErrorList
-	hasSidecar := GetComponentDynamoSidecar(component) != nil
+	var hasSidecar bool
 	detail := fmt.Sprintf("component %q with a runtime init container", component.ComponentName)
 
 	// Validate each authored container at its original API path, including invalid role layouts.
@@ -55,6 +55,8 @@ func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDep
 			allErrs = append(allErrs, field.Invalid(runtimePath.Child("restartPolicy"), ptr.Deref(runtime.RestartPolicy, ""), "must be Always for "+detail))
 		}
 	}
+
+	// Components without a runtime declaration have no further sidecar requirements.
 	if !hasSidecar {
 		return allErrs
 	}

@@ -409,11 +409,12 @@ func groveNativeMinimumPath(component *nvidiacomv1beta1.DynamoComponentDeploymen
 // spec must not be nil.
 func hasRoleSidecarV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) bool {
 	for _, role := range spec.Roles {
-		if role.Name == "leader" && role.PodTemplate != nil {
-			for _, container := range role.PodTemplate.Spec.InitContainers {
-				if container.Name == "runtime" {
-					return true
-				}
+		if role.Name != nvidiacomv1alpha1.ComponentRoleLeader || role.PodTemplate == nil {
+			continue
+		}
+		for _, container := range role.PodTemplate.Spec.InitContainers {
+			if container.Name == consts.RuntimeContainerName {
+				return true
 			}
 		}
 	}

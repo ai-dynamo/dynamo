@@ -358,14 +358,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
 		},
 		// SGLang multinode sidecars resolve runtime compatibility independently of engine images.
-		{name: "sglang sidecar multinode alpha=False roles=False dp=False", deployment: sglangMultinodeDGDForAdmission(t, false, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "sglang sidecar multinode alpha=False roles=False dp=True", deployment: sglangMultinodeDGDForAdmission(t, false, false, true), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "sglang sidecar multinode alpha=False roles=True dp=False", deployment: sglangMultinodeDGDForAdmission(t, false, true, false)},
-		{name: "sglang sidecar multinode alpha=False roles=True dp=True", deployment: sglangMultinodeDGDForAdmission(t, false, true, true)},
-		{name: "sglang sidecar multinode alpha=True roles=False dp=False", deployment: sglangMultinodeDGDForAdmission(t, true, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "sglang sidecar multinode alpha=True roles=False dp=True", deployment: sglangMultinodeDGDForAdmission(t, true, false, true), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "sglang sidecar multinode alpha=True roles=True dp=False", deployment: sglangMultinodeDGDForAdmission(t, true, true, false)},
-		{name: "sglang sidecar multinode alpha=True roles=True dp=True", deployment: sglangMultinodeDGDForAdmission(t, true, true, true)},
+		{name: "sglang sidecar multinode alpha=False roles=False workerRuntime=False", deployment: sglangMultinodeDGDForAdmission(t, false, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "sglang sidecar multinode alpha=False roles=False workerRuntime=True", deployment: sglangMultinodeDGDForAdmission(t, false, false, true), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "sglang sidecar multinode alpha=False roles=True workerRuntime=False", deployment: sglangMultinodeDGDForAdmission(t, false, true, false)},
+		{name: "sglang sidecar multinode alpha=False roles=True workerRuntime=True", deployment: sglangMultinodeDGDForAdmission(t, false, true, true)},
+		{name: "sglang sidecar multinode alpha=True roles=False workerRuntime=False", deployment: sglangMultinodeDGDForAdmission(t, true, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "sglang sidecar multinode alpha=True roles=False workerRuntime=True", deployment: sglangMultinodeDGDForAdmission(t, true, false, true), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "sglang sidecar multinode alpha=True roles=True workerRuntime=False", deployment: sglangMultinodeDGDForAdmission(t, true, true, false)},
+		{name: "sglang sidecar multinode alpha=True roles=True workerRuntime=True", deployment: sglangMultinodeDGDForAdmission(t, true, true, true)},
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
 		{name: "native sidecar beta create", deployment: nativeDGDForAdmission(t, false, nil)},
 		{name: "native sidecar beta update", oldDeployment: nativeDGDForAdmission(t, false, nil), deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
@@ -4886,7 +4886,7 @@ func assertDGDAdmissionDefaults(t *testing.T, actual *unstructured.Unstructured,
 }
 
 // sglangMultinodeDGDForAdmission authors either complete role sources or one shared template.
-func sglangMultinodeDGDForAdmission(t *testing.T, alpha, roles, dp bool) runtime.Object {
+func sglangMultinodeDGDForAdmission(t *testing.T, alpha, roles, workerRuntime bool) runtime.Object {
 	t.Helper()
 	dgd := nativeDGDForAdmission(t, false, nil).(*nvidiacomv1beta1.DynamoGraphDeployment)
 	dgd.Spec.BackendFramework = sglangBackendFramework
@@ -4895,14 +4895,14 @@ func sglangMultinodeDGDForAdmission(t *testing.T, alpha, roles, dp bool) runtime
 	main := &component.PodTemplate.Spec.Containers[0]
 	main.Command = []string{"python3", "-m", "sglang.launch_server"}
 	main.Args = []string{"--model-path", "model", "--tp-size", "2", "--kv-events-config", `{"publisher":"zmq"}`}
-	if dp {
+	if workerRuntime {
 		main.Args = append(main.Args, "--enable-dp-attention", "--dp-size", "2")
 	}
 	if roles {
 		for _, name := range []string{"leader", "worker"} {
 			template := component.PodTemplate.DeepCopy()
 			template.Spec.Containers[0].Command = []string{"/custom-launcher"}
-			if name == "worker" && !dp {
+			if name == "worker" && !workerRuntime {
 				template.Spec.InitContainers = nil
 			}
 			component.Roles = append(component.Roles, nvidiacomv1beta1.ComponentRoleSpec{Name: name, PodTemplate: template})
@@ -4919,9 +4919,9 @@ func sglangMultinodeDGDForAdmission(t *testing.T, alpha, roles, dp bool) runtime
 	return dgd
 }
 
-func sglangMultinodeDCDForAdmission(t *testing.T, alpha, roles, dp bool) runtime.Object {
+func sglangMultinodeDCDForAdmission(t *testing.T, alpha, roles, workerRuntime bool) runtime.Object {
 	t.Helper()
-	dgd := sglangMultinodeDGDForAdmission(t, false, roles, dp).(*nvidiacomv1beta1.DynamoGraphDeployment)
+	dgd := sglangMultinodeDGDForAdmission(t, false, roles, workerRuntime).(*nvidiacomv1beta1.DynamoGraphDeployment)
 	dcd := betaDCDForAdmission(nil)
 	dcd.Spec.BackendFramework = sglangBackendFramework
 	dcd.Spec.DynamoComponentDeploymentSharedSpec = *betaWorkerComponent(dgd).DeepCopy()
