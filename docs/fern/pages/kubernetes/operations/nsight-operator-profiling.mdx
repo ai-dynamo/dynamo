@@ -163,8 +163,8 @@ spec:
 - **Patterns.** They match Dynamo's launch commands, `python -m dynamo.<module>` and `python3 -m dynamo.<module>`, so
   helper commands such as `python3 -c ...` are not wrapped. Write `[.]` rather than `\.`: on Nsight Operator 26.2, a
   backslash in a pattern silently disabled injection.
-- **Field names.** Nsight Operator 26.2 rejects the 26.3 field names above. Use the config in
-  [Nsight Operator 26.2](#nsight-operator-26-2) instead.
+- **Field names.** Nsight Operator 26.2 rejects the 26.3 field names above. Use the config in the next section
+  instead.
 - **Fork tracing.** The config leaves out `--trace-fork-before-exec=true`, which Nsight's template sets. The
   [nsys documentation](https://docs.nvidia.com/nsight-systems/UserGuide/index.html#cli-profile-command-switch-options)
   warns that it can make the application crash or deadlock.
@@ -265,13 +265,15 @@ python3 nsight_operator.py --tag $T download -o ./reports
 python3 nsight_operator.py --tag $T session-end
 ```
 
-`--delay` gives the load time to warm up. The coordinator starts and stops the window itself, so the CLI does not need
-to stay connected. Download before `session-end`: without `--session <UUID>`, `ls` and `download` use the tag's active
-session. To download later, pass the session ID that `session-begin` printed. Reports appear after the delay, the
-window, and the upload; a 30-second window on one GPU worker produced a report of about 100 MB. Each file name carries
-the tag, the process, and the pod name. An `otlp-converter` entry in `status` or `ls` comes from Nsight's OpenTelemetry
-converter, not from a Dynamo pod. Open the reports with an Nsight Systems version at least as new as the `nsys` that the
-operator injects.
+`--delay` gives the load time to warm up. The `nsight_operator.py` of Nsight Operator 26.2 has no `--delay` or
+`--duration`: start the load, run `profiler-start`, wait, then run `profiler-stop`. The coordinator starts and stops the
+window itself, so the CLI does not need to stay connected. Download before `session-end`: without `--session <UUID>`,
+`ls` and `download` use the tag's active session. To download later, pass the session ID that `session-begin` printed.
+Reports appear after the delay, the window, and the upload; a 30-second window on one GPU worker produced a report of
+about 100 MB. Each file name carries the tag, the process, and the pod name; on Nsight Operator 26.3, `ls` and
+`download` show the node name as `host` instead. An `otlp-converter` entry in `status` or `ls` comes from Nsight's
+OpenTelemetry converter, not from a Dynamo pod. Open the reports with an Nsight Systems version at least as new as the
+`nsys` that the operator injects.
 
 <Note>
 `autoconfigure` copies the gateway's storage key into `~/.nsight-cloud.conf` on the machine that runs the CLI. To keep
@@ -322,6 +324,12 @@ kubectl exec -n $NS $POD -c main -- cat /tmp/tmpkro1yevt/<report>.nsys-rep > ./r
   vLLM worker, end-to-end latency rose by about 18%; a frontend-only window changed it by less than 1%.
 - **Use one profiler per process.** If your image already starts Dynamo under `nsys`, use an image without that
   wrapper.
+- **Roll profiled DGDs one or two at a time.** Nsight's injector webhook admits every new pod in opted-in namespaces.
+  On Nsight Operator 26.2.1, creating six DGDs at once made pod creation fail with `failed calling webhook
+  "nsight-injector.nvidia.com" ... context deadline exceeded` until fewer pods were created at once.
+- **Planner on Nsight Operator 26.3.** The `dynamo-planner` 1.6.0 image does not include `libcap.so.2`, which the
+  injected `nsys` needs to write the report, so the planner records but uploads no report. On Nsight Operator 26.2.1
+  the same image produced planner reports.
 - **TensorRT-LLM on Blackwell GPUs:** `-t cuda` can use hardware CUDA trace. If a worker crashes in a device-to-device
   copy under tracing, use `-t cuda-sw,nvtx,osrt`. This was seen with `nsys` outside Kubernetes.
 - **If a pod is not profiled,** follow Nsight's
@@ -339,12 +347,13 @@ restarted, and no request failed.
 |---|---|---|---|---|---|
 | 26.2.1 | 26.2 field names, with `planner` added to the CPU process pattern | vLLM, SGLang, TensorRT-LLM | Aggregated | frontend, planner, worker, all | None |
 | 26.2.1 | Same | vLLM, SGLang, TensorRT-LLM | Disaggregated | frontend, planner, prefill, decode, prefill and decode together, all | None |
-| 26.3.2 | The config above, as written | vLLM, SGLang, TensorRT-LLM | Aggregated | frontend, worker | planner, and all (no planner report) |
-| 26.3.2 | The config above, as written | vLLM, SGLang, TensorRT-LLM | Disaggregated | frontend, prefill, decode, prefill and decode together | planner, and all (no planner report) |
+| 26.3.2 | The 26.3 config, before its planner rule was added | vLLM, SGLang, TensorRT-LLM | Aggregated | frontend, worker | planner, and all (no planner report) |
+| 26.3.2 | The 26.3 config, before its planner rule was added | vLLM, SGLang, TensorRT-LLM | Disaggregated | frontend, prefill, decode, prefill and decode together | planner, and all (no planner report) |
 
-The planner failed on 26.3.2 for two reasons. The config above has no process pattern for `dynamo.planner`. With one
-added, the planner was recorded, but the `nsys` that Nsight Operator 26.3.2 injects could not write the report in the
-`dynamo-planner` 1.6.0 image, because the image does not include `libcap.so.2`.
+The planner failed on 26.3.2 for two reasons. The config tested then had no planner rule. With the planner rule now in
+the 26.3 config, the planner was recorded, but the `nsys` that Nsight Operator 26.3.2 injects could not write the report
+in the `dynamo-planner` 1.6.0 image, because the image does not include `libcap.so.2`. The 26.2 config also ran on
+Nsight Operator 26.3.2: frontend, prefill and decode passed, and the planner failed for the same reason.
 
 Earlier tests on Nsight Operator 26.2.1, with pods created by the Dynamo 1.5.0 operator, also showed:
 
