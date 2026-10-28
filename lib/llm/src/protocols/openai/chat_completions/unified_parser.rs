@@ -265,10 +265,10 @@ impl UnifiedRequestPolicy {
         mut prefill: StreamPrefill,
         constraint: &GuidedToolConstraint,
         explicit_guidance: bool,
-        harmony_required_array: bool,
+        harmony_required_array: impl FnOnce() -> bool,
     ) -> StreamPrefill {
         if family == "gpt_oss"
-            && (explicit_guidance || constraint.installs_guided_json() && !harmony_required_array)
+            && (explicit_guidance || constraint.installs_guided_json() && !harmony_required_array())
         {
             return UnifiedParserStartingState::Response.into();
         }
@@ -4796,6 +4796,7 @@ pub(crate) mod tests {
                 UnifiedParserStartingState::Response,
             ] {
                 let prefix = std::sync::Arc::<str>::from("consumed prompt");
+                let mut array_checked = false;
                 let actual = UnifiedRequestPolicy::default().resolve_stream_prefill(
                     family,
                     StreamPrefill {
@@ -4804,8 +4805,12 @@ pub(crate) mod tests {
                     },
                     &constraint,
                     explicit,
-                    required_array,
+                    || {
+                        array_checked = true;
+                        required_array
+                    },
                 );
+                assert_eq!(array_checked, family == "gpt_oss" && !explicit && guided);
                 if bare {
                     assert_eq!(actual.starting_state, UnifiedParserStartingState::Response);
                     assert!(actual.prefix.is_none());

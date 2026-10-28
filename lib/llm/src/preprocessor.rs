@@ -5797,21 +5797,6 @@ impl OpenAIPreprocessor {
                 structured_response: Self::has_structured_response_format(request),
                 multiple_choices: request.inner.n.unwrap_or(1) > 1,
             };
-            let harmony_required_array = self.runtime_config.structural_tag.is_some()
-                && structural_tag::uses_gpt_oss_required_array(
-                    (
-                        self.tool_call_parser.as_deref(),
-                        self.runtime_config.reasoning_parser.as_deref(),
-                    ),
-                    &tool_choice::convert_tool_choice(
-                        request
-                            .inner
-                            .tool_choice
-                            .as_ref()
-                            .unwrap_or(&ChatCompletionToolChoiceOption::Auto),
-                    ),
-                    request.inner.parallel_tool_calls,
-                );
             let prefill = policy.resolve_stream_prefill(
                 family,
                 unified_parser::StreamPrefill {
@@ -5828,7 +5813,23 @@ impl OpenAIPreprocessor {
                 },
                 &guided_tool_constraint,
                 tool_choice::has_explicit_guided_decoding(request),
-                harmony_required_array,
+                || {
+                    self.runtime_config.structural_tag.is_some()
+                        && structural_tag::uses_gpt_oss_required_array(
+                            (
+                                self.tool_call_parser.as_deref(),
+                                self.runtime_config.reasoning_parser.as_deref(),
+                            ),
+                            &tool_choice::convert_tool_choice(
+                                request
+                                    .inner
+                                    .tool_choice
+                                    .as_ref()
+                                    .unwrap_or(&ChatCompletionToolChoiceOption::Auto),
+                            ),
+                            request.inner.parallel_tool_calls,
+                        )
+                },
             );
             let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
                 Box::pin(unified_parser::apply_stream_with_policy(
