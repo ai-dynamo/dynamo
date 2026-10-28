@@ -127,7 +127,7 @@ logit = prefill_load_scale * adjusted_prefill_blocks   // default 1.0
 
 Before applying the device term, the router computes
 `effective_device_credit = overlap_score_credit / (1 + overlap_score_credit_decay * normalized_excess_prefill)`.
-The host, disk, shared-cache, and fetchable-block credits do not decay. `fetchable_blocks` are the blocks a worker could fetch from a peer through a KV fetch hint, such as from KVCR, beyond everything it holds.
+The host, disk, shared-cache, and fetchable-block credits do not decay. `fetchable_blocks` are the blocks a worker could fetch from a peer through a KV fetch hint, such as from [KVCR](../../kv-offload/kvcr.md), beyond everything it holds.
 
 The router picks the worker with the **minimum** logit.
 
@@ -149,4 +149,5 @@ See [Configuration and Tuning](configuration-and-tuning.md) for the cache-hit we
 - [Native KV Offloading](../backends/vllm/native-kv-offloading.md) — vLLM detail page
 - [Using HiCache](../backends/sglang/hicache.md) — SGLang detail page
 - [KV Cache Offloading](../backends/vllm/kv-cache-offloading.md) — vLLM offloading backend catalog (native, KVBM, LMCache, FlexKV)
+- [KV Cache Management Overview](../../kv-offload/overview.md) - offload tiers, cache managers, and KVCR
 - [Feature Matrix](../../../../reference/general/compatibility.mdx) — per-backend feature support across Dynamo

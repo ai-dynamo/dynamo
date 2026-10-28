@@ -603,6 +603,34 @@ navigation:
                     contents:
                       - page: Mocker Engine Architecture
                         path: pages/developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md
+      - section: KV Cache Management
+        slug: kv-offload
+        collapsed: true
+        contents:
+          - page: KV Cache Management Overview
+            path: pages/developer-guide/knowledge-base/kv-offload/overview.md
+          - page: KV Cache Runner (KVCR)
+            path: pages/developer-guide/knowledge-base/kv-offload/kvcr.md
+          - page: How KV Hints Work
+            path: pages/developer-guide/knowledge-base/kv-offload/kv-hints.md
+          - page: Configure KVCR for vLLM
+            path: pages/developer-guide/knowledge-base/kv-offload/configure-kvcr-vllm.md
+          - page: Run KVCR on Kubernetes with vLLM
+            path: pages/developer-guide/knowledge-base/kv-offload/kvcr-kubernetes-vllm.md
+          - page: Run KVCR Guard on Kubernetes with vLLM
+            path: pages/developer-guide/knowledge-base/kv-offload/kvcr-guard-kubernetes-vllm.md
+          - page: Verify and Monitor KVCR with vLLM
+            path: pages/developer-guide/knowledge-base/kv-offload/kvcr-testing-monitoring-vllm.md
+          - page: Configure KVCR for SGLang
+            path: pages/developer-guide/knowledge-base/kv-offload/configure-kvcr-sglang.md
+          - page: Configure KVCR Linker Mode for SGLang
+            path: pages/developer-guide/knowledge-base/kv-offload/configure-kvcr-sglang-linker.md
+          - page: Run KVCR on Kubernetes with SGLang
+            path: pages/developer-guide/knowledge-base/kv-offload/kvcr-kubernetes-sglang.md
+          - page: Run KVCR Guard on Kubernetes with SGLang
+            path: pages/developer-guide/knowledge-base/kv-offload/kvcr-guard-kubernetes-sglang.md
+          - page: Tune Routing for KVCR
+            path: pages/developer-guide/knowledge-base/kv-offload/kvcr-routing-tuning.md
       - section: Developing and Extending Dynamo
         slug: advanced-customizations
         icon: sliders
