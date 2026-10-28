@@ -797,10 +797,9 @@ impl Model {
 
     pub(crate) fn get_systemone_execution_selection(
         &self,
-        capability: &str,
     ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
         self.select_worker_set_with_worker_count(
-            |ws| self.systemone_execution_inputs(ws, capability),
+            |ws| self.systemone_execution_inputs(ws),
             WorkerSet::decision_worker_count,
         )
         .ok_or_else(|| {
@@ -808,7 +807,7 @@ impl Model {
                 .worker_sets
                 .load()
                 .values()
-                .any(|worker_set| Self::supports_systemone_profile(worker_set, capability))
+                .any(|worker_set| worker_set.card().is_systemone_serial_eligible())
             {
                 SystemOneSelectionError::Unavailable
             } else {
@@ -817,18 +816,12 @@ impl Model {
         })
     }
 
-    fn supports_systemone_profile(worker_set: &WorkerSet, capability: &str) -> bool {
-        worker_set.supports_runtime_capability(capability)
-            && worker_set.card().is_systemone_serial_eligible()
-    }
-
     fn systemone_execution_inputs(
         &self,
         worker_set: &WorkerSet,
-        capability: &str,
     ) -> Option<SystemOneExecutionSelection> {
         let card = worker_set.card();
-        if !Self::supports_systemone_profile(worker_set, capability) {
+        if !card.is_systemone_serial_eligible() {
             return None;
         }
         Some(SystemOneExecutionSelection {
@@ -1384,8 +1377,7 @@ mod tests {
         workers_b.send(vec![]).unwrap();
         model.add_worker_set("ns-a".to_string(), worker_set_a.clone());
         model.add_worker_set("ns-b".to_string(), worker_set_b.clone());
-        let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
-        let selection_a = model.get_systemone_execution_selection(capability).unwrap();
+        let selection_a = model.get_systemone_execution_selection().unwrap();
         assert!(Arc::ptr_eq(
             &selection_a.engine,
             worker_set_a.generate_engine.as_ref().unwrap()
@@ -1399,7 +1391,7 @@ mod tests {
 
         workers_a.send(vec![]).unwrap();
         workers_b.send(vec![2]).unwrap();
-        let selection_b = model.get_systemone_execution_selection(capability).unwrap();
+        let selection_b = model.get_systemone_execution_selection().unwrap();
         assert!(Arc::ptr_eq(
             &selection_b.engine,
             worker_set_b.generate_engine.as_ref().unwrap()
@@ -1414,8 +1406,7 @@ mod tests {
 
     #[test]
     fn systemone_selection_distinguishes_unsupported_from_unavailable() {
-        let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
-        let unsupported: [fn(&mut ModelDeploymentCard); 10] = [
+        let unsupported: [fn(&mut ModelDeploymentCard); 9] = [
             |card| {
                 card.runtime_config
                     .runtime_data
@@ -1452,16 +1443,13 @@ mod tests {
                     .runtime_data
                     .insert("spec_decode".to_string(), serde_json::json!({}));
             },
-            |card| {
-                card.migration_limit = 1;
-            },
         ];
         for configure in unsupported {
             let model = Model::new("scoring-model".to_string());
             let (worker_set, _workers) = systemone_worker_set("ns", configure);
             model.add_worker_set("ns".to_string(), worker_set);
             assert!(matches!(
-                model.get_systemone_execution_selection(capability),
+                model.get_systemone_execution_selection(),
                 Err(SystemOneSelectionError::Unsupported)
             ));
         }
@@ -1472,7 +1460,7 @@ mod tests {
             .systemone_preprocessor = None;
         model.add_worker_set("ns".to_string(), worker_set);
         assert!(matches!(
-            model.get_systemone_execution_selection(capability),
+            model.get_systemone_execution_selection(),
             Err(SystemOneSelectionError::Unavailable)
         ));
         let model = Model::new("scoring-model".to_string());
@@ -1480,7 +1468,7 @@ mod tests {
         Arc::get_mut(&mut worker_set).unwrap().generate_engine = None;
         model.add_worker_set("ns".to_string(), worker_set);
         assert!(matches!(
-            model.get_systemone_execution_selection(capability),
+            model.get_systemone_execution_selection(),
             Err(SystemOneSelectionError::Unavailable)
         ));
         let model = Model::new("scoring-model".to_string());
@@ -1488,9 +1476,19 @@ mod tests {
         workers.send(vec![]).unwrap();
         model.add_worker_set("ns".to_string(), worker_set);
         assert!(matches!(
-            model.get_systemone_execution_selection(capability),
+            model.get_systemone_execution_selection(),
             Err(SystemOneSelectionError::Unavailable)
         ));
+    }
+
+    #[test]
+    fn systemone_selection_ignores_unrelated_card_migration_limit() {
+        let model = Model::new("scoring-model".to_string());
+        let (worker_set, _workers) = systemone_worker_set("ns", |card| {
+            card.migration_limit = 1;
+        });
+        model.add_worker_set("ns".to_string(), worker_set);
+        assert!(model.get_systemone_execution_selection().is_ok());
     }
 
     #[test]
@@ -1502,8 +1500,7 @@ mod tests {
             .unwrap()
             .set_lifecycle_cancellation(cancellation.clone());
         model.add_worker_set("ns".to_string(), workers);
-        let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
-        let selection = model.get_systemone_execution_selection(capability).unwrap();
+        let selection = model.get_systemone_execution_selection().unwrap();
         assert_eq!(selection.validate_dispatch(Some(1)), Ok(()));
         cancellation.cancel();
         assert_eq!(
@@ -1511,7 +1508,7 @@ mod tests {
             Err(SystemOneSelectionError::Unavailable)
         );
         assert!(matches!(
-            model.get_systemone_execution_selection(capability),
+            model.get_systemone_execution_selection(),
             Err(SystemOneSelectionError::Unavailable)
         ));
     }
@@ -1531,8 +1528,7 @@ mod tests {
         local.set_lifecycle_cancellation(cancellation.clone());
         assert_eq!(local.decision_worker_count(), 1);
         model.add_worker_set("local".to_string(), Arc::new(local));
-        let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
-        let selection = model.get_systemone_execution_selection(capability).unwrap();
+        let selection = model.get_systemone_execution_selection().unwrap();
         assert!(selection.admitted_ids.is_none());
         assert_eq!(selection.validate_dispatch(None), Ok(()));
         cancellation.cancel();
@@ -1570,14 +1566,13 @@ mod tests {
             },
         );
         model.add_worker_set("ns-a".to_string(), unadmitted);
-        let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
         assert!(matches!(
-            model.get_systemone_execution_selection(capability),
+            model.get_systemone_execution_selection(),
             Err(SystemOneSelectionError::Unavailable)
         ));
         let (available, _available_tx) = systemone_worker_set("ns-b", |_| {});
         model.add_worker_set("ns-b".to_string(), available.clone());
-        let selection = model.get_systemone_execution_selection(capability).unwrap();
+        let selection = model.get_systemone_execution_selection().unwrap();
         assert!(Arc::ptr_eq(
             &selection.engine,
             available.generate_engine.as_ref().unwrap()
@@ -1594,7 +1589,7 @@ mod tests {
         assert_eq!(workers.decision_worker_count(), 0);
         drop(admitted_tx);
         assert_eq!(workers.decision_worker_count(), 0);
-        let selection = model.get_systemone_execution_selection(capability).unwrap();
+        let selection = model.get_systemone_execution_selection().unwrap();
         assert!(Arc::ptr_eq(
             &selection.engine,
             available.generate_engine.as_ref().unwrap()

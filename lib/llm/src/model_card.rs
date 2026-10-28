@@ -1256,7 +1256,6 @@ impl ModelDeploymentCard {
             && self.worker_type == Some(crate::worker_type::WorkerType::Aggregated)
             && self.needs.is_empty()
             && self.lora.is_none()
-            && self.migration_limit == 0
             && !self
                 .runtime_config
                 .runtime_data
@@ -3700,7 +3699,8 @@ mod ownership_tests {
 
         let enabled = card(|_| {});
         assert!(enabled.is_systemone_serial_eligible());
-        let unsupported: [fn(&mut ModelDeploymentCard); 11] = [
+        assert!(card(|card| card.migration_limit = 1).is_systemone_serial_eligible());
+        let unsupported: [fn(&mut ModelDeploymentCard); 10] = [
             |card| {
                 card.runtime_config
                     .runtime_data
@@ -3723,7 +3723,6 @@ mod ownership_tests {
                     max_gpu_lora_count: None,
                 });
             },
-            |card| card.migration_limit = 1,
             |card| {
                 card.runtime_config
                     .runtime_data
