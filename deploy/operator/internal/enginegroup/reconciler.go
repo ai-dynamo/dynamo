@@ -47,8 +47,6 @@ const (
 	ObservationAuthorityMembership ObservationAuthority = "membership"
 	// ObservationAuthorityCorrelation validates a complete observation set against the durable journal.
 	ObservationAuthorityCorrelation ObservationAuthority = "correlation"
-	// ObservationAuthorityVerification owns serving-progress evidence for an exact topology.
-	ObservationAuthorityVerification ObservationAuthority = "verification"
 )
 
 // ObservationError means reconciliation could not establish fresh authoritative external state. Callers may retain
@@ -96,21 +94,7 @@ func (c *Coordinator) Reconcile(
 	groupID GroupID,
 	desiredPlan *ResolvedPlan,
 	status GroupStatus,
-) (result ReconcileResult, reconcileErr error) {
-	// Retain invocation-only faults before returning. Do not turn an inconclusive observation into a durable rejection,
-	// and never rewrite the membership target or its independently owned Pending/Unknown/terminal result.
-	defer func() {
-		var observationErr *ObservationError
-		if errors.Is(reconcileErr, ErrRecoveryRequired) && !errors.As(reconcileErr, &observationErr) &&
-			result.Status.Transition != nil && !result.Status.Transition.RequiresRecovery() {
-			c.blockTransition(&result.Status, Failure{Classification: FailureClassificationTerminal,
-				Reason: recoveryRequiredReason, Message: reconcileErr.Error()})
-		}
-		if result.Status.Transition.RequiresRecovery() && !errors.Is(reconcileErr, ErrRecoveryRequired) {
-			reconcileErr = errors.Join(reconcileErr, fmt.Errorf("%w: %s", ErrRecoveryRequired, result.Status.Transition.Failure.Message))
-		}
-	}()
-
+) (ReconcileResult, error) {
 	next := cloneStatus(status)
 	if groupID == "" {
 		return ReconcileResult{Status: next}, errors.New("group ID must not be empty")
@@ -129,7 +113,7 @@ func (c *Coordinator) Reconcile(
 	}
 
 	// Start, retain, or replace the one durable resolved transition before executing its explicit steps.
-	if next.Transition == nil {
+	if next.Transition == nil && desiredPlan == nil {
 		handled, result, err := c.reconcileInitialAdmission(ctx, groupID, next, topology)
 		if handled || err != nil {
 			return result, err
@@ -250,18 +234,6 @@ func (c *Coordinator) reconcileDesiredPlan(
 	desiredPlan *ResolvedPlan,
 	observedTopology MembershipTopology,
 ) (handled bool, result ReconcileResult, err error) {
-	// Fresh observations alone cannot clear a fault seen only during Apply. A new semantic recovery plan must pass
-	// the usual topology/identity checks; ordinary growth, retirement and replay cannot bypass this fence.
-	if status.Transition.RequiresRecovery() {
-		recoveryPlan := desiredPlan != nil && desiredPlan.ID != status.Transition.Spec.Plan.ID &&
-			(desiredPlan.Change.Kind == PlanKindReduceToSurvivors || desiredPlan.Change.Kind == PlanKindRestore ||
-				desiredPlan.Change.Kind == PlanKindRemap)
-		if !recoveryPlan || !canReplaceBlockedTransition(status) {
-			return true, ReconcileResult{Status: status, Requeue: true}, fmt.Errorf("%w: %s",
-				ErrRecoveryRequired, status.Transition.Failure.Message)
-		}
-	}
-
 	// Finish interpreting a recovered membership result before considering a replacement plan. In particular, a
 	// correlated rejection must restore preparatory capacity and traffic state even when a newer plan is already desired.
 	if recovered, recoveredStatus := c.recoverMembershipAuthority(status, observedTopology); recovered {
@@ -321,12 +293,8 @@ func (c *Coordinator) recoverMembershipAuthority(
 	observedTopology MembershipTopology,
 ) (bool, GroupStatus) {
 	if status.Transition == nil || status.Transition.Outcome != TransitionOutcomeBlocked ||
-		status.Transition.Failure == nil ||
-		(status.Transition.Failure.Reason != "UnknownMembershipOutcome" &&
-			status.Transition.Failure.Reason != "TopologyChangedWhilePending" &&
-			status.Transition.Failure.Reason != "TopologyChangedWithoutTransition" &&
-			status.Transition.Failure.Reason != "ConflictingTopologyObservation" &&
-			status.Transition.Failure.Reason != "RejectedAfterTopologyChanged") ||
+		status.Transition.BlockKind != TransitionBlockKindMembershipAuthority ||
+		status.Membership.Desired == nil || !membershipTargetMatchesTransition(*status.Membership.Desired, *status.Transition) ||
 		status.Membership.Observed.Transition == nil {
 		return false, status
 	}
@@ -342,6 +310,7 @@ func (c *Coordinator) recoverMembershipAuthority(
 			return false, status
 		}
 		status.Transition.Outcome = TransitionOutcomeProgressing
+		status.Transition.BlockKind = ""
 		status.Transition.Failure = nil
 		status.Transition.UpdatedAt = c.now()
 		return true, status
@@ -350,6 +319,7 @@ func (c *Coordinator) recoverMembershipAuthority(
 			return false, status
 		}
 		status.Transition.Outcome = TransitionOutcomeProgressing
+		status.Transition.BlockKind = ""
 		status.Transition.Failure = nil
 		status.Transition.UpdatedAt = c.now()
 		return true, status
@@ -408,24 +378,44 @@ func (c *Coordinator) reconcilePreparedTransition(
 	topology MembershipTopology,
 	resolution planResolution,
 ) (ReconcileResult, error) {
-	// Growth and restoration first converge exact named capacity, then persist the observed incarnations in the registry.
+	// Interpret native outcomes before preparatory drift can obscure a commit or start an unsafe rollback.
+	if next.Membership.Desired != nil && membershipTargetMatchesTransition(*next.Membership.Desired, *next.Transition) &&
+		next.Membership.Observed.Transition != nil && next.Membership.Observed.Transition.Phase != MembershipTransitionPhasePending {
+		ready, persist, err := c.reconcileMembership(ctx, groupID, &next, base, topology, resolution)
+		if err != nil || persist || !ready {
+			return ReconcileResult{Status: next, Requeue: err == nil}, err
+		}
+		return c.reconcileCommittedTransition(ctx, groupID, next, base, resolution)
+	}
+
+	// Growth and restoration freeze exact joining incarnations before membership submission.
 	ready, persist, err := c.reconcileJoiningCapacity(ctx, groupID, &next, resolution)
 	if err != nil || persist || !ready {
 		return ReconcileResult{Status: next, Requeue: err == nil}, err
 	}
 
-	// Establish the plan's traffic boundary before membership; native drain may complete inside the transaction.
+	// Establish the plan's traffic boundary; native drain may complete inside the transaction.
 	ready, persist, err = c.reconcilePreMembershipTraffic(ctx, groupID, &next, base, resolution)
 	if err != nil || persist || !ready {
 		return ReconcileResult{Status: next, Requeue: err == nil}, err
 	}
 
-	// Membership is the only external subsystem retaining an asynchronous idempotent operation identity.
+	// The adapter owns the serialized membership transaction and its correlated result.
 	ready, persist, err = c.reconcileMembership(ctx, groupID, &next, base, topology, resolution)
 	if err != nil || persist || !ready {
 		return ReconcileResult{Status: next, Requeue: err == nil}, err
 	}
+	return c.reconcileCommittedTransition(ctx, groupID, next, base, resolution)
+}
 
+func (c *Coordinator) reconcileCommittedTransition(
+	ctx context.Context,
+	groupID GroupID,
+	next GroupStatus,
+	base MembershipTopology,
+	resolution planResolution,
+) (ReconcileResult, error) {
+	// Native commit is durable before physical release, verification, or resolving withdrawal intent.
 	membershipTransition := next.Membership.Observed.Transition
 	if membershipTransition == nil || membershipTransition.ResultTopology == nil {
 		return ReconcileResult{Status: next}, errors.New("committed membership result is absent")
@@ -434,8 +424,13 @@ func (c *Coordinator) reconcilePreparedTransition(
 	if !found {
 		return ReconcileResult{Status: next}, errors.New("committed membership topology is absent from history")
 	}
+	if err := validatePinnedCapacity(next.Registry, next.Capacity.Observed, committed); err != nil {
+		return ReconcileResult{Status: next}, observationError(ObservationAuthorityCapacity, err)
+	}
 
 	// Engine-managed drain must produce terminal evidence before any physical release is authorized.
+	var ready, persist bool
+	var err error
 	if next.Transition.Spec.Plan.TrafficRequirement == TrafficRequirementEngineManagedDrain {
 		ready, persist, err = c.reconcileCommittedTraffic(ctx, groupID, &next, committed, resolution)
 		if err != nil || persist || !ready {
@@ -580,12 +575,14 @@ func nextControlRevisionValue(status GroupStatus) (int64, error) {
 
 func (c *Coordinator) blockTransition(status *GroupStatus, failure Failure) {
 	status.Transition.Outcome = TransitionOutcomeBlocked
+	status.Transition.BlockKind = TransitionBlockKindSubsystemFailure
 	status.Transition.Failure = cloneFailure(&failure)
 	status.Transition.UpdatedAt = c.now()
 }
 
 func (c *Coordinator) beginRollback(status *GroupStatus, failure Failure) {
 	status.Transition.Outcome = TransitionOutcomeReverting
+	status.Transition.BlockKind = ""
 	status.Transition.Failure = cloneFailure(&failure)
 	status.Transition.UpdatedAt = c.now()
 }
