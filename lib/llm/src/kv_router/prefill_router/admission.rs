@@ -178,8 +178,7 @@ impl PrefillRouter {
         let prefill_context = prefill_stream.context();
         PrefillTask::spawn_unlogged(async move {
             drop(phase_transition_permit);
-            let result =
-                match Self::consume_prefill_stream(
+            let result = match Self::consume_prefill_stream(
                 prefill_stream,
                 tracker,
                 task_guard,
@@ -187,19 +186,19 @@ impl PrefillRouter {
             )
             .await
             {
-                    Ok(PrefillCompletion::Handoff {
-                        completion: Some(task),
-                        ..
-                    }) => {
-                        // The inner observer already logs its own failures.
-                        return task.wait().await;
-                    }
-                    Ok(PrefillCompletion::Terminal { output }) => {
-                        PrefillTask::check_output(&output).map(|()| None)
-                    }
-                    Ok(_) => Ok(None),
-                    Err(error) => Err(error),
-                };
+                Ok(PrefillCompletion::Handoff {
+                    completion: Some(task),
+                    ..
+                }) => {
+                    // The inner observer already logs its own failures.
+                    return task.wait().await;
+                }
+                Ok(PrefillCompletion::Terminal { output }) => {
+                    PrefillTask::check_output(&output).map(|()| None)
+                }
+                Ok(_) => Ok(None),
+                Err(error) => Err(error),
+            };
             result.inspect_err(|error| PrefillTask::log_failure(error, prefill_context.as_ref()))
         })
     }
@@ -312,12 +311,13 @@ mod tests {
                                         crate::protocols::common::timing::RequestPhase::Prefill,
                                     )
                                     .await;
-                                router.spawn_prefill_task(response, Some(tracker), permit)
+                                router.spawn_prefill_task(response, Some(tracker), permit, None)
                             } else {
-                                let result =
-                                    PrefillRouter::consume_prefill_stream(response, None, None)
-                                        .await
-                                        .unwrap();
+                                let result = PrefillRouter::consume_prefill_stream(
+                                    response, None, None, None,
+                                )
+                                .await
+                                .unwrap();
                                 let PrefillCompletion::Handoff {
                                     completion: Some(task),
                                     ..
