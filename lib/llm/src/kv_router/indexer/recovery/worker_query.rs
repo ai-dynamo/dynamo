@@ -3,10 +3,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -114,8 +111,8 @@ pub(crate) struct WorkerQueryClient<T = IndexerRecoveryTarget> {
     recovery_lane: RecoveryLane<RecoveryKey>,
     recovery_attempt_timeout: Duration,
     cancellation_token: CancellationToken,
-    /// Batches dropped because their publisher had no active binding; throttles the warning.
-    unbound_batches_dropped: AtomicU64,
+    /// Batches dropped per publisher with no active binding; throttles that publisher's warning.
+    unbound_batches_dropped: DashMap<PublisherId, u64>,
 }
 
 impl<T: RecoveryTarget> WorkerQueryClient<T> {
@@ -157,7 +154,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token,
-            unbound_batches_dropped: AtomicU64::new(0),
+            unbound_batches_dropped: DashMap::new(),
         });
 
         Ok(client)
@@ -197,7 +194,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token: CancellationToken::new(),
-            unbound_batches_dropped: AtomicU64::new(0),
+            unbound_batches_dropped: DashMap::new(),
         })
     }
 
@@ -314,6 +311,8 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 slot: slot_handle.clone(),
             },
         );
+        self.unbound_batches_dropped
+            .remove(&binding.source_id.publisher_id);
         tracing::info!(
             worker_id = key.0,
             dp_rank = key.1,
@@ -601,7 +600,14 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             .map(|entry| entry.clone())
         else {
             // Logs the 1st, 2nd, 4th, ... drop so a source that never activates stays visible.
-            let dropped = self.unbound_batches_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            let dropped = {
+                let mut count = self
+                    .unbound_batches_dropped
+                    .entry(publisher_id)
+                    .or_insert(0);
+                *count += 1;
+                *count
+            };
             if dropped.is_power_of_two() {
                 tracing::warn!(
                     publisher_id,

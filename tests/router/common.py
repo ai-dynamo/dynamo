@@ -902,21 +902,37 @@ def _test_remote_indexer_decisions(
             while time.monotonic() < deadline:
                 attempt += 1
                 probe = [random.randint(1, 10000) for _ in range(2 * block_size)]
-                await send_request_via_python_kv_router(
-                    kv_python_router=serving_routers[0],
-                    model_name=model_name,
-                    token_ids=probe,
-                    stop_conditions={"ignore_eos": True, "max_tokens": 2},
-                    worker_id=worker_id,
-                    dp_rank=dp_rank,
-                )
+                try:
+                    await asyncio.wait_for(
+                        send_request_via_python_kv_router(
+                            kv_python_router=serving_routers[0],
+                            model_name=model_name,
+                            token_ids=probe,
+                            stop_conditions={"ignore_eos": True, "max_tokens": 2},
+                            worker_id=worker_id,
+                            dp_rank=dp_rank,
+                        ),
+                        timeout=max(deadline - time.monotonic(), 0.1),
+                    )
+                except asyncio.TimeoutError:
+                    raise AssertionError(
+                        f"Probe request for {key} outlived the readiness deadline "
+                        f"on attempt {attempt}"
+                    ) from None
                 probe_deadline = min(deadline, time.monotonic() + 2.0)
                 while True:
                     stale = {}
                     for idx, serving_router in enumerate(serving_routers):
-                        scores = await serving_router.get_overlap_scores(
-                            probe, include_shared=False
-                        )
+                        try:
+                            scores = await asyncio.wait_for(
+                                serving_router.get_overlap_scores(
+                                    probe, include_shared=False
+                                ),
+                                timeout=max(probe_deadline - time.monotonic(), 0.1),
+                            )
+                        except asyncio.TimeoutError:
+                            stale[idx] = -1
+                            continue
                         blocks_by_rank = {
                             (row["worker_id"], row["dp_rank"]): row["device_blocks"]
                             for row in scores["workers"]
