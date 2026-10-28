@@ -28,6 +28,7 @@ from urllib.request import url2pathname
 
 from dynamo.common.http.url_validator import (
     SOURCE_LABEL_LIMIT,
+    MediaSizeError,
     UrlValidationError,
     UrlValidationPolicy,
     describe_media_source,
@@ -77,14 +78,14 @@ def decode_data_uri(url: str, max_bytes: int | None = None) -> bytes:
         # payload before unquoting, then check the decoded size below.
         max_encoded_chars = 4 * ((max_bytes + 2) // 3)
         if len(payload) > 3 * max_encoded_chars:
-            raise UrlValidationError(
+            raise MediaSizeError(
                 f"Data URI payload exceeds the maximum allowed size ({max_bytes} bytes)"
             )
     body = unquote(payload)
     if max_bytes is not None:
         # Some Python versions accept padding after complete base64 quartets.
         if len(body.rstrip("=")) * 3 // 4 > max_bytes:
-            raise UrlValidationError(
+            raise MediaSizeError(
                 f"Data URI payload exceeds the maximum allowed size ({max_bytes} bytes)"
             )
     try:

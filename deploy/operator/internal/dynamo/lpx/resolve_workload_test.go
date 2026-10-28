@@ -91,7 +91,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	require.Equal(t, lpxv1alpha1.TargetFamilyHx16x8x2x3, hxRequest.TargetFamily)
 	require.Equal(t, lpxv1alpha1.WorkloadModeV3HxLPUOnly, hxRequest.WorkloadMode)
 	require.Equal(t, "LPX", hx.ServingComponentName())
-	plan, err := hx.PlanNodeLocalMaterialization("test-pcs")
+	plan, err := hx.PlanNodeLocalMaterialization("test-pcs", dgd.GetComponentByName(hx.ServingComponentName()))
 	require.NoError(t, err)
 	require.Equal(t, "test-pcs-0-lpx", plan.LPXScalingGroup)
 	require.Equal(t, "cond", plan.ConductorTemplate)
@@ -137,12 +137,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	}
 
 	t.Log("Require resources on the independently authored hybrid conductor")
-	fixture := newV2CompilerFixture()
-	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	fixture.selectedPropSyncChains = nil
-	fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 11, deviceType: manifestcapnp.DeviceType_cuda})
-	snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-	source := staticModelRegistry{"build": snapshot}
+	source := staticModelRegistry{"build": acquireHybridTestSnapshot(t)}
 	_, err = ResolveWorkload(t.Context(), reader, dgd, singleGroupComponents(t, dgd), source)
 	require.ErrorContains(t, err, "requires a positive GPU count")
 	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
@@ -271,7 +266,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	require.Equal(t, lpxv1alpha1.TargetFamilyXt8888, xtRequest.TargetFamily)
 	require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, xtRequest.WorkloadMode)
 	require.Len(t, xt.modelProjections[0].configuredBuild.partitions, 2)
-	plan, err = xt.PlanNodeLocalMaterialization("test-pcs")
+	plan, err = xt.PlanNodeLocalMaterialization("test-pcs", dgd.GetComponentByName(xt.ServingComponentName()))
 	require.NoError(t, err)
 	require.Equal(t, "cond", plan.CyborgTemplate)
 	require.EqualValues(t, 2, plan.Replicas)
@@ -293,7 +288,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 	scheduled, err := ResolveWorkload(t.Context(), reader, dgd, singleGroupComponents(t, dgd), source)
 	require.NoError(t, err)
 	require.Equal(t, xt, scheduled)
-	scheduledPlan, err := scheduled.PlanNodeLocalMaterialization("test-pcs")
+	scheduledPlan, err := scheduled.PlanNodeLocalMaterialization("test-pcs", dgd.GetComponentByName(scheduled.ServingComponentName()))
 	require.NoError(t, err)
 	require.Equal(t, plan, scheduledPlan)
 	require.Empty(t, scheduledPlan.ConductorTemplate)
@@ -374,7 +369,7 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 				[]string{"draft0", "draft1", "target"},
 				[]string{projections[0].Model(), projections[1].Model(), projections[2].Model()},
 			)
-			plan, err := selected.PlanNodeLocalMaterialization("test-pcs")
+			plan, err := selected.PlanNodeLocalMaterialization("test-pcs", dgd.GetComponentByName(selected.ServingComponentName()))
 			require.NoError(t, err)
 			require.EqualValues(t, 1, plan.Replicas, "draft fanout must not become the shared scaling-group axis")
 			require.Equal(t, "small", projections[0].stage)
@@ -398,7 +393,7 @@ func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 			reselected, err := ResolveWorkload(t.Context(), reader, reordered, members, source)
 			require.NoError(t, err)
 			require.Equal(t, selected.Digest(), reselected.Digest())
-			reorderedPlan, err := reselected.PlanNodeLocalMaterialization("test-pcs")
+			reorderedPlan, err := reselected.PlanNodeLocalMaterialization("test-pcs", reordered.GetComponentByName(reselected.ServingComponentName()))
 			require.NoError(t, err)
 			require.Equal(t, plan, reorderedPlan)
 			require.Equal(t, []string{"small", "lpx"}, reselected.ComponentNames())
@@ -503,6 +498,70 @@ func TestResolveWorkloadPreservesAuthoredLaunch(t *testing.T) {
 	require.Equal(t, before, dgd)
 }
 
+func TestResolveWorkloadPlacesRuntimeSidecarWithTheEngine(t *testing.T) {
+	t.Log("Acquire single-Pod HX, two-Pod HX, four-Pod XT and hybrid builds")
+	multiPodHX := newV3CompilerFixture()
+	multiPodHX.selectedPropSyncChains = [][]uint32{{1, 2}}
+	multiPodHX.partitions = append(multiPodHX.partitions, testV3CapnpPartition{
+		id: 2, deviceType: manifestcapnp.DeviceType_lpu, topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 16,
+	})
+	snapshots := map[string]*Build{
+		"hx":           acquireTestSnapshot(t, writeV3CompilerFixture(t)),
+		"multi-pod-hx": acquireTestSnapshot(t, writeCompilerFixture(t, multiPodHX)),
+		"multi-pod-xt": acquireTestSnapshot(t, writeV2CompilerFixture(t)),
+		"hybrid":       acquireHybridTestSnapshot(t),
+	}
+
+	t.Log("Cover the multi-Pod agent placement and the builds whose engine runs elsewhere")
+	for _, test := range []struct {
+		name        string
+		build       string
+		sidecarRole string
+		wantAgents  int
+		wantErr     string
+	}{
+		{name: "agent sidecar serves a multi-Pod XT build", build: "multi-pod-xt", sidecarRole: v1beta1.ComponentRoleLPXAgent, wantAgents: 4},
+		{name: "agent sidecar serves a multi-Pod HX build", build: "multi-pod-hx", sidecarRole: v1beta1.ComponentRoleLPXAgent, wantAgents: 2},
+		{name: "agent sidecar rejects a hybrid build", build: "hybrid", sidecarRole: v1beta1.ComponentRoleLPXAgent,
+			wantErr: `component "lpx" agent "runtime" sidecar requires an LPU-only single-model build; declare the conductor role instead`},
+		{name: "conductor sidecar rejects an LPU-only build", build: "hx", sidecarRole: v1beta1.ComponentRoleLPXConductor,
+			wantErr: `component "lpx" conductor Dynamo sidecar mode requires a hybrid build whose conductor runs the GPU engine`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Author the runtime sidecar, behind a setup init container, in the selected role")
+			agent, conductor := testLPXPodTemplate("agent"), testLPXPodTemplate("conductor")
+			roles := []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: agent}}
+			sidecarTemplate := agent
+			if test.sidecarRole == v1beta1.ComponentRoleLPXConductor {
+				roles = append(roles, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: conductor})
+				sidecarTemplate = conductor
+			}
+			sidecarTemplate.Spec.InitContainers = []corev1.Container{
+				{Name: "setup", Image: "setup"},
+				{Name: commonconsts.RuntimeContainerName, Image: "sidecar", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)},
+			}
+			dgd := newSelectedTestDGD(t, "selected", testLPXComponent("lpx", "build", roles...))
+			before := dgd.DeepCopy()
+
+			t.Log("Resolve the build without mutating the graph")
+			workload, err := ResolveWorkload(t.Context(), fake.NewClientBuilder().Build(), dgd, singleGroupComponents(t, dgd), staticModelRegistry{"build": snapshots[test.build]})
+			require.Equal(t, before, dgd)
+			if test.wantErr != "" {
+				require.ErrorIs(t, err, ErrUnsupportedRuntime)
+				require.EqualError(t, err, "unsupported LPX runtime: "+test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+
+			t.Log("Serve from every Agent Pod the build places")
+			plan, err := workload.PlanNodeLocalMaterialization("pcs", dgd.GetComponentByName(workload.ServingComponentName()))
+			require.NoError(t, err)
+			require.Empty(t, plan.ConductorTemplate)
+			require.Equal(t, []ExpectedAgent{{TemplateName: "agt", Replicas: test.wantAgents}}, plan.Agents)
+		})
+	}
+}
+
 func TestResolveWorkloadIsolatesComponentGroups(t *testing.T) {
 	t.Log("Author two LPU-only workloads with different builds and replica counts")
 	reader := fake.NewClientBuilder().Build()
@@ -528,7 +587,7 @@ func TestResolveWorkloadIsolatesComponentGroups(t *testing.T) {
 		require.Equal(t, PipelineSingle, workload.Pipeline())
 		require.Equal(t, name, workload.ServingComponentName())
 		require.Equal(t, []string{name}, workload.ComponentNames())
-		plan, err := workload.PlanNodeLocalMaterialization("pcs")
+		plan, err := workload.PlanNodeLocalMaterialization("pcs", dgd.GetComponentByName(workload.ServingComponentName()))
 		require.NoError(t, err)
 		require.EqualValues(t, index+2, plan.Replicas)
 	}
@@ -547,4 +606,14 @@ func TestExpandedModelNames(t *testing.T) {
 	require.Equal(t, []string{"draft0"}, expandedModelNames(2, false, 1))
 	require.Equal(t, []string{"target"}, expandedModelNames(2, true, 1))
 	require.Equal(t, []string{"default"}, expandedModelNames(1, true, 2))
+}
+
+// acquireHybridTestSnapshot acquires a revision-2 build whose CUDA partition selects a Cyborg conductor.
+func acquireHybridTestSnapshot(t *testing.T) *Build {
+	t.Helper()
+	fixture := newV2CompilerFixture()
+	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
+	fixture.selectedPropSyncChains = nil
+	fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 11, deviceType: manifestcapnp.DeviceType_cuda})
+	return acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 }

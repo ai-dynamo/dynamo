@@ -51,7 +51,7 @@ The DCD spec is `backendFramework` plus the [shared component spec](#shared-comp
 These fields are shared between a standalone DCD and each entry of a DGD `spec.components` list, except where a field is marked DGD-only. In a DGD, prefix them with `spec.components[*]`. Container paths below use the standalone DCD layout; replace the leading `spec.podTemplate` with `spec.components[*].podTemplate` for DGD components.
 
 <ParamField path="providerOverride" type="ProviderOverride">
-  Customizes the primary Grove unit for a component embedded in a DGD. Standalone DCD OpenAPI omits this field. Use `apiVersion: grove.io/v1alpha1`; the target is `PodCliqueTemplateSpec` for a component backed by a PodClique or `PodCliqueScalingGroupConfig` for one backed by a scaling group. The `value` accepts `topologyConstraint`, the native component minimum (`spec.minAvailable` for standalone cliques or `minAvailable` for scaling groups), and `rollingUpdate.maxUnavailable`, separately or together. LPX conductor components support availability settings but not topology overrides. Omit `target` to let admission resolve it from the component shape. See [Grove rollout budget overrides](dynamo-graph-deployment.mdx#grove-rollout-budget-overrides) and [ProviderOverride](dynamo-graph-deployment.mdx#provideroverride).
+  Customizes the primary Grove unit for a component embedded in a DGD. Standalone DCD OpenAPI omits this field. Use `apiVersion: grove.io/v1alpha1`; the target is `PodCliqueTemplateSpec` for a component backed by a PodClique or `PodCliqueScalingGroupConfig` for one backed by a scaling group. The `value` accepts `topologyConstraint`, the native component minimum (`spec.minAvailable` for standalone cliques or `minAvailable` for scaling groups), and `rollingUpdate.maxUnavailable`, separately or together. LPX components with a conductor role or an agent `runtime` init container support availability settings but not topology overrides. Omit `target` to let admission resolve it from the component shape. See [Grove rollout budget overrides](dynamo-graph-deployment.mdx#grove-rollout-budget-overrides) and [ProviderOverride](dynamo-graph-deployment.mdx#provideroverride).
 </ParamField>
 
 <ParamField path="name" type="string" required={true}>
@@ -151,7 +151,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   <ParamField path="roles" type="[]ComponentRoleSpec">
   Named Pod-producing parts of a compound component, keyed by `name`. Multinode components must contain exactly one `leader` and one `worker`; their cardinality is fixed by `multinode.nodeCount`, and omitted role counts default to `1` and `multinode.nodeCount - 1`, respectively. Omit the field to retain the implicit leader/worker layout. If either multinode role sets `podTemplate`, both roles must set one and the component-level `podTemplate` must be absent.
 
-  LPX components use `agent` for Agent Pods and `conductor` for the serving runtime. Independent LPX components each declare a conductor role with an explicit template. In a speculative pair, the draft has only an agent role and the target declares both roles. A hybrid engine's GPU runtime uses the conductor template.
+  LPX components use `agent` for Agent Pods and `conductor` for the serving runtime. Independent LPX components each declare a conductor role with an explicit template; an LPU-only single-model component may instead omit the conductor role and declare a `runtime` init container in its agent template. In a speculative pair, the draft has only an agent role and the target declares both roles. A hybrid engine's GPU runtime uses the conductor template.
 
   Standalone DCD roles cannot use LPX templates or DGD-only provider overrides. See [ComponentRoleSpec](full-api-reference.mdx#componentrolespec).
 </ParamField>
@@ -166,7 +166,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Complete Pod template for this role. It must include a container named `main` with a non-empty `image`. Role templates do not inherit from each other or from the component-level template.
 
-    An init container named `runtime` is rejected in role templates because Dynamo sidecar mode does not yet support multinode or LPX components.
+    An init container named `runtime` is rejected in multinode role templates because Dynamo sidecar mode does not yet support multinode components. LPX components may declare it only in the role template whose Pods host the engine: `conductor` for a hybrid build, or `agent` for an LPU-only single-model build with no conductor role; a speculative target's conductor takes none. Admission rejects it on other roles. Reconciliation rejects a build that does not match, and the DGD reports `status.state: failed`.
 
     For multinode components, supplying complete role templates transfers ownership of backend-specific leader and worker commands and topology arguments to the user; Dynamo skips its vLLM, SGLang, and TensorRT-LLM role-dependent launch rewrites. Common Pod and workload wiring remains operator-owned. For vLLM multiprocessing, Dynamo still injects the shared coordination port `29500`. Multinode role templates cannot currently be combined with GMS or failover. The component remains the lifecycle, rollout, scaling, service, and status boundary.
 
@@ -284,7 +284,7 @@ The operator leaves native sidecar `servedModelName` and `runtimeComponentName` 
 Upgrading the operator can roll existing sidecar workers whose backend was previously undetected. Review the [platform upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#native-sidecar-backend-inference) before upgrading.
 </Warning>
 
-This mode supports `worker`, `prefill`, and `decode` components. Multinode, enabled checkpoint, GPU memory service, and failover are rejected because they are not currently supported in this mode. Support for these features is planned for a future release. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
+This mode supports `worker`, `prefill`, and `decode` components. Multinode, enabled checkpoint, GPU memory service, and failover are rejected because they are not currently supported in this mode. Support for these features is planned for a future release. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`. LPX components may declare it in a role template instead, as described under `roles[].podTemplate`.
 
 The same convention applies to `v1alpha1` through `spec.extraPodSpec.initContainers[name=runtime]`. Conversion preserves the live init-container list. Adding, renaming, or removing `spec.podTemplate.spec.initContainers[name=runtime]` changes the mode and can trigger a worker rollout. Reserve this name for the Dynamo runtime; rename unrelated init containers before upgrading the operator.
 
