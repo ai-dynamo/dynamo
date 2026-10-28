@@ -827,7 +827,7 @@ CHAT_LOOKUP_TOOL = {
     "option",
     [
         {"prompt": {"id": "pmpt_required", "variables": {"context": "required"}}},
-        {"reasoning": {"effort": "high"}},
+        {"reasoning": {"effort": "huge"}},
         {"tool_choice": {"type": "mcp", "server_label": "remote", "name": "lookup"}},
         {"tools": [{"type": "mcp", "server_label": "remote"}]},
         {"tool_choice": "required"},
@@ -2065,3 +2065,88 @@ def test_text_session_deletes_conversation_items():
         "invalid_item",
     ]
     assert calls[0][1:] == [{"role": "user", "content": "Second"}]
+
+
+@pytest.mark.parametrize(
+    ("session_effort", "response_effort", "prefill_thinking", "answer_thinking"),
+    [
+        ("minimal", None, False, False),
+        ("low", None, True, True),
+        ("minimal", "high", False, True),
+    ],
+)
+def test_text_reasoning_effort_switches_chat_template_thinking(
+    session_effort, response_effort, prefill_thinking, answer_thinking
+):
+    prefill_options = []
+    generation_options = []
+    prefill_seen = asyncio.Event()
+
+    async def prefill(messages, updates, tool_options):
+        prefill_options.append(tool_options)
+        async for _ in updates:
+            prefill_seen.set()
+
+    async def chat_completion(messages, max_output_tokens, tool_options, prefill):
+        generation_options.append(tool_options)
+
+        async def frames():
+            yield 'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":"stop"}]}\n\n'
+            yield "data: [DONE]\n\n"
+
+        return frames()
+
+    response = {"reasoning": {"effort": response_effort}} if response_effort else {}
+    session = {**_text_session(), "reasoning": {"effort": session_effort}}
+    asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL,
+                chat_completion_factory=chat_completion,
+                text_prefill_factory=prefill,
+            ),
+            [
+                {"type": "session.update", "session": session},
+                {"type": "input_text.append", "text": "Hello"},
+                {"type": "input_text.commit"},
+                {"type": "response.create", "response": response},
+            ],
+            before_commit=prefill_seen,
+        )
+    )
+
+    assert prefill_options == [
+        {"chat_template_kwargs": {"enable_thinking": prefill_thinking}}
+    ]
+    assert generation_options == [
+        {"chat_template_kwargs": {"enable_thinking": answer_thinking}}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "message"),
+    [
+        ("high", "reasoning must be an object"),
+        ({"effort": "none"}, "reasoning.effort must be one of minimal, low"),
+    ],
+)
+def test_text_session_rejects_invalid_reasoning(reasoning, message):
+    async def chat_completion(messages, max_output_tokens, tool_options, prefill):
+        raise AssertionError("invalid session must not generate")
+
+    result = asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL, chat_completion_factory=chat_completion
+            ),
+            [
+                {
+                    "type": "session.update",
+                    "session": {**_text_session(), "reasoning": reasoning},
+                },
+            ],
+        )
+    )
+
+    errors = [event["error"]["message"] for event in result if event["type"] == "error"]
+    assert len(errors) == 1 and errors[0].startswith(message)

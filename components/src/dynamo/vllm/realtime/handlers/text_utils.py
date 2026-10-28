@@ -9,6 +9,7 @@ import uuid
 from typing import Any
 
 TOOL_CHOICE_MODES = ("auto", "none", "required")
+REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 
 def _max_output_tokens(value: Any) -> tuple[int | None, int | str]:
@@ -55,8 +56,9 @@ def _validate_text_options(options: dict[str, Any], name: str) -> None:
     _validate_tool_choice(options.get("tool_choice"))
     if not isinstance(options.get("parallel_tool_calls", False), bool):
         raise ValueError(f"{name}.parallel_tool_calls must be a boolean")
-    if any(options.get(field) is not None for field in ("prompt", "reasoning")):
-        raise ValueError("prompt and reasoning configuration are not supported")
+    _reasoning_options(options.get("reasoning"))
+    if options.get("prompt") is not None:
+        raise ValueError("prompt configuration is not supported")
     if not isinstance(options.get("instructions", ""), str):
         raise ValueError(f"{name}.instructions must be a string")
 
@@ -179,6 +181,50 @@ def _text_prompt(
     if instructions:
         messages.insert(0, {"role": "system", "content": instructions})
     return messages
+
+
+def _reasoning_options(value: Any) -> dict[str, Any]:
+    """Map Realtime ``reasoning.effort`` to the chat template ``enable_thinking`` switch.
+
+    Chat templates turn thinking on or off, and Realtime has no ``none`` effort,
+    so ``minimal`` turns it off and every other effort turns it on.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("reasoning must be an object")
+    effort = value.get("effort")
+    if effort is None:
+        return {}
+    if effort not in REASONING_EFFORTS:
+        raise ValueError(
+            f"reasoning.effort must be one of {', '.join(REASONING_EFFORTS)}"
+        )
+    return {"enable_thinking": effort != "minimal"}
+
+
+def _chat_options(
+    session: dict[str, Any], response: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Map session options, overridden by ``response`` ones, to chat completion fields."""
+    response = response or {}
+    options: dict[str, Any] = {}
+    if thinking := _reasoning_options(
+        response.get("reasoning", session.get("reasoning"))
+    ):
+        options["chat_template_kwargs"] = thinking
+    options.update(
+        _chat_tool_options(
+            {
+                "tools": response.get("tools", session.get("tools")),
+                "tool_choice": response.get("tool_choice", session.get("tool_choice")),
+                "parallel_tool_calls": response.get(
+                    "parallel_tool_calls", session.get("parallel_tool_calls")
+                ),
+            }
+        )
+    )
+    return options
 
 
 def _chat_tool_options(options: dict[str, Any]) -> dict[str, Any]:

@@ -37,7 +37,7 @@ from ..factories import (
     vllm_parser_names,
 )
 from .text_utils import (
-    _chat_tool_options,
+    _chat_options,
     _max_output_tokens,
     _normalize_text_item,
     _realtime_usage,
@@ -359,13 +359,7 @@ class RealtimeTextHandler:
     def _checked_chat_options(
         self, session: dict[str, Any], response: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        response = response or {}
-        options = _chat_tool_options(
-            {
-                key: response.get(key, session.get(key))
-                for key in ("tools", "tool_choice", "parallel_tool_calls")
-            }
-        )
+        options = _chat_options(session, response)
         if (
             not self._auto_tool_choice
             and options.get("tools")
@@ -694,7 +688,7 @@ class RealtimeTextHandler:
                     active_prefill = _TextPrefill(
                         messages=_text_prompt(items, session["instructions"]),
                         factory=self._text_prefill_factory,
-                        tool_options=_chat_tool_options(session),
+                        tool_options=_chat_options(session),
                     )
                 try:
                     active_prefill.append(text)
