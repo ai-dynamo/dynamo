@@ -584,6 +584,19 @@ func TestInvalidFinalSnapshotIsAProtocolViolationExit(t *testing.T) {
 	}
 }
 
+func TestFinalSnapshotReadFailureEndsThePublisher(t *testing.T) {
+	f := newFixture(t)
+	f.r.Store.fail(errors.New("permission denied"))
+	f.exitSweeper(1)
+
+	f.mustReconcile()
+
+	err := f.r.Completion.Err()
+	if err == nil || ExitCode(err) != ExitReconcileFailed || !strings.Contains(err.Error(), "reading last snapshot") {
+		t.Fatalf("err = %v, want terminal snapshot read failure", err)
+	}
+}
+
 func TestRegressingSnapshotIsNotReconciled(t *testing.T) {
 	f := newFixture(t)
 	f.publish(withProgress(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}), 3, 5))
@@ -596,20 +609,21 @@ func TestRegressingSnapshotIsNotReconciled(t *testing.T) {
 	}
 }
 
-func TestFinalReconcileFailureEndsTheProcessAfterBoundedRetries(t *testing.T) {
+func TestFinalReconcileRetriesUntilTheAPIRecovers(t *testing.T) {
 	f := newFixture(t)
 	f.w.failOn["status"] = errors.New("api unavailable")
 	f.w.sticky = true
 	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
 	f.exitSweeper(1)
-	for attempt := 1; attempt < finalReconcileAttempts; attempt++ {
+	for attempt := 1; attempt <= 5; attempt++ {
 		if err := f.reconcile(); err == nil || f.r.Completion.Finished() {
 			t.Fatalf("attempt %d: want a retry, err=%v", attempt, err)
 		}
 	}
+	delete(f.w.failOn, "status")
 	f.mustReconcile()
-	if err := f.r.Completion.Err(); err == nil || ExitCode(err) != ExitReconcileFailed {
-		t.Fatalf("err = %v", err)
+	if !f.r.Completion.Finished() || f.r.Completion.Err() != nil {
+		t.Fatalf("finished=%v err=%v", f.r.Completion.Finished(), f.r.Completion.Err())
 	}
 }
 
@@ -843,13 +857,13 @@ func TestExistingCandidateStatusUsesItsCachedVersion(t *testing.T) {
 	}
 }
 
-func TestConflictIsRetriedWithoutUsingUpTheFinalAttempts(t *testing.T) {
+func TestConflictRemainsRetryableUntilTheCacheCatchesUp(t *testing.T) {
 	f := newFixture(t)
 	f.w.failOn["status"] = apierrors.NewConflict(schema.GroupResource{Group: "nvidia.com", Resource: "dynamographdeploymentruns"}, testRunName, errors.New("stale"))
 	f.w.sticky = true
 	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
 	f.exitSweeper(1)
-	for attempt := range 2 * finalReconcileAttempts {
+	for attempt := range 6 {
 		if err := f.reconcile(); !apierrors.IsConflict(err) || f.r.Completion.Finished() {
 			t.Fatalf("attempt %d: a conflict from a stale read must be retried, err=%v finished=%v", attempt, err, f.r.Completion.Finished())
 		}

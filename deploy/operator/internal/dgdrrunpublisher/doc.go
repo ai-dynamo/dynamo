@@ -62,5 +62,7 @@
 //	Sweeper exited zero, no terminal snapshot          -> reconcile last snapshot,
 //	                                                      exit ExitProtocolViolation
 //	invalid or regressing snapshot, Sweeper exited     -> exit ExitProtocolViolation
-//	final/last snapshot cannot be reconciled           -> exit ExitReconcileFailed
+//	final/last snapshot cannot be read                  -> exit ExitReconcileFailed
+//	final/last snapshot has a permanent projection error -> exit ExitReconcileFailed
+//	transient API/network failure after Sweeper exit      -> retry until success or Pod cancellation
 package dgdrrunpublisher

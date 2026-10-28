@@ -28,7 +28,6 @@ import (
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -53,10 +52,6 @@ const (
 
 	// fieldOwner is the server-side-apply field manager of the publisher.
 	fieldOwner = "dgdr-run-publisher"
-
-	// finalReconcileAttempts bounds the retries once the Sweeper has exited: nothing will
-	// rewrite the snapshot, so a persistent failure must end the process.
-	finalReconcileAttempts = 3
 )
 
 // Reconciler reconciles the one DynamoGraphDeploymentRun this publisher serves.
@@ -96,12 +91,6 @@ type Reconciler struct {
 	Observer   *Observer
 	Store      *InputStore
 	Completion *Completion
-
-	// The fields below are touched only by Reconcile; the controller runs one worker, so
-	// they need no locking.
-
-	// finalFailures counts failed reconciles after the Sweeper exited.
-	finalFailures int
 }
 
 func (r *Reconciler) key() types.NamespacedName {
@@ -146,7 +135,8 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 			r.Completion.Finish(input.Err)
 			return nil
 		}
-		return r.retryOrFail(exited, input.Err)
+		r.Completion.Finish(fmt.Errorf("reading last snapshot: %w", input.Err))
+		return nil
 	}
 	if input.Snapshot == nil {
 		if exited {
@@ -157,7 +147,7 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 
 	desired := Desire(r.RunName, r.RunUID, input.Snapshot)
 	if err := r.apply(ctx, &run, desired); err != nil {
-		return r.retryOrFail(exited, err)
+		return r.retryOrFail(err)
 	}
 	switch {
 	case desired.Terminal:
@@ -168,24 +158,14 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 	return nil
 }
 
-// retryOrFail hands a failure to the workqueue's backoff, except where retrying cannot
-// help (malformed projection) or the Sweeper is gone and the attempts are used up.
-func (r *Reconciler) retryOrFail(exited bool, err error) error {
+// retryOrFail hands a transient failure to the workqueue's backoff. A malformed
+// projection is permanent and completes the publisher immediately. Kubernetes API and
+// network failures remain retryable after the Sweeper exits because the terminal snapshot
+// is durable and the publisher Pod's lifecycle is the cancellation boundary.
+func (r *Reconciler) retryOrFail(err error) error {
 	if _, ok := errors.AsType[*dgdcreconcile.DiffInputError](err); ok {
 		r.Completion.Finish(err) // retrying cannot fix it
 		return nil
-	}
-	if apierrors.IsConflict(err) {
-		// A write was based on a stale cached read. The informer delivers the newer
-		// version and the retry decides again, so this is not a failed attempt.
-		return err
-	}
-	if exited {
-		r.finalFailures++
-		if r.finalFailures >= finalReconcileAttempts {
-			r.Completion.Finish(fmt.Errorf("reconciling last snapshot: %w", err))
-			return nil
-		}
 	}
 	return err
 }
