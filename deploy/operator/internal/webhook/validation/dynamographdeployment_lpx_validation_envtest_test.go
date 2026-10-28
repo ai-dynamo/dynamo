@@ -411,6 +411,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
 				}
+				useBetaRestoreEntrypoint(&worker, betaPythonModuleCommand("dynamo.vllm"))
 				dgd.Spec.Components = append(dgd.Spec.Components, worker)
 			}),
 		},

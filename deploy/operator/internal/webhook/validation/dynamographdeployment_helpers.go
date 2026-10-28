@@ -27,8 +27,10 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -65,6 +67,99 @@ func lpxComponentGateErrors(
 		typePath = field.NewPath("spec", "services").Key(newSpec.ComponentName).Child("componentType")
 	}
 	return field.ErrorList{field.Forbidden(typePath, "LPX components require lpx.enabled=true")}
+}
+
+// restoreEntrypointInputs is the complete input of the checkpoint restore
+// entrypoint rule: the restore target and the launch it receives.
+type restoreEntrypointInputs struct {
+	targetContainer string
+	containerIndex  int
+	command         []string
+	args            []string
+}
+
+// equal compares every input of the rule, treating nil and empty launch slices alike.
+func (i restoreEntrypointInputs) equal(other restoreEntrypointInputs) bool {
+	return i.targetContainer == other.targetContainer &&
+		i.containerIndex == other.containerIndex &&
+		slices.Equal(i.command, other.command) &&
+		slices.Equal(i.args, other.args)
+}
+
+// restoreEntrypointInputsFor resolves the entrypoint that restore admission will
+// see for the checkpoint target container. It reports false when the component
+// does not enable checkpointing for a component type that supports it, or when the
+// launch is not authored by the user (intra-pod failover, role PodTemplates, and
+// native sidecars), which the authored container does not describe.
+// spec must not be nil.
+func restoreEntrypointInputsFor(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (restoreEntrypointInputs, bool) {
+	if spec.Experimental == nil || spec.Experimental.Checkpoint == nil || !spec.Experimental.Checkpoint.Enabled {
+		return restoreEntrypointInputs{}, false
+	}
+	switch spec.ComponentType {
+	case nvidiacomv1beta1.ComponentTypeWorker, nvidiacomv1beta1.ComponentTypePrefill, nvidiacomv1beta1.ComponentTypeDecode:
+	default:
+		return restoreEntrypointInputs{}, false
+	}
+	if spec.Experimental.Failover != nil || dynamo.HasRolePodTemplates(spec) || dynamo.GetDynamoSidecar(spec) != nil {
+		return restoreEntrypointInputs{}, false
+	}
+
+	inputs := restoreEntrypointInputs{
+		targetContainer: spec.Experimental.Checkpoint.TargetContainerName,
+		containerIndex:  -1,
+	}
+	if inputs.targetContainer == "" {
+		inputs.targetContainer = consts.MainContainerName
+	}
+
+	// An authored command replaces the operator's /bin/sh -c default, so a missing one leaves the shell.
+	containers := podTemplateContainers(spec.PodTemplate)
+	for i := range containers {
+		if containers[i].Name == inputs.targetContainer {
+			inputs.containerIndex = i
+			inputs.command = containers[i].Command
+			inputs.args = containers[i].Args
+			break
+		}
+	}
+	return inputs, true
+}
+
+// checkpointRestoreEntrypointErrors rejects a checkpoint-enabled component whose
+// target container restore admission would later refuse. A violation is tolerated
+// on update only when the complete rule inputs equal the stored ones, so unrelated
+// edits to a legacy object still succeed. newSpec and fldPath are non-nil; oldSpec
+// is nil for a new component.
+func checkpointRestoreEntrypointErrors(
+	newSpec, oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	inputs, applies := restoreEntrypointInputsFor(newSpec)
+	if !applies || checkpoint.HasSupportedRestoreEntrypoint(&corev1.Container{Command: inputs.command, Args: inputs.args}) {
+		return nil
+	}
+	if oldSpec != nil {
+		oldInputs, oldApplies := restoreEntrypointInputsFor(oldSpec)
+		if oldApplies && inputs.equal(oldInputs) {
+			return nil
+		}
+	}
+
+	containersPath := fldPath.Child("podTemplate", "spec", "containers")
+	if inputs.containerIndex < 0 {
+		return field.ErrorList{field.Required(
+			containersPath,
+			fmt.Sprintf("must contain the checkpoint target container %q that directly runs python -m <module>", inputs.targetContainer),
+		)}
+	}
+	return field.ErrorList{field.Forbidden(
+		containersPath.Index(inputs.containerIndex).Child("command"),
+		"checkpoint restore requires the target container to directly run python -m <module>; "+
+			"shell wrappers and non-python launchers are not supported",
+	)}
 }
 
 // invalidDynamoGraphDeploymentError converts allErrs for dgd into an API error.
