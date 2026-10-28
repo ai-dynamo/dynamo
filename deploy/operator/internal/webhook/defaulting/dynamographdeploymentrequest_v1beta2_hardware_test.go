@@ -53,11 +53,7 @@ func hardwareOfV1beta2(sku *string, budget *int32) *nvidiacomv1beta2.HardwareSpe
 }
 
 func hardwareSpecV1beta2(hardware *nvidiacomv1beta2.HardwareSpec) *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec {
-	return &nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
-		DynamoGraphDeploymentRequestNativeSpec: nvidiacomv1beta2.DynamoGraphDeploymentRequestNativeSpec{
-			NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{Hardware: hardware},
-		},
-	}
+	return &nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{Hardware: hardware}
 }
 
 func TestResolveHardwareV1beta2(t *testing.T) {
