@@ -5,11 +5,6 @@
 # empty workspace to exclude from top level workspace
 # excluded due to pyo3 extension module build issues
 
-# This separate workspace needs the same draft protocol candidate as the root.
-# Replace all three patches (root, Python, KVBM) with the containing release before merge.
-[patch.crates-io]
-dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "1cd60a4af5878b9e380c5c39626a8841cdaca23b" }
-
 [package]
 name = "dynamo-py3"
 version = "1.7.0"
@@ -43,7 +38,8 @@ kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
 ckf-diagnostics = ["dynamo-llm/ckf-diagnostics"]
 slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-slot-tracker"]
 select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-selection"]
-# Stable request identities and deterministic replay tie-breaking for parity builds.
+# Replay parity benchmark builds. Deterministic replay itself is the `deterministic`
+# argument of `run_mocker_trace_replay` and needs no feature.
 replay-bench = ["dynamo-mocker/replay-bench"]
 ais-forward-pass = ["dep:aisimulate-core"]
 nvtx = ["dynamo-runtime/nvtx"]
@@ -64,10 +60,10 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 # former AIC crate surface. The `python` feature is required for
 # AicEngineBuilder; this extension supplies the interpreter, so the dependency
 # must not enable `extension-module`.
-aisimulate-core = { version = "=0.13.0-dev.202610160000000073", optional = true, features = ["python"] }
+aisimulate-core = { version = "=0.13.0-dev.202610240000000082", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "=10.0.7" }
+dynamo-parsers = { version = "=10.2.2" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sidecar-common = { path = "../../sidecar/common" }
 dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }

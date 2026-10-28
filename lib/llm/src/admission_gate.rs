@@ -2742,6 +2742,7 @@ mod tests {
 
         let captured = Captured::default();
         let writer = captured.clone();
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(move || writer.clone())
             .with_ansi(false)

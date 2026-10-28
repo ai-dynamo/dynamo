@@ -7,11 +7,19 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from decimal import Decimal
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeAlias
 
 from aisimulate.config.common import Choices, NumericRange
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from dynamo.aisimulate.domains import (
+    CHOICE_FORM,
+    CHOICES,
+    KNOB_FORM,
+    RANGE,
+    SCALAR,
+    stepped_numeric_values,
+)
 
 MODES = frozenset({"kv_router", "round_robin"})
 OVERLAP_SCORE_CREDIT_DEFAULTS = (0.0, 0.5, 1.0)
@@ -25,19 +33,51 @@ StrictFiniteFloat = Annotated[float, Field(strict=True, ge=0.0, allow_inf_nan=Fa
 Policy = Literal["round_robin", "kv_router"]
 LoadModelType = Literal["none", "ais"]
 
-
-def _stepped_numeric_values(
-    minimum: int | float,
-    maximum: int | float,
-    step: int | float,
-) -> list[float]:
-    """Expand a decimal-facing YAML range without cumulative float drift."""
-
-    start = Decimal(str(minimum))
-    stop = Decimal(str(maximum))
-    increment = Decimal(str(step))
-    step_count = int((stop - start) // increment)
-    return [float(start + increment * index) for index in range(step_count + 1)]
+RouterKnobDomain: TypeAlias = Annotated[
+    Annotated[StrictFiniteFloat, SCALAR]
+    | Annotated[Choices[StrictFiniteFloat], CHOICES]
+    | Annotated[NumericRange, RANGE],
+    KNOB_FORM,
+]
+PolicyDomain: TypeAlias = Annotated[
+    Annotated[Policy, SCALAR] | Annotated[Choices[Policy], CHOICES], CHOICE_FORM
+]
+LoadModelTypeDomain: TypeAlias = Annotated[
+    Annotated[LoadModelType, SCALAR] | Annotated[Choices[LoadModelType], CHOICES],
+    CHOICE_FORM,
+]
+# Public numeric knob -> AISimulate default domain, in plan dimension order.
+ROUTER_KNOB_DEFAULTS: dict[str, tuple[float, ...]] = {
+    "overlap_score_credit": OVERLAP_SCORE_CREDIT_DEFAULTS,
+    "prefill_load_scale": PREFILL_LOAD_SCALE_DEFAULTS,
+    "temperature": TEMPERATURE_DEFAULTS,
+}
+# Public numeric knob -> KV router ``PolicyParameters`` name (the replay hook's
+# ``router_config`` key and the live PATCH ``/router_policy`` key).
+ROUTER_PUBLIC_TO_LIVE: dict[str, str] = {
+    "overlap_score_credit": "overlap_score_credit",
+    "prefill_load_scale": "prefill_load_scale",
+    "temperature": "router_temperature",
+}
+# ``PolicyParameters`` without an AISimulate public name. Retune accepts them
+# under their live names; recommend and predict do not search them.
+ROUTER_RETUNE_EXTENSIONS: tuple[str, ...] = (
+    "overlap_score_credit_decay",
+    "decode_active_request_weight",
+)
+_STARTUP_OVERLAP_ACCOUNTING = (
+    "the startup KvRouterConfig also feeds it to the router's overlap "
+    "accounting (effective cached tokens), which a runtime update does not "
+    "change, so a candidate replay would score a router no update can produce"
+)
+# ``PolicyParameters`` retune rejects, mapped to the reason its error gives.
+ROUTER_NOT_RETUNABLE: dict[str, str] = {
+    "host_cache_hit_weight": _STARTUP_OVERLAP_ACCOUNTING,
+    "disk_cache_hit_weight": _STARTUP_OVERLAP_ACCOUNTING,
+    "shared_cache_multiplier": (
+        "replay reports no shared cache hits, so every value would score the same"
+    ),
+}
 
 
 class PrefillLoadModel(BaseModel):
@@ -49,7 +89,7 @@ class PrefillLoadModel(BaseModel):
 class PrefillLoadRecommendationModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    type: LoadModelType | Choices[LoadModelType] = Field(
+    type: LoadModelTypeDomain = Field(
         default_factory=lambda: Choices[LoadModelType](choices=["none", "ais"])
     )
 
@@ -101,21 +141,15 @@ class RouterPredictionConfig(BaseModel):
 class RouterRecommendationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    policy: Policy | Choices[Policy] = Field(
+    policy: PolicyDomain = Field(
         default_factory=lambda: Choices[Policy](choices=["round_robin", "kv_router"])
     )
     prefill_load_model: PrefillLoadRecommendationModel = Field(
         default_factory=PrefillLoadRecommendationModel
     )
-    overlap_score_credit: (
-        StrictFiniteFloat | Choices[StrictFiniteFloat] | NumericRange | None
-    ) = None
-    prefill_load_scale: (
-        StrictFiniteFloat | Choices[StrictFiniteFloat] | NumericRange | None
-    ) = None
-    temperature: (
-        StrictFiniteFloat | Choices[StrictFiniteFloat] | NumericRange | None
-    ) = None
+    overlap_score_credit: RouterKnobDomain | None = None
+    prefill_load_scale: RouterKnobDomain | None = None
+    temperature: RouterKnobDomain | None = None
 
     @field_validator(
         "overlap_score_credit",
@@ -190,6 +224,72 @@ class RouterRecommendationConfig(BaseModel):
             "prefill_load_scale",
             "temperature",
         ):
+            domain = getattr(self, name)
+            if isinstance(domain, NumericRange) and domain.range.min < 0:
+                raise ValueError(f"router.{name} range requires min >= 0")
+        return self
+
+
+# Live names a retune domain might be written with -> the public name to use.
+_ROUTER_LIVE_NAME_HINTS = {
+    **{
+        live: public for public, live in ROUTER_PUBLIC_TO_LIVE.items() if live != public
+    },
+    "router_mode": "policy",
+    "router_prefill_load_model": "prefill_load_model.type",
+}
+
+
+class RouterRetuneConfig(RouterRecommendationConfig):
+    """``retune.router``: the recommendation schema plus retune extension knobs.
+
+    Syntax, validation and default domains are the recommendation ones. Two
+    differences follow from retuning a running KV router:
+
+    - ``policy`` is fixed at startup and retune requires ``kv_router``, so it
+      defaults to ``kv_router`` and rejects any other domain.
+      ``prefill_load_model.type`` is fixed at startup too; the caller checks
+      an explicit value against the startup one.
+    - The ``ROUTER_RETUNE_EXTENSIONS`` knobs have no AISimulate default
+      domain: omitted, they keep their current value.
+    """
+
+    policy: PolicyDomain = "kv_router"
+    overlap_score_credit_decay: RouterKnobDomain | None = None
+    decode_active_request_weight: RouterKnobDomain | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_live_names_and_other_policies(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        for live, public in _ROUTER_LIVE_NAME_HINTS.items():
+            if live in value:
+                raise ValueError(
+                    f"retune.router.{live} is not a public router name; "
+                    f"write {public} instead"
+                )
+        for name, reason in ROUTER_NOT_RETUNABLE.items():
+            if name in value:
+                raise ValueError(f"retune.router.{name} is not retunable: {reason}")
+        policy = value.get("policy", "kv_router")
+        if policy != "kv_router" and policy != {"choices": ["kv_router"]}:
+            raise ValueError(
+                "retune.router.policy is fixed at startup and retune requires "
+                f"kv_router; got {policy!r}"
+            )
+        return value
+
+    @field_validator(*ROUTER_RETUNE_EXTENSIONS, mode="before")
+    @classmethod
+    def _reject_explicit_null_extension(cls, value: Any) -> Any:
+        if value is None:
+            raise ValueError("Router numeric knobs do not accept null")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_extension_ranges(self) -> RouterRetuneConfig:
+        for name in ROUTER_RETUNE_EXTENSIONS:
             domain = getattr(self, name)
             if isinstance(domain, NumericRange) and domain.range.min < 0:
                 raise ValueError(f"router.{name} range requires min >= 0")
@@ -343,7 +443,7 @@ def domain_choices(value: Any, default: list[Any]) -> list[Any]:
             or raw.get("scale", "linear") != "linear"
         ):
             raise ValueError("Router numeric ranges require a stepped linear range")
-        return _stepped_numeric_values(minimum, maximum, step)
+        return stepped_numeric_values(minimum, maximum, step)
     if isinstance(value, Mapping):
         raise ValueError("Router domains must contain exactly choices or range")
     return [value]
