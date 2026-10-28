@@ -753,7 +753,18 @@ impl RoutingHost {
         }
 
         let request_context = request.context();
-        let operation = self
+        let reacquire = || {
+            self.acquire_affinity_slot(
+                affinity,
+                &session_id,
+                None,
+                request_context.as_ref(),
+                phase,
+                staged_kv,
+                budget,
+            )
+        };
+        let mut operation = self
             .acquire_affinity_slot(
                 affinity,
                 &session_id,
@@ -764,6 +775,19 @@ impl RoutingHost {
                 budget,
             )
             .await?;
+        if self.session_affinity_mode == SessionAffinityMode::Soft
+            && explicit.is_none()
+            && matches!(
+                &self.policy,
+                RoutingPolicy::Builtin(_) | RoutingPolicy::DeviceAwareWeighted
+            )
+            && operation
+                .target()
+                .is_some_and(|target| !self.inner.client.is_instance_discovered(target.worker_id))
+        {
+            operation.invalidate();
+            operation = reacquire().await?;
+        }
         let target = operation.target().map(from_table);
         match select(target).await {
             Ok(selection) => Ok((selection, Some(operation))),
@@ -774,17 +798,7 @@ impl RoutingHost {
                     && target.is_some_and(|target| !self.affinity_target_is_valid(target)) =>
             {
                 operation.invalidate();
-                let retry = self
-                    .acquire_affinity_slot(
-                        affinity,
-                        &session_id,
-                        None,
-                        request_context.as_ref(),
-                        phase,
-                        staged_kv,
-                        budget,
-                    )
-                    .await?;
+                let retry = reacquire().await?;
                 let selection = select(retry.target().map(from_table)).await?;
                 Ok((selection, Some(retry)))
             }
