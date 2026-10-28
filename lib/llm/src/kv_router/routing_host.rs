@@ -68,7 +68,6 @@ const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 /// Bounds the wait for a worker's trailing typed error after a terminal frame.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// A dispatched prefill hop.
 pub(crate) struct PrefillDispatch<M> {
     pub(crate) metadata: M,
     pub(crate) stream: ManyOut<Annotated<LLMEngineOutput>>,

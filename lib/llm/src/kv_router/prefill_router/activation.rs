@@ -1374,8 +1374,12 @@ mod tests {
         }
     }
 
+    /// Fails its first `failures` calls with a migratable error, at dispatch or
+    /// as the first stream item, then streams token 7. The token is not
+    /// terminal, so it is not held back while prefill is in flight.
     struct UnreachableDecodeHost {
         stream: bool,
+        failures: std::sync::atomic::AtomicU32,
     }
 
     #[async_trait::async_trait]
@@ -1390,6 +1394,24 @@ mod tests {
             &self,
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            use std::sync::atomic::Ordering;
+            if self
+                .failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_err()
+            {
+                let token = LLMEngineOutput {
+                    token_ids: vec![7],
+                    ..Default::default()
+                };
+                return Ok(ResponseStream::new(
+                    Box::pin(futures::stream::iter([
+                        Annotated::from_data(token),
+                        Annotated::from_data(LLMEngineOutput::stop()),
+                    ])),
+                    request.context(),
+                ));
+            }
             let error = dynamo_runtime::error::DynamoError::builder()
                 .error_type(ErrorType::CannotConnect)
                 .message("decode worker unreachable")
@@ -1404,12 +1426,67 @@ mod tests {
         }
     }
 
+    /// Remote prefill followed by decode, as the pipeline below `Migration`.
+    struct PrefillThenDecode {
+        router: Arc<PrefillRouter>,
+        decode: Arc<UnreachableDecodeHost>,
+    }
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            anyhow::Error,
+        > for PrefillThenDecode
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            self.router.generate(request, self.decode.clone()).await
+        }
+    }
+
+    /// Run one request through `Migration` with up to one retry, returning its
+    /// first decode tokens or the error the client would see.
+    async fn migrate(
+        router: &Arc<PrefillRouter>,
+        id: &str,
+        decode: UnreachableDecodeHost,
+    ) -> Result<Vec<u32>> {
+        let migration = crate::migration::Migration::new(
+            1,
+            None,
+            "test-model".into(),
+            Arc::new(crate::http::service::metrics::Metrics::new()),
+        );
+        let next: dynamo_runtime::pipeline::ServerStreamingEngine<
+            PreprocessedRequest,
+            Annotated<LLMEngineOutput>,
+        > = Arc::new(PrefillThenDecode {
+            router: router.clone(),
+            decode: Arc::new(decode),
+        });
+        let request = dynamo_runtime::pipeline::Context::with_id_and_metadata(
+            request(),
+            id.to_string(),
+            Default::default(),
+        );
+        let mut response = migration.generate(request, next).await?;
+        let item = response.next().await.expect("decode must respond");
+        if let Some(error) = item.err() {
+            return Err(error.into());
+        }
+        Ok(item.data.map(|data| data.token_ids).unwrap_or_default())
+    }
+
     #[tokio::test]
-    async fn migratable_decode_failure_lets_retry_rebook_prefill() {
+    async fn migration_releases_prefill_booking_only_for_committed_retry() {
         // Isolate the process-global TCP request server, as in the routing-hop test above.
         const TEST: &str = concat!(
             module_path!(),
-            "::migratable_decode_failure_lets_retry_rebook_prefill"
+            "::migration_releases_prefill_booking_only_for_committed_retry"
         );
         let test_name = TEST.split_once("::").unwrap().1;
         if std::env::var("DYNAMO_ROUTING_HOP_TEST").as_deref() != Ok(test_name) {
@@ -1529,59 +1606,52 @@ mod tests {
         .expect("prefill target must activate");
 
         // Migration retries a failed attempt under the same request ID, starting
-        // again from remote prefill. Each first attempt's prefill is still in
-        // flight when its decode fails, as when a decode worker dies between
-        // discovery and dispatch or fails before its first token.
-        // `prefill_output_first` is not covered: it holds a decode error until
-        // prefill finishes, and a finished prefill has already released its booking.
-        for annotations in [vec![], vec!["prefill_output"]] {
-            for streamed in [false, true] {
-                let id = uuid::Uuid::new_v4().to_string();
-                let attempt = || {
-                    let mut input = request();
-                    input.annotations = annotations.iter().map(|s| s.to_string()).collect();
-                    input.migration_state = Some(Default::default());
-                    dynamo_runtime::pipeline::Context::with_id_and_metadata(
-                        input,
-                        id.clone(),
-                        Default::default(),
-                    )
-                };
-                let result = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    router.generate(
-                        attempt(),
-                        Arc::new(UnreachableDecodeHost { stream: streamed }),
-                    ),
-                )
-                .await
-                .unwrap();
-                let error: anyhow::Error = if streamed {
-                    let mut response = result.unwrap();
-                    tokio::time::timeout(Duration::from_secs(5), response.next())
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .err()
-                        .expect("decode stream must fail")
-                        .into()
-                } else {
-                    result.expect_err("decode dispatch must fail")
-                };
-                assert!(
-                    crate::migration::is_migratable(error.as_ref()),
-                    "decode failure must be migratable: {error:#}"
-                );
+        // again from remote prefill. Each attempt's prefill is still in flight
+        // when its decode fails, as when a decode worker dies between discovery
+        // and dispatch or fails before its first token.
+        for streamed in [false, true] {
+            let decode = |failures: u32| UnreachableDecodeHost {
+                stream: streamed,
+                failures: failures.into(),
+            };
+            let id = uuid::Uuid::new_v4().to_string();
+            let tokens =
+                tokio::time::timeout(Duration::from_secs(5), migrate(&router, &id, decode(1)))
+                    .await
+                    .expect("retry must not hang")
+                    .unwrap_or_else(|error| {
+                        panic!("migration retry must re-book remote prefill: {error:#}")
+                    });
+            assert_eq!(tokens, vec![7]);
 
-                let retry = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    router.generate(attempt(), Arc::new(PrefillWorker(7))),
+            // Once retries run out, the last attempt's prefill keeps its booking
+            // while it runs.
+            let id = uuid::Uuid::new_v4().to_string();
+            let error =
+                tokio::time::timeout(Duration::from_secs(5), migrate(&router, &id, decode(2)))
+                    .await
+                    .expect("exhausted migration must not hang")
+                    .expect_err("every decode attempt fails");
+            assert!(
+                crate::migration::is_migratable(error.as_ref()),
+                "decode failure must be migratable: {error:#}"
+            );
+            let rebook = router
+                .generate(
+                    dynamo_runtime::pipeline::Context::with_id_and_metadata(
+                        request(),
+                        id,
+                        Default::default(),
+                    ),
+                    Arc::new(PrefillWorker(7)),
                 )
-                .await
-                .expect("retry must not hang");
-                if let Err(error) = &retry {
-                    panic!("migration retry must re-book remote prefill: {error:#}");
-                }
+                .await;
+            match rebook {
+                Ok(_) => panic!("the final attempt's prefill booking must be retained"),
+                Err(error) => assert!(
+                    format!("{error:#}").contains("already exists"),
+                    "unexpected re-book failure: {error:#}"
+                ),
             }
         }
         // An unreachable decode worker may still have received the request, so

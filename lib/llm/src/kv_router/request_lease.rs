@@ -477,6 +477,14 @@ impl RequestAttemptRelease {
     }
 }
 
+impl std::fmt::Debug for RequestAttemptRelease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestAttemptRelease")
+            .field("booking", &self.record.booking)
+            .finish()
+    }
+}
+
 impl Drop for RequestAttemptLease {
     fn drop(&mut self) {
         self.manager.enqueue_completion(&self.record);
