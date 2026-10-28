@@ -231,7 +231,7 @@ func (r *Reconciler) reconcileWorkflow(
 	result, reconcileErr := coordinator.Reconcile(ctx, engineGroupID(group), desiredPlan, status)
 	var observationErr *domain.ObservationError
 	errors.As(reconcileErr, &observationErr)
-	recoveryRequired := errors.Is(reconcileErr, domain.ErrRecoveryRequired) || result.Status.Transition.RequiresRecovery()
+	recoveryRequired := errors.Is(reconcileErr, domain.ErrRecoveryRequired)
 	next, err := checkpoint.advance(group, runtime.Profile, result.Status, desiredPlan,
 		planningErr == nil && validation == nil && observationErr == nil && !recoveryRequired,
 		observationErr == nil && !recoveryRequired)
