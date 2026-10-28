@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0-dev.202610160000000073"
+version = "0.13.0-dev.202610240000000082"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ede3ff2e2fd29e1c53dc1656ef5e43d4c77c0841483fe37685d3d517566016b2"
+checksum = "fa3e351f2964f97c386e270dc1ef46e771b72542d5015d638a25f3b4eef34ccd"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -841,6 +841,7 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "rustversion",
@@ -2179,6 +2180,7 @@ dependencies = [
  "libc",
  "libloading 0.8.9",
  "lru",
+ "mime",
  "minijinja",
  "modelexpress-client",
  "modelexpress-common",
@@ -2464,9 +2466,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "3.1.2"
+version = "3.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b42180c97822bdad3574873cdf9fb986cc12086dd8a09a0cd321ba76dd2ee8dd"
+checksum = "0088954e64cd5f8ff9db94d08d60f15caa4ec364391e37b15496cf926752528a"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -4792,6 +4794,23 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http 1.4.1",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin 0.9.8",
+ "version_check",
 ]
 
 [[package]]

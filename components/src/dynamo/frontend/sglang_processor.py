@@ -644,6 +644,37 @@ class SglangProcessor:
                     active,
                 )
 
+    def _build_postprocessor(
+        self,
+        request: dict[str, Any],
+        dynamo_preproc: dict[str, Any],
+        *,
+        tool_call_parser: ToolCallParserType | None,
+        reasoning_parser: ReasoningParser | None,
+        named_zero_arg_tool: str | None,
+        prompt_token_ids: list[int],
+    ) -> SglangStreamingPostProcessor:
+        """Parsers are passed in because the pool path must recreate them in the
+        main process; they are not picklable.
+        """
+        return SglangStreamingPostProcessor(
+            tokenizer=self.tokenizer,
+            tool_call_parser=tool_call_parser,
+            reasoning_parser=reasoning_parser,
+            history_tool_calls_count=_get_history_tool_calls_count(
+                request.get("messages", [])
+            ),
+            sglang_tools=convert_tools(request.get("tools")),
+            tool_call_parser_name=self.tool_call_parser_name,
+            named_zero_arg_tool=named_zero_arg_tool,
+            guided_json_is_content=_guided_json_is_content(dynamo_preproc),
+            eos_token_ids=self.eos_token_ids,
+            prompt_token_ids=prompt_token_ids,
+            stop_strings=_request_stop_strings(request),
+            skip_special_tokens=request.get("skip_special_tokens"),
+            stop_token_ids=set(_request_stop_token_ids(request)),
+        )
+
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
@@ -706,22 +737,13 @@ class SglangProcessor:
             logger.exception("SGLang preprocessing failed for request %s", request_id)
             raise Unknown(f"Preprocessing error: {exc}") from exc
 
-        post = SglangStreamingPostProcessor(
-            tokenizer=self.tokenizer,
+        post = self._build_postprocessor(
+            request,
+            dynamo_preproc,
             tool_call_parser=pre.tool_call_parser,
             reasoning_parser=pre.reasoning_parser,
-            history_tool_calls_count=_get_history_tool_calls_count(
-                request.get("messages", [])
-            ),
-            sglang_tools=convert_tools(request.get("tools")),
-            tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=pre.named_zero_arg_tool,
-            guided_json_is_content=_guided_json_is_content(dynamo_preproc),
-            eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
-            stop_strings=_request_stop_strings(request),
-            skip_special_tokens=request.get("skip_special_tokens"),
-            stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
         async for item in self._generate_and_stream(
@@ -775,24 +797,13 @@ class SglangProcessor:
             tokenizer=self.tokenizer,
         )
 
-        post = SglangStreamingPostProcessor(
-            tokenizer=self.tokenizer,
+        post = self._build_postprocessor(
+            request,
+            preproc_result.dynamo_preproc,
             tool_call_parser=tool_call_parser,
             reasoning_parser=reasoning_parser,
-            history_tool_calls_count=_get_history_tool_calls_count(
-                request.get("messages", [])
-            ),
-            sglang_tools=convert_tools(request.get("tools")),
-            tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=preproc_result.named_zero_arg_tool,
-            guided_json_is_content=_guided_json_is_content(
-                preproc_result.dynamo_preproc
-            ),
-            eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
-            stop_strings=_request_stop_strings(request),
-            skip_special_tokens=request.get("skip_special_tokens"),
-            stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
         async for item in self._generate_and_stream(

@@ -20,6 +20,7 @@
 
 mod anthropic;
 mod batch_proxy;
+mod image_edits;
 pub mod metadata;
 mod openai;
 mod server;

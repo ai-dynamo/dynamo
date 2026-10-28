@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# CPU-only image containing the vLLM, SGLang, and TensorRT-LLM Rust sidecars.
+# CPU-only image containing the vLLM, SGLang, TensorRT-LLM, and LPX Rust
+# sidecars.
 # The dynamo-sidecar entrypoint selects an engine-specific binary; the GPU
 # engine continues to run in a separate container.
 #
@@ -82,7 +83,7 @@ FROM builder-base AS sidecar-builder
 ARG TARGETARCH
 ARG CARGO_CYCLONEDX_VERSION=0.5.9
 
-# Build all three sidecars and their compliance inventory in one RUN. BuildKit
+# Build all four sidecars and their compliance inventory in one RUN. BuildKit
 # takes one of its max-parallelism slots before a RUN waits for a
 # sharing=locked cache mount, so every separate RUN on these caches can hold a
 # slot idle while another one compiles. One RUN takes the locks once.
@@ -96,7 +97,7 @@ ARG CARGO_CYCLONEDX_VERSION=0.5.9
 #
 # Each sidecar keeps its own `cargo build -p` call. One
 # `cargo build -p a -p b -p c` would unify features and link the vLLM-only
-# features into the SGLang and TensorRT-LLM binaries.
+# features into the other sidecar binaries.
 # The target directory exists only during this RUN. The final step removes it
 # so the intermediate layer retains only the installed binaries and metadata.
 #
@@ -114,12 +115,12 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
     CARGO_TARGET_DIR=/tmp/cargo-tools \
         cargo install cargo-cyclonedx --locked --version "${CARGO_CYCLONEDX_VERSION}"; \
     mkdir -p /out/bin /out/sidecar-sboms /out/rust-licenses; \
-    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar; do \
+    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar dynamo-lpx-sidecar; do \
         cargo build --release --locked -p "${pkg}"; \
         strip "target/release/${pkg}"; \
         install -D "target/release/${pkg}" "/out/bin/${pkg}"; \
     done; \
-    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar; do \
+    for pkg in dynamo-vllm-sidecar dynamo-sglang-sidecar dynamo-trtllm-sidecar dynamo-lpx-sidecar; do \
         manifest="lib/sidecar/${pkg#dynamo-}"; \
         manifest="${manifest%-sidecar}/Cargo.toml"; \
         cargo cyclonedx \
@@ -208,7 +209,7 @@ COPY container/compliance/ /src/container/compliance/
 
 # Scan the filesystem that actually ships, rather than the build-tool packages
 # present in this helper stage. The Rust SBOM contains only dependencies linked
-# into the three sidecar executables. Bind mounts instead of COPY steps keep
+# into the four sidecar executables. Bind mounts instead of COPY steps keep
 # this to one BuildKit op after the runtime image is assembled.
 ENV PYTHONPATH=/src/container
 RUN --mount=type=bind,from=runtime-base,target=/tmp/runtime-root \

@@ -18,6 +18,7 @@
 package validation_test
 
 import (
+	"fmt"
 	"maps"
 	"testing"
 
@@ -25,6 +26,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -62,12 +64,14 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		name               string
 		deployment         runtime.Object
 		oldDeployment      runtime.Object
+		oldBeforeUpdate    runtime.Object
 		checkpointOff      bool
 		seedWithoutWebhook bool
 		wantSchemaErr      string
 		wantCELErr         string
 		wantWebhookErrs    []string
 		wantWarnings       []string
+		wantOriginVersion  *string
 		wantPodAnnotations map[string]string
 		wantRoleReplicas   map[string]int32
 	}
@@ -214,7 +218,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{name: "native sidecar rejects non-worker component type",
 			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
-			}), wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].name: Forbidden: is supported only for worker, prefill, and decode components`}},
+			}), wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].name: Forbidden: is supported only for worker, prefill, decode, and LPX components`}},
 
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
 		{name: "native sidecar beta create", deployment: nativeDCDForAdmission(t, false, nil)},
@@ -2064,6 +2068,59 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		},
 	}
 
+	// Origin remains immutable through either served API, including legacy absence.
+	for _, alpha := range []bool{false, true} {
+		created := betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver"}
+		})
+		var submitted runtime.Object = created
+		if alpha {
+			converted := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+			require.NoError(t, converted.ConvertFrom(created))
+			submitted = converted
+		}
+		tests = append(tests, dcdAdmissionTestCase{name: fmt.Sprintf("origin alpha=%t CREATE overwrites authored origin", alpha), deployment: submitted, wantOriginVersion: new("1.6.0")})
+		for _, origin := range []struct{ name, old, new string }{
+			{"legacy unrelated update", "", ""},
+			{"legacy invalid origin unrelated update", "custom-build", "custom-build"},
+			{"cannot repair legacy invalid origin", "custom-build", "1.7.0"},
+			{"cannot remove legacy invalid origin", "custom-build", ""},
+			{"cannot backfill origin", "", "1.7.0"},
+			{"cannot change origin", "1.6.0", "1.7.0"},
+			{"cannot remove origin", "1.6.0", ""},
+		} {
+			old := betaDCDForAdmission(nil)
+			if origin.old != "" {
+				old.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: origin.old}
+			}
+			updated := old.DeepCopy()
+			updated.Annotations = map[string]string{"example.com/unrelated": "edit"}
+			if origin.new != "" {
+				updated.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = origin.new
+			}
+			seed := old.DeepCopy()
+			seed.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}
+			tc := dcdAdmissionTestCase{name: fmt.Sprintf("origin alpha=%t %s", alpha, origin.name), oldDeployment: old, oldBeforeUpdate: seed, deployment: updated, seedWithoutWebhook: true}
+			if alpha {
+				oldAlpha := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+				newAlpha := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+				seedAlpha := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+				require.NoError(t, seedAlpha.ConvertFrom(seed))
+				require.NoError(t, oldAlpha.ConvertFrom(old))
+				require.NoError(t, newAlpha.ConvertFrom(updated))
+				tc.oldDeployment, tc.oldBeforeUpdate, tc.deployment = oldAlpha, seedAlpha, newAlpha
+			}
+			if origin.old != origin.new {
+				badValue := fmt.Sprintf("%q", origin.new)
+				if origin.new == "" {
+					badValue = "null"
+				}
+				tc.wantWebhookErrs = []string{"metadata.annotations[" + consts.KubeAnnotationDynamoOperatorOriginVersion + "]: Invalid value: " + badValue + ": " + apivalidation.FieldImmutableErrorMsg}
+			}
+			tests = append(tests, tc)
+		}
+	}
+
 	t.Log("Add complete-probe cases to the admission table for both API versions")
 	for _, placement := range []string{"main", "frontend sidecar", "role"} {
 		beta := betaDCDForAdmission(nil)
@@ -2114,6 +2171,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			test := admissionTestCase{
 				object:             tt.deployment,
 				oldObject:          tt.oldDeployment,
+				oldBeforeUpdate:    tt.oldBeforeUpdate,
 				gates:              gates,
 				seedWithoutWebhook: tt.seedWithoutWebhook,
 				wantSchemaError:    tt.wantSchemaErr,
@@ -2127,6 +2185,9 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				test.seedGates = &seedGates
 			}
 			actual := runAdmissionTest(t, test)
+			if tt.wantOriginVersion != nil {
+				require.Equal(t, *tt.wantOriginVersion, actual.GetAnnotations()[consts.KubeAnnotationDynamoOperatorOriginVersion])
+			}
 			if tt.wantPodAnnotations != nil || tt.wantRoleReplicas != nil {
 				actualDCD := admittedBetaDCD(t, actual)
 				if tt.wantRoleReplicas != nil {
