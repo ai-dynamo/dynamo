@@ -23,6 +23,8 @@ from stat import S_ISREG
 
 import pandas as pd
 
+from dynamo.common.container_images import BACKEND_IMAGE_NAMES as BACKEND_IMAGE_NAMES
+from dynamo.common.container_images import PLANNER_IMAGE_NAME as PLANNER_IMAGE_NAME
 from dynamo.common.container_images import derive_backend_image as derive_backend_image
 from dynamo.common.container_images import derive_planner_image as derive_planner_image
 from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
