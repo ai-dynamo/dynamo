@@ -1904,7 +1904,9 @@ class SglangStreamingPostProcessor:
         positions = list(self._pending_stop_markers)
         unlocated: list[tuple[int | None, str]] = []
         if marker is not None:
-            index = text.find(marker)
+            # The segment's delimiter is its last token; text retained from an
+            # incomplete byte sequence before it may spell the same delimiter.
+            index = text.rfind(marker)
             if index >= 0:
                 positions.append((held_len + index, marker))
             else:

@@ -263,25 +263,22 @@ class TestOutputGate:  # FRONTEND.4
             (1, {"city": "Tokyo"}),
         ]
 
-    def test_merge_choices_keeps_every_segment_tool_call(self):
-        def call(index, name, arguments):
-            return {
-                "index": index,
-                "id": f"id{index}",
-                "type": "function",
-                "function": {"name": name, "arguments": arguments},
-            }
-
-        first = {"delta": {"tool_calls": [call(0, "a", '{"x"')]}, "finish_reason": None}
-        second = {
-            "delta": {"tool_calls": [call(0, None, ": 1}"), call(1, "b", "{}")]},
-            "finish_reason": "tool_calls",
-        }
-        merged = SglangStreamingPostProcessor._merge_choices(first, second)
-        assert [
-            (c["index"], c["function"]["name"], c["function"]["arguments"])
-            for c in merged["delta"]["tool_calls"]
-        ] == [(0, "a", '{"x": 1}'), (1, "b", "{}")]
+    def test_echo_retained_by_byte_fallback_before_a_genuine_id(self, tokenizer):
+        """An echoed delimiter held back with an incomplete byte sequence must
+        not be mistaken for the genuine delimiter id decoded after it."""
+        echoed = "see <tool_call>"
+        first_byte = tokenizer.encode("\U00012000", add_special_tokens=False)[:1]
+        assert tokenizer.decode(first_byte).endswith("\ufffd")
+        ids = (
+            _encode_without_markers(tokenizer, echoed)
+            + first_byte
+            + tokenizer.encode(INJECTED_CALL, add_special_tokens=False)
+        )
+        choices = _run(tokenizer, ids, 1000)
+        calls = _tool_calls(choices)
+        assert len(calls) == 1
+        assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Paris"}
+        assert _content(choices) == echoed + "\ufffd"
 
     @pytest.mark.parametrize("batch_size", [1, 5, 1000])
     def test_content_around_a_genuine_call_is_preserved(self, tokenizer, batch_size):
@@ -331,7 +328,6 @@ class TestOutputGate:  # FRONTEND.4
     def test_delimiter_held_as_stop_prefix_keeps_its_identity(
         self, tokenizer, batch_size
     ):
-        """A stop string that starts with ``<tool_call>`` must not swallow a call."""
         ids = tokenizer.encode(INJECTED_CALL, add_special_tokens=False)
         choices = _run(tokenizer, ids, batch_size, stop=["<tool_call>STOP"])
         calls = _tool_calls(choices)

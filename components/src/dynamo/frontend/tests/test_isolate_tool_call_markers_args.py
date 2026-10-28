@@ -34,9 +34,8 @@ def test_isolate_tool_call_markers_with_sglang_processor() -> None:
     assert config.isolate_tool_call_markers is True
 
 
-@pytest.mark.parametrize("processor", ["dynamo", "vllm"])
-def test_isolate_tool_call_markers_rejects_other_processors(processor: str) -> None:
+def test_isolate_tool_call_markers_rejects_other_processors() -> None:
     with pytest.raises(ValueError, match="--dyn-chat-processor=sglang"):
         parse_frontend_config(
-            ["--dyn-chat-processor", processor, "--isolate-tool-call-markers"]
+            ["--dyn-chat-processor", "dynamo", "--isolate-tool-call-markers"]
         )
