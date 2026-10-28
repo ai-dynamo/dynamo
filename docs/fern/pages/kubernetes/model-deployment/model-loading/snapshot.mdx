@@ -245,10 +245,12 @@ for reuse and retention rules.
 ## Use a Custom Worker Entrypoint
 
 Restore admission accepts a worker container only if it directly runs
-`python -m dynamo.vllm`, `python -m dynamo.sglang`, or `python -m dynamo.trtllm`.
-These entrypoints put the Pod into restore standby before they initialize the
+`python -m <module>`. The Dynamo modules `dynamo.vllm`, `dynamo.sglang`, and
+`dynamo.trtllm` put the Pod into restore standby before they initialize the
 engine. A worker that wraps Dynamo in its own `python -m <module>` entrypoint is
-rejected unless you opt in.
+accepted as well, and there is no extra annotation or flag to set:
+`experimental.checkpoint.enabled: true` is your confirmation that the module
+implements the restore contract.
 
 ### Honor the standby contract
 
@@ -272,10 +274,10 @@ In standby mode the function writes the destination Pod's restore context and
 replaces the process with `sleep infinity`, so nothing initializes before the
 checkpointed worker resumes. Otherwise it returns and the worker starts normally.
 
-### Opt in on the Pod
+### Configure the component
 
-Admission sees only the container `command` and `args`; it cannot inspect your
-module. Annotate the Pod to assert that the module honors the contract:
+Enable checkpointing and set the custom `command`; nothing else changes compared
+with the Dynamo modules:
 
 ```yaml
 spec:
@@ -286,28 +288,21 @@ spec:
         checkpoint:
           enabled: true
       podTemplate:
-        metadata:
-          annotations:
-            nvidia.com/dynamo-restore-standby-capable: "true"
         spec:
           containers:
             - name: main
               command: ["python3", "-m", "my_worker"]
 ```
 
-The checkpoint block is the same as for the Dynamo modules; only the annotation and
-the custom `command` are new. The annotation applies to every restore destination
-container in the Pod.
-
-- The container must directly invoke `python -m <module>`. Shell wrappers such as
-  `/bin/sh -c ...` and non-Python launchers are rejected, with or without the
-  annotation.
-- The three Dynamo modules above never need the annotation.
+- The container must directly invoke `python -m <module>` with a non-empty module
+  name. Shell wrappers such as `/bin/sh -c ...` and non-Python launchers are
+  rejected.
+- The module name is not restricted.
 
 <Warning>
-The annotation is your assertion, not a check. A module that does not call
-`maybe_run_restore_standby_mode()` passes admission, still receives the restore
-environment and startup probe, and then starts its normal workload instead of
-standing by. For example, `dynamo.frontend` does not implement the hook, so do not
-annotate a Pod that runs it as a restore destination.
+Admission cannot inspect your module, so it does not verify the contract. A module
+that does not call `maybe_run_restore_standby_mode()` passes admission, still
+receives the restore environment and startup probe, and then starts its normal
+workload instead of standing by. For example, `dynamo.frontend` does not implement
+the hook, so do not run it as a restore destination.
 </Warning>

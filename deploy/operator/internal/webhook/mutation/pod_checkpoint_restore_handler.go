@@ -10,8 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"path"
-	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -339,18 +337,7 @@ func validateNativeSnapshotCandidate(annotations map[string]string, resolved *ch
 	return nil
 }
 
-// builtinRestoreModules are the Dynamo entrypoints known to call
-// maybe_run_restore_standby_mode(), so they are accepted without an opt-in.
-var builtinRestoreModules = map[string]struct{}{
-	"dynamo.vllm":   {},
-	"dynamo.sglang": {},
-	"dynamo.trtllm": {},
-}
-
 func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerMapping) error {
-	// Custom python -m modules are admitted only when the workload author opts in.
-	customEntrypointOptIn := pod.Annotations[consts.RestoreStandbyCapableAnnotation] == consts.KubeLabelValueTrue
-
 	containers := make(map[string]*corev1.Container, len(pod.Spec.Containers))
 	for i := range pod.Spec.Containers {
 		container := &pod.Spec.Containers[i]
@@ -364,13 +351,11 @@ func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerM
 		if container == nil {
 			return fmt.Errorf("restore destination container %q not found", mapping.Destination)
 		}
-		if !usesSupportedDynamoRestoreEntrypoint(container, customEntrypointOptIn) {
+		if !checkpoint.HasSupportedRestoreEntrypoint(container) {
 			return fmt.Errorf(
-				"restore destination container %q must directly invoke python -m dynamo.vllm|dynamo.sglang|dynamo.trtllm, "+
-					"or python -m <module> with annotation %s=%q for a custom entrypoint that calls maybe_run_restore_standby_mode(); command=%q args=%q",
+				"restore destination container %q must directly invoke python -m <module>, "+
+					"and the module must call maybe_run_restore_standby_mode(); command=%q args=%q",
 				mapping.Destination,
-				consts.RestoreStandbyCapableAnnotation,
-				consts.KubeLabelValueTrue,
 				container.Command,
 				container.Args,
 			)
@@ -402,57 +387,4 @@ func applyDynamoRestorePolicy(pod *corev1.Pod, mappings []podcontract.ContainerM
 		checkpoint.EnsureRestoreStartupProbe(container)
 	}
 	return nil
-}
-
-// usesSupportedDynamoRestoreEntrypoint reports whether the container directly
-// runs `python -m <module>` with a module that honors the restore standby
-// contract. Dynamo's own modules are accepted by default; any other module
-// needs customEntrypointOptIn because admission cannot inspect it. Shell and
-// other non-python launchers are rejected because admission cannot prove they
-// honor SNAPSHOT_RESTORE_STANDBY. The container must be non-nil.
-func usesSupportedDynamoRestoreEntrypoint(container *corev1.Container, customEntrypointOptIn bool) bool {
-	if len(container.Command) == 0 {
-		return false
-	}
-	python := path.Base(container.Command[0])
-	if python != "python" && python != "python3" && !strings.HasPrefix(python, "python3.") {
-		return false
-	}
-
-	arguments := make([]string, 0, len(container.Command)+len(container.Args))
-	arguments = append(arguments, container.Command...)
-	arguments = append(arguments, container.Args...)
-
-	// Skip only operand-free interpreter options so -m remains unambiguous.
-	moduleFlagIndex := 1
-	for moduleFlagIndex < len(arguments) && isOperandFreePythonInterpreterFlag(arguments[moduleFlagIndex]) {
-		moduleFlagIndex++
-	}
-	if moduleFlagIndex+1 >= len(arguments) || arguments[moduleFlagIndex] != "-m" {
-		return false
-	}
-
-	// An empty or option-like token is not a module name and fails at startup.
-	module := arguments[moduleFlagIndex+1]
-	if module == "" || strings.HasPrefix(module, "-") {
-		return false
-	}
-
-	// Dynamo's own modules honor the standby contract; any other module needs the opt-in.
-	if _, ok := builtinRestoreModules[module]; ok {
-		return true
-	}
-	return customEntrypointOptIn
-}
-
-// isOperandFreePythonInterpreterFlag recognizes options that cannot consume
-// the following -m argument. Operand-taking and execution-selector options
-// remain fail-closed.
-func isOperandFreePythonInterpreterFlag(argument string) bool {
-	switch argument {
-	case "-b", "-bb", "-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-s", "-S", "-u", "-v", "-vv", "-x":
-		return true
-	default:
-		return false
-	}
 }

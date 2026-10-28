@@ -126,11 +126,10 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 		assert.Equal(t, pod.Spec.Containers[0].LivenessProbe, shaped.Spec.Containers[0].LivenessProbe)
 	})
 
-	t.Run("admits an opted-in custom python module with standby injected", func(t *testing.T) {
-		t.Log("Given a native restore candidate whose engine runs a custom module that opts in to the standby contract")
+	t.Run("admits a custom python module with standby injected", func(t *testing.T) {
+		t.Log("Given a native restore candidate whose engine runs a custom python module")
 		t.Log("And autovllm.dynamo_server stands in for a wrapper that calls maybe_run_restore_standby_mode() before importing runtime or backend code")
 		pod := nativeRestoreCandidatePod(snapshot)
-		pod.Annotations[consts.RestoreStandbyCapableAnnotation] = consts.KubeLabelValueTrue
 		pod.Spec.Containers[1].Command = []string{"python3", "-m", "autovllm.dynamo_server"}
 		original := mustMarshalPod(t, pod)
 		req := admission.Request{
@@ -190,13 +189,6 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 					pod.Spec.Containers[1].Command = []string{"serve-model"}
 				},
 				wantErr: "must directly invoke python -m",
-			},
-			{
-				name: "custom python module without standby opt-in",
-				mutate: func(pod *corev1.Pod) {
-					pod.Spec.Containers[1].Command = []string{"python3", "-m", "autovllm.dynamo_server"}
-				},
-				wantErr: consts.RestoreStandbyCapableAnnotation,
 			},
 			{
 				name: "missing restore target metadata",
@@ -383,88 +375,6 @@ func TestPodCheckpointRestoreMutatorAutomaticSnapshotJob(t *testing.T) {
 		require.NotNil(t, resp.Result)
 		assert.Contains(t, resp.Result.Message, "not marked as a Dynamo automatic checkpoint")
 	})
-}
-
-func TestUsesSupportedDynamoRestoreEntrypoint(t *testing.T) {
-	tests := []struct {
-		name      string
-		command   []string
-		args      []string
-		optIn     bool
-		supported bool
-	}{
-		{
-			name:      "vLLM module in command",
-			command:   []string{"python3", "-m", "dynamo.vllm"},
-			supported: true,
-		},
-		{
-			name:      "SGLang module split across command and args",
-			command:   []string{"python"},
-			args:      []string{"-m", "dynamo.sglang", "--model", "test"},
-			supported: true,
-		},
-		{
-			name:      "TensorRT-LLM module with versioned Python path",
-			command:   []string{"/usr/bin/python3.11", "-m", "dynamo.trtllm"},
-			supported: true,
-		},
-		{
-			name:      "vLLM module after operand-free interpreter flags",
-			command:   []string{"python3", "-u", "-O", "-m", "dynamo.vllm"},
-			supported: true,
-		},
-		{
-			name:    "shell wrapper",
-			command: []string{"/bin/sh", "-c"},
-			args:    []string{"python3 -m dynamo.vllm"},
-		},
-		{
-			name:    "custom wrapper with module arguments",
-			command: []string{"serve-model"},
-			args:    []string{"-m", "dynamo.vllm"},
-		},
-		{
-			name:    "custom Python module without opt-in",
-			command: []string{"python3", "-m", "autovllm.dynamo_server"},
-		},
-		{
-			name:    "dynamo.frontend does not implement the standby hook",
-			command: []string{"python3", "-m", "dynamo.frontend"},
-		},
-		{
-			name:      "custom Python module with opt-in",
-			command:   []string{"python3", "-m", "autovllm.dynamo_server"},
-			optIn:     true,
-			supported: true,
-		},
-		{
-			name:    "shell wrapper is rejected even with opt-in",
-			command: []string{"/bin/sh", "-c"},
-			args:    []string{"python3 -m autovllm.dynamo_server"},
-			optIn:   true,
-		},
-		{
-			name:    "empty module name",
-			command: []string{"python3", "-m", ""},
-			optIn:   true,
-		},
-		{
-			name:    "option-like module name",
-			command: []string{"python3", "-m", "-c"},
-			optIn:   true,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Given a restore destination with an explicit container entrypoint")
-			container := &corev1.Container{Command: test.command, Args: test.args}
-
-			t.Log("Then Dynamo modules and explicitly opted-in direct python -m modules are accepted")
-			assert.Equal(t, test.supported, usesSupportedDynamoRestoreEntrypoint(container, test.optIn))
-		})
-	}
 }
 
 func nativeRestoreTestSnapshot() *snapshotv1alpha1.PodSnapshot {
