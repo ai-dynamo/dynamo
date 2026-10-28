@@ -241,7 +241,6 @@ def _allowed_runtime_lora_schemes() -> set[str]:
 
 
 def _configure_runtime_lora(manager: LoRAManager) -> None:
-    """Configure worker-local request-time resolution exactly once on demand."""
     if manager.runtime_lora_schemes:
         return
     with _runtime_lora_config_lock:
