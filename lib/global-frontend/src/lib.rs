@@ -9,12 +9,19 @@
 //! forwarded request exactly as it would one sent to it directly.
 //! [`ModelSync`] keeps the HTTP service's models in step with the pool
 //! catalog, so a model is served while at least one pool serves it.
+//! Selectors that weigh pool load read it from `PoolSignals`, which
+//! [`follow_relays`] fills from each pool's KV DC Relay and
+//! [`measure_round_trips`] from the round trip to each region.
 
 mod forward;
 mod model_sync;
+mod relay;
+mod round_trip;
 
 pub use forward::{ForwardedRequest, PoolForwardingEngine};
 pub use model_sync::ModelSync;
+pub use relay::follow_relays;
+pub use round_trip::measure_round_trips;
 
 mod catalog;
 pub use catalog::{PoolCatalog, PoolSnapshot, StaticPoolCatalog};

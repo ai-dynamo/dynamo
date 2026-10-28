@@ -2525,6 +2525,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+ "tonic 0.13.1",
  "tracing",
  "url",
 ]

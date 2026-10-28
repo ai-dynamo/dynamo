@@ -7,14 +7,16 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{
     MODEL, Server, bind, chat, chat_chunk, client, http_service, ok_json, pool, post,
     scripted_pool_frontend, serve, sse_data,
 };
-use dynamo_global_frontend::{Pool, PoolSnapshot};
+use dynamo_global_frontend::{
+    Pool, PoolSelector, PoolSnapshot, PoolTarget, RoundRobinSelector, RoutingRequest,
+};
 use dynamo_llm::endpoint_type::EndpointType;
 use dynamo_llm::engines::{StreamingEngineAdapter, make_echo_engine};
 use reqwest::StatusCode;
@@ -245,6 +247,42 @@ async fn forwards_the_session_and_skips_pool_keep_alives() {
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0]["x-dynamo-session-id"], "session-123");
+}
+
+/// Records the session each request carried, and routes round robin.
+#[derive(Default)]
+struct SessionRecorder {
+    sessions: Mutex<Vec<Option<String>>>,
+    inner: RoundRobinSelector,
+}
+
+impl PoolSelector for SessionRecorder {
+    fn select(&self, request: &RoutingRequest<'_>, candidates: &[&Pool]) -> Option<PoolTarget> {
+        let session = request.session.map(str::to_owned);
+        self.sessions.lock().unwrap().push(session);
+        self.inner.select(request, candidates)
+    }
+}
+
+#[tokio::test]
+async fn the_selector_sees_the_session() {
+    let pool_frontend = echo_pool_frontend().await;
+    let recorder = Arc::new(SessionRecorder::default());
+    let blue = pool("blue", MODEL, &pool_frontend.url);
+    let (_pools, receiver) = watch::channel(Arc::new(PoolSnapshot::new(vec![blue])));
+    let global = common::global_frontend_with(receiver, recorder.clone()).await;
+
+    for session in [Some("session-123"), None] {
+        let mut request = client()
+            .post(global.url.join("v1/chat/completions").unwrap())
+            .json(&chat(MODEL, "hi", false));
+        if let Some(session) = session {
+            request = request.header("x-dynamo-session-id", session);
+        }
+        ok_json(request.send().await.unwrap()).await;
+    }
+    let sessions = recorder.sessions.lock().unwrap();
+    assert_eq!(*sessions, [Some("session-123".to_owned()), None]);
 }
 
 #[tokio::test]
