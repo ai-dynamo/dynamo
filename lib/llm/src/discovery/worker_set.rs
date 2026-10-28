@@ -220,6 +220,7 @@ pub struct WorkerSet {
     pub(crate) pooling_engine: Option<OpenAIPoolingStreamingEngine>,
     pub(crate) rerank_engine: Option<OpenAIRerankStreamingEngine>,
     pub(crate) images_engine: Option<OpenAIImagesStreamingEngine>,
+    pub(crate) image_edit_admission: Option<Arc<super::image_edits::ImageEditAdmission>>,
     pub(crate) videos_engine: Option<OpenAIVideosStreamingEngine>,
     pub(crate) audios_engine: Option<OpenAIAudiosStreamingEngine>,
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
@@ -253,6 +254,7 @@ pub struct WorkerSet {
 }
 
 impl WorkerSet {
+    /// Create an unbound set; engines and discovery admission are installed later.
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
         Self {
             namespace,
@@ -267,6 +269,7 @@ impl WorkerSet {
             pooling_engine: None,
             rerank_engine: None,
             images_engine: None,
+            image_edit_admission: None,
             videos_engine: None,
             audios_engine: None,
             tensor_engine: None,
@@ -512,6 +515,7 @@ impl WorkerSet {
         self.allocator_trim_wrapped = true;
     }
 
+    /// Share base-set engines, admission, and lifecycle under a LoRA model card.
     pub(crate) fn adapter_view(&self, card: ModelDeploymentCard) -> Self {
         let lora_name = card
             .lora
@@ -538,6 +542,7 @@ impl WorkerSet {
             pooling_engine: lora_context_engine(&self.pooling_engine, &lora_name),
             rerank_engine: lora_context_engine(&self.rerank_engine, &lora_name),
             images_engine: lora_context_engine(&self.images_engine, &lora_name),
+            image_edit_admission: self.image_edit_admission.clone(),
             videos_engine: lora_context_engine(&self.videos_engine, &lora_name),
             audios_engine: lora_context_engine(&self.audios_engine, &lora_name),
             tensor_engine: lora_context_engine(&self.tensor_engine, &lora_name),
