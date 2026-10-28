@@ -867,7 +867,9 @@ Set `thinking: {"type": "adaptive", "display": "omitted"}` to suppress readable
 reasoning identified by the backend in both JSON and streaming responses. This
 requires a reasoning parser when the worker emits reasoning inline with text; ordinary
 answer text is not filtered. Each omitted thinking block has empty text and one empty
-streaming delta; tool calls and token usage are preserved. An omitted `display` or `"summarized"` preserves the backend's readable
+streaming delta; tool calls and token usage are preserved. During suppressed output,
+the stream sends a heartbeat every 15 seconds unless a keep-alive interval is configured.
+Thinking that resumes after text or tool calls starts a new block. An omitted `display` or `"summarized"` preserves the backend's readable
 reasoning output; Dynamo does not generate a separate summary. Display is valid
 only with `enabled` or `adaptive` thinking; other mode combinations return HTTP 400.
 Anthropic's beta `display: "updates"` also returns HTTP 400, even with its beta header:

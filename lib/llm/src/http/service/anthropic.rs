@@ -657,7 +657,9 @@ async fn anthropic_messages(
             parsing_options.tool_call_parser.as_deref(),
             parsing_options.reasoning_parser.as_deref(),
             request.chat_template_args.as_ref(),
-        );
+        ) || anthropic_ctx
+            .as_ref()
+            .is_some_and(|ctx| ctx.omit_thinking());
 
     let mut response_collector = inflight_guard.response_collector();
     inflight_guard.request_metrics().attach_to(&mut request);

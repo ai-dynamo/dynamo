@@ -45,9 +45,9 @@ pub struct AnthropicStreamConverter {
     saw_backend_usage: bool,
     // Tool call tracking
     tool_call_states: Vec<ToolCallState>,
-    // Text that arrived after a tool call. Tool blocks stream only once their
-    // call is complete, so this text waits and streams in arrival order.
-    pending_text: Vec<PendingText>,
+    // Text and thinking after a tool call wait until the call is complete,
+    // preserving block order even when tool arguments span multiple chunks.
+    pending_content: Vec<PendingContent>,
     tool_blocks_flushed: bool,
     tool_flush_requested: bool,
     // Block index counter
@@ -58,9 +58,16 @@ pub struct AnthropicStreamConverter {
     backend_stop_reason: Option<serde_json::Value>,
 }
 
-/// Text that arrived after `after_calls` tool calls had started.
-struct PendingText {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingKind {
+    Text,
+    Thinking { omitted: bool },
+}
+
+/// Content that arrived after `after_calls` tool calls had started.
+struct PendingContent {
     after_calls: usize,
+    kind: PendingKind,
     /// Each fragment with the cumulative usage when its chunk was processed.
     fragments: Vec<(String, AnthropicUsage)>,
 }
@@ -110,7 +117,7 @@ impl AnthropicStreamConverter {
             },
             saw_backend_usage: false,
             tool_call_states: Vec::new(),
-            pending_text: Vec::new(),
+            pending_content: Vec::new(),
             tool_blocks_flushed: false,
             tool_flush_requested: false,
             next_block_index: 0,
@@ -187,12 +194,31 @@ impl AnthropicStreamConverter {
     }
 
     fn buffer_text(&mut self, text: &str, usage_snapshot: &AnthropicUsage) {
+        self.buffer_content(text, PendingKind::Text, usage_snapshot);
+    }
+
+    fn buffer_content(&mut self, text: &str, kind: PendingKind, usage_snapshot: &AnthropicUsage) {
         let after_calls = self.tool_call_states.len();
-        let fragment = (text.to_owned(), usage_snapshot.clone());
-        match self.pending_text.last_mut() {
-            Some(pending) if pending.after_calls == after_calls => pending.fragments.push(fragment),
-            _ => self.pending_text.push(PendingText {
+        let omitted = kind == PendingKind::Thinking { omitted: true };
+        let fragment = (
+            if omitted {
+                String::new()
+            } else {
+                text.to_owned()
+            },
+            usage_snapshot.clone(),
+        );
+        match self.pending_content.last_mut() {
+            Some(pending) if pending.after_calls == after_calls && pending.kind == kind => {
+                if omitted {
+                    pending.fragments.last_mut().unwrap().1 = usage_snapshot.clone();
+                } else {
+                    pending.fragments.push(fragment);
+                }
+            }
+            _ => self.pending_content.push(PendingContent {
                 after_calls,
+                kind,
                 fragments: vec![fragment],
             }),
         }
@@ -234,11 +260,16 @@ impl AnthropicStreamConverter {
             .tool_call_states
             .iter_mut()
             .enumerate()
-            .filter(|(_, tool_call)| tool_call.is_emit_ready())
             .filter(|(_, tool_call)| !tool_call.has_emitted && (is_final || tool_call.needs_flush))
         {
             if single_tool && has_emitted {
                 break;
+            }
+            if !tool_call.is_emit_ready() {
+                if !is_final {
+                    break;
+                }
+                continue;
             }
             let raw: String = tool_call
                 .argument_fragments
@@ -250,17 +281,13 @@ impl AnthropicStreamConverter {
             // the block and discard the fragments that follow, so leave it pending and
             // let the final drain decide.
             if !is_final && raw.is_empty() {
-                if single_tool {
-                    break;
-                }
-                continue;
+                break;
             }
             let parsed = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw);
             // Keep an earlier incomplete call pending; it may still become valid.
             if single_tool && !is_final && parsed.as_ref().is_err_and(|error| error.is_eof()) {
                 break;
             }
-            tool_call.needs_flush = false;
             let arguments_are_valid = if raw.is_empty() {
                 // An empty argument string is valid for a completed call, but at a
                 // token-limit finish it means generation stopped immediately after
@@ -275,10 +302,16 @@ impl AnthropicStreamConverter {
                 .then(|| super::types::tool_use_input(&tool_call.name, &raw, true))
                 .flatten();
             if !arguments_are_valid && repaired_input.is_none() {
+                // A later block must not overtake a call whose fragments can
+                // still arrive after the finish reason.
+                if !is_final {
+                    break;
+                }
                 continue;
             }
-            drain_pending_text(
-                &mut self.pending_text,
+            tool_call.needs_flush = false;
+            drain_pending_content(
+                &mut self.pending_content,
                 Some(call_index),
                 &mut block_index,
                 &mut events,
@@ -351,7 +384,12 @@ impl AnthropicStreamConverter {
         }
 
         if is_final {
-            drain_pending_text(&mut self.pending_text, None, &mut block_index, &mut events);
+            drain_pending_content(
+                &mut self.pending_content,
+                None,
+                &mut block_index,
+                &mut events,
+            );
         }
         self.next_block_index = block_index;
         events
@@ -531,41 +569,61 @@ impl AnthropicStreamConverter {
             if let Some(ref reasoning) = delta.reasoning_content
                 && !reasoning.is_empty()
             {
-                // Emit content_block_start on first thinking token
-                let first_thinking_delta = !self.thinking_block_started;
-                if first_thinking_delta {
-                    self.thinking_block_started = true;
-                    self.thinking_block_index = self.next_block_index;
-                    self.next_block_index += 1;
-
-                    let block_start = AnthropicStreamEvent::ContentBlockStart {
-                        index: self.thinking_block_index,
-                        content_block: AnthropicResponseContentBlock::Thinking {
-                            thinking: String::new(),
-                            signature: String::new(),
-                        },
-                    };
-                    events.push(make_sse_event("content_block_start", &block_start));
-                }
-
-                // Omitted display has one empty delta per block, independent of
-                // backend chunking. Usage is still updated from every chunk.
                 let omitted = self
                     .api_context
                     .as_ref()
                     .is_some_and(|ctx| ctx.omit_thinking());
-                if !omitted || first_thinking_delta {
-                    let block_delta = AnthropicStreamEvent::ContentBlockDelta {
-                        index: self.thinking_block_index,
-                        delta: AnthropicDelta::ThinkingDelta {
-                            thinking: if omitted {
-                                String::new()
-                            } else {
-                                reasoning.clone()
+                if !self.tool_call_states.is_empty() {
+                    self.buffer_content(
+                        reasoning,
+                        PendingKind::Thinking { omitted },
+                        &usage_snapshot,
+                    );
+                } else {
+                    if self.text_block_started && !self.text_block_closed {
+                        events.push(make_sse_event(
+                            "content_block_stop",
+                            &AnthropicStreamEvent::ContentBlockStop {
+                                index: self.text_block_index,
                             },
-                        },
-                    };
-                    events.push(self.serialize_event("content_block_delta", &block_delta));
+                        ));
+                        self.text_block_started = false;
+                        self.text_block_closed = false;
+                    }
+                    // Emit content_block_start on first thinking token
+                    let first_thinking_delta =
+                        !self.thinking_block_started || self.thinking_block_closed;
+                    if first_thinking_delta {
+                        self.thinking_block_started = true;
+                        self.thinking_block_closed = false;
+                        self.thinking_block_index = self.next_block_index;
+                        self.next_block_index += 1;
+
+                        let block_start = AnthropicStreamEvent::ContentBlockStart {
+                            index: self.thinking_block_index,
+                            content_block: AnthropicResponseContentBlock::Thinking {
+                                thinking: String::new(),
+                                signature: String::new(),
+                            },
+                        };
+                        events.push(make_sse_event("content_block_start", &block_start));
+                    }
+
+                    // Omitted display has one empty delta per block, independent of
+                    // backend chunking. Usage is still updated from every chunk.
+                    if !omitted || first_thinking_delta {
+                        let block_delta = AnthropicStreamEvent::ContentBlockDelta {
+                            index: self.thinking_block_index,
+                            delta: AnthropicDelta::ThinkingDelta {
+                                thinking: if omitted {
+                                    String::new()
+                                } else {
+                                    reasoning.clone()
+                                },
+                            },
+                        };
+                        events.push(self.serialize_event("content_block_delta", &block_delta));
+                    }
                 }
             }
 
@@ -760,42 +818,68 @@ impl AnthropicStreamConverter {
     }
 }
 
-/// Moves held text into `events` as text blocks: the text that arrived before
-/// tool call `before_call`, or all of it when `None`.
+/// Drain content preceding `before_call`, or all remaining content at EOF.
 #[allow(clippy::type_complexity)]
-fn drain_pending_text(
-    pending_text: &mut Vec<PendingText>,
+fn drain_pending_content(
+    pending: &mut Vec<PendingContent>,
     before_call: Option<usize>,
     block_index: &mut u32,
     events: &mut Vec<(&'static str, AnthropicStreamEvent, Option<AnthropicUsage>)>,
 ) {
     let count = match before_call {
-        Some(call_index) => pending_text
+        Some(call_index) => pending
             .iter()
-            .take_while(|text| text.after_calls <= call_index)
+            .take_while(|content| content.after_calls <= call_index)
             .count(),
-        None => pending_text.len(),
+        None => pending.len(),
     };
-    for text in pending_text.drain(..count) {
+    for content in pending.drain(..count) {
+        let thinking = matches!(content.kind, PendingKind::Thinking { .. });
+        let content_block = if thinking {
+            AnthropicResponseContentBlock::Thinking {
+                thinking: String::new(),
+                signature: String::new(),
+            }
+        } else {
+            AnthropicResponseContentBlock::Text {
+                text: String::new(),
+                citations: None,
+            }
+        };
         events.push((
             "content_block_start",
             AnthropicStreamEvent::ContentBlockStart {
                 index: *block_index,
-                content_block: AnthropicResponseContentBlock::Text {
-                    text: String::new(),
-                    citations: None,
-                },
+                content_block,
             },
             None,
         ));
-        for (fragment, usage) in text.fragments {
+        let final_usage = content.fragments.last().map(|(_, usage)| usage.clone());
+        for (fragment, usage) in content.fragments {
+            let delta = if thinking {
+                AnthropicDelta::ThinkingDelta { thinking: fragment }
+            } else {
+                AnthropicDelta::TextDelta { text: fragment }
+            };
             events.push((
                 "content_block_delta",
                 AnthropicStreamEvent::ContentBlockDelta {
                     index: *block_index,
-                    delta: AnthropicDelta::TextDelta { text: fragment },
+                    delta,
                 },
                 Some(usage),
+            ));
+        }
+        if thinking {
+            events.push((
+                "content_block_delta",
+                AnthropicStreamEvent::ContentBlockDelta {
+                    index: *block_index,
+                    delta: AnthropicDelta::SignatureDelta {
+                        signature: "erased".into(),
+                    },
+                },
+                final_usage,
             ));
         }
         events.push((
@@ -905,28 +989,62 @@ impl AnthropicStreamConverter {
             if let Some(ref reasoning) = delta.reasoning_content
                 && !reasoning.is_empty()
             {
-                if !self.thinking_block_started {
-                    self.thinking_block_started = true;
-                    self.thinking_block_index = self.next_block_index;
-                    self.next_block_index += 1;
+                let omitted = self
+                    .api_context
+                    .as_ref()
+                    .is_some_and(|ctx| ctx.omit_thinking());
+                if !self.tool_call_states.is_empty() {
+                    self.buffer_content(
+                        reasoning,
+                        PendingKind::Thinking { omitted },
+                        &usage_snapshot,
+                    );
+                } else {
+                    if self.text_block_started && !self.text_block_closed {
+                        events.push(make_tagged_event(
+                            "content_block_stop",
+                            &AnthropicStreamEvent::ContentBlockStop {
+                                index: self.text_block_index,
+                            },
+                        ));
+                        self.text_block_started = false;
+                        self.text_block_closed = false;
+                    }
+                    // Emit content_block_start on first thinking token
+                    let first_thinking_delta =
+                        !self.thinking_block_started || self.thinking_block_closed;
+                    if first_thinking_delta {
+                        self.thinking_block_started = true;
+                        self.thinking_block_closed = false;
+                        self.thinking_block_index = self.next_block_index;
+                        self.next_block_index += 1;
 
-                    let ev = AnthropicStreamEvent::ContentBlockStart {
-                        index: self.thinking_block_index,
-                        content_block: AnthropicResponseContentBlock::Thinking {
-                            thinking: String::new(),
-                            signature: String::new(),
-                        },
-                    };
-                    events.push(make_tagged_event("content_block_start", &ev));
+                        let block_start = AnthropicStreamEvent::ContentBlockStart {
+                            index: self.thinking_block_index,
+                            content_block: AnthropicResponseContentBlock::Thinking {
+                                thinking: String::new(),
+                                signature: String::new(),
+                            },
+                        };
+                        events.push(make_tagged_event("content_block_start", &block_start));
+                    }
+
+                    // Omitted display has one empty delta per block, independent of
+                    // backend chunking. Usage is still updated from every chunk.
+                    if !omitted || first_thinking_delta {
+                        let block_delta = AnthropicStreamEvent::ContentBlockDelta {
+                            index: self.thinking_block_index,
+                            delta: AnthropicDelta::ThinkingDelta {
+                                thinking: if omitted {
+                                    String::new()
+                                } else {
+                                    reasoning.clone()
+                                },
+                            },
+                        };
+                        events.push(make_tagged_event("content_block_delta", &block_delta));
+                    }
                 }
-
-                let ev = AnthropicStreamEvent::ContentBlockDelta {
-                    index: self.thinking_block_index,
-                    delta: AnthropicDelta::ThinkingDelta {
-                        thinking: reasoning.clone(),
-                    },
-                };
-                events.push(make_tagged_event("content_block_delta", &ev));
             }
 
             let content_text = match &delta.content {

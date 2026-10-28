@@ -105,7 +105,6 @@ pub struct AnthropicContext {
 }
 
 impl AnthropicContext {
-    /// Whether to suppress readable reasoning in Messages responses.
     pub fn omit_thinking(&self) -> bool {
         self.thinking.as_ref().is_some_and(|thinking| {
             thinking.display == Some(crate::protocols::anthropic::types::ThinkingDisplay::Omitted)
