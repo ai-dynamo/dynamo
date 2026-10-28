@@ -129,9 +129,9 @@ fn response_mux_config() -> Result<MuxConfig> {
     })
 }
 
-/// Velo has no TLS, so refuse to start rather than send responses in
-/// plaintext while TLS is configured for the TCP planes.
-pub(crate) fn reject_tls_settings() -> Result<()> {
+/// Velo has no TLS, so refuse to build a service while TLS is configured
+/// for the TCP planes.
+fn reject_tls_settings() -> Result<()> {
     use crate::config::environment_names::tcp_response_stream::tls::*;
 
     let set: Vec<&str> = [
@@ -446,6 +446,7 @@ pub struct VeloResponseService {
 
 impl VeloResponseService {
     async fn from_env() -> Result<Arc<Self>> {
+        reject_tls_settings()?;
         let transport = ResponseTransport::configured()?;
         let host = crate::utils::ip_resolver::host_override_from_env(
             crate::config::environment_names::tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,

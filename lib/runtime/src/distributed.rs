@@ -351,7 +351,6 @@ impl DistributedRuntime {
             );
         }
         if response_plane == ResponsePlaneMode::Velo {
-            crate::pipeline::network::velo_response::reject_tls_settings()?;
             distributed_runtime.velo_response_service().await?;
             crate::pipeline::network::velo_response::register_metrics(
                 distributed_runtime.get_metrics_registry(),
