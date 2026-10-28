@@ -85,9 +85,6 @@ class TestSingleTurnDefault:
 
 
 class TestSeededSlotSampling:
-    """A fixed seed must keep producing the same slots and RNG state."""
-
-    # Recorded from the image and video samplers before they shared a helper.
     EXPECTED_SLOTS = [
         "item_3",
         "item_4",

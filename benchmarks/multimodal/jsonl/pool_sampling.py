@@ -18,14 +18,12 @@ def sample_pool_slots(
     validate first that ``len(pool) >= items_per_request`` and that
     ``num_requests * items_per_request >= len(pool)``.
     """
-    # Round-robin every pool item into requests so each appears at least once
     shuffled = list(pool)
     py_rng.shuffle(shuffled)
     requests: list[list[str]] = [[] for _ in range(num_requests)]
     for i, item in enumerate(shuffled):
         requests[i % num_requests].append(item)
 
-    # Fill remaining slots with random pool samples (no intra-request duplicates)
     for req in requests:
         remaining = items_per_request - len(req)
         if remaining > 0:
