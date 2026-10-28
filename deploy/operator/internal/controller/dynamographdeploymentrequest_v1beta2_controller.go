@@ -49,6 +49,11 @@ const (
 	// created, so the controller never reconstructs or validates it for an existing Run.
 	dgdrV1beta2GenerationAnnotation = "nvidia.com/dgdr-request-generation"
 
+	// dgdrV1beta2CancelRequestedByGenerationAnnotation records the newer Request generation that
+	// superseded a non-terminal Run. The Request controller owns this intent; the Run controller
+	// stops the execution and publishes the terminal outcome without deleting the Run.
+	dgdrV1beta2CancelRequestedByGenerationAnnotation = "nvidia.com/dgdr-cancel-requested-by-generation"
+
 	// dgdrRunControllerUIDIndex indexes Runs by the UID of their controller OwnerReference. The
 	// OwnerReference is the only definition of which Runs belong to a Request.
 	dgdrRunControllerUIDIndex = "dynamo.nvidia.com/dgdr-run-controller-uid"
@@ -81,7 +86,7 @@ type DynamoGraphDeploymentRequestV1beta2Reconciler struct {
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentrequests,verbs=get;list;watch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentrequests/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentruns,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentruns,verbs=get;list;watch;create;patch;delete
 
 // Reconcile is level based: once no older Run is active it creates the Run of the latest generation
 // only, so generations edited in between are coalesced and never get a Run of their own. It records
@@ -132,12 +137,12 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 	if current == nil {
 		if active != nil {
 			if active.DeletionTimestamp.IsZero() {
-				if err := r.Delete(ctx, active, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
-					return ctrl.Result{}, fmt.Errorf("cancel superseded Run %q: %w", active.Name, err)
+				if err := r.requestRunCancellation(ctx, active, request.Generation); err != nil {
+					return ctrl.Result{}, err
 				}
 			}
 			condition = dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonCancelingStaleRun,
-				fmt.Sprintf("Canceling superseded Run %q before generation %d starts", active.Name, request.Generation))
+				fmt.Sprintf("Waiting for superseded Run %q to stop before generation %d starts", active.Name, request.Generation))
 			request.Status.ActiveRunRef = &corev1.LocalObjectReference{Name: active.Name}
 			meta.SetStatusCondition(&request.Status.Conditions, condition)
 			if err := r.patchStatus(ctx, request, original); err != nil {
@@ -216,6 +221,29 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 		}
 	}
 	return result, nil
+}
+
+func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) requestRunCancellation(
+	ctx context.Context,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	supersedingGeneration int64,
+) error {
+	if existing := run.Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation]; existing != "" {
+		generation, err := strconv.ParseInt(existing, 10, 64)
+		if err == nil && generation >= supersedingGeneration {
+			return nil
+		}
+	}
+	want := strconv.FormatInt(supersedingGeneration, 10)
+	original := run.DeepCopy()
+	if run.Annotations == nil {
+		run.Annotations = map[string]string{}
+	}
+	run.Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation] = want
+	if err := r.Patch(ctx, run, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("request cancellation of superseded Run %q: %w", run.Name, err)
+	}
+	return nil
 }
 
 func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) patchStatus(
