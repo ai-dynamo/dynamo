@@ -31,7 +31,7 @@ func (e *checkpointBindingChangedError) Error() string {
 }
 
 // engineGroupCheckpoint is private persistence, not a second public Kubernetes API.
-// Version it whenever the serialized coordinator state or its recovery invariants change.
+// Version identifies the persisted recovery schema introduced with this feature.
 // A physical binding change requires explicit whole-world recovery, never silent adoption.
 type engineGroupCheckpoint struct {
 	Version            int
