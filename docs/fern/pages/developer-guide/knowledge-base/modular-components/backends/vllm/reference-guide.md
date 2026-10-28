@@ -108,15 +108,24 @@ For more details, see [Graceful Shutdown](../../../../../kubernetes/fault-tolera
 
 ## Health Checks
 
-Each worker type has a specialized health check payload that validates the full inference pipeline:
+Each worker type registers a health check with the Dynamo runtime. Set
+`DYN_HEALTH_CHECK_ENABLED=true` to enable active checks.
 
 | Worker Type | Health Check Strategy |
 |------------|----------------------|
 | Decode / Aggregated | Short generation request (`max_tokens=1`) using the model's BOS token |
 | Prefill | Same payload structure as decode, adapted for prefill request format |
-| vLLM-Omni | Short generation request via AsyncOmni with the model's BOS token |
+| [vLLM-Omni](../../../../../reference/backends/vllm-omni-configuration.mdx) (aggregated) | Native engine health check; see [vLLM-Omni Health Checks](../../../../../reference/observability/health-checks.mdx#vllm-omni-health-checks) for defaults and custom inference checks |
+| vLLM-Omni ([stage worker](vllm-omni-disaggregated-serving.md)) | Short generation request using the model's BOS token |
 
-Health checks are registered with the Dynamo runtime and called by the frontend or Kubernetes liveness probes. The payload can be overridden via `DYN_HEALTH_CHECK_PAYLOAD` environment variable. See [Observability Architecture](../../../concepts/observability-architecture.md#active-worker-health-checks) for the active health-check design.
+An aggregated Omni worker serves the complete model pipeline through one Dynamo endpoint. A stage
+worker runs a single stage in a disaggregated pipeline.
+
+The runtime's HTTP health endpoints expose the resulting status to Kubernetes probes. Override the
+payload with `DYN_HEALTH_CHECK_PAYLOAD`. See the
+[Health Check Reference](../../../../../reference/observability/health-checks.mdx#active-canary-configuration)
+for configuration and [Observability Architecture](../../../concepts/observability-architecture.md#active-worker-health-checks)
+for the active health-check design.
 
 ## Request Cancellation
 

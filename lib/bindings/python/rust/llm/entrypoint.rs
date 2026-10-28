@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::future::Future;
 use std::path::PathBuf;
@@ -20,6 +21,7 @@ use dynamo_kv_router::config::{
     KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
     apply_deprecated_overlap_score_weight_override,
 };
+use dynamo_llm::admission_gate::WorkerAdmissionGate;
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
@@ -251,6 +253,49 @@ impl KvRouterConfig {
 
     fn copy(&self) -> Self {
         self.clone()
+    }
+
+    /// Serialize this configuration as JSON that `from_json` accepts.
+    ///
+    /// The serialization is lossy: the process-local fields `router_approximate_cache_policy`,
+    /// `router_prefill_policy`, `router_decode_policy` and the replay model selector are not
+    /// serialized, so `from_json` restores their defaults. Re-serializing the parsed result
+    /// yields the same JSON.
+    fn to_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner).map_err(|e| {
+            PyValueError::new_err(format!("Failed to serialize KvRouterConfig JSON: {e}"))
+        })
+    }
+
+    /// Resolved default-policy parameters a router built from this configuration starts with
+    /// for `worker_type` (`"aggregated"`, `"prefill"` or `"decode"`).
+    ///
+    /// The keys are the `PATCH /router_policy` parameter names. Plain decode workers (decode
+    /// without conditional disaggregation) report zero cache credits. Raises `ValueError` when
+    /// the configuration (or `DYN_ROUTER_WORKER_SELECTION_POLICY`) selects a worker-selection
+    /// policy instance for `worker_type`: its own parameters are not resolved here.
+    fn policy_parameters(&self, worker_type: &str) -> PyResult<BTreeMap<String, f64>> {
+        let role = dynamo_mocker::replay::parse_router_worker_type(worker_type)
+            .map_err(|e| PyValueError::new_err(format!("worker_type: {e}")))?;
+        let selected = self
+            .inner
+            .selected_worker_selection_policy_instance_for(role)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if let Some(instance) = selected {
+            return Err(PyValueError::new_err(format!(
+                "policy_parameters covers the builtin default policy only; this configuration \
+                 selects worker-selection policy instance {instance:?} for {worker_type}"
+            )));
+        }
+        dynamo_custom_policy_builtin::startup_policy_parameters(&self.inner, role)
+            .into_iter()
+            .map(|(name, value)| match value.as_f64() {
+                Some(value) => Ok((name, value)),
+                None => Err(PyValueError::new_err(format!(
+                    "policy parameter {name} is not a number: {value}"
+                ))),
+            })
+            .collect()
     }
 
     #[getter]
@@ -821,14 +866,22 @@ async fn select_engine(
 
             let endpoint = local_model.endpoint_id().clone();
 
-            let engine =
-                make_mocker_engine(distributed_runtime.inner, endpoint, mocker_args).await?;
+            let engine = make_mocker_engine(
+                distributed_runtime.inner,
+                endpoint,
+                mocker_args,
+                local_model.display_name().to_string(),
+            )
+            .await?;
 
+            // This config is the mocker worker: every endpoint serving it, or a
+            // clone of it, admits through this one gate.
             RsEngineConfig::InProcessTokens {
                 engine,
                 model: Box::new(local_model),
                 is_prefill: args.is_prefill,
                 is_decode: args.is_decode,
+                admission_gate: WorkerAdmissionGate::default(),
             }
         }
     };

@@ -57,6 +57,7 @@ use crate::{
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
     types::generic::realtime::{DynamoRealtimeClientEvent, RealtimeServerEvent},
+    utils::json::canonicalize_json_object_keys,
     worker_type::WorkerType,
 };
 
@@ -97,6 +98,18 @@ fn worker_set_key(
         wt.as_str(),
     ))
     .expect("serializing WorkerSet key strings cannot fail")
+}
+
+/// Refresh committed capability records without changing controller admission.
+fn update_image_edit_capabilities(worker_set: &WorkerSet, members: &[DesiredInstance]) {
+    if let Some(admission) = &worker_set.image_edit_admission {
+        admission.replace(members.iter().map(|member| {
+            (
+                member.mcid.instance_id,
+                super::image_edits::advertised_limit(&member.card),
+            )
+        }));
+    }
 }
 
 fn model_card_endpoint_id(mcid: &ModelCardInstanceId) -> EndpointId {
@@ -468,6 +481,11 @@ impl ModelWatcher {
             WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
         worker_set.set_lifecycle_cancellation(cancellation.clone());
+        if card.model_type.supports_images() {
+            worker_set.image_edit_admission = Some(Arc::new(
+                super::image_edits::ImageEditAdmission::new(admitted_ids.clone()),
+            ));
+        }
         worker_set.set_topology_target(super::CommittedWorkerSetTarget {
             endpoint: endpoint.clone(),
             group: spec.key.id(),
@@ -899,7 +917,14 @@ impl ModelWatcher {
                     Annotated<NvImagesResponse>,
                 >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
-                worker_set.images_engine = Some(Arc::new(images_router));
+                let admission = worker_set
+                    .image_edit_admission
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("image admission state was not initialized"))?;
+                worker_set.images_engine = Some(Arc::new(super::image_edits::ImageEditEngine {
+                    router: images_router,
+                    admission: admission.clone(),
+                }));
             }
 
             if card.model_type.supports_videos() {
@@ -1111,6 +1136,7 @@ impl ControllerHost for ModelWatcher {
             .worker_set
             .take()
             .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
+        update_image_edit_capabilities(&worker_set, members);
         let mut committed_members = members
             .iter()
             .map(|member| (member.key.clone(), member.card.clone()))
@@ -1194,6 +1220,13 @@ impl ControllerHost for ModelWatcher {
                 .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
                 .collect(),
         )?;
+        if let Some(worker_set) = self
+            .manager
+            .get_committed_model(&key.model_name)
+            .and_then(|model| model.get_worker_set(&key.worker_set_key))
+        {
+            update_image_edit_capabilities(&worker_set, members);
+        }
         for (name, card) in &desired {
             if !was_available.get(name).copied().unwrap_or(false)
                 && self.manager.get_committed_model(name).is_some()
@@ -1244,6 +1277,7 @@ impl ControllerHost for ModelWatcher {
             .worker_set
             .take()
             .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
+        update_image_edit_capabilities(&worker_set, members);
         let mut committed_members = members
             .iter()
             .map(|member| (member.key.clone(), member.card.clone()))
@@ -1427,7 +1461,7 @@ fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<Str
         "base_capacity": card.runtime_config.max_gpu_lora_count,
         "requires_registration": card.runtime_config.runtime_flag_enabled(crate::lora::LORA_REQUIRES_REGISTRATION),
     });
-    canonicalize_json(&mut value);
+    canonicalize_json_object_keys(&mut value);
     Ok(blake3::hash(&serde_json::to_vec(&value)?).to_string())
 }
 
@@ -1446,27 +1480,8 @@ pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<S
         return None;
     }
     let mut contracts = serde_json::Value::Object(contracts);
-    canonicalize_json(&mut contracts);
+    canonicalize_json_object_keys(&mut contracts);
     Some(blake3::hash(contracts.to_string().as_bytes()).to_string())
-}
-
-fn canonicalize_json(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(object) => {
-            let mut entries = std::mem::take(object).into_iter().collect::<Vec<_>>();
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
-            for (key, mut value) in entries {
-                canonicalize_json(&mut value);
-                object.insert(key, value);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                canonicalize_json(value);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn worker_set_chat_preprocessor(
@@ -1514,15 +1529,27 @@ mod tests {
 
         let vllm = card_with_contract(
             VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"placeholder_target": "bare_video_token", "resize_mode": "round_ties_even"}),
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even",
+                "sampling": {"max_frames": 768, "fps": 2.0, "steps": [{"z": 1, "a": null}, [3, 1, 2]]},
+            }),
         );
         let reordered_vllm = card_with_contract(
             VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"resize_mode": "round_ties_even", "placeholder_target": "bare_video_token"}),
+            serde_json::json!({
+                "sampling": {"steps": [{"a": null, "z": 1}, [3, 1, 2]], "fps": 2.0, "max_frames": 768},
+                "resize_mode": "round_ties_even",
+                "placeholder_target": "bare_video_token",
+            }),
         );
         let sglang = card_with_contract(
             SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"placeholder_target": "bare_video_token", "resize_mode": "round_ties_even"}),
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even",
+                "sampling": {"max_frames": 768, "fps": 2.0, "steps": [{"z": 1, "a": null}, [3, 1, 2]]},
+            }),
         );
 
         assert_eq!(

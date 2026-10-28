@@ -1283,8 +1283,7 @@ jobs:
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      copy_timeout_minutes: 20
     secrets: inherit
 
   # ============================================================================
@@ -1439,6 +1438,8 @@ jobs:
       DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
       DD_API_KEY: ${{ secrets.DD_API_KEY }}
 
+  # Serialize checkpoint lifecycles through cleanup: each Snapshot install
+  # reserves resources on the same GPU nodes until its namespace is deleted.
   deploy-operator-checkpoint-vllm:
     name: vLLM Snapshot Operator Setup
     if: |
@@ -1483,8 +1484,12 @@ jobs:
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true') &&
-      needs.operator.result == 'success'
-    needs: [changed-files, operator]
+      needs.operator.result == 'success' &&
+      (needs.deploy-cleanup-checkpoint-vllm.result == 'success' ||
+       (needs.deploy-cleanup-checkpoint-vllm.result == 'skipped' &&
+        needs.changed-files.outputs.snapshot != 'true' &&
+        needs.changed-files.outputs.snapshot_vllm != 'true'))
+    needs: [changed-files, operator, deploy-cleanup-checkpoint-vllm]
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read
@@ -1513,6 +1518,8 @@ jobs:
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
+  # Check both cleanups so a failed vLLM cleanup cannot be bypassed when
+  # the blocked SGLang lifecycle only runs its no-op cleanup.
   deploy-operator-checkpoint-trtllm:
     name: TRTLLM Snapshot Operator Setup
     if: |
@@ -1520,8 +1527,16 @@ jobs:
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true') &&
-      needs.operator.result == 'success'
-    needs: [changed-files, operator]
+      needs.operator.result == 'success' &&
+      (needs.deploy-cleanup-checkpoint-vllm.result == 'success' ||
+       (needs.deploy-cleanup-checkpoint-vllm.result == 'skipped' &&
+        needs.changed-files.outputs.snapshot != 'true' &&
+        needs.changed-files.outputs.snapshot_vllm != 'true')) &&
+      (needs.deploy-cleanup-checkpoint-sglang.result == 'success' ||
+       (needs.deploy-cleanup-checkpoint-sglang.result == 'skipped' &&
+        needs.changed-files.outputs.snapshot != 'true' &&
+        needs.changed-files.outputs.snapshot_sglang != 'true'))
+    needs: [changed-files, operator, deploy-cleanup-checkpoint-vllm, deploy-cleanup-checkpoint-sglang]
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read

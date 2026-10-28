@@ -4,7 +4,7 @@ IMG ?= controller:latest
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.30.0
-ENVTEST_PACKAGES ?= ./internal/controller/... ./internal/webhook/validation ./cmd/crd-apply
+ENVTEST_PACKAGES ?= ./internal/controller/... ./internal/webhook/defaulting ./internal/webhook/validation ./cmd/crd-apply
 ENVTEST_ASSETS_CMD = $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path
 
 CLUSTERTEST_PACKAGES ?= ./internal/testing/clusterenv ./internal/controller/...
@@ -710,7 +710,7 @@ clustertest-upgrade-contract: kind kubectl ## Replay in a fresh exclusive Kind c
 clustertest-upgrade-contract-in-cluster: ## Replay in an explicitly selected, exclusively owned cluster.
 	@test -n "$${DYNAMO_CLUSTERTEST_CONTEXT:-}" || { echo "DYNAMO_CLUSTERTEST_CONTEXT is required"; exit 1; }
 	python3 hack/generate_upgrade_fixtures.py --check
-	go test -tags=clustertest ./internal/testing/clusterenv -run '^TestClusterHistoryStorage$$' -count=1 -v -timeout=3m
+	go test -tags=clustertest ./internal/testing/clusterenv -run '^TestCluster(HistoryStorage|ComponentHistoryBlocksWorkloads)$$' -count=1 -v -timeout=3m
 	go test -tags='clustertest upgradecontract' ./internal/controller -run '^TestClusterOperatorUpgrade$$' -count=1 -v -timeout=15m
 
 .PHONY: clustertest-upgrade-fixtures-regen clustertest-upgrade-fixtures-regen-in-cluster

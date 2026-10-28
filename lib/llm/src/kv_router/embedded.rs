@@ -351,6 +351,12 @@ impl EmbeddedSelection {
             tracing::warn!(%error, "embedded selection: initial membership reconcile failed");
         }
         tokio::spawn(reconciler.run(source, cancellation_token.child_token()));
+        crate::kv_router::sequence::start_scheduler_load_publisher(
+            &args.endpoint,
+            Arc::clone(&service),
+            args.kv_router_config.router_replica_sync,
+            cancellation_token.child_token(),
+        );
 
         tracing::info!(
             worker_type = %worker_type,
