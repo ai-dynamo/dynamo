@@ -100,4 +100,19 @@ func TestDGDRRunPublisherRoleDoesNotEscalateManagerPermissions(t *testing.T) {
 	if want := dgdrRunPublisherRules(run.Name); !apiequality.Semantic.DeepEqual(createdRole.Rules, want) {
 		t.Fatalf("publisher Role rules = %#v, want %#v", createdRole.Rules, want)
 	}
+	if !roleAllowsRunFinalizerUpdate(createdRole.Rules, run.Name) {
+		t.Fatalf("publisher Role does not allow updating finalizers of Run %q: %#v", run.Name, createdRole.Rules)
+	}
+}
+
+func roleAllowsRunFinalizerUpdate(rules []rbacv1.PolicyRule, runName string) bool {
+	for _, rule := range rules {
+		if len(rule.APIGroups) == 1 && rule.APIGroups[0] == "nvidia.com" &&
+			len(rule.Resources) == 1 && rule.Resources[0] == "dynamographdeploymentruns/finalizers" &&
+			len(rule.ResourceNames) == 1 && rule.ResourceNames[0] == runName &&
+			len(rule.Verbs) == 1 && rule.Verbs[0] == "update" {
+			return true
+		}
+	}
+	return false
 }
