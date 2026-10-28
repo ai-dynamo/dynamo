@@ -64,8 +64,7 @@ def test_effective_tool_strict(request_strict, schema_mode, expected):
     assert effective_tool_strict(request_strict, schema_mode) is expected
 
 
-# Verdicts from XGrammar 0.2.7 for each pattern (#15687); the Rust preprocessor
-# test unsupported_regex_constructs_match_the_grammar_compiler uses this table.
+# Each verdict matches XGrammar 0.2.7. The Rust preprocessor test shares this table.
 @pytest.mark.parametrize(
     ("pattern", "expected"),
     [
@@ -174,9 +173,6 @@ _UNSUPPORTED_NAMES = {
 }
 
 
-# #15687: an omitted `strict` is Dynamo's own enforcement, so a pattern the
-# backend cannot compile is left out of it. Explicit `strict` and global strict
-# mode still reach the backend.
 @pytest.mark.parametrize(
     ("request_strict", "schema_mode", "parameters", "expected"),
     [

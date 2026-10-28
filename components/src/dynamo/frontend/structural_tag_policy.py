@@ -95,20 +95,9 @@ def should_attempt_structural_tag(
 
 
 def unsupported_regex_construct(pattern: str) -> str | None:
-    """Name the first regex construct in ``pattern`` XGrammar cannot compile.
-
-    Mirrors ``unsupported_regex_construct`` in the Rust preprocessor
-    (lib/llm/src/preprocessor/structural_tag.rs); keep the two in step.
-    ``pattern`` is ECMA-262 syntax, as JSON Schema specifies, so ``[]`` is an
-    empty class and ``[^]`` matches any character.
-
-    The list is XGrammar 0.2.7's, measured per tag format (#15687). A construct
-    is listed when any format rejects it: the JSON format accepts lookahead
-    (ignoring it), ``(?P<name>``, ``(?i)``, and possessive quantifiers, while the
-    XML-parameter formats used by ``qwen3_coder`` and ``kimi_k3`` reject them.
-    Inside a character class, escapes such as ``\\b`` and ``\\p{L}`` compile.
-    Every ``{`` must open ``{n}``, ``{n,}``, or ``{n,m}``, and a quantifier may
-    only be followed by one lazy ``?``.
+    """Name the first regex construct in ``pattern`` that XGrammar cannot
+    compile in any tag format. ``pattern`` is ECMA-262, as JSON Schema
+    specifies. Keep in step with the Rust preprocessor.
     """
     i = 0
     in_class = False
@@ -207,12 +196,9 @@ _SUBSCHEMA_MAPS = frozenset(
 
 
 def unsupported_schema_construct(schema: Any) -> str | None:
-    """Name the first regex construct in a JSON Schema XGrammar cannot compile.
-
-    Checks ``pattern`` values and ``patternProperties`` keys. Instance values
-    (``const``, ``default``, ``enum``, ``examples``) are data and are not
-    searched; maps of named subschemas are searched by value only, so a
-    property that happens to be called ``default`` is still checked.
+    """Name the first unsupported regex in ``pattern`` values or
+    ``patternProperties`` keys. Subschema maps are searched by value only, so a
+    property named ``default`` is still checked.
     """
     if isinstance(schema, list):
         for item in schema:
@@ -240,11 +226,9 @@ def unsupported_schema_construct(schema: Any) -> str | None:
 
 
 def _strip_unsupported_patterns(schema: Any) -> str | None:
-    """Remove ``pattern`` values XGrammar cannot compile, in place.
-
-    Mirrors ``strip_unsupported_patterns`` in the Rust preprocessor. Returns the
-    construct of a ``patternProperties`` key XGrammar cannot compile. Such a key
-    is not removed, since that would change which property names are allowed.
+    """Remove ``pattern`` values XGrammar cannot compile, in place. Returns the
+    construct of an unsupported ``patternProperties`` key, which is kept, since
+    removing it would change which property names are allowed.
     """
     if isinstance(schema, list):
         for item in schema:
@@ -290,13 +274,10 @@ def guidance_tool_schema(
 ) -> tuple[Any, bool]:
     """Return the argument schema and strictness to build a tool's grammar from.
 
-    Enforcing an omitted ``strict`` is Dynamo's own addition: the OpenAI
-    contract treats it as non-strict. A ``pattern`` XGrammar cannot compile
-    would fail the whole request, so it is left out of the grammar and the rest
-    of the schema stays enforced. A ``patternProperties`` key it cannot compile
-    cannot be left out without changing which names are allowed, so that tool
-    is built as ``strict: false``. An explicit ``strict`` and ``strict`` schema
-    mode are left alone, and the backend still reports what it cannot compile.
+    Leaves regexes XGrammar cannot compile out of schemas Dynamo enforces on its
+    own: omitted ``strict`` under schema mode ``auto``, which OpenAI treats as
+    non-strict. Otherwise one bad ``pattern`` fails the whole request. Explicit
+    ``strict`` and schema mode ``strict`` are left for the backend to reject.
     """
     strict = effective_tool_strict(request_strict, schema_mode)
     if schema_mode == "strict" or request_strict is not None:

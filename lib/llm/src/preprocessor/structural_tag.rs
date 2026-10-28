@@ -155,23 +155,11 @@ fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolCh
     exclude_tools_when_none && matches!(tool_choice, ToolChoice::None)
 }
 
-/// Name the first regex construct in `pattern` that XGrammar cannot compile.
+/// Name the first regex construct in `pattern` that XGrammar cannot compile in
+/// any tag format. `pattern` is ECMA-262, as JSON Schema specifies. Keep in step
+/// with `unsupported_regex_construct` in the Python frontend.
 ///
-/// Mirrored by `unsupported_regex_construct` in
-/// `components/src/dynamo/frontend/structural_tag_policy.py`; keep the two in
-/// step. `pattern` is ECMA-262 syntax, as JSON Schema specifies, so `[]` is an
-/// empty class and `[^]` matches any character.
-///
-/// The list is XGrammar 0.2.7's, measured per tag format (#15687). A construct
-/// is listed when any format rejects it: the JSON format accepts lookahead
-/// (ignoring it), `(?P<name>`, `(?i)`, and possessive quantifiers, while the
-/// XML-parameter formats used by `qwen3_coder` and `kimi_k3` reject them.
-/// Inside a character class, escapes such as `\b` and `\p{L}` compile. Every
-/// `{` must open `{n}`, `{n,}`, or `{n,m}`, and a quantifier may only be
-/// followed by one lazy `?`.
-///
-/// Runs per request, so it scans bytes without allocating. Every syntax
-/// character is ASCII, and UTF-8 continuation bytes never are.
+/// Runs per request, so it scans bytes: every syntax character is ASCII.
 fn unsupported_regex_construct(pattern: &str) -> Option<&'static str> {
     let bytes = pattern.as_bytes();
     let at = |i: usize| bytes.get(i).copied();
@@ -263,7 +251,6 @@ const MAX_REPETITION: u64 = 1_000_000_000_000_000;
 
 /// Index of the `}` closing a well-formed `{n}`, `{n,}`, or `{n,m}` at `start`.
 fn repetition_end(bytes: &[u8], start: usize) -> Option<usize> {
-    // `None` for a count above the limit; `Some(None)` when there are no digits.
     let number = |from: usize| {
         let digits = bytes.get(from..).unwrap_or_default();
         let len = digits.iter().take_while(|c| c.is_ascii_digit()).count();
@@ -301,10 +288,9 @@ fn unicode_escape_end(bytes: &[u8], start: usize) -> Option<usize> {
     (len > 0 && hex.get(len) == Some(&b'}')).then_some(start + 3 + len)
 }
 
-/// Instance values are data, not schemas, so they are not searched.
+/// Instance data, not schemas.
 const INSTANCE_KEYWORDS: [&str; 4] = ["const", "default", "enum", "examples"];
-/// Maps of named subschemas, searched by value only, so a property that happens
-/// to be called `default` is still checked.
+/// Searched by value only, so a property named `default` is still checked.
 const SUBSCHEMA_MAPS: [&str; 6] = [
     "properties",
     "patternProperties",
@@ -314,9 +300,7 @@ const SUBSCHEMA_MAPS: [&str; 6] = [
     "dependencies",
 ];
 
-/// Name the first regex construct in a JSON Schema that XGrammar cannot compile.
-///
-/// Checks `pattern` values and `patternProperties` keys.
+/// Name the first unsupported regex in `pattern` values or `patternProperties` keys.
 fn unsupported_schema_construct(schema: &serde_json::Value) -> Option<&'static str> {
     match schema {
         serde_json::Value::Array(items) => items.iter().find_map(unsupported_schema_construct),
@@ -352,12 +336,9 @@ fn unsupported_schema_construct(schema: &serde_json::Value) -> Option<&'static s
     }
 }
 
-/// Remove `pattern` values XGrammar cannot compile, in place.
-///
-/// Returns the construct of a `patternProperties` key XGrammar cannot compile.
-/// Such a key is not removed, since that would change which property names
-/// are allowed. Mirrored by `_strip_unsupported_patterns` in
-/// `components/src/dynamo/frontend/structural_tag_policy.py`.
+/// Remove `pattern` values XGrammar cannot compile, in place. Fails on an
+/// unsupported `patternProperties` key, since removing it would change which
+/// property names are allowed.
 fn strip_unsupported_patterns(schema: &mut serde_json::Value) -> Result<(), &'static str> {
     match schema {
         serde_json::Value::Array(items) => {
@@ -399,17 +380,10 @@ fn strip_unsupported_patterns(schema: &mut serde_json::Value) -> Result<(), &'st
     }
 }
 
-/// Adapt argument enforcement that Dynamo added to what the backend can compile.
-///
-/// Under schema mode `auto`, Dynamo enforces the argument schema of a tool that
-/// omits `strict`; that enforcement is Dynamo's own addition, since the OpenAI
-/// contract treats omitted `strict` as non-strict. A `pattern` XGrammar cannot
-/// compile would fail the whole request, so it is left out of the grammar and
-/// the rest of the schema stays enforced. A `patternProperties` key it cannot
-/// compile cannot be left out without changing which names are allowed, so
-/// that tool is built as `strict: false`. An explicit `strict` and global schema
-/// mode `strict` are client and operator constraints and are left alone, so the
-/// backend still reports what it cannot compile.
+/// Leave regexes XGrammar cannot compile out of schemas Dynamo enforces on its
+/// own: omitted `strict` under schema mode `auto`, which OpenAI treats as
+/// non-strict. Otherwise one bad `pattern` fails the whole request. Explicit
+/// `strict` and schema mode `strict` are left for the backend to reject.
 fn adapt_unsupported_auto_schemas<'a>(
     parser_name: &str,
     tools: &'a [ToolDefinition],
@@ -1834,8 +1808,7 @@ mod tests {
         ));
     }
 
-    // Verdicts from XGrammar 0.2.7 for each pattern (#15687). The Python
-    // frontend test of the same name uses this table.
+    // Each verdict matches XGrammar 0.2.7. The Python frontend test shares this table.
     #[test]
     fn unsupported_regex_constructs_match_the_grammar_compiler() {
         for (pattern, expected) in [
@@ -2059,9 +2032,6 @@ mod tests {
         OpenAIPreprocessor::new(mdc).unwrap()
     }
 
-    // #15687: an omitted `strict` is Dynamo's own enforcement, so a pattern the
-    // backend cannot compile is left out of it instead of failing the request.
-    // Explicit `strict` and global strict mode still reach the backend.
     #[test]
     fn automatic_argument_enforcement_leaves_out_patterns_the_backend_cannot_compile() {
         let lookahead = r"^(?!\s*$).+";
@@ -2104,8 +2074,6 @@ mod tests {
         }
     }
 
-    // Leaving out a `patternProperties` key would change which names are
-    // allowed, so that tool's arguments go unconstrained instead.
     #[test]
     fn unsupported_property_name_patterns_leave_the_arguments_unconstrained() {
         let arguments = record_value_arguments(
@@ -2115,9 +2083,8 @@ mod tests {
         assert_eq!(arguments_kind(&arguments), Arguments::Unconstrained);
     }
 
-    // Kimi K3 named tags are built even with optional structural tags disabled,
-    // so the deployment opt-out cannot avoid the rejection on its own. K3 splices
-    // each argument's pattern into its own grammar instead of a JSON schema.
+    // The opt-out keeps K3 named tags, and K3 splices each pattern into its own
+    // grammar instead of a JSON schema.
     #[test]
     fn kimi_k3_named_tag_leaves_out_patterns_the_backend_cannot_compile_when_global_mode_is_off() {
         // Without anchors, which K3 strips when it splices a pattern in.
