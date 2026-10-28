@@ -68,7 +68,7 @@ Analyze any change to the hot path (per-request or per-token code) statically fo
 
 Every change must be validated: bug fixes on a reproducer, and features and performance changes end to end.
 
-**Coverage and effectiveness.** Add tests only where the change is prone to errors or regressions, and recommend deleting redundant or trivial tests. A test must exercise the new path, not a fallback, and a bug-fix test must fail without the fix. Avoid excessive mock objects, especially ones coupled to internal logic. Don't test the test: scope tests to Dynamo functionality, not to test helpers, fixtures, or harness logic. Test the behavior Dynamo should have, not whatever the code does today; mark behavior that doesn't work yet as `xfail`.
+**Coverage and effectiveness.** Add tests only where the change is prone to errors or regressions, and recommend deleting redundant or trivial tests. A test must exercise the new path, not a fallback, and a bug-fix test must fail without the fix. Avoid excessive mock objects, especially ones coupled to internal logic. Don't test the test: scope tests to Dynamo functionality, not to test helpers, fixtures, or harness logic. Test the behavior Dynamo should have, not whatever the code does today; mark behavior that doesn't work yet as `xfail` (pytest) or `#[ignore = "..."]` (Rust).
 
 **Reliability and speed.** Tests must not be flaky: avoid bit-exact floating-point assertions, dependence on test order or shared state, and hardcoded ports or paths. Tests must also be fast: no fixed or long sleeps or waits, and a proper timeout on every wait. Dynamo has three test levels. E2E tests generally live under `tests/` and use pytest; other Rust and Python tests are unit or integration tests. As a rule of thumb:
 
