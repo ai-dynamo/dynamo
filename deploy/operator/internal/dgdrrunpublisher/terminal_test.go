@@ -27,32 +27,6 @@ import (
 	"unicode/utf8"
 )
 
-func TestTerminalResultIsAStructuredRunFailure(t *testing.T) {
-	var failure *RunFailedError
-	err := terminalResult(DesiredState{Phase: PhaseFailed, Message: "m", Error: "e"})
-	if !errors.Is(err, ErrRunFailed) || !errors.As(err, &failure) || failure.Outcome != (TerminalOutcome{Phase: PhaseFailed, Message: "m", Error: "e"}) {
-		t.Fatalf("failed: %v", err)
-	}
-	if got, want := err.Error(), ErrRunFailed.Error()+": m: e"; got != want {
-		t.Fatalf("error text = %q, want %q", got, want)
-	}
-	err = terminalResult(DesiredState{Phase: PhaseSucceeded, Failed: 1, FirstFailure: "x: render failed"})
-	if !errors.As(err, &failure) || failure.Outcome.Error != "x: render failed" || !strings.Contains(failure.Outcome.Message, "1 candidate materialization failure") {
-		t.Fatalf("empty success: %v", err)
-	}
-}
-
-func TestDesireCarriesBoundedDiagnostics(t *testing.T) {
-	long := strings.Repeat("e", 3*maxDiagnosticBytes)
-	state := desire(t, withRunDiagnostics(t, snapshotJSON(t, PhaseFailed, cand{id: "a"}), "no recommendation\ncould be materialized", long))
-	if state.Phase != PhaseFailed || state.Message != "no recommendation could be materialized" {
-		t.Fatalf("state = %+v", state)
-	}
-	if len(state.Error) > maxDiagnosticBytes || !strings.HasPrefix(state.Error, "eee") {
-		t.Fatalf("error must be kept but bounded, got %d bytes", len(state.Error))
-	}
-}
-
 func TestBoundDiagnostic(t *testing.T) {
 	if got := boundDiagnostic("  a\nb\x00c \t"); got != "a b c" {
 		t.Fatalf("got %q", got)
@@ -64,20 +38,6 @@ func TestBoundDiagnostic(t *testing.T) {
 	}
 	if got := boundDiagnostic("bad\xffbyte"); !utf8.ValidString(got) {
 		t.Fatalf("invalid UTF-8 must be replaced: %q", got)
-	}
-}
-
-func TestTerminalSucceededWithoutAMaterializedCandidateCarriesTheCandidateFailure(t *testing.T) {
-	f := newFixture(t)
-	f.publish(snapshotJSON(t, PhaseSucceeded, cand{id: "x", failed: true}))
-	f.mustReconcile()
-	var failure *RunFailedError
-	err := f.r.Completion.Err()
-	if !errors.Is(err, ErrRunFailed) || !errors.As(err, &failure) || ExitCode(err) != ExitRunFailed {
-		t.Fatalf("err = %v", err)
-	}
-	if !strings.HasPrefix(failure.Outcome.Error, "x: ") {
-		t.Fatalf("the candidate failure must be part of the diagnostics: %+v", failure.Outcome)
 	}
 }
 

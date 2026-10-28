@@ -20,7 +20,6 @@ package dgdrrunpublisher
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
@@ -47,16 +46,46 @@ func TestExitCodes(t *testing.T) {
 }
 
 func TestTerminalResult(t *testing.T) {
-	if err := terminalResult(DesiredState{Phase: PhaseSucceeded, Candidates: []dgdcreconcile.DesiredCandidate{{ID: "a"}}}); err != nil {
-		t.Fatalf("succeeded: %v", err)
+	tests := []struct {
+		name      string
+		state     DesiredState
+		outcome   *TerminalOutcome
+		errorText string
+	}{
+		{
+			name:  "success with a materialized candidate",
+			state: DesiredState{Phase: PhaseSucceeded, Candidates: []dgdcreconcile.DesiredCandidate{{ID: "a"}}},
+		},
+		{
+			name:      "producer failure keeps its diagnostics",
+			state:     DesiredState{Phase: PhaseFailed, Message: "search failed", Error: "backend unavailable"},
+			outcome:   &TerminalOutcome{Phase: PhaseFailed, Message: "search failed", Error: "backend unavailable"},
+			errorText: ErrRunFailed.Error() + ": search failed: backend unavailable",
+		},
+		{
+			name:      "success without a materialized candidate is a failure",
+			state:     DesiredState{Phase: PhaseSucceeded, Failed: 1, FirstFailure: "x: render failed"},
+			outcome:   &TerminalOutcome{Phase: PhaseFailed, Message: "no candidate was materialized: 1 candidate materialization failure", Error: "x: render failed"},
+			errorText: ErrRunFailed.Error() + ": no candidate was materialized: 1 candidate materialization failure: x: render failed",
+		},
 	}
-	failed := terminalResult(DesiredState{Phase: PhaseFailed, Message: "search failed", Error: "backend unavailable"})
-	if !errors.Is(failed, ErrRunFailed) || !strings.Contains(failed.Error(), "search failed") || !strings.Contains(failed.Error(), "backend unavailable") {
-		t.Fatalf("failed: %v", failed)
-	}
-	empty := terminalResult(DesiredState{Phase: PhaseSucceeded, Failed: 2})
-	if !errors.Is(empty, ErrRunFailed) || !strings.Contains(empty.Error(), "2 candidate materialization failures") || !strings.Contains(empty.Error(), "no candidate was materialized") {
-		t.Fatalf("empty success: %v", empty)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := terminalResult(test.state)
+			if test.outcome == nil {
+				if err != nil {
+					t.Fatalf("terminalResult() = %v, want success", err)
+				}
+				return
+			}
+			var failure *RunFailedError
+			if !errors.Is(err, ErrRunFailed) || !errors.As(err, &failure) || failure.Outcome != *test.outcome {
+				t.Fatalf("terminalResult() = %#v, want outcome %+v", err, *test.outcome)
+			}
+			if got := err.Error(); got != test.errorText {
+				t.Fatalf("error text = %q, want %q", got, test.errorText)
+			}
+		})
 	}
 }
 

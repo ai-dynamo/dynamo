@@ -32,7 +32,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -434,21 +433,6 @@ func TestDroppedCandidateIsDeletedAfterTheRunStatusUpdate(t *testing.T) {
 	}
 }
 
-func TestFailedMaterializationIsNotCreatedButCounted(t *testing.T) {
-	f := newFixture(t)
-	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}, cand{id: "x", failed: true}))
-	f.mustReconcile()
-	for _, op := range f.takeOps() {
-		if strings.Contains(op, "x") && strings.HasPrefix(op, "create") {
-			t.Fatalf("a failed candidate must not be created: %s", op)
-		}
-	}
-	status := f.lastStatus()
-	if !reflect.DeepEqual(status.CandidateNames, []string{cn("a")}) || status.Published != 1 {
-		t.Fatalf("status = %+v", status)
-	}
-}
-
 func TestCandidateWithoutStatusIsCompletedNotRecreated(t *testing.T) {
 	f := newFixture(t)
 	existing := candidateForRun(cn("a"), "a", f.currentRun())
@@ -510,7 +494,9 @@ func TestTerminalSucceededSnapshotWithoutAMaterializedCandidateFails(t *testing.
 	f.mustReconcile()
 
 	err := f.r.Completion.Err()
-	if !errors.Is(err, ErrRunFailed) || ExitCode(err) != ExitRunFailed || !strings.Contains(err.Error(), "1 candidate materialization failure") {
+	var failure *RunFailedError
+	if !errors.Is(err, ErrRunFailed) || !errors.As(err, &failure) || ExitCode(err) != ExitRunFailed ||
+		!strings.Contains(err.Error(), "1 candidate materialization failure") || !strings.HasPrefix(failure.Outcome.Error, "x: ") {
 		t.Fatalf("err = %v", err)
 	}
 	if ops := f.takeOps(); len(ops) != 0 {
@@ -650,64 +636,62 @@ func TestForeignLabeledCandidateDoesNotSatisfyOrGetDeleted(t *testing.T) {
 	}
 }
 
-func TestOwnedCandidateWithWrongNameIsReplacedBeforeDeletion(t *testing.T) {
-	f := newFixture(t)
-	wrong := candidateForRun("wrong-name", "a", f.currentRun())
-	if err := f.c.Create(context.Background(), wrong); err != nil {
-		t.Fatal(err)
+func TestOwnedCandidateDriftIsReconciledSafely(t *testing.T) {
+	tests := []struct {
+		name           string
+		existingName   string
+		existingID     string
+		removeRunLabel bool
+		desired        []cand
+		want           []string
+	}{
+		{
+			name:         "wrong name is replaced before deletion",
+			existingName: "wrong-name",
+			existingID:   "a",
+			desired:      []cand{{id: "a"}},
+			want:         []string{"create:" + cn("a"), "populate:" + cn("a"), "status", "delete:wrong-name"},
+		},
+		{
+			name:           "obsolete candidate without run label is deleted",
+			existingName:   cn("obsolete"),
+			existingID:     "obsolete",
+			removeRunLabel: true,
+			want:           []string{"delete:" + cn("obsolete")},
+		},
+		{
+			name:         "wrong identity label is reapplied",
+			existingName: cn("a"),
+			existingID:   "wrong-id",
+			desired:      []cand{{id: "a"}},
+			want:         []string{"create:" + cn("a"), "populate:" + cn("a"), "status"},
+		},
+		{
+			name:           "missing run label is reapplied",
+			existingName:   cn("a"),
+			existingID:     "a",
+			removeRunLabel: true,
+			desired:        []cand{{id: "a"}},
+			want:           []string{"create:" + cn("a"), "populate:" + cn("a"), "status"},
+		},
 	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture(t)
+			existing := candidateForRun(test.existingName, test.existingID, f.currentRun())
+			if test.removeRunLabel {
+				delete(existing.Labels, LabelRunUID)
+			}
+			if err := f.c.Create(context.Background(), existing); err != nil {
+				t.Fatal(err)
+			}
 
-	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
-	f.mustReconcile()
-	want := []string{"create:" + cn("a"), "populate:" + cn("a"), "status", "delete:wrong-name"}
-	if got := f.takeOps(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("ops = %v, want %v", got, want)
-	}
-}
-
-func TestOwnedObsoleteCandidateWithoutRunLabelIsDeleted(t *testing.T) {
-	f := newFixture(t)
-	obsolete := candidateForRun(cn("obsolete"), "obsolete", f.currentRun())
-	delete(obsolete.Labels, LabelRunUID)
-	if err := f.c.Create(context.Background(), obsolete); err != nil {
-		t.Fatal(err)
-	}
-
-	f.publish(snapshotJSON(t, PhaseRunning))
-	f.mustReconcile()
-	if got, want := f.takeOps(), []string{"delete:" + obsolete.Name}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("ops = %v, want %v", got, want)
-	}
-}
-
-func TestOwnedCandidateWithWrongIdentityLabelIsReappliedNotDeleted(t *testing.T) {
-	f := newFixture(t)
-	wrong := candidateForRun(cn("a"), "wrong-id", f.currentRun())
-	if err := f.c.Create(context.Background(), wrong); err != nil {
-		t.Fatal(err)
-	}
-
-	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
-	f.mustReconcile()
-	want := []string{"create:" + cn("a"), "populate:" + cn("a"), "status"}
-	if got := f.takeOps(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("ops = %v, want %v", got, want)
-	}
-}
-
-func TestOwnedCandidateWithMissingRunLabelIsReappliedNotDeleted(t *testing.T) {
-	f := newFixture(t)
-	drifted := candidateForRun(cn("a"), "a", f.currentRun())
-	delete(drifted.Labels, LabelRunUID)
-	if err := f.c.Create(context.Background(), drifted); err != nil {
-		t.Fatal(err)
-	}
-
-	f.publish(snapshotJSON(t, PhaseRunning, cand{id: "a"}))
-	f.mustReconcile()
-	want := []string{"create:" + cn("a"), "populate:" + cn("a"), "status"}
-	if got := f.takeOps(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("ops = %v, want %v", got, want)
+			f.publish(snapshotJSON(t, PhaseRunning, test.desired...))
+			f.mustReconcile()
+			if got := f.takeOps(); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("ops = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
@@ -814,121 +798,6 @@ func TestCacheOptionsCoverThisRunPodAndNamespaceCandidates(t *testing.T) {
 		default:
 			t.Errorf("unexpected cached type %T", object)
 		}
-	}
-}
-
-func nested(t *testing.T, object *unstructured.Unstructured, fields ...string) (any, bool) {
-	t.Helper()
-	value, found, err := unstructured.NestedFieldNoCopy(object.Object, fields...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return value, found
-}
-
-func TestCandidateApplyPayload(t *testing.T) {
-	scheme, err := NewScheme()
-	if err != nil {
-		t.Fatal(err)
-	}
-	run := &v1beta2.DynamoGraphDeploymentRun{Namespace: testNamespace, Name: testRunName, UID: testRunUID}
-	candidate := dgdcreconcile.DesiredCandidate{ID: "a", Spec: validManifest, Parameters: map[string]any{"tp": 2}}
-	apply, err := buildCandidateApply(scheme, testNamespace, testRunUID, run, cn("a"), candidate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if apply.GetAPIVersion() != "nvidia.com/v1beta2" || apply.GetKind() != "DynamoGraphDeploymentCandidate" || apply.GetName() != cn("a") || apply.GetNamespace() != testNamespace {
-		t.Fatalf("identity = %s %s %s/%s", apply.GetAPIVersion(), apply.GetKind(), apply.GetNamespace(), apply.GetName())
-	}
-	if _, found := nested(t, apply, "status"); found {
-		t.Fatal("status goes through the status subresource")
-	}
-	if _, found := nested(t, apply, "metadata", "creationTimestamp"); found {
-		t.Fatal("creationTimestamp must not be part of an apply payload")
-	}
-	if got := apply.GetLabels(); got[LabelRunUID] != testRunUID || got[LabelCandidateID] != "a" {
-		t.Fatalf("labels = %v", got)
-	}
-	if _, found := nested(t, apply, "spec", "parameters"); !found {
-		t.Fatal("the resolved parameters belong in the spec")
-	}
-	owners := apply.GetOwnerReferences()
-	if len(owners) != 1 || owners[0].UID != testRunUID || owners[0].Controller == nil || !*owners[0].Controller {
-		t.Fatalf("owner references = %+v", owners)
-	}
-}
-
-func TestCandidateStatusApplyPayloadIsDeterministic(t *testing.T) {
-	candidate := dgdcreconcile.DesiredCandidate{ID: "a", Metrics: map[string]any{"score": 2}}
-	first, err := buildCandidateStatusApply(testNamespace, cn("a"), "17", candidate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := buildCandidateStatusApply(testNamespace, cn("a"), "17", candidate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(first.Object, second.Object) {
-		t.Fatal("the same input must produce the same payload")
-	}
-	if got, _ := nested(t, first, "metadata", "resourceVersion"); got != "17" {
-		t.Fatalf("the status write must be constrained to the version it was decided on, got %v", got)
-	}
-	if _, found := nested(t, first, "status", "metrics"); !found {
-		t.Fatal("the metrics are the candidate's status")
-	}
-	if _, found := nested(t, first, "status", "conditions"); found {
-		t.Fatal("candidate status is metrics only")
-	}
-}
-
-func TestCandidateStatusApplyAlwaysWritesMetricsEvenWhenEmpty(t *testing.T) {
-	apply, err := buildCandidateStatusApply(testNamespace, cn("a"), "17", dgdcreconcile.DesiredCandidate{ID: "a"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	metrics, found := nested(t, apply, "status", "metrics")
-	if !found {
-		t.Fatal("an evaluated candidate without metrics must still carry an empty metrics object: its presence marks it populated")
-	}
-	if object, ok := metrics.(map[string]any); !ok || len(object) != 0 {
-		t.Fatalf("metrics = %#v, want an empty object", metrics)
-	}
-}
-
-func TestRunStatusApplyPayload(t *testing.T) {
-	when := time.Date(2026, 10, 5, 21, 35, 12, 0, time.UTC)
-	status := RunStatus{Published: 2, LastProgress: when, CandidateNames: []string{"x", "y"}}
-	apply := buildRunStatusApply(testNamespace, testRunName, "42", status)
-	if apply.GetKind() != "DynamoGraphDeploymentRun" || apply.GetName() != testRunName {
-		t.Fatalf("identity = %s %s", apply.GetKind(), apply.GetName())
-	}
-	if got, _ := nested(t, apply, "metadata", "resourceVersion"); got != "42" {
-		t.Fatalf("the status write must be constrained to the observed run version, got %v", got)
-	}
-	if _, found := nested(t, buildRunStatusApply(testNamespace, testRunName, "", status), "metadata", "resourceVersion"); found {
-		t.Fatal("no version known, no constraint")
-	}
-	if got, _ := nested(t, apply, "status", "lastProgressTime"); got != "2026-10-05T21:35:12Z" {
-		t.Fatalf("lastProgressTime = %v", got)
-	}
-	if got, _ := nested(t, apply, "status", "progress", "candidates", "published"); got != int64(2) {
-		t.Fatalf("published = %#v", got)
-	}
-	for _, field := range []string{"message", "provenance"} {
-		if _, found := nested(t, apply, "status", field); found {
-			t.Fatalf("status.%s does not exist in the API and must not be written", field)
-		}
-	}
-	refs, _ := nested(t, apply, "status", "candidateRefs")
-	if list, ok := refs.([]any); !ok || len(list) != 2 {
-		t.Fatalf("candidateRefs = %v", refs)
-	}
-	// A status without a progress time leaves the field out; the reconciler is what
-	// carries the known time into the status it writes.
-	status.LastProgress = time.Time{}
-	if _, found := nested(t, buildRunStatusApply(testNamespace, testRunName, "42", status), "status", "lastProgressTime"); found {
-		t.Fatal("no time known, so none is written")
 	}
 }
 

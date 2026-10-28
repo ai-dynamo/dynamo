@@ -228,6 +228,13 @@ func TestEnvtestCandidateApplyIsAcceptedAndIdempotent(t *testing.T) {
 	if !strings.Contains(got.Annotations[AnnotationAdditionalResources], "kind: ConfigMap") {
 		t.Errorf("companion annotation = %q", got.Annotations[AnnotationAdditionalResources])
 	}
+	var parameters map[string]any
+	if err := json.Unmarshal(got.Spec.Parameters.Raw, &parameters); err != nil || parameters["tp"] != float64(2) {
+		t.Errorf("parameters = %s, err = %v", got.Spec.Parameters.Raw, err)
+	}
+	if got.Status.Metrics != nil {
+		t.Errorf("candidate apply wrote through the status subresource: %+v", got.Status)
+	}
 	if !hasApplyManager(got.ManagedFields, "") {
 		t.Errorf("no apply manager %q on the candidate: %+v", fieldOwner, got.ManagedFields)
 	}
@@ -353,6 +360,10 @@ func TestEnvtestCandidateStatusIsWrittenOnceAndGuardedByResourceVersion(t *testi
 	if got.Status.Metrics == nil {
 		t.Fatal("status.metrics is not set after PopulateStatus")
 	}
+	var metrics map[string]any
+	if err := json.Unmarshal(got.Status.Metrics.Raw, &metrics); err != nil || metrics["throughput"] != 12.5 {
+		t.Errorf("metrics = %s, err = %v", got.Status.Metrics.Raw, err)
+	}
 	if !hasApplyManager(got.ManagedFields, "status") {
 		t.Errorf("no status apply manager %q: %+v", fieldOwner, got.ManagedFields)
 	}
@@ -370,6 +381,28 @@ func TestEnvtestCandidateStatusIsWrittenOnceAndGuardedByResourceVersion(t *testi
 	}
 	if !after.Populated {
 		t.Error("a candidate with status was reported as not populated")
+	}
+
+	// Even an evaluated candidate without metrics gets an empty object. Presence, not
+	// contents, is the persisted marker that its status has been populated.
+	empty := envtestCandidate()
+	empty.ID = "empty"
+	empty.Metrics = nil
+	emptyName := f.name(empty.ID)
+	emptyStored, err := f.writer.CreateCandidate(f.ctx, f.run, emptyName, empty)
+	if err != nil {
+		t.Fatalf("create candidate without metrics: %v", err)
+	}
+	if err := f.writer.PopulateStatus(f.ctx, emptyName, emptyStored.ResourceVersion, empty); err != nil {
+		t.Fatalf("populate candidate without metrics: %v", err)
+	}
+	var emptyMetrics map[string]any
+	got = f.candidate(emptyName)
+	if got.Status.Metrics == nil {
+		t.Fatal("candidate without metrics was not marked populated")
+	}
+	if err := json.Unmarshal(got.Status.Metrics.Raw, &emptyMetrics); err != nil || len(emptyMetrics) != 0 {
+		t.Fatalf("metrics = %s, err = %v; want an empty object", got.Status.Metrics.Raw, err)
 	}
 }
 

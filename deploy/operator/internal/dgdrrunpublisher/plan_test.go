@@ -75,6 +75,17 @@ func TestFailedMaterializationIsNotDesiredButCounted(t *testing.T) {
 	}
 }
 
+func TestDesireCarriesBoundedDiagnostics(t *testing.T) {
+	long := strings.Repeat("e", 3*maxDiagnosticBytes)
+	state := desire(t, withRunDiagnostics(t, snapshotJSON(t, PhaseFailed, cand{id: "a"}), "no recommendation\ncould be materialized", long))
+	if state.Phase != PhaseFailed || state.Message != "no recommendation could be materialized" {
+		t.Fatalf("state = %+v", state)
+	}
+	if len(state.Error) > maxDiagnosticBytes || !strings.HasPrefix(state.Error, "eee") {
+		t.Fatalf("error must be kept but bounded, got %d bytes", len(state.Error))
+	}
+}
+
 func TestPublishedCountsTheReferencedCandidates(t *testing.T) {
 	state := desire(t, snapshotJSON(t, PhaseRunning, cand{id: "a"}, cand{id: "b"}))
 	if got, want := state.Status.Published, int32(len(state.Status.CandidateNames)); got != want || got != 2 {
