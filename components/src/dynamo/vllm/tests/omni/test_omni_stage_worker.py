@@ -901,7 +901,6 @@ def test_create_engine_omits_env_when_stage_declares_none():
 def test_create_engine_preserves_resolved_stage_config(
     monkeypatch, tmp_path, pipeline, stage_id, model_stage, sampling
 ):
-    from vllm_omni.config import resolve_omni_config
     from vllm_omni.config.pipeline_registry import OMNI_PIPELINES
 
     from dynamo.vllm.omni.utils import resolve_stage_configs
@@ -926,19 +925,6 @@ def test_create_engine_preserves_resolved_stage_config(
             }
         )
     )
-    upstream = resolve_omni_config(
-        model,
-        trust_remote_code=False,
-        deploy_config_path=str(deploy_path),
-        cli_overrides={},
-        stage_overrides=None,
-        strategy_config_path=None,
-    )
-    if not hasattr(upstream.stage_configs[stage_id], "stage_pipeline_config"):
-        pytest.skip(
-            "Requires typed Omni stage configs; the legacy YAML round trip is unsupported"
-        )
-
     _, stages = resolve_stage_configs(
         model, trust_remote_code=False, deploy_config_path=str(deploy_path)
     )

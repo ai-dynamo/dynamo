@@ -627,12 +627,9 @@ def test_omni_engine_args_importable():
 
 
 def test_omni_engine_args_add_cli_args_no_extra_params():
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm_omni.engine.arg_utils import OmniEngineArgs
 
-    try:
-        from vllm.utils import FlexibleArgumentParser
-    except ImportError:
-        from vllm.utils.argparse_utils import FlexibleArgumentParser
     parser = FlexibleArgumentParser(add_help=False)
     OmniEngineArgs.add_cli_args(parser)
 

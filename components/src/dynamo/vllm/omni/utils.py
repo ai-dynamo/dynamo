@@ -9,7 +9,6 @@ from typing import Any, cast
 
 import torch
 import vllm_omni.config as omni_config
-import vllm_omni.entrypoints.utils as omni_entrypoint_utils
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
 from vllm_omni.entrypoints.stage_utils import shm_read_bytes
@@ -29,28 +28,21 @@ SIZE_LABEL_LIMIT = 32
 def resolve_stage_configs(
     model: str, *, trust_remote_code: bool, deploy_config_path: str | None
 ) -> tuple[str | None, list[Any]]:
-    """Resolve stages with either the core or the older XPU Omni API."""
-    kwargs = dict(
+    """Resolve stages with vLLM-Omni's config resolver."""
+    resolved = omni_config.resolve_omni_config(
+        model,
         trust_remote_code=trust_remote_code,
         deploy_config_path=deploy_config_path,
+        cli_overrides={},
         stage_overrides=None,
         strategy_config_path=None,
     )
-    if hasattr(omni_config, "resolve_omni_config"):
-        resolved = omni_config.resolve_omni_config(model, cli_overrides={}, **kwargs)
-        return resolved.config_path, [
-            _dynamo_stage_config(stage) for stage in resolved.stage_configs
-        ]
-    path, stages, _ = omni_entrypoint_utils.load_and_resolve_stage_configs(
-        model, stage_configs_path=None, kwargs={}, **kwargs
-    )
-    return path, list(stages)
+    return resolved.config_path, [
+        _dynamo_stage_config(stage) for stage in resolved.stage_configs
+    ]
 
 
 def _dynamo_stage_config(stage: Any) -> Any:
-    if not hasattr(stage, "stage_pipeline_config"):
-        return stage
-
     from vllm_omni.config.resolver import _convert_dataclasses_to_dict
     from vllm_omni.config.yaml_util import create_config
     from vllm_omni.engine.stage_init_utils import _project_omni_stage_engine_args
