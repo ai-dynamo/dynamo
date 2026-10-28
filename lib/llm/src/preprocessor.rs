@@ -54,6 +54,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{self, Instrument};
 
+use crate::http::service::metrics::RequestMetrics;
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use crate::local_model::runtime_config::{
     ModelRuntimeConfig, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
@@ -141,6 +142,24 @@ fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, 
     (priority_jump, strict_priority, priority)
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("prompt has {tokens} tokens but the remaining System One prompt limit is {limit}")]
+pub(crate) struct SystemOnePromptTooLong {
+    pub(crate) tokens: usize,
+    pub(crate) limit: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("prompt validation needs {bytes} encoded text bytes; the remaining limit is {limit}")]
+pub(crate) struct SystemOneEncodingTooLarge {
+    pub(crate) bytes: usize,
+    pub(crate) limit: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct SystemOneModelIncompatible(pub(crate) &'static str);
+
 /// Build a private validation diagnostic. Callers may attach structured `PublicDetails` only when every value is safe for clients.
 pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
     DynamoError::builder()
@@ -203,11 +222,63 @@ fn validate_legacy_jail_nvext_choice_count(
 ///
 /// Native Muse channels and the legacy Basic reasoning parser use different
 /// delimiters. Keep both facts until the request's actual route is known.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub struct PromptReasoningPrefill {
     legacy: bool,
     unified: bool,
-    prefix: Option<&'static str>,
+    unified_starting_state: Option<dynamo_parsers_v2::UnifiedParserStartingState>,
+    prefix: Option<Arc<str>>,
+}
+
+// Harmony suppresses generated body text if initialization restores a non-assistant role.
+fn gpt_oss_assistant_prefill(prompt: &str, header_search_end: Option<usize>) -> Option<&str> {
+    const START: &str = "<|start|>";
+    let start = prompt[..header_search_end.unwrap_or(prompt.len())].rfind(START)?;
+    let prefix = &prompt[start..];
+    let role = prefix[START.len()..]
+        .split(|c: char| c.is_whitespace() || c == '<')
+        .next()?;
+    (role == "assistant").then_some(prefix)
+}
+
+fn gpt_oss_prefill_has_reasoning(message: &str) -> bool {
+    message
+        .split_once("<|message|>")
+        .is_some_and(|(header, _)| {
+            header
+                .split_once("<|channel|>")
+                .is_some_and(|(_, channel)| channel.split_whitespace().next() == Some("analysis"))
+        })
+}
+
+/// Plain response/reasoning text does not affect parser continuation state.
+fn compact_gpt_oss_prefill(prefix: &str) -> &str {
+    const MESSAGE: &str = "<|message|>";
+    let Some((header, body)) = prefix.split_once(MESSAGE) else {
+        return prefix;
+    };
+    if header.contains("to=") || body.contains("<|") {
+        // Recipient-owned bodies may contain a partially consumed JSON argument.
+        // TODO: Use parser-owned continuation snapshots to bound retained seeds;
+        // replay still encodes request-sized input and retains parser state per choice.
+        return prefix;
+    }
+    &prefix[..header.len() + MESSAGE.len()]
+}
+
+impl std::fmt::Debug for PromptReasoningPrefill {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PromptReasoningPrefill")
+            .field("legacy", &self.legacy)
+            .field("unified", &self.unified)
+            .field("unified_starting_state", &self.unified_starting_state)
+            .field(
+                "prefix_bytes",
+                &self.prefix.as_ref().map(|prefix| prefix.len()),
+            )
+            .finish()
+    }
 }
 
 impl From<bool> for PromptReasoningPrefill {
@@ -216,15 +287,16 @@ impl From<bool> for PromptReasoningPrefill {
         Self {
             legacy: value,
             unified: value,
+            unified_starting_state: None,
             prefix: None,
         }
     }
 }
 
 impl PromptReasoningPrefill {
-    fn for_route(self, route: &ToolProcessingRoute) -> bool {
+    fn for_route(&self, route: &ToolProcessingRoute) -> bool {
         match route {
-            ToolProcessingRoute::MuseUnified(_) | ToolProcessingRoute::Unified(_) => self.unified,
+            ToolProcessingRoute::Unified(_) => self.unified,
             _ => self.legacy,
         }
     }
@@ -232,9 +304,7 @@ impl PromptReasoningPrefill {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ToolProcessingRoute {
-    MuseUnified(&'static str),
     Unified(&'static str),
-    ParserV2(String),
     LegacyJail(Option<String>),
     PassThrough,
 }
@@ -1610,6 +1680,7 @@ struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
     continue_final_message: bool,
+    final_message_start_tag: Option<&'a crate::preprocessor::prompt::FinalMessageTags>,
 }
 
 impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> {
@@ -1630,8 +1701,10 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
             );
         }
         if self.continue_final_message
-            && let Err(e) =
-                crate::preprocessor::prompt::append_continue_final_message_tag(&mut json)
+            && let Err(e) = crate::preprocessor::prompt::append_continue_final_message_tag(
+                &mut json,
+                self.final_message_start_tag,
+            )
         {
             tracing::debug!(
                 error = %e,
@@ -3020,6 +3093,106 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Render a System One question through the model's normal chat template and resolve
+    /// candidate labels that each add exactly one distinct token at the answer position.
+    /// Reject over-budget prompts before repeating tokenization for candidate labels.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Consumed by decision execution integration")
+    )]
+    pub(crate) fn render_systemone_question(
+        &self,
+        model: &str,
+        content: &str,
+        chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
+        labels: &[String],
+        limits: (usize, usize),
+    ) -> anyhow::Result<(Vec<TokenIdType>, Vec<TokenIdType>, usize)> {
+        let (max_prompt_tokens, max_encoding_bytes) = limits;
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": content}],
+                "stream": false,
+                "max_tokens": 0,
+                "thinking": false,
+                "chat_template_kwargs": chat_template_kwargs.cloned().unwrap_or_default()
+            }))?;
+        request.normalize_reasoning_template_args()?;
+        if Self::sglang_effective_reasoning_enabled(
+            self.runtime_config.reasoning_parser.as_deref(),
+            request.chat_template_args(),
+        ) {
+            return Err(SystemOneModelIncompatible(
+                "/v1/systemone requires a model with reasoning disabled at the answer position",
+            )
+            .into());
+        }
+        let prompt = self
+            .apply_template(&request)?
+            .ok_or_else(|| anyhow::anyhow!("chat template did not produce a text prompt"))?;
+        if Self::prompt_injected_reasoning_start_for_parsers(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config
+                .reasoning_parser
+                .as_deref()
+                .or(self.tool_call_parser.as_deref()),
+            Some(prompt.as_str()),
+        ) {
+            return Err(SystemOneModelIncompatible(
+                "/v1/systemone requires a chat template that closes or disables reasoning before the answer position"
+            ).into());
+        }
+        let encoding_bytes = prompt
+            .as_str()
+            .len()
+            .checked_mul(labels.len() + 2)
+            .and_then(|bytes| bytes.checked_add(labels.iter().map(String::len).sum()))
+            .unwrap_or(usize::MAX);
+        if encoding_bytes > max_encoding_bytes {
+            return Err(SystemOneEncodingTooLarge {
+                bytes: encoding_bytes,
+                limit: max_encoding_bytes,
+            }
+            .into());
+        }
+        let prompt_ids = self.tokenize_rendered_prompt(&prompt)?.token_ids().to_vec();
+        if prompt_ids.len() > max_prompt_tokens {
+            return Err(SystemOnePromptTooLong {
+                tokens: prompt_ids.len(),
+                limit: max_prompt_tokens,
+            }
+            .into());
+        }
+        let flat_prompt_ids = self.tokenize(prompt.as_str())?.token_ids().to_vec();
+        if flat_prompt_ids != prompt_ids {
+            return Err(invalid_argument_error(
+                "/v1/systemone requires a chat prompt whose rendered text round-trips to the same token IDs",
+            ));
+        }
+
+        let mut label_ids = Vec::with_capacity(labels.len());
+        for label in labels {
+            let with_label = format!("{}{label}", prompt.as_str());
+            let encoded = self.tokenize(&with_label)?.token_ids().to_vec();
+            if encoded.len() != prompt_ids.len() + 1 || encoded[..prompt_ids.len()] != prompt_ids {
+                return Err(SystemOneModelIncompatible(
+                    "answer label is not one token after the chat prompt for this tokenizer",
+                )
+                .into());
+            }
+            let label_id = encoded[prompt_ids.len()];
+            if label_ids.contains(&label_id) {
+                return Err(SystemOneModelIncompatible(
+                    "answer label is not a distinct token after the chat prompt",
+                )
+                .into());
+            }
+            label_ids.push(label_id);
+        }
+        Ok((prompt_ids, label_ids, encoding_bytes))
+    }
+
     /// Translate a [`NvCreateChatCompletionRequest`] request to a common completion request.
     /// Returns the common completion request, a hashmap of annotations, and a boolean
     /// indicating whether the rendered prompt ends with a reasoning start token (e.g.,
@@ -3083,21 +3256,12 @@ impl OpenAIPreprocessor {
         let mut builder = self.builder_with_lora(request, lora_name)?;
 
         let template_start = Instant::now();
-        let formatted_prompt = {
+        let (formatted_prompt, prompt_injected_reasoning) = {
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
-            off_runtime(|| self.apply_template(request))
+            off_runtime(|| self.apply_template_and_prefill(request))
                 .with_context(|| "Failed to apply prompt template")?
         };
         TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
-
-        // Generic reasoning parsers start from `<think>`; MiniMax M3 starts
-        // from `<mm:think>`. If the chat template injected that opener at the
-        // end of the prompt, the model completion starts mid-reasoning.
-        let prompt_injected_reasoning = Self::prompt_reasoning_prefill_for_parsers(
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-            formatted_prompt.as_ref().map(RenderedPrompt::as_str),
-        );
 
         let tokenize_start = Instant::now();
         let (token_ids, annotations) = {
@@ -3201,6 +3365,24 @@ impl OpenAIPreprocessor {
         self.builder_with_lora(request, None)
     }
 
+    fn validate_model_request<R: OAIChatLikeRequest>(&self, request: &R) -> Result<()> {
+        if crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) == Some("gpt_oss")
+            && request
+                .chat_template_args()
+                .and_then(|args| args.get("reasoning_effort"))
+                .and_then(serde_json::Value::as_str)
+                == Some("none")
+        {
+            return Err(invalid_argument_error(
+                "GPT-OSS does not support reasoning_effort=none; use low, medium, or high",
+            ));
+        }
+        Ok(())
+    }
+
     fn builder_with_lora<
         R: OAIChatLikeRequest
             + MediaRequestExt
@@ -3216,6 +3398,7 @@ impl OpenAIPreprocessor {
     ) -> Result<PreprocessedRequestBuilder> {
         let mut builder = PreprocessedRequest::builder();
         builder.model(request.model());
+        self.validate_model_request(request)?;
 
         let mut stop_conditions = request.extract_stop_conditions()?;
         let eos_token_ids = self.model_info.eos_token_ids();
@@ -3488,6 +3671,22 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
     ) -> Result<Option<RenderedPrompt>> {
+        self.apply_template_and_prefill(request)
+            .map(|(prompt, _)| prompt)
+    }
+
+    fn apply_template_and_prefill<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider
+            + CommonExtProvider,
+    >(
+        &self,
+        request: &R,
+    ) -> Result<(Option<RenderedPrompt>, PromptReasoningPrefill)> {
         let continue_final = request.get_continue_final_message() == Some(true);
         if continue_final
             && self
@@ -3503,24 +3702,52 @@ impl OpenAIPreprocessor {
                 "Cannot continue the final message because the prompt formatter moves it before other messages",
             ));
         }
+        let final_message_start_tag = (continue_final
+            && crate::protocols::openai::chat_completions::unified_parser::configured_family(
+                self.tool_call_parser.as_deref(),
+                self.runtime_config.reasoning_parser.as_deref(),
+            ) == Some("gpt_oss"))
+        .then(crate::preprocessor::prompt::FinalMessageTags::new);
         let formatted_prompt = if self.normalize_tool_call_args || continue_final {
             self.apply_template_inner(&NormalizedArgsRequest {
                 inner: request,
                 normalize_tool_call_args: self.normalize_tool_call_args,
                 continue_final_message: continue_final,
+                final_message_start_tag: final_message_start_tag.as_ref(),
             })?
         } else {
             self.apply_template_inner(request)?
         };
-        let Some(prompt) = formatted_prompt else {
-            return Ok(None);
+        let (formatted_prompt, header_search_end) = match formatted_prompt {
+            Some(prompt) => {
+                let prompt = if continue_final {
+                    apply_continue_final_message(prompt)
+                        .map_err(|error| invalid_argument_error(format!("{error:#}")))?
+                } else {
+                    prompt
+                };
+                if let Some(tag) = final_message_start_tag {
+                    let (prompt, start) =
+                        crate::preprocessor::prompt::resolve_final_message_boundary(
+                            prompt,
+                            &tag,
+                            "<|start|>",
+                        )
+                        .map_err(|error| invalid_argument_error(format!("{error:#}")))?;
+                    (Some(prompt), Some(start))
+                } else {
+                    (Some(prompt), None)
+                }
+            }
+            None => (None, None),
         };
-        if !continue_final {
-            return Ok(Some(prompt));
-        }
-        apply_continue_final_message(prompt)
-            .map_err(|error| invalid_argument_error(format!("{error:#}")))
-            .map(Some)
+        let prefill = Self::prompt_reasoning_prefill_at_boundary(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+            formatted_prompt.as_ref().map(RenderedPrompt::as_str),
+            header_search_end,
+        );
+        Ok((formatted_prompt, prefill))
     }
 
     fn apply_template_inner<
@@ -3663,8 +3890,8 @@ impl OpenAIPreprocessor {
         let mut fetch_tasks: Vec<MediaFetchTask<'_>> = Vec::new();
         #[cfg(feature = "mm-routing")]
         let mut mm_routing_entries: Vec<MmRoutingEntry> = Vec::new();
-        // Private per-request total for frontend metrics. `None` means the SMG
-        // counter is unavailable or checked addition overflowed.
+        // Private per-request total for frontend metrics. `None` means the
+        // image counter is unavailable, failed, or checked addition overflowed.
         #[cfg(feature = "mm-routing")]
         let mut image_tokens = self.image_token_counter.as_ref().and_then(|counter| {
             // Request-budgeted processors need the rendered text and complete
@@ -3860,18 +4087,31 @@ impl OpenAIPreprocessor {
                             .as_ref()
                             .filter(|counter| !counter.uses_request_context_budget())
                         {
-                            let n = counter.count_tokens(w, h);
-                            tracing::debug!(
-                                target: "mm_routing",
-                                model = counter.model_id(),
-                                width = w,
-                                height = h,
-                                tokens = n,
-                                mm_hash = mm_hash,
-                                source = hash_source,
-                                "image-token count"
-                            );
-                            image_tokens = checked_add_image_tokens(image_tokens, n);
+                            match counter.count_tokens(w, h) {
+                                Ok(n) => {
+                                    tracing::debug!(
+                                        target: "mm_routing",
+                                        model = counter.model_id(),
+                                        width = w,
+                                        height = h,
+                                        tokens = n,
+                                        mm_hash = mm_hash,
+                                        source = hash_source,
+                                        "image-token count"
+                                    );
+                                    image_tokens = checked_add_image_tokens(image_tokens, n);
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        target: "mm_routing",
+                                        model = counter.model_id(),
+                                        %error,
+                                        "image-token accounting failed; using text-prefix routing"
+                                    );
+                                    image_tokens = None;
+                                    exact_mm_routing_eligible = false;
+                                }
+                            }
                         }
                         mm_routing_entries.push(MmRoutingEntry::Image {
                             mm_hash,
@@ -3966,18 +4206,31 @@ impl OpenAIPreprocessor {
                             .as_ref()
                             .filter(|counter| !counter.uses_request_context_budget())
                         {
-                            let n = counter.count_tokens(w, h);
-                            tracing::debug!(
-                                target: "mm_routing",
-                                model = counter.model_id(),
-                                width = w,
-                                height = h,
-                                tokens = n,
-                                mm_hash = mm_hash,
-                                source = "url_passthrough_header_fetch",
-                                "image-token count"
-                            );
-                            image_tokens = checked_add_image_tokens(image_tokens, n);
+                            match counter.count_tokens(w, h) {
+                                Ok(n) => {
+                                    tracing::debug!(
+                                        target: "mm_routing",
+                                        model = counter.model_id(),
+                                        width = w,
+                                        height = h,
+                                        tokens = n,
+                                        mm_hash = mm_hash,
+                                        source = "url_passthrough_header_fetch",
+                                        "image-token count"
+                                    );
+                                    image_tokens = checked_add_image_tokens(image_tokens, n);
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        target: "mm_routing",
+                                        model = counter.model_id(),
+                                        %error,
+                                        "image-token accounting failed; using text-prefix routing"
+                                    );
+                                    image_tokens = None;
+                                    exact_mm_routing_eligible = false;
+                                }
+                            }
                         }
                         mm_routing_entries.push(MmRoutingEntry::Image {
                             mm_hash,
@@ -4396,7 +4649,18 @@ impl OpenAIPreprocessor {
                             .image_token_counter
                             .as_ref()
                             .expect("image counter requirement checked above");
-                        let token_count = counter.count_tokens(*width, *height);
+                        let token_count = match counter.count_tokens(*width, *height) {
+                            Ok(count) => count,
+                            Err(error) => {
+                                tracing::warn!(
+                                    target: "mm_routing",
+                                    model = counter.model_id(),
+                                    %error,
+                                    "image-token accounting failed; skipping MM routing info"
+                                );
+                                return None;
+                            }
+                        };
                         let mut routing_tokens = Vec::with_capacity(token_count);
                         let mut worker_tokens = Vec::with_capacity(token_count);
                         let image = MmImageEntry {
@@ -5185,23 +5449,7 @@ impl OpenAIPreprocessor {
             return Ok(ToolProcessingRoute::Unified(family));
         }
 
-        let uses_tool_call_structural_tag = guided_tool_constraint.uses_structural_tag();
         let selected_version = tool_parser_v2::selected_version()?;
-        if selected_version == tool_parser_v2::ParserVersion::Auto
-            && let Some(family) = unified_parser::configured_family(
-                self.tool_call_parser.as_deref(),
-                self.runtime_config.reasoning_parser.as_deref(),
-            )
-            && family == "muse_glimmer"
-            && !uses_tool_call_structural_tag
-            && matches!(
-                request.inner.tool_choice.as_ref(),
-                None | Some(ChatCompletionToolChoiceOption::Auto)
-                    | Some(ChatCompletionToolChoiceOption::None)
-            )
-        {
-            return Ok(ToolProcessingRoute::MuseUnified(family));
-        }
         let effective_tool_call_parser = self.tool_call_parser.clone().or_else(|| {
             self.runtime_config
                 .reasoning_parser
@@ -5236,22 +5484,6 @@ impl OpenAIPreprocessor {
         )
         .map_err(|error| invalid_argument_error(format!("{error:#}")))?;
 
-        if let Some(parser_name) = effective_tool_call_parser.as_deref()
-            && tool_parser_v2::enabled()
-            && selected_version == tool_parser_v2::ParserVersion::V2
-            && tool_parser_v2::supports_family(parser_name)
-            && (uses_tool_call_structural_tag
-                || matches!(
-                    request.inner.tool_choice.as_ref(),
-                    None | Some(ChatCompletionToolChoiceOption::Auto)
-                ))
-        {
-            let parser_name = match parser_name {
-                "deepseek-v4" | "deepseekv4" => "deepseek_v4",
-                parser_name => parser_name,
-            };
-            return Ok(ToolProcessingRoute::ParserV2(parser_name.to_string()));
-        }
         if selected_version == tool_parser_v2::ParserVersion::V2 {
             return Err(invalid_argument_error(format!(
                 "{}=2 was requested, but this tool choice requires the v1 tool-call jail",
@@ -5302,7 +5534,7 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        use crate::protocols::openai::chat_completions::{tool_parser_v2, unified_parser};
+        use crate::protocols::openai::chat_completions::unified_parser;
         let prompt_prefill = prompt_injected_reasoning;
         let prompt_injected_reasoning = prompt_prefill.for_route(&tool_processing_route);
         let uses_tool_call_structural_tag = guided_tool_constraint.uses_structural_tag();
@@ -5320,38 +5552,6 @@ impl OpenAIPreprocessor {
             env_is_falsey(env_llm::DYN_ENABLE_GUIDED_TOOL_STREAMING),
         );
 
-        if let ToolProcessingRoute::MuseUnified(family) = &tool_processing_route {
-            let tool_definitions =
-                crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner)?;
-            let tool_definitions = (!tool_definitions.is_empty()).then_some(tool_definitions);
-            let reasoning_disabled = Self::request_disables_reasoning_with_family(
-                request,
-                self.tool_call_parser.as_deref(),
-                self.runtime_config.reasoning_parser.as_deref(),
-                None,
-                Some(family),
-            );
-            let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
-                Box::pin(unified_parser::apply_stream_with_policy(
-                    stream,
-                    tool_definitions,
-                    crate::protocols::openai::GuidedToolConstraint::None,
-                    unified_parser::stream_prefill(family, prompt_injected_reasoning),
-                    family,
-                    guided_tool_streaming,
-                    unified_parser::UnifiedRequestPolicy {
-                        reasoning_disabled,
-                        structured_response: Self::has_structured_response_format(request),
-                    },
-                ));
-            return Ok(Self::apply_unified_response_policies(
-                unified,
-                Self::tool_call_parsing_enabled(request),
-                defer_reasoning_for_nonempty_content,
-                reasoning_disabled,
-            ));
-        }
-
         if let ToolProcessingRoute::Unified(family) = &tool_processing_route {
             let tool_definitions =
                 crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner)?;
@@ -5363,17 +5563,45 @@ impl OpenAIPreprocessor {
                 None,
                 Some(family),
             );
+            // TODO: Resolve model-specific prefill and guidance through the parser adapter's
+            // UnifiedRequestPolicy and parser capabilities; migrate equivalent batch/stream
+            // branches together while preserving legacy/v2 behavior.
+            let bare_guidance = *family == "gpt_oss"
+                && (tool_choice::has_explicit_guided_decoding(request)
+                    || guided_tool_constraint.installs_guided_json()
+                        && !(self.runtime_config.structural_tag.is_some()
+                            && structural_tag::uses_gpt_oss_required_array(
+                                (
+                                    self.tool_call_parser.as_deref(),
+                                    self.runtime_config.reasoning_parser.as_deref(),
+                                ),
+                                &tool_choice::convert_tool_choice(
+                                    request
+                                        .inner
+                                        .tool_choice
+                                        .as_ref()
+                                        .unwrap_or(&ChatCompletionToolChoiceOption::Auto),
+                                ),
+                                request.inner.parallel_tool_calls,
+                            )));
             let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
                 Box::pin(unified_parser::apply_stream_with_policy(
                     stream,
                     tool_definitions,
                     guided_tool_constraint,
                     unified_parser::StreamPrefill {
-                        starting_state: unified_parser::stream_prefill(
-                            family,
-                            prompt_injected_reasoning,
-                        ),
-                        prefix: prompt_prefill.prefix,
+                        starting_state: if bare_guidance {
+                            dynamo_parsers_v2::UnifiedParserStartingState::Response
+                        } else {
+                            prompt_prefill.unified_starting_state.unwrap_or_else(|| {
+                                unified_parser::stream_prefill(family, prompt_injected_reasoning)
+                            })
+                        },
+                        prefix: if bare_guidance {
+                            None
+                        } else {
+                            prompt_prefill.prefix.clone()
+                        },
                     },
                     family,
                     guided_tool_streaming,
@@ -5538,31 +5766,28 @@ impl OpenAIPreprocessor {
             crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner)?;
         let tool_definitions = (!tool_definitions.is_empty()).then_some(tool_definitions);
 
-        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> =
-            match tool_processing_route {
-                ToolProcessingRoute::ParserV2(parser_name) => Box::pin(
-                    tool_parser_v2::apply_stream(stream, tool_definitions, parser_name),
-                ),
-                ToolProcessingRoute::LegacyJail(effective_tool_call_parser) => {
-                    // A forced tool_choice installed a JSON grammar, so the jail may release
-                    // calls as they arrive instead of buffering to the closing brace. The
-                    // jail keeps its own native fallback, so a backend that ignores the
-                    // grammar (MiniMax M2 emits XML under `required`) still parses normally.
-                    // Same request-scoped decision the unified path above was given.
-                    Box::pin(Self::apply_tool_calling_jail(
-                        effective_tool_call_parser,
-                        request.inner.tool_choice.clone(),
-                        tool_definitions,
-                        uses_tool_call_structural_tag,
-                        guided_tool_streaming,
-                        stream,
-                    ))
-                }
-                ToolProcessingRoute::PassThrough => Box::pin(stream),
-                ToolProcessingRoute::MuseUnified(_) | ToolProcessingRoute::Unified(_) => {
-                    unreachable!("unified routes return before legacy response processing")
-                }
-            };
+        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = match tool_processing_route
+        {
+            ToolProcessingRoute::LegacyJail(effective_tool_call_parser) => {
+                // A forced tool_choice installed a JSON grammar, so the jail may release
+                // calls as they arrive instead of buffering to the closing brace. The
+                // jail keeps its own native fallback, so a backend that ignores the
+                // grammar (MiniMax M2 emits XML under `required`) still parses normally.
+                // Same request-scoped decision the unified path above was given.
+                Box::pin(Self::apply_tool_calling_jail(
+                    effective_tool_call_parser,
+                    request.inner.tool_choice.clone(),
+                    tool_definitions,
+                    uses_tool_call_structural_tag,
+                    guided_tool_streaming,
+                    stream,
+                ))
+            }
+            ToolProcessingRoute::PassThrough => Box::pin(stream),
+            ToolProcessingRoute::Unified(_) => {
+                unreachable!("unified routes return before legacy response processing")
+            }
+        };
 
         Ok(Self::apply_tool_call_response_policy(
             transformed_stream,
@@ -6775,6 +7000,9 @@ impl OpenAIPreprocessor {
                 prompt.ends_with("<|channel>thought") || prompt.ends_with("<|channel>")
             }
             Some("muse" | "muse_glimmer") => prompt.ends_with("assistant to=self<|message|>"),
+            Some("gpt_oss") => {
+                gpt_oss_assistant_prefill(prompt, None).is_some_and(gpt_oss_prefill_has_reasoning)
+            }
             _ => prompt.ends_with("<think>"),
         }
     }
@@ -6792,16 +7020,45 @@ impl OpenAIPreprocessor {
         Self::prompt_injected_reasoning_start(parser, formatted_prompt)
     }
 
+    #[cfg(test)]
     fn prompt_reasoning_prefill_for_parsers(
         tool_call_parser: Option<&str>,
         reasoning_parser: Option<&str>,
         formatted_prompt: Option<&str>,
     ) -> PromptReasoningPrefill {
-        let unified = Self::prompt_injected_reasoning_start_for_parsers(
+        Self::prompt_reasoning_prefill_at_boundary(
             tool_call_parser,
             reasoning_parser,
             formatted_prompt,
+            None,
+        )
+    }
+
+    fn prompt_reasoning_prefill_at_boundary(
+        tool_call_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+        formatted_prompt: Option<&str>,
+        header_search_end: Option<usize>,
+    ) -> PromptReasoningPrefill {
+        let family = crate::protocols::openai::chat_completions::unified_parser::configured_family(
+            tool_call_parser,
+            reasoning_parser,
         );
+        let assistant_prefill = (family == Some("gpt_oss"))
+            .then(|| {
+                formatted_prompt
+                    .and_then(|prompt| gpt_oss_assistant_prefill(prompt, header_search_end))
+            })
+            .flatten();
+        let unified = if family == Some("gpt_oss") {
+            assistant_prefill.is_some_and(gpt_oss_prefill_has_reasoning)
+        } else {
+            Self::prompt_injected_reasoning_start_for_parsers(
+                tool_call_parser,
+                reasoning_parser,
+                formatted_prompt,
+            )
+        };
         let legacy = if matches!(reasoning_parser, Some("muse" | "muse_glimmer")) {
             // The legacy crate falls back to Basic for Muse, so only its generic
             // opener may seed reasoning. Native Muse prefill would swallow tool JSON.
@@ -6809,25 +7066,30 @@ impl OpenAIPreprocessor {
         } else {
             unified
         };
-        let prefix =
-            if crate::protocols::openai::chat_completions::unified_parser::configured_family(
-                tool_call_parser,
-                reasoning_parser,
-            ) == Some("gemma4")
-            {
+        let prefix = match family {
+            Some("gemma4") => {
                 const HEADER: &str = "<|channel>thought\n";
                 formatted_prompt.and_then(|raw| {
                     ("<|channel>".len()..HEADER.len())
                         .rev()
                         .map(|end| &HEADER[..end])
                         .find(|prefix| raw.ends_with(prefix))
+                        .map(Arc::from)
                 })
-            } else {
-                None
-            };
+            }
+            Some("gpt_oss") => {
+                assistant_prefill.map(|prefix| Arc::from(compact_gpt_oss_prefill(prefix)))
+            }
+            _ => None,
+        };
         PromptReasoningPrefill {
             legacy,
-            unified: unified || prefix.is_some(),
+            unified: unified || family == Some("gemma4") && prefix.is_some(),
+            // A bare None state synthesizes an unfinished assistant header in ChoiceState.
+            unified_starting_state: (family == Some("gpt_oss")
+                && prefix.is_none()
+                && formatted_prompt.is_some_and(|prompt| prompt.contains("<|start|>")))
+            .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
             prefix,
         }
     }
@@ -6895,6 +7157,8 @@ impl OpenAIPreprocessor {
         if let Some(family) = unified_family {
             let thinking = dynamo_renderer::thinking_bool_from_args(chat_template_args.as_ref());
             return match family {
+                // GPT-OSS cannot disable reasoning; unsupported aliases must not expose it as answer text.
+                "gpt_oss" => false,
                 "gemma4" => thinking != Some(true),
                 "deepseek_v4" | "deepseek_v41" => {
                     !Self::deepseek_renderer_reasoning_enabled(chat_template_args.as_ref(), true)
@@ -7839,6 +8103,9 @@ impl
             )
             .instrument(preprocessing.clone())
             .await?;
+        if let Some(tracked) = RequestMetrics::from_context(&context) {
+            tracked.add_input_tokens(common_request.token_ids.len());
+        }
         attach_request_context_metadata(&mut common_request, &context);
 
         let guided_tool_constraint = self.apply_tool_choice_guided_decoding(
@@ -8068,6 +8335,9 @@ impl
 
         let mut common_request = builder.build()?;
         Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
+        if let Some(tracked) = RequestMetrics::from_context(&context) {
+            tracked.add_input_tokens(common_request.token_ids.len());
+        }
         attach_request_context_metadata(&mut common_request, &context);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
@@ -8157,6 +8427,9 @@ impl
         // Preprocess the embedding request
         let (preprocessed_request, annotations) =
             self.preprocess_embedding_request(&request).await?;
+        if let Some(metrics) = RequestMetrics::from_context(&context) {
+            metrics.add_input_tokens(preprocessed_request.token_ids.iter().map(Vec::len).sum());
+        }
 
         // Forward to next stage
         let preprocessed_request = context.map(|_| preprocessed_request);
@@ -8822,6 +9095,861 @@ mod tests {
     use std::path::PathBuf;
 
     #[tokio::test]
+    async fn gpt_oss_disabled_aliases_keep_reasoning_separate() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_disabled_aliases_keep_reasoning_separate"
+            ),
+            &[(env_llm::DYN_PARSER_VERSION, "2")],
+        ) {
+            return;
+        }
+        let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+        preprocessor.tool_call_parser = Some("harmony".into());
+        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        let input = "<|channel|>analysis<|message|>private thought<|end|><|start|>assistant<|channel|>final<|message|>answer<|return|>";
+        for (alias_index, args) in [
+            serde_json::json!({}),
+            serde_json::json!({"thinking": false}),
+            serde_json::json!({"enable_thinking": false}),
+            serde_json::json!({"thinking_mode": "disabled"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test", "messages": [{"role": "user", "content": "hello"}],
+                    "chat_template_kwargs": args,
+                }))
+                .unwrap();
+            OpenAIPreprocessor::normalize_thinking_arg(
+                &mut request,
+                Some("gpt_oss"),
+                Some("harmony"),
+            );
+            preprocessor.validate_model_request(&request).unwrap();
+            let reasoning_disabled = OpenAIPreprocessor::request_disables_reasoning_with_family(
+                &request,
+                Some("harmony"),
+                Some("gpt_oss"),
+                None,
+                Some("gpt_oss"),
+            );
+            let batch = crate::protocols::openai::chat_completions::unified_parser::parse_complete_with_policy(
+                "gpt_oss", input, &crate::protocols::openai::GuidedToolConstraint::None, &[],
+                crate::protocols::openai::chat_completions::unified_parser::UnifiedRequestPolicy {
+                    reasoning_disabled, ..Default::default()
+                },
+            ).unwrap();
+            assert_eq!(
+                (batch.text.as_str(), batch.reasoning.as_str()),
+                ("answer", "private thought"),
+                "args={args}"
+            );
+            let mut chunk = chat_stream_chunk(0, None);
+            let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = Some(ChatCompletionMessageContent::Text(input.into()));
+            choice.finish_reason = Some(FinishReason::Stop);
+            let output = preprocessor
+                .postprocessor_parsing_stream(
+                    futures::stream::iter([chunk]),
+                    &request,
+                    false,
+                    false,
+                )
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            let (content, reasoning) = gpt_oss_stream_text(&output);
+            assert_eq!(content, "answer", "args={args}");
+            assert_eq!(reasoning, "private thought", "args={args}");
+
+            if alias_index == 0 {
+                for split in 0..=input.len() {
+                    let chunks = [(&input[..split], false), (&input[split..], true)].map(
+                        |(text, terminal)| {
+                            let mut chunk = chat_stream_chunk(0, None);
+                            let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+                            choice.delta.content =
+                                Some(ChatCompletionMessageContent::Text(text.into()));
+                            choice.finish_reason = terminal.then_some(FinishReason::Stop);
+                            chunk
+                        },
+                    );
+                    let output = preprocessor
+                        .postprocessor_parsing_stream(
+                            futures::stream::iter(chunks),
+                            &request,
+                            false,
+                            false,
+                        )
+                        .unwrap()
+                        .collect::<Vec<_>>()
+                        .await;
+                    let (content, reasoning) = gpt_oss_stream_text(&output);
+                    assert_eq!(content, "answer", "args={args} split={split}");
+                    assert_eq!(reasoning, "private thought", "args={args} split={split}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_oss_prefill_does_not_retain_plain_continued_message_bodies() {
+        let header = "<|start|>assistant<|channel|>final<|message|>";
+        let prompt = format!("{header}{}", "x".repeat(64 * 1024));
+        let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+            None,
+            Some("gpt_oss"),
+            Some(&prompt),
+        );
+
+        assert_eq!(
+            prefill.prefix.as_deref().map(str::len),
+            Some(header.len()),
+            "plain message body is irrelevant to the parser seed"
+        );
+
+        let structural_prompt = format!("{header}quoted marker <|ghissue|> remains structural");
+        let structural_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+            None,
+            Some("gpt_oss"),
+            Some(&structural_prompt),
+        );
+        assert_eq!(
+            structural_prefill.prefix.as_deref().map(str::len),
+            Some(structural_prompt.len()),
+            "marker-bearing bodies must retain their parser state"
+        );
+
+        let incomplete_header = "<|start|>assistant to=";
+        let incomplete_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+            None,
+            Some("gpt_oss"),
+            Some(incomplete_header),
+        );
+        assert_eq!(
+            incomplete_prefill.prefix.as_deref(),
+            Some(incomplete_header),
+            "incomplete headers must remain intact"
+        );
+    }
+
+    // The parser corpus cannot exercise preprocessing seed compaction.
+    #[test]
+    fn gpt_oss_tool_prefill_preserves_consumed_json_state() {
+        use crate::protocols::openai::chat_completions::unified_parser::{
+            ChoiceState, StreamPrefill,
+        };
+        use dynamo_parsers_v2::{
+            UnifiedParserEvent, UnifiedParserStartingState, UnifiedToolOutputMode,
+        };
+        for header in [
+            "<|start|>assistant to=functions.lookup<|channel|>commentary<|message|>",
+            "<|start|>assistant<|channel|>commentary to=functions.lookup<|message|>",
+            "<|start|>assistant to=functions.lookup<|channel|>analysis<|message|>",
+        ] {
+            for (body, input, expected_arguments, expected_completed) in [
+                ("{\"q\":\"hé", "llo🙂\"}<|call|>", "llo🙂\"}", 1),
+                ("{\"q\":\"hello\"}", "<|call|>", "", 1),
+                ("not-json", "<|call|>", "", 0),
+            ] {
+                let prompt = format!("{header}{body}");
+                let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                    Some("harmony"),
+                    Some("gpt_oss"),
+                    Some(&prompt),
+                );
+                assert_eq!(prefill.prefix.as_deref(), Some(prompt.as_str()));
+                for split in (0..=input.len()).filter(|at| input.is_char_boundary(*at)) {
+                    let mut state = ChoiceState::new(
+                        "gpt_oss",
+                        &[],
+                        StreamPrefill {
+                            starting_state: UnifiedParserStartingState::None,
+                            prefix: prefill.prefix.clone(),
+                        },
+                        UnifiedToolOutputMode::Native,
+                        true,
+                    )
+                    .unwrap();
+                    let mut events = state.push(&input[..split]);
+                    events.extend(state.push(&input[split..]));
+                    events.extend(state.finish());
+                    let mut arguments = String::new();
+                    let mut completed = 0;
+                    for event in events {
+                        let UnifiedParserEvent::ToolCall(call) = event else {
+                            panic!("continued tool body must not become text or reasoning");
+                        };
+                        assert_eq!(call.tool_index, 0);
+                        assert!(
+                            call.name.is_none(),
+                            "consumed tool name must not be replayed"
+                        );
+                        arguments.push_str(&call.arguments);
+                        completed += usize::from(call.complete);
+                    }
+                    assert_eq!(
+                        arguments, expected_arguments,
+                        "header={header} split={split}"
+                    );
+                    assert_eq!(
+                        completed, expected_completed,
+                        "header={header} split={split}"
+                    );
+                }
+            }
+        }
+    }
+
+    // The corpus cannot install preprocessing guidance or render a continued request.
+    #[tokio::test]
+    async fn gpt_oss_structural_array_ignores_consumed_tool_recipient() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_structural_array_ignores_consumed_tool_recipient"
+            ),
+            &[(env_llm::DYN_PARSER_VERSION, "2")],
+        ) {
+            return;
+        }
+        let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+        preprocessor.tool_call_parser = Some("harmony".into());
+        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        preprocessor.runtime_config.structural_tag = Some(Default::default());
+        let input = "<|end|><|start|>assistant<|channel|>final<|message|>[{\"name\":\"lookup\",\"parameters\":{\"q\":\"x\"}}]<|return|>";
+        for channel in ["commentary", "analysis"] {
+            preprocessor.formatter = test_prompt_formatter(&format!(
+                "{{% for message in messages %}}<|start|>{{{{ message.role }}}} to=functions.lookup<|channel|>{channel}<|message|>{{{{ message.content }}}}<|return|>{{% endfor %}}"
+            ));
+            for body in ["{\"q\":\"he", "{\"q\":\"hello\"}"] {
+                let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+                    "model":"test", "messages":[{"role":"assistant","content":body}],
+                    "continue_final_message":true, "add_generation_prompt":false,
+                    "tool_choice":"required", "parallel_tool_calls":true,
+                    "tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}}],
+                })).unwrap();
+                let (_, prefill) = preprocessor.apply_template_and_prefill(&request).unwrap();
+                for split in 0..=input.len() {
+                    let mut common = preprocessor
+                        .builder(&request)
+                        .unwrap()
+                        .token_ids(vec![1])
+                        .build()
+                        .unwrap();
+                    let constraint = preprocessor
+                        .apply_tool_choice_guided_decoding(&request, &mut common, prefill.unified)
+                        .unwrap();
+                    assert!(matches!(
+                        &constraint,
+                        crate::protocols::openai::GuidedToolConstraint::GuidedJsonRequired
+                    ));
+                    let route = preprocessor
+                        .tool_processing_route(&request, &constraint)
+                        .unwrap();
+                    let chunks = [(&input[..split], false), (&input[split..], true)].map(
+                        |(text, terminal)| {
+                            let mut chunk = chat_stream_chunk(0, None);
+                            let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+                            choice.delta.content =
+                                Some(ChatCompletionMessageContent::Text(text.into()));
+                            choice.finish_reason = terminal.then_some(FinishReason::Stop);
+                            chunk
+                        },
+                    );
+                    let output = preprocessor
+                        .postprocessor_parsing_stream_with_constraint(
+                            futures::stream::iter(chunks),
+                            &request,
+                            prefill.clone(),
+                            constraint,
+                            route,
+                        )
+                        .unwrap()
+                        .collect::<Vec<_>>()
+                        .await;
+                    assert_eq!(gpt_oss_stream_text(&output), (String::new(), String::new()));
+                    let calls: Vec<_> = output
+                        .iter()
+                        .filter_map(|response| response.data.as_ref())
+                        .flat_map(|data| &data.inner.choices)
+                        .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                        .collect();
+                    let name: String = calls
+                        .iter()
+                        .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                        .collect();
+                    let arguments: String = calls
+                        .iter()
+                        .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                        .collect();
+                    assert_eq!(
+                        name, "lookup",
+                        "channel={channel} body={body} split={split}"
+                    );
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                        serde_json::json!({"q":"x"})
+                    );
+                }
+            }
+        }
+    }
+
+    // The parser corpus cannot express rendered-message boundaries; exercise that adapter here.
+    #[test]
+    fn gpt_oss_prefill_keeps_headers_quoted_in_tool_arguments() {
+        let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+        preprocessor.tool_call_parser = Some("harmony".into());
+        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        for body in [
+            "{\"q\":\"<|start|>assistant<|channel|>analysis<|message|>literal\"}",
+            "{\"q\":\"<|start|>user literal\"}",
+        ] {
+            for content in [
+                serde_json::json!(body),
+                serde_json::json!([{ "type": "text", "text": body }]),
+            ] {
+                preprocessor.formatter = test_prompt_formatter(if content.is_string() {
+                    "{% for message in messages %}<|start|>{{ message.role }} to=functions.lookup<|channel|>commentary<|message|>{{ message.content }}<|return|>{% endfor %}"
+                } else {
+                    "{% for message in messages %}<|start|>{{ message.role }} to=functions.lookup<|channel|>commentary<|message|>{% for part in message.content %}{{ part.text }}{% endfor %}<|return|>{% endfor %}"
+                });
+                let request: NvCreateChatCompletionRequest =
+                    serde_json::from_value(serde_json::json!({
+                        "model": "test", "messages": [{"role": "assistant", "content": content}],
+                        "continue_final_message": true, "add_generation_prompt": false,
+                    }))
+                    .unwrap();
+                let (prompt, prefill) = preprocessor.apply_template_and_prefill(&request).unwrap();
+                let prompt = prompt.unwrap();
+                assert_eq!(prefill.prefix.as_deref(), Some(prompt.as_str()));
+                assert!(prompt.as_str().ends_with(body));
+                assert!(!prompt.as_str().contains("DYNAMO_FINAL_MESSAGE_"));
+                assert!(!prefill.unified, "quoted analysis is tool data");
+                let input = "<|call|>";
+                for split in 0..=input.len() {
+                    use crate::protocols::openai::chat_completions::unified_parser::{
+                        ChoiceState, StreamPrefill,
+                    };
+                    use dynamo_parsers_v2::{
+                        UnifiedParserEvent, UnifiedParserStartingState, UnifiedToolOutputMode,
+                    };
+                    let mut state = ChoiceState::new(
+                        "gpt_oss",
+                        &[],
+                        StreamPrefill {
+                            starting_state: UnifiedParserStartingState::None,
+                            prefix: prefill.prefix.clone(),
+                        },
+                        UnifiedToolOutputMode::Native,
+                        true,
+                    )
+                    .unwrap();
+                    let mut events = state.push(&input[..split]);
+                    events.extend(state.push(&input[split..]));
+                    events.extend(state.finish());
+                    // Initialization already consumed the completed name and arguments;
+                    // the generated handoff must complete that call, without replaying them.
+                    assert!(
+                        matches!(events.as_slice(), [UnifiedParserEvent::ToolCall(call)]
+                        if call.tool_index == 0 && call.name.is_none()
+                            && call.arguments.is_empty() && call.complete),
+                        "split={split} events={events:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_oss_rendered_boundary_preserves_trim_and_repeated_content() {
+        let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+        preprocessor.tool_call_parser = Some("harmony".into());
+        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test", "messages": [{"role":"assistant", "content":"  Hello"}],
+            "continue_final_message":true, "add_generation_prompt":false,
+        }))
+        .unwrap();
+        for (template, expected) in [
+            (
+                "{% for message in messages %}<|start|>{{ message.role }}<|channel|>analysis<|message|>{{ message.content | trim }}<|return|>{% endfor %}",
+                "Hello",
+            ),
+            (
+                "{% for message in messages %}<|start|>{{ message.role }}<|channel|>analysis<|message|>{{ message.content }}{{ message.content }}<|return|>{% endfor %}",
+                "  Hello  Hello",
+            ),
+        ] {
+            preprocessor.formatter = test_prompt_formatter(template);
+            let (prompt, prefill) = preprocessor.apply_template_and_prefill(&request).unwrap();
+            assert_eq!(
+                prompt.unwrap().as_str(),
+                format!("<|start|>assistant<|channel|>analysis<|message|>{expected}")
+            );
+            assert!(prefill.unified);
+        }
+    }
+
+    #[test]
+    fn gpt_oss_rendered_boundary_excludes_repeated_body_markers() {
+        let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+        preprocessor.tool_call_parser = Some("harmony".into());
+        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        let body = "keep CONTINUE_FINAL_MESSAGE_TAG <|start|>user";
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"test", "messages":[{"role":"assistant","content":body}],
+            "continue_final_message":true, "add_generation_prompt":false,
+        }))
+        .unwrap();
+        for template in [
+            "{% for message in messages %}preamble {{ message.content }}<|start|>assistant<|channel|>analysis<|message|>{{ message.content }}<|return|>{% endfor %}",
+            "{% for message in messages %}<|start|>assistant<|channel|>final<|message|>{{ message.content }}<|end|><|start|>assistant<|channel|>analysis<|message|>{{ message.content }}<|return|>{% endfor %}",
+            "{% for message in messages %}<|start|>assistant<|channel|>analysis<|message|>{{ message.content }}{{ message.content }}<|return|>{% endfor %}",
+        ] {
+            preprocessor.formatter = test_prompt_formatter(template);
+            let (prompt, prefill) = preprocessor.apply_template_and_prefill(&request).unwrap();
+            let prompt = prompt.unwrap();
+            assert_eq!(prompt.as_str().matches(body).count(), 2);
+            assert!(!prompt.as_str().contains("DYNAMO_FINAL_MESSAGE_"));
+            assert!(prefill.unified);
+            assert!(
+                prefill
+                    .prefix
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("<|start|>assistant<|channel|>analysis<|message|>")
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_oss_prefill_only_restores_assistant_messages() {
+        for role in [
+            "assistant",
+            "user",
+            "system",
+            "developer",
+            "tool",
+            "assistant_extra",
+            "assistantx",
+        ] {
+            for metadata in [
+                "",
+                " to=python",
+                "<|channel|>analysis",
+                "<|channel|>final",
+                "<|constrain|>json",
+                " to=python<|channel|>analysis",
+                "<|channel|>analysis to=python",
+            ] {
+                for body in ["Hello", "quoted <|ghissue|>", "partial <|"] {
+                    let prompt = format!(
+                        "<|start|>assistant<|channel|>analysis<|message|>earlier<|end|><|start|>{role}{metadata}<|message|>{body}"
+                    );
+                    let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                        None,
+                        Some("gpt_oss"),
+                        Some(&prompt),
+                    );
+                    assert_eq!(
+                        prefill.prefix.is_some(),
+                        role == "assistant",
+                        "role={role} metadata={metadata} body={body}"
+                    );
+                    assert_eq!(
+                        prefill.unified_starting_state,
+                        (role != "assistant")
+                            .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
+                        "role={role} metadata={metadata}"
+                    );
+                    let reasoning = role == "assistant" && metadata.contains("<|channel|>analysis");
+                    assert_eq!(
+                        prefill.unified, reasoning,
+                        "role={role} metadata={metadata}"
+                    );
+                    assert_eq!(prefill.legacy, reasoning, "role={role} metadata={metadata}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_large_plain_continuation_prefill_supports_multiple_choices() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_large_plain_continuation_prefill_supports_multiple_choices"
+            ),
+            &[(env_llm::DYN_PARSER_VERSION, "2")],
+        ) {
+            return;
+        }
+        let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+        preprocessor.tool_call_parser = Some("harmony".into());
+        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        preprocessor.formatter = test_prompt_formatter(
+            "{% for message in messages %}<|start|>{{ message.role }}<|channel|>final<|message|>{{ message.content }}<|return|>{% endfor %}",
+        );
+        let message_body = "x".repeat(64 * 1024);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test", "messages": [{"role": "assistant", "content": message_body}],
+            "n": 2, "continue_final_message": true, "add_generation_prompt": false,
+        }))
+        .unwrap();
+        let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+        let prefill = preprocessor.configured_prompt_prefill(Some(prompt.as_str()));
+        let header = "<|start|>assistant<|channel|>final<|message|>";
+        assert_eq!(prefill.prefix.as_deref().map(str::len), Some(header.len()));
+
+        let mut common = preprocessor
+            .builder(&request)
+            .unwrap()
+            .token_ids(vec![1])
+            .build()
+            .unwrap();
+        let constraint = preprocessor
+            .apply_tool_choice_guided_decoding(&request, &mut common, prefill.unified)
+            .unwrap();
+        let route = preprocessor
+            .tool_processing_route(&request, &constraint)
+            .unwrap();
+        let mut chunk = chat_stream_chunk(0, None);
+        let data = chunk.data.as_mut().unwrap();
+        let mut second = data.inner.choices[0].clone();
+        for choice in [&mut data.inner.choices[0], &mut second] {
+            choice.delta.content = Some(ChatCompletionMessageContent::Text(" world".into()));
+            choice.finish_reason = Some(FinishReason::Stop);
+        }
+        second.index = 1;
+        data.inner.choices.push(second);
+
+        let output = preprocessor
+            .postprocessor_parsing_stream_with_constraint(
+                futures::stream::iter([chunk]),
+                &request,
+                prefill,
+                constraint,
+                route,
+            )
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let mut content = std::collections::BTreeMap::<u32, String>::new();
+        for choice in output
+            .iter()
+            .filter_map(|response| response.data.as_ref())
+            .flat_map(|data| &data.inner.choices)
+        {
+            if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                content.entry(choice.index).or_default().push_str(text);
+            }
+        }
+        assert_eq!(content.len(), 2);
+        assert!(content.values().all(|text| text == " world"));
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_continuations_keep_the_rendered_channel() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_continuations_keep_the_rendered_channel"
+            ),
+            &[(env_llm::DYN_PARSER_VERSION, "2")],
+        ) {
+            return;
+        }
+        let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+        preprocessor.tool_call_parser = Some("harmony".into());
+        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        for (role, channel, input, content, reasoning, structured, forced) in [
+            (
+                "assistant",
+                "final",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "assistant",
+                "analysis",
+                " next<|end|><|start|>assistant<|channel|>final<|message|>answer<|return|>",
+                "answer",
+                " next",
+                false,
+                None,
+            ),
+            (
+                "assistant",
+                "analysis",
+                "[1,2]<|end|><|start|>assistant<|channel|>final<|message|>{\"answer\":1}<|return|>",
+                "{\"answer\":1}",
+                "[1,2]",
+                true,
+                None,
+            ),
+            (
+                "assistant",
+                "analysis",
+                "[1,2]<|end|><|start|>assistant<|channel|>final<|message|>[{\"name\":\"lookup\",\"parameters\":{\"q\":\"x\"}}]<|return|>",
+                "",
+                "[1,2]",
+                false,
+                Some(true),
+            ),
+            (
+                "assistant",
+                "analysis",
+                "[{\"name\":\"lookup\",\"parameters\":{\"q\":\"x\"}}]",
+                "",
+                "",
+                false,
+                Some(false),
+            ),
+            (
+                "user",
+                "",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "system",
+                "",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "developer",
+                "",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "tool",
+                "",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "user",
+                "analysis",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "system",
+                "analysis",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "developer",
+                "analysis",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "tool",
+                "analysis",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "user",
+                "final",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "user",
+                "",
+                "{\"answer\":1}",
+                "{\"answer\":1}",
+                "",
+                true,
+                None,
+            ),
+            (
+                "user",
+                "",
+                "[{\"name\":\"lookup\",\"parameters\":{\"q\":\"x\"}}]",
+                "",
+                "",
+                false,
+                Some(false),
+            ),
+            (
+                "user",
+                "",
+                "[{\"name\":\"lookup\",\"parameters\":{\"q\":\"x\"}}]",
+                "",
+                "",
+                false,
+                Some(true),
+            ),
+        ] {
+            let channel_header = if channel.is_empty() {
+                String::new()
+            } else {
+                format!("<|channel|>{channel}")
+            };
+            preprocessor.formatter = test_prompt_formatter(&format!(
+                "{{% for message in messages %}}<|start|>{{{{ message.role }}}}{channel_header}<|message|>{{{{ message.content }}}}<|return|>{{% endfor %}}"
+            ));
+            preprocessor.runtime_config.structural_tag = forced
+                .filter(|enabled| *enabled)
+                .map(|_| Default::default());
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test", "messages": [{"role": role, "content": "Hello", "tool_call_id": "call_0"}],
+                    "continue_final_message": true, "add_generation_prompt": false,
+                    "response_format": if structured { serde_json::json!({"type":"json_object"}) } else { serde_json::Value::Null },
+                }))
+                .unwrap();
+            if forced.is_some() {
+                request.inner.tools = Some(serde_json::from_value(serde_json::json!([
+                    {"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}}
+                ])).unwrap());
+                request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Required);
+            }
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert!(prompt.as_str().ends_with("<|message|>Hello"));
+            for split in (0..=input.len()).filter(|split| input.is_char_boundary(*split)) {
+                let prefill = preprocessor.configured_prompt_prefill(Some(prompt.as_str()));
+                assert!(!format!("{prefill:?}").contains("Hello"));
+                let mut common = preprocessor
+                    .builder(&request)
+                    .unwrap()
+                    .token_ids(vec![1])
+                    .build()
+                    .unwrap();
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, prefill.unified)
+                    .unwrap();
+                let route = preprocessor
+                    .tool_processing_route(&request, &constraint)
+                    .unwrap();
+                let chunks =
+                    [(&input[..split], false), (&input[split..], true)].map(|(text, terminal)| {
+                        let mut chunk = chat_stream_chunk(0, None);
+                        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+                        choice.delta.content =
+                            Some(ChatCompletionMessageContent::Text(text.into()));
+                        choice.finish_reason = terminal.then_some(FinishReason::Stop);
+                        chunk
+                    });
+                let output = preprocessor
+                    .postprocessor_parsing_stream_with_constraint(
+                        futures::stream::iter(chunks),
+                        &request,
+                        prefill,
+                        constraint,
+                        route,
+                    )
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await;
+                assert_eq!(
+                    gpt_oss_stream_text(&output),
+                    (content.into(), reasoning.into()),
+                    "role={role} channel={channel} split={split}"
+                );
+                let choices: Vec<_> = output
+                    .iter()
+                    .filter_map(|response| response.data.as_ref())
+                    .flat_map(|data| &data.inner.choices)
+                    .collect();
+                let calls: Vec<_> = choices
+                    .iter()
+                    .filter_map(|choice| choice.delta.tool_calls.as_ref())
+                    .flatten()
+                    .collect();
+                if forced.is_some() {
+                    let names: Vec<_> = calls
+                        .iter()
+                        .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                        .collect();
+                    assert_eq!(names, ["lookup"]);
+                    let arguments: String = calls
+                        .iter()
+                        .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                        .collect();
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                        serde_json::json!({"q":"x"})
+                    );
+                } else {
+                    assert!(calls.is_empty());
+                }
+                assert_eq!(
+                    choices
+                        .iter()
+                        .filter(|choice| choice.finish_reason.is_some())
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    // These cases exercise request policy and consumed prompts, which the parser corpus does not carry.
+    fn gpt_oss_stream_text(
+        output: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> (String, String) {
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        for response in output {
+            assert!(!response.is_error());
+            if let Some(data) = &response.data {
+                for choice in &data.inner.choices {
+                    if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                        content.push_str(text);
+                    }
+                    if let Some(text) = &choice.delta.reasoning_content {
+                        reasoning.push_str(text);
+                    }
+                }
+            }
+        }
+        (content, reasoning)
+    }
+
+    #[tokio::test]
     async fn eight_family_routes_and_tool_suppression() {
         use crate::protocols::openai::chat_completions::unified_parser;
         let card = ModelDeploymentCard::load_from_disk(
@@ -8874,10 +10002,6 @@ mod tests {
                         matches!(route, ToolProcessingRoute::Unified(actual) if actual == expected),
                         "{family} {choice}"
                     );
-                } else if family == "muse_glimmer"
-                    && (choice.is_null() || choice == "auto" || choice == "none")
-                {
-                    assert!(matches!(route, ToolProcessingRoute::MuseUnified(_)));
                 } else {
                     assert!(!matches!(route, ToolProcessingRoute::Unified(_)));
                 }
@@ -9143,7 +10267,7 @@ mod tests {
                     .postprocessor_parsing_stream_with_constraint(
                         futures::stream::iter(chunks),
                         &request,
-                        prefill,
+                        prefill.clone(),
                         crate::protocols::openai::GuidedToolConstraint::None,
                         ToolProcessingRoute::Unified("gemma4"),
                     )
@@ -9580,6 +10704,251 @@ mod tests {
         }
     }
 
+    struct SystemOneCountingTokenizer(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl crate::tokenizers::traits::Encoder for SystemOneCountingTokenizer {
+        fn encode(&self, input: &str) -> anyhow::Result<Encoding> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Encoding::Sp(input.bytes().map(u32::from).collect()))
+        }
+
+        fn encode_batch(&self, inputs: &[&str]) -> anyhow::Result<Vec<Encoding>> {
+            inputs.iter().map(|input| self.encode(input)).collect()
+        }
+    }
+
+    impl crate::tokenizers::traits::Decoder for SystemOneCountingTokenizer {
+        fn decode(
+            &self,
+            _token_ids: &[TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<crate::tokenizers::traits::DecodeResult> {
+            Ok(crate::tokenizers::traits::DecodeResult::Complete(
+                String::new(),
+            ))
+        }
+    }
+
+    impl Tokenizer for SystemOneCountingTokenizer {}
+
+    #[test]
+    fn systemone_prompt_budget_rejects_before_candidate_tokenization() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let mut preprocessor = match Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap()) {
+            Ok(preprocessor) => preprocessor,
+            Err(_) => panic!("test preprocessor unexpectedly shared"),
+        };
+        let encodes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        preprocessor.tokenizer = Arc::new(SystemOneCountingTokenizer(encodes.clone()));
+        let labels: Vec<_> = ('A'..='Z').map(|label| label.to_string()).collect();
+        let error = preprocessor
+            .render_systemone_question("test-model", &"x".repeat(4096), None, &labels, (65_536, 8))
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<SystemOneEncodingTooLarge>()
+                .unwrap()
+                .limit,
+            8
+        );
+        assert_eq!(encodes.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let error = preprocessor
+            .render_systemone_question(
+                "test-model",
+                &"x".repeat(4096),
+                None,
+                &labels,
+                (8, usize::MAX),
+            )
+            .unwrap_err();
+        let oversized = error.downcast_ref::<SystemOnePromptTooLong>().unwrap();
+        assert_eq!(oversized.limit, 8);
+        assert!(oversized.tokens > oversized.limit);
+        assert_eq!(encodes.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn systemone_rejects_always_on_reasoning_before_tokenization() {
+        for parser in ["deepseek_r1", "step3", "gpt_oss", "kimi"] {
+            let mdc = ModelDeploymentCard::load_from_disk(
+                "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                None,
+            )
+            .unwrap();
+            let mut preprocessor = match Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap()) {
+                Ok(preprocessor) => preprocessor,
+                Err(_) => panic!("test preprocessor unexpectedly shared"),
+            };
+            preprocessor.runtime_config.reasoning_parser = Some(parser.to_string());
+            let encodes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            preprocessor.tokenizer = Arc::new(SystemOneCountingTokenizer(encodes.clone()));
+            let kwargs = serde_json::Map::from_iter([
+                ("enable_thinking".to_string(), serde_json::json!(false)),
+                ("thinking_mode".to_string(), serde_json::json!("disabled")),
+            ]);
+            let error = preprocessor
+                .render_systemone_question(
+                    "test-model",
+                    "A decision",
+                    Some(&kwargs),
+                    &["yes".to_string(), "no".to_string()],
+                    (65_536, usize::MAX),
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("reasoning disabled"), "{parser}");
+            assert_eq!(encodes.load(std::sync::atomic::Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn systemone_resolves_labels_at_real_bpe_boundaries() {
+        let mut card =
+            ModelDeploymentCard::load_from_disk("tests/data/sample-models/TinyLlama_v1.1", None)
+                .unwrap();
+        card.runtime_config.tokenizer_backend =
+            Some(crate::local_model::runtime_config::TokenizerBackend::Default);
+        let mut preprocessor = OpenAIPreprocessor::new(card).unwrap();
+        let (prompt_ids, label_ids, _) = preprocessor
+            .render_systemone_question(
+                "test-model",
+                "A decision",
+                None,
+                &["A".into(), " B".into()],
+                (65_536, usize::MAX),
+            )
+            .unwrap();
+        assert_eq!(label_ids, vec![29909, 350]);
+        assert!(!prompt_ids.is_empty());
+
+        for labels in [vec!["not one token".into()], vec![" A".into(), "▁A".into()]] {
+            let error = preprocessor
+                .render_systemone_question(
+                    "test-model",
+                    "A decision",
+                    None,
+                    &labels,
+                    (65_536, usize::MAX),
+                )
+                .unwrap_err();
+            assert!(error.downcast_ref::<SystemOneModelIncompatible>().is_some());
+        }
+
+        Arc::get_mut(&mut preprocessor).unwrap().formatter = test_prompt_formatter("Answer: ");
+        let prompt_ids = preprocessor.tokenize("Answer: ").unwrap();
+        let merged_ids = preprocessor.tokenize("Answer: nswer").unwrap();
+        assert_eq!(
+            merged_ids.token_ids().len(),
+            prompt_ids.token_ids().len() + 1
+        );
+        assert_ne!(
+            &merged_ids.token_ids()[..prompt_ids.token_ids().len()],
+            prompt_ids.token_ids()
+        );
+        let error = preprocessor
+            .render_systemone_question(
+                "test-model",
+                "A decision",
+                None,
+                &["nswer".into()],
+                (65_536, usize::MAX),
+            )
+            .unwrap_err();
+        assert!(error.downcast_ref::<SystemOneModelIncompatible>().is_some());
+    }
+
+    #[test]
+    fn systemone_rejects_tool_only_reasoning_prefixes() {
+        for (family, prefix) in [
+            ("gemma4", "<|channel>thought\n"),
+            ("kimi_k3", "<|open|>think<|sep|>"),
+            ("minimax_m3", "<mm:think>"),
+        ] {
+            let card = ModelDeploymentCard::load_from_disk(
+                "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                None,
+            )
+            .unwrap();
+            let mut preprocessor = OpenAIPreprocessor::new(card).unwrap();
+            let preprocessor = Arc::get_mut(&mut preprocessor).unwrap();
+            preprocessor.tool_call_parser = Some(family.into());
+            preprocessor.formatter = test_prompt_formatter(prefix);
+            let encodes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            preprocessor.tokenizer = Arc::new(SystemOneCountingTokenizer(encodes.clone()));
+            let kwargs = serde_json::Map::from_iter([
+                ("enable_thinking".into(), serde_json::json!(false)),
+                ("thinking_mode".into(), serde_json::json!("disabled")),
+            ]);
+            let error = preprocessor
+                .render_systemone_question(
+                    "test-model",
+                    "A decision",
+                    Some(&kwargs),
+                    &["A".into()],
+                    (65_536, usize::MAX),
+                )
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("closes or disables reasoning"),
+                "{family}: {error}"
+            );
+            assert_eq!(encodes.load(std::sync::atomic::Ordering::Relaxed), 0);
+        }
+    }
+
+    struct SystemOneSegmentedFormatter;
+
+    impl OAIPromptFormatter for SystemOneSegmentedFormatter {
+        fn supports_add_generation_prompt(&self) -> bool {
+            true
+        }
+
+        fn render(&self, request: &dyn OAIChatLikeRequest) -> anyhow::Result<String> {
+            Ok(self.render_prompt(request)?.into_text())
+        }
+
+        fn render_prompt(
+            &self,
+            request: &dyn OAIChatLikeRequest,
+        ) -> anyhow::Result<RenderedPrompt> {
+            let messages = serde_json::to_value(request.messages())?;
+            Ok(RenderedPrompt::segmented(vec![
+                dynamo_renderer::RenderedSegment::new(
+                    messages[0]["content"].as_str().unwrap(),
+                    false,
+                ),
+            ]))
+        }
+    }
+
+    #[test]
+    fn systemone_special_token_text_is_an_input_error() {
+        let mut card =
+            ModelDeploymentCard::load_from_disk("tests/data/sample-models/TinyLlama_v1.1", None)
+                .unwrap();
+        card.runtime_config.tokenizer_backend =
+            Some(crate::local_model::runtime_config::TokenizerBackend::Fastokens);
+        let mut preprocessor = OpenAIPreprocessor::new(card).unwrap();
+        Arc::get_mut(&mut preprocessor).unwrap().formatter = Arc::new(SystemOneSegmentedFormatter);
+        let error = preprocessor
+            .render_systemone_question(
+                "test-model",
+                "literal </s> text",
+                None,
+                &[" A".into()],
+                (65_536, usize::MAX),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("round-trips"), "{error:#}");
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().error_type(),
+            ErrorType::InvalidArgument
+        );
+    }
+
     #[test]
     fn deepseek_v41_preserves_markers_and_initializes_backend_reasoning() {
         for (tool, reasoning) in [(Some("deepseek_v41"), None), (None, Some("deepseek_v41"))] {
@@ -9679,7 +11048,10 @@ mod tests {
                         description: None,
                         parameters: None,
                         strict: None,
+                        defer_loading: None,
                     },
+                    custom: None,
+                    defer_loading: None,
                 }])
                 .tool_choice(tool_choice)
                 .build()
@@ -9767,7 +11139,6 @@ mod tests {
             }
             return;
         }
-        let explicit_v2 = std::env::var(CHILD).unwrap() == "2";
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
         let named = serde_json::from_value::<ChatCompletionToolChoiceOption>(
@@ -9808,15 +11179,8 @@ mod tests {
                         let route = preprocessor
                             .tool_processing_route(&request, &constraint)
                             .unwrap();
-                        let unified = explicit_v2 || (!structural_tag && !forced);
-                        assert_eq!(
-                            matches!(
-                                route,
-                                ToolProcessingRoute::MuseUnified(_)
-                                    | ToolProcessingRoute::Unified(_)
-                            ),
-                            unified
-                        );
+                        let unified = true;
+                        assert_eq!(matches!(route, ToolProcessingRoute::Unified(_)), unified);
                         for (prompt, native_open, generic_open) in [
                             ("assistant to=self<|message|>", true, false),
                             ("assistant<think>", false, true),
@@ -9872,7 +11236,7 @@ mod tests {
                                     .postprocessor_parsing_stream(
                                         stream::iter(input()),
                                         &request,
-                                        prefill,
+                                        prefill.clone(),
                                         structural_tag,
                                     )
                                     .unwrap()
@@ -9977,7 +11341,13 @@ mod tests {
     fn all_requested_families_use_unified_serving_route_for_every_tool_policy() {
         const CHILD: &str = "DYNAMO_ALL_UNIFIED_SERVING_ROUTE_CHILD";
         if std::env::var_os(CHILD).is_none() {
-            for (version, experimental) in [(Some("2"), None), (None, Some("true"))] {
+            for (version, experimental) in [
+                (None, None),
+                (Some("auto"), None),
+                (Some("2"), None),
+                (None, Some("false")),
+                (None, Some("true")),
+            ] {
                 let mut command = crate::test_utils::isolated_command(
                     "preprocessor::tests::all_requested_families_use_unified_serving_route_for_every_tool_policy",
                 );
@@ -10059,57 +11429,6 @@ mod tests {
     }
 
     #[test]
-    fn qwen3_coder_uses_unified_route_only_after_explicit_opt_in() {
-        const CHILD: &str = "DYNAMO_PARSER_VERSION_TEST_QWEN3_OPT_IN";
-        const MODE: &str = "DYNAMO_PARSER_VERSION_TEST_QWEN3_MODE";
-        if std::env::var_os(CHILD).is_none() {
-            for (mode, experimental) in [("default", None), ("opt-in", Some("true"))] {
-                let mut command = crate::test_utils::isolated_command(
-                    "preprocessor::tests::qwen3_coder_uses_unified_route_only_after_explicit_opt_in",
-                );
-                command
-                    .arg("--test-threads=1")
-                    .env(CHILD, "1")
-                    .env(MODE, mode)
-                    .env_remove(env_llm::DYN_PARSER_VERSION);
-                if let Some(value) = experimental {
-                    command.env(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, value);
-                } else {
-                    command.env_remove(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2);
-                }
-                let output = command.output().unwrap();
-                crate::test_utils::assert_isolated_success(&output);
-            }
-            return;
-        }
-
-        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
-        let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
-        card.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
-        let preprocessor = OpenAIPreprocessor::new(card).unwrap();
-        let request = parser_route_test_request(ChatCompletionToolChoiceOption::Auto);
-        let constraint = crate::preprocessor::tool_choice::guided_tool_constraint(
-            &request,
-            Some("qwen3_coder"),
-            None,
-            false,
-        )
-        .unwrap();
-        let route = preprocessor
-            .tool_processing_route(&request, &constraint)
-            .unwrap();
-        match std::env::var(MODE).as_deref() {
-            Ok("default") => assert_eq!(
-                route,
-                ToolProcessingRoute::LegacyJail(Some("qwen3_coder".to_string()))
-            ),
-            Ok("opt-in") => assert_eq!(route, ToolProcessingRoute::Unified("qwen3")),
-            value => panic!("unexpected test mode: {value:?}"),
-        }
-    }
-
-    #[test]
     fn experimental_flag_uses_explicit_v2_compatibility_validation() {
         if crate::test_utils::run_isolated(
             concat!(
@@ -10131,106 +11450,6 @@ mod tests {
                 .err()
                 .expect("unsupported V2 configuration must fail");
             assert!(error.to_string().contains("DYN_PARSER_VERSION=2"));
-        }
-    }
-
-    #[test]
-    fn family_defaults_keep_original_routes_for_every_request_mode() {
-        const CHILD: &str = "DYNAMO_PARSER_FAMILY_DEFAULT_MODE_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let output = crate::test_utils::isolated_command(
-                "preprocessor::tests::family_defaults_keep_original_routes_for_every_request_mode",
-            )
-            .env(CHILD, "1")
-            .env_remove(env_llm::DYN_PARSER_VERSION)
-            .env_remove(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2)
-            .output()
-            .unwrap();
-            crate::test_utils::assert_isolated_success(&output);
-            return;
-        }
-
-        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
-        let families = [
-            ("deepseek_v4", "deepseek_v4", "deepseek_v4"),
-            ("deepseek_v41", "deepseek_v41", "deepseek_v41"),
-            ("gemma4", "gemma4", "gemma4"),
-            ("glm47", "glm45", "glm47"),
-            ("kimi_k2", "kimi_k25", "kimi_k2"),
-            ("kimi_k3", "kimi_k3", "kimi_k3"),
-            ("muse", "muse", "muse_glimmer"),
-            ("qwen3_coder", "qwen3", "qwen3"),
-        ];
-        let choices = [
-            ChatCompletionToolChoiceOption::Auto,
-            ChatCompletionToolChoiceOption::None,
-            ChatCompletionToolChoiceOption::Required,
-            serde_json::from_value(
-                serde_json::json!({"type":"function","function":{"name":"get_weather"}}),
-            )
-            .unwrap(),
-        ];
-
-        for (tool, reasoning, family) in families {
-            let mut card = ModelDeploymentCard::load_from_disk(model_path.clone(), None).unwrap();
-            card.runtime_config.tool_call_parser = Some(tool.to_string());
-            card.runtime_config.reasoning_parser = Some(reasoning.to_string());
-            let preprocessor = OpenAIPreprocessor::new(card).unwrap();
-            let is_default_v2 = family == "deepseek_v41";
-            for choice in &choices {
-                for structural_tag in [false, true] {
-                    for has_tools in [true, false] {
-                        let mut request = parser_route_test_request(choice.clone());
-                        if !has_tools {
-                            request.inner.tools = None;
-                        }
-                        let constraint = crate::preprocessor::tool_choice::guided_tool_constraint(
-                            &request,
-                            Some(tool),
-                            Some(reasoning),
-                            structural_tag,
-                        );
-                        let Ok(constraint) = constraint else {
-                            continue;
-                        };
-                        let route = preprocessor
-                            .tool_processing_route(&request, &constraint)
-                            .unwrap();
-                        let is_original_muse_unified = family == "muse_glimmer"
-                            && !structural_tag
-                            && matches!(
-                                choice,
-                                ChatCompletionToolChoiceOption::Auto
-                                    | ChatCompletionToolChoiceOption::None
-                            );
-                        if is_original_muse_unified {
-                            assert_eq!(
-                                route,
-                                ToolProcessingRoute::MuseUnified("muse_glimmer"),
-                                "{tool}/{reasoning} {choice:?} structural_tag={structural_tag} has_tools={has_tools}"
-                            );
-                            continue;
-                        }
-                        if is_default_v2 {
-                            assert_eq!(
-                                route,
-                                ToolProcessingRoute::Unified(family),
-                                "{tool}/{reasoning} {choice:?} structural_tag={structural_tag} has_tools={has_tools}"
-                            );
-                        } else {
-                            assert!(
-                                !matches!(
-                                    route,
-                                    ToolProcessingRoute::Unified(_)
-                                        | ToolProcessingRoute::MuseUnified(_)
-                                ),
-                                "{tool}/{reasoning} {choice:?} structural_tag={structural_tag} has_tools={has_tools}: {route:?}"
-                            );
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -13919,6 +15138,128 @@ mod tests {
         assert!(dynamo_err.to_string().contains("legacy tool-call parsing"));
     }
 
+    /// Records each dispatched prompt's length, then fails before any output.
+    #[derive(Default)]
+    struct PromptRecordingBackend(std::sync::Mutex<Vec<usize>>);
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for PromptRecordingBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            self.0.lock().unwrap().push(request.token_ids.len());
+            anyhow::bail!("stop before any output")
+        }
+    }
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedEmbeddingRequest>,
+            ManyOut<Annotated<EmbeddingsEngineOutput>>,
+            Error,
+        > for PromptRecordingBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedEmbeddingRequest>,
+        ) -> Result<ManyOut<Annotated<EmbeddingsEngineOutput>>, Error> {
+            self.0
+                .lock()
+                .unwrap()
+                .extend(request.token_ids.iter().map(Vec::len));
+            anyhow::bail!("stop before any output")
+        }
+    }
+
+    #[tokio::test]
+    async fn embedding_operator_reports_batched_input_tokens_before_output() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.model_type = crate::model_type::ModelType::Embedding;
+        let preprocessor = OpenAIPreprocessor::new_for_embeddings(mdc).unwrap();
+        let request: NvCreateEmbeddingRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model", "input": [[1, 2, 3], [4, 5]],
+        }))
+        .unwrap();
+        let metrics = Arc::new(crate::http::service::metrics::Metrics::new());
+        let inflight = metrics.clone().create_inflight_guard(
+            "test-model",
+            crate::http::service::metrics::Endpoint::Embeddings,
+            false,
+            "",
+        );
+        let mut context = PipelineContext::new(request);
+        inflight.request_metrics().attach_to(&mut context);
+        let backend = Arc::new(PromptRecordingBackend::default());
+        let Err(error) = Operator::generate(preprocessor.as_ref(), context, backend.clone()).await
+        else {
+            panic!("the recording backend must stop before producing output");
+        };
+        assert_eq!(error.to_string(), "stop before any output");
+        assert_eq!(*backend.0.lock().unwrap(), [3, 2]);
+        assert_eq!(awaiting_first_token_input_tokens(&metrics), 5);
+        drop(inflight);
+        assert_eq!(awaiting_first_token_input_tokens(&metrics), 0);
+    }
+
+    fn awaiting_first_token_input_tokens(metrics: &crate::http::service::metrics::Metrics) -> u64 {
+        let view = crate::discovery::CommittedModelView {
+            name: "test-model".to_string(),
+            is_ready: true,
+            aliases: Vec::new(),
+        };
+        metrics.frontend_load(0, true, vec![view]).models[0]
+            .gauges
+            .awaiting_first_token_input_tokens
+    }
+
+    fn mock_llama_preprocessor() -> Arc<OpenAIPreprocessor> {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    #[tokio::test]
+    async fn chat_operator_reports_prompt_tokens_before_first_output() {
+        let preprocessor = mock_llama_preprocessor();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "What is the weather?"}],
+        }))
+        .unwrap();
+        let metrics = Arc::new(crate::http::service::metrics::Metrics::new());
+        let inflight = metrics.clone().create_inflight_guard(
+            "test-model",
+            crate::http::service::metrics::Endpoint::ChatCompletions,
+            false,
+            "",
+        );
+        let mut context = PipelineContext::new(request);
+        inflight.request_metrics().attach_to(&mut context);
+        let backend = Arc::new(PromptRecordingBackend::default());
+
+        let result = Operator::generate(preprocessor.as_ref(), context, backend.clone()).await;
+
+        assert!(result.is_err());
+        let dispatched = backend.0.lock().unwrap().clone();
+        assert_eq!(dispatched.len(), 1);
+        assert!(dispatched[0] > 0);
+        assert_eq!(
+            awaiting_first_token_input_tokens(&metrics),
+            dispatched[0] as u64
+        );
+    }
+
     fn test_prompt_formatter(template: &str) -> Arc<dyn OAIPromptFormatter> {
         let template: dynamo_renderer::ChatTemplate = serde_json::from_value(serde_json::json!({
             "chat_template": template
@@ -13932,6 +15273,156 @@ mod tests {
         .unwrap()
         {
             dynamo_renderer::PromptFormatter::OAI(formatter) => formatter,
+        }
+    }
+
+    // MiniMax M2 disabled thinking through the renderer adapter: prompt rendering
+    // and preprocessing. The synthetic template spells out the stock generation
+    // block independently of the renderer's matcher.
+
+    const MINIMAX_OPEN_TAIL: &str = "]~b]ai\n<think>\n";
+    const MINIMAX_CLOSED_TAIL: &str = "]~b]ai\n<think>\n</think>\n";
+
+    const MINIMAX_M2_STYLE_TEMPLATE: &str = r"<minimax:tool_call>
+{%- for message in messages -%}
+{{- message.content ~ '\n' }}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+{{- ']~b]ai' ~ '\n' ~ '<think>' ~ '\n' }}
+{%- endif -%}";
+
+    fn minimax_m2_test_preprocessor() -> OpenAIPreprocessor {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.reasoning_parser = Some("minimax_m2".to_string());
+        mdc.runtime_config.tool_call_parser = Some("minimax_m2".to_string());
+        let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap())
+            .unwrap_or_else(|_| panic!("test preprocessor unexpectedly shared"));
+        preprocessor.formatter = test_prompt_formatter(MINIMAX_M2_STYLE_TEMPLATE);
+        preprocessor
+    }
+
+    fn minimax_m2_named_choice() -> serde_json::Value {
+        serde_json::json!({"type": "function", "function": {"name": "calculate"}})
+    }
+
+    fn minimax_m2_request(
+        chat_template_kwargs: serde_json::Value,
+        tool_choice: Option<serde_json::Value>,
+    ) -> NvCreateChatCompletionRequest {
+        let mut request = serde_json::json!({
+            "model": "MiniMaxAI/MiniMax-M2.7",
+            "messages": [{"role": "user", "content": "Use the calculator tool for 937 * 18 + 42."}],
+            "max_tokens": 128,
+            "chat_template_kwargs": chat_template_kwargs,
+            "tools": [{"type": "function", "function": {
+                "name": "calculate",
+                "description": "Evaluate a mathematical expression.",
+                "parameters": {"type": "object", "properties": {
+                    "expression": {"type": "string"}
+                }, "required": ["expression"]}
+            }}]
+        });
+        if let Some(choice) = tool_choice {
+            request["tool_choice"] = choice;
+        }
+        serde_json::from_value(request).unwrap()
+    }
+
+    #[tokio::test]
+    async fn minimax_m2_disabled_thinking_closes_prompt_and_forwards_no_override() {
+        let preprocessor = minimax_m2_test_preprocessor();
+        let choices = [Some(minimax_m2_named_choice()), None];
+        for args in [
+            serde_json::json!({"thinking": false}),
+            serde_json::json!({"enable_thinking": false}),
+            serde_json::json!({"thinking_mode": "chat"}),
+        ] {
+            for choice in &choices {
+                let mut request = minimax_m2_request(args.clone(), choice.clone());
+                OpenAIPreprocessor::normalize_thinking_arg(
+                    &mut request,
+                    Some("minimax_m2"),
+                    Some("minimax_m2"),
+                );
+
+                let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+                assert!(
+                    prompt.as_str().ends_with(MINIMAX_CLOSED_TAIL),
+                    "{args}/{choice:?}: disabled thinking must close the empty block: {:?}",
+                    prompt.as_str()
+                );
+
+                let (mut prepared, _, injected) = preprocessor
+                    .preprocess_request(&request, None)
+                    .await
+                    .unwrap();
+                assert!(!injected.unified, "{args}/{choice:?}");
+                assert!(
+                    prepared
+                        .extra_args
+                        .as_ref()
+                        .and_then(|args| args.get("reasoning_ended"))
+                        .is_none(),
+                    "{args}/{choice:?}: closed prompts do not forward reasoning_ended"
+                );
+                assert!(OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                    Some("minimax_m2"),
+                    request.chat_template_args.as_ref(),
+                ));
+
+                let forced = choice.is_some();
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut prepared, injected.unified)
+                    .unwrap();
+                let guided_json = prepared
+                    .sampling_options
+                    .guided_decoding
+                    .as_ref()
+                    .and_then(|g| g.json.as_ref());
+                assert_eq!(
+                    guided_json.is_some(),
+                    forced,
+                    "{args}/{choice:?}: forced choices install JSON guidance ({constraint:?})"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn minimax_m2_default_and_enabled_thinking_keep_open_prompt() {
+        let preprocessor = minimax_m2_test_preprocessor();
+        for args in [
+            serde_json::json!({}),
+            serde_json::json!({"thinking": true}),
+            serde_json::json!({"enable_thinking": true}),
+        ] {
+            let request = minimax_m2_request(args.clone(), Some(minimax_m2_named_choice()));
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert!(
+                prompt.as_str().ends_with(MINIMAX_OPEN_TAIL),
+                "{args}: {:?}",
+                prompt.as_str()
+            );
+            assert!(!prompt.as_str().contains("</think>"));
+
+            let (prepared, _, injected) = preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .unwrap();
+            assert!(injected.unified, "{args}");
+            assert_eq!(
+                prepared.extra_args.as_ref().unwrap()["reasoning_ended"],
+                false,
+                "{args}: opened prompts keep forwarding reasoning_ended=false"
+            );
+            assert!(!OpenAIPreprocessor::is_reasoning_disabled_by_request(
+                Some("minimax_m2"),
+                request.chat_template_args.as_ref(),
+            ));
         }
     }
 
@@ -14186,6 +15677,7 @@ mod tests {
             inner: &request,
             normalize_tool_call_args: true,
             continue_final_message: true,
+            final_message_start_tag: None,
         };
         assert!(request.typed_messages().is_some());
         assert!(normalized.typed_messages().is_none());
@@ -14228,6 +15720,7 @@ mod tests {
                     inner: request,
                     normalize_tool_call_args: false,
                     continue_final_message: true,
+                    final_message_start_tag: None,
                 })
                 .unwrap()
         } else {

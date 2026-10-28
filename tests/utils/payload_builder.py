@@ -23,6 +23,7 @@ from tests.utils.payloads import (
     EmbeddingPayload,
     GuidedDecodingChatPayload,
     HttpCancellationPayload,
+    ImagesAccountingPayload,
     ImagesPayload,
     ImageTokenMetricsPayload,
     KvEventMetricsPayload,
@@ -37,6 +38,7 @@ from tests.utils.payloads import (
     SGLangGenerateCancellationPayload,
     SGLangGenerateRecoveryPayload,
     SGLangMetricsPayload,
+    StopStringChatPayload,
     StreamingChatPayload,
     TRTLLMMetricsPayload,
     VLLMMetricsPayload,
@@ -722,6 +724,32 @@ def images_payload_default(
     )
 
 
+def images_accounting_payload(
+    n: int = 2,
+    num_inference_steps: int | None = None,
+    repeat_count: int = 1,
+    timeout: int = 60,
+) -> ImagesAccountingPayload:
+    """Image-generation request whose response must carry the accounting
+    contract: ``n`` images in ``data``, null token ``usage``, and
+    ``nvext.usage`` counting the images returned. With ``num_inference_steps``
+    the request asks for that step count and the accounting must echo it."""
+    body: dict[str, Any] = {
+        "prompt": "a red balloon over green hills",
+        "n": n,
+        "response_format": "b64_json",
+    }
+    if num_inference_steps is not None:
+        body["nvext"] = {"num_inference_steps": num_inference_steps}
+    return ImagesAccountingPayload(
+        body=body,
+        expected_response=["iVBOR"],
+        expected_log=[],
+        repeat_count=repeat_count,
+        timeout=timeout,
+    )
+
+
 def make_images_health_check(port: int, model: str):
     def _check_images_endpoint(remaining_timeout: float = 30.0) -> bool:
         payload = images_payload_default(repeat_count=1).with_model(model)
@@ -964,6 +992,34 @@ def http_cancellation_payloads(
             expected_log=[],
             expected_finish_reason="length",
             expected_completion_tokens=4,
+        ),
+    ]
+
+
+def stop_string_payloads(metrics: EngineMetrics | None) -> list[BasePayload]:
+    """End on a stop string, once keeping it and once trimming it.
+
+    With metrics, the trimming request also checks that the engine stops at
+    the match. It cannot use ignore_eos, which drops stop strings; Qwen3's
+    thinking for this prompt runs past max_tokens instead, so an engine that
+    misses the cancel generates all of them.
+    """
+    body = {
+        "messages": [{"role": "user", "content": "Can you write me a song?"}],
+        "temperature": 0,
+        "stop": ["song"],
+    }
+    return [
+        StopStringChatPayload(
+            body={**body, "max_tokens": 32, "include_stop_str_in_output": True},
+            expected_response=["song"],
+            expected_log=[],
+        ),
+        StopStringChatPayload(
+            body={**body, "max_tokens": 256},
+            expected_response=[],
+            expected_log=[],
+            metrics=metrics,
         ),
     ]
 

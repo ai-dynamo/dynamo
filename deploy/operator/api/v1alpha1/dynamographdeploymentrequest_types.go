@@ -137,29 +137,26 @@ type DeploymentOverridesSpec struct {
 	WorkersImage string `json:"workersImage,omitempty"`
 }
 
-// DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
-// This CRD serves as the primary interface for users to request model deployments with
-// specific performance constraints and resource requirements, enabling SLA-driven deployments.
-type DynamoGraphDeploymentRequestSpec struct {
+// DynamoGraphDeploymentRequestNativeSpec contains the native v1alpha1 request fields.
+type DynamoGraphDeploymentRequestNativeSpec struct {
 	// Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
 	// This is a high-level identifier for easy reference in kubectl output and logs.
 	// The controller automatically sets this value in profilingConfig.config.deployment.model.
-	// +kubebuilder:validation:Required
-	Model string `json:"model"`
+	// +optional
+	Model string `json:"model,omitempty"`
 
 	// Backend specifies the inference backend for profiling.
 	// The controller automatically sets this value in profilingConfig.config.engine.backend.
 	// Profiling runs on real GPUs or via AIC simulation to collect performance data.
-	// +kubebuilder:validation:Required
+	// +optional
 	// +kubebuilder:validation:Enum=auto;vllm;sglang;trtllm
-	Backend string `json:"backend"`
+	Backend string `json:"backend,omitempty"`
 
 	// UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of
 	// a real backend deployment. When true, the deployment uses simulated engines that
 	// don't require GPUs, using the profiling data to simulate realistic timing behavior.
 	// Mocker is available in all backend images and useful for large-scale experiments.
 	// Profiling still runs against the real backend (specified above) to collect performance data.
-	// +kubebuilder:default=false
 	UseMocker bool `json:"useMocker,omitempty"`
 
 	// ProfilingConfig provides the complete configuration for the profiling job.
@@ -173,8 +170,8 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).
 	// Note: deployment.model and engine.backend are automatically set from the high-level
 	// modelName and backend fields and should not be specified in this config.
-	// +kubebuilder:validation:Required
-	ProfilingConfig ProfilingConfigSpec `json:"profilingConfig"`
+	// +optional
+	ProfilingConfig *ProfilingConfigSpec `json:"profilingConfig,omitempty"`
 
 	// RuntimeVersionOverride explicitly sets the Dynamo runtime version for every
 	// component in the generated DynamoGraphDeployment. Set this when
@@ -190,19 +187,38 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// GPU hardware when node read permissions are available. If discovery is unavailable (e.g., namespace-scoped
 	// operator without permissions), manual hardware configuration is required regardless of this setting.
 	// +optional
-	// +kubebuilder:default=true
 	EnableGPUDiscovery *bool `json:"enableGpuDiscovery,omitempty"`
 
 	// AutoApply indicates whether to automatically create a DynamoGraphDeployment
 	// after profiling completes. If false, only the spec is generated and stored in status.
 	// Users can then manually create a DGD using the generated spec.
-	// +kubebuilder:default=false
 	AutoApply bool `json:"autoApply,omitempty"`
 
 	// DeploymentOverrides allows customizing metadata for the auto-created DGD.
 	// Only applicable when AutoApply is true.
 	// +kubebuilder:validation:Optional
 	DeploymentOverrides *DeploymentOverridesSpec `json:"deploymentOverrides,omitempty"`
+}
+
+// DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
+// This CRD serves as the primary interface for users to request model deployments with
+// specific performance constraints and resource requirements, enabling SLA-driven deployments.
+// Native v1alpha1 fields and the V1Beta2 conversion envelope are mutually exclusive.
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) != has(self.model)",message="exactly one of native v1alpha1 fields or v1beta2 must be specified"
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) || (has(self.backend) && has(self.profilingConfig))",message="native v1alpha1 requests require backend and profilingConfig"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.backend) || has(self.useMocker) || has(self.profilingConfig) || has(self.runtimeVersionOverride) || has(self.enableGpuDiscovery) || has(self.autoApply) || has(self.deploymentOverrides))",message="v1beta2 is mutually exclusive with native v1alpha1 fields"
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) == has(oldSelf.v1beta2) && (!has(self.v1beta2) || self.v1beta2 == oldSelf.v1beta2)",message="the conversion carrier is immutable"
+type DynamoGraphDeploymentRequestSpec struct {
+	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`
+
+	// V1Beta2 losslessly preserves a native v1beta2 spec while this object is
+	// represented through v1alpha1. It is mutually exclusive with native fields.
+	// This field is a read-only conversion view; modify the request through the
+	// native v1beta2 API.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	V1Beta2 *apiextensionsv1.JSON `json:"v1beta2,omitempty"`
 }
 
 // DeploymentStatus tracks the state of an auto-created DynamoGraphDeployment.
@@ -224,12 +240,11 @@ type DeploymentStatus struct {
 	Created bool `json:"created,omitempty"`
 }
 
-// DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
-// The controller updates this status as the DGDR progresses through its lifecycle.
-type DynamoGraphDeploymentRequestStatus struct {
+// DynamoGraphDeploymentRequestNativeStatus contains the native v1alpha1 status fields.
+type DynamoGraphDeploymentRequestNativeStatus struct {
 	// State is a high-level textual status of the deployment request lifecycle.
-	// +kubebuilder:default=Initializing
-	State DGDRState `json:"state"`
+	// +optional
+	State DGDRState `json:"state,omitempty"`
 
 	// Backend is extracted from profilingConfig.config.engine.backend for display purposes.
 	// This field is populated by the controller and shown in kubectl output.
@@ -266,6 +281,20 @@ type DynamoGraphDeploymentRequestStatus struct {
 	Deployment *DeploymentStatus `json:"deployment,omitempty"`
 }
 
+// DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
+// The controller updates this status as the DGDR progresses through its lifecycle.
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.state) || has(self.backend) || has(self.observedGeneration) || has(self.conditions) || has(self.profilingResults) || has(self.generatedDeployment) || has(self.deployment))",message="v1beta2 is mutually exclusive with native v1alpha1 status fields"
+type DynamoGraphDeploymentRequestStatus struct {
+	DynamoGraphDeploymentRequestNativeStatus `json:",inline"`
+
+	// V1Beta2 losslessly preserves a native v1beta2 status while this object is
+	// represented through v1alpha1.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	V1Beta2 *apiextensionsv1.JSON `json:"v1beta2,omitempty"`
+}
+
 // DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.
 // It serves as the primary interface for users to request model deployments with
 // specific performance and resource constraints, enabling SLA-driven deployments.
@@ -294,6 +323,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
 // +kubebuilder:printcolumn:name="DGD-State",type=string,JSONPath=`.status.deployment.state`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !(has(self.status.v1beta2) || has(self.status.state) || has(self.status.backend) || has(self.status.observedGeneration) || has(self.status.conditions) || has(self.status.profilingResults) || has(self.status.generatedDeployment) || has(self.status.deployment)) || has(self.spec.v1beta2) == has(self.status.v1beta2)",message="nonempty status must use the representation selected by spec"
 type DynamoGraphDeploymentRequest struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

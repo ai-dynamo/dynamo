@@ -30,8 +30,8 @@ func testCanonicalLPXConfig() *v1beta1.LPXConfig {
 
 func testLPXRoleTemplate(image string) corev1.PodTemplateSpec {
 	return corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"role": image}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: image}}},
+		Labels: map[string]string{"role": image},
+		Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: image}}},
 	}
 }
 
@@ -51,7 +51,7 @@ func TestDynamoGraphDeploymentRoleShapesRoundTrip(t *testing.T) {
 				{
 					Name:        v1beta1.ComponentRoleLPXAgent,
 					Replicas:    ptr.To[int32](3),
-					PodTemplate: ptr.To(testLPXRoleTemplate("agent")),
+					PodTemplate: new(testLPXRoleTemplate("agent")),
 				},
 			},
 			beta: []v1beta1.ComponentRoleSpec{
@@ -59,7 +59,7 @@ func TestDynamoGraphDeploymentRoleShapesRoundTrip(t *testing.T) {
 				{
 					Name:        v1beta1.ComponentRoleLPXAgent,
 					Replicas:    ptr.To[int32](3),
-					PodTemplate: ptr.To(testLPXRoleTemplate("agent")),
+					PodTemplate: new(testLPXRoleTemplate("agent")),
 				},
 			},
 		},
@@ -97,7 +97,7 @@ func TestDynamoGraphDeploymentRoleShapesRoundTrip(t *testing.T) {
 func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 	transitionTime := metav1.NewTime(time.Unix(1_800_000_000, 0))
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "lpx", Namespace: "ns"},
+		Name: "lpx", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "lpx",
@@ -105,7 +105,7 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 				LPX:           testCanonicalLPXConfig(),
 				Roles: []v1beta1.ComponentRoleSpec{
 					{Name: v1beta1.ComponentRoleLPXConductor, Replicas: ptr.To[int32](2)},
-					{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: ptr.To(testLPXRoleTemplate("agent"))},
+					{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: new(testLPXRoleTemplate("agent"))},
 				},
 			}},
 		},
@@ -132,7 +132,7 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 	}
 	wantAlphaRoles := []ComponentRoleSpec{
 		{Name: v1beta1.ComponentRoleLPXConductor, Replicas: ptr.To[int32](2)},
-		{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: ptr.To(testLPXRoleTemplate("agent"))},
+		{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: new(testLPXRoleTemplate("agent"))},
 	}
 	if diff := cmp.Diff(wantAlphaRoles, service.Roles); diff != "" {
 		t.Fatalf("LPX role order or optional fields changed in alpha (-want +got):\n%s", diff)
@@ -144,7 +144,7 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 	*service.LPX.Scheduling.AttemptDeadlineSeconds = 600
 	service.Roles = []ComponentRoleSpec{
 		*service.Roles[1].DeepCopy(),
-		{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: ptr.To(testLPXRoleTemplate("conductor"))},
+		{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: new(testLPXRoleTemplate("conductor"))},
 	}
 
 	got := &v1beta1.DynamoGraphDeployment{}
@@ -156,8 +156,8 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 		t.Fatalf("alpha LPX edit was lost: %#v", component)
 	}
 	wantBetaRoles := []v1beta1.ComponentRoleSpec{
-		{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: ptr.To(testLPXRoleTemplate("agent"))},
-		{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: ptr.To(testLPXRoleTemplate("conductor"))},
+		{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: new(testLPXRoleTemplate("agent"))},
+		{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: new(testLPXRoleTemplate("conductor"))},
 	}
 	if diff := cmp.Diff(wantBetaRoles, component.Roles); diff != "" {
 		t.Fatalf("authored alpha role edits did not survive conversion (-want +got):\n%s", diff)

@@ -104,6 +104,24 @@ def test_factory_propagates_request_timeout():
     assert t.timeout_seconds == 12.5
 
 
+def test_factory_without_in_process_timeout_bounds_only_grpc():
+    # Replay: an in-process call takes no simulated time, so it runs to
+    # completion; a remote gRPC plugin keeps its deadline.
+    cfg = TransportConfig(request_timeout_seconds=12.5, allow_insecure_grpc=True)
+    inproc = make_transport_for_endpoint(
+        "p",
+        "inproc://p",
+        cfg,
+        in_process_instance=_StubPlugin(),
+        in_process_timeout=False,
+    )
+    grpc = make_transport_for_endpoint(
+        "g", "grpc://host:9090", cfg, in_process_timeout=False
+    )
+    assert inproc.timeout_seconds is None
+    assert grpc.timeout_seconds == 12.5
+
+
 def test_factory_propagates_grpc_channel_knobs():
     """``TransportConfig.keepalive_time_ms`` and
     ``TransportConfig.max_message_size_bytes`` must be plumbed through

@@ -150,6 +150,12 @@ pub(crate) struct RemovedDiscoveryGroup {
     pub(crate) cards: Vec<ModelDeploymentCard>,
 }
 
+pub(crate) struct CommittedModelView {
+    pub(crate) name: String,
+    pub(crate) is_ready: bool,
+    pub(crate) aliases: Vec<String>,
+}
+
 /// Central manager for model engines, routing, and configuration.
 ///
 /// Models are stored hierarchically: ModelManager → Model → WorkerSet.
@@ -503,6 +509,34 @@ impl ModelManager {
 
     pub(crate) fn get_committed_model(&self, model_name: &str) -> Option<Arc<Model>> {
         self.catalog.load().models.get(model_name).cloned()
+    }
+
+    /// Committed primary models with their aliases, sorted by name.
+    pub(crate) fn committed_model_views(&self) -> Vec<CommittedModelView> {
+        let catalog = self.catalog.load();
+        let mut aliases_by_primary = HashMap::<&str, Vec<String>>::new();
+        for (alias, primary) in catalog.aliases.iter() {
+            aliases_by_primary
+                .entry(primary)
+                .or_default()
+                .push(alias.clone());
+        }
+        let mut views = catalog
+            .models
+            .iter()
+            .filter(|(name, _)| !catalog.aliases.contains_key(name.as_str()))
+            .map(|(name, model)| {
+                let mut aliases = aliases_by_primary.remove(name.as_str()).unwrap_or_default();
+                aliases.sort_unstable();
+                CommittedModelView {
+                    name: name.clone(),
+                    is_ready: model.is_ready_to_serve(),
+                    aliases,
+                }
+            })
+            .collect::<Vec<_>>();
+        views.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        views
     }
 
     fn get_model_internal(&self, model_name: &str) -> Option<Arc<Model>> {
@@ -1483,6 +1517,20 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_images_engine()
+    }
+
+    /// Resolve the model before applying its WorkerSet-level edit admission policy.
+    pub(crate) fn select_image_edit_engine(
+        &self,
+        model: &str,
+        count: usize,
+    ) -> Result<Option<super::image_edits::ImageEngineSelection>, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .select_image_edit_engine(count)
     }
 
     pub fn get_videos_engine(
@@ -3392,6 +3440,65 @@ mod tests {
     }
 
     #[test]
+    fn committed_model_views_collapse_aliases_onto_the_primary() {
+        let mm = ModelManager::new();
+        let worker_set = Arc::new(make_worker_set("ns1", "abc"));
+        assert!(mm.add_worker_set_arc("llama", "ns1", worker_set.clone()));
+        assert!(mm.register_alias("llama-alias", "llama"));
+        assert!(mm.add_worker_set_arc("llama-alias", "ns1", worker_set.clone()));
+        assert!(mm.register_alias("a-llama", "llama"));
+        assert!(mm.add_worker_set_arc("a-llama", "ns1", worker_set));
+        let other = Arc::new(make_worker_set("ns1", "def"));
+        assert!(mm.add_worker_set_arc("granite", "ns1", other));
+
+        let views = mm.committed_model_views();
+        let views = views
+            .iter()
+            .map(|view| (view.name.as_str(), view.aliases.as_slice()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            views,
+            [
+                ("granite", &[][..]),
+                (
+                    "llama",
+                    &["a-llama".to_string(), "llama-alias".to_string()][..]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn alias_requests_publish_frontend_load_under_the_primary_model() {
+        use crate::http::service::metrics::{Endpoint, Metrics};
+
+        let mm = ModelManager::new();
+        let worker_set = Arc::new(make_worker_set("ns1", "abc"));
+        assert!(mm.add_worker_set_arc("llama", "ns1", worker_set.clone()));
+        assert!(mm.register_alias("llama-alias", "llama"));
+        assert!(mm.add_worker_set_arc("llama-alias", "ns1", worker_set));
+
+        // Handlers that do not rewrite the request model track it under the alias.
+        let metric_model = mm.metric_model_for("llama-alias");
+        assert_eq!(metric_model, "llama-alias");
+
+        let metrics = Arc::new(Metrics::new());
+        let _alias =
+            metrics
+                .clone()
+                .create_inflight_guard(metric_model, Endpoint::Embeddings, false, "");
+        let _primary =
+            metrics
+                .clone()
+                .create_inflight_guard("llama", Endpoint::Embeddings, false, "");
+        let frame = metrics.frontend_load(0, true, mm.committed_model_views());
+        assert_eq!(frame.models.len(), 1);
+        assert_eq!(frame.models[0].model, "llama");
+        assert_eq!(frame.models[0].totals.requests_started, 2);
+        assert_eq!(frame.models[0].gauges.requests_awaiting_first_token, 2);
+    }
+
+    #[test]
     fn test_register_alias_rejects_primary_collision() {
         let mm = ModelManager::new();
         mm.add_worker_set("llama-alias", "ns1", make_worker_set("ns1", "abc"));
@@ -3784,11 +3891,50 @@ mod tests {
     fn capture_events<T>(body: impl FnOnce() -> T) -> (T, Vec<CapturedEvent>) {
         use tracing_subscriber::layer::SubscriberExt;
 
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
         let out = tracing::subscriber::with_default(subscriber, body);
         let events = captured.lock().unwrap().clone();
         (out, events)
+    }
+
+    #[test]
+    fn capture_events_keeps_interest_when_another_thread_registers_the_callsite() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::capture_events_keeps_interest_when_another_thread_registers_the_callsite"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        fn shared_callsite() {
+            tracing::info!("capture interest probe");
+        }
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let first_logged = Arc::new(std::sync::Barrier::new(2));
+        let worker_ready = Arc::clone(&ready);
+        let worker_first_logged = Arc::clone(&first_logged);
+        let worker = std::thread::spawn(move || {
+            capture_events(|| {
+                worker_ready.wait();
+                worker_first_logged.wait();
+                shared_callsite();
+            })
+        });
+        ready.wait();
+        shared_callsite();
+        first_logged.wait();
+        let (_, events) = worker.join().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.message == "capture interest probe")
+                .count(),
+            1
+        );
     }
 
     fn alias_claim_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {

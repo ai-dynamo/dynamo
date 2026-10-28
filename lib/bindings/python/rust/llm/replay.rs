@@ -15,13 +15,14 @@ use dynamo_mocker::loadgen::{
     TraceFileFormat, WekaImportOptions, WekaNestedTimestampBasis, WekaResolvedTimestampBasis,
 };
 use dynamo_mocker::replay::{
-    AgenticReplayOptions, ReplayArgsMode, ReplayRuntimeObservers, ReplayScalingDecision,
-    ReplayScalingPolicy, ReplayScalingSnapshot, ReplayTelemetryObserver, ReplayTelemetryOptions,
-    ReplayTelemetrySnapshot,
+    AgenticReplayOptions, ReplayArgsMode, ReplayDeterminism, ReplayRouterControls,
+    ReplayRouterParameters, ReplayRuntimeObservers, ReplayScalingDecision, ReplayScalingPolicy,
+    ReplayScalingSnapshot, ReplayScope, ReplayTelemetryObserver, ReplayTelemetryOptions,
+    ReplayTelemetrySnapshot, with_replay_scope,
 };
 use parking_lot::Mutex;
 use pyo3::{
-    exceptions::{PyException, PyTypeError, PyValueError},
+    exceptions::{PyException, PyKeyError, PyTypeError, PyValueError},
     prelude::*,
 };
 use pythonize::pythonize;
@@ -241,7 +242,7 @@ fn replay_paths_equal(left: &Path, right: &Path) -> bool {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, kv_event_lag_ms=None, agentic_snapshot=None, agentic_warmup=false, agentic_profile=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, ais_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None, weka_nested_timestamp_basis=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None, kv_event_lag_ms=None, agentic_snapshot=None, agentic_warmup=false, agentic_profile=None, deterministic=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -282,6 +283,7 @@ pub fn run_mocker_trace_replay(
     agentic_snapshot: Option<&Bound<'_, PyAny>>,
     agentic_warmup: bool,
     agentic_profile: Option<&Bound<'_, PyAny>>,
+    deterministic: bool,
 ) -> PyResult<PyObject> {
     let kv_event_lag_ms = validate_kv_event_lag_ms(kv_event_lag_ms, replay_mode, router_mode)?;
     if telemetry_jsonl_path.as_deref().is_some_and(|path| {
@@ -303,6 +305,11 @@ pub fn run_mocker_trace_replay(
     if capture_per_request && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "capture_per_request only supports replay_mode='offline'",
+        ));
+    }
+    if deterministic && replay_mode != "offline" {
+        return Err(PyValueError::new_err(
+            "deterministic only supports replay_mode='offline'",
         ));
     }
     let args_selection = load_replay_args_selection(
@@ -624,8 +631,22 @@ pub fn run_mocker_trace_replay(
         }
         .map(|report| (report, None))
     };
+    let scope = ReplayScope {
+        kv_event_lag_ms,
+        router_controls: None,
+        determinism: if deterministic {
+            ReplayDeterminism::CanonicalV1
+        } else {
+            ReplayDeterminism::Random
+        },
+    };
     let report_result = if let Some(callback) = scaling_policy {
-        dynamo_mocker::replay::with_kv_event_lag_ms(kv_event_lag_ms, || {
+        let router_controls = ReplayRouterControls::new();
+        let scope = ReplayScope {
+            router_controls: Some(router_controls.clone()),
+            ..scope
+        };
+        with_replay_scope(scope, || {
             run(
                 Some(Box::new(PyReplayScalingPolicy {
                     callback,
@@ -633,6 +654,7 @@ pub fn run_mocker_trace_replay(
                     callback_error: scaling_callback_error
                         .clone()
                         .expect("scaling error slot exists with callback"),
+                    router_controls,
                 })),
                 telemetry,
             )
@@ -640,8 +662,7 @@ pub fn run_mocker_trace_replay(
         .and_then(|result| result)
     } else {
         py.allow_threads(move || {
-            dynamo_mocker::replay::with_kv_event_lag_ms(kv_event_lag_ms, || run(None, telemetry))
-                .and_then(|result| result)
+            with_replay_scope(scope, || run(None, telemetry)).and_then(|result| result)
         })
     };
     // Always finish the sink so buffered I/O errors are observed even when the
@@ -1234,8 +1255,17 @@ pub fn run_mocker_synthetic_trace_replay(
             }
         }
     };
+    let scope = ReplayScope {
+        kv_event_lag_ms,
+        ..Default::default()
+    };
     let report_result = if let Some(callback) = scaling_policy {
-        dynamo_mocker::replay::with_kv_event_lag_ms(kv_event_lag_ms, || {
+        let router_controls = ReplayRouterControls::new();
+        let scope = ReplayScope {
+            router_controls: Some(router_controls.clone()),
+            ..scope
+        };
+        with_replay_scope(scope, || {
             run(
                 Some(Box::new(PyReplayScalingPolicy {
                     callback,
@@ -1243,6 +1273,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     callback_error: scaling_callback_error
                         .clone()
                         .expect("scaling error slot exists with callback"),
+                    router_controls,
                 })),
                 telemetry,
             )
@@ -1250,8 +1281,7 @@ pub fn run_mocker_synthetic_trace_replay(
         .and_then(|result| result)
     } else {
         py.allow_threads(move || {
-            dynamo_mocker::replay::with_kv_event_lag_ms(kv_event_lag_ms, || run(None, telemetry))
-                .and_then(|result| result)
+            with_replay_scope(scope, || run(None, telemetry)).and_then(|result| result)
         })
     };
     // Always finish the sink so buffered I/O errors are observed even when the
@@ -1794,6 +1824,7 @@ fn build_synthetic_workload(
         },
         seed: 42,
         arrival_seed,
+        images: None,
     })
 }
 
@@ -2113,12 +2144,74 @@ impl PyCallbackErrorSlot {
     }
 }
 
+/// Read the optional `router_parameters` key of a scaling decision. A missing key and `None` both
+/// leave the routers unchanged.
+fn decision_router_parameters(
+    decision: &Bound<'_, PyAny>,
+) -> PyResult<Option<ReplayRouterParameters>> {
+    let value = match decision.get_item("router_parameters") {
+        Ok(value) if !value.is_none() => value,
+        Ok(_) => return Ok(None),
+        Err(error) if error.is_instance_of::<PyKeyError>(decision.py()) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    value.extract().map(Some).map_err(|error| {
+        PyTypeError::new_err(format!(
+            "router_parameters must be a dict[str, dict[str, float]] or None: {error}"
+        ))
+    })
+}
+
 /// Adapts a Python object to [`ReplayScalingPolicy`]. The high-level replay call
 /// keeps the GIL for Python-backed scaling, so each tick is a cheap re-entry.
+///
+/// Besides the three mandatory decision keys, `on_tick` may return `router_parameters`: desired
+/// default-policy parameters keyed by worker type (`aggregated`, `prefill` or `decode`). They are
+/// applied to the replay's KV routers at the tick's virtual time, before the next routing
+/// decision. Values equal to the current parameters are a no-op.
 struct PyReplayScalingPolicy {
     callback: Py<PyAny>,
     capture_lifecycle_evidence: bool,
     callback_error: PyCallbackErrorSlot,
+    /// The KV routers this replay registered.
+    router_controls: ReplayRouterControls,
+}
+
+impl PyReplayScalingPolicy {
+    /// Revision and resolved parameters of each registered router, reported to `on_tick` as
+    /// `router_policies` before this tick's decision is applied. Omitted without KV routers.
+    fn router_policies(&self) -> anyhow::Result<Option<serde_json::Value>> {
+        let policies = self.router_controls.runtime_configs()?;
+        if policies.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::Value::Array(
+            policies
+                .into_iter()
+                .map(|(worker_type, config)| {
+                    json!({
+                        "worker_type": worker_type.as_str(),
+                        "revision": config.revision(),
+                        "parameters": config.parameters(),
+                    })
+                })
+                .collect(),
+        )))
+    }
+
+    fn apply_router_parameters(
+        &self,
+        desired: &ReplayRouterParameters,
+        now_ms: f64,
+    ) -> PyResult<()> {
+        dynamo_mocker::replay::apply_router_parameters(&self.router_controls, desired)
+            .map(|_| ())
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+                    "failed to apply router_parameters at {now_ms} ms: {error:#}"
+                ))
+            })
+    }
 }
 
 impl ReplayScalingPolicy for PyReplayScalingPolicy {
@@ -2157,11 +2250,12 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
             draining_decode_ids,
         } = snapshot;
         let result = Python::with_gil(|py| -> PyResult<ReplayScalingDecision> {
+            let router_policies = self.router_policies().map_err(to_pyerr)?;
             let non_draining_prefill_count = active_prefill_ids.len() + starting_prefill_ids.len();
             let non_draining_decode_count = active_decode_ids.len() + starting_decode_ids.len();
             let total_prefill_count = non_draining_prefill_count + draining_prefill_ids.len();
             let total_decode_count = non_draining_decode_count + draining_decode_ids.len();
-            let metrics_json = json!({
+            let mut metrics_json = json!({
                 "tick_ordinal": tick_ordinal,
                 "now_ms": now_ms,
                 "prefill_fpm_snapshots": fpm_snapshots_to_json(prefill_fpm),
@@ -2203,16 +2297,23 @@ impl ReplayScalingPolicy for PyReplayScalingPolicy {
                     "accept_length_forward_count": traffic.accept_length_forward_count,
                 },
             });
+            if let Some(router_policies) = router_policies {
+                metrics_json["router_policies"] = router_policies;
+            }
             let metrics_obj = pythonize(py, &metrics_json).map_err(to_pyerr)?;
             let decision = self
                 .callback
                 .bind(py)
                 .call_method1("on_tick", (metrics_obj,))?;
-            Ok(ReplayScalingDecision {
+            let scaling = ReplayScalingDecision {
                 target_prefill: decision.get_item("target_prefill")?.extract()?,
                 target_decode: decision.get_item("target_decode")?.extract()?,
                 next_tick_ms: decision.get_item("next_tick_ms")?.extract()?,
-            })
+            };
+            if let Some(desired) = decision_router_parameters(&decision)? {
+                self.apply_router_parameters(&desired, now_ms)?;
+            }
+            Ok(scaling)
         });
         if let Err(error) = &result {
             Python::with_gil(|py| self.callback_error.record(py, error));
