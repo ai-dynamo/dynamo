@@ -118,7 +118,7 @@ impl RoutingStats {
                     "served_per_s": timing.map(|timing| timing.served_per_s),
                     "occupancy": occupancy.map(|occupancy| occupancy.load),
                     "slot_occupancy": occupancy.map(|occupancy| occupancy.slots),
-                    "kv_occupancy": occupancy.map(|occupancy| occupancy.kv),
+                    "kv_occupancy": occupancy.and_then(|occupancy| occupancy.kv),
                     "round_trip_ms": signals
                         .round_trip(&pool.id)
                         .map(|round_trip| round_trip.as_secs_f64() * 1000.0),

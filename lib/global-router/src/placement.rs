@@ -28,8 +28,9 @@ pub enum LoadMeasure {
     Latency,
     /// How full a pool is against its own capacity, 1 being full: the
     /// fuller of its request slots and its KV blocks (see
-    /// [`PoolSignals::occupancy`]). It compares pools of any speed or size,
-    /// and a pool counts as overloaded only when it is full.
+    /// [`PoolSignals::occupancy`]; the slots alone until the pool's KV is
+    /// known). It compares pools of any speed or size, and a pool counts as
+    /// overloaded only when it is full.
     Occupancy,
 }
 

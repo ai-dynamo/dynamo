@@ -78,8 +78,9 @@ pub struct PoolOccupancy {
     /// Requests in flight over the requests the pool can run at once.
     pub slots: f64,
     /// The KV blocks all requests in flight would hold, at the blocks each
-    /// running request holds now, over the pool's KV blocks.
-    pub kv: f64,
+    /// running request holds now, over the pool's KV blocks. `None` until
+    /// the Relay has a complete KV view of the pool.
+    pub kv: Option<f64>,
 }
 
 /// What the router knows about each pool besides the catalog: its load, as
@@ -239,31 +240,36 @@ impl PoolSignals {
     /// [`Self::load`]. The KV side counts waiting requests too, at the blocks
     /// each running request holds now, so it reaches 1 when the pool's KV
     /// cannot hold everything it has, even though the blocks in use never
-    /// exceed the total. `None` without fresh reports of both, or before the
-    /// workers report how many requests they can run.
+    /// exceed the total. Workers report KV only when it changes, so a pool
+    /// that has had no traffic may have no KV view yet; its KV is then
+    /// empty in practice, and its slots alone say how full it is. `None`
+    /// without a fresh load report, or before the workers report how many
+    /// requests they can run.
     pub fn occupancy(&self, pool: &PoolId) -> Option<PoolOccupancy> {
         let report = self
             .loads
             .get(pool)
             .filter(|report| report.received.elapsed() <= self.max_age)?;
         let capacity = report.max_concurrency.filter(|capacity| *capacity > 0)?;
-        let kv = self
-            .kv
-            .get(pool)
-            .filter(|kv| kv.received.elapsed() <= self.max_age && kv.total > 0)?;
         let in_flight = (report.load.in_flight
             + self.in_flight.started(pool).saturating_sub(report.started))
             as f64;
         let generating = report.samples.back().map_or(0, |sample| sample.generating) as f64;
         let slots = in_flight / capacity as f64;
-        let held = if generating > 0.0 {
-            kv.used as f64 * in_flight.max(generating) / generating
-        } else {
-            kv.used as f64
-        };
-        let kv = held / kv.total as f64;
+        let kv = self
+            .kv
+            .get(pool)
+            .filter(|kv| kv.received.elapsed() <= self.max_age && kv.total > 0)
+            .map(|kv| {
+                let held = if generating > 0.0 {
+                    kv.used as f64 * in_flight.max(generating) / generating
+                } else {
+                    kv.used as f64
+                };
+                held / kv.total as f64
+            });
         Some(PoolOccupancy {
-            load: slots.max(kv),
+            load: kv.map_or(slots, |kv| slots.max(kv)),
             slots,
             kv,
         })
@@ -557,14 +563,16 @@ mod tests {
         report.awaiting = 32;
         report.max_concurrency = Some(128);
         signals.record_load(&blue, report);
-        assert_eq!(signals.occupancy(&blue), None);
+        // No KV view yet: the slots alone.
+        let occupancy = signals.occupancy(&blue).unwrap();
+        assert_eq!((occupancy.load, occupancy.kv), (0.5, None));
 
         // Slot-bound: half the slots, and 1,000 of 16,384 KV blocks for 32
         // running requests (2,000 for all 64).
         signals.record_kv(&blue, 1000, 16384);
         let occupancy = signals.occupancy(&blue).unwrap();
         assert_eq!(occupancy.slots, 0.5);
-        assert!((occupancy.kv - 2000.0 / 16384.0).abs() < 1e-12);
+        assert!((occupancy.kv.unwrap() - 2000.0 / 16384.0).abs() < 1e-12);
         assert_eq!(occupancy.load, 0.5);
 
         // KV-bound: 8,000 blocks for 32 running requests; all 64 would need
@@ -577,8 +585,10 @@ mod tests {
         let _sent = [in_flight.start(&blue), in_flight.start(&blue)];
         assert!((signals.occupancy(&blue).unwrap().slots - 66.0 / 128.0).abs() < 1e-12);
 
-        // Without the workers' capacity, or a KV report, nothing is known.
-        signals.forget_kv(&blue);
+        // Without the workers' capacity, nothing is known.
+        let mut unknown = generating(1000, 32, 0, 0);
+        unknown.max_concurrency = None;
+        signals.record_load(&blue, unknown);
         assert_eq!(signals.occupancy(&blue), None);
     }
 
