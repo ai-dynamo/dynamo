@@ -19,7 +19,9 @@
 // AISimulate recommendation input consumed by `aisimulate recommend --stack dynamo`.
 //
 // Admission and reconciliation use the same lowering. Admission runs it after structural
-// validation so malformed overrides and unmappable typed values fail before persistence. The
+// validation, then validates the complete merged input against the Pydantic-generated JSON
+// Schema for the pinned AISimulate release. Unchanged specs may still receive metadata
+// updates after the bundled schema changes; any spec edit requires a fully valid input. The
 // Request reconciler snapshots the accepted input into an immutable Run. The Run reconciler
 // lowers that snapshot once, records the result in status.aisimulate.input and passes the same
 // document to the Job.

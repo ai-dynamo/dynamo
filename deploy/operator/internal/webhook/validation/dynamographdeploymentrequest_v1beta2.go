@@ -19,10 +19,13 @@ package validation
 
 import (
 	"encoding/json"
+	"errors"
 
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/aisimulate"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -30,9 +33,11 @@ import (
 // spec.v1beta2 of a v1beta1 object. raw is that field and fldPath is its path; a spec that
 // does not decode is reported there. Errors about the decoded spec use the v1beta2 spec's own
 // field paths (spec.model, spec.aisimulate, ...), which are what the user wrote, so they are
-// rooted at spec rather than at fldPath.
+// rooted at spec rather than at fldPath. oldRaw is nil on CREATE; on UPDATE an
+// unchanged complete typed spec ratchets only the generated input-schema check.
 func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRequestEnvelopeV1beta2(
 	raw *apiextensionsv1.JSON,
+	oldRaw *apiextensionsv1.JSON,
 	fldPath *field.Path,
 ) field.ErrorList {
 	var spec nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
@@ -41,12 +46,30 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	}
 
 	allErrs := v.validateDynamoGraphDeploymentRequestSpecV1beta2(&spec, field.NewPath("spec"))
-	if _, err := aisimulate.Lower(&spec.NativeSearchInput); err != nil {
+	input, err := aisimulate.Lower(&spec.NativeSearchInput)
+	if err != nil {
 		allErrs = append(allErrs, field.Invalid(
 			field.NewPath("spec"),
 			"<redacted>",
 			"cannot be lowered to the public AISimulate recommendation input: "+err.Error(),
 		))
+		return allErrs
+	}
+
+	// A schema upgrade must not prevent metadata updates to persisted requests.
+	// Any spec change, including fields outside the lowered input, requires full repair.
+	if oldRaw != nil {
+		var oldSpec nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
+		if json.Unmarshal(oldRaw.Raw, &oldSpec) == nil && apiequality.Semantic.DeepEqual(&spec, &oldSpec) {
+			return allErrs
+		}
+	}
+	if err := aisimulate.ValidateInput(input); err != nil {
+		var schemaErr *jsonschema.ValidationError
+		if !errors.As(err, &schemaErr) {
+			return append(allErrs, field.InternalError(field.NewPath("spec"), err))
+		}
+		allErrs = append(allErrs, inputSchemaErrors(schemaErr, field.NewPath("spec"))...)
 	}
 	return allErrs
 }

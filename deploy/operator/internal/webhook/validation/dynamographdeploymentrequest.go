@@ -127,7 +127,7 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	// A v1beta2 Request reaches this webhook as a v1beta1 object carrying spec.v1beta2;
 	// the v1beta1 rules below do not apply to it.
 	if spec.V1Beta2 != nil {
-		return v.validateDynamoGraphDeploymentRequestEnvelopeV1beta2(spec.V1Beta2, fldPath.Child("v1beta2"))
+		return v.validateDynamoGraphDeploymentRequestEnvelopeV1beta2(spec.V1Beta2, nil, fldPath.Child("v1beta2"))
 	}
 
 	allErrs := field.ErrorList{}
@@ -291,10 +291,10 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 		return foreignUpdateVerdict(fldPath, newSpec, oldSpec)
 	}
 	// A native v1beta2 spec is unconstrained by phase. Stateless validation of the new typed
-	// spec runs on every CREATE and UPDATE: an unchanged spec is no reason to skip it. Ratcheting
-	// belongs to the generated AISimulate schema validation, which will ratchet its own result.
+	// spec runs on every CREATE and UPDATE. Only the generated AISimulate schema check is
+	// ratcheted when the complete spec stays unchanged.
 	if newSpec.V1Beta2 != nil {
-		return v.validateDynamoGraphDeploymentRequestEnvelopeV1beta2(newSpec.V1Beta2, fldPath.Child("v1beta2"))
+		return v.validateDynamoGraphDeploymentRequestEnvelopeV1beta2(newSpec.V1Beta2, oldSpec.V1Beta2, fldPath.Child("v1beta2"))
 	}
 
 	allErrs := field.ErrorList{}
