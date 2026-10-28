@@ -3,6 +3,7 @@
 
 mod agent_context;
 pub mod config;
+mod generate_output;
 mod integration;
 mod otel_sink;
 pub mod payload;
@@ -26,13 +27,15 @@ pub use agent_context::SharedFinishReasonMetadata;
 pub(crate) use agent_context::{
     AgentContextTraceState, build_agent_context_trace_state, into_owned_replay_metrics,
     record_backend_finish_reason_metadata, record_chat_finish_reason_metadata,
-    record_completion_finish_reason_metadata, record_llm_metric_tokens, request_metrics,
-    request_metrics_from_agent_state, start_request_trace_tool_event_ingest,
+    record_completion_finish_reason_metadata, record_generate_tool_calls, record_llm_metric_tokens,
+    request_metrics, request_metrics_from_agent_state, snapshot_finish_reason_metadata,
+    start_request_trace_tool_event_ingest,
 };
 pub use config::{
     RequestTraceFileFormat, RequestTracePolicy, RequestTraceRecordKind, RequestTraceSinkKind,
     is_enabled, policy,
 };
+pub(crate) use generate_output::GenerateOutputParsers;
 pub(crate) use integration::{
     RequestEndTraceState, build_request_end_trace_state, finish_reason_metadata_handle,
     wrap_chat_request_end_stream, wrap_completion_request_end_stream,
