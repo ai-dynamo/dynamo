@@ -89,6 +89,26 @@ def _main_container(component: dict) -> dict:
             "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.3@sha256:deadbeef",
             "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3",
         ),
+        (
+            "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3@sha256:deadbeef",
+            "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.3@sha256:deadbeef",
+        ),
+        (
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend",
+            "nvcr.io/nvidia/ai-dynamo/dynamo-planner",
+        ),
+        (
+            "dynamo-frontend",
+            "dynamo-planner",
+        ),
+        (
+            "localhost:5000/dynamo-frontend",
+            "localhost:5000/dynamo-planner",
+        ),
+        (
+            "localhost:5000/dynamo-frontend:1.2.3@sha256:deadbeef",
+            "localhost:5000/dynamo-planner:1.2.3",
+        ),
     ],
 )
 def test_derive_planner_image_uses_the_shared_release_tag(
@@ -110,6 +130,31 @@ def test_derive_planner_image_uses_the_shared_release_tag(
             "trtllm",
             "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.3",
         ),
+        (
+            "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.3@sha256:deadbeef",
+            "sglang",
+            "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.3@sha256:deadbeef",
+        ),
+        (
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend",
+            "vllm",
+            "nvcr.io/nvidia/ai-dynamo/vllm-runtime",
+        ),
+        (
+            "dynamo-frontend",
+            "vllm",
+            "vllm-runtime",
+        ),
+        (
+            "localhost:5000/dynamo-frontend",
+            "vllm",
+            "localhost:5000/vllm-runtime",
+        ),
+        (
+            "localhost:5000/dynamo-frontend:1.2.3@sha256:deadbeef",
+            "vllm",
+            "localhost:5000/vllm-runtime:1.2.3",
+        ),
     ],
 )
 def test_derive_backend_image_uses_the_shared_release_tag(
@@ -122,10 +167,18 @@ def test_derive_backend_image_uses_the_shared_release_tag(
     "target",
     ["planner", "backend"],
 )
-def test_sibling_image_derivation_rejects_digest_only_references(
-    target: str,
+@pytest.mark.parametrize(
+    "image",
+    [
+        "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:deadbeef",
+        "localhost:5000/dynamo-frontend@sha256:deadbeef",
+        "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:",
+        "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:@sha256:deadbeef",
+    ],
+)
+def test_sibling_image_derivation_rejects_digest_only_and_empty_tag_references(
+    target: str, image: str
 ) -> None:
-    image = "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:deadbeef"
     with pytest.raises(ValueError, match="shared release tag"):
         if target == "planner":
             derive_planner_image(image)
