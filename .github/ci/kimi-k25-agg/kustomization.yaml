@@ -9,9 +9,11 @@ commonLabels:
 resources:
 - ../../../recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/deploy.yaml
 - ../../../recipes/kimi-k2.5/model-cache/compute-domain.yaml
+- ../../../recipes/kimi-k2.5/model-cache/model-download.yaml
 - ../../../recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/perf.yaml
 patches:
 - path: patch-deploy.yaml
+- path: patch-model-download.yaml
 - path: patch-perf.yaml
 - target:
     kind: ComputeDomain
@@ -53,3 +55,10 @@ patches:
     - op: add
       path: /spec/services/agg/extraPodSpec/volumes/-
       value: {name: sshd-run, emptyDir: {}}
+- target:
+    kind: Job
+    name: model-download
+  patch: |-
+    - op: replace
+      path: /metadata/name
+      value: kimi-k25-agg-model-download

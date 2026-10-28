@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+spec:
+  activeDeadlineSeconds: 3600
+  backoffLimit: 0
+  template:
+    spec:
+      priorityClassName: ci-nightly-high-priority
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+      - key: dedicated
+        operator: Equal
+        value: user-workload
+        effect: NoExecute
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: shared-model-cache
