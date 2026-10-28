@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+pytest.importorskip("sglang")
+
 from dynamo.common import kv_state_agent
 from dynamo.common.constants import DisaggregationMode
 from dynamo.sglang import state_agent
