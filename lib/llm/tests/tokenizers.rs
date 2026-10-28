@@ -220,6 +220,9 @@ fn test_decode_stream_basic(#[case] tokenizer: Arc<dyn Tokenizer>) {
             output.push_str(&chunk);
         }
     }
+    if let Some(chunk) = stream.finish().expect("Failed to finish decoding") {
+        output.push_str(&chunk);
+    }
     assert_eq!(output, text);
 }
 
@@ -248,6 +251,9 @@ fn test_decode_stream_with_prefill(#[case] tokenizer: Arc<dyn Tokenizer>) {
             }
         }
 
+        if let Some(chunk) = stream.finish().expect("Failed to finish decoding") {
+            output.push_str(&chunk);
+        }
         assert_eq!(output.trim(), output_text.to_string());
     }
 }
@@ -277,6 +283,9 @@ fn test_decode_stream_multibyte(#[case] tokenizer: Arc<dyn Tokenizer>) {
             }
         }
 
+        if let Some(chunk) = stream.finish().expect("Failed to finish decoding") {
+            reassembled.push_str(&chunk);
+        }
         assert_eq!(
             reassembled.trim(),
             output_text,

@@ -125,6 +125,7 @@ func (r *graphReconciler) reconcileSchedulingFailure(
 	explicitReplicas map[string]*int32,
 	requests, desiredRequests map[string]*lpxv1alpha1.LPUPipelineRequest,
 	expired []*lpxv1alpha1.LPUPipelineRequest,
+	scalingBlocked bool,
 ) (ctrl.Result, error) {
 	// Persist evidence covering every expired cycle before deleting any expired request.
 	if len(expired) > 0 && !schedulingFailureCoversPipelineRequests(deployment, expired) {
@@ -152,6 +153,10 @@ func (r *graphReconciler) reconcileSchedulingFailure(
 
 	// An interior failure in one workload does not prevent another workload's suffix cleanup.
 	for _, name := range slices.Sorted(maps.Keys(expiredByGroup)) {
+		// Preserve owned suffixes until their capacity can be reduced before deletion.
+		if scalingBlocked && explicitReplicas[name] != nil {
+			continue
+		}
 		if err := r.reconcileExpiredPipelineRequests(ctx, pcsgs[name], requestsByGroup[name], expiredByGroup[name], explicitReplicas[name] != nil); err != nil {
 			return ctrl.Result{}, err
 		}

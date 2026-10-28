@@ -278,6 +278,15 @@ def test_templates_guard_on_the_same_version(path: str) -> None:
     assert versions == {EXPECTED_VERSION}, f"{path} guards on {sorted(versions)}"
 
 
+@pytest.mark.parametrize("path", TEMPLATES)
+def test_templates_run_the_shared_guard(path: str) -> None:
+    template = ROOT / path
+    if not template.is_file():
+        pytest.skip(f"{path} is not staged in this component image (.dockerignore)")
+    invocation = f"compliance.check_pynvvideocodec --pinned {EXPECTED_VERSION}"
+    assert invocation in template.read_text(encoding="utf-8")
+
+
 def test_error_text_naming_the_package_does_not_claim_another_pin() -> None:
     """An error message that mentions PyNvVideoCodec is not a PyNvVideoCodec guard.
 
@@ -366,6 +375,7 @@ def main() -> int:
         check(
             f"template version {path}", test_templates_guard_on_the_same_version, path
         )
+        check(f"template guard {path}", test_templates_run_the_shared_guard, path)
 
     for failure in failures:
         print(f"ERROR: {failure}")

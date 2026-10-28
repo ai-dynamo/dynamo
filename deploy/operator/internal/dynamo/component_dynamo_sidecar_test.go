@@ -13,10 +13,140 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 )
+
+// TestNativeSidecarBackendFramework keeps backend detection on the engine
+// independently of the runtime launch and rejects false positives and conflicting explicit configuration.
+func TestNativeSidecarBackendFramework(t *testing.T) {
+	cases := []struct {
+		name     string
+		engine   []string
+		command  []string
+		explicit string
+		want     BackendFramework
+		wantErr  string
+	}{
+		{name: "vllm with runtime image entrypoint", engine: []string{"vllm-rs"}, want: BackendFrameworkVLLM},
+		{name: "native vllm executable", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, want: BackendFrameworkVLLM},
+		{name: "wrapped runtime does not change engine backend", engine: []string{"vllm-rs"}, command: []string{"/bin/sh", "-c", "exec dynamo-vllm-sidecar"}, want: BackendFrameworkVLLM},
+		{name: "native launch conflicts with explicit backend", engine: []string{"vllm-rs"}, command: []string{"dynamo-vllm-sidecar"}, explicit: "sglang", wantErr: "backend framework mismatch"},
+		{name: "sglang", engine: []string{"python3", "-m", "dynamo.sglang"}, want: BackendFrameworkSGLang},
+		{name: "trtllm", engine: []string{"python3", "-m", "dynamo.trtllm"}, want: BackendFrameworkTRTLLM},
+		{name: "conflicting explicit backend", engine: []string{"vllm-rs"}, explicit: "sglang", wantErr: "backend framework mismatch"},
+		{name: "opaque engine uses explicit backend", command: []string{"dynamo-vllm-sidecar"}, explicit: "sglang", want: BackendFrameworkSGLang},
+		{name: "opaque engine cannot inherit runtime backend", command: []string{"dynamo-vllm-sidecar"}, want: BackendFrameworkNoop},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Configure an independent engine launch and a native Dynamo runtime")
+			runtime := corev1.Container{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), Command: tc.command}
+			component := v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers:     []corev1.Container{{Name: commonconsts.MainContainerName, Image: "engine:latest", Command: tc.engine, Args: []string{"serve", "model"}}},
+					InitContainers: []corev1.Container{{Name: "setup", Image: "setup:latest"}, runtime},
+				}},
+			}
+			original := component.DeepCopy()
+			dgd := &v1beta1.DynamoGraphDeployment{Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: tc.explicit}}
+			dcd := &v1beta1.DynamoComponentDeployment{Spec: v1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: component, BackendFramework: tc.explicit,
+			}}
+
+			t.Log("Resolve both graph and standalone component backends without changing authored containers")
+			graphBackend, graphErr := getBackendFrameworkFromComponent(&component, dgd)
+			componentBackend, componentErr := GetBackendFrameworkFromDynamoComponent(dcd)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, graphErr, tc.wantErr)
+				require.ErrorContains(t, componentErr, tc.wantErr)
+			} else {
+				require.NoError(t, graphErr)
+				require.NoError(t, componentErr)
+				require.Equal(t, tc.want, graphBackend)
+				require.Equal(t, tc.want, componentBackend)
+			}
+			require.Equal(t, original, &component)
+			require.Equal(t, original, &dcd.Spec.DynamoComponentDeploymentSharedSpec)
+		})
+	}
+}
+
+// TestNativeSidecarCompilationCacheBackendDetection applies inferred vLLM cache
+// defaults to the engine in both graph and standalone component rendering.
+func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
+	for _, tc := range []struct {
+		name, mountPath string
+		command         []string
+	}{
+		{name: "default mount", command: []string{"dynamo-vllm-sidecar"}},
+		{name: "explicit mount", mountPath: "/cache", command: []string{"dynamo-vllm-sidecar"}},
+		{name: "runtime shell wrapper", mountPath: "/cache", command: []string{"bash", "-ec", "exec dynamo-vllm-sidecar"}},
+		{name: "runtime image entrypoint", mountPath: "/cache"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mountPath := tc.mountPath
+			t.Log("Configure a vLLM sidecar without an explicit backend")
+			component := v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: mountPath},
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers:     []corev1.Container{{Name: commonconsts.MainContainerName, Image: "engine:latest", Command: []string{"vllm-rs"}, Args: []string{"serve", "model"}}},
+					InitContainers: []corev1.Container{{Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), Command: tc.command, Args: []string{"--grpc-endpoint", "127.0.0.1:50051"}}},
+				}},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{
+				Name: "test", Namespace: "test",
+				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
+			}
+			original := dgd.DeepCopy()
+
+			t.Log("Materialize a graph child with the inferred engine backend")
+			children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+			require.NoError(t, err)
+			require.Len(t, children, 1)
+			require.Equal(t, string(BackendFrameworkVLLM), children["worker"].Spec.BackendFramework)
+			require.Equal(t, original, dgd)
+
+			t.Log("Verify inferred and explicit vLLM produce the same worker generation")
+			inferredHash, err := ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			explicit := dgd.DeepCopy()
+			explicit.Spec.BackendFramework = "vllm"
+			explicitHash, err := ComputeDGDWorkersSpecHash(explicit)
+			require.NoError(t, err)
+			require.Equal(t, explicitHash, inferredHash)
+			require.Equal(t, original, dgd)
+
+			t.Log("Render an independent standalone DCD so graph inference cannot mask controller detection")
+			dcd := &v1beta1.DynamoComponentDeployment{
+				Name: "worker", Namespace: "test",
+				Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: component},
+			}
+			originalDCD := dcd.DeepCopy()
+			pod, err := GenerateBasePodSpecForController(dcd, nil, &configv1alpha1.OperatorConfiguration{}, RoleMain, commonconsts.MultinodeDeploymentTypeGrove, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+			require.NoError(t, err)
+			require.Equal(t, originalDCD, dcd)
+
+			t.Log("Apply the vLLM cache defaults to the engine while preserving both launches")
+			engine, runtime := pod.Containers[0], pod.InitContainers[0]
+			wantMount := mountPath
+			if wantMount == "" {
+				wantMount = commonconsts.DefaultVLLMCacheMountPoint
+			}
+			cacheMount := corev1.VolumeMount{Name: "cache", MountPath: wantMount}
+			require.Contains(t, engine.VolumeMounts, cacheMount)
+			require.Equal(t, wantMount, envVarsToMap(engine.Env)["VLLM_CACHE_ROOT"])
+			require.NotContains(t, runtime.VolumeMounts, cacheMount)
+			require.NotContains(t, envVarsToMap(runtime.Env), "VLLM_CACHE_ROOT")
+			require.Equal(t, component.PodTemplate.Spec.Containers[0].Command, engine.Command)
+			require.Equal(t, component.PodTemplate.Spec.Containers[0].Args, engine.Args)
+			require.Equal(t, component.PodTemplate.Spec.InitContainers[0].Command, runtime.Command)
+			require.Equal(t, component.PodTemplate.Spec.InitContainers[0].Args, runtime.Args)
+		})
+	}
+}
 
 func TestNativeSidecarEnvironmentIgnoresOrigin(t *testing.T) {
 	const currentOrigin = "1.6.0"
@@ -43,7 +173,7 @@ func TestNativeSidecarEnvironmentIgnoresOrigin(t *testing.T) {
 				{Name: "NATS_SERVER", Value: "nats://frontend:4222"},
 			}
 			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "test"},
+				Name: "test", Namespace: "test",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					BackendFramework: string(BackendFrameworkVLLM), Env: graphEnv,
 					Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{KvTransferPolicy: &v1beta1.KvTransferPolicy{
@@ -55,10 +185,10 @@ func TestNativeSidecarEnvironmentIgnoresOrigin(t *testing.T) {
 				dgd.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin}
 			}
 			component := v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker, FrontendSidecar: ptr.To("frontend"),
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker, FrontendSidecar: new("frontend"),
 				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: "/cache"},
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: currentOrigin}},
+					Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: currentOrigin},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{Name: commonconsts.MainContainerName, Image: "engine:latest", Env: engineEnv},
@@ -125,19 +255,19 @@ func TestNativeSidecarRendering(t *testing.T) {
 				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}},
 				Env:       []corev1.EnvVar{{Name: "GLOBAL", Value: "engine"}},
 			}
-			dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "test"}, Spec: v1beta1.DynamoGraphDeploymentSpec{
+			dgd := &v1beta1.DynamoGraphDeployment{Name: "test", Namespace: "test", Spec: v1beta1.DynamoGraphDeploymentSpec{
 				Env:          []corev1.EnvVar{{Name: "GLOBAL", Value: "default"}, {Name: "SHARED", Value: "value"}},
 				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{KvTransferPolicy: &v1beta1.KvTransferPolicy{LabelKey: "topology.example/zone", Domain: "zone", Enforcement: "required"}},
 			}}
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "worker", ComponentType: componentType, FrontendSidecar: ptr.To("frontend"),
+				ComponentName: "worker", ComponentType: componentType, FrontendSidecar: new("frontend"),
 				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: "/cache"},
-				PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}, Labels: map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"}}, Spec: corev1.PodSpec{
+				PodTemplate: &corev1.PodTemplateSpec{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}, Labels: map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"}, Spec: corev1.PodSpec{
 					Containers: []corev1.Container{engine, {Name: "frontend", Image: "frontend:1.5.0", Env: []corev1.EnvVar{{Name: "ETCD_ENDPOINTS", Value: "frontend-etcd:2379"}}}},
 					InitContainers: []corev1.Container{{Name: "setup", Image: "setup:latest"}, {
 						Name: "runtime", Image: "runtime:1.5.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 						Env:          []corev1.EnvVar{{Name: "GLOBAL", Value: "runtime"}, {Name: "NATS_TLS_CA_CERT_PATH", Value: "/runtime/ca.crt"}, {Name: commonconsts.EnvKvTransferEnforcement, Value: "preferred"}},
-						StartupProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}}},
+						StartupProbe: &corev1.Probe{Exec: &corev1.ExecAction{Command: []string{"true"}}},
 					}},
 				}},
 			}
@@ -238,10 +368,14 @@ func TestGenerateBasePodSpecRejectsInvalidDynamoSidecar(t *testing.T) {
 		{
 			name: "frontend with runtime init container", componentType: v1beta1.ComponentTypeFrontend,
 			restartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
-			wantErrors:    field.ErrorList{field.Forbidden(field.NewPath("spec", "podTemplate", "spec", "initContainers").Index(0).Child("name"), "is supported only for worker, prefill, and decode components")},
+			wantErrors:    field.ErrorList{field.Forbidden(field.NewPath("spec", "podTemplate", "spec", "initContainers").Index(0).Child("name"), "is supported only for worker, prefill, decode, and LPX components")},
 		},
 		{
 			name: "runtime without restartPolicy Always", componentType: v1beta1.ComponentTypeWorker,
+			wantErrors: field.ErrorList{field.Invalid(field.NewPath("spec", "podTemplate", "spec", "initContainers").Index(0).Child("restartPolicy"), corev1.ContainerRestartPolicy(""), `must be Always for component "worker" with a runtime init container`)},
+		},
+		{
+			name: "LPX runtime without restartPolicy Always", componentType: v1beta1.ComponentTypeLPX,
 			wantErrors: field.ErrorList{field.Invalid(field.NewPath("spec", "podTemplate", "spec", "initContainers").Index(0).Child("restartPolicy"), corev1.ContainerRestartPolicy(""), `must be Always for component "worker" with a runtime init container`)},
 		},
 		{
@@ -338,7 +472,7 @@ func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
 				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
 				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: "/cache"},
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin}},
+					Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{
 						Name: commonconsts.MainContainerName, Image: "runtime:1.6.0",
 						Env: []corev1.EnvVar{

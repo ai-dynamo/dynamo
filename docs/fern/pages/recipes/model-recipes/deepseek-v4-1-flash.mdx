@@ -2,205 +2,395 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "DeepSeek-V4.1-Flash"
-subtitle: "Serve DeepSeek-V4.1-Flash with Dynamo and SGLang on GB200, aggregated or disaggregated."
+subtitle: "Serve DeepSeek-V4.1-Flash with Dynamo on B200, GB200, and H200 using aggregated or disaggregated workers."
 ---
 
 import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Both targets are Dynamo and SGLang deployments of DeepSeek-V4.1-Flash. Each uses 8x GB200 GPUs with TP4 workers. The checkpoint is FP8 dense with FP4 MoE experts, and the KV cache is FP8. Both targets serve up to 1,048,576 tokens of context. Pick your serving topology.
+Deploy DeepSeek-V4.1-Flash with NVIDIA Dynamo. The vLLM B200 and GB200 recipes use eight GPUs, sparse-indexer logits, and DSpark speculative decoding. H200 uses 16 GPUs for aggregated serving or eight for disaggregated serving, with CUTLASS MoE, EPLB, and DSpark-3. SGLang recipes are also available for GB200.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
 <div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Framework</span>
+<input type="radio" id="recipe-framework-vllm" name="recipe-framework" value="vllm" defaultChecked />
+<label htmlFor="recipe-framework-vllm">vLLM</label>
+<input type="radio" id="recipe-framework-sglang" name="recipe-framework" value="sglang" />
+<label htmlFor="recipe-framework-sglang">SGLang</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" defaultChecked />
+<label htmlFor="recipe-sku-gb200">GB200</label>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" />
+<label htmlFor="recipe-sku-b200">B200</label>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
+<label htmlFor="recipe-sku-h200">H200</label>
+</div>
+<div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
 <input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
-<label htmlFor="recipe-variant-agg">Aggregated <span className="dynamo-target-picker-hint">Recommended</span></label>
+<label htmlFor="recipe-variant-agg">Aggregated</label>
 <input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
 <label htmlFor="recipe-variant-disagg">Disaggregated</label>
 </div>
-<div className="dynamo-target-picker-summary" data-variant="agg">
-<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
-<span><b>Precision</b> FP8 dense, FP4 MoE experts, FP8 KV cache</span>
-<span><b>GPUs</b> 8x GB200, two workers</span>
-<span><b>Parallelism</b> TP4 and EP4 per worker</span>
-<span><b>Speculation</b> DSpark, block size 5</span>
-<span><b>Routing</b> KV-aware</span>
-<span><b>Context</b> Up to 1,048,576 tokens</span>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
+<span><b>Model</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
+<span><b>GPUs</b> 8x GB200</span>
+<span><b>Layout</b> Two TP4 workers</span>
+<span><b>Configuration</b> MXFP4 sparse-indexer KV and sparse-indexer logits</span>
 </div>
-<div className="dynamo-target-picker-summary" data-variant="disagg">
-<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
-<span><b>Precision</b> FP8 dense, FP4 MoE experts, FP8 KV cache</span>
-<span><b>GPUs</b> 4x GB200 prefill + 4x GB200 decode</span>
-<span><b>Parallelism</b> TP4 and EP4 per role</span>
-<span><b>Speculation</b> None. SGLang refuses it under disaggregation.</span>
-<span><b>KV transfer</b> Mooncake over TCP, or RDMA where the cluster provides it</span>
-<span><b>Context</b> Up to 1,048,576 tokens</span>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
+<span><b>Model</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
+<span><b>GPUs</b> 8x GB200</span>
+<span><b>Layout</b> One TP4 prefill worker and one TP4 decode worker</span>
+<span><b>Configuration</b> MXFP4 sparse-indexer KV and sparse-indexer logits</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
+<span><b>Model</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
+<span><b>GPUs</b> 8x B200</span>
+<span><b>Layout</b> Two TP4 workers</span>
+<span><b>Configuration</b> MXFP4 sparse-indexer KV and sparse-indexer logits</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
+<span><b>Model</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
+<span><b>GPUs</b> 8x B200</span>
+<span><b>Layout</b> One TP4 prefill worker and one TP4 decode worker</span>
+<span><b>Configuration</b> MXFP4 sparse-indexer KV and sparse-indexer logits</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="agg">
+<span><b>Model</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
+<span><b>GPUs</b> 16x H200</span>
+<span><b>Layout</b> Four TP4 workers</span>
+<span><b>Configuration</b> CUTLASS MoE, EPLB, DSpark-3</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="h200" data-variant="disagg">
+<span><b>Model</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
+<span><b>GPUs</b> 8x H200</span>
+<span><b>Layout</b> One TP4 prefill worker and one TP4 decode worker</span>
+<span><b>Configuration</b> CUTLASS MoE, EPLB, DSpark-3</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="h200" data-variant="agg disagg">
+<span><b>Status</b> No SGLang recipe for H200. Select vLLM or GB200.</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="agg">
+<span><b>Model</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
+<span><b>GPUs</b> 8x GB200</span>
+<span><b>Layout</b> Two TP4 workers</span>
+<span><b>Configuration</b> TP4 + EP4</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
+<span><b>Model</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
+<span><b>GPUs</b> 8x GB200</span>
+<span><b>Layout</b> One TP4 prefill worker and one TP4 decode worker</span>
+<span><b>Configuration</b> TP4 + EP4</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b200" data-variant="agg disagg">
+<span><b>Status</b> No SGLang recipe for B200. Select vLLM or GB200.</span>
 </div>
 </div>
-
-<Warning>
-Day-0 recipe. Both targets pass a functional probe. Neither is benchmarked, and neither carries a performance claim.
-</Warning>
-
-## Overview
-
-DeepSeek-V4.1-Flash is a Mixture-of-Experts model. SGLang picks its attention, MoE, and GEMM backends from the checkpoint. Do not set those backend flags. A hand-set backend flag selects a slower fallback.
-
-The checkpoint also accepts images. Both targets serve text only, and neither enables multimodal input.
-
-The aggregated target caps the decode CUDA graph batch at 64. DSpark verify graphs run out of memory at batch 256.
 
 ## Prerequisites
 
-<div data-variant="agg">
+- A Kubernetes cluster with a compatible Dynamo operator and eight B200/GB200 GPUs, 16 H200 GPUs for aggregated serving, or eight H200 GPUs for disaggregated serving.
+- Per frontend: 16 CPU cores and 128 GiB of host memory on B200/GB200, or 4 CPU cores and 8 GiB on H200.
+- Per worker: four GPUs, 16 CPU cores, 512 GiB of host memory, 64 GiB of ephemeral storage, and capacity for a 200 GiB shared-memory volume.
+- A populated ReadWriteMany model-cache PVC, referenced as `shared-model-cache` by the recipes.
 
-- A Kubernetes cluster with the Dynamo platform installed. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
-- 8x GB200 GPUs on two ARM64 nodes. Each worker needs 4 GPUs on one node.
-- A ReadWriteMany PVC named `shared-model-cache`, with at least 1000Gi.
-- Access to `deepseek-ai/DeepSeek-V4.1-Flash`, which is 510 GB over 48 shards.
+The worker memory and shared-memory requests match the tested configuration.
 
-</div>
+<div data-recipe-framework="vllm">
 
-<div data-variant="disagg">
-
-- A Kubernetes cluster with the Dynamo platform installed. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
-- 8x GB200 GPUs on two ARM64 nodes. Prefill and decode each need 4 GPUs.
-- The NVIDIA DRA driver with ComputeDomain support. The manifest creates the ComputeDomain and both workers claim its channel.
-- A ReadWriteMany PVC named `shared-model-cache`, with at least 1000Gi.
-- Access to `deepseek-ai/DeepSeek-V4.1-Flash`, which is 510 GB over 48 shards.
+- Kustomize v5.8.1 and a filled [cluster Kustomization](https://github.com/ai-dynamo/dynamo/blob/main/recipes/templates/kustomize/README.md) for placement, cache binding, registry credentials, and networking.
+- ARM64 worker nodes for GB200 or AMD64 worker nodes for B200/H200.
 
 </div>
 
-Create the namespace and the token secret:
+<div data-recipe-framework="vllm" data-variant="disagg">
 
-```bash
-export NAMESPACE=your-namespace
-kubectl create namespace ${NAMESPACE}
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="your-token" \
-  -n ${NAMESPACE}
-```
+- The recipe Kustomization supplies UCX transport settings. For B200 and GB200,
+  add the cluster's RDMA device and interface settings.
 
-<Warning>
-Edit the namespace, node selectors, tolerations, storage class, and image tag to match your cluster.
-</Warning>
+</div>
+
+<div data-recipe-framework="vllm" data-sku="h200" data-variant="disagg">
+
+- Place the prefill and decode workers on separate RDMA-capable H200 nodes, with
+  four GPUs per worker. The recipe requests four `rdma/ib` devices per worker
+  and selects their assigned NICs at startup. Configure the SR-IOV network
+  device plugin to provide `rdma/ib`, `PCIDEVICE_RDMA_IB`, and
+  `PCIDEVICE_RDMA_IB_INFO`. Do not set a static `UCX_NET_DEVICES` value.
+
+</div>
+
+<div data-sku="gb200" data-variant="disagg">
+
+- NVIDIA DRA and ComputeDomain support, with the workers placed in one NVLink clique.
+
+</div>
 
 ## Deploy
 
-Both targets read the checkpoint from the `shared-model-cache` PVC with `HF_HUB_OFFLINE=1`. First create the PVC and download the weights:
+Set the namespace and populate the cache using the [model-cache manifests](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4.1-flash/model-cache). The download Job pins snapshot `dba1be0a40aa45a94ad051997016db3960a90277`.
 
 ```bash
-kubectl apply -f recipes/deepseek-v4.1-flash/model-cache/model-cache.yaml -n ${NAMESPACE}
-kubectl apply -f recipes/deepseek-v4.1-flash/model-cache/model-download.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+export NAMESPACE=your-namespace
+export CLUSTER_CONFIG=/path/to/your/filled-cluster-kustomization
 ```
 
-Then apply the manifest for your target.
+<div data-recipe-framework="vllm">
 
-<div data-variant="agg">
+Render the selected configuration to a local file:
+
+</div>
+<div data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
 
 ```bash
-kubectl apply -f recipes/deepseek-v4.1-flash/sglang/agg-gb200/deploy.yaml -n ${NAMESPACE}
+kustomize build recipes/deepseek-v4.1-flash/vllm/agg-gb200-agentic > "${CLUSTER_CONFIG}/recipe.yaml"
+```
+
+[Source Kustomization](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/agg-gb200-agentic/kustomization.yaml)
+
+</div>
+<div data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
+
+```bash
+kustomize build recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic > "${CLUSTER_CONFIG}/recipe.yaml"
+```
+
+[Source Kustomization](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/kustomization.yaml)
+
+</div>
+<div data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
+
+```bash
+kustomize build recipes/deepseek-v4.1-flash/vllm/agg-b200-agentic > "${CLUSTER_CONFIG}/recipe.yaml"
+```
+
+[Source Kustomization](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/agg-b200-agentic/kustomization.yaml)
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="h200" data-variant="agg">
+
+```bash
+kustomize build recipes/deepseek-v4.1-flash/vllm/agg-h200-agentic > "${CLUSTER_CONFIG}/recipe.yaml"
+```
+
+[Source Kustomization](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/agg-h200-agentic/kustomization.yaml)
+
+</div>
+<div data-recipe-framework="vllm" data-sku="h200" data-variant="disagg">
+
+```bash
+kustomize build recipes/deepseek-v4.1-flash/vllm/disagg-h200-agentic > "${CLUSTER_CONFIG}/recipe.yaml"
+```
+
+[Source Kustomization](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-h200-agentic/kustomization.yaml)
+
+</div>
+<div data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
+
+```bash
+kustomize build recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic > "${CLUSTER_CONFIG}/recipe.yaml"
+```
+
+[Source Kustomization](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic/kustomization.yaml)
+
+</div>
+<div data-recipe-framework="vllm">
+
+Use the [cluster Kustomization guide](https://github.com/ai-dynamo/dynamo/blob/main/recipes/templates/kustomize/README.md) to configure node placement, registry access, model storage, and networking. Set its single `resources` entry to `recipe.yaml`, then apply:
+
+```bash
+set -o pipefail
+kustomize build --load-restrictor LoadRestrictionsNone "${CLUSTER_CONFIG}" | \
+  kubectl apply --dry-run=server -f - -n "${NAMESPACE}"
+kustomize build --load-restrictor LoadRestrictionsNone "${CLUSTER_CONFIG}" | \
+  kubectl apply -f - -n "${NAMESPACE}"
 ```
 
 </div>
 
-<div data-variant="disagg">
+<div data-recipe-framework="sglang" data-sku="gb200" data-variant="agg">
 
 ```bash
-kubectl apply -f recipes/deepseek-v4.1-flash/sglang/disagg-gb200/deploy-generic.yaml -n ${NAMESPACE}
-```
-
-On Google Kubernetes Engine, apply the RDMA variant instead. It claims the four GKE RDMA networks that GB200 node pools advertise:
-
-```bash
-kubectl apply -f recipes/deepseek-v4.1-flash/sglang/disagg-gb200/deploy-gke-rdma.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v4.1-flash/sglang/agg-gb200/deploy.yaml -n "${NAMESPACE}"
 ```
 
 </div>
 
-The first worker start loads 510 GB of weights and captures CUDA graphs. This step can take tens of minutes.
+<div data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash/sglang/disagg-gb200/deploy-generic.yaml -n "${NAMESPACE}"
+```
+
+The [GKE variant](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/sglang/disagg-gb200/deploy-gke-rdma.yaml) supplies provider RDMA settings.
+
+</div>
 
 ## Smoke Test
 
-Forward the frontend port for your target:
+Forward the selected deployment's frontend Service:
 
-<div data-variant="agg">
+<div data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
 
 ```bash
-kubectl port-forward svc/deepseek-v41-flash-sglang-gb200-agg-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/dsv41-flash-vllm-gb200-agg-agentic-frontend 8000:8000 -n "${NAMESPACE}"
 ```
 
 </div>
 
-<div data-variant="disagg">
+<div data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
 
 ```bash
-kubectl port-forward svc/deepseek-v41-flash-sglang-gb200-disagg-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/dsv41-flash-vllm-gb200-disagg-agentic-frontend 8000:8000 -n "${NAMESPACE}"
 ```
 
 </div>
 
-Then send a request:
+<div data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+kubectl port-forward svc/dsv41-flash-vllm-b200-agg-agentic-frontend 8000:8000 -n "${NAMESPACE}"
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="h200" data-variant="agg">
+
+```bash
+kubectl port-forward svc/dsv41-flash-vllm-h200-agg-agentic-frontend 8000:8000 -n "${NAMESPACE}"
+```
+
+</div>
+<div data-recipe-framework="vllm" data-sku="h200" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/dsv41-flash-vllm-h200-disagg-agentic-frontend 8000:8000 -n "${NAMESPACE}"
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/dsv41-flash-vllm-b200-disagg-agentic-frontend 8000:8000 -n "${NAMESPACE}"
+```
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="gb200" data-variant="agg">
+
+```bash
+kubectl port-forward svc/deepseek-v41-flash-sglang-gb200-agg-frontend 8000:8000 -n "${NAMESPACE}"
+```
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/deepseek-v41-flash-sglang-gb200-disagg-frontend 8000:8000 -n "${NAMESPACE}"
+```
+
+</div>
+
+Send a request in a separate terminal:
+
+```bash
+curl -sS http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-ai/DeepSeek-V4.1-Flash","messages":[{"role":"user","content":"Reply with exactly: READY"}],"temperature":0,"max_tokens":64}'
+  -d '{"model":"deepseek-ai/DeepSeek-V4.1-Flash","messages":[{"role":"user","content":"Reply with exactly: READY"}],"temperature":0,"max_tokens":512}'
 ```
 
-Read the response body, not the status code. On the disaggregated target a KV transfer failure still returns HTTP 200, with `content: null` and zero completion tokens. Readiness does not exercise the KV path. The Notes explain what to read in the worker log.
+Check that the response contains an answer.
 
-The model reasons before it answers, and the reasoning text arrives in `reasoning_content`. Both targets support streaming chat, tool calls, and schema-constrained output. The `deepseek_v41` reasoning and tool-call parsers build the response.
+<div data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
 
-## Compare All Targets
+For disaggregated SGLang, HTTP 200 can still contain `content: null` and zero completion tokens when KV transfer fails. Require a nonempty answer. The generic manifest forces Mooncake TCP with `MC_FORCE_TCP=1`; the GKE variant uses RDMA. If you select the NVLink fabric path, place both workers in one NVLink clique. A split can log `cuMemImportFromShareableHandle failed: 400` and return an empty answer.
 
-| | Aggregated | Disaggregated |
-|---|---|---|
-| **Checkpoint** | deepseek-ai/DeepSeek-V4.1-Flash | deepseek-ai/DeepSeek-V4.1-Flash |
-| **Precision** | FP8 dense, FP4 MoE experts | FP8 dense, FP4 MoE experts |
-| **GPUs** | 8x GB200, two workers | 4x GB200 prefill + 4x GB200 decode (1P1D) |
-| **Parallelism** | TP4, EP4 | TP4, EP4 per role |
-| **Attention backend** | dsv4 | dsv4 |
-| **MoE backend** | flashinfer_mxfp4 | flashinfer_mxfp4 |
-| **KV cache dtype** | fp8_e4m3 | fp8_e4m3 |
-| **Grammar backend** | xgrammar | xgrammar |
-| **Page size** | 256 | 256 |
-| **GPU memory utilization** | 0.80 | 0.80 |
-| **Maximum running requests** | 256 | 256 |
-| **Maximum prefill tokens** | 16,384 | 16,384 |
-| **Decode CUDA graph batch** | 64 | 512 |
-| **Speculative decoding** | DSpark, block size 5 | None |
-| **KV transfer** | — | Mooncake over TCP, or RDMA |
-| **Routing** | KV-aware | KV-aware |
-| **Context length** | 1,048,576 | 1,048,576 |
+</div>
 
-## Related Feature Benchmarks
+## Measured Performance
 
-No feature benchmark is linked to this recipe. Browse the [Feature Benchmarks](../feature-benchmarks/browse-all-benchmarks.mdx) for comparable KV-routing and disaggregation studies.
+<div data-recipe-framework="vllm">
 
-## Notes
+Results for the agentic workload (64K input tokens, 400 output tokens), using
+eight B200/GB200 GPUs, 16 H200 GPUs for aggregated serving, or eight H200 GPUs for disaggregated serving. Output throughput includes reasoning tokens.
 
-- The disaggregated target has no speculative decoding. SGLang refuses DSpark under prefill and decode disaggregation for this model. Use the aggregated target for speculative decoding.
-- Each worker needs TP4 and a GB200 node holds 4 GPUs. So prefill and decode always sit on different nodes, and KV crosses nodes. The generic target pins Mooncake to TCP with `MC_FORCE_TCP=1`. The GKE variant drops that pin and uses RDMA, because it attaches RDMA devices. Mooncake does not default to TCP on its own: with no RDMA device it reports `Found 0 HCAs` and takes the NVLink fabric, which is why the pin is explicit.
-- The NVLink fabric is the faster KV path, and this recipe does not take it. To opt in, remove `MC_FORCE_TCP` and set `SGLANG_MOONCAKE_CUSTOM_MEM_POOL=NVLINK` and `MC_FORCE_MNNVL=true` on both workers. Measured on GB200: TCP across cliques 0.707 GB/s, NVLink inside one clique 1.7 to 2.2 GB/s, so the fabric is about 3 times faster on KV. Read the warning that follows first.
+| Workload | Recipe | Framework | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) | TTFT P90 (ms) |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | B200 | 168 | 990.57 | 54.69 | 178.66 | 3,068.28 |
+| Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | B200 | 184 | 1,087.71 | 82.12 | 135.12 | 90,076.83 |
+| Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | GB200 | 168 | 953.08 | 51.83 | 286.75 | 3,524.82 |
+| Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | GB200 | 168 | 1,154.87 | 80.85 | 169.02 | 57,116.54 |
+| Agentic (64K input, 400 output) | Aggregated (4 × TP4) | vLLM | H200 | 80 | 209.18 | 51.32 | 171.29 | 6,368.76 |
+| Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | H200 | 64 | 359.41 | 50.63 | 177.59 | 35,043.23 |
 
-<Warning>
-The NVLink fabric KV path needs both workers in one NVLink clique. A fabric memory handle cannot be imported across cliques, and a split gives no error: the deployment reports Ready, and chat completions return HTTP 200 with `content: null` and zero completion tokens. The workers log `cuMemImportFromShareableHandle failed: 400`. Readiness does not exercise the KV path. Pin both workers to one clique with a `nvidia.com/gpu.clique` nodeSelector, read from `kubectl get nodes -L nvidia.com/gpu.clique`, and send one request to confirm the answer is not empty.
-</Warning>
+The catalog recommends GB200 disaggregated for maximum measured system output
+throughput per GPU at these operating points.
 
-- If completions come back empty on the disaggregated target, read the worker log. `cuMemImportFromShareableHandle failed: 400` means prefill and decode landed in different NVLink cliques, and only the fabric KV path fails this way. `Failed to register memory: Bad address [14]` means GPU memory did not register for RDMA, because the nodes load no `nvidia_peermem` module. The GKE target sets `WITH_NVIDIA_PEERMEM=0` for that reason, which selects the DMA-BUF path instead.
-- Both targets set the router to KV-aware. On the disaggregated target this is a no-op today, because one decode worker gives the router nothing to choose between. To make it count, raise the decode replicas and add `--kv-events-config` to the decode worker.
-- Both targets set `SGLANG_DEFAULT_THINKING=true`. Thinking is off by default for this model, and then `reasoning_content` is empty.
-- Both targets keep `--enable-metrics` on and set `DYN_FORWARDPASS_METRIC_PORT` to an empty value. The forward-pass publisher crashes this model on a null `seq_lens_cpu`.
-- Both targets pair the native `reasoning-parser` with `--dyn-reasoning-parser`. The native parser gates guided decoding, and Dynamo builds the response. Do not pair the native and Dynamo tool-call parsers. Dynamo rejects that pair.
-- The disaggregated target is authored as a Kustomize matrix. Edit `kustomize/base/`, then regenerate with `scripts/kustomize-matrix.py`. Never edit `deploy-generic.yaml` or `deploy-gke-rdma.yaml` by hand.
+For GB200 at the selected concurrency, disaggregated serving delivers 21%
+more output tok/s/GPU and 56% more p50 user tok/s. TTFT p90 rises from
+3.52 s to 57.12 s.
+
+[Benchmark instructions and full TTFT/ITL distributions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/perf/README.md).
+
+</div>
+
+<div data-recipe-framework="sglang">
+
+No published benchmark results.
+
+</div>
+
+## Configurations
+
+<div data-recipe-framework="vllm">
+
+All vLLM targets use expert parallelism, expert load balancing (EPLB), KV-aware
+routing, and DSpark with three draft tokens and block verification. Adaptive
+verification is disabled. They serve text using the `deepseek_v41` reasoning
+and tool-call parsers. In the table below, P/D means prefill/decode.
+
+| Setting | B200 / GB200 aggregated | B200 disaggregated | GB200 disaggregated | H200 aggregated | H200 disaggregated |
+| --- | --- | --- | --- | --- | --- |
+| MoE backend | `deep_gemm_mega_moe` | `deep_gemm_mega_moe` | `deep_gemm_mega_moe` | `flashinfer_cutlass` | `flashinfer_cutlass` |
+| KV cache dtype | `fp8_ds_mla` | Auto (`nvfp4_ds_mla`) | `fp8_ds_mla` | `fp8_ds_mla` | `fp8_ds_mla` |
+| Attention backend | `FLASHMLA_MEGA_ATTN_DSV41` | `FLASHMLA_MEGA_ATTN_DSV41` | `FLASHMLA_MEGA_ATTN_DSV41` | Runtime default | Runtime default |
+| Sparse indexer | MXFP4 KV, sparse logits | MXFP4 KV, sparse logits | MXFP4 KV, sparse logits | Runtime default | Runtime default |
+| EPLB communicator | `torch_gloo` | `torch_gloo` | `torch_gloo` | Runtime default | Runtime default |
+| Max context tokens | 1,048,576 | Runtime default | 1,048,576 | Model default (1,048,576) | Model default (1,048,576) |
+| Max sequences | 1,024 | Runtime default | 1,024 | 1,024 | 1,024 |
+| Max batched tokens | 16,384 | 32,768 P / runtime default D | 16,384 | 8,192 | 8,192 |
+| GPU memory utilization | 0.92 | Runtime default | 0.92 | 0.92 | 0.92 |
+| KV block size | 128 | Runtime default | 128 | Runtime default | Runtime default |
+| Max CUDA graph capture size | 512 | 512 P / 1,024 D | 512 P / 1,024 D | 512 | 512 |
+| Long-prefill threshold | Unset | 4,096 P | 4,096 P | Unset | Unset |
+| Prefix-cache retention interval | 1,024 | 1,024 | 1,024 | 1,024 | 1,024 |
+| Conditional disaggregation | N/A | `isl_bounding` | Enabled, default policy | N/A | `isl_bounding` |
+| KV transfer | N/A | NIXL/UCX over InfiniBand | NIXL/UCX within one NVLink clique | N/A | NIXL/UCX over InfiniBand |
+
+Aggregated targets and H200 disaggregated set the decode-active-request weight
+to 50. B200 and H200 disaggregated use `isl_bounding` with effective-input
+threshold 2,048, input-ratio threshold 0.70, and decode-busy threshold 0.50.
+With the measured image, both B200 disaggregated workers logged
+`Using DeepSeek's nvfp4_ds_mla KV cache format` when `kv_cache_dtype=auto`.
+See the linked Kustomize sources for the complete flags and container images.
+
+</div>
+
+<div data-recipe-framework="sglang">
+
+The SGLang GB200 targets use the `dev.1` runtime. Aggregated serving enables
+DSpark; disaggregated serving uses Mooncake without speculative decoding.
+
+</div>
 
 ## Source
 
-- Source README: [recipes/deepseek-v4.1-flash/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/README.md)
-- Aggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/sglang/agg-gb200/deploy.yaml)
-- Disaggregated GB200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/sglang/disagg-gb200/deploy-generic.yaml)
-- Disaggregated GB200 on GKE: [deploy-gke-rdma.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/sglang/disagg-gb200/deploy-gke-rdma.yaml)
+[Recipe sources](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4.1-flash)

@@ -139,6 +139,11 @@ pub mod labels {
     /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     pub const WORKER_TYPE: &str = "worker_type";
 
+    /// Label for where a booked request is in its lifecycle: "prefill" until it is
+    /// marked prefill-complete, "decode" after. Distinct from `phase`, which names
+    /// the serving leg ("aggregated", "prefill", "decode").
+    pub const REQUEST_PHASE: &str = "request_phase";
+
     /// Label for router instance (discovery.instance_id() of the frontend)
     pub const ROUTER_ID: &str = "router_id";
 }
@@ -170,11 +175,24 @@ pub mod frontend_service {
     /// Whether the frontend can route at least one inference request for a model
     pub const MODEL_READY: &str = "model_ready";
 
+    /// Number of discovered physical workers by router admission state
+    pub const ROUTER_WORKERS: &str = "router_workers";
+
+    /// Current router admission state and reason for a discovered worker
+    pub const ROUTER_WORKER_STATE: &str = "router_worker_state";
+
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
     /// Total number of LLM requests accepted by the frontend handler
     pub const REQUESTS_STARTED_TOTAL: &str = "requests_started_total";
+
+    /// Admitted requests that have not produced an output token.
+    pub const AWAITING_FIRST_TOKEN_REQUESTS: &str = "awaiting_first_token_requests";
+    /// Known prompt tokens in inflight requests, labeled by state.
+    pub const INFLIGHT_INPUT_TOKENS: &str = "inflight_input_tokens";
+    /// Total known input tokens of admitted requests.
+    pub const INPUT_TOKENS_TOTAL: &str = "input_tokens_total";
 
     /// Total number of terminal semantic request failures.
     pub const FAILURES_TOTAL: &str = "failures_total";
@@ -309,6 +327,10 @@ pub mod frontend_service {
     /// Active prefill tokens per worker
     /// Gauge metric tracking current queued prefill tokens for each worker
     pub const WORKER_ACTIVE_PREFILL_TOKENS: &str = "worker_active_prefill_tokens";
+
+    /// Active requests booked per worker, labeled by request phase
+    /// Gauge metric split into `prefill` (not yet marked prefill-complete) and `decode`
+    pub const WORKER_ACTIVE_REQUESTS: &str = "worker_active_requests";
 
     /// Last observed time to first token per worker (in seconds)
     /// Gauge metric tracking the most recent TTFT for each worker
@@ -987,9 +1009,15 @@ pub fn sanitize_frontend_prometheus_prefix(raw: &str) -> String {
 /// Builds a full component metric name by prepending the component prefix
 /// Sanitizes the metric name to ensure it's valid for Prometheus
 pub fn build_component_metric_name(metric_name: &str) -> String {
+    build_metric_name(name_prefix::COMPONENT, metric_name)
+}
+
+/// Builds a full metric name by prepending `prefix`
+/// Sanitizes the metric name to ensure it's valid for Prometheus
+pub(crate) fn build_metric_name(prefix: &str, metric_name: &str) -> String {
     let sanitized_name =
         sanitize_prometheus_name(metric_name).expect("metric name should be valid or sanitizable");
-    format!("{}_{}", name_prefix::COMPONENT, sanitized_name)
+    format!("{}_{}", prefix, sanitized_name)
 }
 
 /// Safely converts a u64 value to i64 for Prometheus metrics

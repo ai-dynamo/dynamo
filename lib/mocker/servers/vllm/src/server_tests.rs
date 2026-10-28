@@ -12,16 +12,18 @@ use std::collections::BTreeMap;
 
 /// Engine arguments with ample capacity and instant simulated timing, for
 /// tests that need requests to be admitted and run to completion quickly.
-fn admitting_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
-        .block_size(4)
-        .enable_prefix_caching(false)
-        .num_gpu_blocks(4096)
-        .max_num_seqs(Some(64))
-        .max_num_batched_tokens(Some(1024))
-        .speedup_ratio(0.0)
-        .build()
-        .unwrap()
+fn admitting_args() -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "block_size": 4,
+            "enable_prefix_caching": false,
+            "num_gpu_blocks": 4096,
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 1024,
+            "speedup_ratio": 0.0
+        }
+    }))
+    .unwrap()
 }
 
 fn request(id: &str) -> pb::GenerateRequest {
@@ -71,12 +73,178 @@ fn preparation_is_deterministic() {
 }
 
 #[test]
-fn oversized_generation_is_rejected_before_token_planning() {
-    let mut oversized = request("too-many-tokens");
-    oversized.stopping.as_mut().unwrap().max_new_tokens = MAX_NEW_TOKENS + 1;
-    let error =
-        PreparedRequest::new(oversized, &MockerServerConfig::default(), 4, None).unwrap_err();
-    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+fn generation_output_limit_is_one_million_tokens() {
+    let config = MockerServerConfig::default();
+    for max_model_len in [None, Some(1_000_003)] {
+        for max_new_tokens in [32_769, 1_000_000] {
+            let mut req = request("large-output");
+            req.stopping.as_mut().unwrap().max_new_tokens = max_new_tokens;
+            let prepared = PreparedRequest::new(req, &config, 4, max_model_len).unwrap();
+            assert_eq!(prepared.max_output_tokens, max_new_tokens as usize);
+        }
+
+        let mut oversized = request("too-many-tokens");
+        oversized.stopping.as_mut().unwrap().max_new_tokens = 1_000_001;
+        let error = PreparedRequest::new(oversized, &config, 4, max_model_len).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(
+            error
+                .message()
+                .contains("max_new_tokens must not exceed 1000000")
+        );
+    }
+}
+
+#[test]
+fn image_sources_are_opaque_but_require_payloads() {
+    use pb::media_item::Source;
+
+    let features = pb::PreprocessedMediaFeatures {
+        kwargs: Some(vec![0xc1]), // Deliberately opaque, not valid MessagePack.
+        identifier: "image-1".to_string(),
+        length: 1,
+        ..Default::default()
+    };
+    let cases = [
+        (
+            "url",
+            Some(Source::Url("https://example.invalid/image.png".into())),
+            true,
+        ),
+        (
+            "data URI",
+            Some(Source::DataUri("data:image/png;base64,b3BhcXVl".into())),
+            true,
+        ),
+        ("bytes", Some(Source::RawBytes(vec![1, 2, 3])), true),
+        ("features", Some(Source::Features(features.clone())), true),
+        ("missing source", None, false),
+        ("empty URL", Some(Source::Url(String::new())), false),
+        (
+            "empty data URI",
+            Some(Source::DataUri(String::new())),
+            false,
+        ),
+        ("empty bytes", Some(Source::RawBytes(Vec::new())), false),
+        (
+            "missing kwargs",
+            Some(Source::Features(pb::PreprocessedMediaFeatures {
+                kwargs: None,
+                ..features.clone()
+            })),
+            false,
+        ),
+        (
+            "empty kwargs",
+            Some(Source::Features(pb::PreprocessedMediaFeatures {
+                kwargs: Some(Vec::new()),
+                ..features.clone()
+            })),
+            false,
+        ),
+        (
+            "missing identifier",
+            Some(Source::Features(pb::PreprocessedMediaFeatures {
+                identifier: String::new(),
+                ..features.clone()
+            })),
+            false,
+        ),
+        (
+            "missing length",
+            Some(Source::Features(pb::PreprocessedMediaFeatures {
+                length: 0,
+                ..features
+            })),
+            false,
+        ),
+    ];
+    let config = MockerServerConfig {
+        supports_multimodal: true,
+        ..Default::default()
+    };
+    let text = PreparedRequest::new(request("image"), &config, 4, None).unwrap();
+    for (name, source, valid) in cases {
+        let mut req = request("image");
+        req.media.push(pb::MediaItem {
+            modality: pb::Modality::Image as i32,
+            source,
+            ..Default::default()
+        });
+        let result = PreparedRequest::new(req, &config, 4, None);
+        if valid {
+            let prepared = result.unwrap();
+            assert_eq!(
+                prepared.direct_request().tokens,
+                text.direct_request().tokens,
+                "{name}"
+            );
+            assert_eq!(prepared.output_token(0), text.output_token(0), "{name}");
+        } else {
+            assert_eq!(
+                result.unwrap_err().code(),
+                tonic::Code::InvalidArgument,
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn non_image_modalities_are_rejected() {
+    let config = MockerServerConfig {
+        supports_multimodal: true,
+        ..Default::default()
+    };
+    for modality in [
+        pb::Modality::Audio as i32,
+        pb::Modality::Video as i32,
+        pb::Modality::Unspecified as i32,
+        99,
+    ] {
+        let mut req = request("non-image");
+        req.media.push(pb::MediaItem {
+            modality,
+            source: Some(pb::media_item::Source::RawBytes(vec![1, 2, 3])),
+            ..Default::default()
+        });
+        let error = PreparedRequest::new(req, &config, 4, None).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{modality}");
+    }
+}
+
+#[test]
+fn image_requests_require_multimodal_support() {
+    let mut req = request("image");
+    req.media.push(pb::MediaItem {
+        modality: pb::Modality::Image as i32,
+        source: Some(pb::media_item::Source::RawBytes(vec![1, 2, 3])),
+        ..Default::default()
+    });
+    let error = PreparedRequest::new(req, &MockerServerConfig::default(), 4, None).unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
+}
+
+#[tokio::test]
+async fn model_discovery_reports_configured_multimodal_support() {
+    for supports_multimodal in [false, true] {
+        let service = VllmMockerService::new(
+            MockerServerConfig {
+                supports_multimodal,
+                ..Default::default()
+            },
+            admitting_args(),
+        )
+        .unwrap();
+        let model = pb::control_server::Control::get_model_info(
+            &service,
+            Request::new(pb::GetModelInfoRequest::default()),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(model.supports_multimodal, supports_multimodal);
+    }
 }
 
 #[test]
@@ -227,10 +395,12 @@ fn text_prompts_fail_with_an_actionable_status() {
 
 #[tokio::test]
 async fn service_rejects_non_vllm_or_multi_rank_engines() {
-    let mut sglang = MockEngineArgs::builder()
-        .engine_type(EngineType::Sglang)
-        .build()
-        .unwrap();
+    let mut sglang = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": EngineType::Sglang
+        }
+    }))
+    .unwrap();
     // Service-specific errors must take priority over general validation.
     sglang.num_gpu_blocks = 0;
     assert!(
@@ -241,7 +411,7 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
             .contains("engine_type")
     );
 
-    let mut multi_rank = MockEngineArgs::builder().dp_size(2).build().unwrap();
+    let mut multi_rank = MockerConfig::from_value(serde_json::json!({"dp_size":2})).unwrap();
     multi_rank.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), multi_rank)
@@ -251,10 +421,12 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
             .contains("dp_size")
     );
 
-    let mut disaggregated = MockEngineArgs::builder()
-        .worker_type(WorkerType::Prefill)
-        .build()
-        .unwrap();
+    let mut disaggregated = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "worker_type": WorkerType::Prefill
+        }
+    }))
+    .unwrap();
     disaggregated.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), disaggregated)
@@ -269,7 +441,7 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
         ..Default::default()
     };
     assert!(
-        VllmMockerService::new(disabled, MockEngineArgs::default())
+        VllmMockerService::new(disabled, MockerConfig::default())
             .err()
             .unwrap()
             .to_string()
@@ -316,15 +488,17 @@ async fn unsupported_rl_control_reports_unimplemented() {
 
 #[tokio::test]
 async fn unary_generate_maps_capacity_rejection_to_resource_exhausted() {
-    let args = MockEngineArgs::builder()
-        .block_size(4)
-        .enable_prefix_caching(false)
-        .num_gpu_blocks(1)
-        .max_num_seqs(Some(8))
-        .max_num_batched_tokens(Some(64))
-        .speedup_ratio(0.0)
-        .build()
-        .unwrap();
+    let args = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "block_size": 4,
+            "enable_prefix_caching": false,
+            "num_gpu_blocks": 1,
+            "max_num_seqs": 8,
+            "max_num_batched_tokens": 64,
+            "speedup_ratio": 0.0
+        }
+    }))
+    .unwrap();
     let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
     let mut oversized = request("oversized");
     oversized.prompt = Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
@@ -339,14 +513,16 @@ async fn unary_generate_maps_capacity_rejection_to_resource_exhausted() {
 
 #[tokio::test]
 async fn concurrent_request_limit_rejects_a_stalled_stream() {
-    let args = MockEngineArgs::builder()
-        .block_size(4)
-        .enable_prefix_caching(false)
-        .num_gpu_blocks(128)
-        .max_num_seqs(Some(1))
-        .speedup_ratio(0.01)
-        .build()
-        .unwrap();
+    let args = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "block_size": 4,
+            "enable_prefix_caching": false,
+            "num_gpu_blocks": 128,
+            "max_num_seqs": 1,
+            "speedup_ratio": 0.01
+        }
+    }))
+    .unwrap();
     let service = VllmMockerService::new(
         MockerServerConfig {
             max_concurrent_requests: 2,
@@ -525,15 +701,17 @@ async fn streaming_generate_maps_capacity_rejection_to_resource_exhausted() {
     // Same undersized KV cache as the unary case, but exercised through the
     // streaming RPC the production sidecar uses: the call opens successfully and
     // the rejection arrives as a later stream item after prompt info.
-    let args = MockEngineArgs::builder()
-        .block_size(4)
-        .enable_prefix_caching(false)
-        .num_gpu_blocks(1)
-        .max_num_seqs(Some(8))
-        .max_num_batched_tokens(Some(64))
-        .speedup_ratio(0.0)
-        .build()
-        .unwrap();
+    let args = MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "block_size": 4,
+            "enable_prefix_caching": false,
+            "num_gpu_blocks": 1,
+            "max_num_seqs": 8,
+            "max_num_batched_tokens": 64,
+            "speedup_ratio": 0.0
+        }
+    }))
+    .unwrap();
     let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
     let mut oversized = request("oversized-stream");
     oversized.prompt = Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
@@ -642,7 +820,7 @@ async fn failed_kv_publisher_is_not_advertised() {
     let occupied = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let mut args = admitting_args();
     args.enable_prefix_caching = true;
-    args.zmq_kv_events_port = Some(occupied.local_addr().unwrap().port());
+    args.runtime.zmq_kv_events_port = Some(occupied.local_addr().unwrap().port());
     let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
     assert_eq!(
         pb::control_server::Control::get_kv_event_sources(

@@ -18,12 +18,15 @@
 package v1beta1
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -48,6 +51,7 @@ const (
 
 // DynamoComponentDeploymentSpec defines the desired state of a DynamoComponentDeployment.
 // +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx')",message="standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 type DynamoComponentDeploymentSpec struct {
 	// backendFramework specifies the backend framework.
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
@@ -73,7 +77,6 @@ type DynamoComponentDeploymentSpec struct {
 // any `extraPodSpec`-style escape hatch. Container paths are relative to the component spec.
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (!has(self.replicas) && has(self.type) && self.type == 'lpx') || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)",message="type is immutable after it is set"
 // +kubebuilder:validation:XValidation:rule="!has(self.lpx) || (has(self.type) && self.type == 'lpx')",message="lpx may only be set when type is lpx"
 // +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx') || has(self.lpx)",message="lpx is required when type is lpx"
@@ -86,7 +89,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// component. With apiVersion `grove.io/v1alpha1`, target is
 	// `PodCliqueTemplateSpec` for a single-node component or
 	// `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set
-	// only `topologyConstraint`. Standalone DCD OpenAPI omits this field.
+	// `topologyConstraint` and `rollingUpdate.maxUnavailable`. Standalone DCD
+	// OpenAPI omits this field.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
 
@@ -178,11 +182,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// gang-scheduled, and 2) when violating minAvailable replicas triggers gang
 	// termination.
 	//
-	// For Grove-backed DynamoGraphDeployment components, minAvailable defaults to
-	// 1 when omitted and is immutable after creation. Positive replica counts must
-	// be greater than or equal to minAvailable. Replicas may be scaled to 0 as a
-	// special scale-to-zero state; minAvailable remains configured but is not
-	// enforced again until replicas is scaled back to a positive value.
+	// Deprecated: use providerOverride.value.spec.minAvailable for a standalone
+	// Grove PodClique, or providerOverride.value.minAvailable for a scaling group.
+	// The effective minimum is immutable after creation; moving the same value
+	// to the new form is supported without changing the update strategy.
+	// Grove uses RollingRecreate unless a strategy annotation explicitly overrides it.
+	// New Grove deployments default the provider-native form to 1. Scale-to-zero
+	// preserves the minimum until replicas becomes positive again.
 	//
 	// For non-Grove deployments, setting this field will result in a validation error.
 	// +kubebuilder:validation:Minimum=1
@@ -454,17 +460,29 @@ func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
 	return ComputeDynamoNamespace(s.Spec.GlobalDynamoNamespace, s.GetNamespace(), s.GetParentGraphDeploymentName())
 }
 
-// ComputeDynamoNamespace is the single source of truth for computing the Dynamo namespace.
-// When `globalDynamoNamespace` is true, returns the global namespace constant.
-// Otherwise returns `{k8sNamespace}-{dgdName}` with dots in `dgdName` replaced
-// by hyphens so that the namespace can safely form the first segment of
-// endpoint paths.
+// ComputeDynamoNamespace is the single source of truth for derived Dynamo namespaces.
+// It returns the global namespace when requested; otherwise it combines the
+// Kubernetes namespace and DGD name, replacing dots with hyphens
+// for endpoint path parsing. Values over the Kubernetes label limit are shortened
+// with a 16-character SHA-256 suffix derived from the original namespace/name pair.
+// Inputs must be valid Kubernetes namespace and DGD names.
 func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName string) string {
+	// Preserve the explicit global namespace independently of resource names.
 	if globalDynamoNamespace {
 		return commonconsts.GlobalDynamoNamespace
 	}
-	sanitized := strings.ReplaceAll(dgdName, ".", "-")
-	return fmt.Sprintf("%s-%s", k8sNamespace, sanitized)
+
+	// Preserve existing runtime identities that already fit in a Kubernetes label.
+	namespace := k8sNamespace + "-" + strings.ReplaceAll(dgdName, ".", "-")
+	if len(namespace) <= validation.LabelValueMaxLength {
+		return namespace
+	}
+
+	// Hash the original pair so truncation and dot normalization do not merge identities.
+	sum := sha256.Sum256([]byte(k8sNamespace + "/" + dgdName))
+	suffix := hex.EncodeToString(sum[:8])
+	prefix := strings.TrimRight(namespace[:validation.LabelValueMaxLength-len(suffix)-1], "-")
+	return prefix + "-" + suffix
 }
 
 // GetSpec returns the spec as an interface, used by generic resource helpers.

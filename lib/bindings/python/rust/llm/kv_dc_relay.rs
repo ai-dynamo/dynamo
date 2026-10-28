@@ -202,6 +202,9 @@ impl KvDcRelay {
                 "max_load_subscribers" => {
                     require_wan()?.max_load_subscribers = to_usize(value)?;
                 }
+                "max_serving_load_subscribers" => {
+                    require_wan()?.max_serving_load_subscribers = to_usize(value)?;
+                }
                 _ => {
                     return Err(PyValueError::new_err(format!(
                         "unknown tuning key {key}; producer keys: publication_threshold, \

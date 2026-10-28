@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SWE-bench Pro multi-turn replay. Set empty Job environment values before applying.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: swe-bench-pro-aiperf-config
+data:
+  run.sh: |
+    set -euo pipefail
+    : "${CONCURRENCY:?Set the benchmark concurrency}"
+    : "${BENCHMARK_DURATION:?Set the measured duration in seconds}"
+    : "${WARMUP_GRACE_PERIOD:?Set the warmup grace period in seconds}"
+    : "${REQUEST_TIMEOUT_SECONDS:?Set the request timeout in seconds}"
+    : "${MAX_CONTEXT_LENGTH:?Set the context limit for your deployment}"
+    : "${ENDPOINT:?Set the server base URL, for example http://localhost:8000}"
+    : "${ARTIFACT_DIR:?Set a unique persistent artifact directory}"
+    : "${CACHE_SALT:?Set a fresh cache salt for this run}"
+    MODEL_REPO=${TOKENIZER}
+    SERVED_MODEL=${TARGET_MODEL}
+    : "${TRACE_DIR:?Set the extracted trace directory}"
+    export AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT=1200
+    export AIPERF_DATASET_CONFIGURATION_TIMEOUT=1200
+    # Required for per-trajectory affinity when targeting Dynamo.
+    export AIPERF_HTTP_X_DYNAMO_SESSION_ID_FROM_CORRELATION_ID=1
+    test -d "$TRACE_DIR"
+    TRACE_COUNT=$(find "$TRACE_DIR" -maxdepth 1 -type f -name '*.json' | wc -l)
+    if [ "$TRACE_COUNT" -ne 400 ]; then
+      echo "Expected 400 trajectory JSON files in $TRACE_DIR; found $TRACE_COUNT" >&2
+      exit 1
+    fi
+    if [ -e "$ARTIFACT_DIR" ]; then
+      echo "Use a new ARTIFACT_DIR for each run: $ARTIFACT_DIR" >&2
+      exit 1
+    fi
+    exec aiperf profile \
+      --model "$SERVED_MODEL" \
+      --tokenizer "$MODEL_REPO" \
+      --tokenizer-trust-remote-code \
+      --endpoint-type chat \
+      --url "$ENDPOINT" \
+      --input-file "$TRACE_DIR" \
+      --custom-dataset-type weka_trace \
+      --scenario inferencex-agentx-mvp \
+      --unsafe-override \
+      --concurrency "$CONCURRENCY" \
+      --workers-max "$CONCURRENCY" \
+      --benchmark-duration "$BENCHMARK_DURATION" \
+      --request-timeout-seconds "$REQUEST_TIMEOUT_SECONDS" \
+      --max-context-length "$MAX_CONTEXT_LENGTH" \
+      --trajectory-start-min-ratio 0.25 \
+      --trajectory-start-max-ratio 0.75 \
+      --random-seed 42 \
+      --warmup-grace-period "$WARMUP_GRACE_PERIOD" \
+      --no-fixed-schedule \
+      --streaming \
+      --use-server-token-count \
+      --extra-inputs ignore_eos:true \
+      --extra-inputs temperature:1 \
+      --extra-inputs "cache_salt:${CACHE_SALT}" \
+      --failed-request-threshold 0.1 \
+      --server-metrics \
+      --server-metrics-formats json \
+      --server-metrics-formats csv \
+      --server-metrics-formats jsonl \
+      --export-level records \
+      --artifact-dir "$ARTIFACT_DIR" \
+      --ui none
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: swe-bench-pro-aiperf-job
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: aiperf
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/bash
+        - -lc
+        args:
+        - |
+          set -euo pipefail
+          pip install --no-cache-dir --pre "aiperf==0.13.*"
+          exec bash /etc/aiperf/run.sh
+        env:
+        - name: HF_HOME
+          value: /shared-model-cache
+        - name: HF_HUB_OFFLINE
+          value: '1'
+        - name: TARGET_MODEL
+          value: nvidia/nemotron-3.5-super-vl-120b-a12b
+        - name: TOKENIZER
+          value: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
+        - name: TRACE_DIR
+          value: /shared-model-cache/traces/swe-bench-pro__super-3dot5__stacked
+        - name: ENDPOINT
+          value: ''
+        - name: CONCURRENCY
+          value: ''
+        - name: BENCHMARK_DURATION
+          value: ''
+        - name: WARMUP_GRACE_PERIOD
+          value: ''
+        - name: REQUEST_TIMEOUT_SECONDS
+          value: ''
+        - name: MAX_CONTEXT_LENGTH
+          value: ''
+        - name: ARTIFACT_DIR
+          value: ''
+        - name: CACHE_SALT
+          value: ''
+        volumeMounts:
+        - name: aiperf-config
+          mountPath: /etc/aiperf
+          readOnly: true
+        - name: shared-model-cache
+          mountPath: /shared-model-cache
+      volumes:
+      - name: aiperf-config
+        configMap:
+          name: swe-bench-pro-aiperf-config
+      - name: shared-model-cache
+        persistentVolumeClaim:
+          claimName: shared-model-cache

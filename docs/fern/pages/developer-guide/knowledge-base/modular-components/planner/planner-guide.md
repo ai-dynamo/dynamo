@@ -69,7 +69,7 @@ spec:
       advisory: true
 ```
 
-Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment.
+Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment. Planner-in-the-loop replay honors it too: the replay keeps the simulated deployment fixed, reports the recommendations, and records [retune](#periodic-retune-experimental) decisions, which run only in simulation, without applying them; see [Replay in Advisory Mode](aisimulate-planner-replay.mdx#replay-in-advisory-mode).
 
 ### Optimization Target
 
@@ -184,7 +184,7 @@ spec:
 | `backend` | string | `vllm` | Backend: `vllm`, `sglang`, `trtllm`, or `mocker`. |
 | `environment` | string | `kubernetes` | Runtime environment: `kubernetes`, `virtual`, or `global-planner`. |
 | `namespace` | string | env `DYN_NAMESPACE` | Dynamo logical/runtime namespace for the deployment. |
-| `advisory` | bool | `false` | Suggestion-only mode. Compute, log, export, and report recommended replica counts without executing scaling actions or changing the deployment. |
+| `advisory` | bool | `false` | Suggestion-only mode. Compute, log, export, and report recommended replica counts without executing scaling actions or changing the deployment. Planner-in-the-loop replay honors it too and records retune decisions without applying them. |
 
 ### Traffic Prediction Settings
 
@@ -238,6 +238,50 @@ The same diagnostic signals surfaced in these reports are also exported as Prome
 
 The Replica Counts plot overlays actual prefill/decode replicas with discrete recommendation markers for the Planner's recommended prefill/decode replicas. When `advisory: true`, these recommended counts are suggestions only; the Planner records what it would do without applying the change.
 
+### Unavailable Scaling Inputs
+
+`dynamo_planner_signal_unavailable{component,signal}` reports missing inputs on
+their most recent scheduled observation. After the consecutive-observation
+threshold defined by `SIGNAL_DEGRADATION_OBSERVATIONS` in
+[planner_metrics.py](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/monitoring/planner_metrics.py)
+is reached, the Planner logs `Planner degraded signal` and increments
+`dynamo_planner_degraded_signals_total{component,signal}` once for that episode.
+A successful observation clears the gauge and allows a later outage to produce
+a new alert. Ticks that do not request a signal do not count as missing samples.
+
+The signals distinguish missing FPM, stale FPM, worker discovery join failures,
+missing speculative accept length, and unavailable traffic observations.
+`load_inputs` and `throughput_inputs` report `missing_engine_metadata` from the
+scaling paths' own metadata checks, such as missing KV capacity or batching
+limits. Normal performance-model warmup (`insufficient_data` or
+`model_not_ready`) remains visible in decision diagnostics and does not trigger
+a degraded-input alert. For a pool with ready workers, metadata health changes
+only when a scaling path actually evaluates that metadata; skipped, idle, or
+zero-demand decisions do not clear an existing metadata alarm. An explicitly
+empty pool clears its metadata alarm.
+Runtime FPM samples expire after three load-adjustment
+intervals measured from local receipt. Idle heartbeats refresh that receipt
+time. Samples from workers absent from discovery are excluded and logged with
+their worker IDs.
+Each discovered worker must provide a fresh sample for every DP rank declared
+in its model card. A worker or rank that has never published is unavailable;
+the Planner does not use a partial component snapshot to infer idle capacity.
+A snapshot is also unavailable if any rank's payload is malformed or uses an
+unsupported FPM schema version.
+
+Missing, non-finite, or failed router request-counter queries produce unavailable
+demand, matching the frontend collection behavior. An explicit counter value of
+zero remains a valid idle observation.
+
+Fresh idle FPM can reduce an SLA pool without waiting for a cold performance
+model. A valid zero-demand throughput prediction can also reduce a pool without
+a capacity estimate. Missing observations do not count as idle. Replica floors,
+GPU budgets, pending rollout checks, and downstream actuation constraints still
+apply. A restarted Planner uses observed deployment counts to resume decisions.
+These model-independent idle paths retain at least one worker per active role,
+even when `min_endpoint: 0`: without a publisher or a ready capacity model, they
+cannot independently wake a fully stopped pool.
+
 ### Scheduling / plugin pipeline
 
 The planner runs through the builtin plugin pipeline by default. The base
@@ -248,8 +292,8 @@ plugin registration, transport, and auth settings live under
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `scheduling.scale_interval_seconds` | float | gcd of enabled builtin intervals | Base pipeline cadence. The pipeline wakes once per interval; each plugin's `execution_interval_seconds` decides whether that plugin fires on the tick. By default, the cadence is the gcd of `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`, preserving existing config fire times. |
-| `scheduling.tick_max_duration_seconds` | float | `30.0` | Outer deadline wrapping the full plugin pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. |
-| `plugin_registration.transport.request_timeout_seconds` | float | `5.0` | Per-plugin RPC timeout. Plugins exceeding this raise `PluginTimeoutError`; the stage continues with the remaining plugins. |
+| `scheduling.tick_max_duration_seconds` | float | `30.0` | Outer wall-clock deadline wrapping the full plugin pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. Replay does not apply it. |
+| `plugin_registration.transport.request_timeout_seconds` | float | `5.0` | Per-plugin RPC timeout. Plugins exceeding this raise `PluginTimeoutError`; the stage continues with the remaining plugins. Replay does not apply it to in-process plugins. |
 
 Existing planner fields still drive the builtin plugins:
 
@@ -281,6 +325,75 @@ spec:
           request_timeout_seconds: 5.0
 ```
 
+## Periodic Retune (Experimental)
+
+> [!WARNING]
+> **Experimental.** In this release, retune runs only in offline simulation:
+> `aisimulate predict --stack dynamo` and `dynamo.replay.run_trace_replay`. A live Planner rejects a
+> configuration that sets `retune` at startup.
+
+Retune lets the Planner tune its own runtime parameters from the traffic it served. Every
+`retune.interval_seconds`, it takes the window of the request trace that just ended and replays it
+once per candidate parameter point, on the deployment's engine configuration and from the replica
+counts at the window start. It scores each candidate by SLA goodput per GPU: SLA-good output tokens
+per second of the window, divided by the GPUs provisioned. When the best candidate beats the current
+point on the same window by more than `min_improvement_percentage`, the Planner switches to it.
+
+Retune searches parameters a running deployment can change without a restart:
+
+- **Router parameters** of the KV router, in `retune.router`: `overlap_score_credit`,
+  `prefill_load_scale`, `temperature`, and four more `/router_policy` parameters.
+- **Planner runtime fields**, in `retune.planner`: load-scaling sensitivity, the load predictor,
+  minimum worker counts, GPU budgets, `max_throughput_scaling_replicas`, and the thresholds of
+  `optimization_target: load`.
+
+The engine, the topology, the router mode, and Planner settings fixed at startup, such as the
+scaling intervals and `ttft_ms` / `itl_ms`, stay as configured.
+
+Retune supports two scenarios:
+
+| Scenario | Planner | Searched | Each candidate replay |
+|---|---|---|---|
+| Fixed replicas | Retune-only mode: `retune` set with both `enable_load_scaling: false` and `enable_throughput_scaling: false`. The Planner never scales | Router parameters | Keeps the replica counts fixed |
+| Autoscaling | Load-based or throughput-based scaling, or both | Router parameters, Planner fields, or both | Runs the current Planner with the candidate's fields |
+
+With `advisory: true`, the Planner still runs every sweep but only records the decision it would
+apply, with outcome `advisory`; the router and Planner parameters keep their starting values.
+
+A sweep takes time, so the decision lands at least one Planner tick after the sweep launches, and
+later when `decision_latency_seconds` models the sweep's duration. The old parameters serve traffic
+until then. Each candidate is replayed once, and all candidates of a window share one random seed,
+so a candidate that changes no routing or scaling decision ties the current point and is kept (with
+the pinned AISimulate release, an inner Planner with `optimization_target: sla` is not guaranteed to
+be bitwise reproducible; see
+[Candidates and the Sweep](planner-design.md#candidates-and-the-sweep)).
+A candidate that changes decisions is judged on one replay of one window, so
+`min_improvement_percentage` sets the margin it must clear; see
+[Measure the Gain](aisimulate-planner-replay.mdx#measure-the-gain).
+
+This minimal fixed-replica configuration searches the 108-point default router domain every six
+hours. It is a `PlannerConfig` for the `planner_config` argument of `dynamo.replay.run_trace_replay`
+(see [Run Retune from Python](aisimulate-planner-replay.mdx#run-retune-from-python)), not a DGDR
+`spec.features.planner` fragment: a live Planner rejects it. In `aisimulate predict`, the `planner`
+section takes `retune` and the two scaling flags, and `mode` comes from `engine.mode`; see
+[Scenario 1](aisimulate-planner-replay.mdx#scenario-1-fixed-replicas-router-only).
+
+```yaml
+mode: disagg
+enable_load_scaling: false
+enable_throughput_scaling: false
+retune:
+  interval_seconds: 21600
+  router: default
+```
+
+To run retune and read its decisions, see
+[Simulate Retune](aisimulate-planner-replay.mdx#simulate-retune-experimental). For windows,
+candidates, scoring, and decision timing, see
+[Planner Design](planner-design.md#retune-experimental-simulation-only). For every field and the
+search-domain syntax, see the
+[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only).
+
 ## Integration with Profiler
 
 When the profiler runs with planner enabled, it:
@@ -309,6 +422,7 @@ In the current workflow, run profiling independently for each intended pool, the
 - [Planner overview](overview.md) — Why LLM inference needs a different autoscaler
 - [Planner Design](planner-design.md) — Architecture and algorithm internals
 - [Planner Examples](planner-examples.md) — Planner-specific configuration examples
+- [Simulate Planner Decisions with AISimulate](aisimulate-planner-replay.mdx) — Replay a trace through the Planner offline, including retune
 - [DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx) — DGDR YAML examples, sample configurations, advanced patterns
 - [Global Planner Guide](global-planner-guide.md) — Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments
 - [Profiler Guide](../profiler/profiler-guide.md) — How profiling data is generated

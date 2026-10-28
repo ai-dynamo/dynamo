@@ -3,6 +3,7 @@
 
 """Shared assertions for router metadata returned in OpenAI `nvext` responses."""
 
+import json
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -14,6 +15,25 @@ class RouterNvextExpectation:
 
 def router_nvext_extra_body(fields: Sequence[str]) -> dict[str, Any]:
     return {"nvext": {"extra_fields": list(dict.fromkeys(fields))}}
+
+
+def parse_sse_json_chunks(body: str) -> list[dict[str, Any]]:
+    """Decode JSON objects from single-line SSE data fields."""
+    chunks = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(chunk, dict):
+            chunks.append(chunk)
+    return chunks
 
 
 def _context_prefix(context: str) -> str:

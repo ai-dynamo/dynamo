@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{cell::Cell, collections::HashMap};
+use std::{
+    cell::{Cell, OnceCell},
+    collections::HashMap,
+};
 
 mod policy;
 #[cfg(any(test, feature = "bench"))]
@@ -19,7 +22,15 @@ pub use crate::plugins::worker_selection::{
 #[cfg(any(test, feature = "bench"))]
 use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
-use crate::plugins::worker_selection::{CacheSnapshot, CandidateData, WorkerCacheData};
+use crate::kv_hints::{
+    KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
+};
+use crate::plugins::worker_selection::{
+    CacheSnapshot, CandidateData, WorkerCacheData, WorkerTransferInput,
+};
+use crate::plugins::worker_selection::{
+    RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
+};
 pub use policy::WorkerSelectionPolicy;
 use policy::{ComposedPolicyState, WorkerSelectionPolicyStateRef, collect_policy_candidates};
 #[cfg(any(test, feature = "bench"))]
@@ -27,12 +38,28 @@ use reference::pick_default_worker;
 
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use crate::protocols::{
+    SelectionTrace, SelectionTraceRow, SelectionTraceSpec, WorkerConfigLike, WorkerId,
+    WorkerSelectionResult, WorkerWithDpRank,
+};
 
 /// Low-level selector used by routing hosts.
 ///
 /// External policies should use [`WorkerSelectionPolicy`].
 pub trait WorkerSelector<C: WorkerConfigLike> {
+    /// Snapshot runtime parameters, when this selector explicitly supports updates.
+    fn runtime_config(&self) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        Err(RuntimePolicyError::Unsupported)
+    }
+
+    /// Apply a validated replacement between selections. The scheduler actor serializes calls.
+    fn update_runtime_config(
+        &mut self,
+        _update: RuntimePolicyUpdate,
+    ) -> Result<RuntimePolicyConfig, RuntimePolicyError> {
+        Err(RuntimePolicyError::Unsupported)
+    }
+
     /// Optional worker data required by this selector.
     fn required_worker_inputs(&self) -> WorkerInputs;
 
@@ -48,6 +75,18 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         &self,
         input: WorkerSelectionInput<'_, C>,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
+
+    /// Select a worker and, when `trace` is set, also return the per-candidate costs
+    /// the policy scored. The default ignores `trace`; policies that can report their
+    /// candidates override it. Hosts call this instead of [`Self::select_worker`]
+    /// when a selection trace is installed.
+    fn select_worker_traced(
+        &self,
+        input: WorkerSelectionInput<'_, C>,
+        _trace: Option<SelectionTraceSpec>,
+    ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+        self.select_worker(input).map(|result| (result, None))
+    }
 }
 
 /// Inputs supplied by the selector's host.
@@ -134,6 +173,9 @@ struct MaterializedSelectionInput<'a> {
     // Track the maximum over the eligible ranks row() already visits; no second scan.
     max_raw_cached_tokens: Cell<Option<usize>>,
     cache_snapshot: CacheSnapshot<'a>,
+    // Built at most once and shared by every row's fetch credit and the
+    // selected worker's fetch source, so the two cannot disagree.
+    kv_transfer_sources: OnceCell<KvTransferSourceSummary>,
 }
 
 impl<'a> MaterializedSelectionInput<'a> {
@@ -158,7 +200,61 @@ impl<'a> MaterializedSelectionInput<'a> {
                     .and_then(|config| config.router_temperature),
             },
             max_raw_cached_tokens: Cell::new(request.mode.is_tracked().then_some(0)),
+            kv_transfer_sources: OnceCell::new(),
         }
+    }
+
+    /// The request's fetch sources for the targets in `scope`, built on the
+    /// first call.
+    fn kv_transfer_sources<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        scope: impl FnOnce() -> KvTransferScope,
+    ) -> Option<&KvTransferSourceSummary> {
+        let candidates = self.request.kv_transfer_candidates.as_ref()?;
+        Some(
+            self.kv_transfer_sources
+                .get_or_init(|| KvTransferSourceSummary::new(candidates, workers, scope())),
+        )
+    }
+
+    /// Fill every row's fetch input once all rows are built, so the sources
+    /// skip anything shorter than the shortest local prefix. `targets` is
+    /// index-aligned with `rows`: each hint-capable row's target and local prefix.
+    fn fill_kv_transfer_sources<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        rows: &mut [CandidateData],
+        targets: &[Option<(KvTransferTarget, usize)>],
+    ) {
+        debug_assert_eq!(rows.len(), targets.len());
+        let scope = || KvTransferScope::of(targets.iter().flatten().copied());
+        let Some(sources) = self.kv_transfer_sources(workers, scope) else {
+            return;
+        };
+        for (row, &target) in rows.iter_mut().zip(targets) {
+            row.transfer = Some(WorkerTransferInput {
+                source_prefix_blocks: target
+                    .and_then(|(target, local)| sources.source_for(row.worker, target, local))
+                    .map(source_prefix_blocks),
+            });
+        }
+    }
+
+    fn selected_kv_transfer_source<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        worker: WorkerWithDpRank,
+    ) -> Option<KvTransferSourceChoice> {
+        self.request.kv_transfer_candidates.as_ref()?;
+        let target = workers
+            .get(&worker.worker_id)?
+            .kv_transfer_keys()
+            .target()?;
+        let local_prefix_blocks = self.request.transfer_local_prefix_blocks_for(worker);
+        let scope = || KvTransferScope::of([(target, local_prefix_blocks)]);
+        self.kv_transfer_sources(workers, scope)?
+            .source_for(worker, target, local_prefix_blocks)
     }
 
     fn max_raw_cached_tokens(&self) -> Option<usize> {
@@ -249,7 +345,7 @@ impl<'a> MaterializedSelectionInput<'a> {
         };
         let load = if inputs.contains(WorkerInputs::LOAD) {
             let available = worker_load.is_some();
-            let worker_load = worker_load.unwrap_or_default();
+            let worker_load = worker_load.unwrap_or_else(|| self.request.worker_load_for(worker));
             WorkerLoadInput {
                 available,
                 active_prefill_tokens: worker_load.active_prefill_tokens,
@@ -265,9 +361,14 @@ impl<'a> MaterializedSelectionInput<'a> {
             inputs,
             cache,
             load,
+            transfer: None,
             preferred_taint_multiplier,
         }
     }
+}
+
+fn source_prefix_blocks(source: KvTransferSourceChoice) -> u32 {
+    u32::try_from(source.prefix_blocks).unwrap_or(u32::MAX)
 }
 
 fn selection_result(
@@ -275,6 +376,7 @@ fn selection_result(
     worker: WorkerWithDpRank,
     block_size: u32,
     max_raw_cached_tokens: Option<usize>,
+    kv_transfer_source: Option<KvTransferSourceChoice>,
 ) -> WorkerSelectionResult {
     WorkerSelectionResult {
         worker,
@@ -286,6 +388,83 @@ fn selection_result(
             .map(|_| request.raw_cached_tokens_for(worker, block_size)),
         potential_decode_blocks: request
             .potential_decode_blocks_after_admission(worker, block_size),
+        kv_transfer_source,
+    }
+}
+
+/// Copy the retained candidate costs out of the policy's scratch rows in one pass.
+///
+/// Keeps every candidate when `spec.top_k` is zero or not below the candidate count;
+/// otherwise the `top_k` lowest-cost rows plus the selected row when it is not among
+/// them. Rows are unordered: this runs on the scheduler actor, so sorting is left to
+/// the trace emitter on the routing task.
+fn build_selection_trace(
+    candidates: &[ScoredWorkerCandidate],
+    selected_row: usize,
+    pinned: bool,
+    spec: SelectionTraceSpec,
+) -> SelectionTrace {
+    let candidate_count = candidates.len();
+    let row_of = |candidate: &ScoredWorkerCandidate| SelectionTraceRow {
+        worker: candidate.worker,
+        cost: candidate.cost,
+    };
+    let rows = if spec.top_k == 0 || spec.top_k >= candidate_count {
+        candidates.iter().map(row_of).collect()
+    } else {
+        let mut rows: Vec<SelectionTraceRow> = Vec::with_capacity(spec.top_k + 1);
+        // Index into `rows` of the costliest retained row.
+        let mut costliest = 0;
+        for candidate in candidates {
+            if rows.len() < spec.top_k {
+                if rows.is_empty() || candidate.cost > rows[costliest].cost {
+                    costliest = rows.len();
+                }
+                rows.push(row_of(candidate));
+            } else if candidate.cost < rows[costliest].cost {
+                rows[costliest] = row_of(candidate);
+                for (index, row) in rows.iter().enumerate() {
+                    if row.cost > rows[costliest].cost {
+                        costliest = index;
+                    }
+                }
+            }
+        }
+        let selected = &candidates[selected_row];
+        if !rows.iter().any(|row| row.worker == selected.worker) {
+            rows.push(row_of(selected));
+        }
+        rows
+    };
+    SelectionTrace {
+        candidate_count,
+        pinned,
+        rows,
+    }
+}
+
+/// Log every scored candidate at TRACE, one row per worker and rank, stamped with
+/// `request_id` and `worker_type` because the scheduler actor task has no request span.
+fn log_scored_candidates(
+    request: &SchedulingRequest,
+    worker_type: &'static str,
+    candidates: &[ScoredWorkerCandidate],
+    selected_row: usize,
+) {
+    if !tracing::enabled!(tracing::Level::TRACE) {
+        return;
+    }
+    let request_id = request.mode.request_id().unwrap_or("-");
+    for (row, candidate) in candidates.iter().enumerate() {
+        tracing::trace!(
+            request_id,
+            worker_type,
+            worker_id = candidate.worker.worker_id,
+            dp_rank = candidate.worker.dp_rank,
+            cost = candidate.cost,
+            selected = row == selected_row,
+            "Scored worker candidate"
+        );
     }
 }
 
@@ -365,7 +544,8 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
     block_size: u32,
-) -> Result<WorkerSelectionResult, KvSchedulerError> {
+    trace: Option<SelectionTraceSpec>,
+) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
     eligibility.validate_pinned_worker_allowed()?;
 
     if let Some(worker) = eligibility.pinned_worker() {
@@ -390,6 +570,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 worker_type,
             };
             pick_default_worker(&scorer, picker, &input, workers, request, eligibility)
+                .map(|(worker, cost)| (worker, cost, None))
         }
         WorkerSelectionPolicyStateRef::Composed(state) => {
             let mut state = state.borrow_mut();
@@ -437,11 +618,20 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     }
                     .into());
                 };
-                Some((candidate.worker, candidate.cost))
+                log_scored_candidates(request, worker_type, candidates, row);
+                let trace = trace.map(|spec| {
+                    build_selection_trace(
+                        candidates,
+                        row,
+                        input.context.pinned_worker.is_some(),
+                        spec,
+                    )
+                });
+                Some((candidate.worker, candidate.cost, trace))
             }
         }
     };
-    let Some((worker, cost)) = selected else {
+    let Some((worker, cost, selection_trace)) = selected else {
         if eligibility.has_eligible_worker_ignoring_overload(
             workers
                 .iter()
@@ -451,7 +641,14 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let result = selection_result(request, worker, block_size, input.max_raw_cached_tokens());
+    let kv_transfer_source = input.selected_kv_transfer_source(workers, worker);
+    let result = selection_result(
+        request,
+        worker,
+        block_size,
+        input.max_raw_cached_tokens(),
+        kv_transfer_source,
+    );
     log_selection(
         workers,
         request,
@@ -460,7 +657,68 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         cost,
         result.effective_overlap_blocks,
     );
-    Ok(result)
+    Ok((result, selection_trace))
+}
+
+#[cfg(test)]
+mod selection_trace_tests {
+    use super::*;
+
+    fn candidates(costs: &[f64]) -> Vec<ScoredWorkerCandidate> {
+        costs
+            .iter()
+            .enumerate()
+            .map(|(id, cost)| ScoredWorkerCandidate {
+                worker: WorkerWithDpRank::from_worker_id(id as u64),
+                cost: *cost,
+                preferred_taint_multiplier: None,
+            })
+            .collect()
+    }
+
+    fn worker_ids_by_cost(trace: &SelectionTrace) -> Vec<u64> {
+        let mut rows = trace.rows.clone();
+        rows.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+        rows.iter().map(|row| row.worker.worker_id).collect()
+    }
+
+    #[test]
+    fn zero_top_k_keeps_every_candidate() {
+        let rows = candidates(&[3.0, 1.0, 2.0]);
+        let trace = build_selection_trace(&rows, 2, false, SelectionTraceSpec { top_k: 0 });
+        assert_eq!(trace.candidate_count, 3);
+        assert_eq!(worker_ids_by_cost(&trace), vec![1, 2, 0]);
+        assert!(!trace.pinned);
+    }
+
+    #[test]
+    fn top_k_keeps_lowest_costs_and_appends_selected_row() {
+        let rows = candidates(&[5.0, 1.0, 4.0, 2.0, 3.0, 0.5]);
+        // Selected row 0 costs 5.0, the worst candidate: it is appended after the three cheapest.
+        let trace = build_selection_trace(&rows, 0, true, SelectionTraceSpec { top_k: 3 });
+        assert_eq!(trace.candidate_count, 6);
+        assert_eq!(worker_ids_by_cost(&trace), vec![5, 1, 3, 0]);
+        assert!(trace.pinned);
+
+        // Selected row already among the cheapest: nothing is appended.
+        let trace = build_selection_trace(&rows, 1, false, SelectionTraceSpec { top_k: 3 });
+        assert_eq!(worker_ids_by_cost(&trace), vec![5, 1, 3]);
+    }
+
+    #[test]
+    fn top_k_at_or_above_candidate_count_keeps_everything() {
+        let rows = candidates(&[2.0, 1.0]);
+        let trace = build_selection_trace(&rows, 0, false, SelectionTraceSpec { top_k: 8 });
+        assert_eq!(worker_ids_by_cost(&trace), vec![1, 0]);
+    }
+
+    #[test]
+    fn top_k_pass_tracks_the_costliest_retained_row() {
+        // Descending costs force a replacement on every candidate after the first k.
+        let rows = candidates(&[9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0]);
+        let trace = build_selection_trace(&rows, 6, false, SelectionTraceSpec { top_k: 2 });
+        assert_eq!(worker_ids_by_cost(&trace), vec![6, 5]);
+    }
 }
 
 #[cfg(test)]
@@ -579,7 +837,7 @@ mod cache_reuse_tests {
         input.track_kept_candidate(second);
 
         assert_eq!(input.max_raw_cached_tokens(), Some(96));
-        let result = selection_result(&request, first, 16, input.max_raw_cached_tokens());
+        let result = selection_result(&request, first, 16, input.max_raw_cached_tokens(), None);
         assert_eq!(result.max_raw_cached_tokens, Some(96));
         assert_eq!(result.selected_raw_cached_tokens, Some(48));
         assert_eq!(result.cached_tokens, 120);
@@ -596,7 +854,7 @@ mod cache_reuse_tests {
         input.track_kept_candidate(worker);
 
         assert_eq!(input.max_raw_cached_tokens(), None);
-        let result = selection_result(&request, worker, 16, input.max_raw_cached_tokens());
+        let result = selection_result(&request, worker, 16, input.max_raw_cached_tokens(), None);
         assert_eq!(result.max_raw_cached_tokens, None);
         assert_eq!(result.selected_raw_cached_tokens, None);
     }
@@ -625,7 +883,7 @@ mod cache_reuse_tests {
         request.overlap.effective_cached_tokens.insert(selected, 3);
         assert_eq!(request.raw_cached_tokens_for(selected, 16), 64);
         assert_eq!(request.raw_cached_tokens_for(other_rank, 16), 112);
-        let result = selection_result(&request, selected, 16, Some(112));
+        let result = selection_result(&request, selected, 16, Some(112), None);
         assert_eq!(result.selected_raw_cached_tokens, Some(64));
     }
 

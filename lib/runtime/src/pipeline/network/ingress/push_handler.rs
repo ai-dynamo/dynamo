@@ -3,7 +3,6 @@
 
 use super::*;
 
-use crate::admission_gate;
 use crate::engine::AsyncEngineContext;
 use crate::error::DynamoError;
 use crate::metrics::prometheus_names::work_handler;
@@ -111,10 +110,6 @@ impl WorkHandlerMetrics {
             "Total number of requests cancelled by work handler",
             metrics_labels,
         )?;
-
-        // The gate admits on this endpoint's behalf, so expose its family here
-        // too. Idempotent: the gate is process-global and every endpoint asks.
-        admission_gate::register_metrics(endpoint.get_metrics_registry());
 
         Ok(Self::new(
             request_counter,
@@ -289,11 +284,16 @@ where
             };
             let is_error = encoded.is_error;
             saw_error_response |= is_error;
+            // Notify before the publish: engine progress counts even if the send fails.
+            // Error chunks do not prove health, so they never reset the canary.
+            if !is_error && let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                notifier.notify_one();
+            }
             let resp_bytes = encoded.bytes;
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
-            if (publisher.send(resp_bytes).await).is_err() {
+            if let Err(send_err) = publisher.send(resp_bytes).await {
                 send_complete_final = false;
                 if context.is_stopped() {
                     // Say there are 2 threads accessing `context`, the sequence can be either:
@@ -304,10 +304,18 @@ where
                     // Case 1 can happen when client closed the connection after receiving the
                     // complete response from frontend. Hence, send failure can be expected in this
                     // case.
-                    tracing::warn!("Failed to publish response for stream {}", context.id());
+                    tracing::warn!(
+                        error = %send_err,
+                        "Failed to publish response for stream {}",
+                        context.id()
+                    );
                 } else {
                     // Otherwise, this is an error.
-                    tracing::error!("Failed to publish response for stream {}", context.id());
+                    tracing::error!(
+                        error = %send_err,
+                        "Failed to publish response for stream {}",
+                        context.id()
+                    );
                     context.stop_generating();
                 }
                 // Account errors in all cases, including cancellation. Therefore this metric can be
@@ -318,12 +326,6 @@ where
                         .inc();
                 }
                 break;
-            } else if !is_error {
-                // Only notify on non-error chunks — error responses don't prove
-                // the engine is healthy and should not reset the canary timer.
-                if let Some(notifier) = self.endpoint_health_check_notifier.get() {
-                    notifier.notify_one();
-                }
             }
             if encoded.stop_stream {
                 // Dropping the engine stream after the terminal frame is sent
@@ -713,18 +715,12 @@ where
         let request_context = request.context();
         tracing::trace!("calling generate");
         let worker_operation = lifecycle.start_worker_operation();
-        // Route backend generation through the transport-independent admission
-        // boundary. Admission errors follow the existing generate error path.
         let stream = async {
-            admission_gate::global()
-                .admit(
-                    Some(request_context.as_ref()),
-                    self.segment
-                        .get()
-                        .expect("segment not set")
-                        .generate(request)
-                        .instrument(lifecycle.start(LifecycleStage::RequestDispatch)),
-                )
+            self.segment
+                .get()
+                .expect("segment not set")
+                .generate(request)
+                .instrument(lifecycle.start(LifecycleStage::RequestDispatch))
                 .await
         }
         .instrument(worker_operation.clone())
@@ -884,8 +880,11 @@ where
         let advertised_mode =
             ResponsePlaneMode::from_transport_name(&response_connection_info.transport)
                 .map_err(|error| PipelineError::Generic(error.to_string()))?;
-        let configured_mode = ResponsePlaneMode::configured()
-            .map_err(|error| PipelineError::Generic(error.to_string()))?;
+        let configured_mode = match self.response_plane.get() {
+            Some(mode) => *mode,
+            None => ResponsePlaneMode::configured()
+                .map_err(|error| PipelineError::Generic(error.to_string()))?,
+        };
         let response_modes = ResponsePlaneModes {
             configured: configured_mode,
             advertised: advertised_mode,
@@ -973,7 +972,7 @@ where
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
     fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
-        self.bind_lifecycle_endpoint(endpoint);
+        self.bind_endpoint_config(endpoint);
     }
 
     fn add_metrics(
@@ -1009,7 +1008,7 @@ where
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
     fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
-        self.bind_lifecycle_endpoint(endpoint);
+        self.bind_endpoint_config(endpoint);
     }
 
     fn add_metrics(
@@ -1058,7 +1057,7 @@ mod tests {
     use crate::pipeline::network::{Ingress, RequestPlanePayloadCodec, StreamSender};
     use crate::pipeline::{Context, ManyOut, ResponseStream, SingleIn};
     use crate::protocols::annotated::Annotated;
-    use futures::stream;
+    use futures::{FutureExt, Stream, stream};
     use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts};
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1179,6 +1178,7 @@ mod tests {
                     [(true, true), (true, false), (false, true), (false, false)]
                 {
                     let capture = AdmissionCapture::default();
+                    let _interest_guard = crate::test_utils::tracing_interest_guard();
                     let subscriber = tracing_subscriber::registry().with(capture.clone());
                     async {
                         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1551,6 +1551,57 @@ mod tests {
                 .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
                 .get(),
             0
+        );
+    }
+
+    /// Run the pump with a health-check notifier set and a publisher whose
+    /// receiver is already gone, so every `send` fails. This models a client
+    /// that left before the engine produced its first chunk.
+    /// Returns whether the pump left a notification permit for the canary.
+    async fn pump_with_dead_publisher(
+        engine: impl Stream<Item = TestResponse> + Send + 'static,
+    ) -> bool {
+        let ingress = TestIngress::new();
+        let notifier = Arc::new(tokio::sync::Notify::new());
+        ingress
+            .set_endpoint_health_check_notifier(notifier.clone())
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        drop(rx);
+        let publisher = StreamSender { tx, prologue: None };
+
+        let ctx = Context::new(serde_json::json!({}));
+        let response_stream: ManyOut<TestResponse> =
+            ResponseStream::new(Box::pin(engine), ctx.context());
+        ingress
+            .pump_response_stream(response_stream, &publisher, RequestPlanePayloadCodec::Json)
+            .await;
+
+        // `notify_one` stores a permit when no task is waiting, so a pending
+        // notification resolves immediately here.
+        notifier.notified().now_or_never().is_some()
+    }
+
+    /// Issue #15707: under overload the client often leaves before the engine
+    /// sends its first chunk, so every publish fails. The engine is still
+    /// making progress, so the canary timer must be reset.
+    #[tokio::test]
+    async fn publish_failure_with_engine_progress_still_resets_canary() {
+        let chunk = TestResponse::from_data(serde_json::json!({ "token": 0 }));
+        assert!(
+            pump_with_dead_publisher(stream::iter([chunk])).await,
+            "a produced non-error chunk must reset the canary even when the publish fails"
+        );
+    }
+
+    /// Error chunks do not prove the engine is healthy, so they must not reset
+    /// the canary timer even though they are engine output.
+    #[tokio::test]
+    async fn error_only_output_does_not_reset_canary() {
+        assert!(
+            !pump_with_dead_publisher(stream::iter(vec![TestResponse::from_error("boom")])).await,
+            "an error-only chunk must not reset the canary"
         );
     }
 }
