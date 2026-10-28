@@ -68,6 +68,10 @@ impl KvStateIngressProtocol {
     pub fn supports_owned_residency(self) -> bool {
         matches!(self, Self::VllmResidencyV1 | Self::SglangHiCacheV1)
     }
+
+    pub fn has_process_local_inventory(self) -> bool {
+        matches!(self, Self::SglangHiCacheV1)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

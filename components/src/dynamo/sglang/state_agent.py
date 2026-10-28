@@ -5,20 +5,22 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
-import re
 from collections.abc import Mapping
 from urllib.parse import urlsplit
 
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.kv_state_agent import (
+    CACHE_OWNER_PATTERN,
+    bounded_close,
+    validate_advertise_host,
+)
 from dynamo.llm import KvStateAttachmentOwner
 from dynamo.sglang._compat import resolved_server_args
 from dynamo.sglang.capacity import model_card_dp_rank_bounds
 from dynamo.sglang.kv_hints import kvcr_hint_endpoints
 
 logger = logging.getLogger(__name__)
-_OWNER_PATTERN = re.compile(r"^[0-9a-f]{32}:[0-9a-f]{32}/[0-9a-f]{16}/[0-9a-f]{32}$")
 
 
 def inventory_sources(engine) -> dict[int, Mapping[str, object]]:
@@ -96,7 +98,7 @@ def state_agent_descriptors(engine, config) -> list[dict]:
     owners = set()
     for rank, source in sorted(sources.items()):
         owner = source.get("cache_owner_id")
-        if not isinstance(owner, str) or _OWNER_PATTERN.fullmatch(owner) is None:
+        if not isinstance(owner, str) or CACHE_OWNER_PATTERN.fullmatch(owner) is None:
             raise ValueError("KVCR inventory source requires a canonical CacheOwnerId")
         if owner in owners:
             raise ValueError("KVCR inventory owners must be unique across DP ranks")
@@ -122,12 +124,8 @@ def state_agent_descriptors(engine, config) -> list[dict]:
             or parsed.hostname == "*"
         ):
             raise ValueError("Invalid reported KVCR raw event endpoint")
-        try:
-            address = ipaddress.ip_address(parsed.hostname)
-        except ValueError:
-            address = None
-        if address is not None and address.is_unspecified:
-            raise ValueError("KVCR raw event source cannot advertise a wildcard")
+        host = parsed.hostname
+        validate_advertise_host(f"[{host}]" if ":" in host else host)
         block_size = raw.get("block_size")
         if type(block_size) is not int or block_size <= 0:
             raise ValueError("KVCR raw event source requires a positive block size")
@@ -187,8 +185,8 @@ class StateAgentLifecycle:
 
     async def close(self):
         if self._cleanup_task is not None:
-            await asyncio.wait_for(asyncio.shield(self._cleanup_task), timeout=30.0)
+            await bounded_close(asyncio.shield(self._cleanup_task))
             return
         owner, self._owner = self._owner, None
         if owner is not None:
-            await asyncio.wait_for(owner.close(), timeout=30.0)
+            await bounded_close(owner.close())

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from dynamo.common import kv_state_agent
 from dynamo.common.constants import DisaggregationMode
 from dynamo.sglang import state_agent
 from dynamo.sglang.state_agent import StateAgentLifecycle, state_agent_descriptors
@@ -78,35 +79,126 @@ def test_descriptors_use_only_reported_sources():
 
 
 @pytest.mark.parametrize(
-    "change,match",
+    "target,updates,match",
     [
-        ("missing_events", "raw event source per rank"),
-        ("wildcard", "wildcard"),
-        ("missing_rank", "every managed DP rank"),
-        ("missing_router_hint", "router_hint source for every managed DP rank"),
-        ("events_disabled", "KV event emission"),
-        ("wrong_format", "Dynamo-format"),
-        ("empty_topic", "engine incarnation"),
+        ("info", {"kv_event_sources": []}, "raw event source per rank"),
+        ("raw", {"endpoint": "tcp://0.0.0.0:24020"}, "non-loopback"),
+        ("server_args", {"dp_size": 2}, "every managed DP rank"),
+        (
+            "source",
+            {"capabilities": ["kvcr_inventory"]},
+            "router_hint source for every managed DP rank",
+        ),
+        ("dynamo_args", {"use_kv_events": False}, "KV event emission"),
+        ("raw", {"format": "default"}, "Dynamo-format"),
+        ("raw", {"topic": ""}, "engine incarnation"),
     ],
 )
-def test_inventory_fails_closed_for_incomplete_startup_metadata(change, match):
+def test_inventory_fails_closed_for_incomplete_startup_metadata(target, updates, match):
     engine, config, source, info = fixture()
-    if change == "missing_events":
-        info["kv_event_sources"] = []
-    elif change == "wildcard":
-        info["kv_event_sources"][0]["endpoint"] = "tcp://0.0.0.0:24020"
-    elif change == "missing_rank":
-        config.server_args.dp_size = 2
-    elif change == "missing_router_hint":
-        source["capabilities"] = ["kvcr_inventory"]
-    elif change == "wrong_format":
-        info["kv_event_sources"][0]["format"] = "default"
-    elif change == "empty_topic":
-        info["kv_event_sources"][0]["topic"] = ""
-    else:
-        config.dynamo_args.use_kv_events = False
+    targets = {
+        "info": info,
+        "source": source,
+        "raw": info["kv_event_sources"][0],
+        "server_args": vars(config.server_args),
+        "dynamo_args": vars(config.dynamo_args),
+    }
+    targets[target].update(updates)
     with pytest.raises(ValueError, match=match):
         state_agent_descriptors(engine, config)
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "localhost",
+        "127.0.0.1",
+        "127.1",
+        "2130706433",
+        "0",
+        "[::1]",
+        "[::ffff:127.0.0.1]",
+    ],
+)
+def test_raw_event_endpoint_rejects_loopback_and_unspecified_hosts(host):
+    engine, config, _, info = fixture()
+    info["kv_event_sources"][0]["endpoint"] = f"tcp://{host}:24020"
+    with pytest.raises(ValueError, match="non-loopback"):
+        state_agent_descriptors(engine, config)
+
+
+def test_raw_event_endpoint_accepts_connectable_ipv6():
+    engine, config, _, info = fixture()
+    endpoint = "tcp://[2001:db8::1]:24020"
+    info["kv_event_sources"][0]["endpoint"] = endpoint
+    (descriptor,) = state_agent_descriptors(engine, config)
+    assert descriptor["raw_zmq_endpoint"] == endpoint
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
+async def test_cleanup_timeout_preserves_body_exception(
+    monkeypatch, caplog, error_type
+):
+    engine, config, _, _ = fixture()
+    owner = SimpleNamespace(
+        start=AsyncMock(), close=AsyncMock(side_effect=asyncio.Event().wait)
+    )
+    monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
+    monkeypatch.setattr(kv_state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
+    lifecycle = StateAgentLifecycle()
+    await lifecycle.start(engine, config, SimpleNamespace(connection_id=lambda: 17))
+    original = error_type("worker body failed")
+
+    with pytest.raises(error_type) as caught:
+        try:
+            raise original
+        finally:
+            await lifecycle.close()
+
+    assert caught.value is original
+    assert "cleanup timed out" in caplog.text
+    await lifecycle.close()
+    owner.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_start_cleanup_timeout_preserves_withdrawal(
+    monkeypatch, caplog
+):
+    engine, config, _, _ = fixture()
+    started = asyncio.Event()
+    native_result = asyncio.get_running_loop().create_future()
+
+    def start():
+        started.set()
+        return native_result
+
+    async def close():
+        assert native_result.done() and not native_result.cancelled()
+
+    owner = SimpleNamespace(start=start, close=AsyncMock(side_effect=close))
+    monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
+    monkeypatch.setattr(kv_state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
+    lifecycle = StateAgentLifecycle()
+    task = asyncio.create_task(
+        lifecycle.start(engine, config, SimpleNamespace(connection_id=lambda: 17))
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        try:
+            await task
+        finally:
+            await lifecycle.close()
+
+    assert "cleanup timed out" in caplog.text
+    assert not native_result.done()
+    owner.close.assert_not_awaited()
+    native_result.set_result(None)
+    await asyncio.wait_for(lifecycle.close(), timeout=1)
+    owner.close.assert_awaited_once()
+    assert lifecycle._owner is None
 
 
 @pytest.mark.parametrize("native_finished_first", [False, True])

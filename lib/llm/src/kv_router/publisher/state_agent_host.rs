@@ -624,12 +624,17 @@ async fn reconcile_owner(
     let intent = match matching.map(HashMap::len).unwrap_or(0) {
         0 => {
             if let Some(slot) = slots.get_mut(&owner) {
-                detach_slot(slot).await?;
-                if slot.ingress_protocol == KvStateIngressProtocol::SglangHiCacheV1 {
-                    if let Some(agent) = slot.agent.as_ref() {
-                        agent.shutdown().await?;
+                if slot.ingress_protocol.has_process_local_inventory() {
+                    if let Err(error) = detach_slot(slot).await {
+                        tracing::warn!(%owner, %error, "Failed to detach engine-local KV state-agent slot");
                     }
-                    slot.agent = None;
+                    if let Some(agent) = slot.agent.take()
+                        && let Err(error) = agent.shutdown().await
+                    {
+                        tracing::warn!(%owner, %error, "Failed to stop engine-local KV state agent");
+                    }
+                } else {
+                    detach_slot(slot).await?;
                 }
                 if slot.agent.is_none() {
                     sockets.remove_slot(owner, slots);
@@ -650,10 +655,10 @@ async fn reconcile_owner(
     let intent = intent.expect("one intent was counted");
 
     if !slots.contains_key(&owner) {
-        // NOTE: Detached agents deliberately retain CacheOwner/index/recovery
-        // state and count against max_slots. This is a durable-slot resource
-        // budget, not an active-attachment count. Failed construction remains
-        // reserved only until its matching intent disappears.
+        // NOTE: Detached persistent agents retain CacheOwner/index/recovery state
+        // and count against max_slots. Engine-local slots release their capacity
+        // when their last intent disappears. Failed construction remains reserved
+        // only until its matching intent disappears.
         // TODO(#13044): require explicit decommission/migration authority
         // before reclaiming a durable owner from a long-lived host.
         if slots.len() >= max_slots {
@@ -814,11 +819,12 @@ mod tests {
     use dynamo_runtime::component::{Instance, TransportType};
     use dynamo_runtime::discovery::DiscoveryInstanceId;
     use dynamo_runtime::protocols::EndpointId;
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
     use super::*;
 
-    #[tokio::test]
-    async fn failed_slot_returns_its_shared_socket_share() {
+    #[test]
+    fn failed_slot_returns_its_shared_socket_share() {
         let mut sockets = HostSockets {
             slots_per_socket: 2,
             share_publishers: true,
@@ -834,8 +840,8 @@ mod tests {
         assert_eq!(sockets.publishers[0].1, 2);
     }
 
-    #[tokio::test]
-    async fn removed_slots_reuse_their_shared_publisher() {
+    #[test]
+    fn removed_slots_reuse_their_shared_publisher() {
         let mut sockets = HostSockets {
             slots_per_socket: 2,
             share_publishers: true,
@@ -869,6 +875,161 @@ mod tests {
             sockets.remove_slot(owner(2), &mut slots);
             assert!(slots.is_empty());
             assert_eq!(sockets.publishers[0].1, 0);
+        }
+    }
+
+    async fn test_component() -> Component {
+        DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap()
+        .namespace("state-agent-host-test")
+        .unwrap()
+        .component("host")
+        .unwrap()
+    }
+
+    #[test]
+    fn missing_intent_releases_failed_engine_local_slot_but_retains_durable_slot() {
+        for (protocol, has_process_local_inventory) in [
+            (KvStateIngressProtocol::SglangHiCacheV1, true),
+            (KvStateIngressProtocol::VllmResidencyV1, false),
+        ] {
+            let agent_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let (mut slots, mut sockets, mut request) = agent_runtime.block_on(async {
+                let component = test_component().await;
+                let raw = SharedZmqPublisherSocket::bind("raw-kv").unwrap();
+                let mut request = intent(
+                    &instance("kv_state_agent", 1),
+                    instance("producer", 11),
+                    owner(4),
+                    WorkerWithDpRank::new(17, 4),
+                    101,
+                );
+                request.ingress_protocol = protocol;
+                request.raw_zmq_endpoint = raw.endpoint().to_string();
+                let mut slots = HashMap::new();
+                let mut sockets = HostSockets {
+                    slots_per_socket: 2,
+                    share_publishers: true,
+                    publishers: Vec::new(),
+                    raw_pool: None,
+                };
+                reconcile_owner(
+                    &component,
+                    request.cache_owner_id,
+                    &HashMap::from([(
+                        request.cache_owner_id,
+                        HashMap::from([(request.intent_incarnation, request.clone())]),
+                    )]),
+                    &mut slots,
+                    1,
+                    &mut sockets,
+                    &mut 0,
+                    &HostMetrics::new(&component).unwrap(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    slots[&request.cache_owner_id].lifecycle,
+                    SlotLifecycle::Active
+                );
+                (slots, sockets, request)
+            });
+            let agent = slots[&request.cache_owner_id]
+                .agent
+                .as_ref()
+                .unwrap()
+                .clone();
+            let generation = agent.status().attachment.as_ref().unwrap().generation;
+            let publisher_index = slots[&request.cache_owner_id].publisher_index;
+            // Abort the real coordinator and recovery endpoint: detach encounters
+            // a closed channel, and shutdown encounters the endpoint's JoinError.
+            drop(agent_runtime);
+
+            let host_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            host_runtime.block_on(async {
+                let component = test_component().await;
+                let metrics = HostMetrics::new(&component).unwrap();
+                let mut rejected = 0;
+                assert!(agent.detach(generation).await.is_err());
+                let result = reconcile_owner(
+                    &component,
+                    request.cache_owner_id,
+                    &HashMap::new(),
+                    &mut slots,
+                    1,
+                    &mut sockets,
+                    &mut rejected,
+                    &metrics,
+                )
+                .await;
+                if has_process_local_inventory {
+                    result.unwrap();
+                    assert!(slots.is_empty());
+                    assert_eq!(Arc::strong_count(&agent), 1);
+                    assert_eq!(sockets.publishers[0].1, 0);
+                    // Shutdown must already have consumed the aborted endpoint.
+                    agent.shutdown().await.unwrap();
+                } else {
+                    assert!(result.is_err());
+                    assert_eq!(
+                        slots[&request.cache_owner_id].lifecycle,
+                        SlotLifecycle::Failed
+                    );
+                    assert!(Arc::ptr_eq(
+                        slots[&request.cache_owner_id].agent.as_ref().unwrap(),
+                        &agent
+                    ));
+                    assert_eq!(sockets.publishers[0].1, 1);
+                }
+
+                let raw = SharedZmqPublisherSocket::bind("replacement-kv").unwrap();
+                request.cache_owner_id = owner(5);
+                request.raw_zmq_endpoint = raw.endpoint().to_string();
+                reconcile_owner(
+                    &component,
+                    request.cache_owner_id,
+                    &HashMap::from([(
+                        request.cache_owner_id,
+                        HashMap::from([(request.intent_incarnation, request.clone())]),
+                    )]),
+                    &mut slots,
+                    1,
+                    &mut sockets,
+                    &mut rejected,
+                    &metrics,
+                )
+                .await
+                .unwrap();
+                assert_eq!(slots.len(), 1);
+                assert_eq!(sockets.publishers.len(), 1);
+                assert_eq!(sockets.publishers[0].1, 1);
+                if has_process_local_inventory {
+                    let replacement = &slots[&request.cache_owner_id];
+                    assert_eq!(replacement.lifecycle, SlotLifecycle::Active);
+                    assert_eq!(replacement.publisher_index, publisher_index);
+                    assert_eq!(rejected, 0);
+                    replacement
+                        .agent
+                        .as_ref()
+                        .unwrap()
+                        .shutdown()
+                        .await
+                        .unwrap();
+                } else {
+                    assert!(!slots.contains_key(&request.cache_owner_id));
+                    assert_eq!(rejected, 1);
+                }
+            });
         }
     }
 

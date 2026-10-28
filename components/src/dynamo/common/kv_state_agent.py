@@ -16,9 +16,10 @@ logger = logging.getLogger(__name__)
 CACHE_OWNER_PATTERN = re.compile(
     r"^(?P<domain>[0-9a-f]{32}:[0-9a-f]{32})/[0-9a-f]{16}/[0-9a-f]{32}$"
 )
-
 _STATE_AGENT_CLOSE_TIMEOUT_SECS = 30.0
 
+# Fixed width, so no worker's topic is a prefix of another's: SUB subscriptions
+# are prefix filters, and the state agent routes pooled raw streams by topic.
 _RAW_TOPIC_HEX_DIGITS = 16
 
 

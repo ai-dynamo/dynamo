@@ -379,7 +379,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                     .context("failed to establish Worker reset barrier before attach");
             }
         };
-        if attachment.ingress_protocol == KvStateIngressProtocol::SglangHiCacheV1 {
+        if attachment.ingress_protocol.has_process_local_inventory() {
             barrier_cursor = match self
                 .apply_and_publish_reset(attachment.worker, ResidencyDomain::CacheOwner)
                 .await
@@ -413,7 +413,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             anyhow::bail!("stale attachment generation {generation}");
         }
         attachment.ready = false;
-        if attachment.ingress_protocol == KvStateIngressProtocol::SglangHiCacheV1 {
+        if attachment.ingress_protocol.has_process_local_inventory() {
             self.cache_owner_domain_failed = true;
         }
         self.publish_status();
@@ -447,7 +447,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 return Err(error).context("failed to publish final Worker detach barrier");
             }
         };
-        if attachment.ingress_protocol == KvStateIngressProtocol::SglangHiCacheV1 {
+        if attachment.ingress_protocol.has_process_local_inventory() {
             cursor = self
                 .apply_and_publish_reset(attachment.worker, ResidencyDomain::CacheOwner)
                 .await
@@ -468,7 +468,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         }
         attachment.ready = false;
         self.ingress_generation = None;
-        tracing::warn!(generation, reason, "Quarantining vLLM KV ingress");
+        tracing::warn!(generation, reason, "Quarantining KV ingress");
         self.publish_status();
     }
 
@@ -490,7 +490,9 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             anyhow::bail!("oversized ingress envelope");
         }
 
-        self.observe_source_cursor_lossy(&batch, "live ingress");
+        if !self.observe_source_cursor(&batch, "live ingress") {
+            anyhow::bail!("raw KV source retired after a sequence gap");
+        }
 
         if let Some(reason) = batch.source_fault {
             self.fail_source(batch.generation, reason);
@@ -522,7 +524,9 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 continue;
             }
 
-            self.observe_source_cursor_lossy(&batch, "detach drain");
+            if !self.observe_source_cursor(&batch, "detach drain") {
+                continue;
+            }
             if let Some(reason) = batch.source_fault {
                 self.fail_source(generation, reason);
                 continue;
@@ -544,10 +548,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             }
         }
         if self.source_cursor.active.is_some() {
-            tracing::warn!(
-                generation,
-                "Detaching after an incomplete raw source batch; CacheOwner remains advisory"
-            );
+            tracing::warn!(generation, "Detaching after an incomplete raw source batch");
             if let Some(metrics) = kv_publisher_metrics() {
                 metrics.increment_engines_dropped_events(1);
             }
@@ -555,15 +556,34 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         }
     }
 
-    fn observe_source_cursor_lossy(&mut self, batch: &IngressBatch, phase: &'static str) {
+    fn observe_source_cursor(&mut self, batch: &IngressBatch, phase: &'static str) -> bool {
         if self.source_cursor.observe(batch) {
-            return;
+            return true;
         }
         let previous_cursor = self.source_cursor.completed;
         let missing = previous_cursor
             .and_then(|previous| batch.source_cursor.checked_sub(previous.checked_add(1)?))
             .filter(|missing| *missing > 0)
             .unwrap_or(1);
+        if let Some(metrics) = kv_publisher_metrics() {
+            metrics.increment_engines_dropped_events(missing);
+        }
+        if self
+            .attachment
+            .as_ref()
+            .is_some_and(|attachment| attachment.ingress_protocol.has_process_local_inventory())
+        {
+            tracing::error!(
+                generation = batch.generation,
+                source_cursor = batch.source_cursor,
+                ?previous_cursor,
+                chunk_index = batch.chunk_index,
+                phase,
+                "Raw KV source cursor gap; process-local inventory retired until engine restart"
+            );
+            self.fail_source(batch.generation, "process-local inventory cursor gap");
+            return false;
+        }
         tracing::warn!(
             generation = batch.generation,
             source_cursor = batch.source_cursor,
@@ -572,15 +592,8 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             phase,
             "Raw KV source cursor gap or regression; continuing with advisory residency"
         );
-        if let Some(metrics) = kv_publisher_metrics() {
-            metrics.increment_engines_dropped_events(missing);
-        }
-        if self.attachment.as_ref().is_some_and(|attachment| {
-            attachment.ingress_protocol == KvStateIngressProtocol::SglangHiCacheV1
-        }) {
-            self.fail_source(batch.generation, "process-local inventory cursor gap");
-        }
         self.source_cursor.accept_after_loss(batch);
+        true
     }
 
     fn fail_source(&mut self, generation: u64, reason: &'static str) {
@@ -825,8 +838,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             attachment: self.attachment.as_ref().map(Attachment::status),
             cache_owner_ready: !self.cache_owner_domain_failed
                 && self.attachment.as_ref().is_none_or(|attachment| {
-                    attachment.ingress_protocol != KvStateIngressProtocol::SglangHiCacheV1
-                        || attachment.ready
+                    !attachment.ingress_protocol.has_process_local_inventory() || attachment.ready
                 }),
             outbound_cursor: self.outbound_cursor(),
         });
@@ -908,7 +920,7 @@ impl KvStateAgent {
         let status = Arc::new(KvStateAgentStatusCell::new(KvStateAgentStatus {
             identity: identity.clone(),
             attachment: None,
-            cache_owner_ready: config.ingress_protocol != KvStateIngressProtocol::SglangHiCacheV1,
+            cache_owner_ready: !config.ingress_protocol.has_process_local_inventory(),
             outbound_cursor: 0,
         }));
 
@@ -2757,7 +2769,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sglang_detach_clears_process_local_owner() {
+    async fn sglang_inventory_is_cleared_on_detach_and_retires_on_gaps() {
         check_detach_lifetime(KvStateIngressProtocol::SglangHiCacheV1).await;
     }
 
@@ -2890,21 +2902,31 @@ mod tests {
             })
             .await
             .unwrap();
+        let cursor_before_gap = coordinator.outbound_cursor();
+        let result = coordinator
+            .handle_ingress(IngressBatch {
+                generation: replacement.generation,
+                source_cursor: 3,
+                chunk_index: 0,
+                final_chunk: true,
+                events: vec![
+                    store(worker, ResidencyDomain::Worker, None, 401, 41),
+                    store(worker, ResidencyDomain::CacheOwner, None, 402, 42),
+                ],
+                source_fault: None,
+                cache_owner_fault: None,
+            })
+            .await;
         if process_local {
-            coordinator
-                .handle_ingress(IngressBatch {
-                    generation: replacement.generation,
-                    source_cursor: 3,
-                    chunk_index: 0,
-                    final_chunk: true,
-                    events: vec![],
-                    source_fault: None,
-                    cache_owner_fault: None,
-                })
-                .await
-                .unwrap();
+            assert!(result.is_err());
+            assert_eq!(coordinator.outbound_cursor(), cursor_before_gap);
             assert!(!coordinator.status.load().cache_owner_ready);
             assert!(!coordinator.status.load().attachment.as_ref().unwrap().ready);
+        } else {
+            result.unwrap();
+            assert_eq!(coordinator.outbound_cursor(), cursor_before_gap + 2);
+            assert!(coordinator.status.load().cache_owner_ready);
+            assert!(coordinator.status.load().attachment.as_ref().unwrap().ready);
         }
         coordinator.begin_detach(replacement.generation).unwrap();
         coordinator
