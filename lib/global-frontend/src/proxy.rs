@@ -171,7 +171,16 @@ async fn forward(
     {
         Ok(upstream) => upstream,
         Err(failure) => {
-            tracing::warn!(pool = %target.pool, %url, error = %failure, "pool frontend failed");
+            // reqwest names only the outermost failure ("error sending
+            // request"); the cause, such as a refused or reset connection,
+            // is in its sources.
+            let failure = anyhow::Error::new(failure);
+            tracing::warn!(
+                pool = %target.pool,
+                %url,
+                error = format!("{failure:#}"),
+                "pool frontend failed"
+            );
             let message = format!("pool frontend {url} failed: {failure}");
             return error(StatusCode::SERVICE_UNAVAILABLE, message);
         }
