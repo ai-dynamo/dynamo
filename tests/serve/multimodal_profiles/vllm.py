@@ -353,12 +353,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg_router": TopologyConfig(
                 health_check_workers=True,
-                # TODO: revert to pytest.mark.post_merge after pre_merge validation
-                # on this PR (see .ai/ci-guidelines.md).
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=19.0,
-                # Two workers share one 22 GiB L4; 1.6 GiB each OOMed in warmup.
+                # Leave warmup headroom for two workers sharing one L4.
                 # 512 MiB (~14.5k tokens) still fits several 4096-token requests.
                 requested_vllm_kv_cache_bytes=536_870_912,
                 env={"SINGLE_GPU": "true"},
@@ -369,19 +367,14 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 # stores. (the per-spec id is `<|vision_pad|>`
                 # 151654; the routing path now uses config.json's
                 # `image_token_id` instead, see preprocessor.rs splice.)
-                # TODO: restore one case after PR #16091 validates 20 fresh
-                # worker startups with CI's vLLM 0.31.0. Each case launches and
-                # tears down both workers; repeated requests alone miss warmup.
                 tests=[
                     MmCase(
-                        suffix=f"startup_{startup:02d}",
                         payload=make_image_payload_cached_tokens(
                             ["green"],
                             require_rust_processor_init=True,
                             min_avg_kv_hit_rate=0.9,
-                        ),
+                        )
                     )
-                    for startup in range(1, 21)
                 ],
             ),
         },

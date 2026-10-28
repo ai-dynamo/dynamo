@@ -826,11 +826,7 @@ jobs:
       cpu_e2e_test_timeout_minutes: 15
       # Plain runtime images do not include sidecar binaries.
       gpu_test_markers: pre_merge and vllm and gpu_1 and not sidecar
-      # TODO: restore 45 minutes after PR #16091's 20 startup cases finish.
-      # Each case retains its 500s timeout; this covers the larger test pool.
-      gpu_test_timeout_minutes: 120
-      # TODO: remove after PR #16091 validation so retries cannot hide failures.
-      dd_flaky_retry_enabled: 'false'
+      gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
       run_gpu_parallel_tests: true
