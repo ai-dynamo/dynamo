@@ -18,15 +18,15 @@ Setting this up is two steps: one thing that always runs, then two optional feat
     Because the chat processor decides *who* parses, it also decides which parser flags you use and where they go — so it is the first decision. Keep the `dynamo` default unless Dynamo lacks a parser for your model; see [Chat Processors](chat-processors.mdx) for the options and engine-fallback configuration.
   </Step>
   <Step title="Choose your parsers">
-    With a chat processor in place, tool-call parsing and reasoning parsing are two **independent, optional** features. Turn on either, both, or neither — they do not depend on each other, and there is no required order between them:
+    With a chat processor in place, configure tool-call extraction, reasoning extraction, or both for the model output format:
 
     - **Tool call parsing** extracts `tool_calls` from a model that emits tool-call markup. See [Tool Call Parsing](tool-call-parsing.mdx).
     - **Reasoning parsing** splits chain-of-thought into `reasoning_content` for a model that emits thinking content. See [Reasoning Parsing](reasoning-parsing.md).
 
-    A model that only calls tools needs just the tool-call parser; a pure chain-of-thought model needs just the reasoning parser; a model that does both needs both.
+    On a compatible Unified route, either selector can choose the whole family grammar; if both are set, they must agree. The legacy split route uses separate selectors. See the [canonical routing table](troubleshooting-tool-calls.md#parser-generation-routing) for auto/explicit generation selection and the reasoning-only Qwen exception.
 
     <Note>
-    When both are enabled, reasoning parsing runs before tool-call parsing at request time: Dynamo first separates the reasoning text, then parses tool calls from the remaining assistant output. This is execution order inside the frontend, not something you configure — the two flags are still set independently.
+    Unified emits reasoning, visible text, and calls in their original order from one parser. The legacy split pipeline extracts reasoning first, then parses tools from the remaining output. Batch responses aggregate those events into response fields; streaming can expose incremental events.
     </Note>
   </Step>
 </Steps>

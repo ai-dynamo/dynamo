@@ -115,47 +115,49 @@ the parser configuration, or the parser logic.
 
 ## Parser Generation Routing
 
-To select a parser generation, set `DYN_PARSER_VERSION=1` or `DYN_PARSER_VERSION=2`. Leave it unset or use `auto` to prefer a compatible V2 parser, falling back to V1 when no compatible V2 configuration exists. The aliases `v1` and `v2` are not accepted.
+Set `DYN_PARSER_VERSION` on the frontend process that runs the `dynamo` chat processor, and consistently on worker processes that construct parser-dependent guidance. The worker's `--dyn-tool-call-parser` and `--dyn-reasoning-parser` publish model configuration; the frontend selects and runs the parser. Restart after changing the environment: generation selection is cached for the process lifetime. This revision pins `dynamo-parsers` `10.2.2` and `dynamo-parsers-v2` `0.7.35`, independently of the latest library release.
 
-| `DYN_PARSER_VERSION` | Selection |
+| `DYN_PARSER_VERSION` | Compatible Unified configuration | Unavailable or incompatible configuration |
+| --- | --- | --- |
+| Unset or `auto` | V2, except reasoning-only `qwen3` below | Existing V1 route |
+| `1` | V1 if both configured names exist in V1 | Reject names unavailable in V1 |
+| `2` | V2 | Reject; no V1 configuration fallback |
+
+Only `auto`, `1`, and `2` are accepted; `v1` and `v2` stop startup. Auto configuration fallback does not make an unknown V1 parser valid. A runtime V2 parse error does not retry through V1.
+
+The pinned Unified registry and Dynamo aliases resolve to the families below. Either configured selector can choose a family. When both selectors are set, both must resolve to the same family; the table describes routing availability, not GPU qualification or complete model/backend integration.
+
+| Unified family | Accepted family names and Dynamo aliases |
 | --- | --- |
-| Unset or `auto` | Compatible V2 parser when available; otherwise V1 |
-| `1` | V1 |
-| `2` | V2 |
+| DeepSeek V4 | `deepseek_v4`, `deepseek-v4`, `deepseekv4` |
+| DeepSeek V4.1 | `deepseek_v41` |
+| Gemma 4 | `gemma4`, `gemma-4` |
+| GLM 4.7 | `glm47`, `glm45` |
+| Kimi K2 / K2.5 | `kimi_k2`, `kimi_k25` |
+| Kimi K3 | `kimi_k3`, `kimi-k3` |
+| Qwen3 Coder | `qwen3`, `qwen3_coder` |
+| Muse Glimmer | `muse_glimmer`, `muse` |
+| Nemotron V3 | `nemotron_v3`, `nemotron3` |
+| Beam | `beam` |
+| GPT-OSS / Harmony | `gpt_oss`, `harmony` |
 
-Unsupported values stop startup. Explicit selections validate the configured tool and reasoning parsers and reject combinations that the selected generation cannot support.
+For example, `qwen3_coder` + `qwen3`, `glm47` + `glm45`, and `kimi_k2` + `kimi_k25` are compatible pairs. `hermes` + `qwen3` is not a Unified pair and uses V1 under auto; explicit `2` rejects it. `qwen3_coder` + `deepseek_v4` is also incompatible. Set just `qwen3_coder` to choose its complete Unified grammar from the tool selector, or just `deepseek_v41` to choose that grammar from the reasoning selector. One-sided selection still uses the family's reasoning, text, and tool grammar; request tool policy remains a serving-layer responsibility.
 
-| Configured family | Unset or `auto` selection |
-| --- | --- |
-| Beam 1.0 | V2; `beam` must be set as both the tool-call and the reasoning parser (there is no V1 route) |
-| Muse Glimmer | V2 |
-| DeepSeek V4.1 | V2 |
-| DeepSeek V4 | V2 |
-| Gemma 4 | V2 |
-| GLM 4.7 | V2; its reasoning name may be `glm45` |
-| Kimi K2 / K2.5 | V2; `kimi_k2` and `kimi_k25` resolve to the same family |
-| Kimi K3 | V2 |
-| Qwen3 Coder | V2; `qwen3_coder` and `qwen3` resolve to the same family, with the reasoning-only `qwen3` exception below |
-| Qwen3 / QwQ with only the `qwen3` reasoning parser | Existing V1 route; explicit `2` selects the Qwen3 Coder grammar |
-| Other parser names or incompatible pairs | Existing V1 route |
+**Reasoning-only Qwen exception:** with no tool selector and exactly `--dyn-reasoning-parser qwen3`, unset/auto stays on V1. Qwen thinking/QwQ models can use Hermes JSON tool syntax, which differs from Coder XML. Explicit `2` selects the Coder Unified grammar even for reasoning-only `qwen3`. Set the Coder tool selector only for a matching output format.
 
-For supported configurations other than reasoning-only `qwen3`, unset, `auto`, and version `2` use a compatible unified parser for streaming, batch, and content decoding when either the tool-call parser or reasoning parser identifies a supported family. When both are configured, they must resolve to the same family. Unset and `auto` fall back to the existing V1 route for unavailable or incompatible configurations; explicit `2` rejects them. A runtime V2 parse failure does not retry through V1. Explicit `1` keeps supported configurations on the legacy parser.
+**Deprecated setting:** remove `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` when migrating to `DYN_PARSER_VERSION`. Legacy `true` maps to explicit V2; `false` maps to auto and now prefers compatible V2. `true` with version `1`, `false` with version `2`, and malformed booleans reject. For rollback, unset the deprecated variable and use `1` only when both selectors exist in V1; Unified-only families such as Muse Glimmer, Beam, and DeepSeek V4.1 cannot use V1.
 
-A reasoning-only `qwen3` configuration stays on V1 under unset and `auto`, including the deprecated false setting, because Qwen3 thinking and QwQ models can emit Hermes tool-call JSON. Configuring `qwen3_coder` as the tool-call parser selects the unified Coder grammar by default. Explicit `DYN_PARSER_VERSION=2` retains its existing behavior for reasoning-only `qwen3`.
+Unified owns one ordered reasoning, text, and tool event stream. The legacy split route extracts reasoning before tool parsing and may buffer calls in the jail. Streaming feeds chunks incrementally; partial call deltas depend on family and request mode. Non-streaming responses aggregate the selected parser's output into `message.content`, `message.reasoning_content`, and `message.tool_calls`; they do not select a different generation. `tool_choice: none` suppresses structured calls while the content decoder handles recognized markup.
 
-The deprecated `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2=false` setting retains its mapping to `auto`, so it now prefers compatible V2 parsers. Use `DYN_PARSER_VERSION=1` for rollback.
+Prompt-prefilled reasoning must initialize the parser in the channel opened by the rendered prompt. Dynamo resolves this after template rendering, so an opener consumed in the prompt need not appear again in generated text. For example, Kimi K3's `<|open|>think<|sep|>` suffix starts reasoning, including supported whitespace between markers. This is distinct from force-reasoning defaults and engine-native grammar gates.
 
-Explicit V1 and V2 apply the same generation selection to streaming and batch. Streaming passes output chunks to the selected parser as they arrive; partial tool-call deltas depend on the family and output shape. Batch parsing waits for the complete response before constructing `message.content`, `message.reasoning_content`, and `message.tool_calls`. `tool_choice: none` suppresses tool calls while the selected content decoder removes recognized native markup from visible content.
-
-Forced tool choices can install a guided JSON constraint, and structural-tag requests keep that constraint when the configured family has a compatible unified parser. A request mode that requires the V1 tool-call jail cannot silently fall back when explicit V2 is selected; Dynamo rejects that unsupported parser configuration before serving requests.
-
-On the default Kimi K3 route, a prompt ending with the XTML reasoning opener `<|open|>think<|sep|>` starts parsing inside the reasoning channel; whitespace between the markers is ignored. This also applies when `DYN_PARSER_VERSION` is unset.
+Forced choices can install guided JSON or family-native structural tags. A mode requiring the V1 jail cannot silently fall back under explicit V2; unsupported combinations are rejected. See [Structural Tags](structural-tag.md) for builder availability and backend activation.
 
 ## Known limitations and follow-up
 
-This revision pins `dynamo-parsers-v2` version 0.7.24. The earlier 0.7.17 update included the quoted-control and streaming fixes from [frontend-crates #326](https://github.com/ai-dynamo/frontend-crates/pull/326) and the Kimi tool-ID and call-boundary fixes from [frontend-crates #332](https://github.com/ai-dynamo/frontend-crates/pull/332). Targeted parser regressions do not establish qualification of every parser path.
+This revision pins `dynamo-parsers-v2` version 0.7.35. The earlier 0.7.17 update included the quoted-control and streaming fixes from [frontend-crates #326](https://github.com/ai-dynamo/frontend-crates/pull/326) and the Kimi tool-ID and call-boundary fixes from [frontend-crates #332](https://github.com/ai-dynamo/frontend-crates/pull/332). Targeted parser regressions do not establish qualification of every parser path.
 
-A separate quoted native tool-call opener case can still cut off the rest of an answer under V2, in streaming and batch requests. The exact regression remains follow-up work tracked with related native Qwen3 and Kimi streaming changes in [Dynamo #15577](https://github.com/ai-dynamo/dynamo/pull/15577). With generic `<think>` prompt prefill, splitting `thought</think>` after `thought<` can also leave the remaining tool JSON in reasoning; this behavior is present on the existing V1 route as well. Both cases still need qualification before they can be claimed as fixed.
+The existing quoted-control regressions cover reasoning markers and leave literal native tool-call opener text as a qualification gap. The generic prompt-prefill regression also does not qualify V1 with a closing `</think>` split after its first `<`. Related work is in [Dynamo #15577](https://github.com/ai-dynamo/dynamo/pull/15577). These coverage gaps do not establish that either failure occurs on every current route, and passing nearby reasoning-marker tests does not establish that they are fixed.
 
 For configurations supported by V1, select `DYN_PARSER_VERSION=1` to use the legacy parser.
 
