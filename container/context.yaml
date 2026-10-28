@@ -38,12 +38,12 @@ dynamo:
   # the epp image carries) add on top.
   frontend_baseline_sbom: ubuntu@7291df36
   planner_build_image: python
-  planner_build_image_tag: 3.13-slim
+  planner_build_image_tag: 3.13.17-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
-  planner_runtime_image_tag: 3.13-v4.1.6
+  planner_runtime_image_tag: 3.13-v4.1.9
   # Self-baseline of the distroless-python runtime; the licenses stage subtracts
   # it so planner NOTICES attribute only what the builder adds on top.
-  planner_baseline_sbom: python@5be5c1f0
+  planner_baseline_sbom: python@d9eff629
   # Planner-scoped interpreter. The planner uses a separate, newer CPython line
   # from the global python_version below because it is the only stage whose
   # interpreter is decoupled from the framework/runtime bases: the build stage
@@ -60,13 +60,16 @@ dynamo:
   python_version: "3.12"
   # Every stage must use the same uv: stages share one BuildKit uv cache mount,
   # and uv rejects cache entries written by a newer version.
-  uv_version: "0.12.0"
+  uv_version: "0.13.5"
+  go_version: "1.27.3"
 
-  nats_version: v2.14.7
-  etcd_version: v3.5.34
+  nats_version: v2.14.8
+  nats_commit: 3e47c8fa715b0e3b2feaeedc378c25fff88a966e
+  etcd_version: v3.5.35
+  etcd_commit: b0dc93710686bba178c9b6408e545be21d27b2ce
 
   nixl_ref: v1.3.2
-  nixl_ucx_ref: v1.21.0
+  nixl_ucx_ref: v1.22.0
   nixl_gdrcopy_ref: v2.5.2
   nixl_libfabric_repo: https://github.com/ofiwg/libfabric.git
   # >= v2.5 for NIXL 1.5.0 (fi_mr_attr.device.rocr). <= the libfabric of
@@ -75,7 +78,6 @@ dynamo:
   nixl_libfabric_ref: v2.6.0
   # Keep in sync with upstream NIXL's contrib/Dockerfile.manylinux.
   hwloc_version: 2.12.2
-  enable_kvbm: "true"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   # Built from source in wheel_builder with a narrow codec allowlist and
@@ -95,8 +97,8 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.31.0-ubuntu2404
-    vllm_omni_ref: "v0.31.0rc1"
+    runtime_image_tag: v0.32.0-ubuntu2404
+    vllm_omni_ref: "v0.32.0rc1"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -108,24 +110,26 @@ vllm:
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
-    base_image_tag: v0.30.0
-    runtime_image_tag: v0.30.0
-    baseline_sbom: vllm-openai-xpu@fc0e112a
+    base_image_tag: v0.31.0
+    runtime_image_tag: v0.31.0
+    # Omni 0.31.0rc1 requires Transformers <5.15, which requires tokenizers <=0.23.0.
+    transformers_version: "5.14.1"
+    tokenizers_version: "0.22.2"
+    baseline_sbom: vllm-openai-xpu@95ac8150
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 22.04
-    runtime_image_tag: v0.30.0
+    runtime_image_tag: v0.31.0
+    # Omni 0.31.0rc1 requires Transformers <5.15, which requires tokenizers <=0.23.0.
+    transformers_version: "5.14.1"
+    tokenizers_version: "0.22.2"
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
-  vllm_omni_ref: "v0.30.0rc1"
-  # Omni requires Transformers <5.15, which requires tokenizers <=0.23.0.
-  transformers_version: "5.14.1"
-  tokenizers_version: "0.22.2"
+  vllm_omni_ref: "v0.31.0rc1"
   nixl_ref: v1.4.1
   max_jobs: "10"
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
-  enable_kvbm: "true"
   enable_modelexpress: "true"
   modelexpress_version: "0.7.0"
   # aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
@@ -136,7 +140,7 @@ sglang:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.5.21-cu130-runtime
+    runtime_image_tag: v0.5.22-cu130-runtime
     # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
     # nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.3,
     # ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.
@@ -149,16 +153,20 @@ sglang:
     # codec-limited build for frontend video decoding; XPU remains codec-free.
     baseline_sbom: cuda@0230b7f2
   xpu:
+    # oneAPI 2026.0 is required by the SGLang XPU pins below: torch 2.13.0+xpu
+    # links intel-sycl-rt 2026.0.0 (libsycl.so.9), and sgl-kernel-xpu's SYCL
+    # kernels must be compiled by the matching icpx. The 2025.3 base ships
+    # libsycl.so.8, so its icpx produces a kernel .so that torch cannot load.
     base_image: intel/deep-learning-essentials
-    base_image_tag: 2025.3.2-0-devel-ubuntu24.04
+    base_image_tag: 2026.0.0-devel-ubuntu24.04
     runtime_image: intel/deep-learning-essentials
-    runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
-    sglang_ref: v0.5.11
+    runtime_image_tag: 2026.0.0-devel-ubuntu24.04
+    sglang_ref: v0.5.19
     sglang_git_url: https://github.com/sgl-project/sglang.git
-    sglang_kernel_ref: 3fbd4d33721ce3cf818b1cec3978043951406f10
+    sglang_kernel_ref: v0.2.0
     sglang_kernel_git_url: https://github.com/sgl-project/sgl-kernel-xpu.git
     # XPU SGLang requires a newer NIXL than the framework default; scoped here
-    # to avoid affecting sglang-cuda or other frameworks (e.g. dynamo KVBM link).
+    # to avoid affecting sglang-cuda or other frameworks.
     nixl_ref: v1.1.0
   # Builds the NIXL C++ SDK in wheel_builder so the dev stage can link nixl-sys
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
@@ -167,7 +175,6 @@ sglang:
   nixl_ref: v1.5.0
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
-  enable_kvbm: "false"
   enable_modelexpress: "true"
   modelexpress_version: "0.7.0"
 
@@ -176,13 +183,12 @@ trtllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/tensorrt-llm/release
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
-    runtime_image_tag: 1.3.0rc29
+    runtime_image_tag: 1.4.0rc0
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
-    baseline_sbom: release@124da3f1
+    baseline_sbom: release@cab83184
   nixl_ref: v1.3.1
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
-  enable_kvbm: "true"
 
 triton:
   # The runtime image is the upstream Triton Inference Server release from NGC
@@ -194,12 +200,8 @@ triton:
     runtime_image: nvcr.io/nvidia/tritonserver
     # Build toolchain only, pinned to CUDA 13.1: the Rust cudarc crate rejects 13.4 at build time.
     # The wheels load CUDA dynamically, so they run on the 13.4 runtime image regardless.
+    # Matches trtllm's base_image_tag so Triton reuses the trtllm BuildKit pool cache (route_buildkit.sh); if it diverges, route Triton back to general.
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
     runtime_image_tag: 26.09-py3
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
-  # KVBM is disabled: it is an LLM KV-cache feature whose Python NIXL path
-  # (nixl -> nixl_cu13 -> import torch) needs PyTorch, which the Triton py3
-  # release image does not ship. The Triton runtime serves generic Triton models
-  # over KServe, so KVBM/NIXL does not apply (mirrors the sglang runtime).
-  enable_kvbm: "false"

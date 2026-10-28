@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	"github.com/stretchr/testify/require"
@@ -21,10 +22,13 @@ func TestPlanMaterializationBounds(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Project hybrid and LPU-only materialization fixtures")
+	serving := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}},
+	}
 	snapshot := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	hybrid := newV2CompilerFixture()
 	hybrid.compilationMode = manifestcapnp.CompilationMode_lpx
-	hybridProjection := projectRenderFixture(t, PipelineLPX, acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)))
+	hybridProjection := projectRenderFixture(t, PipelineHybrid, acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)))
 	lpuOnlyProjection := projectRenderFixture(t, PipelineSingle, snapshot)
 
 	t.Log("Reserve readable roles at the maximum PCS length and scheduling replica count")
@@ -54,7 +58,7 @@ func TestPlanMaterializationBounds(t *testing.T) {
 				scalingGroupReplicas: 2496,
 			}
 			pcsName := strings.Repeat("a", MaxPodCliqueSetNameLength)
-			plan, err := workload.PlanNodeLocalMaterialization(pcsName)
+			plan, err := workload.PlanNodeLocalMaterialization(pcsName, serving)
 			require.NoError(t, err)
 			require.Equal(t, pcsName+"-0-lpx", plan.LPXScalingGroup)
 
@@ -84,18 +88,18 @@ func TestPlanMaterializationBounds(t *testing.T) {
 			for _, projection := range projections {
 				projection.stage = "short"
 			}
-			renamed, err := workload.PlanNodeLocalMaterialization(pcsName)
+			renamed, err := workload.PlanNodeLocalMaterialization(pcsName, serving)
 			require.NoError(t, err)
 			require.Equal(t, plan, renamed)
 
 			t.Log("Reject a PCS name one character beyond Grove's combined name budget")
-			_, err = workload.PlanNodeLocalMaterialization(pcsName + "a")
+			_, err = workload.PlanNodeLocalMaterialization(pcsName+"a", serving)
 			require.ErrorContains(t, err, "exceeds the LPX maximum of 38 characters")
 
 			t.Log("Bound workload replicas before allocating per-workload request state")
 			for _, replicas := range []int32{-1, 0, 1, 2496, 2497, math.MaxInt32} {
 				workload.scalingGroupReplicas = replicas
-				_, err := workload.PlanNodeLocalMaterialization(pcsName)
+				_, err := workload.PlanNodeLocalMaterialization(pcsName, serving)
 				require.Equal(t, replicas < 0 || replicas > 2496, err != nil, "replicas=%d: %v", replicas, err)
 			}
 		})
@@ -104,12 +108,15 @@ func TestPlanMaterializationBounds(t *testing.T) {
 
 func TestWorkloadNames(t *testing.T) {
 	t.Log("Project a real workload at the maximum scaling-group replica count")
+	serving := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}},
+	}
 	projection := projectRenderFixture(t, PipelineSingle, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
 	workload := &Workload{modelProjections: []*ModelProjection{projection}, scalingGroupReplicas: maxWorkloadReplicas}
 	for _, pcsName := range []string{"model", strings.Repeat("p", 26)} {
 		t.Run(pcsName, func(t *testing.T) {
 			t.Log("Keep shared-runtime resource names and the PCS identity")
-			plan, err := workload.PlanNodeLocalMaterialization(pcsName)
+			plan, err := workload.PlanNodeLocalMaterialization(pcsName, serving)
 			require.NoError(t, err)
 			before := *plan
 			before.Agents = slices.Clone(plan.Agents)
@@ -167,7 +174,7 @@ func TestWorkloadNames(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Scope the workload without renaming its PCS")
-			plan, err := workload.PlanNodeLocalMaterialization(strings.Repeat("p", test.pcsLength))
+			plan, err := workload.PlanNodeLocalMaterialization(strings.Repeat("p", test.pcsLength), serving)
 			require.NoError(t, err)
 			scoped, err := plan.WithGroup(test.component)
 			if test.wantError {

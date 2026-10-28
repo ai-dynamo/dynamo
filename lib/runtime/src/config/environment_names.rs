@@ -377,11 +377,23 @@ pub mod llm {
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
 
+    /// Batch file upload limit in MiB, including multipart framing (default 202).
+    pub const DYN_BATCH_UPLOAD_BODY_LIMIT_MB: &str = "DYN_BATCH_UPLOAD_BODY_LIMIT_MB";
+
+    /// Concurrent batch uploads/downloads per frontend replica (default 4).
+    pub const DYN_BATCH_MAX_FILE_TRANSFERS: &str = "DYN_BATCH_MAX_FILE_TRANSFERS";
+
+    /// Maximum batch file transfer lifetime, including response consumption (default 600 seconds).
+    pub const DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS: &str = "DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS";
+
     /// Listen backlog of the frontend HTTP/HTTPS socket (default 4096).
     pub const DYN_HTTP_LISTEN_BACKLOG: &str = "DYN_HTTP_LISTEN_BACKLOG";
 
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
+
+    /// Maximum stalled downstream write time per connection (default 120 seconds).
+    pub const DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS: &str = "DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS";
 
     /// HTTP status code returned when the frontend rejects a request because
     /// all workers are overloaded. Defaults to 529 ("Site is overloaded"); set
@@ -419,6 +431,12 @@ pub mod llm {
     pub const DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: &str =
         "DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS";
 
+    /// Skip OpenAI strict function-tool schema preflight for legacy clients.
+    /// Request schemas and strictness are preserved; basic tool validation and
+    /// downstream processor/backend constraints remain active.
+    pub const DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: &str =
+        "DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION";
+
     /// Master switch for the frontend's HTTP admin API surface.
     /// The admin API is **enabled by default**; this variable disables it.
     /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) prevent
@@ -447,7 +465,8 @@ pub mod llm {
     /// Accepted values: "reasoning_content" (default) or "reasoning".
     pub const DYN_REASONING_FIELD_NAME: &str = "DYN_REASONING_FIELD_NAME";
 
-    /// Select the parser generation. Unset or `auto` keeps the original family defaults.
+    /// Select the parser generation. Unset or `auto` prefers a compatible unified V2
+    /// parser and falls back to V1 when no compatible family is configured.
     ///
     /// Explicit `1` keeps the V1 parsers; explicit `2` selects a compatible unified
     /// parser for the configured family. When both parser slots are set, their names
@@ -460,8 +479,8 @@ pub mod llm {
     pub const DYN_PARSER_VERSION: &str = "DYN_PARSER_VERSION";
 
     /// Compatibility alias for `DYN_PARSER_VERSION=2` when enabled. Uses the shared
-    /// boolean parser: `1`/`true`/`on`/`yes` enable it; `0`/`false`/`off`/`no`/empty
-    /// disable it. This conflicts with `DYN_PARSER_VERSION=1`; `false` conflicts with `2`.
+    /// boolean parser: `1`/`true`/`on`/`yes` select V2; `0`/`false`/`off`/`no`/empty
+    /// retain auto selection. True conflicts with `DYN_PARSER_VERSION=1`; false conflicts with `2`.
     pub const DYN_ENABLE_EXPERIMENTAL_PARSERS_V2: &str = "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2";
 
     /// Rollback lever for incremental guided-tool-call streaming.
@@ -550,6 +569,10 @@ pub mod llm {
     /// not parse or are above 1000000 use the default.
     pub const DYN_MM_NIXL_PROGRESS_DELAY_US: &str = "DYN_MM_NIXL_PROGRESS_DELAY_US";
 
+    /// Publish the serving-load streams the KV DC Relay aggregates: frontend
+    /// request load and router scheduler load. Off unless truthy.
+    pub const DYN_SERVING_LOAD_PUBLISH: &str = "DYN_SERVING_LOAD_PUBLISH";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -568,6 +591,8 @@ pub mod llm {
         pub const DYN_METRICS_TTFT: &str = "DYN_METRICS_TTFT";
         /// See [`DYN_METRICS_REQUEST_DURATION`].
         pub const DYN_METRICS_ITL: &str = "DYN_METRICS_ITL";
+        /// Comma-separated inter-token latency histogram bucket boundaries.
+        pub const DYN_METRICS_ITL_BUCKETS: &str = "DYN_METRICS_ITL_BUCKETS";
         /// See [`DYN_METRICS_REQUEST_DURATION`].
         pub const DYN_METRICS_EMBEDDING_LATENCY: &str = "DYN_METRICS_EMBEDDING_LATENCY";
 
@@ -727,6 +752,12 @@ pub mod llm {
         /// are recorded unredacted; avoid credential-bearing headers.
         pub const DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST: &str =
             "DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST";
+
+        /// Lowest-cost candidates retained per `router_selection` record. `0`
+        /// retains every scored candidate. The selected worker is always
+        /// retained. Default `16`.
+        pub const DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K: &str =
+            "DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K";
 
         /// S3 bucket for the S3 request-trace sink. Required when
         /// `DYN_REQUEST_TRACE_SINKS` includes `s3`.
@@ -1134,16 +1165,22 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_BATCH_UPLOAD_BODY_LIMIT_MB,
+            llm::DYN_BATCH_MAX_FILE_TRANSFERS,
+            llm::DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS,
             llm::DYN_HTTP_LISTEN_BACKLOG,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            llm::DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
+            llm::DYN_SERVING_LOAD_PUBLISH,
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+            llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
             llm::DYN_DISABLE_FRONTEND_ADMIN_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
@@ -1172,6 +1209,7 @@ mod tests {
             llm::metrics::DYN_METRICS_OUTPUT_SEQUENCE,
             llm::metrics::DYN_METRICS_TTFT,
             llm::metrics::DYN_METRICS_ITL,
+            llm::metrics::DYN_METRICS_ITL_BUCKETS,
             llm::metrics::DYN_METRICS_EMBEDDING_LATENCY,
             llm::audit::DYN_AUDIT_SINKS,
             llm::audit::DYN_AUDIT_FORCE_LOGGING,

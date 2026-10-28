@@ -71,6 +71,16 @@ def _make_png_bytes() -> bytes:
 PNG_BYTES = _make_png_bytes()
 
 
+# A presigned URL is a bearer credential for its lifetime: its signature must
+# reach neither the worker log nor the error body returned to the client.
+_SIGNATURE = "0123456789abcdef" * 16
+_SIGNED_URL = (
+    "https://bucket.s3.amazonaws.com/{name}?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+    "&X-Amz-Credential=AKIAEXAMPLE%2F20260101%2Fus-east-1%2Fs3%2Faws4_request"
+    f"&X-Amz-Expires=900&X-Amz-SignedHeaders=host&X-Amz-Signature={_SIGNATURE}"
+)
+
+
 def _permissive_policy(
     allowed_local_path: str | None = None,
 ) -> UrlValidationPolicy:
@@ -610,6 +620,37 @@ def _assert_inline_reference_elided(caplog, encoded: str) -> None:
     assert encoded[:32] not in caplog.text
     assert "payload elided" in caplog.text
     assert all(len(record.getMessage()) < 512 for record in caplog.records)
+
+
+async def test_multi_picture_jpeg_loads_primary_frame(loader: ImageLoader) -> None:
+    primary = Image.new("RGB", (4, 3), color="red")
+    buf = BytesIO()
+    primary.save(
+        buf,
+        format="MPO",
+        save_all=True,
+        append_images=[Image.new("RGB", (2, 2), color="blue")],
+    )
+    encoded = base64.b64encode(buf.getvalue()).decode()
+
+    image = await loader.load_image(f"data:image/jpeg;base64,{encoded}")
+
+    assert image.mode == "RGB"
+    assert image.size == (4, 3)
+    assert image.getpixel((0, 0))[0] > 200
+
+
+@pytest.mark.parametrize("fmt", ["GIF", "BMP", "TIFF"])
+async def test_pillow_format_outside_allowlist_raises_415(
+    loader: ImageLoader, fmt: str
+) -> None:
+    buf = BytesIO()
+    Image.new("RGB", (4, 3), color="red").save(buf, format=fmt)
+    encoded = base64.b64encode(buf.getvalue()).decode()
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_image(f"data:image/{fmt.lower()};base64,{encoded}")
+    assert exc_info.value.status == 415
 
 
 async def test_unsupported_format_url_raises_415(loader: ImageLoader) -> None:
@@ -1328,3 +1369,28 @@ async def test_session_scoped_cache_bypasses_when_scope_is_missing(monkeypatch) 
 )
 async def test_image_cache_scope_from_request(payload, expected) -> None:
     assert image_cache_scope_from_request(payload) == expected
+
+
+@pytest.mark.parametrize(
+    "fetch",
+    [
+        _mock_fetch_bytes(side_effect=HttpTimeoutError("timed out")),
+        _mock_fetch_bytes(side_effect=HttpConnectionError("connection refused")),
+        _mock_fetch_bytes(content=b""),
+    ],
+    ids=["timeout", "connection_error", "empty_body"],
+)
+async def test_load_image_failure_keeps_signed_url_out(
+    loader: ImageLoader, fetch: AsyncMock, caplog
+) -> None:
+    url = _SIGNED_URL.format(name="img.png")
+    with (
+        patch(_FETCH_BYTES_PATH, fetch),
+        caplog.at_level(logging.DEBUG),
+        pytest.raises((HttpStatusError, ValueError)) as exc_info,
+    ):
+        await loader.load_image(url)
+
+    assert _SIGNATURE not in str(exc_info.value)
+    assert _SIGNATURE not in caplog.text
+    assert "bucket.s3.amazonaws.com/img.png" in str(exc_info.value)

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+pub(crate) mod image_edits;
 mod model;
 pub(crate) mod readiness;
 pub(crate) use model::GenerateEngineSelection;
@@ -20,6 +21,8 @@ pub use kv_source_watch::KvSourceMembershipWatch;
 pub mod kv_state_agent;
 
 mod model_manager;
+pub(crate) mod router_policy;
+pub(crate) use model_manager::CommittedModelView;
 pub use model_manager::{ModelManager, ModelManagerError, UNKNOWN_METRIC_MODEL};
 
 mod controller;

@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Optional
 
@@ -29,8 +29,10 @@ from dynamo.planner.control_api import (
     _start_control_api,
 )
 from dynamo.planner.core import util
-from dynamo.planner.core.budget import minimum_power_footprint_fits
-from dynamo.planner.core.engine_protocol import EngineProtocol
+from dynamo.planner.core.engine_protocol import (
+    EngineProtocol,
+    ReconfigurableEngineProtocol,
+)
 from dynamo.planner.core.types import (
     EngineCapabilities,
     FpmObservations,
@@ -49,10 +51,16 @@ from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
 from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
+from dynamo.planner.reconfiguration import (
+    PlannerReconfiguration,
+    runtime_candidate_errors,
+    runtime_configuration_errors,
+)
 from dynamo.runtime import DistributedRuntime
 
 if TYPE_CHECKING:
     from dynamo.planner.monitoring.worker_info import WorkerInfo
+    from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +131,8 @@ class NativePlannerBase:
         config: PlannerConfig,
         environment: PlannerEnvironment,
     ) -> None:
+        if config.retune is not None:
+            raise ValueError("planner.retune is replay-only in this release")
         self.runtime = runtime
         self.config = config
         self.environment = environment
@@ -156,6 +166,7 @@ class NativePlannerBase:
         self._config_lock = asyncio.Lock()
         self._effect_admission_lock = asyncio.Lock()
         self._config_generation = 0
+        self.reconfiguration = PlannerReconfiguration(self)
         self._effect_submission_task: Optional[asyncio.Task[None]] = None
         self._effect_submission_outcome_unknown: Optional[str] = None
         self._effect_submission_hold_logged = False
@@ -175,10 +186,17 @@ class NativePlannerBase:
             await self._bootstrap_regression()
             await self._bootstrap_engine_plugins_if_needed()
 
+            if self.config.enable_runtime_reconfiguration:
+                if self.runtime is None:
+                    raise ValueError("system-port reconfiguration requires a runtime")
+                self._reconfigurable_engine()
+                self.reconfiguration.register(self.runtime)
+
             if self.config.advisory:
                 logger.info(
-                    "[ADVISORY] Planner started in advisory mode; "
-                    "scaling decisions will be logged but NOT executed."
+                    "[ADVISORY] Planner started in advisory mode; scaling "
+                    "decisions will be logged but NOT executed, and the "
+                    "deployment is never changed."
                 )
 
             if self.config.live_dashboard_port:
@@ -205,6 +223,8 @@ class NativePlannerBase:
 
     async def _shutdown_runtime(self) -> None:
         """Release initialized planner resources after normal or failed startup."""
+
+        await self.reconfiguration.close()
 
         if not self._diagnostics_finalized:
             self._diagnostics_finalized = True
@@ -267,67 +287,14 @@ class NativePlannerBase:
         max_gpu_budget: int,
     ) -> list[str]:
         capabilities = self._build_worker_capabilities()
-        errors: list[str] = []
-
-        if (
-            min_gpu_budget >= 0
-            and max_gpu_budget >= 0
-            and min_gpu_budget > max_gpu_budget
-        ):
-            errors.append(
-                f"min_gpu_budget={min_gpu_budget} exceeds "
-                f"max_gpu_budget={max_gpu_budget}"
-            )
-
-        required_gpus = 0
-        if prefill_min_endpoint is not None and capabilities.prefill is not None:
-            p_gpu = capabilities.prefill.resolved_gpu_cost_per_replica
-            if p_gpu is not None:
-                required_gpus += prefill_min_endpoint * p_gpu
-        if decode_min_endpoint is not None and capabilities.decode is not None:
-            d_gpu = capabilities.decode.resolved_gpu_cost_per_replica
-            if d_gpu is not None:
-                required_gpus += decode_min_endpoint * d_gpu
-        if max_gpu_budget >= 0 and required_gpus > max_gpu_budget:
-            errors.append(
-                "minimum endpoint footprint requires "
-                f"{required_gpus} GPUs, exceeding max_gpu_budget="
-                f"{max_gpu_budget}"
-            )
-
-        power_budget = self.config.total_gpu_power_limit
-        if power_budget is not None:
-            p_watts = (
-                capabilities.prefill.power_watts_per_replica
-                if capabilities.prefill is not None
-                else None
-            )
-            d_watts = (
-                capabilities.decode.power_watts_per_replica
-                if capabilities.decode is not None
-                else None
-            )
-            power_known = (prefill_min_endpoint is None or p_watts is not None) and (
-                decode_min_endpoint is None or d_watts is not None
-            )
-            prefill_floor = prefill_min_endpoint or 0
-            decode_floor = decode_min_endpoint or 0
-            if power_known and not minimum_power_footprint_fits(
-                total_budget=power_budget,
-                prefill_min_endpoint=prefill_floor,
-                decode_min_endpoint=decode_floor,
-                p_watts=p_watts,
-                d_watts=d_watts,
-            ):
-                required_watts = prefill_floor * (p_watts or 0) + decode_floor * (
-                    d_watts or 0
-                )
-                errors.append(
-                    "minimum endpoint footprint requires "
-                    f"{required_watts}W, exceeding total_gpu_power_limit="
-                    f"{power_budget}W"
-                )
-        return errors
+        return runtime_configuration_errors(
+            prefill_min_endpoint,
+            decode_min_endpoint,
+            min_gpu_budget,
+            max_gpu_budget,
+            self.config.total_gpu_power_limit,
+            capabilities,
+        )
 
     def _validate_min_endpoint_budgets_at_startup(self) -> None:
         prefill_min_endpoint, decode_min_endpoint = self.config.active_min_endpoints()
@@ -374,6 +341,33 @@ class NativePlannerBase:
 
         async with self._bounded_config_lock():
             return self._min_endpoint_response()
+
+    def validate_runtime_candidate(self, candidate: PlannerConfig) -> None:
+        errors = runtime_candidate_errors(candidate, self._build_worker_capabilities())
+        if errors:
+            raise ValueError("; ".join(errors))
+        self._reconfigurable_engine()
+
+    def _reconfigurable_engine(self) -> ReconfigurableEngineProtocol:
+        engine = self._ensure_engine()
+        if not isinstance(engine, ReconfigurableEngineProtocol):
+            raise ValueError("this engine does not support runtime reconfiguration")
+        return engine
+
+    def apply_runtime_candidate(
+        self,
+        candidate: PlannerConfig,
+        fields: Iterable[str],
+        predictor: BuiltinLoadPredict | None,
+    ) -> None:
+        engine = self._reconfigurable_engine()
+        engine.apply_runtime_configuration(candidate, fields, predictor)
+        self._config_generation += 1
+        self.prometheus_metrics.sla_target_ttft_ms.set(self.config.ttft_ms)
+        self.prometheus_metrics.sla_target_itl_ms.set(self.config.itl_ms)
+        logger.info(
+            "Activated planner configuration revision %d", self._config_generation
+        )
 
     @asynccontextmanager
     async def _bounded_config_lock(self) -> AsyncIterator[None]:

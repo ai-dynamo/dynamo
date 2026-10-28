@@ -13,9 +13,14 @@ rather than a concrete implementation. Runtime planner execution uses
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from dynamo.planner.core.types import PlannerEffects, ScheduledTick, TickInput
+
+if TYPE_CHECKING:
+    from dynamo.planner.config.planner_config import PlannerConfig
+    from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
 
 
 @runtime_checkable
@@ -38,4 +43,17 @@ class EngineProtocol(Protocol):
         """Release any engine-owned resources. Idempotent."""
 
 
-__all__ = ["EngineProtocol"]
+@runtime_checkable
+class ReconfigurableEngineProtocol(EngineProtocol, Protocol):
+    """Optional configuration activation capability for production engines."""
+
+    def apply_runtime_configuration(
+        self,
+        candidate: PlannerConfig,
+        fields: Iterable[str],
+        predictor: BuiltinLoadPredict | None,
+    ) -> None:
+        """Activate settings while preserving the existing tick cadence."""
+
+
+__all__ = ["EngineProtocol", "ReconfigurableEngineProtocol"]

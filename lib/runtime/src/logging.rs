@@ -2471,6 +2471,7 @@ pub mod tests {
         // Use the core `set_default` (not `SubscriberInitExt::set_default`, which
         // also installs the global `log` LogTracer and would poison a later
         // `logging::init()` with SetLoggerError).
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(DistributedTraceIdLayer),
         );
@@ -2496,6 +2497,7 @@ pub mod tests {
         // Use the core `set_default` (not `SubscriberInitExt::set_default`, which
         // also installs the global `log` LogTracer and would poison a later
         // `logging::init()` with SetLoggerError).
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(DistributedTraceIdLayer),
         );
@@ -2534,6 +2536,7 @@ pub mod tests {
         // Core `set_default` (not `SubscriberInitExt::set_default`) to avoid
         // installing the global `log` LogTracer, which would poison a later
         // `logging::init()` with SetLoggerError.
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry()
                 .with(tracing_opentelemetry::layer().with_tracer(tracer))
@@ -2563,6 +2566,7 @@ pub mod tests {
         // Core `set_default` (not `SubscriberInitExt::set_default`) to avoid
         // installing the global `log` LogTracer, which would poison a later
         // `logging::init()` with SetLoggerError.
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry()
                 .with(tracing_opentelemetry::layer().with_tracer(tracer))

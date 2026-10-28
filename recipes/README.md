@@ -32,6 +32,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 
 | Model | Framework | Mode | GPUs | Deployment | Benchmark | Notes | GAIE |
 |-------|-----------|------|------|------------|-----------|-------|------|
+| **[Beam-1.0-501B-A23B](beam-1.0-501b/)** | SGLang / vLLM | Aggregated / Disaggregated | 8–16x H200; 8x B200/B300/GB200/GB300 | ✅ | ✅ | FP8 / NVFP4, FP8 KV cache, KV-aware routing, NIXL prefill/decode transfer, and DFlash2 block length 8 | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 2x H100/H200/A100 | ✅ | ✅ | FP8 quantization | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 8x H100/H200/A100 | ✅ | ✅ | Prefill + Decode separation | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/vllm/disagg/)** | vLLM | Disagg (Single-Node) | 8x A100 | ✅ | ✅ | 2× TP2 prefill + 1× TP4 decode, NixlConnector KV transfer | ❌ |
@@ -50,6 +51,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Qwen3.5-122B-A10B-FP8](qwen3.5-122b/fp8/vllm/disagg-h200-agentic/)** | vLLM | Disaggregated | 3x H200 | ✅ | ✅ | Hybrid GDN+MoE, 1P2D over NIXL, KV-aware routing, no MTP; agentic profile | ❌ |
 | **[GLM-5-NVFP4](glm-5-nvfp4/sglang/disagg/)** | SGLang | Disagg Prefill/Decode | 20x GB200 | ✅ | ✅ | NVFP4, EAGLE speculative decoding, TP16 decode + TP4 prefill, stable SGLang runtime image | ❌ |
 | **[GLM-5.3](glm-5.3/)** | SGLang | Aggregated + Disaggregated | 16x/20x B200 or 24x/16x H200 | ✅ | ✅ | B200 NVFP4 or H200 FP8 with FP8 KV, KV-aware routing, EAGLE, B200 HiCache CPU offload, agentic trace profile | ❌ |
+| **[GLM-5.3-Flash NVFP4](glm-5.3-flash/README.md#sglang)** | SGLang | Aggregated + Disaggregated | 4x B200; 4x / 12x GB200 | ✅ | ❌ | Kustomize recipes: TP4 aggregate on B200/GB200 or GB200 2P1D with KV events, text/image/video input, EAGLE ReplaySSM, HiCache, FP8 KV, Mooncake NVLink transfer | ❌ |
 | **[A.X-K2](ax-k2/)** | vLLM | Aggregated / Disaggregated | 8x / 12x B200; 32x H200 | ✅ | ✅ | Two TP4 aggregate workers or 2P1D TP4 over NIXL; prefill async disabled in 2P1D, EAGLE3 k=3 on both roles, NVFP4 + FP8 KV, sparse MLA, FlashInfer autotuning disabled, KV-aware routing. H200: FP8, TP8 with expert parallelism, KV-aware routing, EAGLE3 k=3, 262K context; c16–128 AIPerf sweep. | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | TP=8, single-node. Use `model-download-sglang.yaml` | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅ | ❌ | TP=16, multi-node. Use `model-download-sglang.yaml` | ❌ |
@@ -92,6 +94,7 @@ These recipes are under active development and may require additional setup step
 
 | Model | Framework | Mode | GPUs | Deployment | Notes |
 |-------|-----------|------|------|------------|-------|
+| **[Motif-3 NVFP4](motif-3/)** | vLLM | Aggregated / Disaggregated 3P1D | 2x / 8x B200 | ✅ | TP2 per worker, expert parallelism, MTP2, FP8 KV cache; KV-aware routing and NIXL for disaggregation |
 | **[Gemma-4-31B](gemma4-31b/)** | TensorRT-LLM | Aggregated | 8x B200 / 8x GB200 / 8x H200 | ✅ | NVFP4 + FP8 KV on B200/GB200; BF16 + 16-bit KV and TP4 on H200; KV-aware routing; MTP on B200/GB200, not yet verified on H200; agentic profile |
 | **[GLM-5-NVFP4 (EFA)](glm-5-nvfp4/sglang/disagg/efa/)** | SGLang | Disagg Prefill/Decode over AWS EFA | 20x GB200 | ✅ | KV transfer over AWS EFA via NIXL LIBFABRIC instead of UCX. Patched libfabric baked into image. Requires [custom container build](glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa). |
 | **[Nemotron-3-Nano-Omni-NVFP4](nemotron-3-nano-omni/vllm/agg/)** | vLLM | Aggregated | 1x GPU | ✅ | Multimodal text/image/video/audio serving. Requires [custom container build](nemotron-3-nano-omni/). |
@@ -105,6 +108,7 @@ These recipes are under active development and may require additional setup step
 | **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/sglang/agg/)** | SGLang | Aggregated | 8x B200 | ✅ | Text only — MoE model (1.6T / 49B active, 1M context), TP=8, MXFP4 MoE via FlashInfer, EAGLE MTP (3 steps / 4 draft tokens), reasoning + tool calling. Prebuilt image available (shared with [DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/sglang/agg/)). |
 | **[Solar-Open2-250B-NVFP4](solar-open2-250b/vllm/agg-b200-chat/)** | vLLM | Aggregated | 4x B200 | ✅ | Text only — NVFP4 checkpoint, 2 replicas × TP2, reasoning + tool calling. Prebuilt image available. |
 | **[Solar-Open2-250B-NVFP4](solar-open2-250b/vllm/disagg-b200-chat/)** | vLLM | Disaggregated | 8x B200 | ✅ | Text only — NVFP4 checkpoint, 1× prefill TP4 + EP and 2× decode TP2, NIXL/RDMA KV transfer, reasoning + tool calling. Prebuilt image available. |
+| **[MiniMax-M3.1-Flash](minimax-m3.1/)** | vLLM, SGLang, TensorRT-LLM | Aggregated | 4x B200 or 4x GB300 | ✅ | Day-0 profile for the MiniMax-M3.1-Flash checkpoint — TP4 + EP on one node, 1M context, up to 256 concurrent requests with prefix caching (plus FP8 KV cache and KV-aware routing on vLLM and SGLang), reasoning + tool calling; text + image input. |
 
 ## Recipe Structure
 

@@ -26,16 +26,15 @@ use super::{
 };
 
 use dynamo_runtime::{
-    component::{Client, Endpoint, build_transport_type},
-    discovery::{Discovery, DiscoverySpec, ModelCardInstanceId},
-    pipeline::network::RequestPlanePayloadCodec,
+    component::{Client, Endpoint},
+    discovery::{Discovery, ModelCardInstanceId},
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
 };
 
 use crate::{
     kv_router::{
-        KvEventSourceRequirement, KvRouter, SelectionPolicySource, router_endpoint_id,
+        KvEventSourceRequirement, KvRouter, SelectionPolicySource,
         shared_cache::HicacheSharedKvCache,
     },
     local_model::runtime_config::{
@@ -151,6 +150,12 @@ pub(crate) struct RemovedDiscoveryGroup {
     pub(crate) cards: Vec<ModelDeploymentCard>,
 }
 
+pub(crate) struct CommittedModelView {
+    pub(crate) name: String,
+    pub(crate) is_ready: bool,
+    pub(crate) aliases: Vec<String>,
+}
+
 /// Central manager for model engines, routing, and configuration.
 ///
 /// Models are stored hierarchically: ModelManager → Model → WorkerSet.
@@ -158,6 +163,7 @@ pub(crate) struct RemovedDiscoveryGroup {
 ///
 /// Note: Don't implement Clone for this, put it in an Arc instead.
 pub struct ModelManager {
+    pub(crate) router_policies: super::router_policy::RouterPolicyRegistry,
     /// Model name → Model (which contains WorkerSets with engines)
     models: DashMap<String, Arc<Model>>,
 
@@ -275,6 +281,7 @@ impl ModelManager {
 
     pub fn new() -> Self {
         Self {
+            router_policies: Default::default(),
             models: DashMap::new(),
             catalog: ArcSwap::from_pointee(CommittedCatalog::default()),
             cards: DashMap::new(),
@@ -502,6 +509,34 @@ impl ModelManager {
 
     pub(crate) fn get_committed_model(&self, model_name: &str) -> Option<Arc<Model>> {
         self.catalog.load().models.get(model_name).cloned()
+    }
+
+    /// Committed primary models with their aliases, sorted by name.
+    pub(crate) fn committed_model_views(&self) -> Vec<CommittedModelView> {
+        let catalog = self.catalog.load();
+        let mut aliases_by_primary = HashMap::<&str, Vec<String>>::new();
+        for (alias, primary) in catalog.aliases.iter() {
+            aliases_by_primary
+                .entry(primary)
+                .or_default()
+                .push(alias.clone());
+        }
+        let mut views = catalog
+            .models
+            .iter()
+            .filter(|(name, _)| !catalog.aliases.contains_key(name.as_str()))
+            .map(|(name, model)| {
+                let mut aliases = aliases_by_primary.remove(name.as_str()).unwrap_or_default();
+                aliases.sort_unstable();
+                CommittedModelView {
+                    name: name.clone(),
+                    is_ready: model.is_ready_to_serve(),
+                    aliases,
+                }
+            })
+            .collect::<Vec<_>>();
+        views.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        views
     }
 
     fn get_model_internal(&self, model_name: &str) -> Option<Arc<Model>> {
@@ -1484,6 +1519,20 @@ impl ModelManager {
             .get_images_engine()
     }
 
+    /// Resolve the model before applying its WorkerSet-level edit admission policy.
+    pub(crate) fn select_image_edit_engine(
+        &self,
+        model: &str,
+        count: usize,
+    ) -> Result<Option<super::image_edits::ImageEngineSelection>, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .select_image_edit_engine(count)
+    }
+
     pub fn get_videos_engine(
         &self,
         model: &str,
@@ -2327,27 +2376,6 @@ impl ModelManager {
         let endpoint = client.endpoint.clone();
         let lora_domain = self.lora_domain(&endpoint.id());
 
-        // Register router via discovery mechanism.
-        let drt = endpoint.component().drt();
-        let instance_id = drt.discovery().instance_id();
-
-        // Build transport for router endpoint based on request plane mode
-        // Use the worker's component name so each target pool gets its own router discovery group
-        let router_endpoint_id =
-            router_endpoint_id(endpoint.id().namespace, endpoint.id().component);
-        let transport = build_transport_type(&endpoint, &router_endpoint_id, instance_id).await?;
-
-        let discovery_spec = DiscoverySpec::Endpoint {
-            namespace: router_endpoint_id.namespace.clone(),
-            component: router_endpoint_id.component.clone(),
-            endpoint: router_endpoint_id.name.clone(),
-            transport,
-            device_type: None,
-            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
-        };
-
-        let registration = drt.register_endpoint_lease(discovery_spec).await?;
-
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(&endpoint).await?;
 
@@ -2400,7 +2428,8 @@ impl ModelManager {
             None
         };
 
-        let mut chooser = KvRouter::new_with_worker_role_and_scheduler_load(
+        let runtime_model_name = model_name.clone();
+        let chooser = KvRouter::new_with_worker_role_and_scheduler_load(
             endpoint.clone(),
             client,
             workers_with_configs,
@@ -2419,7 +2448,6 @@ impl ModelManager {
             cancellation_token,
         )
         .await?;
-        chooser.set_endpoint_registration(registration);
 
         // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one active-sequence
         // subscription per decode endpoint. WORKER_TYPE_DECODE is the routing path for BOTH
@@ -2479,6 +2507,14 @@ impl ModelManager {
             }
         }
 
+        if let Some(model) = runtime_model_name {
+            self.router_policies.register(
+                model,
+                endpoint.id(),
+                worker_type,
+                chooser.policy_control(),
+            );
+        }
         Ok(Arc::new(chooser))
     }
 
@@ -2873,7 +2909,7 @@ mod tests {
     use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
-        discovery::{Discovery, MockDiscovery, SharedMockRegistry},
+        discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
         distributed::DistributedConfig,
         pipeline::RouterMode,
         transports::event_plane::EventScope,
@@ -2982,6 +3018,69 @@ mod tests {
     ) {
         let (_tx, rx) = tokio::sync::watch::channel(configs);
         mm.runtime_configs.insert(endpoint_id.clone(), rx);
+    }
+
+    #[tokio::test]
+    async fn kv_chooser_ignores_stale_presence() {
+        use dynamo_runtime::{component::TransportType, discovery::DiscoveryQuery};
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = distributed
+            .namespace("router-presence".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate");
+        let discovery = distributed.discovery();
+        let query = DiscoveryQuery::Endpoint {
+            namespace: endpoint.id().namespace,
+            component: endpoint.id().component,
+            endpoint: "router-discovery".to_string(),
+        };
+        // Model a prior frontend process with the same discovery identity and an old port.
+        discovery
+            .register(DiscoverySpec::Endpoint {
+                namespace: endpoint.id().namespace,
+                component: endpoint.id().component,
+                endpoint: "router-discovery".to_string(),
+                transport: TransportType::Tcp("127.0.0.1:1".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+        let before = discovery.list(query.clone()).await.unwrap();
+        assert_eq!(before.len(), 1);
+
+        let manager = ModelManager::new();
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_replica_sync: true,
+            skip_initial_worker_wait: true,
+            ..Default::default()
+        };
+        let router = manager
+            .kv_chooser_for(
+                &endpoint,
+                16,
+                Some(config),
+                None,
+                crate::protocols::common::timing::WORKER_TYPE_DECODE,
+                Some("test-model".to_string()),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(discovery.list(query).await.unwrap(), before);
+        let registered = manager.router_policies.list(Some("test-model"));
+        assert_eq!(registered.len(), 1);
+        assert!(Arc::ptr_eq(&registered[0].1, router.policy_control()));
+        assert_eq!(registered[0].1.get().await.unwrap().revision(), 0);
+        drop(router);
+        distributed.shutdown();
     }
 
     #[tokio::test]
@@ -3338,6 +3437,65 @@ mod tests {
 
         assert_eq!(mm.resolve_canonical_name("llama-alias"), "llama");
         assert_eq!(mm.resolve_canonical_name("llama"), "llama");
+    }
+
+    #[test]
+    fn committed_model_views_collapse_aliases_onto_the_primary() {
+        let mm = ModelManager::new();
+        let worker_set = Arc::new(make_worker_set("ns1", "abc"));
+        assert!(mm.add_worker_set_arc("llama", "ns1", worker_set.clone()));
+        assert!(mm.register_alias("llama-alias", "llama"));
+        assert!(mm.add_worker_set_arc("llama-alias", "ns1", worker_set.clone()));
+        assert!(mm.register_alias("a-llama", "llama"));
+        assert!(mm.add_worker_set_arc("a-llama", "ns1", worker_set));
+        let other = Arc::new(make_worker_set("ns1", "def"));
+        assert!(mm.add_worker_set_arc("granite", "ns1", other));
+
+        let views = mm.committed_model_views();
+        let views = views
+            .iter()
+            .map(|view| (view.name.as_str(), view.aliases.as_slice()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            views,
+            [
+                ("granite", &[][..]),
+                (
+                    "llama",
+                    &["a-llama".to_string(), "llama-alias".to_string()][..]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn alias_requests_publish_frontend_load_under_the_primary_model() {
+        use crate::http::service::metrics::{Endpoint, Metrics};
+
+        let mm = ModelManager::new();
+        let worker_set = Arc::new(make_worker_set("ns1", "abc"));
+        assert!(mm.add_worker_set_arc("llama", "ns1", worker_set.clone()));
+        assert!(mm.register_alias("llama-alias", "llama"));
+        assert!(mm.add_worker_set_arc("llama-alias", "ns1", worker_set));
+
+        // Handlers that do not rewrite the request model track it under the alias.
+        let metric_model = mm.metric_model_for("llama-alias");
+        assert_eq!(metric_model, "llama-alias");
+
+        let metrics = Arc::new(Metrics::new());
+        let _alias =
+            metrics
+                .clone()
+                .create_inflight_guard(metric_model, Endpoint::Embeddings, false, "");
+        let _primary =
+            metrics
+                .clone()
+                .create_inflight_guard("llama", Endpoint::Embeddings, false, "");
+        let frame = metrics.frontend_load(0, true, mm.committed_model_views());
+        assert_eq!(frame.models.len(), 1);
+        assert_eq!(frame.models[0].model, "llama");
+        assert_eq!(frame.models[0].totals.requests_started, 2);
+        assert_eq!(frame.models[0].gauges.requests_awaiting_first_token, 2);
     }
 
     #[test]
@@ -3733,11 +3891,50 @@ mod tests {
     fn capture_events<T>(body: impl FnOnce() -> T) -> (T, Vec<CapturedEvent>) {
         use tracing_subscriber::layer::SubscriberExt;
 
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
         let out = tracing::subscriber::with_default(subscriber, body);
         let events = captured.lock().unwrap().clone();
         (out, events)
+    }
+
+    #[test]
+    fn capture_events_keeps_interest_when_another_thread_registers_the_callsite() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::capture_events_keeps_interest_when_another_thread_registers_the_callsite"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        fn shared_callsite() {
+            tracing::info!("capture interest probe");
+        }
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let first_logged = Arc::new(std::sync::Barrier::new(2));
+        let worker_ready = Arc::clone(&ready);
+        let worker_first_logged = Arc::clone(&first_logged);
+        let worker = std::thread::spawn(move || {
+            capture_events(|| {
+                worker_ready.wait();
+                worker_first_logged.wait();
+                shared_callsite();
+            })
+        });
+        ready.wait();
+        shared_callsite();
+        first_logged.wait();
+        let (_, events) = worker.join().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.message == "capture interest probe")
+                .count(),
+            1
+        );
     }
 
     fn alias_claim_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {

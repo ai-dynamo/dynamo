@@ -19,6 +19,7 @@ import {
   resolveCalendarMonth,
   resolveToday,
 } from "./calendar-today";
+import { eventsInMonth, upcomingWithMeeting } from "./community-meeting";
 
 const CALENDAR_URL =
   "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
@@ -113,13 +114,10 @@ export function EventsCalendar() {
   // Days in the displayed month that have something scheduled, so the grid
   // still carries event information now that the highlight marks today.
   const eventDays = new Set(
-    [...UPCOMING_EVENTS, ...PAST_EVENTS]
-      .filter(
-        (event) =>
-          Number(event.year) === year && MONTH_INDEX[event.month] === month,
-      )
+    eventsInMonth([...UPCOMING_EVENTS, ...PAST_EVENTS], year, month, MONTH_INDEX)
       .map((event) => Number(event.day)),
   );
+  const upcoming = upcomingWithMeeting(UPCOMING_EVENTS);
 
   return (
     <section
@@ -195,8 +193,8 @@ export function EventsCalendar() {
           </div>
 
           <div className="dynamo-calendar__events">
-            {UPCOMING_EVENTS.length > 0 ? (
-              UPCOMING_EVENTS.slice(0, 4).map((event) => (
+            {upcoming.length > 0 ? (
+              upcoming.slice(0, 4).map((event) => (
                 <UpcomingEvent
                   key={`${event.start}-${event.title}`}
                   event={event}

@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -30,7 +31,9 @@ use super::types::{
 };
 use crate::plugins::request_classifier::{ClassifyRequest, RequestClassifier};
 use crate::protocols::RoutingConstraints;
-use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{
+    LocalBlockHash, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillCompletion, PrefillTokenDeltas,
@@ -60,6 +63,9 @@ pub struct LocalScheduler<
     queue: Arc<SchedulerQueue<P, C, Sel, RF>>,
     queue_updates: watch::Sender<()>,
     request_classifier: OnceLock<Arc<RequestClassifierRuntime>>,
+    worker_configs: watch::Receiver<HashMap<WorkerId, C>>,
+    applied_worker_configs: Arc<Mutex<Option<HashMap<WorkerId, C>>>>,
+    monitor_worker_configs: bool,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
@@ -186,21 +192,22 @@ where
         ));
 
         let (queue_updates, _) = watch::channel(());
+        let applied_worker_configs = Arc::new(Mutex::new(None));
 
         if monitor_worker_configs {
             let slots_monitor = Arc::clone(&slots);
+            let applied_configs_monitor = Arc::clone(&applied_worker_configs);
             let queue_config_updates = Arc::clone(&queue);
             let queue_updates_config = queue_updates.clone();
             let mut monitor_rx = workers_with_configs.clone();
             let monitor_cancel_token = cancellation_token.clone();
             tokio::spawn(async move {
                 tracing::trace!("LocalScheduler workers monitoring task started");
-                let mut last_workers = None;
-                Self::reconcile_worker_configs(
-                    &slots_monitor,
-                    monitor_rx.borrow_and_update().clone(),
-                    &mut last_workers,
-                );
+                {
+                    let mut applied = applied_configs_monitor.lock();
+                    let current_workers = monitor_rx.borrow_and_update().clone();
+                    Self::reconcile_worker_configs(&slots_monitor, current_workers, &mut applied);
+                }
 
                 loop {
                     tokio::select! {
@@ -216,16 +223,20 @@ where
                         }
                     }
 
-                    let current_workers = monitor_rx.borrow_and_update().clone();
-                    if Self::reconcile_worker_configs(
-                        &slots_monitor,
-                        current_workers,
-                        &mut last_workers,
-                    ) == WorkerConfigReconcileOutcome::Applied
                     {
-                        queue_config_updates.update().await;
-                        let _ = queue_updates_config.send(());
+                        // Read the watch while holding the same lock as synchronous publishers.
+                        let mut applied = applied_configs_monitor.lock();
+                        let current_workers = monitor_rx.borrow_and_update().clone();
+                        Self::reconcile_worker_configs(
+                            &slots_monitor,
+                            current_workers,
+                            &mut applied,
+                        );
                     }
+                    // A publisher may already have applied this topology. The queue still
+                    // needs every observed config update to recheck pending requests.
+                    queue_config_updates.update().await;
+                    let _ = queue_updates_config.send(());
                 }
             });
         }
@@ -274,14 +285,31 @@ where
             }
         });
 
-        Self {
+        let scheduler = Self {
             slots,
             queue,
             queue_updates,
             request_classifier: OnceLock::new(),
+            worker_configs: workers_with_configs,
+            applied_worker_configs,
+            monitor_worker_configs,
             track_prefill_tokens_default,
             worker_type,
+        };
+        if monitor_worker_configs {
+            scheduler.apply_published_worker_configs();
         }
+        scheduler
+    }
+
+    /// Apply published topology before a subsequent catalog mutation can replace it.
+    pub(crate) fn apply_published_worker_configs(&self) {
+        if !self.monitor_worker_configs {
+            return;
+        }
+        let mut applied = self.applied_worker_configs.lock();
+        let current_workers = self.worker_configs.borrow().clone();
+        Self::reconcile_worker_configs(&self.slots, current_workers, &mut applied);
     }
 
     pub async fn schedule_request(
@@ -291,6 +319,10 @@ where
         self.schedule_request_admitted(request)
             .await
             .map(AdmittedSchedulingResponse::into_response)
+    }
+
+    pub fn policy_control(&self) -> &Arc<super::queue::RuntimePolicyControl> {
+        self.queue.policy_control()
     }
 
     /// Schedule a request and return the router-internal admitted-attempt identity.
@@ -447,6 +479,13 @@ where
         observer: NonMaxOverlapSelectionObserver,
     ) -> bool {
         self.queue.set_non_max_overlap_selection_observer(observer)
+    }
+
+    /// Install per-candidate cost capture for admitted selections.
+    ///
+    /// Returns `false` when a spec is already installed.
+    pub fn set_selection_trace(&self, spec: SelectionTraceSpec) -> bool {
+        self.queue.set_selection_trace(spec)
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -762,6 +801,13 @@ where
     /// With queueing disabled, return immediately without an admission barrier.
     pub async fn update_queue(&self) {
         self.queue.update().await;
+    }
+
+    /// Process submitted admissions and ready work, including when queueing is
+    /// disabled. Capacity-blocked requests remain pending. Scheduling futures
+    /// must be polled to submit their commands before awaiting this barrier.
+    pub async fn admission_barrier(&self) -> Result<(), KvSchedulerError> {
+        self.queue.admission_barrier().await
     }
 
     pub fn pending_count(&self) -> usize {
@@ -1145,6 +1191,102 @@ mod tests {
             retain_kv_transfer_chain: false,
             shared_cache_hits: None,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn admission_barrier_processes_submitted_requests_in_both_queueing_modes() {
+        let now = Instant::now();
+        for threshold in [None, Some(0.5)] {
+            let (scheduler, slots, _configs, cancellation) = make_scheduler(
+                HashMap::from([(0, SimpleWorkerConfig::default())]),
+                threshold,
+                false,
+                None,
+            );
+            let mut admission = Box::pin(scheduler.schedule_request_admitted(request(
+                ScheduleMode::TrackedWithLifecycle {
+                    request_id: "admitted".into(),
+                },
+            )));
+            assert!(poll_once(admission.as_mut()).is_pending());
+            if threshold.is_none() {
+                // Keep the existing no-queue update fast path: it does not
+                // drive the actor or finish the submitted admission.
+                assert!(poll_once(scheduler.update_queue()).is_ready());
+                assert!(poll_once(admission.as_mut()).is_pending());
+            }
+            scheduler.admission_barrier().await.unwrap();
+            let std::task::Poll::Ready(Ok(admitted)) = poll_once(admission.as_mut()) else {
+                panic!("barrier did not process a runnable admission");
+            };
+            assert_eq!(admitted.response.best_worker, WorkerWithDpRank::new(0, 0));
+            assert!(matches!(admitted.attempt, AdmissionAttempt::Tracked(_)));
+            assert!(scheduler.has_request("admitted"));
+            scheduler.free("admitted").await.unwrap();
+            scheduler.admission_barrier().await.unwrap();
+            slots.assert_completely_drained(Instant::now());
+            assert_eq!(Instant::now(), now);
+            cancellation.cancel();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn admission_barrier_handles_blocked_admission_cancellation_and_capacity() {
+        let now = Instant::now();
+        let (scheduler, slots, _configs, cancellation) = make_scheduler(
+            HashMap::from([(
+                0,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(64),
+                    ..Default::default()
+                },
+            )]),
+            Some(0.5),
+            false,
+            None,
+        );
+        scheduler
+            .schedule_request_admitted(request(ScheduleMode::TrackedWithLifecycle {
+                request_id: "active".into(),
+            }))
+            .await
+            .unwrap();
+        let mut blocked = Box::pin(scheduler.schedule_request_admitted(request(
+            ScheduleMode::TrackedWithLifecycle {
+                request_id: "cancelled".into(),
+            },
+        )));
+        assert!(poll_once(blocked.as_mut()).is_pending());
+        scheduler.admission_barrier().await.unwrap();
+        assert!(poll_once(blocked.as_mut()).is_pending());
+        assert_eq!(scheduler.pending_count(), 1);
+        drop(blocked);
+        scheduler.admission_barrier().await.unwrap();
+        assert_eq!(scheduler.pending_count(), 0);
+        assert!(scheduler.has_request("active"));
+        assert!(!scheduler.has_request("cancelled"));
+
+        let mut next = Box::pin(scheduler.schedule_request_admitted(request(
+            ScheduleMode::TrackedWithLifecycle {
+                request_id: "next".into(),
+            },
+        )));
+        assert!(poll_once(next.as_mut()).is_pending());
+        scheduler.admission_barrier().await.unwrap();
+        assert!(poll_once(next.as_mut()).is_pending());
+        scheduler.mark_prefill_completed("active").await.unwrap();
+        scheduler.admission_barrier().await.unwrap();
+        assert!(matches!(
+            poll_once(next.as_mut()),
+            std::task::Poll::Ready(Ok(_))
+        ));
+        assert_eq!(scheduler.pending_count(), 0);
+        scheduler.free("active").await.unwrap();
+        scheduler.free("next").await.unwrap();
+        scheduler.admission_barrier().await.unwrap();
+        slots.assert_completely_drained(Instant::now());
+        assert_eq!(Instant::now(), now);
+        cancellation.cancel();
     }
 
     #[tokio::test]
@@ -2097,6 +2239,7 @@ mod tests {
         updated_workers.insert(0, SimpleWorkerConfig::default());
         updated_workers.insert(1, SimpleWorkerConfig::default());
         cfg_tx.send(updated_workers).unwrap();
+        scheduler.apply_published_worker_configs();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 

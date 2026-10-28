@@ -364,7 +364,7 @@ pub type MultimodalUuidMap = std::collections::HashMap<String, Vec<Option<String
 
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The `dynamo.llm-preprocessor`
 /// crate is responsible for converting request from the public APIs to this internal representation.
-#[derive(Serialize, Deserialize, Debug, Clone, Builder)]
+#[derive(Serialize, Deserialize, Clone, Builder)]
 pub struct PreprocessedRequest {
     /// ID of the model to use.
     ///
@@ -710,6 +710,17 @@ where
     Ok(value)
 }
 
+impl std::fmt::Debug for PreprocessedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreprocessedRequest")
+            .field("model", &self.model)
+            .field("token_count", &self.token_ids.len())
+            .field("output_options", &self.output_options)
+            .field("extra_args", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
 impl PreprocessedRequest {
     pub fn phase(&self) -> RequestPhase {
         self.tracker
@@ -759,6 +770,14 @@ impl PreprocessedRequest {
             .as_ref()
             .filter(|mm| !mm.routing_token_ids.is_empty() && mm.expanded_prompt_len > 0)
             .map_or(self.token_ids.len(), |mm| mm.expanded_prompt_len)
+    }
+}
+
+/// The worker's backend admission gate admits a request under `routing.dp_rank`:
+/// the rank routing selected for this dispatch, which the backend serves it on.
+impl crate::admission_gate::AdmissionRequest for PreprocessedRequest {
+    fn dp_rank(&self) -> Option<u32> {
+        self.routing.as_ref().and_then(|routing| routing.dp_rank)
     }
 }
 
@@ -979,6 +998,54 @@ mod tests {
         ids.iter().flat_map(|id| id.to_le_bytes()).collect()
     }
 
+    /// A native worker's ingress reads the rank from the body as sent, under
+    /// either request-plane codec: `routing.dp_rank` when it is set, and no rank
+    /// when it, or `routing`, is missing or null.
+    #[tokio::test]
+    async fn worker_ingress_reads_routing_dp_rank_from_the_body() {
+        use crate::admission_gate::AdmissionRequest;
+        use dynamo_runtime::pipeline::network::{
+            IngressRequestDecoder, RequestPlanePayloadCodec, SerdeIngressPayloadAdapter,
+        };
+        use serde_json::{Value, json};
+
+        let body = |routing: Option<Value>| {
+            let mut body = json!({
+                "model": "m",
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {},
+                "sampling_options": {},
+                "output_options": {},
+            });
+            if let Some(routing) = routing {
+                body["routing"] = routing;
+            }
+            body
+        };
+        let cases = [
+            (
+                body(Some(json!({"dp_rank": 5, "prefill_dp_rank": 3}))),
+                Some(5),
+            ),
+            (body(Some(json!({"dp_rank": null}))), None),
+            (body(Some(json!({"backend_instance_id": 7}))), None),
+            (body(Some(Value::Null)), None),
+            (body(None), None),
+        ];
+        for (body, expected) in cases {
+            for codec in [
+                RequestPlanePayloadCodec::Json,
+                RequestPlanePayloadCodec::Msgpack,
+            ] {
+                let request: PreprocessedRequest = SerdeIngressPayloadAdapter
+                    .decode_request(codec, codec.encode(&body).unwrap().into())
+                    .await
+                    .unwrap();
+                assert_eq!(request.dp_rank(), expected, "{body}");
+            }
+        }
+    }
+
     #[test]
     fn packed_token_ids_deserialize_from_msgpack_bytes() {
         let ids = vec![0u32, 1, 128_000, i32::MAX as u32];
@@ -1099,6 +1166,20 @@ mod tests {
         assert!(!Arc::ptr_eq(&request.token_ids, &cloned.token_ids));
         assert_eq!(request.token_ids.as_slice(), &[1, 2, 3]);
         assert_eq!(cloned.token_ids.as_slice(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn metadata_upload_capability_is_serialized_but_never_debug_logged() {
+        let mut request = request_with_tokens(vec![1, 2, 3]);
+        request.extra_args = Some(
+            serde_json::json!({"nvext": {"metadata_upload": {"destination": {"url": "https://storage.example?sig=secret", "required_headers": {"x-token": "private-token"}}}}}),
+        );
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("secret"));
+        assert!(!debug.contains("private-token"));
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert!(serialized.contains("sig=secret"));
+        assert!(serialized.contains("private-token"));
     }
 
     #[test]

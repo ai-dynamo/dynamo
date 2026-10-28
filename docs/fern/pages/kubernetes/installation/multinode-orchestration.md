@@ -4,11 +4,15 @@
 title: Multinode Orchestration
 ---
 
-Multinode deployments require either Grove + KAI Scheduler or an alternative orchestrator setup (LeaderWorkerSet + Volcano) to enable gang scheduling for workloads that span multiple nodes.
+Multinode deployments require an orchestrator for workloads that span multiple nodes. Gang scheduling is strongly recommended to schedule all required Pods together and avoid partial resource allocation that can leave workloads stalled.
 
-## Option 1: Grove + KAI Scheduler
+## Option 1: Grove
 
-Grove is the default and recommended orchestrator for multinode deployments. It requires KAI Scheduler as well. There are two ways to enable Grove and KAI Scheduler, either dynamo can install it automatically (recommended for development and testing), or you can install them separately (recommended for production).
+Grove is the default and recommended orchestrator for multinode deployments. Gang scheduling requires a compatible scheduling backend, but the Grove’s default backend, the standard Kubernetes scheduler, does not provide this capability.
+
+### Gang Scheduling with KAI Scheduler
+
+There are two ways to enable Grove and KAI Scheduler, either dynamo can install it automatically (recommended for development and testing), or you can install them separately (recommended for production).
 
 <Tabs>
   <Tab title="Managed Installation" value="managed">
@@ -47,15 +51,22 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
   > | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
   > | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
   > | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
-  > | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14 |
+  > | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
 
   </Tab>
 </Tabs>
 
 
-## Option 2: LeaderWorkerSet + Volcano
+## Option 2: LeaderWorkerSet
 
-If you are not using Grove for multinode, you can use [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) with [Volcano](https://github.com/volcano-sh/volcano#quick-start-guide) for gang scheduling. Use an LWS release that serves `disaggregatedset.x-k8s.io/v1` (the current Dynamo operator dependency is LWS `v0.10.0`) when enabling DS; the standard DCD pathway supports LWS `v0.7.0` or newer. Both must be installed before deploying multinode workloads.
+If you are not using Grove for multinode, you can use [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/). Use an LWS release that serves `disaggregatedset.x-k8s.io/v1` (the current Dynamo operator dependency is LWS `v0.10.0`) when enabling DS; the standard DCD pathway supports LWS `v0.7.0` or newer. Both must be installed before deploying multinode workloads.
+
+> [!NOTE]
+> The native gang scheduling is available in LWS v0.11.0 and later, but Dynamo does not yet support this alpha feature.
+
+#### Gang Scheduling with Volcano
+
+LeaderWorkerSet can be combined with [Volcano](https://github.com/volcano-sh/volcano#quick-start-guide) for gang scheduling.
 
 1. Install Volcano:
 
@@ -226,4 +237,4 @@ args:
 The immutable operator origin version controls this behavior. An operator-only upgrade does not add
 the variables or change the command line of an existing DGD, so it does not roll that workload. To
 use the aliases, create the DGD with Dynamo Operator 1.6.0 or later. When Grove is managed outside
-the Dynamo platform chart, install Grove `v0.1.0-alpha.14` or later before creating the DGD.
+the Dynamo platform chart, install Grove `v0.1.0-alpha.15` or later before creating the DGD.

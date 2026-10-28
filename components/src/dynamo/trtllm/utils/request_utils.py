@@ -63,18 +63,38 @@ def apply_stop_conditions_to_sampling_params(
 ) -> None:
     """Apply Dynamo stop conditions using TRT-LLM stopping semantics.
 
-    TRT-LLM cannot return a token that it consumes as an engine-side stop. If
-    Dynamo marks a stop token as visible or requests ``no_stop_trim``, disable
-    TRT-LLM stopping and let the Dynamo decoder return the token and terminate
-    the request. TRT-LLM maps
-    ``ignore_eos=True`` to both ``end_id=-1`` and an empty stop-word list when
-    it builds the executor request.
+    If the request asks for ``ignore_eos`` or ``no_stop_trim``, disable TRT-LLM
+    stopping and let the Dynamo decoder return the stop token and terminate the
+    request. TRT-LLM maps ``ignore_eos=True`` to both ``end_id=-1`` and an empty
+    stop-word list when it builds the executor request.
+
+    Otherwise visible stop tokens stop generation in-engine like hidden ones,
+    with ``include_stop_str_in_output`` so TRT-LLM still returns the token to
+    the Dynamo decoder and tool parser. Mapping visible tokens to ``ignore_eos``
+    made TRT-LLM decode past them until the frontend saw the token in a
+    streamed chunk (up to ``stream_interval`` tokens later) and cancelled the
+    request; with a tool parser whose end token is the model EOS, every request
+    with tools ended in a cancel.
+
+    TRT-LLM only holds back EOS until ``min_tokens``; stop words still fire
+    early, so visible stop tokens stay with the Dynamo decoder when a minimum
+    is requested.
     """
     visible_stop_token_ids = set(stop_conditions.get("stop_token_ids_visible") or [])
-    if no_stop_trim or stop_conditions.get("ignore_eos") or visible_stop_token_ids:
-        sampling_params.ignore_eos = True
-
     min_tokens = stop_conditions.get("min_tokens")
+    frontend_stops = bool(
+        no_stop_trim
+        or stop_conditions.get("ignore_eos")
+        or (min_tokens and visible_stop_token_ids)
+    )
+    if frontend_stops:
+        sampling_params.ignore_eos = True
+    elif visible_stop_token_ids:
+        engine_stop_token_ids = set(sampling_params.stop_token_ids or [])
+        engine_stop_token_ids.update(visible_stop_token_ids)
+        sampling_params.stop_token_ids = list(engine_stop_token_ids)
+        sampling_params.include_stop_str_in_output = True
+
     if min_tokens:
         sampling_params.min_tokens = min_tokens
 
@@ -82,9 +102,10 @@ def apply_stop_conditions_to_sampling_params(
     if hidden_stop_token_ids:
         engine_stop_token_ids = set(sampling_params.stop_token_ids or [])
         engine_stop_token_ids.update(hidden_stop_token_ids)
-        engine_stop_token_ids.difference_update(visible_stop_token_ids)
+        if frontend_stops:
+            engine_stop_token_ids.difference_update(visible_stop_token_ids)
         sampling_params.stop_token_ids = list(engine_stop_token_ids)
-    elif visible_stop_token_ids and sampling_params.stop_token_ids:
+    elif frontend_stops and visible_stop_token_ids and sampling_params.stop_token_ids:
         sampling_params.stop_token_ids = list(
             set(sampling_params.stop_token_ids) - visible_stop_token_ids
         )

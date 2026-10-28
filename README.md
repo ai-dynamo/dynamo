@@ -17,18 +17,18 @@ limitations under the License.
 
 ![Dynamo banner](./docs/fern/assets/img/dynamo-frontpage-banner.png)
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
-[![PyPI](https://img.shields.io/pypi/v/ai-dynamo)](https://pypi.org/project/ai-dynamo/)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
-[![Slack](https://badgen.net/badge/Slack/Join%20ai-dynamo%20workspace/4A154B?icon=slack)](https://ai-dynamo.org/slack)
-![Community Contributors](https://img.shields.io/badge/community_contributors-160%2B-brightgreen)
+[![License](https://img.shields.io/badge/License-Apache_2.0-76B900.svg)](https://opensource.org/licenses/Apache-2.0)
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo?color=76B900)](https://github.com/ai-dynamo/dynamo/releases/latest)
+[![PyPI](https://img.shields.io/pypi/v/ai-dynamo?color=76B900)](https://pypi.org/project/ai-dynamo/)
+[![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-76B900)](https://deepwiki.com/ai-dynamo/dynamo)
+[![Slack](https://img.shields.io/badge/Slack-Join%20ai--dynamo%20workspace-76B900?labelColor=4A154B&logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxZW0iIGhlaWdodD0iMWVtIiB2aWV3Qm94PSIwIDAgMjU2IDI1NiI+PHBhdGggZmlsbD0iI2UwMWU1YSIgZD0iTTUzLjg0MSAxNjEuMzJjMCAxNC44MzItMTEuOTg3IDI2LjgyLTI2LjgxOSAyNi44MlMuMjAzIDE3Ni4xNTIuMjAzIDE2MS4zMmMwLTE0LjgzMSAxMS45ODctMjYuODE4IDI2LjgyLTI2LjgxOEg1My44NHptMTMuNDEgMGMwLTE0LjgzMSAxMS45ODctMjYuODE4IDI2LjgxOS0yNi44MThzMjYuODE5IDExLjk4NyAyNi44MTkgMjYuODE5djY3LjA0N2MwIDE0LjgzMi0xMS45ODcgMjYuODItMjYuODIgMjYuODJjLTE0LjgzIDAtMjYuODE4LTExLjk4OC0yNi44MTgtMjYuODJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMCIgZD0iTTk0LjA3IDUzLjYzOGMtMTQuODMyIDAtMjYuODItMTEuOTg3LTI2LjgyLTI2LjgxOVM3OS4yMzkgMCA5NC4wNyAwczI2LjgxOSAxMS45ODcgMjYuODE5IDI2LjgxOXYyNi44MnptMCAxMy42MTNjMTQuODMyIDAgMjYuODE5IDExLjk4NyAyNi44MTkgMjYuODE5cy0xMS45ODcgMjYuODE5LTI2LjgyIDI2LjgxOUgyNi44MkMxMS45ODcgMTIwLjg4OSAwIDEwOC45MDIgMCA5NC4wNjljMC0xNC44MyAxMS45ODctMjYuODE4IDI2LjgxOS0yNi44MTh6Ii8+PHBhdGggZmlsbD0iIzJlYjY3ZCIgZD0iTTIwMS41NSA5NC4wN2MwLTE0LjgzMiAxMS45ODctMjYuODIgMjYuODE4LTI2LjgyczI2LjgyIDExLjk4OCAyNi44MiAyNi44MnMtMTEuOTg4IDI2LjgxOS0yNi44MiAyNi44MTlIMjAxLjU1em0tMTMuNDEgMGMwIDE0LjgzMi0xMS45ODggMjYuODE5LTI2LjgyIDI2LjgxOWMtMTQuODMxIDAtMjYuODE4LTExLjk4Ny0yNi44MTgtMjYuODJWMjYuODJDMTM0LjUwMiAxMS45ODcgMTQ2LjQ4OSAwIDE2MS4zMiAwczI2LjgxOSAxMS45ODcgMjYuODE5IDI2LjgxOXoiLz48cGF0aCBmaWxsPSIjZWNiMjJlIiBkPSJNMTYxLjMyIDIwMS41NWMxNC44MzIgMCAyNi44MiAxMS45ODcgMjYuODIgMjYuODE4cy0xMS45ODggMjYuODItMjYuODIgMjYuODJjLTE0LjgzMSAwLTI2LjgxOC0xMS45ODgtMjYuODE4LTI2LjgyVjIwMS41NXptMC0xMy40MWMtMTQuODMxIDAtMjYuODE4LTExLjk4OC0yNi44MTgtMjYuODJjMC0xNC44MzEgMTEuOTg3LTI2LjgxOCAyNi44MTktMjYuODE4aDY3LjI1YzE0LjgzMiAwIDI2LjgyIDExLjk4NyAyNi44MiAyNi44MTlzLTExLjk4OCAyNi44MTktMjYuODIgMjYuODE5eiIvPjwvc3ZnPg==)](https://ai-dynamo.org/slack)
+![Community Contributors](https://img.shields.io/badge/community_contributors-160%2B-76B900)
 
-| **[Docs](https://docs.nvidia.com/dynamo/)** | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/9178)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Digest](docs/fern/pages/blog/latest.mdx)** | **[Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** | **[How to Contribute](#community-and-contributing)** | **[Slack](https://ai-dynamo.org/slack)** |
+| **[Docs](https://docs.nvidia.com/dynamo/)** | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/14124)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Digest](docs/fern/pages/blog/latest.mdx)** | **[Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** | **[How to Contribute](#community-and-contributing)** | **[Slack](https://ai-dynamo.org/slack)** |
 
-<!-- The SVG badge uses systemLanguage so it only draws for Simplified Chinese/China browser language preferences. -->
-<p align="left">
-  <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="./docs/fern/assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+<!-- GitHub does not support browser-language negotiation for repository README rendering. Keep explicit alternate-language links in sync. -->
+<p align="right">
+  <strong>English</strong> | <a href="./README.zh-CN.md" hreflang="zh-CN">简体中文</a>
 </p>
 
 # Dynamo
@@ -42,10 +42,8 @@ Built in Rust for performance, Python for extensibility.
 <!-- EVENTS:START -->
 | Date | Event | Location |
 |:-----|:------|:---------|
-| Tue, Oct 13, 2026 | **[Dynamo Engineering Sync](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Engineering+Sync&dates=20261013T160000Z%2F20261013T170000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzyn-hfqk-asm%0AOr+dial%3A+%28US%29+%2B1+347-486-6566+PIN%3A+403835665%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzyn-hfqk-asm%3Fpin%3D5772284027174%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720)** | – |
-| Thu, Oct 15, 2026 | **[CoreWeave x NVIDIA Dynamo Meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=CoreWeave+x+NVIDIA+Dynamo+Meetup&dates=20261016T010000Z%2F20261016T040000Z&location=San+Francisco%2C+CA+%28venue+details+via+Luma+registration%29&details=Join+CoreWeave+and+NVIDIA+Dynamo+for+technical+talks+and+developer+networking+on+production+inference+and+RL+post-training.%0A%0ATopics%3A+CoreWeave+Forge%2C+Dynamo+inference+at+scale%2C+efficient+rollouts%2C+and+fast+weight+updates.%0A%0AAgenda+%28Pacific%29%3A%0A6%3A00+pm%3A+Doors+open%0A6%3A30+pm%3A+CoreWeave+talk%0A6%3A45+pm%3A+NVIDIA+Dynamo+talk%0A7%3A00%E2%80%939%3A00+pm%3A+Developer+networking%0A%0ARegister%3A+https%3A%2F%2Fluma.com%2FCWDynOctMeetup%0ARegistration+is+required.+Use+Luma+for+attendance+approval+and+venue+details.+Adding+this+calendar+event+does+not+register+you.)** | San Francisco |
-| Wed, Sep 23, 2026 | ~~[Dynamo community meeting](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260923T173000Z%2F20260923T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok)~~ | [Online](https://meet.google.com/heb-demu-qok) |
-| Thu, Sep 10, 2026 | ~~[Baseten x Dynamo x SGLang RL post training meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Baseten+x+Dynamo+x+SGLang+RL+post+training+meetup&dates=20260911T010000Z%2F20260911T040000Z&location=https%3A%2F%2Fluma.com%2FBaseDynSGL)~~ | [Luma](https://luma.com/BaseDynSGL) |
+| Thu, Oct 15, 2026 | ~~[CoreWeave x NVIDIA Dynamo Meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=CoreWeave+x+NVIDIA+Dynamo+Meetup&dates=20261016T010000Z%2F20261016T040000Z&location=San+Francisco%2C+CA+%28venue+details+via+Luma+registration%29&details=Join+CoreWeave+and+NVIDIA+Dynamo+for+technical+talks+and+developer+networking+on+production+inference+and+RL+post-training.%0A%0ATopics%3A+CoreWeave+Forge%2C+Dynamo+inference+at+scale%2C+efficient+rollouts%2C+and+fast+weight+updates.%0A%0AAgenda+%28Pacific%29%3A%0A6%3A00+pm%3A+Doors+open%0A6%3A30+pm%3A+CoreWeave+talk%0A6%3A45+pm%3A+NVIDIA+Dynamo+talk%0A7%3A00%E2%80%939%3A00+pm%3A+Developer+networking%0A%0ARegister%3A+https%3A%2F%2Fluma.com%2FCWDynOctMeetup%0ARegistration+is+required.+Use+Luma+for+attendance+approval+and+venue+details.+Adding+this+calendar+event+does+not+register+you.)~~ | San Francisco |
+| Tue, Oct 13, 2026 | ~~[Dynamo Engineering Sync](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Engineering+Sync&dates=20261013T160000Z%2F20261013T170000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzyn-hfqk-asm%0AOr+dial%3A+%28US%29+%2B1+347-486-6566+PIN%3A+403835665%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzyn-hfqk-asm%3Fpin%3D5772284027174%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720)~~ | – |
 <!-- EVENTS:END -->
 
 > Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com).
@@ -146,7 +144,7 @@ Choose either vLLM or SGLang:
 
 ```bash
 # Pull a prebuilt container
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
@@ -164,7 +162,7 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 
 ```bash
 # Pull a prebuilt container
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
@@ -178,7 +176,7 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-Also available: [`tensorrtllm-runtime:1.5.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
+Also available: [`tensorrtllm-runtime:1.6.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
 
 ### Option B: Install from PyPI
 
@@ -257,7 +255,7 @@ Dynamo is built in the open with an OSS-first development model. We welcome cont
 - **[Contribution Guide](https://docs.nvidia.com/dynamo/getting-started/contribution-guide)** — How to contribute code, docs, and recipes
 - **[Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** — RFCs for major features, tracked as `dep:*` labeled GitHub issues
 - **[Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)** — Biweekly calls
-- **[Community Meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view)** ([Youtube](https://www.youtube.com/@ai-dynamo-community)) – Weekly (Wed 10:30 AM PT) development community meetings
+- **[Community Meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view)** ([Youtube](https://www.youtube.com/@ai-dynamo-community)) – Weekly (Tue 9:00 AM PT) development community meetings
 - **[Slack](https://ai-dynamo.org/slack)** — Chat with the team and community
 - **[Dynamo Day Recordings](https://nvevents.nvidia.com/dynamoday)** — Deep dives from production users
 
