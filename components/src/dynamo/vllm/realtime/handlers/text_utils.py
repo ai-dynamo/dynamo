@@ -11,6 +11,22 @@ from typing import Any
 TOOL_CHOICE_MODES = ("auto", "none", "required")
 REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
+#: Chat completion request fields a session may set through the
+#: ``chat_completion_options`` extension, mapped to their JSON types.
+CHAT_COMPLETION_OPTIONS: dict[str, type] = {
+    "temperature": float,
+    "top_p": float,
+    "top_k": int,
+    "min_p": float,
+    "seed": int,
+    "repetition_penalty": float,
+    "presence_penalty": float,
+    "frequency_penalty": float,
+    "thinking_token_budget": int,
+    "chat_template_kwargs": dict,
+}
+_JSON_TYPES = {int: "an integer", float: "a number", dict: "an object"}
+
 
 def _max_output_tokens(value: Any) -> tuple[int | None, int | str]:
     if value in (None, "inf"):
@@ -208,11 +224,14 @@ def _chat_options(
 ) -> dict[str, Any]:
     """Map session options, overridden by ``response`` ones, to chat completion fields."""
     response = response or {}
-    options: dict[str, Any] = {}
+    options = _chat_completion_options(session.get("chat_completion_options"))
     if thinking := _reasoning_options(
         response.get("reasoning", session.get("reasoning"))
     ):
-        options["chat_template_kwargs"] = thinking
+        options["chat_template_kwargs"] = {
+            **options.get("chat_template_kwargs", {}),
+            **thinking,
+        }
     options.update(
         _chat_tool_options(
             {
@@ -224,6 +243,37 @@ def _chat_options(
             }
         )
     )
+    return options
+
+
+def _chat_completion_options(value: Any) -> dict[str, Any]:
+    """Validate the ``chat_completion_options`` session extension and drop nulls.
+
+    Realtime sessions have no sampling or chat template fields, so this carries
+    them to every chat completion request the session renders, prefill included.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("chat_completion_options must be an object")
+    options = {}
+    for key, option in value.items():
+        kind = CHAT_COMPLETION_OPTIONS.get(key)
+        if kind is None:
+            raise ValueError(f"chat_completion_options.{key} is not supported")
+        if option is None:
+            continue
+        if kind is dict:
+            valid = isinstance(option, dict)
+        else:
+            valid = not isinstance(option, bool) and isinstance(
+                option, int if kind is int else (int, float)
+            )
+        if not valid:
+            raise ValueError(
+                f"chat_completion_options.{key} must be {_JSON_TYPES[kind]}"
+            )
+        options[key] = option
     return options
 
 

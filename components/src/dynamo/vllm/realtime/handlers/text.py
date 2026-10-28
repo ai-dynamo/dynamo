@@ -577,7 +577,10 @@ class RealtimeTextHandler:
             event_type = event.get("type")
             running = current_response()
 
-            if event_type == "session.update":
+            if event_type in (
+                "session.update",
+                "session.chat_completion_options.update",
+            ):
                 if active_prefill is not None:
                     emit_error(
                         event,
@@ -585,7 +588,14 @@ class RealtimeTextHandler:
                         "session cannot change while the text buffer is active",
                     )
                     return
-                update = event.get("session")
+                # Dynamo's extension event sets what OpenAI session fields cannot carry.
+                update = (
+                    event.get("session")
+                    if event_type == "session.update"
+                    else {
+                        "chat_completion_options": event.get("chat_completion_options")
+                    }
+                )
                 if not isinstance(update, dict):
                     emit_error(event, "invalid_session", "session must be an object")
                     return

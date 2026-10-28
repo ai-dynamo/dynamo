@@ -2067,6 +2067,102 @@ def test_text_session_deletes_conversation_items():
     assert calls[0][1:] == [{"role": "user", "content": "Second"}]
 
 
+def test_chat_completion_options_event_reaches_prefill_and_generation():
+    prefill_options = []
+    generation_options = []
+    prefill_seen = asyncio.Event()
+
+    async def prefill(messages, updates, tool_options):
+        prefill_options.append(tool_options)
+        async for _ in updates:
+            prefill_seen.set()
+
+    async def chat_completion(messages, max_output_tokens, tool_options, prefill):
+        generation_options.append(tool_options)
+
+        async def frames():
+            yield 'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":"stop"}]}\n\n'
+            yield "data: [DONE]\n\n"
+
+        return frames()
+
+    options = {
+        "temperature": 0.3,
+        "top_p": 0.9,
+        "seed": None,
+        "chat_template_kwargs": {"enable_thinking": True},
+        "thinking_token_budget": 256,
+    }
+    result = asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL,
+                chat_completion_factory=chat_completion,
+                text_prefill_factory=prefill,
+            ),
+            [
+                {"type": "session.update", "session": _text_session()},
+                {
+                    "type": "session.chat_completion_options.update",
+                    "chat_completion_options": options,
+                },
+                {"type": "input_text.append", "text": "Hello"},
+                {"type": "input_text.commit"},
+                {"type": "response.create"},
+            ],
+            before_commit=prefill_seen,
+        )
+    )
+
+    expected = {key: value for key, value in options.items() if value is not None}
+    updates = [event for event in result if event["type"] == "session.updated"]
+    assert updates[-1]["session"]["chat_completion_options"] == options
+    assert prefill_options == [expected]
+    assert generation_options == [expected]
+    done = next(event for event in result if event["type"] == "response.done")
+    assert done["response"]["status"] == "completed"
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ([], "chat_completion_options must be an object"),
+        ({"logprobs": True}, "chat_completion_options.logprobs is not supported"),
+        (
+            {"temperature": "hot"},
+            "chat_completion_options.temperature must be a number",
+        ),
+        ({"seed": 1.5}, "chat_completion_options.seed must be an integer"),
+        ({"top_k": True}, "chat_completion_options.top_k must be an integer"),
+        (
+            {"chat_template_kwargs": []},
+            "chat_completion_options.chat_template_kwargs must be an object",
+        ),
+    ],
+)
+def test_chat_completion_options_event_rejects_invalid_options(options, message):
+    async def chat_completion(messages, max_output_tokens, tool_options, prefill):
+        raise AssertionError("invalid session must not generate")
+
+    result = asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL, chat_completion_factory=chat_completion
+            ),
+            [
+                {"type": "session.update", "session": _text_session()},
+                {
+                    "type": "session.chat_completion_options.update",
+                    "chat_completion_options": options,
+                },
+            ],
+        )
+    )
+
+    errors = [event for event in result if event["type"] == "error"]
+    assert [error["error"]["message"] for error in errors] == [message]
+
+
 @pytest.mark.parametrize(
     ("session_effort", "response_effort", "prefill_thinking", "answer_thinking"),
     [
@@ -2097,7 +2193,11 @@ def test_text_reasoning_effort_switches_chat_template_thinking(
         return frames()
 
     response = {"reasoning": {"effort": response_effort}} if response_effort else {}
-    session = {**_text_session(), "reasoning": {"effort": session_effort}}
+    session = {
+        **_text_session(),
+        "reasoning": {"effort": session_effort},
+        "chat_completion_options": {"chat_template_kwargs": {"custom": 1}},
+    }
     asyncio.run(
         _drive(
             RealtimeTextHandler(
@@ -2116,10 +2216,10 @@ def test_text_reasoning_effort_switches_chat_template_thinking(
     )
 
     assert prefill_options == [
-        {"chat_template_kwargs": {"enable_thinking": prefill_thinking}}
+        {"chat_template_kwargs": {"custom": 1, "enable_thinking": prefill_thinking}}
     ]
     assert generation_options == [
-        {"chat_template_kwargs": {"enable_thinking": answer_thinking}}
+        {"chat_template_kwargs": {"custom": 1, "enable_thinking": answer_thinking}}
     ]
 
 
