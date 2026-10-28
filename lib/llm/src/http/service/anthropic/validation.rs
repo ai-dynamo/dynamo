@@ -3,68 +3,99 @@
 
 use std::{collections::HashMap, marker::PhantomData};
 
-use axum::{Json, http::HeaderMap};
-use serde::{Deserialize, de::DeserializeOwned};
+use axum::{
+    Json,
+    extract::{FromRequest, Request, rejection::MissingJsonContentType},
+    http::{HeaderMap, header},
+    response::{IntoResponse, Response},
+};
+use bytes::Bytes;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, value::RawValue};
 
-/// Retain the original JSON until header-aware admission. Typed deserialization
-/// must read the original bytes, since a Value loses duplicate object keys.
+/// Retain the ingress buffer and small admission fields. Borrowed raw fields
+/// avoid copying messages, images, or tool schemas before typed deserialization.
 pub(super) struct ValidatedRequest<T> {
-    raw: Box<RawValue>,
+    body: Bytes,
+    model: String,
+    stream: bool,
+    fields: Result<Value, String>,
     marker: PhantomData<T>,
 }
 
-impl<'de, T> Deserialize<'de> for ValidatedRequest<T> {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(Self {
-            raw: Box::<RawValue>::deserialize(deserializer)?,
-            marker: PhantomData,
-        })
+impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequest<S> for ValidatedRequest<T> {
+    type Rejection = Response;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let is_json = request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<mime::Mime>().ok())
+            .is_some_and(|mime| {
+                mime.type_() == mime::APPLICATION
+                    && (mime.subtype() == mime::JSON || mime.suffix() == Some(mime::JSON))
+            });
+        if !is_json {
+            return Err(MissingJsonContentType::default().into_response());
+        }
+        let body = Bytes::from_request(request, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        Ok(Self::from_bytes(body))
     }
 }
 
 impl<T: DeserializeOwned> ValidatedRequest<T> {
-    fn fields(&self) -> Result<HashMap<String, &RawValue>, String> {
-        serde_json::from_str(self.raw.get()).map_err(|error| error.to_string())
+    pub(super) fn from_bytes(body: Bytes) -> Self {
+        let mut model = String::new();
+        let mut stream = false;
+        let fields = (|| {
+            let raw: HashMap<String, &RawValue> =
+                serde_json::from_slice(&body).map_err(|error| error.to_string())?;
+            model = raw
+                .get("model")
+                .and_then(|raw| serde_json::from_str(raw.get()).ok())
+                .unwrap_or_default();
+            stream = raw
+                .get("stream")
+                .and_then(|raw| serde_json::from_str(raw.get()).ok())
+                .unwrap_or(false);
+            let mut values = serde_json::Map::new();
+            for (name, value) in raw {
+                let value = if matches!(
+                    name.as_str(),
+                    "system" | "tool_choice" | "metadata" | "thinking" | "max_tokens" | "top_k"
+                ) {
+                    serde_json::from_str(value.get()).map_err(|error| format!("{name}: {error}"))?
+                } else {
+                    // Presence is sufficient for version checks. Unknown values
+                    // retain the typed parser's permissive numeric range.
+                    Value::Null
+                };
+                values.insert(name, value);
+            }
+            Ok(Value::Object(values))
+        })();
+        Self {
+            body,
+            model,
+            stream,
+            fields,
+            marker: PhantomData,
+        }
     }
 
-    /// Best-effort labels only; admission below still rejects malformed fields.
+    /// Best-effort labels; validation and typed parsing run inside the handler's metrics guard.
     pub(super) fn identity(&self) -> (String, bool) {
-        let fields = self.fields().unwrap_or_default();
-        let model = fields
-            .get("model")
-            .and_then(|raw| serde_json::from_str(raw.get()).ok())
-            .unwrap_or_default();
-        let stream = fields
-            .get("stream")
-            .and_then(|raw| serde_json::from_str(raw.get()).ok())
-            .unwrap_or(false);
-        (model, stream)
+        (self.model.clone(), self.stream)
     }
 
     pub(super) fn into_request(self, headers: &HeaderMap) -> Result<T, String> {
-        let fields = self.fields()?;
-        // Inspect only fields whose shape the shared types would discard. Unknown
-        // fields keep the typed parser's permissive behavior and numeric range.
-        let mut values = serde_json::Map::new();
-        for name in [
-            "system",
-            "tool_choice",
-            "metadata",
-            "thinking",
-            "max_tokens",
-            "top_k",
-        ] {
-            if let Some(raw) = fields.get(name) {
-                values.insert(
-                    name.into(),
-                    serde_json::from_str(raw.get()).map_err(|error| format!("{name}: {error}"))?,
-                );
-            }
-        }
-        validate(&Value::Object(values), headers)?;
-        // Axum retains typed field paths in diagnostics, including nested ones.
-        Json::<T>::from_bytes(self.raw.get().as_bytes())
+        validate(&self.fields?, headers)?;
+        // Read the original bytes, preserving duplicate-field rejection and Axum's
+        // nested field paths. Do not reconstruct the request through a Value.
+        Json::<T>::from_bytes(&self.body)
             .map(|Json(request)| request)
             .map_err(|error| error.body_text())
     }

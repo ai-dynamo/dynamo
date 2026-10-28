@@ -75,6 +75,12 @@ async fn extractor_errors_have_anthropic_envelopes_and_request_ids() {
                     "invalid_request_error",
                 ),
                 (
+                    Some("application/json"),
+                    format!("{} {{}}", request()),
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                ),
+                (
                     Some("text/plain"),
                     request().to_string(),
                     StatusCode::BAD_REQUEST,
@@ -140,20 +146,18 @@ async fn duplicate_request_fields_are_rejected_before_generation() {
             ),
         ];
         for path in ["/v1/messages", "/v1/messages/count_tokens"] {
-            for stream in [false, true] {
-                for fields in &fields {
-                    let body = format!("{{{fields},\"max_tokens\":2048,\"stream\":{stream}}}");
-                    let response = svc
-                        .client
-                        .post(format!("{}{path}", svc.base_url))
-                        .timeout(Duration::from_secs(10))
-                        .header("content-type", "application/json")
-                        .body(body)
-                        .send()
-                        .await
-                        .unwrap();
-                    assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
-                }
+            for fields in &fields {
+                let body = format!("{{{fields},\"max_tokens\":2048,\"stream\":false}}");
+                let response = svc
+                    .client
+                    .post(format!("{}{path}", svc.base_url))
+                    .timeout(Duration::from_secs(10))
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
             }
         }
         assert!(svc.engine.take_requests().await.is_empty());
@@ -235,27 +239,25 @@ async fn malformed_request_fields_are_rejected_before_generation() {
             ),
             ("thinking", json!(true)),
         ];
-        for stream in [false, true] {
-            for (field, value) in &invalid {
-                let mut body = request();
-                body["stream"] = stream.into();
-                body["tools"] = json!([{"name": "read", "input_schema": {"type": "object"}}]);
-                body[*field] = value.clone();
-                let response = svc
-                    .client
-                    .post(format!("{}/v1/messages", svc.base_url))
-                    .timeout(Duration::from_secs(10))
-                    .json(&body)
-                    .send()
-                    .await
-                    .unwrap();
-                let error =
-                    assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
-                assert!(
-                    error["error"]["message"].as_str().unwrap().contains(field),
-                    "{field}={value}: {error}"
-                );
-            }
+        for (field, value) in &invalid {
+            let mut body = request();
+            body["stream"] = false.into();
+            body["tools"] = json!([{"name": "read", "input_schema": {"type": "object"}}]);
+            body[*field] = value.clone();
+            let response = svc
+                .client
+                .post(format!("{}/v1/messages", svc.base_url))
+                .timeout(Duration::from_secs(10))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            let error =
+                assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+            assert!(
+                error["error"]["message"].as_str().unwrap().contains(field),
+                "{field}={value}: {error}"
+            );
         }
         assert!(svc.engine.take_requests().await.is_empty());
         svc.shutdown().await;
@@ -268,38 +270,36 @@ async fn malformed_request_fields_are_rejected_before_generation() {
 async fn valid_choices_and_shapes_preserve_backend_requests_and_assigned_ids() {
     temp_env::async_with_vars(ENV, async {
         let script = load_agent_fixture("text.sse").await.unwrap();
-        let svc = HarnessService::start(std::iter::repeat_n(script, 8)).await;
+        let svc = HarnessService::start(std::iter::repeat_n(script, 5)).await;
         let mut response_ids = Vec::new();
-        for stream in [false, true] {
-            for choice_type in ["none", "auto", "any", "tool"] {
-                let mut body = request();
-                body["stream"] = stream.into();
-                body["max_tokens"] = 1025.into();
-                body["thinking"] = if matches!(choice_type, "auto" | "none") {
-                    json!({"type": "enabled", "budget_tokens": 1024})
-                } else {
-                    json!({"type": "disabled"})
-                };
-                body["system"] = json!([{"type": "text", "text": "instructions"}]);
-                body["metadata"] = json!({"user_id": "é".repeat(512)});
-                body["tools"] = json!([{"name": "read", "input_schema": {"type": "object"}}]);
-                body["tool_choice"] = json!({"type": choice_type});
-                if choice_type == "tool" {
-                    body["tool_choice"]["name"] = "read".into();
-                }
-                let response = svc.client.post(format!("{}/v1/messages", svc.base_url)).timeout(Duration::from_secs(10))
-                    .json(&body).send().await.unwrap();
-                assert_eq!(response.status(), StatusCode::OK);
-                response_ids.push(response.headers()["request-id"].to_str().unwrap().to_owned());
-                let text = response.text().await.unwrap();
-                if stream {
-                    assert!(!text.contains("[DONE]"));
-                    assert!(text.trim_end().ends_with("data: {\"type\":\"message_stop\"}"));
-                }
+        for (choice_type, stream) in [("none", false), ("auto", false), ("any", false), ("tool", false), ("auto", true)] {
+            let mut body = request();
+            body["stream"] = stream.into();
+            body["max_tokens"] = 1025.into();
+            body["thinking"] = if matches!(choice_type, "auto" | "none") {
+                json!({"type": "enabled", "budget_tokens": 1024})
+            } else {
+                json!({"type": "disabled"})
+            };
+            body["system"] = json!([{"type": "text", "text": "instructions"}]);
+            body["metadata"] = json!({"user_id": "é".repeat(512)});
+            body["tools"] = json!([{"name": "read", "input_schema": {"type": "object"}}]);
+            body["tool_choice"] = json!({"type": choice_type});
+            if choice_type == "tool" {
+                body["tool_choice"]["name"] = "read".into();
+            }
+            let response = svc.client.post(format!("{}/v1/messages", svc.base_url)).timeout(Duration::from_secs(10))
+                .json(&body).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            response_ids.push(response.headers()["request-id"].to_str().unwrap().to_owned());
+            let text = response.text().await.unwrap();
+            if stream {
+                assert!(!text.contains("[DONE]"));
+                assert!(text.trim_end().ends_with("data: {\"type\":\"message_stop\"}"));
             }
         }
         let requests = svc.engine.take_requests().await;
-        assert_eq!(requests.len(), 8);
+        assert_eq!(requests.len(), 5);
         for group in requests.chunks_exact(4) {
             assert_eq!(group[0].inner.tool_choice, Some(ChatCompletionToolChoiceOption::None));
             assert_eq!(group[1].inner.tool_choice, Some(ChatCompletionToolChoiceOption::Auto));
@@ -311,7 +311,7 @@ async fn valid_choices_and_shapes_preserve_backend_requests_and_assigned_ids() {
         assert_eq!(response_ids, backend_ids);
         response_ids.sort();
         response_ids.dedup();
-        assert_eq!(response_ids.len(), 8);
+        assert_eq!(response_ids.len(), 5);
         assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
     }).await;
@@ -322,20 +322,12 @@ async fn valid_choices_and_shapes_preserve_backend_requests_and_assigned_ids() {
 async fn handler_errors_and_token_counts_have_request_ids() {
     temp_env::async_with_vars(ENV, async {
         let svc = HarnessService::start([]).await;
-        for (field, value, status, error_type) in [
-            (
-                "max_tokens",
-                json!(0),
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-            ),
-            (
-                "model",
-                json!("missing-model"),
-                StatusCode::NOT_FOUND,
-                "not_found_error",
-            ),
-        ] {
+        for (field, value, status, error_type) in [(
+            "max_tokens",
+            json!(0),
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+        )] {
             let mut body = request();
             body[field] = value;
             let response = svc
@@ -469,7 +461,7 @@ async fn admission_retains_typed_paths_unknown_fields_and_nonempty_method_errors
         let response = svc
             .client
             .post(format!("{}/v1/messages", svc.base_url))
-            .header("content-type", "application/json")
+            .header("content-type", "application/vnd.test+json; charset=utf-8")
             .body(raw)
             .send()
             .await

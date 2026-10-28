@@ -104,6 +104,7 @@ http-body-util = "0.1"
 ipnet = { workspace = true }
 libc = { workspace = true }
 lru = { workspace = true }
+mime = "0.3"
 moka = { workspace = true }
 oneshot = { workspace = true }
 parking_lot = { workspace = true }

@@ -419,7 +419,7 @@ async fn handler_anthropic_messages(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Extension(AnthropicRequestId(request_id)): Extension<AnthropicRequestId>,
     headers: HeaderMap,
-    Json(request): Json<ValidatedRequest<AnthropicCreateMessageRequest>>,
+    request: ValidatedRequest<AnthropicCreateMessageRequest>,
 ) -> Result<Response, Response> {
     let (model, streaming) = request.identity();
     let resolved_model = resolve_request_model(&model, template.as_ref());
@@ -1013,7 +1013,7 @@ async fn anthropic_messages(
 async fn handler_count_tokens(
     State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(request): Json<ValidatedRequest<AnthropicCountTokensRequest>>,
+    request: ValidatedRequest<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
     let mut request = request
         .into_request(&headers)

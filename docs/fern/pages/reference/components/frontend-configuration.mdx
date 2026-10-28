@@ -853,8 +853,8 @@ accepted fields, limits, errors, and rolling upgrades.
 | `POST` | `/v1/messages/count_tokens` | Token counting for the Anthropic API |
 
 <Note>
-The compatibility behavior below is unreleased and requires a build containing the
-Messages API fixes tracked in [#17362](https://github.com/ai-dynamo/dynamo/issues/17362).
+These behaviors require a build containing
+[PR #17367](https://github.com/ai-dynamo/dynamo/pull/17367).
 </Note>
 
 Responses from the Messages handlers, including request parsing and validation errors, return
@@ -862,7 +862,7 @@ the assigned request ID in the `request-id` response header. HTTP errors from th
 use the [Anthropic error envelope](https://platform.claude.com/docs/en/api/errors), including
 the same ID in `request_id`. Malformed JSON, invalid request shapes, and missing or incorrect
 JSON content types return HTTP 400. Requests exceeding `DYN_HTTP_BODY_LIMIT_MB` return HTTP
-413 with `request_too_large`; the default limit remains 45 MiB.
+413 with `request_too_large`; the default is 45 MiB.
 
 Successful Messages streams end with `message_stop`, without an additional `[DONE]` event.
 Before conversion, the frontend validates these
@@ -876,8 +876,7 @@ Before conversion, the frontend validates these
 - `thinking.type: "enabled"` requires an integer `budget_tokens` of at least 1,024 and less
   than `max_tokens`, except when `anthropic-beta` includes
   `interleaved-thinking-2025-05-14`. Budgets are invalid with `disabled`, `adaptive`,
-  or `between_tools`. The latter is accepted as a wire mode; this admission change
-  does not implement model-specific progress updates.
+  or `between_tools`. `between_tools` is accepted without enabling thinking before the first tool.
 - `top_k` must fit the backend's signed 32-bit field (at most 2,147,483,647).
 
 For `system`, `metadata`, `tool_choice`, and `thinking`, `null` is treated as omission.
