@@ -277,7 +277,11 @@ impl CanonicalOutputTracker {
     }
 }
 
-/// Owns request-scoped timing and metrics state.
+/// Owns one routing attempt's timing and labeled histogram handles.
+///
+/// Prefill and decode attempts can update the same request tracker. TTFT and
+/// ITL therefore use this attempt's clock and output count, while the tracker
+/// retains request-scoped timing for tracing.
 struct RequestObservability {
     tracker: Option<Arc<RequestTracker>>,
     request_metrics: Arc<RouterRequestMetrics>,

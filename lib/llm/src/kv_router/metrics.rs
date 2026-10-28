@@ -1252,8 +1252,13 @@ impl RouterRequestMetrics {
         }
     }
 
+    /// Resolve the five histogram handles once for a routing attempt.
+    ///
+    /// Reuse these handles for streamed observations so a later phase change on
+    /// the shared tracker cannot change their labels or repeat vector lookups.
+    /// A new `(phase, model)` pair creates children before any observation; an
+    /// existing pair reuses them. The phase name borrows a static string.
     pub(crate) fn attempt(&self, phase: RequestPhase, model: &str) -> AttemptMetrics {
-        let phase = phase.to_string();
         let labels = [phase.as_str(), model];
         AttemptMetrics {
             time_to_first_token_seconds: self
