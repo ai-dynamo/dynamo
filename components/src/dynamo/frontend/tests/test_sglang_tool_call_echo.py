@@ -441,7 +441,6 @@ class TestOutputGate:  # FRONTEND.4
     def test_echo_after_a_held_closing_delimiter_stays_content(
         self, tokenizer, batch_size
     ):
-        """Text released together with a held delimiter is routed per boundary."""
         echoed = f"\nThe file said:\n{INJECTED_CALL}"
         ids = tokenizer.encode(
             INJECTED_CALL, add_special_tokens=False
