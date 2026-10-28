@@ -82,11 +82,11 @@ def _component_args(config: dict, component_name: str) -> list[str]:
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
 @pytest.mark.parametrize("mode", ["agg", "disagg"])
-def test_production_frontend_has_hf_token_secret(backend: str, mode: str) -> None:
+def test_production_frontend_has_optional_hf_token_secret(backend: str, mode: str) -> None:
     config = load_dgd_template(backend, mode)
 
     env_from = _main_container(config, "Frontend").get("envFrom", [])
-    assert {"secretRef": {"name": "hf-token-secret"}} in env_from
+    assert {"secretRef": {"name": "hf-token-secret", "optional": True}} in env_from
 
 
 def test_vllm_decode_blueprint_does_not_enable_kv_transfer() -> None:
