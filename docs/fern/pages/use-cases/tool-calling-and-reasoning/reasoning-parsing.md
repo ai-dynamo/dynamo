@@ -348,7 +348,7 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
 
         **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
 
-        **Notes:** Harmony channel reasoning format
+        **Notes:** Harmony channel reasoning format. Air-gapped clusters need a staged vocabulary file. See [Harmony Vocabulary for Air-Gapped Clusters](tool-call-parsing.mdx#harmony-vocabulary-for-air-gapped-clusters).
       </Accordion>
     </AccordionGroup>
   </Accordion>
