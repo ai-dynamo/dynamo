@@ -933,8 +933,7 @@ class TestToolCallingMultiTurn:
             ],
             tools=TOOLS_WEATHER,
             # Keep pinned: with sampling the model sometimes never closes its
-            # thinking block, leaving the answer in reasoning_content and
-            # content empty.
+            # thinking block, leaving content empty.
             temperature=0,
             seed=0,
         )
