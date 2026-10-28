@@ -110,7 +110,6 @@ class TestSeededSlotSampling:
         py_rng = random.Random(1234)
         pool = [f"item_{i}" for i in range(5)]
 
-        # 4 requests with 3 slots each
         slots = sampler(py_rng, pool, 4, 3)
 
         assert slots == self.EXPECTED_SLOTS
