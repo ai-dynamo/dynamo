@@ -127,15 +127,14 @@ impl DiscoveredEngine {
         })
     }
 
-    /// Keeps the load the engine reports at startup, if any. Load is counted
-    /// in the capacity's KV blocks, so it needs a reported capacity.
-    pub(crate) fn with_load(mut self, load: pb::LoadInfo) -> Result<Self, DynamoError> {
-        if load.used_kv_blocks.is_none() && load.total_kv_blocks.is_none() && load.ranks.is_empty()
-        {
+    /// Keeps the load the engine reports at startup; `None` means it does not
+    /// implement `GetLoad`. Load is counted in the capacity's KV blocks, so it
+    /// needs a reported capacity.
+    pub(crate) fn with_load(mut self, load: Option<pb::LoadInfo>) -> Result<Self, DynamoError> {
+        let Some(load) = load else {
             return Ok(self);
-        }
+        };
         let engine = engine_label(&self.engine_name);
-        // Set only together with a positive kv_block_size.
         if self.total_kv_blocks.is_none() {
             return Err(protocol_error(
                 engine,

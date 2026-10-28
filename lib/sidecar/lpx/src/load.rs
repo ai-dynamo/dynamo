@@ -91,7 +91,12 @@ pub(crate) async fn poll(
                 client.load(Instant::now() + GET_LOAD_TIMEOUT).await
             } => load,
         };
-        match load.and_then(|load| snapshot(client.peer(), load)) {
+        let polled = load.and_then(|load| {
+            let load = load
+                .ok_or_else(|| protocol_error(client.peer(), "GetLoad answered UNIMPLEMENTED"))?;
+            snapshot(client.peer(), load)
+        });
+        match polled {
             Ok(snapshot) => {
                 warned = false;
                 stale_at = Instant::now() + STALENESS_LIMIT;

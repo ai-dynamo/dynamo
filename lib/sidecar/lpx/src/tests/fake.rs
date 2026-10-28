@@ -37,7 +37,6 @@ pub(super) enum Behavior {
     HangBeforeFirstToken,
 }
 
-/// What `GetLoad` answers.
 #[derive(Clone, Copy)]
 pub(super) enum Load {
     Unimplemented,
