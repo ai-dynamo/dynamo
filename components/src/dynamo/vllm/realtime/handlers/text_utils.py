@@ -8,6 +8,8 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+TOOL_CHOICE_MODES = ("auto", "none", "required")
+
 
 def _max_output_tokens(value: Any) -> tuple[int | None, int | str]:
     if value in (None, "inf"):
@@ -17,22 +19,98 @@ def _max_output_tokens(value: Any) -> tuple[int | None, int | str]:
     return value, value
 
 
+def _validate_tools(tools: Any) -> None:
+    if tools is None:
+        return
+    if not isinstance(tools, list):
+        raise ValueError("tools must be an array")
+    for tool in tools:
+        if (
+            not isinstance(tool, dict)
+            or tool.get("type") != "function"
+            or not isinstance(tool.get("name"), str)
+            or not tool["name"]
+        ):
+            raise ValueError("each tool must be a function with a name")
+        if not isinstance(tool.get("parameters", {}), dict):
+            raise ValueError(f"tool {tool['name']!r} parameters must be an object")
+
+
+def _validate_tool_choice(tool_choice: Any) -> None:
+    if tool_choice is None or tool_choice in TOOL_CHOICE_MODES:
+        return
+    if (
+        isinstance(tool_choice, dict)
+        and tool_choice.get("type") == "function"
+        and isinstance(tool_choice.get("name"), str)
+    ):
+        return
+    raise ValueError("tool_choice must be auto, none, required, or a named function")
+
+
 def _validate_text_options(options: dict[str, Any], name: str) -> None:
     if options.get("output_modalities") not in (None, ["text"]):
         raise ValueError("only text output is supported")
-    if options.get("tools") not in (None, []):
-        raise ValueError("tools are not supported")
-    if options.get("tool_choice") not in (None, "none"):
-        raise ValueError("tool_choice is not supported")
+    _validate_tools(options.get("tools"))
+    _validate_tool_choice(options.get("tool_choice"))
+    if not isinstance(options.get("parallel_tool_calls", False), bool):
+        raise ValueError(f"{name}.parallel_tool_calls must be a boolean")
     if any(options.get(field) is not None for field in ("prompt", "reasoning")):
         raise ValueError("prompt and reasoning configuration are not supported")
     if not isinstance(options.get("instructions", ""), str):
         raise ValueError(f"{name}.instructions must be a string")
 
 
+def _item_id(value: dict[str, Any]) -> str:
+    item_id = value.get("id") or f"item_{uuid.uuid4().hex}"
+    if not isinstance(item_id, str):
+        raise ValueError("conversation item id must be a string")
+    return item_id
+
+
+def _normalize_function_call_item(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value.get("call_id"), str) or not value["call_id"]:
+        raise ValueError("function_call call_id must be a non-empty string")
+    if not isinstance(value.get("name"), str) or not value["name"]:
+        raise ValueError("function_call name must be a non-empty string")
+    arguments = value.get("arguments", "")
+    if not isinstance(arguments, str):
+        raise ValueError("function_call arguments must be a JSON string")
+    return {
+        "id": _item_id(value),
+        "object": "realtime.item",
+        "type": "function_call",
+        "status": "completed",
+        "call_id": value["call_id"],
+        "name": value["name"],
+        "arguments": arguments,
+    }
+
+
+def _normalize_function_call_output_item(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value.get("call_id"), str) or not value["call_id"]:
+        raise ValueError("function_call_output call_id must be a non-empty string")
+    if not isinstance(value.get("output"), str):
+        raise ValueError("function_call_output output must be a string")
+    return {
+        "id": _item_id(value),
+        "object": "realtime.item",
+        "type": "function_call_output",
+        "status": "completed",
+        "call_id": value["call_id"],
+        "output": value["output"],
+    }
+
+
 def _normalize_text_item(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict) and value.get("type") == "function_call":
+        return _normalize_function_call_item(value)
+    if isinstance(value, dict) and value.get("type") == "function_call_output":
+        return _normalize_function_call_output_item(value)
     if not isinstance(value, dict) or value.get("type") != "message":
-        raise ValueError("only message conversation items are supported")
+        raise ValueError(
+            "only message, function_call, and function_call_output items are supported"
+        )
     role = value.get("role")
     if role not in {"system", "user", "assistant"}:
         raise ValueError("message role must be system, user, or assistant")
@@ -49,33 +127,97 @@ def _normalize_text_item(value: Any) -> dict[str, Any]:
     ):
         raise ValueError(f"{role} message content must contain only {content_type}")
 
-    item = {
-        "id": value.get("id") or f"item_{uuid.uuid4().hex}",
+    return {
+        "id": _item_id(value),
         "object": "realtime.item",
         "type": "message",
         "status": "completed",
         "role": role,
         "content": [{"type": content_type, "text": part["text"]} for part in content],
     }
-    if not isinstance(item["id"], str):
-        raise ValueError("conversation item id must be a string")
-    return item
+
+
+def _tool_call(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item["call_id"],
+        "type": "function",
+        "function": {"name": item["name"], "arguments": item["arguments"]},
+    }
 
 
 def _text_prompt(
     items: list[dict[str, Any]], instructions: str
-) -> list[dict[str, str]]:
-    """Convert Realtime items to chat messages; vLLM applies the chat template."""
-    messages = [
-        {
-            "role": item["role"],
-            "content": "".join(part["text"] for part in item["content"]),
-        }
-        for item in items
-    ]
+) -> list[dict[str, Any]]:
+    """Convert Realtime items to chat messages; vLLM applies the chat template.
+
+    Function calls join the assistant message they follow, as one chat
+    completion turn holds both the spoken text and its tool calls.
+    """
+    messages: list[dict[str, Any]] = []
+    for item in items:
+        if item["type"] == "function_call":
+            previous = messages[-1] if messages else None
+            if previous is None or previous["role"] != "assistant":
+                previous = {"role": "assistant", "content": ""}
+                messages.append(previous)
+            previous.setdefault("tool_calls", []).append(_tool_call(item))
+        elif item["type"] == "function_call_output":
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": item["call_id"],
+                    "content": item["output"],
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "role": item["role"],
+                    "content": "".join(part["text"] for part in item["content"]),
+                }
+            )
     if instructions:
         messages.insert(0, {"role": "system", "content": instructions})
     return messages
+
+
+def _chat_tool_options(options: dict[str, Any]) -> dict[str, Any]:
+    """Map Realtime tool options to chat completion tool fields."""
+    tools = options.get("tools") or []
+    tool_choice = options.get("tool_choice")
+    if not tools:
+        if tool_choice in (None, "auto", "none"):
+            return {}
+        raise ValueError("tool_choice requires tools")
+    if isinstance(tool_choice, dict) and tool_choice["name"] not in {
+        tool["name"] for tool in tools
+    }:
+        raise ValueError(
+            f"tool_choice function {tool_choice['name']!r} is not in tools"
+        )
+    chat: dict[str, Any] = {
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    key: tool[key]
+                    for key in ("name", "description", "parameters")
+                    if key in tool
+                },
+            }
+            for tool in tools
+        ]
+    }
+    if isinstance(tool_choice, dict):
+        chat["tool_choice"] = {
+            "type": "function",
+            "function": {"name": tool_choice["name"]},
+        }
+    elif tool_choice is not None:
+        chat["tool_choice"] = tool_choice
+    if options.get("parallel_tool_calls") is not None:
+        chat["parallel_tool_calls"] = options["parallel_tool_calls"]
+    return chat
 
 
 def _realtime_usage(usage: dict[str, Any] | None) -> dict[str, int] | None:

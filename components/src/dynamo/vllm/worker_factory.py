@@ -29,6 +29,7 @@ from dynamo.common.utils.prometheus import (
     register_embedding_cache_metrics,
     register_image_loader_metrics,
 )
+from dynamo.frontend.thinking import apply_default_thinking_mode_to_template_kwargs
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, Endpoint
 
@@ -1916,6 +1917,11 @@ class WorkerFactory:
                 model_name=model_name,
                 model_path=config.model_source_path,
                 chat_template_path=config.custom_jinja_template,
+                tool_parser=config.dyn_tool_call_parser,
+                reasoning_parser=config.dyn_reasoning_parser,
+                default_chat_template_kwargs=apply_default_thinking_mode_to_template_kwargs(
+                    {}, config.dyn_default_thinking_mode
+                ),
             )
         if "realtime" in supported_tasks:
             handlers["transcription"] = RealtimeTranscriptionHandler.from_engine(
