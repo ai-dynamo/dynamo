@@ -1121,6 +1121,7 @@ fn startup_policy_parameters_match_the_default_factory_for_every_role() {
                 host_cache_hit_weight: 0.5,
                 disk_cache_hit_weight: 0.2,
                 shared_cache_multiplier: Some(0.3),
+                prefix_affinity_weight: 0.25,
                 router_temperature: 0.7,
                 ..Default::default()
             },
@@ -1152,7 +1153,7 @@ fn startup_policy_parameters_match_the_default_factory_for_every_role() {
                     expected.parameters(),
                     "role={role:?} conditional_disagg={conditional_disagg_enabled}"
                 );
-                assert_eq!(startup.len(), 8);
+                assert_eq!(startup.len(), 9);
                 assert!(startup.values().all(serde_json::Value::is_number));
             }
         }
