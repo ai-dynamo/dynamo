@@ -10,8 +10,6 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"strconv"
-	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
 )
@@ -112,14 +110,12 @@ func (a *MembershipAdapter) resolvePlan(base enginegroup.MembershipTopology, pla
 	if base.Generation <= 0 || base.Generation == math.MaxInt64 {
 		return 0, terminalFailure("InvalidBase", "the base requires a positive topology generation with room for a successor")
 	}
+	if err := a.Layout.ValidateComplete(base); err != nil {
+		return 0, terminalFailure("PartialMembershipUnsupported", err.Error())
+	}
 	byRank, err := membersByRank(base)
 	if err != nil {
 		return 0, terminalFailure("UnsupportedRankLayout", err.Error())
-	}
-	for _, replica := range base.Replicas {
-		if len(replica.Members) != int(a.Layout.NativeMembersPerReplica) {
-			return 0, terminalFailure("PartialMembershipUnsupported", "planned external resize requires complete allocations; survivor recovery is a separate capability")
-		}
 	}
 	change := plan.Change
 	variants := 0
@@ -190,33 +186,32 @@ func (a *MembershipAdapter) resolveRetirement(base []enginegroup.ReplicaMembersh
 }
 
 func (a *MembershipAdapter) resolveAppend(base []enginegroup.ReplicaMembership, targets []enginegroup.ReplicaTarget, bootstrap enginegroup.BootstrapMode) (int32, *enginegroup.Failure) {
-	// Reject unsafe additions without relying on native count arithmetic to validate identity ownership.
+	// The already-validated base is flattened by native rank; additions must cover complete new allocation slots.
 	added, err := a.Layout.NativeSize(int32(len(targets)))
 	if err != nil || len(targets) == 0 || int64(len(base))+int64(added) > int64(a.MaxDataParallelSize) {
 		return 0, terminalFailure("UnsupportedGrowth", "growth needs a nonempty joining suffix within the profile maximum")
 	}
-	ids := make(map[enginegroup.ReplicaID]bool, len(base)+len(targets))
-	for _, membership := range base {
-		ids[membership.ReplicaID] = true
-	}
-	ranks := make(map[int32]bool, len(targets))
-	slots := make(map[enginegroup.CapacitySlotID]bool, len(targets))
-	size := int32(len(base)) + added
+	first := int32(len(base)) / a.Layout.NativeMembersPerReplica
+	end := first + int32(len(targets))
+	seen := make(map[int32]bool, len(targets))
 	for _, replica := range targets {
-		if replica.ReplicaID == "" || ids[replica.ReplicaID] || replica.SlotID == "" || slots[replica.SlotID] ||
-			replica.Bootstrap != bootstrap || len(replica.NativeMembers) != int(a.Layout.NativeMembersPerReplica) {
-			return 0, terminalFailure("UnsupportedRankLayout", "each new allocation needs a unique replica, slot, and its full profile-defined native-member set")
+		index, err := SlotIndex(replica.SlotID)
+		if err != nil || index < first || index >= end || seen[index] {
+			return 0, terminalFailure("UnsupportedRankLayout", "joining allocations must form the complete contiguous suffix")
 		}
-		for _, member := range replica.NativeMembers {
-			rank, err := nativeRank(member)
-			if err != nil || rank < int32(len(base)) || rank >= size || ranks[rank] {
-				return 0, terminalFailure("UnsupportedRankLayout", "joining DP ranks must form the complete contiguous suffix")
-			}
-			ranks[rank] = true
+		expected, err := a.Layout.Target(index)
+		if err != nil {
+			return 0, terminalFailure("UnsupportedRankLayout", err.Error())
 		}
-		ids[replica.ReplicaID], slots[replica.SlotID] = true, true
+		actual := slices.Clone(replica.NativeMembers)
+		slices.Sort(actual)
+		slices.Sort(expected.NativeMembers)
+		if replica.ReplicaID != expected.ReplicaID || replica.Bootstrap != bootstrap || !slices.Equal(actual, expected.NativeMembers) {
+			return 0, terminalFailure("UnsupportedRankLayout", "each joining allocation must own its fixed complete native-member range")
+		}
+		seen[index] = true
 	}
-	return a.validateSize(size)
+	return a.validateSize(int32(len(base)) + added)
 }
 
 func (a *MembershipAdapter) validateSize(size int32) (int32, *enginegroup.Failure) {
@@ -277,7 +272,7 @@ func membersByRank(topology enginegroup.MembershipTopology) ([]enginegroup.Repli
 			return nil, fmt.Errorf("vLLM topology requires distinct allocations with concrete native members")
 		}
 		for _, member := range membership.Members {
-			rank, err := nativeRank(member.ID)
+			rank, err := NativeRank(member.ID)
 			if err != nil || member.RuntimeIncarnation == "" || rank >= int32(len(byRank)) || byRank[rank].ReplicaID != "" {
 				return nil, fmt.Errorf("committed vLLM DP ranks must be distinct concrete members forming the contiguous prefix")
 			}
@@ -286,14 +281,6 @@ func membersByRank(topology enginegroup.MembershipTopology) ([]enginegroup.Repli
 		ids[membership.ReplicaID] = true
 	}
 	return byRank, nil
-}
-
-func nativeRank(id enginegroup.NativeMemberID) (int32, error) {
-	rank, err := strconv.ParseInt(strings.TrimPrefix(string(id), "dp-"), 10, 32)
-	if err != nil || rank < 0 || string(id) != fmt.Sprintf("dp-%d", rank) {
-		return 0, fmt.Errorf("invalid native DP member %q", id)
-	}
-	return int32(rank), nil
 }
 
 func rejectedPreflight(reason, message string) enginegroup.PreflightResult {

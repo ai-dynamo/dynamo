@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
-	"strings"
 
 	api "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -169,7 +168,7 @@ func resolveVLLMProcesses(ctx context.Context, capacity *VLLMCapacity, httpClien
 			return nil, fmt.Errorf("packed vLLM launch requires a distinct control endpoint for every native process")
 		}
 		member := allocation.Incarnation.Members[0]
-		rank, err := strconv.ParseInt(strings.TrimPrefix(string(member.ID), "dp-"), 10, 32)
+		rank, err := vllmruntime.NativeRank(member.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -183,7 +182,7 @@ func resolveVLLMProcesses(ctx context.Context, capacity *VLLMCapacity, httpClien
 			return nil, err
 		}
 		processes = append(processes, vllmruntime.Process{
-			Rank: int32(rank), PodUID: domain.PodUID(pod.UID), Membership: domain.ReplicaMembership{
+			Rank: rank, PodUID: domain.PodUID(pod.UID), Membership: domain.ReplicaMembership{
 				ReplicaID: allocation.Incarnation.ReplicaID, Members: []domain.NativeMemberIncarnation{member},
 			}, Client: native,
 		})

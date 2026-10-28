@@ -87,6 +87,11 @@ func (r groveEngineGroupRenderer) renderWorld(
 	restart *RestartState,
 	restartAnnotations map[string]string,
 ) (*grove.PodCliqueTemplateSpec, grove.PodCliqueScalingGroupConfig, error) {
+	// Validate provider-owned environment before constructing any desired world resources.
+	if err := ValidateGroveEngineGroupTemplate(component.PodTemplate, dgd.Spec.Env); err != nil {
+		return nil, grove.PodCliqueScalingGroupConfig{}, err
+	}
+
 	// Propagate metadata on a private component copy before standard Pod construction.
 	component = component.DeepCopy()
 	propagateDGDAnnotations(dgd.Annotations, component)

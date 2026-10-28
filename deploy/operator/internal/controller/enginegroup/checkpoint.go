@@ -163,7 +163,7 @@ func (c engineGroupCheckpoint) isStable(group *api.DynamoGraphDeploymentEngineGr
 		topology.NativeMemberCount() >= profile.MinSafeServingNativeMembers &&
 		allEngineGroupMembersAvailable(topology, state.Registry, state.Capacity.Observed) &&
 		allEngineGroupMembersAdmitted(topology, state.Traffic.Observed) &&
-		!engineGroupHasDegradedAllocation(projectEngineGroupReplicaStates(state))
+		!engineGroupHasDegradedAllocation(state)
 }
 
 // projectHistory copies already-durable correlation, never historical health as fresh evidence.

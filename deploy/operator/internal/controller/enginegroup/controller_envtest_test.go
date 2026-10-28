@@ -372,19 +372,19 @@ func (b *engineGroupControllerTestBackend) ResolveScalePlan(
 	_ domain.GroupID,
 	targetReplicas int32,
 	status domain.GroupStatus,
-) (ScalePlanResolution, error) {
+) (domain.ScalePlanResolution, error) {
 	b.mu.Lock()
 	plannerErr := b.plannerErr
 	b.mu.Unlock()
 	if plannerErr != nil {
-		return ScalePlanResolution{}, plannerErr
+		return domain.ScalePlanResolution{}, plannerErr
 	}
 	current, found := status.Topologies.Current()
 	if !found {
-		return ScalePlanResolution{}, errors.New("current topology is absent")
+		return domain.ScalePlanResolution{}, errors.New("current topology is absent")
 	}
 	if targetReplicas == current.ReplicaCount() {
-		return ScalePlanResolution{}, nil
+		return domain.ScalePlanResolution{}, nil
 	}
 	plan := &domain.ResolvedPlan{
 		ID:                      fmt.Sprintf("scale-%d-%d", current.Generation, targetReplicas),
@@ -403,7 +403,7 @@ func (b *engineGroupControllerTestBackend) ResolveScalePlan(
 				NativeMembers: []domain.NativeMemberID{domain.NativeMemberID(fmt.Sprintf("dp-%d", index))},
 			})
 		}
-		return ScalePlanResolution{Plan: plan}, nil
+		return domain.ScalePlanResolution{Plan: plan}, nil
 	}
 
 	plan.Change = domain.ResolvedChange{Kind: domain.PlanKindRetire, Retire: &domain.RetireChange{}}
@@ -415,7 +415,7 @@ func (b *engineGroupControllerTestBackend) ResolveScalePlan(
 		plan.Change.Retire.Replicas = append(plan.Change.Retire.Replicas,
 			domain.ReplicaID(fmt.Sprintf("replica-%d", index)))
 	}
-	return ScalePlanResolution{Plan: plan}, nil
+	return domain.ScalePlanResolution{Plan: plan}, nil
 }
 
 type engineGroupControllerTestCapacityAdapter struct {

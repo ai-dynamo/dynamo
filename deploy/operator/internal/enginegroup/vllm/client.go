@@ -9,16 +9,15 @@
 package vllm
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/controlhttp"
 )
 
 const (
@@ -26,7 +25,6 @@ const (
 	submitPath                = "/submit_elastic_ep"
 	defaultObservationTimeout = 5 * time.Second
 	defaultSubmissionTimeout  = 10 * time.Second
-	maximumResponseBytes      = 1 << 20
 )
 
 // Phase is the native epoch-scoped resize phase, not the controller's operation phase.
@@ -83,25 +81,11 @@ type SubmissionReceipt struct {
 	Error     *string      `json:"error"`
 }
 
-// HTTPError preserves invocation evidence without interpreting an HTTP response as a definitive membership rejection.
-// In particular, a conflict or timeout on one rank does not prove that other ranks cannot commit.
-type HTTPError struct {
-	Path       string
-	StatusCode int
-	Body       string
-}
-
-// Error describes an unsuccessful native control request.
-func (e *HTTPError) Error() string {
-	return fmt.Sprintf("vLLM %s returned HTTP %d: %s", e.Path, e.StatusCode, e.Body)
-}
-
 // Client addresses one native vLLM control process, directly or through its Dynamo worker.
 // It does not address a load-balanced service.
 // The immutable base URL is private so an observed process cannot silently be retargeted.
 type Client struct {
-	baseURL            url.URL
-	httpClient         *http.Client
+	transport          *controlhttp.Client
 	routePrefix        string
 	ObservationTimeout time.Duration
 	SubmissionTimeout  time.Duration
@@ -110,24 +94,13 @@ type Client struct {
 // NewClient constructs one API process's control client without mutating httpClient.
 // httpClient must not be nil. The URL identifies the native API process, not a Dynamo wrapper.
 func NewClient(rawBaseURL string, httpClient *http.Client) (*Client, error) {
-	// Reject ambiguous destinations rather than following a redirect to another engine process.
-	parsed, err := url.Parse(rawBaseURL)
+	// Freeze the identity-bound transport independently of native protocol handling.
+	transport, err := controlhttp.New(rawBaseURL, httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("parse vLLM control URL: %w", err)
 	}
-	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" ||
-		parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery ||
-		parsed.Fragment != "" || parsed.RawPath != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return nil, fmt.Errorf("vLLM control URL must identify an http(s) process endpoint without credentials, path, query, or fragment")
-	}
-
-	// Keep identity-bound native requests on this process instead of following redirects.
-	transport := *httpClient
-	transport.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
 	return &Client{
-		baseURL: *parsed, httpClient: &transport,
+		transport:          transport,
 		ObservationTimeout: defaultObservationTimeout,
 		SubmissionTimeout:  defaultSubmissionTimeout,
 	}, nil
@@ -170,9 +143,9 @@ func (c *Client) Submit(ctx context.Context, target ScaleRequest) (SubmissionRec
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.SubmissionTimeout)
 	defer cancel()
-	payload, err := c.request(ctx, submitPath, target)
+	payload, err := c.transport.Request(ctx, http.MethodPost, c.routePrefix+submitPath, target)
 	if err != nil {
-		return SubmissionReceipt{}, err
+		return SubmissionReceipt{}, fmt.Errorf("vLLM %w", err)
 	}
 	var receipt SubmissionReceipt
 	if err := json.Unmarshal(payload, &receipt); err != nil {
@@ -200,9 +173,9 @@ func (r ScaleRequest) validate() error {
 
 func (c *Client) call(ctx context.Context, path string, target any) (Status, error) {
 	// Native and worker transports retain the exact same evidence decoder.
-	payload, err := c.request(ctx, path, target)
+	payload, err := c.transport.Request(ctx, http.MethodPost, c.routePrefix+path, target)
 	if err != nil {
-		return Status{}, err
+		return Status{}, fmt.Errorf("vLLM %w", err)
 	}
 	var wire struct {
 		Status
@@ -219,52 +192,6 @@ func (c *Client) call(ctx context.Context, path string, target any) (Status, err
 		return Status{}, fmt.Errorf("invalid vLLM %s status: %w", path, err)
 	}
 	return wire.Status, nil
-}
-
-func (c *Client) request(ctx context.Context, path string, target any) ([]byte, error) {
-	// Only route placement changes; both transports use identical native evidence.
-	path = c.routePrefix + path
-
-	// Encode the exact request; observations intentionally have no JSON payload.
-	var body io.Reader
-	if target != nil {
-		encoded, err := json.Marshal(target)
-		if err != nil {
-			return nil, fmt.Errorf("encode vLLM %s request: %w", path, err)
-		}
-		body = bytes.NewReader(encoded)
-	}
-	endpoint := c.baseURL
-	endpoint.Path = path
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), body)
-	if err != nil {
-		return nil, fmt.Errorf("build vLLM %s request: %w", path, err)
-	}
-	if target != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	response, err := c.httpClient.Do(request)
-	if err != nil {
-		return nil, fmt.Errorf("call vLLM %s: %w", path, err)
-	}
-	defer func() { _ = response.Body.Close() }()
-
-	// Bound and fully decode the response so trailing garbage cannot become membership evidence.
-	payload, err := io.ReadAll(io.LimitReader(response.Body, maximumResponseBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read vLLM %s response: %w", path, err)
-	}
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, &HTTPError{
-			Path: path, StatusCode: response.StatusCode,
-			Body: strings.TrimSpace(string(payload[:min(len(payload), 4096)])),
-		}
-	}
-	if len(payload) > maximumResponseBytes {
-		return nil, fmt.Errorf("vLLM %s response exceeds %d bytes", path, maximumResponseBytes)
-	}
-
-	return payload, nil
 }
 
 func (s Status) validate() error {
