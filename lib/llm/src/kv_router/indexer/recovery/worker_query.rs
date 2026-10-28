@@ -2616,6 +2616,7 @@ mod tests {
     async fn local_catchup_warns_through_gaps_without_rpc() {
         let logs = CapturedLogs::default();
         let writer = logs.clone();
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::fmt()
                 .without_time()

@@ -841,6 +841,7 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "rustversion",
@@ -2179,6 +2180,7 @@ dependencies = [
  "libc",
  "libloading 0.8.9",
  "lru",
+ "mime",
  "minijinja",
  "modelexpress-client",
  "modelexpress-common",
@@ -2279,14 +2281,15 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "10.0.7"
+version = "10.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d16648322cc1b4feb6fd722cb0b3cc23f6a545b7d37e167543a1675fa1c3d4a"
+checksum = "1e1888c34549d90094c35f9960b071c259bd051e6a3b89458b17eee4def0a139"
 dependencies = [
  "aho-corasick",
  "anyhow",
  "async-stream",
  "dynamo-protocols",
+ "dynamo-structural-tag",
  "futures",
  "num-traits",
  "openai-harmony",
@@ -2321,9 +2324,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "8.2.0"
+version = "8.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "774a621dbee86866def6f59eac858651bf080af0732e9c3c4e46081563749c9a"
+checksum = "b3105191d378178513e101572dedf09b5e171eec0371861ca8b303d9cb224aed"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -4791,6 +4794,23 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http 1.4.1",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin 0.9.8",
+ "version_check",
 ]
 
 [[package]]

@@ -2675,6 +2675,7 @@ pub(crate) mod tests {
     #[test]
     fn generate_dispatch_span_uses_resolved_request_id() {
         let captured_request_id = Arc::new(Mutex::new(RequestIdVisitor::default()));
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(RequestIdCaptureLayer(captured_request_id.clone())),
         );

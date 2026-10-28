@@ -490,7 +490,13 @@ async fn frontend_refuses_duplicate_in_flight_request_id() {
             .await?;
         Ok::<_, Error>(collect_data(stream).await)
     });
-    assert_eq!(arrivals.recv().await.as_deref(), Some("first"));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), arrivals.recv())
+            .await
+            .expect("first request must reach the backend")
+            .as_deref(),
+        Some("first")
+    );
 
     // The first request is still parked, so its id is in flight. Keep the gate closed until
     // the duplicate is answered, or the first id could be released first.
@@ -534,7 +540,13 @@ async fn frontend_releases_request_id_when_caller_is_dropped() {
             .generate(request_with_id("parked", "same-id"))
             .await;
     });
-    assert_eq!(arrivals.recv().await.as_deref(), Some("parked"));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), arrivals.recv())
+            .await
+            .expect("parked request must reach the backend")
+            .as_deref(),
+        Some("parked")
+    );
 
     // Drop the caller while its request is still being handed to the backend.
     parked.abort();
