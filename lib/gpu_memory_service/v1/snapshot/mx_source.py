@@ -111,7 +111,9 @@ def main(argv: list[str] | None = None) -> None:
     argv = argv if argv is not None else sys.argv[1:]
     args = parser.parse_args(argv)
     if args.device is None:
-        run_per_device("gpu_memory_service.v1.snapshot.mx_source", argv)
+        # Count GMS devices from /proc, without starting CUDA here.
+        devices = list(range(len(device_identity.node_gpus())))
+        run_per_device("gpu_memory_service.v1.snapshot.mx_source", argv, devices)
         return
     init_vmm(VMMDeviceType.CUDA)
     stop = threading.Event()
