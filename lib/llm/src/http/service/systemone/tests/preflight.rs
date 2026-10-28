@@ -3,16 +3,22 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
+use dynamo_decisions::Dialect;
+
 use super::*;
 use crate::tokenizers::{Encoding, traits};
 
 #[derive(Default)]
 struct ByteTokenizer {
     split_second_label: bool,
+    fail_encoding: bool,
 }
 
 impl traits::Encoder for ByteTokenizer {
     fn encode(&self, input: &str) -> anyhow::Result<Encoding> {
+        if self.fail_encoding {
+            anyhow::bail!("private tokenizer failure: {input}");
+        }
         let mut ids: Vec<_> = input.bytes().map(u32::from).collect();
         if self.split_second_label && input.ends_with('B') {
             ids.push(300);
@@ -82,6 +88,7 @@ fn incompatible_candidate_labels_return_safe_actionable_validation_error() {
         None,
         ByteTokenizer {
             split_second_label: true,
+            ..Default::default()
         },
     );
     let result = super::super::prepare_branches(&request_named("choice"), &selection, 65_536);
@@ -91,6 +98,33 @@ fn incompatible_candidate_labels_return_safe_actionable_validation_error() {
     assert!(message.contains("reduce candidates or select another model"));
     assert!(!message.contains("Preserve this task evidence"));
     assert!(!message.contains("Payments"));
+}
+
+#[tokio::test]
+async fn tokenizer_failure_is_internal_in_both_dialects() {
+    let selection = preflight_selection_with_tokenizer(
+        None,
+        ByteTokenizer {
+            fail_encoding: true,
+            ..Default::default()
+        },
+    );
+    let (status, message) =
+        super::super::prepare_branches(&request_named("private-name"), &selection, 65_536)
+            .err()
+            .expect("tokenizer must fail before execution");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(message, "internal server error");
+    for dialect in [Dialect::Jev, Dialect::OpenAi] {
+        let response = super::super::error(dialect, status, message.clone());
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response_body(response).await;
+        assert!(!body.to_string().contains("private"));
+        assert!(!body.to_string().contains("Preserve this task evidence"));
+        if dialect == Dialect::OpenAi {
+            assert_eq!(body["error"]["type"], "server_error");
+        }
+    }
 }
 
 #[test]

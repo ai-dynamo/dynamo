@@ -427,9 +427,23 @@ fn prepare_branches(
                         format!("question {question_id:?}: {incompatible}"),
                     );
                 }
-                let reason = cause
-                    .downcast_ref::<crate::preprocessor::SystemOneModelIncompatible>()
-                    .map_or("chat template or tokenizer failed", |reason| reason.0);
+                let reason = if let Some(incompatible) =
+                    cause.downcast_ref::<crate::preprocessor::SystemOneModelIncompatible>()
+                {
+                    incompatible.0
+                } else if super::error::find_canonical_error_in_chain(cause.as_ref())
+                    .is_some_and(|error| {
+                        error.class() == dynamo_runtime::error::ErrorClass::InvalidRequest
+                    })
+                {
+                    "chat template or tokenizer failed"
+                } else {
+                    tracing::error!("System One prompt tokenization failed");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal server error".to_string(),
+                    );
+                };
                 tracing::warn!(reason, "System One prompt rendering failed");
                 (
                     StatusCode::UNPROCESSABLE_ENTITY,
