@@ -57,7 +57,7 @@ class _SGLangSnapshotLifecycle:
 
 
 async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
-    """Warm up the direct SGLang Engine generation path before snapshot capture."""
+    """Warm up the direct SGLang Engine generation path before serving."""
     DUMMY_WARMUP_MAX_NEW_TOKENS = 8
     DUMMY_WARMUP_TEMPERATURE = 0
     DUMMY_WARMUP_INPUT_IDS = [10, 11, 12]
@@ -69,8 +69,7 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
     DEFAULT_WARMUP_TIMEOUT = 600
     DEFAULT_DISAGG_WARMUP_TIMEOUT = 1800
 
-    # The direct Engine API does not run SGLang's HTTP server warmup. Snapshot
-    # mode only needs to warm the generation path before the engine is frozen.
+    # The direct Engine API does not run SGLang's HTTP server warmup.
     if getattr(server_args, "skip_server_warmup", False):
         return
 
@@ -137,12 +136,16 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
             warmup_timeout if warmup_timeout > 0 else DEFAULT_DISAGG_WARMUP_TIMEOUT
         )
 
-    logger.info("SGLang snapshot warmup starting")
-    await asyncio.wait_for(
-        engine.async_generate(**warmup_args),
-        timeout=timeout,
-    )
-    logger.info("SGLang snapshot warmup complete")
+    warmups = [warmup_args]
+    if not is_disaggregated:
+        # A greedy batch skips the sampling kernels, so also warm a sampled request.
+        sampling_params = dict(warmup_args["sampling_params"], temperature=1.0, top_k=2)
+        warmups.append({**warmup_args, "sampling_params": sampling_params})
+
+    logger.info("SGLang warmup starting")
+    for args in warmups:
+        await asyncio.wait_for(engine.async_generate(**args), timeout=timeout)
+    logger.info("SGLang warmup complete")
 
 
 async def prepare_snapshot_engine(
