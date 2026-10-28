@@ -33,11 +33,12 @@ const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_INITIAL_LOAD_AGE: Duration = Duration::from_secs(5);
 const METRICS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// How often native metadata is polled, and how long metadata or load may stay
-/// unavailable before the worker withdraws.
+/// Routing health limits; `Default` holds the production values.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RoutingSupervision {
     pub(crate) metadata_poll_interval: Duration,
+    /// Separate from the interval so tests can poll quickly without timing out RPCs.
+    pub(crate) metadata_poll_timeout: Duration,
     pub(crate) metadata_recovery_limit: Duration,
     pub(crate) load_staleness_limit: Duration,
 }
@@ -46,6 +47,7 @@ impl Default for RoutingSupervision {
     fn default() -> Self {
         Self {
             metadata_poll_interval: Duration::from_secs(5),
+            metadata_poll_timeout: Duration::from_secs(5),
             metadata_recovery_limit: Duration::from_secs(30),
             load_staleness_limit: Duration::from_secs(30),
         }

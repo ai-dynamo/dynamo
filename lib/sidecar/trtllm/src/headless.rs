@@ -226,9 +226,8 @@ pub(crate) async fn monitor_engine(
     sources: &[pb::KvEventSource],
     supervision: RoutingSupervision,
 ) -> Result<()> {
-    let poll_interval = supervision.metadata_poll_interval;
     let recovery_limit = supervision.metadata_recovery_limit;
-    let mut ticks = tokio::time::interval(poll_interval);
+    let mut ticks = tokio::time::interval(supervision.metadata_poll_interval);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut deadline = tokio::time::Instant::now() + recovery_limit;
     let mut warned = false;
@@ -252,7 +251,8 @@ pub(crate) async fn monitor_engine(
             );
             Ok::<_, anyhow::Error>(())
         };
-        let attempt_deadline = deadline.min(tokio::time::Instant::now() + poll_interval);
+        let attempt_deadline =
+            deadline.min(tokio::time::Instant::now() + supervision.metadata_poll_timeout);
         match tokio::time::timeout_at(attempt_deadline, check).await {
             Ok(Ok(())) => {
                 deadline = tokio::time::Instant::now() + recovery_limit;

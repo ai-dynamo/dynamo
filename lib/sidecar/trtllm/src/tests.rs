@@ -56,6 +56,10 @@ struct FakeTrtllm {
     kv_routing: Arc<AtomicBool>,
     server_info_error: Arc<Mutex<Option<tonic::Code>>>,
     kv_sources_error: Arc<Mutex<Option<tonic::Code>>>,
+    /// Injected metadata errors returned by either RPC.
+    metadata_errors_served: Arc<AtomicUsize>,
+    /// `GetKvEventSources` calls answered successfully.
+    kv_sources_served: Arc<AtomicUsize>,
     subagent_affinity: Arc<AtomicBool>,
     disable_events: Arc<AtomicBool>,
     disable_load: Arc<AtomicBool>,
@@ -257,6 +261,7 @@ impl pb::control_server::Control for FakeTrtllm {
         _request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
         if let Some(code) = *self.server_info_error.lock().await {
+            self.metadata_errors_served.fetch_add(1, Ordering::SeqCst);
             return Err(Status::new(code, "temporary metadata failure"));
         }
         if !self.kv_routing.load(Ordering::SeqCst) {
@@ -377,11 +382,13 @@ impl pb::control_server::Control for FakeTrtllm {
         _request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
         if let Some(code) = *self.kv_sources_error.lock().await {
+            self.metadata_errors_served.fetch_add(1, Ordering::SeqCst);
             return Err(Status::new(code, "temporary metadata failure"));
         }
         if !self.kv_routing.load(Ordering::SeqCst) {
             return Err(Status::unimplemented("GetKvEventSources is not used"));
         }
+        self.kv_sources_served.fetch_add(1, Ordering::SeqCst);
         if self.disable_events.load(Ordering::SeqCst) {
             return Ok(Response::new(pb::GetKvEventSourcesResponse::default()));
         }
