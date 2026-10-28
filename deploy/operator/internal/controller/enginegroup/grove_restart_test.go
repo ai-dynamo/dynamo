@@ -38,7 +38,7 @@ func TestGroveRestartPreservesLogicalWorldAndReinitializesAuthority(t *testing.T
 	t.Log("initialize a three-allocation world and protect its exact Pod lifetimes")
 	fixture := newGroveRestartTestWorld(t, 3)
 	ctx := t.Context()
-	controller := &Reconciler{Client: fixture.client, RuntimeProvider: engineGroupControllerTestRuntimeProvider{backend: fixture.backend}}
+	controller := &Reconciler{Client: fixture.client, WorkloadProvider: &GroveWorkloadProvider{Client: fixture.client}, RuntimeProvider: engineGroupControllerTestRuntimeProvider{workload: &GroveWorkloadProvider{Client: fixture.client}, backend: fixture.backend}}
 	req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(fixture.group)}
 	for range 5 {
 		_, err := controller.Reconcile(ctx, req)
@@ -85,7 +85,7 @@ func TestGroveRestartPreservesLogicalWorldAndReinitializesAuthority(t *testing.T
 	backend.capacity.Allocations[0].Incarnation.Members[0].RuntimeIncarnation = newRuntime
 	backend.topology.Replicas[0].Members[0].RuntimeIncarnation = newRuntime
 	backend.traffic.Admitted[0].Members[0].RuntimeIncarnation = newRuntime
-	controller.RuntimeProvider = engineGroupControllerTestRuntimeProvider{backend: backend}
+	controller.RuntimeProvider = engineGroupControllerTestRuntimeProvider{workload: &GroveWorkloadProvider{Client: controller.Client}, backend: backend}
 	_, err = controller.Reconcile(ctx, req)
 	require.NoError(t, err)
 	require.NoError(t, fixture.client.Get(ctx, req.NamespacedName, fixture.group))
@@ -95,7 +95,7 @@ func TestGroveRestartPreservesLogicalWorldAndReinitializesAuthority(t *testing.T
 	}
 
 	t.Log("restart the controller after binding changes but before checkpoint replacement")
-	controller = &Reconciler{Client: fixture.client, RuntimeProvider: engineGroupControllerTestRuntimeProvider{backend: backend}}
+	controller = &Reconciler{Client: fixture.client, WorkloadProvider: &GroveWorkloadProvider{Client: fixture.client}, RuntimeProvider: engineGroupControllerTestRuntimeProvider{workload: &GroveWorkloadProvider{Client: fixture.client}, backend: backend}}
 	for range 2 {
 		_, err := controller.Reconcile(ctx, req)
 		require.NoError(t, err)
@@ -132,7 +132,7 @@ func TestGroveRestartRequiresExactStopEvidence(t *testing.T) {
 			fixture := newGroveRestartTestWorld(t, 1)
 			ctx := t.Context()
 			kube := &checkpointTestClient{Client: fixture.client}
-			controller := &Reconciler{Client: kube, RuntimeProvider: engineGroupControllerTestRuntimeProvider{backend: fixture.backend}}
+			controller := &Reconciler{Client: kube, WorkloadProvider: &GroveWorkloadProvider{Client: kube}, RuntimeProvider: engineGroupControllerTestRuntimeProvider{workload: &GroveWorkloadProvider{Client: kube}, backend: fixture.backend}}
 			req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(fixture.group)}
 			for range 4 {
 				_, err := controller.Reconcile(ctx, req)
@@ -186,7 +186,7 @@ func TestGroveRestartVerificationAndPublicationAreRestartSafe(t *testing.T) {
 	fixture := newGroveRestartTestWorld(t, 1)
 	ctx := t.Context()
 	kube := &checkpointTestClient{Client: fixture.client}
-	controller := &Reconciler{Client: kube, RuntimeProvider: engineGroupControllerTestRuntimeProvider{backend: fixture.backend}}
+	controller := &Reconciler{Client: kube, WorkloadProvider: &GroveWorkloadProvider{Client: kube}, RuntimeProvider: engineGroupControllerTestRuntimeProvider{workload: &GroveWorkloadProvider{Client: kube}, backend: fixture.backend}}
 	req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(fixture.group)}
 	for range 4 {
 		_, err := controller.Reconcile(ctx, req)
@@ -216,7 +216,7 @@ func TestGroveRestartVerificationAndPublicationAreRestartSafe(t *testing.T) {
 	backend.topology.Replicas[0].Members[0].RuntimeIncarnation = newRuntime
 	backend.traffic.Admitted[0].Members[0].RuntimeIncarnation = newRuntime
 	backend.verificationFailure = &domain.Failure{Classification: domain.FailureClassificationRetryable, Reason: "ServingNotReadyYet"}
-	controller.RuntimeProvider = engineGroupControllerTestRuntimeProvider{backend: backend}
+	controller.RuntimeProvider = engineGroupControllerTestRuntimeProvider{workload: &GroveWorkloadProvider{Client: controller.Client}, backend: backend}
 	for range 2 {
 		_, err := controller.Reconcile(ctx, req)
 		require.NoError(t, err)
@@ -227,7 +227,7 @@ func TestGroveRestartVerificationAndPublicationAreRestartSafe(t *testing.T) {
 	require.ErrorContains(t, err, "no matching serving proof")
 	require.NoError(t, kube.Get(ctx, req.NamespacedName, fixture.group))
 	var checkpoint engineGroupCheckpoint
-	store := engineGroupCheckpointStore(controller, fixture.group)
+	store := engineGroupCheckpointStore(controller.Client, fixture.group)
 	_, err = store.Load(ctx, &checkpoint)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.clique.UID, checkpoint.BindingUID)
@@ -245,7 +245,7 @@ func TestGroveRestartVerificationAndPublicationAreRestartSafe(t *testing.T) {
 
 	t.Log("restart from the new checkpoint without replaying old targets or requiring another topology change")
 	kube.failStatus = false
-	controller = &Reconciler{Client: kube, RuntimeProvider: engineGroupControllerTestRuntimeProvider{backend: backend}}
+	controller = &Reconciler{Client: kube, WorkloadProvider: &GroveWorkloadProvider{Client: kube}, RuntimeProvider: engineGroupControllerTestRuntimeProvider{workload: &GroveWorkloadProvider{Client: kube}, backend: backend}}
 	_, err = controller.Reconcile(ctx, req)
 	require.NoError(t, err)
 	require.NoError(t, kube.Get(ctx, req.NamespacedName, fixture.group))
@@ -298,14 +298,14 @@ func TestRestartedGroveFormationRequiresServingEvidence(t *testing.T) {
 			t.Log("initialize an owned old world before testing fresh formation")
 			fixture := newGroveRestartTestWorld(t, 1)
 			ctx := t.Context()
-			controller := &Reconciler{Client: fixture.client, RuntimeProvider: engineGroupControllerTestRuntimeProvider{backend: fixture.backend}}
+			controller := &Reconciler{Client: fixture.client, WorkloadProvider: &GroveWorkloadProvider{Client: fixture.client}, RuntimeProvider: engineGroupControllerTestRuntimeProvider{workload: &GroveWorkloadProvider{Client: fixture.client}, backend: fixture.backend}}
 			req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(fixture.group)}
 			for range 4 {
 				_, err := controller.Reconcile(ctx, req)
 				require.NoError(t, err)
 			}
 			require.NoError(t, fixture.client.Get(ctx, req.NamespacedName, fixture.group))
-			store := engineGroupCheckpointStore(controller, fixture.group)
+			store := engineGroupCheckpointStore(controller.Client, fixture.group)
 			var original engineGroupCheckpoint
 			snapshot, err := store.Load(ctx, &original)
 			require.NoError(t, err)
@@ -316,6 +316,7 @@ func TestRestartedGroveFormationRequiresServingEvidence(t *testing.T) {
 			backend := newEngineGroupControllerTestBackend(1)
 			runtime, err := (engineGroupControllerTestRuntimeProvider{backend: backend}).Resolve(ctx, fixture.group)
 			require.NoError(t, err)
+			runtime.Workload = WorkloadBinding{ID: newClique, Fence: groveWorldFenceStore(fixture.client, fixture.group, newClique)}
 			if test.terminal {
 				backend.verificationFailure = &domain.Failure{Classification: domain.FailureClassificationTerminal, Reason: "ServingWedged"}
 			}
@@ -323,10 +324,10 @@ func TestRestartedGroveFormationRequiresServingEvidence(t *testing.T) {
 				runtime.Profile.MinSafeServingNativeMembers = 2
 			}
 			fenceStore := groveWorldFenceStore(fixture.client, fixture.group, newClique)
-			var fence groveWorldFence
+			var fence worldFence
 			fenceSnapshot, err := fenceStore.Load(ctx, &fence)
 			require.NoError(t, err)
-			_, err = fenceStore.Save(ctx, fenceSnapshot, groveWorldFence{CliqueUID: newClique, PreviousUID: fixture.clique.UID})
+			_, err = fenceStore.Save(ctx, fenceSnapshot, worldFence{WorldID: newClique, PreviousID: fixture.clique.UID})
 			require.NoError(t, err)
 			_, err = controller.initializeRestartedEngineGroup(ctx, fixture.group, runtime, store, snapshot)
 			require.ErrorContains(t, err, test.wantError)
@@ -342,7 +343,7 @@ func TestRestartedGroveFormationRequiresServingEvidence(t *testing.T) {
 			if test.terminal {
 				t.Log("keep a definitive failure after restart even if a later probe would succeed")
 				backend.verificationFailure = nil
-				controller = &Reconciler{Client: fixture.client, RuntimeProvider: engineGroupControllerTestRuntimeProvider{backend: backend}}
+				controller = &Reconciler{Client: fixture.client, WorkloadProvider: &GroveWorkloadProvider{Client: fixture.client}, RuntimeProvider: engineGroupControllerTestRuntimeProvider{workload: &GroveWorkloadProvider{Client: fixture.client}, backend: backend}}
 				_, err = controller.initializeRestartedEngineGroup(ctx, fixture.group, runtime, store, snapshot)
 				require.ErrorContains(t, err, "requires recreation after terminal verification failure")
 				_, err = store.Load(ctx, &retained)
@@ -359,17 +360,17 @@ func TestGroveRestartVerifiesFormationWithoutAnOldCoordinatorCheckpoint(t *testi
 	t.Log("retain stop proof when Grove interrupts startup before the first coordinator checkpoint")
 	fixture := newGroveRestartTestWorld(t, 1)
 	ctx := t.Context()
-	controller := &Reconciler{Client: fixture.client, RuntimeProvider: engineGroupControllerTestRuntimeProvider{backend: fixture.backend}}
+	controller := &Reconciler{Client: fixture.client, WorkloadProvider: &GroveWorkloadProvider{Client: fixture.client}, RuntimeProvider: engineGroupControllerTestRuntimeProvider{workload: &GroveWorkloadProvider{Client: fixture.client}, backend: fixture.backend}}
 	runtime, err := controller.RuntimeProvider.Resolve(ctx, fixture.group)
 	require.NoError(t, err)
 	fixture.group.Status.Profile = runtime.Profile.DeepCopy()
 	require.NoError(t, fixture.client.Status().Update(ctx, fixture.group))
-	for _, fence := range []groveWorldFence{
-		{CliqueUID: fixture.clique.UID, Pods: []grovePodFence{{Ref: domain.CapacityRef{Name: fixture.pods[0].Name, UID: domain.PodUID(fixture.pods[0].UID)}, SlotID: "slot-0", Stopped: true}}},
-		{CliqueUID: newClique, PreviousUID: fixture.clique.UID},
+	for _, fence := range []worldFence{
+		{WorldID: fixture.clique.UID, Pods: []worldPodFence{{Ref: domain.CapacityRef{Name: fixture.pods[0].Name, UID: domain.PodUID(fixture.pods[0].UID)}, SlotID: "slot-0", Stopped: true}}},
+		{WorldID: newClique, PreviousID: fixture.clique.UID},
 	} {
-		store := groveWorldFenceStore(fixture.client, fixture.group, fence.CliqueUID)
-		var saved groveWorldFence
+		store := groveWorldFenceStore(fixture.client, fixture.group, fence.WorldID)
+		var saved worldFence
 		snapshot, err := store.Load(ctx, &saved)
 		require.NoError(t, err)
 		_, err = store.Save(ctx, snapshot, fence)
@@ -377,10 +378,11 @@ func TestGroveRestartVerifiesFormationWithoutAnOldCoordinatorCheckpoint(t *testi
 	}
 	fixture.group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID] = newClique
 	require.NoError(t, fixture.client.Update(ctx, fixture.group))
+	runtime.Workload = WorkloadBinding{ID: newClique, Fence: groveWorldFenceStore(fixture.client, fixture.group, newClique)}
 
 	t.Log("refuse first-checkpoint initialization without a fresh serving proof")
 	fixture.backend.verificationFailure = &domain.Failure{Classification: domain.FailureClassificationTerminal, Reason: "ServingWedged"}
-	store := engineGroupCheckpointStore(controller, fixture.group)
+	store := engineGroupCheckpointStore(controller.Client, fixture.group)
 	var checkpoint engineGroupCheckpoint
 	snapshot, err := store.Load(ctx, &checkpoint)
 	require.NoError(t, err)

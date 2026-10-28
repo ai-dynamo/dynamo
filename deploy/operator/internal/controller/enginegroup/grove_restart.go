@@ -25,231 +25,142 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 const engineGroupProcessFinalizer = "nvidia.com/engine-group-process-fence"
 
-// groveWorldFence retains kubelet-confirmed stop evidence after Grove deletes Pods.
-// An API deletion, missing endpoint, NotReady node, or replacement UID is not stop evidence.
-// The growth profile uses restartPolicy Never; live-member recovery and infrastructure
-// fencing are deliberately not inferred by this whole-world restart path.
-type groveWorldFence struct {
-	CliqueUID           types.UID
-	PreviousUID         types.UID
-	Pods                []grovePodFence
-	VerificationFailure *domain.Failure
-}
-
-type grovePodFence struct {
-	Ref     domain.CapacityRef
-	SlotID  domain.CapacitySlotID
-	Stopped bool
-}
-
 func groveWorldFenceStore(kubeClient client.Client, group *api.DynamoGraphDeploymentEngineGroup, uid types.UID) kubejournal.Store {
 	return kubejournal.NewStore(kubeClient, group.Namespace, group.Name, group.UID, "grove-fence-"+string(uid))
 }
 
-// reconcileGroveWorld pauses normal effects until the current binding is protected
-// or a replacement has passed a durable, exact-UID stop fence. true means requeue.
-func (r *Reconciler) reconcileGroveWorld(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup) (bool, error) {
+// Reconcile protects the current physical world and proposes a fenced successor without accepting it.
+func (p *GroveWorkloadProvider) Reconcile(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup) (*api.DynamoGraphDeploymentEngineGroup, bool, error) {
 	// Only the concrete Grove realization has this physical lifecycle boundary.
 	name := group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodClique]
 	uid := types.UID(group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID])
 	if name == "" || uid == "" {
-		return false, nil
+		return nil, false, nil
 	}
 	if !controllerutil.ContainsFinalizer(group, engineGroupFinalizer) {
-		return false, nil
+		return nil, false, nil
 	}
 	clique := &grove.PodClique{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: group.Namespace, Name: name}, clique)
+	err := p.Client.Get(ctx, client.ObjectKey{Namespace: group.Namespace, Name: name}, clique)
 	if err != nil && !apierrors.IsNotFound(err) {
-		return true, fmt.Errorf("observe bound Grove clique: %w", err)
+		return nil, true, fmt.Errorf("observe bound Grove clique: %w", err)
 	}
 	sourcePresent := err == nil && clique.UID == uid
 
 	// Persist stop observations before letting Pod garbage collection erase them.
-	fence, changed, err := r.reconcileGroveProcessFences(ctx, group, name, uid)
+	fence, changed, err := p.reconcileGroveProcessFences(ctx, group, name, uid)
 	if err != nil {
-		return true, err
+		return nil, true, err
 	}
 	if sourcePresent && clique.DeletionTimestamp.IsZero() {
-		return changed, nil
+		return nil, changed, nil
 	}
 	if sourcePresent || !group.DeletionTimestamp.IsZero() {
-		return true, nil
+		return nil, true, nil
 	}
-	if err := r.validateStoppedGroveWorld(ctx, group, fence); err != nil {
-		return true, err
+	if err := p.validateStoppedGroveWorld(ctx, group, fence); err != nil {
+		return nil, true, err
 	}
 
 	// Rebinding is restricted to the same logical world under the exact DGD-owned PCS.
-	candidate, err := r.resolveReplacementGroveClique(ctx, group)
+	candidate, err := p.resolveReplacementGroveClique(ctx, group)
 	if err != nil || candidate == nil || !candidate.DeletionTimestamp.IsZero() {
-		return true, err
+		return nil, true, err
 	}
 	if candidate.UID == uid {
-		return true, nil
+		return nil, true, nil
 	}
 	nextGroup := group.DeepCopy()
 	nextGroup.Annotations[consts.KubeAnnotationDynamoEngineGroupPodClique] = candidate.Name
 	nextGroup.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID] = string(candidate.UID)
-	runtime, err := r.RuntimeProvider.Resolve(ctx, nextGroup)
+	return nextGroup, true, nil
+}
+
+// Accept rechecks physical authority before persisting a successor approved by engine resolution.
+func (p *GroveWorkloadProvider) Accept(ctx context.Context, group, nextGroup *api.DynamoGraphDeploymentEngineGroup) error {
+	// A new observation must still propose exactly the same lifetime and preserve the complete declaration.
+	candidate, _, err := p.Reconcile(ctx, group)
 	if err != nil {
-		return true, err
+		return err
 	}
-	if err := validateEngineGroupRuntime(runtime); err != nil {
-		return true, err
+	if candidate == nil || !reflect.DeepEqual(candidate, nextGroup) {
+		return errors.New("replacement Grove binding changed before acceptance")
 	}
-	if group.Status.Profile != nil && runtime.Profile.Fingerprint != group.Status.Profile.Fingerprint {
-		return true, errors.New("replacement Grove world has a different immutable profile")
-	}
+	uid := types.UID(group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID])
+	nextUID := types.UID(nextGroup.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID])
 
 	// The predecessor record authorizes only this exact new lifetime, before the binding write.
-	store := groveWorldFenceStore(r.Client, group, candidate.UID)
-	var nextFence groveWorldFence
+	store := groveWorldFenceStore(p.Client, group, nextUID)
+	var nextFence worldFence
 	snapshot, err := store.Load(ctx, &nextFence)
 	if err != nil {
-		return true, err
+		return err
 	}
-	if snapshot.Exists() && (nextFence.CliqueUID != candidate.UID || nextFence.PreviousUID != uid) {
-		return true, errors.New("replacement Grove world has conflicting restart authority")
+	if snapshot.Exists() && (nextFence.WorldID != nextUID || nextFence.PreviousID != uid) {
+		return errors.New("replacement Grove world has conflicting restart authority")
 	}
 	if !snapshot.Exists() {
-		nextFence = groveWorldFence{CliqueUID: candidate.UID, PreviousUID: uid}
+		nextFence = worldFence{WorldID: nextUID, PreviousID: uid}
 		if _, err := store.Save(ctx, snapshot, nextFence); err != nil {
-			return true, err
+			return err
 		}
 	}
-	if err := r.Patch(ctx, nextGroup, client.MergeFromWithOptions(group, client.MergeFromWithOptimisticLock{})); err != nil {
-		return true, fmt.Errorf("accept restarted Grove world binding: %w", err)
+	if err := p.Client.Patch(ctx, nextGroup, client.MergeFromWithOptions(group, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("accept restarted Grove world binding: %w", err)
 	}
 	*group = *nextGroup
-	return true, nil
+	return nil
 }
 
 // authorizeGroveCheckpointRestart proves the handoff even after the binding update
 // succeeded but controller initialization or public status publication failed.
-func (r *Reconciler) authorizeGroveCheckpointRestart(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup, previousUID types.UID) error {
+func (p *GroveWorkloadProvider) AuthorizeRestart(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup, previousUID types.UID) error {
 	uid := types.UID(group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID])
 	if uid == "" || previousUID == "" {
 		return errors.New("checkpoint binding changed without Grove restart authority")
 	}
-	var current, previous groveWorldFence
-	snapshot, err := groveWorldFenceStore(r.Client, group, uid).Load(ctx, &current)
+	var current, previous worldFence
+	snapshot, err := groveWorldFenceStore(p.Client, group, uid).Load(ctx, &current)
 	if err != nil {
 		return err
 	}
-	if !snapshot.Exists() || current.CliqueUID != uid || current.PreviousUID != previousUID {
+	if !snapshot.Exists() || current.WorldID != uid || current.PreviousID != previousUID {
 		return errors.New("checkpoint binding changed without correlated Grove restart authority")
 	}
-	snapshot, err = groveWorldFenceStore(r.Client, group, previousUID).Load(ctx, &previous)
+	snapshot, err = groveWorldFenceStore(p.Client, group, previousUID).Load(ctx, &previous)
 	if err != nil {
 		return err
 	}
-	if !snapshot.Exists() || previous.CliqueUID != previousUID {
+	if !snapshot.Exists() || previous.WorldID != previousUID {
 		return errors.New("previous Grove world has no durable process fence")
 	}
-	return r.validateStoppedGroveWorld(ctx, group, previous)
+	return p.validateStoppedGroveWorld(ctx, group, previous)
 }
 
-func (r *Reconciler) initializeRestartedEngineGroup(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup, runtime Runtime, store kubejournal.Store, snapshot kubejournal.Snapshot) (ctrl.Result, error) {
-	// A terminal formation failure cannot disappear during an operator restart or an implicit retry.
-	fenceStore := groveWorldFenceStore(r.Client, group, types.UID(group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID]))
-	var fence groveWorldFence
-	fenceSnapshot, err := fenceStore.Load(ctx, &fence)
-	if err != nil {
-		return r.reconcileCheckpointFailure(ctx, group, err)
-	}
-	if fence.VerificationFailure != nil {
-		return r.reconcileUnavailableRuntime(ctx, group, fmt.Errorf("restarted world requires recreation after terminal verification failure: %s", fence.VerificationFailure.Reason))
-	}
-
-	// New formation is observation, not an invented membership resize of the old topology.
-	observations, err := observeEngineGroupRuntime(ctx, runtime, engineGroupID(group), "")
-	if err != nil {
-		return r.reconcileUnavailableRuntime(ctx, group, fmt.Errorf("observe restarted world: %w", err))
-	}
-	_, err = domain.NewGroupStatus(observations.membership.CommittedTopology, observations.capacity, observations.traffic)
-	if err != nil {
-		return r.reconcileUnavailableRuntime(ctx, group, fmt.Errorf("initialize restarted world: %w", err))
-	}
-	if observations.membership.CommittedTopology.ReplicaCount() < runtime.Profile.MinSupportedReplicas ||
-		observations.membership.CommittedTopology.NativeMemberCount() < runtime.Profile.MinSafeServingNativeMembers {
-		return r.reconcileUnavailableRuntime(ctx, group, errors.New("restarted world has not formed its initial serving membership"))
-	}
-	verified, err := runtime.Verifier.Verify(ctx, engineGroupID(group), observations.membership.CommittedTopology)
-	if err != nil {
-		return r.reconcileUnavailableRuntime(ctx, group, fmt.Errorf("verify restarted world: %w", err))
-	}
-	if verified.Failure != nil && verified.Failure.Classification == domain.FailureClassificationTerminal {
-		fence.VerificationFailure = verified.Failure
-		if _, err := fenceStore.Save(ctx, fenceSnapshot, fence); err != nil {
-			return r.reconcileCheckpointFailure(ctx, group, err)
-		}
-		return r.reconcileUnavailableRuntime(ctx, group, fmt.Errorf("restarted world failed serving verification: %s", verified.Failure.Reason))
-	}
-	if verified.Proof == nil || verified.Failure != nil ||
-		verified.Proof.ObservedAt.IsZero() ||
-		verified.Proof.TopologyGeneration != observations.membership.CommittedTopology.Generation ||
-		verified.Proof.RuntimeDigest != domain.TopologyRuntimeDigest(observations.membership.CommittedTopology) {
-		return r.reconcileUnavailableRuntime(ctx, group, errors.New("restarted world has no matching serving proof"))
-	}
-
-	// Revalidate exact membership after the probe; an unrelated incarnation cannot inherit its proof.
-	fresh, err := observeEngineGroupRuntime(ctx, runtime, engineGroupID(group), "")
-	if err != nil || !domain.SameTopology(observations.membership.CommittedTopology, fresh.membership.CommittedTopology) {
-		return r.reconcileUnavailableRuntime(ctx, group, errors.Join(errors.New("restarted membership changed during serving verification"), err))
-	}
-	state, err := domain.NewGroupStatus(fresh.membership.CommittedTopology, fresh.capacity, fresh.traffic)
-	if err != nil {
-		return r.reconcileUnavailableRuntime(ctx, group, fmt.Errorf("revalidate restarted world: %w", err))
-	}
-	if !allEngineGroupMembersAvailable(state.Membership.Observed.CommittedTopology, state.Registry, state.Capacity.Observed) ||
-		!allEngineGroupMembersAdmitted(state.Membership.Observed.CommittedTopology, state.Traffic.Observed) {
-		return r.reconcileUnavailableRuntime(ctx, group, errors.New("restarted world is not fully available and admitted"))
-	}
-
-	// Replace only lifetime-scoped evidence; desired replicas, policy, identity and immutable profile survive.
-	before := group.Status.DeepCopy()
-	next, err := newEngineGroupCheckpoint(group, runtime.Profile, state).advance(group, runtime.Profile, state, nil, true, true)
-	if err != nil {
-		return r.reconcileCheckpointFailure(ctx, group, err)
-	}
-	if _, err := store.Save(ctx, snapshot, next); err != nil {
-		return r.reconcileCheckpointFailure(ctx, group, err)
-	}
-	group.Status = api.DynamoGraphDeploymentEngineGroupStatus{Profile: runtime.Profile.DeepCopy()}
-	next.projectHistory(group)
-	r.projectEngineGroupStatus(group, runtime.Profile, state, nil, nil)
-	if err := r.updateEngineGroupStatus(ctx, group, before); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{Requeue: true}, nil
-}
-
-func (r *Reconciler) reconcileGroveProcessFences(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup, cliqueName string, uid types.UID) (groveWorldFence, bool, error) {
+func (p *GroveWorkloadProvider) reconcileGroveProcessFences(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup, cliqueName string, uid types.UID) (worldFence, bool, error) {
 	// This journal is scoped to the physical clique, so old tombstones cannot authorize new Pods.
-	store := groveWorldFenceStore(r.Client, group, uid)
-	var fence groveWorldFence
+	store := groveWorldFenceStore(p.Client, group, uid)
+	var fence worldFence
 	snapshot, err := store.Load(ctx, &fence)
 	if err != nil {
 		return fence, false, err
 	}
-	if snapshot.Exists() && fence.CliqueUID != uid {
+	if snapshot.Exists() && fence.WorldID != uid {
 		return fence, false, errors.New("Grove process fence belongs to a different clique")
 	}
 	previous := fence
 	fence.Pods = slices.Clone(fence.Pods)
-	fence.CliqueUID = uid
+	fence.WorldID = uid
 
 	// Include native capacity even when a Pod lost its Dynamo label; never adopt another clique UID.
 	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods, client.InNamespace(group.Namespace), client.MatchingLabels{grovecommon.LabelPodClique: cliqueName}); err != nil {
+	if err := p.Client.List(ctx, pods, client.InNamespace(group.Namespace), client.MatchingLabels{grovecommon.LabelPodClique: cliqueName}); err != nil {
 		return fence, false, fmt.Errorf("observe Grove process lifetimes: %w", err)
 	}
 	owned := make([]*corev1.Pod, 0, len(pods.Items))
@@ -270,9 +181,9 @@ func (r *Reconciler) reconcileGroveProcessFences(ctx context.Context, group *api
 			return fence, false, fmt.Errorf("Pod %s has an invalid Grove slot index", pod.Name)
 		}
 		ref := domain.CapacityRef{Name: pod.Name, UID: domain.PodUID(pod.UID)}
-		recordIndex := slices.IndexFunc(fence.Pods, func(record grovePodFence) bool { return record.Ref == ref })
+		recordIndex := slices.IndexFunc(fence.Pods, func(record worldPodFence) bool { return record.Ref == ref })
 		if recordIndex < 0 {
-			fence.Pods = append(fence.Pods, grovePodFence{Ref: ref, SlotID: domain.CapacitySlotID("slot-" + literal)})
+			fence.Pods = append(fence.Pods, worldPodFence{Ref: ref, SlotID: domain.CapacitySlotID("slot-" + literal)})
 			recordIndex = len(fence.Pods) - 1
 		}
 		if podProcessesStopped(pod) {
@@ -280,7 +191,7 @@ func (r *Reconciler) reconcileGroveProcessFences(ctx context.Context, group *api
 		}
 		owned = append(owned, pod)
 	}
-	slices.SortFunc(fence.Pods, func(a, b grovePodFence) int { return strings.Compare(string(a.Ref.UID), string(b.Ref.UID)) })
+	slices.SortFunc(fence.Pods, func(a, b worldPodFence) int { return strings.Compare(string(a.Ref.UID), string(b.Ref.UID)) })
 	if !snapshot.Exists() || !reflect.DeepEqual(previous, fence) {
 		if _, err := store.Save(ctx, snapshot, fence); err != nil {
 			return fence, false, err
@@ -300,7 +211,7 @@ func (r *Reconciler) reconcileGroveProcessFences(ctx context.Context, group *api
 				continue
 			}
 		}
-		if err := r.Patch(ctx, pod, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+		if err := p.Client.Patch(ctx, pod, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
 			return fence, changed, fmt.Errorf("persist process fence for Pod %s: %w", pod.Name, err)
 		}
 		changed = true
@@ -324,7 +235,7 @@ func podProcessesStopped(pod *corev1.Pod) bool {
 	return len(pod.Spec.Containers) > 0
 }
 
-func (r *Reconciler) validateStoppedGroveWorld(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup, fence groveWorldFence) error {
+func (p *GroveWorkloadProvider) validateStoppedGroveWorld(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup, fence worldFence) error {
 	// Retain ambiguous or missing process identities, including ones GC removed before protection was installed.
 	if len(fence.Pods) == 0 {
 		return errors.New("old Grove world has no process-stop evidence")
@@ -335,7 +246,7 @@ func (r *Reconciler) validateStoppedGroveWorld(ctx context.Context, group *api.D
 		}
 	}
 	var checkpoint engineGroupCheckpoint
-	snapshot, err := engineGroupCheckpointStore(r, group).Load(ctx, &checkpoint)
+	snapshot, err := engineGroupCheckpointStore(p.Client, group).Load(ctx, &checkpoint)
 	if err != nil {
 		return err
 	}
@@ -345,7 +256,7 @@ func (r *Reconciler) validateStoppedGroveWorld(ctx context.Context, group *api.D
 		}
 		return nil
 	}
-	if err := validateEngineGroupCheckpoint(checkpoint, group, fence.CliqueUID); err != nil {
+	if err := validateEngineGroupCheckpoint(checkpoint, group, fence.WorldID); err != nil {
 		return err
 	}
 
@@ -368,34 +279,34 @@ func (r *Reconciler) validateStoppedGroveWorld(ctx context.Context, group *api.D
 			if replica.Incarnation != nil {
 				refs = append(refs, replica.Incarnation.CapacityRefs...)
 			}
-			if replica.Bootstrap != nil && !slices.ContainsFunc(fence.Pods, func(pod grovePodFence) bool { return pod.SlotID == replica.SlotID && pod.Stopped }) {
+			if replica.Bootstrap != nil && !slices.ContainsFunc(fence.Pods, func(pod worldPodFence) bool { return pod.SlotID == replica.SlotID && pod.Stopped }) {
 				return fmt.Errorf("old bootstrap slot %s has no stop proof", replica.SlotID)
 			}
 		}
 	}
 	for _, ref := range refs {
-		if !slices.ContainsFunc(fence.Pods, func(pod grovePodFence) bool { return pod.Ref == ref && pod.Stopped }) {
+		if !slices.ContainsFunc(fence.Pods, func(pod worldPodFence) bool { return pod.Ref == ref && pod.Stopped }) {
 			return fmt.Errorf("old allocated Pod %s (UID %s) has no stop proof", ref.Name, ref.UID)
 		}
 	}
 	return nil
 }
 
-func (r *Reconciler) resolveReplacementGroveClique(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup) (*grove.PodClique, error) {
+func (p *GroveWorkloadProvider) resolveReplacementGroveClique(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup) (*grove.PodClique, error) {
 	// Recovery may not adopt a same-named PCS owned by another DGD lifetime.
 	owner := metav1.GetControllerOf(group)
 	if owner == nil || owner.Kind != "DynamoGraphDeployment" || owner.APIVersion != api.GroupVersion.String() {
 		return nil, errors.New("Grove world restart requires a DGD-owned Engine Group")
 	}
 	dgd := &api.DynamoGraphDeployment{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: group.Namespace, Name: owner.Name}, dgd); err != nil {
+	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: group.Namespace, Name: owner.Name}, dgd); err != nil {
 		return nil, client.IgnoreNotFound(err)
 	}
 	if dgd.UID != owner.UID || !dgd.DeletionTimestamp.IsZero() {
 		return nil, errors.New("Grove world restart owner changed or is terminating")
 	}
 	pcs := &grove.PodCliqueSet{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: group.Namespace, Name: dynamo.PCSNameForDGD(dgd, (*api.DynamoComponentDeploymentSharedSpec).ManagedByExternalController)}, pcs); err != nil {
+	if err := p.Client.Get(ctx, client.ObjectKey{Namespace: group.Namespace, Name: dynamo.PCSNameForDGD(dgd, (*api.DynamoComponentDeploymentSharedSpec).ManagedByExternalController)}, pcs); err != nil {
 		return nil, client.IgnoreNotFound(err)
 	}
 	if !metav1.IsControlledBy(pcs, dgd) || !pcs.DeletionTimestamp.IsZero() {
@@ -405,5 +316,5 @@ func (r *Reconciler) resolveReplacementGroveClique(ctx context.Context, group *a
 	if index != "0" {
 		return nil, errors.New("Grove world restart currently requires logical world index zero")
 	}
-	return resolveGroveMemberClique(ctx, r.Client, group, pcs, 0)
+	return resolveGroveMemberClique(ctx, p.Client, group, pcs, 0)
 }

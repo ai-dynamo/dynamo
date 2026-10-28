@@ -13,11 +13,11 @@ import (
 	"slices"
 
 	api "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	domain "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/kubejournal"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const engineGroupCheckpointVersion = 1
@@ -27,7 +27,7 @@ type checkpointBindingChangedError struct {
 }
 
 func (e *checkpointBindingChangedError) Error() string {
-	return "checkpoint belongs to a different PodClique incarnation"
+	return "checkpoint belongs to a different physical world incarnation"
 }
 
 // engineGroupCheckpoint is private persistence, not a second public Kubernetes API.
@@ -47,14 +47,15 @@ type engineGroupCheckpoint struct {
 	Operation                    *api.EngineGroupOperationStatus
 }
 
-func engineGroupCheckpointStore(r *Reconciler, group *api.DynamoGraphDeploymentEngineGroup) kubejournal.Store {
-	return kubejournal.NewStore(r.Client, group.Namespace, group.Name, group.UID, "checkpoint")
+func engineGroupCheckpointStore(kubeClient client.Client, group *api.DynamoGraphDeploymentEngineGroup) kubejournal.Store {
+	return kubejournal.NewStore(kubeClient, group.Namespace, group.Name, group.UID, "checkpoint")
 }
 
 func loadEngineGroupCheckpoint(
 	ctx context.Context,
 	store kubejournal.Store,
 	group *api.DynamoGraphDeploymentEngineGroup,
+	worldID types.UID,
 ) (engineGroupCheckpoint, kubejournal.Snapshot, error) {
 	var checkpoint engineGroupCheckpoint
 	snapshot, err := store.Load(ctx, &checkpoint)
@@ -69,7 +70,7 @@ func loadEngineGroupCheckpoint(
 	}
 
 	// Validate the payload before considering a separately authorized whole-world restart.
-	err = validateEngineGroupCheckpoint(checkpoint, group, types.UID(group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID]))
+	err = validateEngineGroupCheckpoint(checkpoint, group, worldID)
 	return checkpoint, snapshot, err
 }
 
@@ -110,19 +111,19 @@ func (r *Reconciler) reconcileCheckpointLoadFailure(
 ) (ctrl.Result, error) {
 	// Only an exact, fenced predecessor can authorize replacing valid old-lifetime recovery state.
 	var bindingChanged *checkpointBindingChangedError
-	if !errors.As(loadErr, &bindingChanged) {
+	if !errors.As(loadErr, &bindingChanged) || r.WorkloadProvider == nil {
 		return r.reconcileCheckpointFailure(ctx, group, loadErr)
 	}
-	if err := r.authorizeGroveCheckpointRestart(ctx, group, bindingChanged.PreviousUID); err != nil {
+	if err := r.WorkloadProvider.AuthorizeRestart(ctx, group, bindingChanged.PreviousUID); err != nil {
 		return r.reconcileCheckpointFailure(ctx, group, errors.Join(loadErr, err))
 	}
 	return r.initializeRestartedEngineGroup(ctx, group, runtime, store, snapshot)
 }
 
-func newEngineGroupCheckpoint(group *api.DynamoGraphDeploymentEngineGroup, profile api.EngineGroupProfileStatus, state domain.GroupStatus) engineGroupCheckpoint {
+func newEngineGroupCheckpoint(profile api.EngineGroupProfileStatus, state domain.GroupStatus, worldID types.UID) engineGroupCheckpoint {
 	return engineGroupCheckpoint{
 		Version: engineGroupCheckpointVersion, ProfileFingerprint: profile.Fingerprint,
-		BindingUID: types.UID(group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID]),
+		BindingUID: worldID,
 		State:      state,
 	}
 }

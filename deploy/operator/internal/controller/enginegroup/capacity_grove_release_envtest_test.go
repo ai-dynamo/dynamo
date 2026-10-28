@@ -75,7 +75,7 @@ func TestGroveReadinessReleaseUsesRealStatusAndScaleSubresources(t *testing.T) {
 		Client: env.Client(), Clique: client.ObjectKeyFromObject(clique), CliqueUID: clique.UID, GroupName: group.Name,
 		Journal: kubejournal.NewStore(env.Client(), group.Namespace, group.Name, group.UID, "grove-capacity"), ReadinessScaleIn: true,
 	}
-	require.NoError(t, adapter.InitializeRetention(ctx))
+	require.NoError(t, adapter.Prepare(ctx))
 	observation, err := adapter.Observe(ctx, domain.GroupID(group.UID))
 	require.NoError(t, err)
 	retained, victim := groveCapacityAssertion(observation.Allocations[0]), groveCapacityAssertion(observation.Allocations[1])
