@@ -1384,6 +1384,8 @@ fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
 
 /// A frontend in direct routing mode does not pick workers, so its handle
 /// ignores busy-worker thresholds: they belong to the caller that picks workers.
+/// The prefill router shares this handle, because in direct mode the caller
+/// (EPP) picks both workers, decode and prefill.
 fn load_threshold_handle(router_config: &RouterConfig) -> LoadThresholdHandle {
     if !router_config.router_mode.is_direct_routing() {
         return LoadThresholdHandle::new(router_config.load_threshold_config.clone());
