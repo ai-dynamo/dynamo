@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Types that more than one Global Router component needs, defined once.
+//! Types shared by the Global Router components.
 //!
 //! - A pool's identity and location: [`PoolKey`], [`PoolId`] and its deriver
 //!   [`V1PoolIdDeriver`], and [`PoolLocation`].
