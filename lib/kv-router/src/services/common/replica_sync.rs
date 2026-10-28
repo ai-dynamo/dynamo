@@ -67,7 +67,9 @@ impl AffinityBindingEvent {
 pub(crate) struct AffinityMeshSink {
     partition: RoutingPartitionId,
     tx: mpsc::Sender<AffinityBindingEvent>,
+    cancel_token: CancellationToken,
     full_drops: parking_lot::Mutex<RateLimitedFailureLog>,
+    unexpected_closed_drops: parking_lot::Mutex<RateLimitedFailureLog>,
 }
 
 #[cfg(feature = "standalone-selection")]
@@ -75,11 +77,14 @@ impl AffinityMeshSink {
     pub(crate) fn new(
         partition: RoutingPartitionId,
         tx: mpsc::Sender<AffinityBindingEvent>,
+        cancel_token: CancellationToken,
     ) -> Self {
         Self {
             partition,
             tx,
+            cancel_token,
             full_drops: parking_lot::Mutex::default(),
+            unexpected_closed_drops: parking_lot::Mutex::default(),
         }
     }
 }
@@ -108,8 +113,20 @@ impl AffinityReplicaSink for AffinityMeshSink {
                     "Session affinity replication channel full; dropping binding"
                 );
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(mpsc::error::TrySendError::Closed(_)) if self.cancel_token.is_cancelled() => {
                 tracing::trace!("dropping session affinity replica update; channel closed");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                let Some(dropped_bindings) =
+                    self.unexpected_closed_drops.lock().record(Instant::now())
+                else {
+                    return;
+                };
+                tracing::warn!(
+                    partition = %self.partition,
+                    dropped_bindings_since_last_log = dropped_bindings,
+                    "Session affinity replication channel closed unexpectedly; dropping binding"
+                );
             }
         }
     }
@@ -212,7 +229,11 @@ impl ReplicaSyncConfig {
         partition: &RoutingPartitionId,
     ) -> Option<Arc<dyn AffinityReplicaSink>> {
         self.affinity_tx.clone().map(|tx| {
-            Arc::new(AffinityMeshSink::new(partition.clone(), tx)) as Arc<dyn AffinityReplicaSink>
+            Arc::new(AffinityMeshSink::new(
+                partition.clone(),
+                tx,
+                self.cancel_token.clone(),
+            )) as Arc<dyn AffinityReplicaSink>
         })
     }
 
