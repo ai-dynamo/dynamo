@@ -46,6 +46,7 @@ These arguments are passed to the **frontend** (not the worker) when using `--dy
 | `--dyn-chat-processor sglang` | (none) | Enable the SGLang chat processor |
 | `--tool-call-parser` | `None` | Tool call parser name (any SGLang-supported parser) |
 | `--reasoning-parser` | `None` | Reasoning parser name (any SGLang-supported parser) |
+| `--isolate-tool-call-markers` | `false` | Tokenize message content that contains the parser's tool-call delimiters as plain sub-words (see [Echoed delimiters](#echoed-delimiters)) |
 
 ### Environment Variables
 
@@ -110,6 +111,15 @@ Response:
   }]
 }
 ```
+
+### Echoed delimiters
+
+Most tool-call formats open and close a call with a delimiter that the tokenizer stores as one added token (`<tool_call>` for GLM, Qwen, Hermes). That token is not reserved: a literal `<tool_call>` inside a tool result or a pasted file encodes to the same id the model emits to open a call. SGLang's detectors work on text, so on their own they cannot tell a call the model issued from a delimiter it reproduced from its input.
+
+The processor uses the token ids to keep the two apart:
+
+- The tool-call parser is opened only by the opening delimiter's token id and closed by the closing id. Delimiter text the model spells out of ordinary sub-words is returned as `content`, never parsed as a call. This is always on when both delimiters of the configured parser are single tokens.
+- With `--isolate-tool-call-markers`, message content that contains a delimiter is tokenized without added-token matching, so the model sees `<`, `tool`, `_call`, `>` and has no single token to copy back. Delimiters the chat template itself emits (the tool instructions, earlier assistant `tool_calls`) keep their ids, and content without a delimiter tokenizes exactly as before. A request whose delimiter-bearing content the template rewrites in a way the processor cannot align is rejected instead of being encoded with the delimiter ids. The option changes what the model sees for such content; evaluate it against your model before enabling it in production.
 
 ## Reasoning Parsing
 
