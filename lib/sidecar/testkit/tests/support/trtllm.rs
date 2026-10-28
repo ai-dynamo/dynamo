@@ -43,6 +43,8 @@ pub struct Discovery {
     pub hold: AtomicBool,
     pub portable_image: AtomicBool,
     pub advertises_image: AtomicBool,
+    pub omit_context_length: AtomicBool,
+    pub error: Mutex<Option<tonic::Code>>,
     release: tokio::sync::Notify,
 }
 
@@ -190,8 +192,14 @@ impl Control for ControlledControl {
         if self.discovery.unavailable.load(Ordering::SeqCst) {
             return Err(Status::unavailable("discovery temporarily unavailable"));
         }
+        if let Some(code) = *self.discovery.error.lock().unwrap() {
+            return Err(Status::new(code, "model discovery rejected"));
+        }
         let mut response = self.inner.get_model_info(request).await?;
         let info = response.get_mut();
+        if self.discovery.omit_context_length.load(Ordering::SeqCst) {
+            info.max_context_length = None;
+        }
         info.supports_multimodal = Some(self.discovery.portable_image.load(Ordering::SeqCst));
         let modalities = if self.discovery.advertises_image.load(Ordering::SeqCst) {
             vec!["image"]

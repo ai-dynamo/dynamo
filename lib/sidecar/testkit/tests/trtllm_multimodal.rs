@@ -7,19 +7,19 @@ use std::time::Duration;
 
 use dynamo_backend_common::testing::mock_context;
 use dynamo_backend_common::{
-    BackendError, ErrorType, FinishReason, GenerateContext, LLMEngine, MultimodalData,
-    PreprocessedRequest,
+    FinishReason, GenerateContext, LLMEngine, MultimodalData, PreprocessedRequest,
 };
+use dynamo_sidecar_common::EngineBootstrapResult;
 use dynamo_sidecar_testkit::bounded;
 use dynamo_sidecar_testkit::control::{Controller, RequestPlan};
 use dynamo_sidecar_testkit::fixtures::{collect, request};
+use dynamo_trtllm_sidecar::TrtllmSidecarEngine;
 use dynamo_trtllm_sidecar::proto as pb;
-use futures::future::join_all;
 
 #[allow(dead_code)]
 mod support;
 use support::trtllm::{Adapter, Fixture};
-use support::{FixtureConfig, SidecarFixture};
+use support::{FixtureConfig, ProcessFixture, SidecarFixture};
 
 fn image_request() -> PreprocessedRequest {
     let mut request = request("mocker-model", vec![11, 22, 33], 1);
@@ -146,110 +146,171 @@ async fn both_image_capability_signals_are_required() {
     }
 }
 
-#[tokio::test]
-async fn concurrent_discovery_failure_is_shared_and_later_recovers() {
-    let control = Controller::<Adapter>::default();
-    let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
-    fixture.discovery.unavailable.store(true, Ordering::SeqCst);
-    let engine = fixture.engine_with_context_length(32768);
-    engine.start(0).await.unwrap();
-    fixture.discovery.hold.store(true, Ordering::SeqCst);
-    let requests = (0..4)
-        .map(|_| engine.generate(image_request(), GenerateContext::new(mock_context(), None)));
-    let (results, ()) = tokio::join!(join_all(requests), async {
-        wait_for_calls(&fixture, 2).await;
-        fixture.release_discovery();
-    });
-    for result in results {
-        let error = result.err().expect("discovery must fail for every waiter");
-        assert_eq!(
-            error.error_type(),
-            ErrorType::Backend(BackendError::CannotConnect)
-        );
+fn bootstrap(
+    fixture: &Fixture,
+    context_length: Option<u32>,
+    deadline_secs: u32,
+) -> impl std::future::Future<Output = EngineBootstrapResult<TrtllmSidecarEngine>> + use<> {
+    let mut args = vec![
+        "dynamo-trtllm-sidecar".into(),
+        "--grpc-endpoint".into(),
+        fixture.endpoint(),
+        "--model-path".into(),
+        "mocker-model".into(),
+        "--grpc-startup-deadline-secs".into(),
+        deadline_secs.to_string(),
+    ];
+    if let Some(context_length) = context_length {
+        args.extend(["--context-length".into(), context_length.to_string()]);
     }
-    assert_eq!(fixture.discovery.calls.load(Ordering::SeqCst), 2);
-    // Failures are retained for one second; recovery is not permanently latched.
-    fixture.discovery.unavailable.store(false, Ordering::SeqCst);
-    advertise_images(&fixture);
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    for _ in 0..2 {
-        let ctx = mock_context();
-        control.request(ctx.id(), RequestPlan::default());
-        fixture.respond(ctx.id(), vec![finished()]);
-        let outputs = collect(&engine, image_request(), GenerateContext::new(ctx, None)).await;
-        assert_eq!(outputs.len(), 1);
-        assert_eq!(
-            outputs[0].as_ref().unwrap().finish_reason,
-            Some(FinishReason::Stop)
-        );
-    }
-    assert_eq!(fixture.discovery.calls.load(Ordering::SeqCst), 3);
-    engine.cleanup().await.unwrap();
-    fixture.shutdown().await;
+    TrtllmSidecarEngine::try_from_args_async(args).unwrap().1
 }
 
 #[tokio::test]
-async fn stalled_discovery_observes_request_and_shutdown_cancellation() {
-    for shutdown in [false, true] {
+async fn startup_recovers_image_capabilities_before_registration() {
+    for omit_window in [false, true] {
         let control = Controller::<Adapter>::default();
-        let mut fixture = Fixture::start(control, FixtureConfig::default()).await;
+        let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
+        advertise_images(&fixture);
+        fixture
+            .discovery
+            .omit_context_length
+            .store(omit_window, Ordering::SeqCst);
         fixture.discovery.unavailable.store(true, Ordering::SeqCst);
-        let engine = fixture.engine_with_context_length(32768);
-        engine.start(0).await.unwrap();
-        fixture.discovery.hold.store(true, Ordering::SeqCst);
-        let ctx = mock_context();
-        let cancelling_ctx = ctx.clone();
-        let (outputs, ()) = bounded("cancel stalled discovery", async {
-            tokio::join!(
-                collect(&engine, image_request(), GenerateContext::new(ctx, None)),
-                async {
-                    wait_for_calls(&fixture, 2).await;
-                    if shutdown {
-                        engine.cleanup().await.unwrap();
-                    } else {
-                        cancelling_ctx.stop_generating();
-                    }
-                }
-            )
-        })
-        .await;
-        assert_eq!(outputs.len(), 1);
-        assert_eq!(
-            outputs[0].as_ref().unwrap().finish_reason,
-            Some(FinishReason::Cancelled)
+        let mut startup = tokio::spawn(bootstrap(&fixture, Some(32768), 5));
+        wait_for_calls(&fixture, 2).await;
+        assert!(
+            !startup.is_finished(),
+            "unresolved capabilities must prevent registration"
         );
-        fixture.release_discovery();
+        fixture.discovery.unavailable.store(false, Ordering::SeqCst);
+        let (engine, _) = bounded("recover startup discovery", &mut startup)
+            .await
+            .unwrap()
+            .unwrap();
+        let config = engine.start(0).await.unwrap();
+        assert_eq!(config.llm.unwrap().context_length, Some(32768));
+        let calls = fixture.discovery.calls.load(Ordering::SeqCst);
+        // Serving must use startup metadata, including image support when the
+        // engine supplied no window. No Generate may rediscover capabilities.
+        fixture.discovery.unavailable.store(true, Ordering::SeqCst);
+        for _ in 0..2 {
+            let ctx = mock_context();
+            let handle = control.request(ctx.id(), RequestPlan::default());
+            if omit_window {
+                let error = engine
+                    .generate(image_request(), GenerateContext::new(ctx, None))
+                    .await
+                    .err()
+                    .expect("media still needs a reported engine window");
+                assert!(
+                    error.to_string().contains("--context-length to match"),
+                    "{error}"
+                );
+                assert!(handle.native_request().is_none());
+            } else {
+                fixture.respond(ctx.id(), vec![finished()]);
+                let outputs =
+                    collect(&engine, image_request(), GenerateContext::new(ctx, None)).await;
+                assert_eq!(
+                    outputs.last().unwrap().as_ref().unwrap().finish_reason,
+                    Some(FinishReason::Stop)
+                );
+                assert_eq!(handle.native_request().unwrap().media.len(), 2);
+            }
+        }
+        assert_eq!(fixture.discovery.calls.load(Ordering::SeqCst), calls);
         engine.cleanup().await.unwrap();
         fixture.shutdown().await;
     }
 }
 
 #[tokio::test]
-async fn unresponsive_discovery_has_one_bounded_timeout_for_all_waiters() {
-    let control = Controller::<Adapter>::default();
-    let mut fixture = Fixture::start(control, FixtureConfig::default()).await;
-    fixture.discovery.unavailable.store(true, Ordering::SeqCst);
-    let engine = fixture.engine_with_context_length(32768);
-    engine.start(0).await.unwrap();
-    fixture.discovery.hold.store(true, Ordering::SeqCst);
-    let requests = (0..4)
-        .map(|_| engine.generate(image_request(), GenerateContext::new(mock_context(), None)));
-    let results = tokio::time::timeout(Duration::from_secs(35), join_all(requests))
-        .await
-        .expect("all four requests must share the 30-second RPC timeout");
-    for result in results {
-        let error = result
-            .err()
-            .expect("discovery must time out for every waiter");
-        assert_eq!(
-            error.error_type(),
-            ErrorType::Backend(BackendError::ConnectionTimeout)
-        );
+async fn discovery_model_and_authentication_errors_fail_startup_without_retry() {
+    for configured in [None, Some(32768)] {
+        for code in [
+            tonic::Code::InvalidArgument,
+            tonic::Code::NotFound,
+            tonic::Code::Unauthenticated,
+            tonic::Code::PermissionDenied,
+        ] {
+            let mut fixture =
+                Fixture::start(Controller::<Adapter>::default(), FixtureConfig::default()).await;
+            *fixture.discovery.error.lock().unwrap() = Some(code);
+            let result = bounded(
+                "terminal discovery error",
+                bootstrap(&fixture, configured, 60),
+            )
+            .await;
+            let error = result
+                .err()
+                .expect("model/authentication errors must prevent registration");
+            assert!(
+                error.to_string().contains("model discovery rejected"),
+                "{error}"
+            );
+            assert!(error.to_string().contains(&format!("{code:?}")), "{error}");
+            assert_eq!(fixture.discovery.calls.load(Ordering::SeqCst), 1);
+            fixture.shutdown().await;
+        }
     }
-    assert_eq!(fixture.discovery.calls.load(Ordering::SeqCst), 2);
-    fixture.release_discovery();
-    engine.cleanup().await.unwrap();
-    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn startup_deadline_bounds_retrying_and_stalled_discovery() {
+    for configured in [None, Some(32768)] {
+        for held in [false, true] {
+            let mut fixture =
+                Fixture::start(Controller::<Adapter>::default(), FixtureConfig::default()).await;
+            fixture.discovery.unavailable.store(true, Ordering::SeqCst);
+            fixture.discovery.hold.store(held, Ordering::SeqCst);
+            let result =
+                tokio::time::timeout(Duration::from_secs(4), bootstrap(&fixture, configured, 2))
+                    .await
+                    .expect("discovery must respect the startup deadline");
+            let error = result
+                .err()
+                .expect("unresolved capabilities must prevent registration");
+            assert!(error.to_string().contains("startup deadline"), "{error}");
+            let calls = fixture.discovery.calls.load(Ordering::SeqCst);
+            if held {
+                assert_eq!(calls, 1);
+            } else {
+                assert!(calls >= 2);
+            }
+            fixture.release_discovery();
+            fixture.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn shutdown_cancels_retrying_and_stalled_bootstrap_discovery() {
+    for held in [false, true] {
+        let mut fixture =
+            Fixture::start(Controller::<Adapter>::default(), FixtureConfig::default()).await;
+        fixture.discovery.unavailable.store(true, Ordering::SeqCst);
+        fixture.discovery.hold.store(held, Ordering::SeqCst);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let cancel = shutdown.clone();
+        let startup = bootstrap(&fixture, Some(32768), 60);
+        // Mirrors the shared runner's cancellation of the bootstrap future.
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {},
+                _ = startup => panic!("unresolved discovery must not register a worker"),
+            }
+        });
+        wait_for_calls(&fixture, 1).await;
+        cancel.cancel();
+        bounded("shutdown cancels bootstrap", task).await.unwrap();
+        let calls = fixture.discovery.calls.load(Ordering::SeqCst);
+        fixture.release_discovery();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(fixture.discovery.calls.load(Ordering::SeqCst), calls);
+        fixture.shutdown().await;
+    }
 }
 
 #[tokio::test]
