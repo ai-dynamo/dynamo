@@ -111,11 +111,11 @@
 //! Each setting is a per-rank limit, read once when a worker's gate is created,
 //! from the first of its environment names that holds a valid value:
 //!
-//! | Setting | Environment names, in precedence order | Default |
+//! | Setting | Environment names, in precedence order | Automatic value |
 //! |---|---|---|
 //! | Engine request limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT`, `DYN_ENGINE_REQUEST_LIMIT` | `max_num_seqs` |
 //! | Engine request waiting limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT`, `DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT` | `max_num_seqs` |
-//! | Request queue limit | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT`, `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | `40000 / rank_count` |
+//! | Request queue limit | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT`, `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | `2 * max_num_seqs` |
 //!
 //! Engine limits must be positive integers, and the queue limit a non-negative
 //! one. A value that is set but invalid is warned about and passed over. A
@@ -123,13 +123,13 @@
 //! canonical engine request limit name before the gate is created, so an
 //! explicit flag takes precedence over both environment names.
 //!
-//! Engine limits without explicit values follow the `max_num_seqs` the engine
-//! reports through its worker's model card, assuming [`FALLBACK_MAX_NUM_SEQS`]
-//! until then. The queue defaults to `40000 / rank_count` per rank, using
-//! integer division and assuming one rank until the engine reports its ranks.
-//! Capacity and rank reports update defaults without resetting live occupancy;
-//! they never replace an explicit value. A lower limit evicts nothing: it holds
-//! further admission or queueing back until occupancy falls below it.
+//! A setting without an explicit value is automatic: it follows the
+//! `max_num_seqs` the engine reports through its worker's model card, and
+//! assumes [`FALLBACK_MAX_NUM_SEQS`] until then. Capacity and rank reports
+//! update the automatic limits and the rank count at any time, without
+//! resetting live occupancy; they never replace an explicit value. A lower
+//! limit evicts nothing: it holds further admission back until occupancy falls
+//! below it.
 //!
 //! TCP requests pass through the TCP work queue and worker pool before reaching
 //! this gate, then keep their worker-pool permit while waiting here. The TCP
@@ -186,22 +186,21 @@ const DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT: &str = "DYN_BACKEND_ADMISSION_R
 /// Legacy alias of [`DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT`].
 const DYN_DYNAMO_REQUEST_QUEUE_LIMIT: &str = "DYN_DYNAMO_REQUEST_QUEUE_LIMIT";
 
-/// The `max_num_seqs` the automatic engine limits assume until the engine
-/// reports its own.
+/// The `max_num_seqs` the automatic limits assume until the engine reports its
+/// own.
 const FALLBACK_MAX_NUM_SEQS: usize = 10_000;
-
-/// Default queue budget per worker, divided evenly among its DP ranks.
-const DEFAULT_WORKER_REQUEST_QUEUE_LIMIT: usize = 40_000;
 
 /// How far a limit may exceed the engine's reported capacity before the gate
 /// warns that it is unlikely to hold any work back.
 const CAPACITY_WARNING_FACTOR: usize = 10;
 
-/// One configuration setting: its environment names in precedence order and
-/// the smallest value it accepts.
+/// One configuration setting: its environment names in precedence order, the
+/// smallest value it accepts, and its automatic value as a multiple of the
+/// engine's `max_num_seqs`.
 struct Setting {
     names: &'static [&'static str],
     min: usize,
+    capacity_multiple: usize,
 }
 
 const ENGINE_REQUEST_LIMIT: Setting = Setting {
@@ -210,6 +209,7 @@ const ENGINE_REQUEST_LIMIT: Setting = Setting {
         DYN_ENGINE_REQUEST_LIMIT,
     ],
     min: 1,
+    capacity_multiple: 1,
 };
 
 const ENGINE_REQUEST_WAITING_LIMIT: Setting = Setting {
@@ -218,6 +218,7 @@ const ENGINE_REQUEST_WAITING_LIMIT: Setting = Setting {
         DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT,
     ],
     min: 1,
+    capacity_multiple: 1,
 };
 
 /// Zero is valid: it disables queueing.
@@ -227,11 +228,12 @@ const REQUEST_QUEUE_LIMIT: Setting = Setting {
         DYN_DYNAMO_REQUEST_QUEUE_LIMIT,
     ],
     min: 0,
+    capacity_multiple: 2,
 };
 
 impl Setting {
     /// The value of the first name `lookup` finds valid, and that name, or
-    /// `None` when the setting uses its default.
+    /// `None` when the setting is left automatic.
     ///
     /// A value that is set but is not an integer of at least `min` is warned
     /// about and passed over, so it cannot hide a valid value behind it.
@@ -253,6 +255,15 @@ impl Setting {
         }
         None
     }
+
+    /// The per-rank limit in force: the explicit value, or the automatic
+    /// multiple of `max_num_seqs`.
+    fn value(&self, explicit: Option<Explicit>, max_num_seqs: usize) -> usize {
+        explicit.map_or_else(
+            || max_num_seqs.saturating_mul(self.capacity_multiple),
+            |explicit| explicit.value,
+        )
+    }
 }
 
 /// A setting's explicit per-rank value, and the environment name it came from.
@@ -262,8 +273,8 @@ struct Explicit {
     name: &'static str,
 }
 
-/// The per-rank values configured explicitly, each `None` when using its
-/// default. Read once, when the gate is created; no capacity report ever
+/// The per-rank values configured explicitly, each `None` when left
+/// automatic. Read once, when the gate is created; no capacity report ever
 /// replaces one, including a queue limit of zero.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ExplicitLimits {
@@ -335,22 +346,17 @@ struct AdmissionLimits {
 impl AdmissionLimits {
     /// The limits for these explicit settings, reported `max_num_seqs` and
     /// rank count. Each setting resolves independently: an explicit value wins,
-    /// engine defaults follow `max_num_seqs`, and the queue default divides the
-    /// worker budget by the nonzero rank count using integer division.
+    /// and an automatic one derives from `max_num_seqs` alone, never from
+    /// another setting.
     fn resolve(explicit: &ExplicitLimits, max_num_seqs: Option<usize>, rank_count: usize) -> Self {
         let max_num_seqs = max_num_seqs.unwrap_or(FALLBACK_MAX_NUM_SEQS);
         Self {
-            engine_request_limit: explicit
-                .engine_request_limit
-                .map_or(max_num_seqs, |setting| setting.value),
-            engine_request_waiting_limit: explicit
-                .engine_request_waiting_limit
-                .map_or(max_num_seqs, |setting| setting.value),
-            request_queue_limit: explicit
-                .request_queue_limit
-                .map_or(DEFAULT_WORKER_REQUEST_QUEUE_LIMIT / rank_count, |setting| {
-                    setting.value
-                }),
+            engine_request_limit: ENGINE_REQUEST_LIMIT
+                .value(explicit.engine_request_limit, max_num_seqs),
+            engine_request_waiting_limit: ENGINE_REQUEST_WAITING_LIMIT
+                .value(explicit.engine_request_waiting_limit, max_num_seqs),
+            request_queue_limit: REQUEST_QUEUE_LIMIT
+                .value(explicit.request_queue_limit, max_num_seqs),
             rank_count,
         }
     }
@@ -371,8 +377,8 @@ struct LimitsSnapshot {
 }
 
 impl LimitsSnapshot {
-    /// Where an engine limit's value comes from: the environment name that set
-    /// it, or the capacity its automatic value follows.
+    /// Where a limit's value comes from: the environment name that set it, or
+    /// the capacity its automatic value follows.
     fn source(&self, explicit: Option<Explicit>) -> &'static str {
         match (explicit, self.max_num_seqs) {
             (Some(explicit), _) => explicit.name,
@@ -397,8 +403,7 @@ impl LimitsSnapshot {
             engine_request_waiting_limit_source =
                 self.source(self.explicit.engine_request_waiting_limit),
             request_queue_limit = limits.request_queue_limit,
-            request_queue_limit_source = self.explicit.request_queue_limit
-                .map_or("default", |setting| setting.name),
+            request_queue_limit_source = self.source(self.explicit.request_queue_limit),
             limit_scope = "per DP rank",
             dp_rank_count = limits.rank_count,
             dp_ranks = %served,
@@ -422,14 +427,10 @@ struct CapacityWarning {
 }
 
 impl CapacityWarning {
-    /// Limits that exceed `max_num_seqs` by more than the warning factor.
-    /// The fixed queue default is excluded; explicit queue limits still warn.
-    /// Per-rank and worker-wide comparisons have the same ratio.
-    fn check(
-        limits: &AdmissionLimits,
-        explicit: &ExplicitLimits,
-        max_num_seqs: usize,
-    ) -> Vec<Self> {
+    /// Every limit in `limits` that exceeds `max_num_seqs` by more than the
+    /// warning factor. A per-rank limit is compared with per-rank capacity; the
+    /// worker-wide one with the worker's capacity, which is the same ratio.
+    fn check(limits: &AdmissionLimits, max_num_seqs: usize) -> Vec<Self> {
         let threshold = max_num_seqs.saturating_mul(CAPACITY_WARNING_FACTOR);
         [
             (
@@ -446,11 +447,7 @@ impl CapacityWarning {
             ),
         ]
         .into_iter()
-        .filter(|&(setting, limit)| {
-            limit > threshold
-                && (setting != DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT
-                    || explicit.request_queue_limit.is_some())
-        })
+        .filter(|&(_, limit)| limit > threshold)
         .map(|(setting, per_rank_limit)| Self {
             setting,
             per_rank_limit,
@@ -1510,7 +1507,7 @@ impl GateState {
         let warnings = match self.max_num_seqs {
             Some(max_num_seqs) if self.capacity_checked != Some((limits, max_num_seqs)) => {
                 self.capacity_checked = Some((limits, max_num_seqs));
-                CapacityWarning::check(&limits, &self.explicit, max_num_seqs)
+                CapacityWarning::check(&limits, max_num_seqs)
             }
             _ => Vec::new(),
         };
@@ -1812,8 +1809,8 @@ impl BackendAdmissionGate {
     /// `max_num_seqs` per rank, and the ranks `data_parallel_start_rank`
     /// through `data_parallel_start_rank + data_parallel_size - 1`.
     ///
-    /// Updates default engine and queue limits and the rank count the worker-wide
-    /// limits aggregate over, whenever a report arrives or changes. Explicit settings,
+    /// Updates the automatic limits and the rank count the worker-wide limits
+    /// aggregate over, whenever a report arrives or changes. Explicit settings,
     /// live occupancy, queued requests and outstanding permits are kept; a
     /// request already classified keeps its rank.
     pub fn record_engine_capacity(
@@ -2327,7 +2324,7 @@ mod tests {
     }
 
     #[test]
-    fn unset_settings_use_their_defaults() {
+    fn unset_settings_are_left_automatic() {
         assert_eq!(explicit_from(&[]), ExplicitLimits::default());
     }
 
@@ -2479,25 +2476,29 @@ mod tests {
         );
     }
 
-    /// Engine defaults follow reported capacity; the queue default divides a
-    /// fixed worker budget across the reported ranks, without growing storage.
+    /// Before any report the gate starts at `10000` / `10000` / `20000` with
+    /// one rank; a reported `max_num_seqs` `S` makes them `S` / `S` / `2S`, and
+    /// every process-wide limit is the per-rank one times the reported rank
+    /// count, multiplied once.
     #[test]
-    fn engine_defaults_follow_capacity_and_queue_defaults_follow_rank_count() {
+    fn automatic_limits_follow_the_reported_capacity_and_rank_count() {
         let automatic = ExplicitLimits::default();
-        let startup = AdmissionLimits {
-            engine_request_limit: 10_000,
-            engine_request_waiting_limit: 10_000,
-            request_queue_limit: 40_000,
-            rank_count: 1,
-        };
-        assert_eq!(AdmissionLimits::resolve(&automatic, None, 1), startup);
+        assert_eq!(
+            AdmissionLimits::resolve(&automatic, None, 1),
+            AdmissionLimits {
+                engine_request_limit: 10_000,
+                engine_request_waiting_limit: 10_000,
+                request_queue_limit: 20_000,
+                rank_count: 1,
+            }
+        );
         let reported = AdmissionLimits::resolve(&automatic, Some(256), 4);
         assert_eq!(
             reported,
             AdmissionLimits {
                 engine_request_limit: 256,
                 engine_request_waiting_limit: 256,
-                request_queue_limit: 10_000,
+                request_queue_limit: 512,
                 rank_count: 4,
             }
         );
@@ -2507,24 +2508,15 @@ mod tests {
                 reported.aggregate(reported.engine_request_waiting_limit),
                 reported.aggregate(reported.request_queue_limit),
             ),
-            (1_024, 1_024, 40_000)
+            (1_024, 1_024, 2_048)
         );
 
+        // The live gate applies the same, from its own reports.
         let gate = BackendAdmissionGate::new(automatic);
-        assert_eq!(gate.state.lock().limits, startup);
-        assert_eq!(gate.state.lock().slots.capacity(), 40_000);
-
-        // Rank information may arrive before engine capacity.
-        gate.record_engine_capacity(None, 4, 3);
         assert_eq!(
             gate.state.lock().limits,
-            AdmissionLimits {
-                request_queue_limit: 13_333,
-                rank_count: 3,
-                ..startup
-            }
+            AdmissionLimits::resolve(&automatic, None, 1)
         );
-
         gate.record_engine_capacity(Some(256), 4, 4);
         let state = gate.state.lock();
         assert_eq!(state.limits, reported);
@@ -2534,42 +2526,18 @@ mod tests {
                 state.engine_requests_waiting.aggregate_limit,
                 state.queued.aggregate_limit,
             ),
-            (1_024, 1_024, 40_000)
+            (1_024, 1_024, 2_048)
         );
-        assert_eq!(state.slots.capacity(), 40_000);
-        drop(state);
-
-        // Integer division leaves any remainder unused. Neither larger nor
-        // smaller rank counts require more than the startup allocation.
-        for (count, per_rank, aggregate) in [
-            (3, 13_333, 39_999),
-            (512, 78, 39_936),
-            (2, 20_000, 40_000),
-            (1, 40_000, 40_000),
-        ] {
-            gate.record_engine_capacity(Some(32), 4, count);
-            let state = gate.state.lock();
-            assert_eq!(
-                state.limits,
-                AdmissionLimits {
-                    engine_request_limit: 32,
-                    engine_request_waiting_limit: 32,
-                    request_queue_limit: per_rank,
-                    rank_count: count as usize,
-                }
-            );
-            assert_eq!(state.queued.aggregate_limit, aggregate);
-            assert_eq!(
-                state.slots.capacity(),
-                40_000,
-                "default storage never grows"
-            );
-        }
+        assert!(
+            state.slots.capacity() >= 2_048,
+            "queue storage holds the whole aggregate queue"
+        );
     }
 
-    /// Overriding one setting leaves the others at their defaults. The queue
-    /// default is independent of engine capacity and overrides. Explicit
-    /// values stay per-rank, including a queue of zero.
+    /// Overriding one setting leaves the others automatic; in particular the
+    /// queue's automatic value follows `max_num_seqs`, not an overridden engine
+    /// limit. Explicit values stay per-rank, and a queue of zero or one deeper
+    /// than twice the capacity are kept.
     #[test]
     fn each_setting_resolves_independently() {
         let engine_only = ExplicitLimits {
@@ -2581,7 +2549,7 @@ mod tests {
             AdmissionLimits {
                 engine_request_limit: 5,
                 engine_request_waiting_limit: 64,
-                request_queue_limit: 20_000,
+                request_queue_limit: 128,
                 rank_count: 2,
             }
         );
@@ -2599,25 +2567,11 @@ mod tests {
                 (queue, queue * 2)
             );
             assert_eq!(limits.engine_request_limit, 64);
-
-            let gate = BackendAdmissionGate::new(queue_only);
-            assert_eq!(gate.state.lock().slots.capacity(), queue);
-            for count in [3, 2] {
-                gate.record_engine_capacity(Some(64), 0, count);
-                let state = gate.state.lock();
-                assert_eq!(state.limits.request_queue_limit, queue);
-                assert_eq!(state.queued.aggregate_limit, queue * count as usize);
-                assert_eq!(
-                    state.slots.capacity(),
-                    queue * 3,
-                    "explicit capacity grows with ranks and retains allocated storage"
-                );
-            }
         }
     }
 
-    /// Reports update automatic engine limits as they arrive or change, but
-    /// never replace an explicit value — a queue limit of zero included.
+    /// Reports update the automatic limits as they arrive or change, but never
+    /// replace an explicit value — a queue limit of zero included.
     #[test]
     fn reports_never_replace_explicit_settings() {
         let gate = BackendAdmissionGate::new(ExplicitLimits {
@@ -2640,18 +2594,19 @@ mod tests {
         );
     }
 
-    /// Explicit limits warn only beyond ten times reported capacity.
-    /// Defaults do not warn, but explicitly setting the same queue size does.
+    /// The warning compares each nonzero limit with the reported capacity, per
+    /// rank and process-wide, and fires only beyond ten times it. Automatic
+    /// limits never trigger it.
     #[test]
-    fn capacity_warnings_only_flag_explicit_limits_above_the_threshold() {
-        let configured = ExplicitLimits {
-            engine_request_limit: explicit(2_561),
-            engine_request_waiting_limit: explicit(2_560),
-            request_queue_limit: explicit(40_000),
+    fn capacity_warnings_name_every_limit_more_than_ten_times_the_capacity() {
+        let limits = AdmissionLimits {
+            engine_request_limit: 2_561,
+            engine_request_waiting_limit: 2_560,
+            request_queue_limit: 40_000,
+            rank_count: 2,
         };
-        let limits = AdmissionLimits::resolve(&configured, Some(256), 2);
         assert_eq!(
-            CapacityWarning::check(&limits, &configured, 256),
+            CapacityWarning::check(&limits, 256),
             [
                 CapacityWarning {
                     setting: DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT,
@@ -2667,15 +2622,13 @@ mod tests {
                 },
             ]
         );
-        let defaults = ExplicitLimits::default();
-        let automatic = AdmissionLimits::resolve(&defaults, Some(256), 2);
-        assert!(CapacityWarning::check(&automatic, &defaults, 256).is_empty());
-        let disabled_queue = ExplicitLimits {
-            request_queue_limit: explicit(0),
-            ..defaults
+        let automatic = AdmissionLimits::resolve(&ExplicitLimits::default(), Some(256), 2);
+        assert!(CapacityWarning::check(&automatic, 256).is_empty());
+        let disabled_queue = AdmissionLimits {
+            request_queue_limit: 0,
+            ..automatic
         };
-        let limits = AdmissionLimits::resolve(&disabled_queue, Some(256), 2);
-        assert!(CapacityWarning::check(&limits, &disabled_queue, 256).is_empty());
+        assert!(CapacityWarning::check(&disabled_queue, 256).is_empty());
     }
 
     /// The warning is evaluated when capacity first arrives, never guessed
@@ -3754,7 +3707,7 @@ mod tests {
         assert_eq!(published(&gate), (0, 0, 0));
     }
 
-    /// A late capacity report raises automatic engine limits and admits queued work
+    /// A late capacity report raises automatic limits and admits queued work
     /// at once; a lower one evicts nothing and admits again only once
     /// occupancy falls below it. Queue handles and permits survive both.
     #[tokio::test]
@@ -4100,11 +4053,7 @@ mod tests {
     /// end.
     #[tokio::test]
     async fn the_schedule_stays_exact_through_every_kind_of_transition() {
-        // Keep the queue small so this sequence exercises rejection too.
-        let gate = BackendAdmissionGate::new(ExplicitLimits {
-            request_queue_limit: explicit(2),
-            ..ExplicitLimits::default()
-        });
+        let gate = BackendAdmissionGate::new(ExplicitLimits::default());
         let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
         let mut next = |bound: usize| {
             seed ^= seed << 13;

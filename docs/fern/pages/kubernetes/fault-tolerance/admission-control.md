@@ -21,7 +21,7 @@ These three settings apply **per data-parallel (DP) rank**:
 |---|---|---|
 | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` | Admitted requests that have not finished. | Reported `max_num_seqs`; `10000` until reported. |
 | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` | Admitted requests awaiting their first generated token or completion. | Reported `max_num_seqs`; `10000` until reported. |
-| `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | Requests waiting outside the engine. Set `0` to disable queueing. | `40000 / number_of_dp_ranks`. |
+| `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | Requests waiting outside the engine. Set `0` to disable queueing. | Twice reported `max_num_seqs`; `20000` until reported. |
 
 A request needs room under both engine limits. Otherwise, it waits in the gate queue. If the queue is
 also full, the worker rejects it; overload reaches the client as HTTP 529 by default.
