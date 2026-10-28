@@ -7,7 +7,7 @@ subtitle: Configure Dynamo's built-in reasoning parsers for models that emit thi
 
 Some models emit reasoning separately from their final response. Dynamo can split that output into `reasoning_content` and normal assistant `content` by configuring `--dyn-reasoning-parser` on the backend worker. This page covers Dynamo-native parsing; if your model is not listed, use [engine fallback](chat-processors.mdx), which also explains valid combinations of `--dyn-reasoning-parser`, `--dyn-chat-processor`, and `--dyn-tool-call-parser`.
 
-See the [canonical routing table](troubleshooting-tool-calls.md#parser-generation-routing) for version selection and compatible names. Either selector can identify a Unified family; both configured selectors must agree.
+See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing) for version selection and compatible names.
 
 ## Configure Reasoning Parsing
 
@@ -144,7 +144,7 @@ Thinking controls use this precedence order:
 2. `--dyn-default-thinking-mode` or `DYN_DEFAULT_THINKING_MODE`
 3. The model or chat template's native default
 
-Kimi K3 named-tool choice is an exception to this thinking precedence: configuring `--dyn-tool-call-parser kimi_k3` or `kimi-k3` forces thinking off for a named call even when the request enables it. Selecting K3 only through the reasoning selector does not apply that override.
+Kimi K3 overrides this precedence for named calls: `--dyn-tool-call-parser kimi_k3` (or `kimi-k3`) forces thinking off, even if requested. The reasoning selector alone does not apply this override.
 
 Explicit request controls include root-level `thinking`, top-level
 `reasoning_effort`, and the `thinking`, `enable_thinking`, `thinking_mode`, or
@@ -178,9 +178,9 @@ deployment default.
 
 Choose a model family, then expand the matching model option to see its parser name and configuration details.
 
-The **Upstream name** column shows where the vLLM or SGLang parser name differs from Dynamo's. This is relevant for engine fallback and when configuring the native structured-output reasoning gate. Upstream names are engine-version dependent. A `Dynamo-only` label describes this catalog's Dynamo entry; it is not a claim that no engine release can implement the format.
+The **Upstream name** column lists engine names that differ from Dynamo's, for engine fallback and native reasoning gates. Names vary by engine version; `Dynamo-only` describes this catalog, not every engine release.
 
-Parsers marked **Force-reasoning: Yes** emit reasoning content from token one without requiring an explicit opening tag such as `<think>`. Other parsers can start from an opener in generated output or supported prompt-prefilled state; force-reasoning and prompt prefill are separate mechanisms.
+Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. Other parsers can start from a generated opener or supported prompt-prefilled state. Prompt prefill and force-reasoning are separate mechanisms.
 
 <AccordionGroup>
   <Accordion title="Kimi">
@@ -188,7 +188,7 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
       <Accordion title="Kimi K3">
         **Parser:** `kimi_k3` (Unified alias `kimi-k3`)
 
-        **Notes:** XTML thinking and response channels, including prompt-prefilled reasoning. The named-tool thinking override requires `--dyn-tool-call-parser kimi_k3` or `kimi-k3`; the reasoning selector alone does not enable it. See [Tool Call Parsing](tool-call-parsing.mdx).
+        **Notes:** XTML thinking and response channels, including prompt-prefilled reasoning. See [Tool Call Parsing](tool-call-parsing.mdx) for the K3 named-tool thinking override.
       </Accordion>
 
       <Accordion title="Kimi K2.5 / Kimi K2.6 format-compatible thinking models">
