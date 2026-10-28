@@ -140,12 +140,11 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "options, allow_top, wrapped, expected",
+    "options, wrapped, expected",
     [
-        pytest.param({}, False, False, {}, id="default"),
+        pytest.param({}, False, {}, id="default"),
         pytest.param(
             {"logprobs": 0},
-            False,
             False,
             {"return_logprob": True, "top_logprobs_num": 0},
             id="chosen-token",
@@ -153,31 +152,24 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
         pytest.param(
             {"prompt_logprobs": 0},
             False,
-            False,
             {},
             id="prompt-only-excluded",
         ),
-        pytest.param({"logprobs": 3}, False, False, None, id="top-rejected"),
         pytest.param(
             {"logprobs": 3},
-            True,
             False,
             {"return_logprob": True, "top_logprobs_num": 3},
-            id="top-allowed",
+            id="top-allowed-by-default",
         ),
         pytest.param(
             {"logprobs": 0, "prompt_logprobs": 5},
-            True,
             True,
             {"return_logprob": True, "top_logprobs_num": 0},
             id="wrapped-mixed-excludes-prompt",
         ),
     ],
 )
-async def test_prefill_forwards_first_token_logprob_options(
-    monkeypatch, wrapped, allow_top, options, expected
-):
-    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1" if allow_top else "0")
+async def test_prefill_forwards_first_token_logprob_options(wrapped, options, expected):
     calls = []
 
     async def async_generate(**kwargs):
@@ -204,11 +196,6 @@ async def test_prefill_forwards_first_token_logprob_options(
 
     context = SimpleNamespace(id=lambda: "request-id", trace_id="trace-id")
     async with aclosing(handler.generate(request, context)) as stream:
-        if expected is None:
-            with pytest.raises(ValueError, match="DYN_SGL_ALLOW_TOP_LOGPROBS"):
-                await anext(stream)
-            assert not calls
-            return
         await anext(stream)
 
     assert len(calls) == 1
@@ -683,6 +670,33 @@ async def test_ordered_cancellation_skips_stopped_chunk_processing(processor_nam
 
 
 @pytest.mark.parametrize(
+    "router_hint", [None, {"protocol_version": "0.1", "actions": []}]
+)
+@pytest.mark.parametrize("supports_hints", [False, True])
+def test_native_generate_uses_only_router_hints(
+    monkeypatch, router_hint, supports_hints
+):
+    if supports_hints and "kv_hints" not in GenerateReqInput.__dataclass_fields__:
+        pytest.skip("installed SGLang does not support kv_hints")
+    payload = {"kv_hints": {"caller_controlled": True}}
+    if not supports_hints:
+        monkeypatch.delitem(
+            GenerateReqInput.__dataclass_fields__, "kv_hints", raising=False
+        )
+    native = build_native_generate_request(
+        payload,
+        input_ids=[7],
+        request_id="internal",
+        priority=None,
+        kv_hint=router_hint,
+    )
+    assert getattr(native, "kv_hints", None) == (
+        router_hint if supports_hints else None
+    )
+    assert payload == {"kv_hints": {"caller_controlled": True}}
+
+
+@pytest.mark.parametrize(
     "body_salt,routing_salt,expected_salt",
     [
         (None, None, None),
@@ -790,29 +804,15 @@ def test_engine_generate_requires_object_sampling_params_for_prefill_override():
         )
 
 
-def test_engine_generate_rejects_top_logprobs_by_default(monkeypatch):
-    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
-
-    with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
-        build_native_generate_request(
-            {"return_logprob": True, "top_logprobs_num": 1},
-            input_ids=[1],
-            request_id="request",
-            priority=None,
-        )
-
-
-def test_engine_generate_allows_top_logprobs_with_escape_hatch(monkeypatch):
-    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
-
+def test_engine_generate_allows_top_logprobs_by_default():
     native = build_native_generate_request(
-        {"return_logprob": True, "top_logprobs_num": 2},
+        {"return_logprob": True, "top_logprobs_num": 1},
         input_ids=[1],
         request_id="request",
         priority=None,
     )
 
-    assert native.top_logprobs_num == 2
+    assert native.top_logprobs_num == 1
 
 
 @pytest.mark.asyncio
@@ -1327,7 +1327,7 @@ def test_ordered_cancellation_rejects_native_batch():
     )
 
 
-def test_build_sampling_params_forwards_repetition_controls_for_token_requests():
+def test_build_sampling_params_forwards_sampling_options_for_token_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
     sampling_params = handler._build_sampling_params(
@@ -1340,6 +1340,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
                 "top_p": 0.95,
                 "top_k": 40,
                 "min_p": 0.01,
+                "logit_bias": {"18": -10.0},
                 "seed": 1234,
             },
             "stop_conditions": {"max_tokens": 8},
@@ -1353,6 +1354,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
     assert sampling_params["top_p"] == 0.95
     assert sampling_params["top_k"] == 40
     assert sampling_params["min_p"] == 0.01
+    assert sampling_params["logit_bias"] == {"18": -10.0}
     assert sampling_params["sampling_seed"] == 1234
     assert "seed" not in sampling_params
 
@@ -1726,7 +1728,7 @@ def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
     assert sampling_params["stop_token_ids"] == [32, 34]
 
 
-def test_build_sampling_params_forwards_repetition_controls_for_openai_requests():
+def test_build_sampling_params_forwards_sampling_options_for_openai_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=True)
 
     sampling_params = handler._build_sampling_params(
@@ -1738,6 +1740,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_openai_requests(
             "top_p": 0.95,
             "top_k": 40,
             "min_p": 0.01,
+            "logit_bias": {"18": -10.0},
             "seed": 1234,
             "max_tokens": 8,
         }
@@ -1750,6 +1753,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_openai_requests(
     assert sampling_params["top_p"] == 0.95
     assert sampling_params["top_k"] == 40
     assert sampling_params["min_p"] == 0.01
+    assert sampling_params["logit_bias"] == {"18": -10.0}
     assert sampling_params["sampling_seed"] == 1234
     assert "seed" not in sampling_params
 
@@ -1889,9 +1893,7 @@ class TestMultimodalGuard:
         )
 
 
-def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
-    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
-
+def test_build_logprob_kwargs_allows_chosen_token_logprobs():
     kwargs = DecodeWorkerHandler._build_logprob_kwargs(
         {"output_options": {"logprobs": 0}}
     )
@@ -1899,16 +1901,7 @@ def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
     assert kwargs == {"return_logprob": True, "top_logprobs_num": 0}
 
 
-def test_build_logprob_kwargs_rejects_top_logprobs_by_default(monkeypatch):
-    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
-
-    with pytest.raises(ValueError, match="does not currently support logprobs >= 1"):
-        DecodeWorkerHandler._build_logprob_kwargs({"output_options": {"logprobs": 1}})
-
-
-def test_build_logprob_kwargs_allows_top_logprobs_with_escape_hatch(monkeypatch):
-    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
-
+def test_build_logprob_kwargs_allows_top_logprobs_by_default():
     kwargs = DecodeWorkerHandler._build_logprob_kwargs(
         {"output_options": {"logprobs": 2}}
     )

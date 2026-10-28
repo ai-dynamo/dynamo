@@ -3,12 +3,12 @@
 
 //! Ordered reasoning, text, and tool-call parsing through one state machine.
 //!
-//! Qwen3 is gated behind
-//! [`DYN_PARSER_VERSION`](dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION).
+//! Compatible configured families use this path by default; `DYN_PARSER_VERSION=1`
+//! selects the legacy parsers when available.
 //!
 //! # What this replaces
 //!
-//! Dynamo serves a Qwen3 turn today by chaining two independent parsers: the reasoning
+//! The legacy Qwen3 route chains two independent parsers: the reasoning
 //! parser strips `<think>...</think>` across the whole stream into one assembled
 //! `reasoning_content`, and the tool-call jail then scans whatever is left. That chain
 //! cannot represent WHERE a thought happened. Given
@@ -134,8 +134,15 @@ pub(crate) fn selected_family(
     let configured = configured_family(tool_call_parser, reasoning_parser);
     let selection = super::tool_parser_v2::selected_version()
         .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    let selected =
-        selected_family_for_selection(configured, selection, tool_call_parser, reasoning_parser);
+    // Qwen3 thinking models also use this reasoning name with Hermes tool syntax.
+    let selected = if tool_call_parser.is_none()
+        && reasoning_parser == Some("qwen3")
+        && selection == dynamo_runtime::config::ParserVersion::Auto
+    {
+        None
+    } else {
+        selected_family_for_selection(configured, selection)
+    };
     tracing::debug!(
         target: "dynamo_unified",
         ?tool_call_parser,
@@ -150,99 +157,27 @@ pub(crate) fn selected_family(
 fn selected_family_for_selection(
     configured: Option<&'static str>,
     selection: dynamo_runtime::config::ParserVersion,
-    tool_call_parser: Option<&str>,
-    reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
     match selection {
-        dynamo_runtime::config::ParserVersion::Auto => configured.filter(|family| {
-            *family == DEEPSEEK_V41_UNIFIED_FAMILY
-                && tool_call_parser == Some(DEEPSEEK_V41_UNIFIED_FAMILY)
-                && reasoning_parser == Some(DEEPSEEK_V41_UNIFIED_FAMILY)
-        }),
+        dynamo_runtime::config::ParserVersion::Auto | dynamo_runtime::config::ParserVersion::V2 => {
+            configured
+        }
         dynamo_runtime::config::ParserVersion::V1 => None,
-        dynamo_runtime::config::ParserVersion::V2 => configured,
     }
 }
 
-/// Whether the configured unified family is needed to decode content even when
-/// request-level routing may keep tool calls on the legacy path. Muse's auto
-/// route is request-mode dependent, but its decoder must remain available for
-/// reasoning-only streams and when tool-call output is suppressed.
 pub(crate) fn selected_content_decoder_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
-    let configured = configured_family(tool_call_parser, reasoning_parser);
-    let selection = super::tool_parser_v2::selected_version()
-        .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    let selected = selected_batch_family_for_selection(
-        configured,
-        selection,
-        tool_call_parser,
-        reasoning_parser,
-    );
-    tracing::debug!(
-        target: "dynamo_unified",
-        ?tool_call_parser,
-        ?reasoning_parser,
-        ?configured,
-        ?selection,
-        ?selected,
-        "unified content decoder decision"
-    );
-    selected
-}
-
-fn selected_batch_family_for_selection(
-    configured: Option<&'static str>,
-    selection: dynamo_runtime::config::ParserVersion,
-    tool_call_parser: Option<&str>,
-    reasoning_parser: Option<&str>,
-) -> Option<&'static str> {
-    match selection {
-        dynamo_runtime::config::ParserVersion::Auto if configured == Some("muse_glimmer") => {
-            configured
-        }
-        _ => {
-            selected_family_for_selection(configured, selection, tool_call_parser, reasoning_parser)
-        }
-    }
-}
-
-/// The configured family eligible to own raw aggregate text.
-///
-/// Return the compatible unified family configured on the model card, before applying
-/// the process-wide generation policy. Batch requests that suppress calls still need
-/// the unified decoder to strip native markup before the calls are discarded.
-pub(crate) fn configured_batch_family(
-    tool_call_parser: Option<&str>,
-    reasoning_parser: Option<&str>,
-) -> Option<&'static str> {
-    configured_family(tool_call_parser, reasoning_parser)
+    selected_family(tool_call_parser, reasoning_parser)
 }
 
 pub(crate) fn selected_batch_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
-    let configured = configured_batch_family(tool_call_parser, reasoning_parser);
-    let selection = super::tool_parser_v2::selected_version()
-        .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    let selected = selected_batch_family_for_selection(
-        configured,
-        selection,
-        tool_call_parser,
-        reasoning_parser,
-    );
-    tracing::debug!(
-        target: "dynamo_unified",
-        ?tool_call_parser,
-        ?reasoning_parser,
-        ?configured,
-        ?selection,
-        "unified batch parser path decision"
-    );
-    selected
+    selected_family(tool_call_parser, reasoning_parser)
 }
 
 pub(crate) fn selected_request_family(
@@ -660,10 +595,10 @@ fn starts_bare_json(content: &str) -> bool {
 /// computes: the rendered prompt ended with the family's reasoning opener, so generated
 /// output starts inside a thought the model will close without ever emitting the
 /// opener. Absent that, the answer is per family.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct StreamPrefill {
     pub starting_state: UnifiedParserStartingState,
-    pub prefix: Option<&'static str>,
+    pub prefix: Option<std::sync::Arc<str>>,
 }
 
 impl From<UnifiedParserStartingState> for StreamPrefill {
@@ -777,6 +712,7 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
                 _ => UnifiedParserStartingState::None,
             },
         ),
+        "gpt_oss" => Ok(UnifiedParserStartingState::None),
         "muse_glimmer" => Ok(infer_marker_prefill(content, "<|start|>", "<|eom|>")),
         other => anyhow::bail!("no prefill detector for unified parser family '{other}'"),
     }
@@ -1645,10 +1581,37 @@ impl ChoiceState {
     ) -> anyhow::Result<Self> {
         let prefill = prefill.into();
         let mut parser = create_unified_parser_for_family(family, tools)?;
-        // `prompt_token_ids` stays empty: this path establishes the starting state from
-        // the rendered prompt text (see `stream_prefill` / `detect_prefill`), not from
-        // token IDs, which the preprocessor has already consumed by this point.
-        //
+        // The built-in Harmony initializer resets its call counter. Replay consumed
+        // tokens afterward so the open call and later calls share that counter.
+        // Guided JSON inherits only the resolved channel, since its request constraint
+        // owns the tool envelope. Vendor overrides retain their initialization contract.
+        let harmony = family == "gpt_oss";
+        let native_harmony = harmony && matches!(&tool_output_mode, UnifiedToolOutputMode::Native);
+        let vendor_harmony = harmony
+            && dynamo_parsers_v2::vendor_unified_families()
+                .iter()
+                .any(|registered| registered == family);
+        let replay_harmony =
+            native_harmony && !vendor_harmony && parser.input_capabilities().token_ids;
+        let mut harmony_prefix_tokens = if native_harmony || vendor_harmony {
+            prefill
+                .prefix
+                .as_deref()
+                .or_else(|| {
+                    (native_harmony && prefill.starting_state == UnifiedParserStartingState::None)
+                        .then_some("<|start|>assistant")
+                })
+                .map(dynamo_parsers_v2::unified::harmony::encode_harmony)
+                .transpose()?
+        } else {
+            None
+        };
+        let prompt_token_ids = if replay_harmony {
+            Vec::new()
+        } else {
+            harmony_prefix_tokens.take().unwrap_or_default()
+        };
+
         // Streaming guided calls commit per call once the name and argument object opener
         // are unambiguous. A committed fragment cannot later be rejected or recovered as
         // text, so this path opts into that contract explicitly — unless the request
@@ -1658,8 +1621,10 @@ impl ChoiceState {
         // it is inert in `UnifiedToolOutputMode::Native`, where the parser builds no
         // guided state at all.
         parser.initialize_request(UnifiedParserInit {
-            prompt_token_ids: Vec::new(),
-            starting_state: if prefill.prefix.is_some() {
+            prompt_token_ids,
+            starting_state: if prefill.prefix.is_some()
+                && (!harmony || native_harmony || vendor_harmony)
+            {
                 UnifiedParserStartingState::None
             } else {
                 prefill.starting_state
@@ -1667,11 +1632,18 @@ impl ChoiceState {
             tool_output_mode: tool_output_mode.clone(),
             invalid_guided_payload: invalid_guided_payload_policy(guided_streaming),
         })?;
-        if let Some(prefix) = prefill.prefix {
+        if let Some(tokens) = harmony_prefix_tokens {
+            // Consumed prompt deltas stay private; token replay preserves literal
+            // delimiter fragments without joining them to generated text.
+            parser.parse_token_ids_into(&tokens, &mut UnifiedParserOutput::default())?;
+        }
+        if family != "gpt_oss"
+            && let Some(prefix) = prefill.prefix
+        {
             // Replay only consumed structural bytes; the grammar retains ownership
             // of an optional channel label that generation has not completed yet.
             let mut output = UnifiedParserOutput::default();
-            parser.parse_into(prefix, &mut output)?;
+            parser.parse_into(&prefix, &mut output)?;
             anyhow::ensure!(
                 output.events.is_empty(),
                 "prompt prefix emitted visible output"
@@ -1994,6 +1966,7 @@ impl ChoiceState {
                         name: first.then_some(call.name).flatten(),
                         arguments: Some(call.arguments),
                     }),
+                    custom: None,
                 }]);
             }
         }
@@ -2391,6 +2364,14 @@ fn parse_complete_in_mode(
     .flatten();
     let content = &content[..incomplete_start.unwrap_or(content.len())];
     parser.initialize_request(UnifiedParserInit {
+        prompt_token_ids: if family == "gpt_oss"
+            && matches!(&effective_mode, UnifiedToolOutputMode::Native)
+            && content.trim_start().starts_with("to=")
+        {
+            dynamo_parsers_v2::unified::harmony::encode_harmony("<|start|>assistant")?
+        } else {
+            Vec::new()
+        },
         starting_state: policy.batch_starting_state(family, content)?,
         tool_output_mode: effective_mode,
         ..UnifiedParserInit::default()
@@ -2457,6 +2438,7 @@ fn parse_complete_in_mode(
                         name,
                         arguments: serde_json::to_string(&arguments)?,
                     },
+                    custom: None,
                 });
             }
         }
@@ -2966,6 +2948,9 @@ where
         prefix: prefill_prefix,
     } = prefill.into();
     let prefill = policy.starting_state(family, prefill);
+    let prefill_prefix = prefill_prefix
+        .filter(|_| family == "gpt_oss" || prefill == UnifiedParserStartingState::Reasoning);
+    let has_consumed_harmony_prefix = family == "gpt_oss" && prefill_prefix.is_some();
     let tools = to_v2_tools(tool_definitions.as_deref());
     stream! {
         let mut undecided_guided_prefix: HashMap<u32, JsonPrefillProbe> = HashMap::new();
@@ -3017,8 +3002,13 @@ where
                 }
             }
 
+            // A finished choice cannot reopen its parser; preserve envelope metadata below.
+            chat.inner.choices.retain(|choice| {
+                !records.get(&choice.index).is_some_and(|record| record.finished)
+            });
+
             if chat.inner.choices.is_empty() {
-                // A usage-only chunk. OpenAI stream ordering requires every choice's
+                // A metadata-only chunk. OpenAI stream ordering requires every choice's
                 // terminal finish_reason to precede it, so flush first.
                 if chat.inner.usage.is_some()
                     && let Some(template) = &template {
@@ -3335,6 +3325,7 @@ where
                     && (prefill == UnifiedParserStartingState::Reasoning
                         || policy.structured_response && prefill == UnifiedParserStartingState::None)
                     && policy.inspects_json_prefill(&guided_tool_constraint)
+                    && !has_consumed_harmony_prefix
                     && !records.get(&original.index).is_some_and(|record| record.detoured)
                 {
                     let text = match original.delta.content.as_ref() {
@@ -3405,6 +3396,7 @@ where
                             UnifiedParserStartingState::Response
                         } else if prefill == UnifiedParserStartingState::Reasoning
                             && policy.inspects_json_prefill(&guided_tool_constraint)
+                            && !has_consumed_harmony_prefix
                         {
                             if policy.structured_response {
                                 match original.delta.content.as_ref() {
@@ -3458,7 +3450,8 @@ where
                         }
                         let choice_prefill = StreamPrefill {
                             starting_state: choice_prefill,
-                            prefix: (choice_prefill == UnifiedParserStartingState::Reasoning).then_some(prefill_prefix).flatten(),
+                            prefix: (choice_prefill == prefill && !records.get(&original.index).is_some_and(|record| record.detoured))
+                                .then(|| prefill_prefix.clone()).flatten(),
                         };
                         match ChoiceState::new(family, &tools, choice_prefill, mode, guided_streaming) {
                             Ok(mut state) => {
@@ -4022,41 +4015,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn selected_family_needs_the_env_flag() {
-        // The env flag is process-wide and read once, so this asserts the relationship
-        // between the two functions rather than mutating the environment: whatever the
-        // flag says, `selected_family` never selects a pair `configured_family` rejects,
-        // and it agrees with `configured_family` exactly when the flag is on.
-        let pair = (Some("qwen3_coder"), Some("qwen3"));
-        assert_eq!(
-            configured_family(pair.0, pair.1),
-            Some(QWEN3_UNIFIED_FAMILY)
-        );
-        if parsers_v2_selected() {
-            assert_eq!(
-                selected_family(pair.0, pair.1),
-                Some(QWEN3_UNIFIED_FAMILY),
-                "flag on: the configured pair must be selected"
-            );
-        } else {
-            assert_eq!(
-                selected_family(pair.0, pair.1),
-                None,
-                "flag off: the configured pair must NOT be selected"
-            );
-        }
-        // Never selected regardless of the flag.
-        assert_eq!(
-            selected_family(Some("qwen3_coder"), None),
-            parsers_v2_selected().then_some(QWEN3_UNIFIED_FAMILY)
-        );
-        assert_eq!(
-            selected_family(None, Some("qwen3")),
-            parsers_v2_selected().then_some(QWEN3_UNIFIED_FAMILY)
-        );
-    }
-
-    #[test]
     fn batch_routing_uses_the_configured_pair_for_every_output_mode() {
         let pair = (Some("qwen3_coder"), Some("qwen3"));
         assert_eq!(
@@ -4067,6 +4025,417 @@ pub(crate) mod tests {
     }
 
     // --- tool_choice -> UnifiedToolOutputMode ------------------------------------
+
+    #[test]
+    fn gpt_oss_aliases_select_the_unified_route_unless_v1() {
+        use dynamo_runtime::config::ParserVersion;
+
+        for (tool, reasoning) in [
+            (Some("harmony"), Some("gpt_oss")),
+            (Some("harmony"), None),
+            (None, Some("gpt_oss")),
+        ] {
+            let family = configured_family(tool, reasoning);
+            assert_eq!(family, Some("gpt_oss"));
+            for (version, expected) in [
+                (ParserVersion::Auto, Some("gpt_oss")),
+                (ParserVersion::V1, None),
+                (ParserVersion::V2, Some("gpt_oss")),
+            ] {
+                assert_eq!(selected_family_for_selection(family, version), expected);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_consumed_headers_and_guided_calls_match_batch_at_every_split() {
+        for (input, constraint, reasoning) in [
+            (
+                " to=functions.get_weather<|channel|>analysis<|message|>{\"city\":\"Tokyo\"}<|call|>",
+                GuidedToolConstraint::None,
+                "",
+            ),
+            (
+                "<|channel|>analysis<|message|>plan<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary<|message|>{\"city\":\"Tokyo\"}<|call|>",
+                GuidedToolConstraint::StructuralTag,
+                "plan",
+            ),
+            (
+                r#"[{"name":"get_weather","parameters":{"city":"Tokyo"}}]"#,
+                GuidedToolConstraint::GuidedJsonRequired,
+                "",
+            ),
+            (
+                "<|channel|>analysis<|message|>plan<|end|><|start|>assistant<|channel|>final<|message|>[{\"name\":\"get_weather\",\"parameters\":{\"city\":\"Tokyo\"}}]<|return|>",
+                GuidedToolConstraint::GuidedJsonRequired,
+                "plan",
+            ),
+            (
+                r#"{"city":"Tokyo"}"#,
+                GuidedToolConstraint::GuidedJsonNamed {
+                    tool_name: "get_weather".to_string(),
+                },
+                "",
+            ),
+        ] {
+            let batch = parse_complete("gpt_oss", input, &constraint, &weather_tools()).unwrap();
+            assert!(batch.text.is_empty(), "{:?}", batch.text);
+            assert_eq!(batch.reasoning, reasoning);
+            assert_eq!(batch.tool_calls.len(), 1);
+            assert_eq!(batch.tool_calls[0].function.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&batch.tool_calls[0].function.arguments)
+                    .unwrap(),
+                serde_json::json!({"city":"Tokyo"})
+            );
+            for split in 0..=input.len() {
+                let output = apply_stream_with_constraint(
+                    stream::iter([chunk(&input[..split], false), chunk(&input[split..], true)]),
+                    Some(weather_tools()),
+                    constraint.clone(),
+                    UnifiedParserStartingState::None,
+                    "gpt_oss",
+                    true,
+                )
+                .collect::<Vec<_>>()
+                .await;
+                assert!(output.iter().all(|response| !response.is_error()));
+                let events = logical_events(&output);
+                assert_stream_calls_match_batch(&events, &batch, &format!("split={split}"));
+                let streamed_reasoning: String = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        LogicalEvent::Reasoning(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(streamed_reasoning, reasoning, "split={split}");
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, LogicalEvent::Text(text) if !text.is_empty())),
+                    "split={split}: {events:?}"
+                );
+                assert_eq!(
+                    collect_choices(&output).last().unwrap().finish_reason,
+                    Some(FinishReason::ToolCalls)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_stranded_final_reaches_stream_and_batch_at_stop_and_eof() {
+        let input = "<|channel|>analysis<|message|>thought<|end|><|start|>assistant<|channel|>final*)__Hello!";
+        let batch = parse_complete("gpt_oss", input, &GuidedToolConstraint::None, &[]).unwrap();
+        assert_eq!(batch.text, "*)__Hello!");
+        assert_eq!(batch.reasoning, "thought");
+        assert!(batch.tool_calls.is_empty());
+        for terminal in [false, true] {
+            for split in 0..=input.len() {
+                let output = apply_stream_with_constraint(
+                    stream::iter([
+                        chunk(&input[..split], false),
+                        chunk(&input[split..], terminal),
+                    ]),
+                    None,
+                    GuidedToolConstraint::None,
+                    UnifiedParserStartingState::None,
+                    "gpt_oss",
+                    true,
+                )
+                .collect::<Vec<_>>()
+                .await;
+                assert!(output.iter().all(|response| !response.is_error()));
+                assert_eq!(
+                    logical_events(&output),
+                    vec![
+                        LogicalEvent::Reasoning("thought".into()),
+                        LogicalEvent::Text("*)__Hello!".into()),
+                    ],
+                    "terminal={terminal} split={split}"
+                );
+                assert_eq!(
+                    collect_choices(&output).last().unwrap().finish_reason,
+                    terminal.then_some(FinishReason::Stop)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_oss_vendor_keeps_prompt_initialization() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_vendor_keeps_prompt_initialization"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        struct VendorHarmony {
+            initialized: bool,
+            token_input: bool,
+        }
+        impl UnifiedParser for VendorHarmony {
+            fn input_capabilities(&self) -> dynamo_parsers_v2::UnifiedParserInputCapabilities {
+                dynamo_parsers_v2::UnifiedParserInputCapabilities {
+                    text: true,
+                    token_ids: self.token_input,
+                }
+            }
+            fn initialize_request(&mut self, init: UnifiedParserInit) -> anyhow::Result<()> {
+                assert_eq!(
+                    dynamo_parsers_v2::unified::harmony::decode_harmony(&init.prompt_token_ids)?,
+                    "<|start|>assistant<|channel|>final<|message|>"
+                );
+                assert_eq!(init.starting_state, UnifiedParserStartingState::None);
+                self.initialized = true;
+                Ok(())
+            }
+            fn parse_into(
+                &mut self,
+                delta: &str,
+                output: &mut UnifiedParserOutput,
+            ) -> anyhow::Result<()> {
+                assert!(self.initialized);
+                output.push_text(delta);
+                Ok(())
+            }
+            fn parse_token_ids_into(
+                &mut self,
+                ids: &[u32],
+                output: &mut UnifiedParserOutput,
+            ) -> anyhow::Result<()> {
+                anyhow::ensure!(
+                    self.token_input,
+                    "vendor does not support generated token ingestion"
+                );
+                self.parse_into(
+                    &dynamo_parsers_v2::unified::harmony::decode_harmony(ids)?,
+                    output,
+                )
+            }
+            fn finish(&mut self) -> anyhow::Result<UnifiedParserOutput> {
+                Ok(UnifiedParserOutput::default())
+            }
+        }
+        fn make_parser(token_input: bool) -> anyhow::Result<Box<dyn UnifiedParser>> {
+            Ok(Box::new(VendorHarmony {
+                initialized: false,
+                token_input,
+            }))
+        }
+        fn text_factory(_: &[Tool]) -> anyhow::Result<Box<dyn UnifiedParser>> {
+            make_parser(false)
+        }
+        fn token_factory(_: &[Tool]) -> anyhow::Result<Box<dyn UnifiedParser>> {
+            make_parser(true)
+        }
+        let factories: [dynamo_parsers_v2::unified::UnifiedParserFactory; 2] =
+            [text_factory, token_factory];
+        for factory in factories {
+            let _ = dynamo_parsers_v2::register_unified_parser("gpt_oss", factory);
+            for mode in [
+                UnifiedToolOutputMode::Native,
+                UnifiedToolOutputMode::GuidedJson {
+                    named_tool: Some("lookup".into()),
+                },
+            ] {
+                let mut state = ChoiceState::new(
+                    "gpt_oss",
+                    &[],
+                    StreamPrefill {
+                        starting_state: UnifiedParserStartingState::Reasoning,
+                        prefix: Some(std::sync::Arc::from(
+                            "<|start|>assistant<|channel|>final<|message|>",
+                        )),
+                    },
+                    mode,
+                    true,
+                )
+                .unwrap();
+                assert_eq!(
+                    state.push("answer"),
+                    vec![UnifiedParserEvent::Text("answer".into())]
+                );
+                assert!(state.finish().is_empty());
+            }
+            assert!(dynamo_parsers_v2::unregister_unified_parser("gpt_oss").is_some());
+        }
+    }
+
+    // Adapter token replay and public tool indices are outside the parser-only corpus.
+    #[test]
+    fn gpt_oss_consumed_tool_body_keeps_later_call_indices_distinct() {
+        let tools = to_v2_tools(Some(&weather_tools()));
+        for (body, first_tail, first_arguments) in [
+            ("", "{\"city\":\"first\"}<|call|>", "{\"city\":\"first\"}"),
+            ("{\"city\":\"fi", "rst\"}<|call|>", "rst\"}"),
+            ("{\"city\":\"first\"}", "<|call|>", ""),
+        ] {
+            let prefix = format!(
+                "<|start|>assistant to=functions.get_weather<|channel|>commentary<|message|>{body}"
+            );
+            let input = format!(
+                "{first_tail}<|start|>assistant to=functions.get_weather<|channel|>commentary<|message|>{{\"city\":\"second\"}}<|call|><|start|>assistant to=functions.get_weather<|channel|>commentary<|message|>{{\"city\":\"third\"}}<|call|>"
+            );
+            for split in 0..=input.len() {
+                let mut state = ChoiceState::new(
+                    "gpt_oss",
+                    &tools,
+                    StreamPrefill {
+                        starting_state: UnifiedParserStartingState::None,
+                        prefix: Some(std::sync::Arc::from(prefix.as_str())),
+                    },
+                    UnifiedToolOutputMode::Native,
+                    true,
+                )
+                .unwrap();
+                let events = state.push(&input[..split]);
+                let mut choices = state.choices_for(&empty_choice(0), events, true, None);
+                let mut events = state.push(&input[split..]);
+                events.extend(state.finish());
+                choices.extend(state.choices_for(
+                    &empty_choice(0),
+                    events,
+                    true,
+                    Some(FinishReason::Stop),
+                ));
+                let mut calls = std::collections::BTreeMap::<u32, (String, String, usize)>::new();
+                for call in choices
+                    .iter()
+                    .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                {
+                    let entry = calls.entry(call.index).or_default();
+                    entry.2 += usize::from(call.id.is_some());
+                    if let Some(function) = &call.function {
+                        if let Some(name) = &function.name {
+                            entry.0.push_str(name);
+                        }
+                        if let Some(arguments) = &function.arguments {
+                            entry.1.push_str(arguments);
+                        }
+                    }
+                }
+                assert_eq!(
+                    calls.keys().copied().collect::<Vec<_>>(),
+                    [0, 1, 2],
+                    "body={body} split={split}"
+                );
+                assert_eq!(calls[&0].1, first_arguments);
+                for (index, city) in [(1, "second"), (2, "third")] {
+                    assert_eq!(calls[&index].0, "get_weather");
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&calls[&index].1).unwrap(),
+                        serde_json::json!({"city":city})
+                    );
+                }
+                assert!(calls.values().all(|call| call.2 == 1));
+                assert_eq!(
+                    choices.last().unwrap().finish_reason,
+                    Some(FinishReason::ToolCalls)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_oss_argument_progress_preserves_long_field_positions() {
+        let tools = to_v2_tools(Some(&write_file_tools()));
+        let value = format!(
+            "é {} STAGE_TWO {} END",
+            "first content ".repeat(64),
+            "second content ".repeat(64)
+        );
+        for position in 0..3 {
+            let mut fields = vec![
+                ("path", serde_json::json!("a.rs")),
+                ("count", serde_json::json!(2)),
+            ];
+            fields.insert(position, ("content", serde_json::json!(value)));
+            let arguments = ordered_arguments(&fields);
+            let expected: serde_json::Value = serde_json::from_str(&arguments).unwrap();
+            for mode in [
+                UnifiedToolOutputMode::Native,
+                UnifiedToolOutputMode::GuidedJson { named_tool: None },
+                UnifiedToolOutputMode::GuidedJson {
+                    named_tool: Some("write_file".into()),
+                },
+            ] {
+                let input = match &mode {
+                    UnifiedToolOutputMode::Native => format!(
+                        " to=functions.write_file<|channel|>commentary<|message|>{arguments}<|call|>"
+                    ),
+                    UnifiedToolOutputMode::GuidedJson { named_tool: None } => {
+                        format!("[{{\"name\":\"write_file\",\"parameters\":{arguments}}}]")
+                    }
+                    _ => arguments.clone(),
+                };
+                let mut state = ChoiceState::new(
+                    "gpt_oss",
+                    &tools,
+                    UnifiedParserStartingState::None,
+                    mode.clone(),
+                    true,
+                )
+                .unwrap();
+                let mut wire = Vec::new();
+                let mut start = 0;
+                for (marker, fragment) in
+                    [(" STAGE_TWO ", "first content"), (" END", "second content")]
+                {
+                    let end = input.find(marker).unwrap();
+                    let events = state.push(&input[start..end]);
+                    wire.extend(state.choices_for(&empty_choice(0), events, true, None));
+                    let arguments: String = wire
+                        .iter()
+                        .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                        .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                        .collect();
+                    assert!(
+                        arguments.contains(fragment),
+                        "position={position} mode={mode:?} marker={marker}: {arguments:?}"
+                    );
+                    start = end;
+                }
+                let mut events = state.push(&input[start..]);
+                events.extend(state.finish());
+                wire.extend(state.choices_for(
+                    &empty_choice(0),
+                    events,
+                    true,
+                    Some(FinishReason::Stop),
+                ));
+                let calls: Vec<_> = wire
+                    .iter()
+                    .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                    .collect();
+                assert!(calls.iter().all(|call| call.index == 0));
+                assert_eq!(calls.iter().filter(|call| call.id.is_some()).count(), 1);
+                assert_eq!(
+                    calls
+                        .iter()
+                        .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                        .collect::<String>(),
+                    "write_file"
+                );
+                let arguments: String = calls
+                    .iter()
+                    .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                    .collect();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                    expected
+                );
+                assert_eq!(
+                    wire.last().unwrap().finish_reason,
+                    Some(FinishReason::ToolCalls)
+                );
+            }
+        }
+    }
 
     #[test]
     fn maps_tool_choice_onto_the_output_mode() {
@@ -4355,6 +4724,7 @@ pub(crate) mod tests {
                 name: Some("upstream".to_string()),
                 arguments: Some("{}".to_string()),
             }),
+            custom: None,
         }]);
 
         let choices = state.choices_for(
@@ -4382,6 +4752,7 @@ pub(crate) mod tests {
                 name: None,
                 arguments: Some("more".to_string()),
             }),
+            custom: None,
         }]);
         let choices = state.choices_for(&upstream_continuation, Vec::new(), true, None);
         assert_eq!(
@@ -4595,6 +4966,7 @@ pub(crate) mod tests {
                     name: Some("first".to_string()),
                     arguments: Some(r#"{"city":"Paris"}"#.to_string()),
                 }),
+                custom: None,
             },
             ChatCompletionMessageToolCallChunk {
                 index: 1,
@@ -4604,6 +4976,7 @@ pub(crate) mod tests {
                     name: Some("second".to_string()),
                     arguments: Some(r#"{"city":"Tokyo"}"#.to_string()),
                 }),
+                custom: None,
             },
         ]);
         let partials = state.choices_for(&parsed_fragments, Vec::new(), true, None);
@@ -6128,6 +6501,7 @@ pub(crate) mod tests {
                 name: Some("already_parsed".to_string()),
                 arguments: Some("{}".to_string()),
             }),
+            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -6180,6 +6554,7 @@ pub(crate) mod tests {
                 name: Some("upstream".to_string()),
                 arguments: Some("{\"city\":\"Paris\"}".to_string()),
             }),
+            custom: None,
         }]);
 
         let mut continuation = chunk("", false);
@@ -6193,6 +6568,7 @@ pub(crate) mod tests {
                 name: None,
                 arguments: Some("more".to_string()),
             }),
+            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -6431,6 +6807,51 @@ pub(crate) mod tests {
             "text after the already-parsed gap must resume as content, not reasoning"
         );
         assert_eq!(reasoning, "secretalready parsed");
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_consumed_analysis_prefix_is_not_replayed_after_parsed_gap() {
+        let mut parsed = chunk("", false);
+        let choice = &mut parsed.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some("already parsed".into());
+        let responses = apply_stream_with_policy(
+            stream::iter([
+                chunk(
+                    "secret<|end|><|start|>assistant<|channel|>final<|message|>before ",
+                    false,
+                ),
+                parsed,
+                chunk("after", true),
+            ]),
+            None,
+            GuidedToolConstraint::None,
+            StreamPrefill {
+                starting_state: UnifiedParserStartingState::Reasoning,
+                prefix: Some(std::sync::Arc::from(
+                    "<|start|>assistant<|channel|>analysis<|message|>consumed",
+                )),
+            },
+            "gpt_oss",
+            true,
+            UnifiedRequestPolicy::default(),
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert!(responses.iter().all(|response| !response.is_error()));
+        assert_eq!(
+            logical_events(&responses),
+            vec![
+                LogicalEvent::Reasoning("secret".into()),
+                LogicalEvent::Text("before ".into()),
+                LogicalEvent::Reasoning("already parsed".into()),
+                LogicalEvent::Text("after".into()),
+            ]
+        );
+        assert_eq!(
+            collect_choices(&responses).last().unwrap().finish_reason,
+            Some(FinishReason::Stop)
+        );
     }
 
     #[tokio::test]
@@ -6737,6 +7158,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some("{}".to_string()),
             }),
+            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -6775,6 +7197,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"#.to_string()),
             }),
+            custom: None,
         }]);
 
         let mut second = chunk("", false);
@@ -6788,6 +7211,7 @@ pub(crate) mod tests {
                 name: None,
                 arguments: Some(r#""Tokyo"}"#.to_string()),
             }),
+            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -6832,6 +7256,7 @@ pub(crate) mod tests {
                     name: id.map(|_| "get_weather".to_string()),
                     arguments: Some(arguments.to_string()),
                 }),
+                custom: None,
             }]);
             parsed
         };
@@ -6965,6 +7390,7 @@ pub(crate) mod tests {
                     name: name.map(str::to_string),
                     arguments: arguments.map(str::to_string),
                 }),
+                custom: None,
             }]);
             choice.finish_reason = finish;
             response
@@ -7048,6 +7474,7 @@ pub(crate) mod tests {
                 name: Some("get_".to_string()),
                 arguments: Some(r#"{"city":"Pa"#.to_string()),
             }),
+            custom: None,
         }]);
         let mut gap = chunk("", false);
         let gap_choice = &mut gap.data.as_mut().unwrap().inner.choices[0];
@@ -7065,6 +7492,7 @@ pub(crate) mod tests {
                 name: Some("weather".to_string()),
                 arguments: Some("ris\"}".to_string()),
             }),
+            custom: None,
         }]);
         resumed_choice.finish_reason = Some(FinishReason::ToolCalls);
 
@@ -7130,6 +7558,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Pa"#.to_string()),
             }),
+            custom: None,
         }]);
         let mut gap = chunk("", false);
         let gap_choice = &mut gap.data.as_mut().unwrap().inner.choices[0];
@@ -7221,6 +7650,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some("{}".to_string()),
             }),
+            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -7263,6 +7693,7 @@ pub(crate) mod tests {
                 name: Some("upstream".to_string()),
                 arguments: Some("{\"city\":\"Paris\"}".to_string()),
             }),
+            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -7590,6 +8021,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris""#.to_string()),
             }),
+            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -7661,6 +8093,7 @@ pub(crate) mod tests {
                     name: Some("get_weather".to_string()),
                     arguments: Some(r#"{"city":"NY"}"#.to_string()),
                 }),
+                custom: None,
             }]);
 
             let responses = apply_stream(
@@ -7894,6 +8327,7 @@ pub(crate) mod tests {
                         name: Some("get_weather".to_string()),
                         arguments: Some(r#"{"city":"Par"#.to_string()),
                     }),
+                    custom: None,
                 },
                 ChatCompletionMessageToolCallChunk {
                     index: 1,
@@ -7903,6 +8337,7 @@ pub(crate) mod tests {
                         name: Some("get_weather".to_string()),
                         arguments: Some(r#"{"city":"Tok"#.to_string()),
                     }),
+                    custom: None,
                 },
             ]);
 
@@ -7963,6 +8398,7 @@ pub(crate) mod tests {
                     name: Some("get_weather".to_string()),
                     arguments: Some(r#"{"city":"#.to_string()),
                 }),
+                custom: None,
             },
             ChatCompletionMessageToolCallChunk {
                 index: 1,
@@ -7972,6 +8408,7 @@ pub(crate) mod tests {
                     name: Some("get_weather".to_string()),
                     arguments: Some(r#"{"city":"#.to_string()),
                 }),
+                custom: None,
             },
         ]);
         let mut second = first.clone();
@@ -7984,6 +8421,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(String::new()),
             }),
+            custom: None,
         }]);
         partials.data.as_mut().unwrap().inner.choices.push(second);
 
@@ -8000,6 +8438,7 @@ pub(crate) mod tests {
                     name: None,
                     arguments: Some("not-json".to_string()),
                 }),
+                custom: None,
             },
             ChatCompletionMessageToolCallChunk {
                 index: 1,
@@ -8009,6 +8448,7 @@ pub(crate) mod tests {
                     name: None,
                     arguments: Some(r#""Tokyo"}"#.to_string()),
                 }),
+                custom: None,
             },
         ]);
         let mut second = first.clone();
@@ -8021,6 +8461,7 @@ pub(crate) mod tests {
                 name: None,
                 arguments: Some(String::new()),
             }),
+            custom: None,
         }]);
         terminal.data.as_mut().unwrap().inner.choices.push(second);
 
@@ -8076,6 +8517,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some("{}".to_string()),
             }),
+            custom: None,
         }]);
 
         // This choice index never has a raw chunk at all — no ChoiceState is ever
@@ -8199,6 +8641,94 @@ pub(crate) mod tests {
             "the already-explicitly-finished choice must not be finished a second \
              time by the EOF backstop"
         );
+    }
+
+    #[tokio::test]
+    async fn finished_choices_keep_other_choices_and_late_metadata() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+
+        let mut first = chunk("A", true);
+        let mut active = empty_choice(1);
+        active.delta.content = Some(ChatCompletionMessageContent::Text("B".into()));
+        first.data.as_mut().unwrap().inner.choices.push(active);
+
+        let mut mixed = chunk("<think>late</think>", false);
+        let mut terminal = empty_choice(1);
+        terminal.delta.content = Some(ChatCompletionMessageContent::Text("C".into()));
+        terminal.delta.reasoning_content = Some("r".into());
+        terminal.finish_reason = Some(FinishReason::Stop);
+        mixed.data.as_mut().unwrap().inner.choices.push(terminal);
+
+        let mut late = chunk("late raw payload", false);
+        late.id = Some("late-metadata".into());
+        let data = late.data.as_mut().unwrap();
+        let mut parsed = empty_choice(1);
+        parsed.delta.reasoning_content = Some("late parsed payload".into());
+        parsed.finish_reason = Some(FinishReason::Stop);
+        data.inner.choices.push(parsed);
+        data.inner.usage = Some(
+            serde_json::from_value(serde_json::json!({
+                "prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3
+            }))
+            .unwrap(),
+        );
+        data.nvext = Some(serde_json::json!({"completion_token_ids": [42]}));
+        data.llm_metrics = Some(LLMMetricAnnotation {
+            chunk_tokens: 2,
+            ..Default::default()
+        });
+
+        let responses: Vec<_> = apply_stream(
+            stream::iter([first, mixed, late]),
+            None,
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect()
+        .await;
+        let payloads: Vec<_> = collect_choices(&responses)
+            .into_iter()
+            .map(|choice| {
+                let text = match &choice.delta.content {
+                    Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                    _ => None,
+                };
+                (
+                    choice.index,
+                    text,
+                    choice.delta.reasoning_content.as_deref(),
+                    choice.finish_reason,
+                )
+            })
+            .collect();
+        assert_eq!(
+            payloads,
+            [
+                (0, Some("A"), None, Some(FinishReason::Stop)),
+                (1, Some("B"), None, None),
+                (1, Some("C"), Some("r"), Some(FinishReason::Stop)),
+            ]
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .filter_map(|response| response.data.as_ref())
+                .filter(|data| data.inner.usage.is_some())
+                .count(),
+            1
+        );
+        let tail = responses.last().unwrap();
+        assert_eq!(tail.id.as_deref(), Some("late-metadata"));
+        let metadata = tail.data.as_ref().unwrap();
+        assert!(metadata.inner.choices.is_empty());
+        assert_eq!(metadata.inner.usage.as_ref().unwrap().total_tokens, 3);
+        assert_eq!(
+            metadata.nvext,
+            Some(serde_json::json!({"completion_token_ids": [42]}))
+        );
+        assert_eq!(metadata.llm_metrics.as_ref().unwrap().chunk_tokens, 2);
     }
 
     #[tokio::test]
@@ -9246,7 +9776,9 @@ pub(crate) mod tests {
             ("kimi-k3", "kimi-k3", KIMI_K3_UNIFIED_FAMILY),
         ] {
             assert_eq!(configured_family(Some(tool), Some(reason)), Some(family));
-            let selected = parsers_v2_selected().then_some(family);
+            let selected = (super::super::tool_parser_v2::selected_version().unwrap()
+                != dynamo_runtime::config::ParserVersion::V1)
+                .then_some(family);
             assert_eq!(
                 selected_request_family(
                     Some(tool),
@@ -9443,6 +9975,7 @@ pub(crate) mod tests {
                                     name: Some("get_weather".into()),
                                     arguments: Some("{}".into()),
                                 }),
+                                custom: None,
                             }]);
                         data.tool_call_completion
                             .push(super::super::ToolCallCompletion {
@@ -9563,6 +10096,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".into()),
                 arguments: Some("{}".into()),
             }),
+            custom: None,
         }]);
         data.tool_call_completion
             .push(super::super::ToolCallCompletion {
@@ -9624,6 +10158,7 @@ pub(crate) mod tests {
                         name: Some("get_weather".into()),
                         arguments: Some("{}".into()),
                     }),
+                    custom: None,
                 })
                 .collect(),
         );
@@ -9718,6 +10253,7 @@ pub(crate) mod tests {
                     name: Some("get_weather".into()),
                     arguments: Some("{}".into()),
                 }),
+                custom: None,
             }]);
             let mut terminal = chunk("", false);
             terminal.data.as_mut().unwrap().inner.choices[0].finish_reason =
@@ -9798,6 +10334,7 @@ pub(crate) mod tests {
                                 name: Some("get_weather".into()),
                                 arguments: Some("{}".into()),
                             }),
+                            custom: None,
                         }]);
                         let mut input = vec![upstream];
                         if let Some(finish) = finish.filter(|_| !same_envelope) {
@@ -11233,81 +11770,70 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn muse_content_decoder_preserves_auto_routing_without_changing_v1() {
-        let muse = configured_family(Some("muse_glimmer"), None);
-        assert_eq!(
-            selected_batch_family_for_selection(
-                muse,
-                dynamo_runtime::config::ParserVersion::Auto,
-                Some("muse_glimmer"),
-                None,
-            ),
-            Some("muse_glimmer")
-        );
-        assert_eq!(
-            selected_batch_family_for_selection(
-                muse,
-                dynamo_runtime::config::ParserVersion::V1,
-                Some("muse_glimmer"),
-                None,
-            ),
-            None
-        );
-        assert_eq!(
-            selected_batch_family_for_selection(
-                muse,
-                dynamo_runtime::config::ParserVersion::V2,
-                Some("muse_glimmer"),
-                None,
-            ),
-            Some("muse_glimmer")
-        );
-        assert_eq!(
-            selected_batch_family_for_selection(
-                configured_family(Some("qwen3"), None),
-                dynamo_runtime::config::ParserVersion::Auto,
-                Some("qwen3"),
-                None,
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn family_defaults_keep_deepseek_v41_on_v2_and_muse_on_original_modes() {
-        const CHILD: &str = "DYNAMO_PARSER_FAMILY_DEFAULTS_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let output = crate::test_utils::isolated_command(
-                "protocols::openai::chat_completions::unified_parser::tests::family_defaults_keep_deepseek_v41_on_v2_and_muse_on_original_modes",
-            )
-            .arg("--test-threads=1")
-            .env(CHILD, "1")
-            .env_remove(dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION)
-            .env_remove(
-                dynamo_runtime::config::environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
-            )
-            .output()
-            .expect("run isolated family-default routing test");
-            crate::test_utils::assert_isolated_success(&output);
+    fn default_v2_routing_in_isolated_processes() {
+        use dynamo_runtime::config::environment_names::llm::{
+            DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, DYN_PARSER_VERSION,
+        };
+        const CHILD: &str = "DYNAMO_DEFAULT_V2_ROUTING_CHILD";
+        let Ok(selection) = std::env::var(CHILD) else {
+            for selection in ["unset", "auto", "1", "2", "deprecated_false"] {
+                let mut command = crate::test_utils::isolated_command(
+                    "protocols::openai::chat_completions::unified_parser::tests::default_v2_routing_in_isolated_processes",
+                );
+                command.env(CHILD, selection);
+                match selection {
+                    "unset" => {}
+                    "deprecated_false" => {
+                        command.env(DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, "false");
+                    }
+                    value => {
+                        command.env(DYN_PARSER_VERSION, value);
+                    }
+                }
+                let output = command.output().expect("run isolated routing regression");
+                crate::test_utils::assert_isolated_success(&output);
+            }
             return;
-        }
-
-        let (tool, reasoning) = (Some("deepseek_v41"), Some("deepseek_v41"));
-        let expected = configured_family(tool, reasoning);
-        assert!(expected.is_some());
-        assert_eq!(selected_family(tool, reasoning), expected);
-        assert_eq!(selected_batch_family(tool, reasoning), expected);
-        for (tool, reasoning) in [(Some("muse_glimmer"), None), (None, Some("muse_glimmer"))] {
-            assert!(configured_family(tool, reasoning).is_some());
-            assert_eq!(selected_family(tool, reasoning), None);
-            assert_eq!(selected_batch_family(tool, reasoning), Some("muse_glimmer"));
+        };
+        // Qwen3 was previously left on V1 by both unset and auto.
+        let expected = (selection != "1").then_some(QWEN3_UNIFIED_FAMILY);
+        assert_eq!(
+            selected_family(Some("qwen3_coder"), Some("qwen3")),
+            expected
+        );
+        assert_eq!(
+            selected_family(None, Some("qwen3")),
+            (selection == "2").then_some(QWEN3_UNIFIED_FAMILY)
+        );
+        for &parser in FAMILY_NAMES.iter() {
+            let family = canonical_family(parser).unwrap();
+            for (tool, reasoning) in [
+                (Some(parser), Some(family)),
+                (Some(parser), None),
+                (None, Some(parser)),
+            ] {
+                let reasoning_only_qwen3 = tool.is_none() && reasoning == Some("qwen3");
+                let expected = (selection != "1" && (selection == "2" || !reasoning_only_qwen3))
+                    .then_some(family);
+                assert_eq!(
+                    selected_family(tool, reasoning),
+                    expected,
+                    "{selection} {tool:?} {reasoning:?}"
+                );
+                assert_eq!(selected_batch_family(tool, reasoning), expected);
+                assert_eq!(selected_content_decoder_family(tool, reasoning), expected);
+            }
         }
         for (tool, reasoning) in [
-            (Some("qwen3_coder"), Some("qwen3")),
-            (Some("deepseek_v41"), None),
+            (Some("qwen3_coder"), Some("glm47")),
+            (Some("qwen3_coder"), Some("deepseek_r1")),
+            (Some("hermes"), None),
+            (None, Some("deepseek_r1")),
+            (None, None),
         ] {
             assert_eq!(selected_family(tool, reasoning), None);
             assert_eq!(selected_batch_family(tool, reasoning), None);
+            assert_eq!(selected_content_decoder_family(tool, reasoning), None);
         }
     }
 
@@ -11359,6 +11885,7 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some("{}".to_string()),
             }),
+            custom: None,
         }]);
 
         // This choice index never has a raw chunk at all — no ChoiceState is ever
@@ -12133,6 +12660,7 @@ pub(crate) mod tests {
                             name: Some("get_weather".into()),
                             arguments: Some(arguments.into()),
                         }),
+                        custom: None,
                     }]);
                     let output = apply_stream(
                         stream::iter([input]),

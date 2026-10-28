@@ -11,7 +11,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/webhookconfig"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -70,17 +69,15 @@ func Configurations() webhookconfig.Configurations {
 		admissionregistrationv1.Update,
 	}
 	rule := admissionregistrationv1.RuleWithOperations{
-		Operations: operations,
-		Rule: admissionregistrationv1.Rule{
-			APIGroups:   []string{groveGroup},
-			APIVersions: []string{"v1alpha1"},
-			Resources:   []string{groveResource},
-			Scope:       &namespaced,
-		},
+		Operations:  operations,
+		APIGroups:   []string{groveGroup},
+		APIVersions: []string{"v1alpha1"},
+		Resources:   []string{groveResource},
+		Scope:       &namespaced,
 	}
 	return webhookconfig.Configurations{
 		Mutating: []*admissionregistrationv1.MutatingWebhookConfiguration{{
-			ObjectMeta: metav1.ObjectMeta{Name: "podcliqueset-defaulting-webhook"},
+			Name: "podcliqueset-defaulting-webhook",
 			Webhooks: []admissionregistrationv1.MutatingWebhook{{
 				Name:                    "pcs.defaulting.webhooks.grove.io",
 				AdmissionReviewVersions: []string{"v1"},
@@ -92,7 +89,7 @@ func Configurations() webhookconfig.Configurations {
 			}},
 		}},
 		Validating: []*admissionregistrationv1.ValidatingWebhookConfiguration{{
-			ObjectMeta: metav1.ObjectMeta{Name: "podcliqueset-validating-webhook"},
+			Name: "podcliqueset-validating-webhook",
 			Webhooks: []admissionregistrationv1.ValidatingWebhook{{
 				Name:                    "pcs.validating.webhooks.grove.io",
 				AdmissionReviewVersions: []string{"v1"},

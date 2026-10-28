@@ -431,6 +431,12 @@ pub mod llm {
     pub const DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: &str =
         "DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS";
 
+    /// Skip OpenAI strict function-tool schema preflight for legacy clients.
+    /// Request schemas and strictness are preserved; basic tool validation and
+    /// downstream processor/backend constraints remain active.
+    pub const DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: &str =
+        "DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION";
+
     /// Master switch for the frontend's HTTP admin API surface.
     /// The admin API is **enabled by default**; this variable disables it.
     /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) prevent
@@ -459,7 +465,8 @@ pub mod llm {
     /// Accepted values: "reasoning_content" (default) or "reasoning".
     pub const DYN_REASONING_FIELD_NAME: &str = "DYN_REASONING_FIELD_NAME";
 
-    /// Select the parser generation. Unset or `auto` keeps the original family defaults.
+    /// Select the parser generation. Unset or `auto` prefers a compatible unified V2
+    /// parser and falls back to V1 when no compatible family is configured.
     ///
     /// Explicit `1` keeps the V1 parsers; explicit `2` selects a compatible unified
     /// parser for the configured family. When both parser slots are set, their names
@@ -472,8 +479,8 @@ pub mod llm {
     pub const DYN_PARSER_VERSION: &str = "DYN_PARSER_VERSION";
 
     /// Compatibility alias for `DYN_PARSER_VERSION=2` when enabled. Uses the shared
-    /// boolean parser: `1`/`true`/`on`/`yes` enable it; `0`/`false`/`off`/`no`/empty
-    /// disable it. This conflicts with `DYN_PARSER_VERSION=1`; `false` conflicts with `2`.
+    /// boolean parser: `1`/`true`/`on`/`yes` select V2; `0`/`false`/`off`/`no`/empty
+    /// retain auto selection. True conflicts with `DYN_PARSER_VERSION=1`; false conflicts with `2`.
     pub const DYN_ENABLE_EXPERIMENTAL_PARSERS_V2: &str = "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2";
 
     /// Rollback lever for incremental guided-tool-call streaming.
@@ -561,6 +568,10 @@ pub mod llm {
     /// wait up to the full delay, so larger values add longer stalls. Values that do
     /// not parse or are above 1000000 use the default.
     pub const DYN_MM_NIXL_PROGRESS_DELAY_US: &str = "DYN_MM_NIXL_PROGRESS_DELAY_US";
+
+    /// Publish the serving-load streams the Pool Relay aggregates: frontend
+    /// request load and router scheduler load. Off unless truthy.
+    pub const DYN_SERVING_LOAD_PUBLISH: &str = "DYN_SERVING_LOAD_PUBLISH";
 
     /// Metrics configuration
     pub mod metrics {
@@ -1166,8 +1177,10 @@ mod tests {
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
+            llm::DYN_SERVING_LOAD_PUBLISH,
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+            llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
             llm::DYN_DISABLE_FRONTEND_ADMIN_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,

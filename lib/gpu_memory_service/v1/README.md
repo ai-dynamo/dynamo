@@ -111,25 +111,48 @@ rank-local socket is the control-plane trust boundary.
 
 ## Cold weight storage
 
-The checkpoint saver with `DYN_GMS_USE_V1=true` connects RO to the rank-local `weights`
-socket, enumerates the committed allocation IDs and aligned sizes, temporarily
-imports them, and writes raw shard bytes through
-`snapshot.disk.write_device_shards`. Its manifest contains only a version and,
-for each allocation, its exact ID, aligned size, shard path, and shard offset.
+GMS saves weight bytes before Snapshot captures the sleeping engine. A size
+check cannot detect a shard that changes on disk without changing size. New
+checkpoints record a BLAKE3 digest for each shard and verify the bytes during
+restore. A mismatch stops the restore before the worker uses those weights.
 
-Without `--sharded-ssd-roots`, shard paths remain relative to the device
-artifact directory. With sharded roots, files are distributed across the
-per-device roots using the existing V0 directory convention and the manifest
-records their absolute paths.
+| Weight-artifact version | Integrity check | Restore behavior |
+| --- | --- | --- |
+| 2 (new checkpoints) | BLAKE3 for each shard | Rejects missing, truncated, or changed shards, including same-size changes. |
+| 1 (legacy checkpoints) | No content digest | Still loads after structural checks, with a warning that same-size corruption cannot be detected. |
 
-On restore, the checkpoint loader with `DYN_GMS_USE_V1=true` connects RW to a fresh
-`weights` socket, recreates the exact IDs and sizes, and builds generic
-`FileTransferSource` and `GMSTransferTarget` records. Backend selection goes
-through `snapshot.transfer.create_transfer_backend`; `nixl`, `nixl-gds`, and
-`sharded-ssd` use the same implementations and configuration as V0. The loader
-synchronizes, releases its temporary mappings, commits the same socket RW to
-RO, closes its lease, and exits. The server retains the committed backing while
-the restored worker acquires a new RO lease and remaps its preserved VAs.
+The weight-artifact version is independent of the GMS protocol version.
+Recapture a version-1 checkpoint with the current saver to add digests: hashing
+an old shard now cannot prove what it contained when it was captured.
+
+With `DYN_GMS_USE_V1=true`, the saver reads committed allocation IDs and sizes
+from the rank-local `weights` socket, temporarily imports the allocations, and
+writes raw shards through the shared snapshot disk writer. It hashes bytes as
+they pass through host memory, without rereading the saved files. The manifest
+records each allocation's ID, aligned size, shard path, and offset, plus the
+size and digest of every shard. By default, paths are relative to the device
+artifact directory. `--sharded-ssd-roots` distributes files across per-device
+roots using the V0 layout and records absolute paths.
+
+On restore, the loader validates the manifest and shard layout, including the
+required digests for version 2. Missing or invalid digests fail the load;
+they do not silently fall back to version-1 behavior. The loader requests
+`RW_OR_RO` on the `weights` socket. If weights are already committed, it gets
+RO and returns without another transfer. Otherwise, it gets RW, recreates the
+saved allocation IDs and sizes, and transfers the shards. Backend selection
+uses `snapshot.transfer.create_transfer_backend` and the existing V0
+configuration:
+
+| Transfer backend | How it verifies the recorded digest |
+| --- | --- |
+| `nixl` and `sharded-ssd` | Hash the same bytes being copied through pinned host memory, with no extra storage read. |
+| `nixl-gds` | Read and verify each shard before direct transfer, because GDS has no CPU-visible staging buffer. Keep files unchanged between verification and transfer. |
+
+After transfer and verification succeed, the loader synchronizes, releases its
+temporary mappings, commits the socket from RW to RO, and closes its lease.
+The loader process stays running so Kubernetes does not restart the container.
+The server keeps the committed backing while the restored worker reconnects RO
+and remaps the preserved virtual addresses.
 
 ## Weight construction
 

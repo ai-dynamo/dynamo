@@ -25,7 +25,7 @@ from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uu
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import InvalidArgument, Unknown
+from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 
 from .sglang_prepost import (
     ReasoningParser,
@@ -71,14 +71,28 @@ def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
 
 
 def _request_logprobs_count(request: dict[str, Any]) -> int | None:
+    """Map OpenAI chat logprob fields onto ``output_options.logprobs``.
+
+    The result is the number of alternatives per token. ``logprobs: true``
+    without ``top_logprobs`` is ``0``: the sampled token only. A positive
+    ``top_logprobs`` requires ``logprobs: true``, as in OpenAI.
+    """
     logprobs = request.get("logprobs")
     top_logprobs = request.get("top_logprobs")
+    if top_logprobs is not None and (
+        not isinstance(top_logprobs, int)
+        or isinstance(top_logprobs, bool)
+        or top_logprobs < 0
+    ):
+        raise PreprocessError("`top_logprobs` must be an integer >= 0.")
+    if top_logprobs and logprobs is not True:
+        raise PreprocessError(
+            "When using `top_logprobs`, `logprobs` must be set to true."
+        )
     if logprobs is True:
-        return top_logprobs if top_logprobs is not None else 1
+        return top_logprobs if top_logprobs is not None else 0
     if isinstance(logprobs, int) and not isinstance(logprobs, bool):
         return logprobs
-    if top_logprobs not in (None, 0):
-        return top_logprobs
     return None
 
 
@@ -616,6 +630,37 @@ class SglangProcessor:
                     active,
                 )
 
+    def _build_postprocessor(
+        self,
+        request: dict[str, Any],
+        dynamo_preproc: dict[str, Any],
+        *,
+        tool_call_parser: ToolCallParserType | None,
+        reasoning_parser: ReasoningParser | None,
+        named_zero_arg_tool: str | None,
+        prompt_token_ids: list[int],
+    ) -> SglangStreamingPostProcessor:
+        """Parsers are passed in because the pool path must recreate them in the
+        main process; they are not picklable.
+        """
+        return SglangStreamingPostProcessor(
+            tokenizer=self.tokenizer,
+            tool_call_parser=tool_call_parser,
+            reasoning_parser=reasoning_parser,
+            history_tool_calls_count=_get_history_tool_calls_count(
+                request.get("messages", [])
+            ),
+            sglang_tools=convert_tools(request.get("tools")),
+            tool_call_parser_name=self.tool_call_parser_name,
+            named_zero_arg_tool=named_zero_arg_tool,
+            guided_json_is_content=_guided_json_is_content(dynamo_preproc),
+            eos_token_ids=self.eos_token_ids,
+            prompt_token_ids=prompt_token_ids,
+            stop_strings=_request_stop_strings(request),
+            skip_special_tokens=request.get("skip_special_tokens"),
+            stop_token_ids=set(_request_stop_token_ids(request)),
+        )
+
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
@@ -678,22 +723,13 @@ class SglangProcessor:
             logger.exception("SGLang preprocessing failed for request %s", request_id)
             raise Unknown(f"Preprocessing error: {exc}") from exc
 
-        post = SglangStreamingPostProcessor(
-            tokenizer=self.tokenizer,
+        post = self._build_postprocessor(
+            request,
+            dynamo_preproc,
             tool_call_parser=pre.tool_call_parser,
             reasoning_parser=pre.reasoning_parser,
-            history_tool_calls_count=_get_history_tool_calls_count(
-                request.get("messages", [])
-            ),
-            sglang_tools=convert_tools(request.get("tools")),
-            tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=pre.named_zero_arg_tool,
-            guided_json_is_content=_guided_json_is_content(dynamo_preproc),
-            eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
-            stop_strings=_request_stop_strings(request),
-            skip_special_tokens=request.get("skip_special_tokens"),
-            stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
         async for item in self._generate_and_stream(
@@ -747,24 +783,13 @@ class SglangProcessor:
             tokenizer=self.tokenizer,
         )
 
-        post = SglangStreamingPostProcessor(
-            tokenizer=self.tokenizer,
+        post = self._build_postprocessor(
+            request,
+            preproc_result.dynamo_preproc,
             tool_call_parser=tool_call_parser,
             reasoning_parser=reasoning_parser,
-            history_tool_calls_count=_get_history_tool_calls_count(
-                request.get("messages", [])
-            ),
-            sglang_tools=convert_tools(request.get("tools")),
-            tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=preproc_result.named_zero_arg_tool,
-            guided_json_is_content=_guided_json_is_content(
-                preproc_result.dynamo_preproc
-            ),
-            eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
-            stop_strings=_request_stop_strings(request),
-            skip_special_tokens=request.get("skip_special_tokens"),
-            stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
         async for item in self._generate_and_stream(
@@ -1074,7 +1099,7 @@ class SglangProcessor:
             else:
                 if pending_terminal is not None:
                     yield finalize_terminal(pending_terminal)
-        except (InvalidArgument, Unknown):
+        except (InvalidArgument, Unknown, WorkerUnavailable):
             raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)
