@@ -861,8 +861,9 @@ impl ResponseStreamConverter {
             state.deferred = false;
             let incomplete = output_status == OutputStatus::Incomplete
                 && (!only_terminal_is_incomplete || position == last);
+            // A later interruption must preserve earlier completed raw-text calls.
             if state.custom
-                && (incomplete || interrupted)
+                && (incomplete || (interrupted && position == last))
                 && serde_json::from_str::<serde_json::Value>(&state.accumulated_args).is_err()
             {
                 state.output_status = Some(OutputStatus::Incomplete);

@@ -121,7 +121,8 @@ impl ChatCustomToolAdapter {
                             input: None,
                         });
                     }
-                    if call.id.is_some() {
+                    // Empty continuation fields must not erase a known identity.
+                    if call.id.as_deref().is_some_and(|id| !id.is_empty()) {
                         pending.header.id = call.id;
                     }
                     if pending.header.custom.is_none() && call.r#type.is_some() {
@@ -131,7 +132,12 @@ impl ChatCustomToolAdapter {
                         if let Some(fragment) = &function.arguments {
                             pending.arguments.push_str(fragment);
                         }
-                        if pending.header.custom.is_none() && function.name.is_some() {
+                        if pending.header.custom.is_none()
+                            && function
+                                .name
+                                .as_deref()
+                                .is_some_and(|name| !name.is_empty())
+                        {
                             pending
                                 .header
                                 .function
