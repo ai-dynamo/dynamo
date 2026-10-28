@@ -238,3 +238,40 @@ The immutable operator origin version controls this behavior. An operator-only u
 the variables or change the command line of an existing DGD, so it does not roll that workload. To
 use the aliases, create the DGD with Dynamo Operator 1.6.0 or later. When Grove is managed outside
 the Dynamo platform chart, install Grove `v0.1.0-alpha.15` or later before creating the DGD.
+
+### Use the variables in a DGD created before 1.6.0
+
+A DGD that an operator older than 1.6.0 created does not receive `DYNAMO_RANK` and
+`DYNAMO_LEADER_ADDRESS`. An operator upgrade does not add them, and neither does a later edit of
+the DGD, such as a switch to sidecar mode. To run a manifest that references the variables, such as
+the multinode sidecar examples, choose one of these options:
+
+- Delete the DGD and create it again under the upgraded operator. The new DGD receives the
+  variables, so the manifest needs no change.
+- Keep the DGD and replace each variable reference with the provider's own variable, as described
+  below.
+
+> [!WARNING]
+> Before you create the replacement DGD under the same name, wait until every Pod of the old DGD
+> is gone. A worker that starts while the old leader terminates can handshake with that leader at
+> the same hostname, then fail its ZMQ connection after 30 seconds and exit.
+
+To keep the DGD on Grove, the group-wide pod index requires Grove `v0.1.0-alpha.15` or later and
+matching CRDs. Replace the variables with these values:
+
+| Variable | Grove | LeaderWorkerSet |
+|---|---|---|
+| `DYNAMO_RANK` | `$(GROVE_PCSG_POD_INDEX)` | `$(LWS_WORKER_INDEX)` |
+| `DYNAMO_LEADER_ADDRESS` | `$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-<component>-ldr-0.$(GROVE_HEADLESS_SERVICE)` | `$(LWS_LEADER_ADDRESS)` |
+
+Replace `<component>` with the component name in lowercase. For a component named `VllmWorker`,
+the value is `vllmworker`.
+
+Replace the variables in both the leader and the worker role template. Each engine reads them
+from these flags:
+
+| Engine | Rank flag | Leader address flag |
+|---|---|---|
+| vLLM tensor parallelism | `--node-rank` | `--master-addr` |
+| vLLM hybrid load balancing data parallelism | `--node-rank` | `--data-parallel-address` |
+| SGLang | `--node-rank` | `--dist-init-addr`, followed by `:29500` |

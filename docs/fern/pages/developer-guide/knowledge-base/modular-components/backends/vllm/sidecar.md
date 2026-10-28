@@ -26,7 +26,7 @@ for the architecture.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Kubernetes multinode TP and hybrid-LB DP | Experimental; explicit leader and worker PodTemplates |
+| Kubernetes multinode tensor parallelism (TP) and hybrid load balancing (hybrid-LB) data parallelism (DP) | Experimental |
 
 ## Launch Locally
 
@@ -61,57 +61,26 @@ kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000
 
 Multinode deployments require `backendFramework: vllm` and complete `leader` and
 `worker` role PodTemplates. The templates own the native engine commands and
-sidecar placement; the operator does not inject executor or coordination flags.
+sidecar placement. The operator does not inject executor or coordination flags.
 See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_tp.yaml),
 which uses the multiprocessing executor with a sidecar on the leader only, and the
 [hybrid-LB DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_dp.yaml),
-where every Pod runs a sidecar for its local data-parallel ranks. Both examples
-launch `vllm serve --grpc-port` with `VLLM_USE_RUST_FRONTEND=1`, which requires
-vLLM v0.32.0 or later; `vllm-rs serve` does not support `--data-parallel-hybrid-lb`.
+where every Pod runs a sidecar for its local DP ranks. Unlike `agg.yaml`, which
+launches `vllm-rs serve`, both multinode examples launch `vllm serve --grpc-port`
+with `VLLM_USE_RUST_FRONTEND=1`. That entry point needs vLLM v0.32.0 or later. The
+examples use it because `vllm-rs serve` does not support `--data-parallel-hybrid-lb`.
 Engine-failure KV recovery remains incomplete and is tracked in
 [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
 
-### Migrate an existing DGD to multinode sidecars
+The examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which exist only in
+DGDs created by operator 1.6.0 or later. For an older DGD, see
+[Use the variables in a DGD created before 1.6.0](../../../../../kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160).
 
-The multinode examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`. The operator
-injects these variables only into DGDs originally created by operator 1.6.0 or
-later. Upgrading the operator or switching to sidecar mode does not enable them
-for older DGDs.
-
-For a DGD created before operator 1.6.0, choose one of these options:
-
-- Delete and recreate the DGD after upgrading the operator, then use the examples
-  with their existing topology arguments.
-- Keep the DGD and replace the topology variables in the `main` container of both
-  the leader and worker role templates with the provider-specific values below.
-  The TP example uses them in `--node-rank` and `--master-addr`; the DP example
-  uses them in `--data-parallel-start-rank` and `--data-parallel-address`.
-
-For Grove, use these values. The group-wide pod index requires Grove
-`v0.1.0-alpha.15` or later and matching CRDs.
-
-```yaml
-- --node-rank
-- $(GROVE_PCSG_POD_INDEX)
-- --master-addr
-- $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-vllmworker-ldr-0.$(GROVE_HEADLESS_SERVICE)
-```
-
-Here, `vllmworker` is the example component name, `VllmWorker`, in lowercase.
-Replace it with your component name in lowercase if you rename the component.
-
-For LeaderWorkerSet, use these values:
-
-```yaml
-- --node-rank
-- $(LWS_WORKER_INDEX)
-- --master-addr
-- $(LWS_LEADER_ADDRESS)
-```
-
-Kubernetes expands these variable references in container arguments. The DP
-worker computes its start rank in a shell, so replace `DYNAMO_RANK` there with
-`GROVE_PCSG_POD_INDEX` or `LWS_WORKER_INDEX`.
+In sidecar mode the operator injects no engine environment. A disaggregated role
+template must set `VLLM_NIXL_SIDE_CHANNEL_HOST` from `status.podIP` on its `main`
+container, as `disagg.yaml` does, so the decode engine can reach the prefill
+engine's NIXL handshake listener. vLLM offsets the side-channel port by the
+engine's data-parallel rank.
 
 ## Topologies
 

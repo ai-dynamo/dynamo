@@ -1,17 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# EXPERIMENTAL: multinode vLLM hybrid-LB DP with explicit leader and worker templates
+# EXPERIMENTAL: multinode vLLM hybrid load balancing (hybrid-LB) data parallelism (DP) with explicit leader and worker templates.
 # One engine group spans two Pods with four DP ranks. Every Pod runs the Dynamo
-# sidecar and serves only its two local ranks; the KV-aware router selects the
-# rank and the Pod that owns it. Requires vLLM v0.32.0 or later for
-# `vllm serve --grpc-port`; `vllm-rs serve` does not support hybrid LB.
-# This example uses DYNAMO_RANK and DYNAMO_LEADER_ADDRESS, which require a
-# DGD originally created by operator 1.6.0 or later. Upgrading the operator
-# does not enable these variables for an existing older DGD.
-# For older DGDs, delete and recreate after upgrading, or replace the
-# topology arguments in both role templates with Grove/LWS variables.
-# See ../README.md#deploy-on-kubernetes for migration guidance.
+# sidecar and serves only its two local ranks. The KV-aware router selects the
+# rank and the Pod that owns it.
+# For a DGD created before operator 1.6.0, see docs/fern/pages/kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160.
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
