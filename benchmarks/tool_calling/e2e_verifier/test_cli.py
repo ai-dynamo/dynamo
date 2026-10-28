@@ -143,6 +143,21 @@ def test_qwen36_27b_uses_complete_qwen_xml_profile() -> None:
     assert len(selection_hash) == 64
 
 
+def test_minimax_m3_resolves_to_its_own_profile_with_generic_cases() -> None:
+    profile, _ = _profile(DEFAULT_PROFILES, "qualification")
+
+    selection, selection_hash = _custom_selection(
+        profile["custom"], "nvidia/MiniMax-M3-NVFP4"
+    )
+
+    assert selection["resolved_case_profile"] == "minimax_m3"
+    assert len(selection["case_groups"]["generic"]) == 24
+    assert selection["case_groups"]["model_specific"] == []
+    assert selection["case_groups"]["complete_profile"] == []
+    assert selection["record_count"] == 48
+    assert len(selection_hash) == 64
+
+
 def test_custom_selection_rejects_cross_group_overlap() -> None:
     profile, _ = _profile(DEFAULT_PROFILES, "qualification")
     config = {

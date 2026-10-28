@@ -64,6 +64,8 @@ def test_qualification_uses_the_same_24_generic_cases_for_inline_profiles() -> N
         "glm5",
         "glm47",
         "minimax_m2",
+        "minimax_m3",
+        "kimi_k3",
         "deepseek_v4",
     ):
         selected = probe.select_cases(
@@ -89,6 +91,34 @@ def test_kimi_k2_adds_only_its_model_specific_customer_regressions() -> None:
         case.profiles == ("kimi_k2",)
         for case in selected
         if case.case_id in model_specific_ids
+    )
+
+
+def test_kimi_models_resolve_by_generation() -> None:
+    assert probe.model_case_profile("moonshotai/Kimi-K2.5") == "kimi_k2"
+    assert probe.model_case_profile("moonshotai/Kimi-K2.6") == "kimi_k2"
+    assert probe.model_case_profile("nvidia/Kimi-K2.6-NVFP4") == "kimi_k2"
+    assert probe.model_case_profile("moonshotai/Kimi-K3") == "kimi_k3"
+    # K3 has no model-specific cases yet, so its profile selects exactly the
+    # generic qualification set; the K2 customer regressions stay on kimi_k2.
+    assert {case.case_id for case in probe.build_cases("kimi_k3")} == set(
+        qualification_generic_case_ids()
+    )
+
+
+def test_minimax_models_resolve_by_generation() -> None:
+    assert probe.model_case_profile("MiniMaxAI/MiniMax-M2.7") == "minimax_m2"
+    assert probe.model_case_profile("MiniMaxAI/MiniMax-M2.5") == "minimax_m2"
+    assert probe.model_case_profile("nvidia/MiniMax-M3-NVFP4") == "minimax_m3"
+    assert probe.model_case_profile("MiniMaxAI/MiniMax-M3") == "minimax_m3"
+    assert probe.model_case_profile("MiniMaxAI/MiniMax-M1") == "generic"
+    # M3 has no model-specific cases yet: its profile selects exactly the
+    # generic qualification set, while M2 adds its parser-stress cases.
+    assert {case.case_id for case in probe.build_cases("minimax_m3")} == set(
+        qualification_generic_case_ids()
+    )
+    assert {case.case_id for case in probe.build_cases("minimax_m2")} > set(
+        qualification_generic_case_ids()
     )
 
 

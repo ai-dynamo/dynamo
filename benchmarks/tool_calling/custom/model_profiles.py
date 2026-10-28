@@ -13,13 +13,17 @@ INLINE_CASE_PROFILES = (
     "glm5",
     "glm47",
     "minimax_m2",
+    "minimax_m3",
     "gpt_oss",
     "kimi_k2",
+    "kimi_k3",
 )
 
 
 def model_case_profile(model: str) -> str:
     normalized = model.lower().replace("_", "-")
+    if "kimi-k3" in normalized:
+        return "kimi_k3"
     if "kimi-k2" in normalized or "kimi-k25" in normalized or "kimi-k26" in normalized:
         return "kimi_k2"
     if "deepseek-v4" in normalized:
@@ -38,7 +42,9 @@ def model_case_profile(model: str) -> str:
         return "glm5"
     if "glm47" in normalized or "glm-4.7" in normalized or "glm-47" in normalized:
         return "glm47"
-    if "minimax" in normalized or "mini-max" in normalized or "m2.7" in normalized:
+    if "minimax-m3" in normalized:
+        return "minimax_m3"
+    if "minimax-m2" in normalized or "m2.7" in normalized:
         return "minimax_m2"
     if "gpt-oss" in normalized or "gptoss" in normalized:
         return "gpt_oss"
