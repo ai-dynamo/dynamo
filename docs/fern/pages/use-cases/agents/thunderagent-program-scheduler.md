@@ -50,7 +50,7 @@ flowchart LR
     E -->|Progress and lifecycle events| B
 ```
 
-The classifier uses each worker/rank's published GPU KV-block capacity and a logical token estimate from active and retained programs. It observes context growth during generation, then pauses and repacks programs between turns. This estimate is not physical KV occupancy and does not deduplicate shared prefixes or include host/offload capacity. Running generation is allowed to finish.
+The classifier uses each worker/rank's published GPU KV-block capacity and a logical token estimate from active and retained programs. It observes context growth during generation, then pauses and repacks programs between turns. This estimate is not physical KV occupancy and does not include host/offload capacity. By default, each program is charged for its full context; optional shared-prefix accounting is described below. Running generation is allowed to finish.
 
 ### Native Plugin Parameters
 
@@ -58,6 +58,8 @@ Set admission parameters under `request_classifier.parameters`. Leave worker-sel
 
 | Parameter | Default | Meaning |
 |---|---|---|
+| `event_driven_admission` | `false` | Wake admission on waiting demand, completion, cancellation, and finalization; coalesce bursts for 50 ms. The periodic tick remains a fallback. |
+| `shared_prefix_accounting` | `false` | Experimental per-worker/rank accounting of complete input blocks with identical tracking hashes. Requires `acting_token_weight: 1`. |
 | `pause_threshold` | `0.95` | Per-worker usage fraction that starts pausing programs. |
 | `pause_target` | `0.80` | Usage fraction the pause cycle drains toward. |
 | `resume_hysteresis` | `0.10` | Headroom below the pause threshold required for normal resume. |
@@ -75,6 +77,32 @@ Program state is local to each frontend's router instance. This is not a cluster
 
 The native plugin's classifier and worker selector register together in Dynamo's builtin catalog. It does not expose the Python prototype's soft-demotion controls, priority boosts, host-cache budget, or separate status endpoints described below.
 
+### Event Wakeups and Shared-Prefix Accounting
+
+Enable either control independently under `request_classifier.parameters`:
+
+```yaml
+request_classifier:
+  type: thunderagent
+  parameters:
+    event_driven_admission: true
+    shared_prefix_accounting: true
+    buffer_per_program: 256
+worker_selection:
+  aggregated: thunderagent
+  instances:
+    - name: thunderagent
+      type: thunderagent
+```
+
+Event wakeups shorten the wait after a completed turn makes an idle reservation reclaimable, or cancellation/finalization releases budget. They do not interrupt generation or change client deadlines. Multiple events within 50 ms trigger one reconciliation.
+
+Shared-prefix accounting charges the union of complete input blocks on each worker/rank, plus each program's private tail, observed generation growth, and `buffer_per_program`. Missing hashes receive the full-context charge. Hashes come from the router's existing tracking domain; they are not inferred from an aggregate cache-hit percentage. Pausing, migration, finalization, and cancellation update ownership. Releasing one owner preserves blocks still charged to another. Idle reservations are reclaimed only when an eligible waiting request can make progress.
+
+**Experimental.** Matching hashes indicate logical sharing potential, not physical KV residency or simultaneous allocation sharing. Keep backend prefix caching enabled, preserve pause/resume headroom, and compare backend KV usage, preemptions, queueing, and throughput before adopting this mode. The example's 256-token reserve is a starting point for an experiment, not a bound on generation length. Generated tokens remain fully charged until a later request supplies their input hashes. Prefix accounting does not evict backend KV blocks, and forced timeout admission can still exceed the normal budget.
+
+Disable `shared_prefix_accounting` to restore full-context charging. Disable `event_driven_admission` to restore periodic reconciliation. Neither option changes session IDs or subagent relationships.
+
 ### Native Plugin Logs
 
 The plugin logs its interval, deferral timeout, and tracking limit at INFO when admission is enabled. A WARN event reports the number of programs forcibly resumed after reaching the deferral timeout. These requests continue processing; they are not rejected. Timeout warnings are aggregated into one event per scheduler tick.
@@ -85,7 +113,7 @@ To see scheduler state changes, enable DEBUG for the `thunderagent` log target b
 export DYN_LOG='info,thunderagent=debug'
 ```
 
-Each changed tick reports counts of active, paused, and marked-for-pause programs, waiting requests, and tracked requests. Unchanged ticks are silent. Log snapshots use stored counts without scanning programs or requests, and log emission happens after releasing the scheduler lock.
+Each changed reconciliation reports counts of active, paused, and marked-for-pause programs, waiting requests, and tracked requests. It also reports `gross_budget_tokens`, `shared_prefix_savings_tokens`, `effective_budget_tokens`, and `growth_reserve_tokens`. These are logical admission estimates, not GPU KV occupancy. Unchanged reconciliations are silent. Snapshots aggregate stored per-worker totals without scanning programs or requests, and log emission happens after releasing the scheduler lock.
 
 ## Python Router Prototype
 

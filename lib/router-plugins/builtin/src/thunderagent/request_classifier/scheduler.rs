@@ -12,6 +12,7 @@ use tokio::sync::Notify;
 
 use super::super::ThunderAgentConfig;
 use super::ThunderAgentError;
+use super::accounting::PrefixAccounting;
 use super::capacity::WorkerCapacitySnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,7 @@ pub(crate) struct Program {
     pub(crate) lifecycle: ProgramLifecycle,
     pub(crate) assigned_worker: Option<WorkerWithDpRank>,
     token_total: usize,
+    prefix_hashes: Arc<[u64]>,
     request_progress: Option<RequestProgress>,
     pub(crate) step_count: usize,
     marked_for_pause: bool,
@@ -46,6 +48,7 @@ impl Program {
             lifecycle: ProgramLifecycle::Active,
             assigned_worker: None,
             token_total: input_tokens,
+            prefix_hashes: Arc::from([]),
             request_progress: None,
             step_count: 1,
             marked_for_pause: false,
@@ -64,6 +67,7 @@ enum RequestPhase {
 pub(crate) struct RequestState {
     session_id: String,
     input_tokens: usize,
+    prefix_hashes: Arc<[u64]>,
     progress: RequestProgress,
     session_final: bool,
     pinned_worker: Option<WorkerWithDpRank>,
@@ -78,6 +82,7 @@ pub(crate) struct RequestRegistration {
     request_id: String,
     session_id: String,
     input_tokens: usize,
+    prefix_hashes: Arc<[u64]>,
     progress: RequestProgress,
     session_final: bool,
     pinned_worker: Option<WorkerWithDpRank>,
@@ -97,8 +102,14 @@ impl RequestRegistration {
             input_tokens,
             progress,
             session_final,
+            prefix_hashes: Arc::from([]),
             pinned_worker: None,
         }
+    }
+
+    pub(crate) fn with_prefix_hashes(mut self, hashes: Arc<[u64]>) -> Self {
+        self.prefix_hashes = hashes;
+        self
     }
 
     pub(crate) fn with_pinned_worker(mut self, worker: Option<WorkerWithDpRank>) -> Self {
@@ -143,6 +154,10 @@ pub(crate) struct StateTelemetry {
     pub(crate) marked_for_pause: usize,
     pub(crate) waiting_requests: usize,
     pub(crate) tracked_requests: usize,
+    pub(crate) gross_budget_tokens: usize,
+    pub(crate) shared_prefix_savings_tokens: usize,
+    pub(crate) effective_budget_tokens: usize,
+    pub(crate) growth_reserve_tokens: usize,
 }
 
 pub(crate) struct ReconcileOutcome {
@@ -180,6 +195,8 @@ pub(crate) struct State {
     paused_programs: HashSet<String>,
     marked_for_pause: usize,
     normal_usage: HashMap<WorkerWithDpRank, usize>,
+    charged_programs: usize,
+    prefix_accounting: PrefixAccounting,
     pub(crate) requests: HashMap<String, RequestState>,
     sessions: HashMap<String, SessionRequests>,
     pub(crate) arrival_order: VecDeque<WaitingRequest>,
@@ -196,6 +213,8 @@ impl State {
             paused_programs: HashSet::new(),
             marked_for_pause: 0,
             normal_usage: HashMap::new(),
+            charged_programs: 0,
+            prefix_accounting: PrefixAccounting::default(),
             requests: HashMap::new(),
             sessions: HashMap::new(),
             arrival_order: VecDeque::new(),
@@ -203,6 +222,11 @@ impl State {
             next_retention_expiry: None,
             capacity_snapshot_id: None,
         }
+    }
+
+    pub(crate) fn with_block_size(mut self, block_size: usize) -> Self {
+        self.prefix_accounting.block_size = block_size;
+        self
     }
 
     pub(crate) fn register(
@@ -218,7 +242,19 @@ impl State {
             progress,
             session_final,
             pinned_worker,
+            prefix_hashes,
         } = request;
+        let prefix_hashes =
+            if self.config.shared_prefix_accounting && self.prefix_accounting.block_size > 0 {
+                let complete_blocks = input_tokens / self.prefix_accounting.block_size;
+                if prefix_hashes.len() > complete_blocks {
+                    Arc::from(&prefix_hashes[..complete_blocks])
+                } else {
+                    prefix_hashes
+                }
+            } else {
+                Arc::from([])
+            };
         if self.requests.contains_key(&request_id) {
             return Err(ThunderAgentError::DuplicateRequestId(request_id));
         }
@@ -252,6 +288,7 @@ impl State {
             RequestState {
                 session_id,
                 input_tokens,
+                prefix_hashes,
                 progress,
                 session_final,
                 pinned_worker,
@@ -279,7 +316,24 @@ impl State {
 
     pub(crate) fn telemetry(&self) -> StateTelemetry {
         let paused_programs = self.paused_programs.len();
+        let gross_budget_tokens = self
+            .normal_usage
+            .values()
+            .copied()
+            .fold(0usize, usize::saturating_add);
+        let effective_budget_tokens = self
+            .normal_usage
+            .keys()
+            .map(|worker| self.worker_used(*worker))
+            .fold(0usize, usize::saturating_add);
         StateTelemetry {
+            gross_budget_tokens,
+            effective_budget_tokens,
+            shared_prefix_savings_tokens: gross_budget_tokens
+                .saturating_sub(effective_budget_tokens),
+            growth_reserve_tokens: self
+                .charged_programs
+                .saturating_mul(self.config.buffer_per_program),
             programs: self.programs.len(),
             active_programs: self.programs.len().saturating_sub(paused_programs),
             paused_programs,
@@ -330,10 +384,27 @@ impl State {
         ))
     }
 
+    fn worker_used(&self, worker: WorkerWithDpRank) -> usize {
+        self.normal_usage
+            .get(&worker)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(self.prefix_accounting.savings(worker))
+    }
+
+    fn incremental_cost(&self, session_id: &str, worker: WorkerWithDpRank) -> usize {
+        self.prefix_accounting.incremental_cost(
+            worker,
+            &self.programs[session_id].prefix_hashes,
+            self.buffered_program_tokens(session_id),
+        )
+    }
+
     fn subtract_charge(&mut self, charge: Option<(WorkerWithDpRank, usize)>) {
         let Some((worker, tokens)) = charge else {
             return;
         };
+        self.charged_programs -= 1;
         let Some(used) = self.normal_usage.get_mut(&worker) else {
             return;
         };
@@ -345,6 +416,7 @@ impl State {
 
     fn add_charge(&mut self, charge: Option<(WorkerWithDpRank, usize)>) {
         if let Some((worker, tokens)) = charge {
+            self.charged_programs += 1;
             let used = self.normal_usage.entry(worker).or_default();
             *used = used.saturating_add(tokens);
         }
@@ -368,6 +440,7 @@ impl State {
     ) -> Option<R> {
         let program = self.programs.get(session_id)?;
         let before = self.program_charge(program);
+        let old_hashes = Arc::clone(&program.prefix_hashes);
         self.marked_for_pause -= usize::from(program.marked_for_pause);
         self.subtract_charge(before);
         let result = update(self.programs.get_mut(session_id)?);
@@ -378,6 +451,17 @@ impl State {
                 program.marked_for_pause,
             )
         })?;
+        let hashes = Arc::clone(&self.programs[session_id].prefix_hashes);
+        if before.map(|(worker, _)| worker) != after.map(|(worker, _)| worker)
+            || !Arc::ptr_eq(&old_hashes, &hashes)
+        {
+            if let Some((worker, _)) = before {
+                self.prefix_accounting.remove(worker, &old_hashes);
+            }
+            if let Some((worker, _)) = after {
+                self.prefix_accounting.add(worker, &hashes);
+            }
+        }
         self.marked_for_pause += usize::from(marked_for_pause);
         self.add_charge(after);
         if paused {
@@ -390,6 +474,9 @@ impl State {
 
     fn insert_program(&mut self, session_id: String, program: Program) {
         let charge = self.program_charge(&program);
+        if let Some((worker, _)) = charge {
+            self.prefix_accounting.add(worker, &program.prefix_hashes);
+        }
         let paused = program.lifecycle == ProgramLifecycle::Paused;
         debug_assert!(!self.programs.contains_key(&session_id));
         self.marked_for_pause += usize::from(program.marked_for_pause);
@@ -404,6 +491,10 @@ impl State {
         let program = self.programs.remove(session_id)?;
         self.marked_for_pause -= usize::from(program.marked_for_pause);
         let charge = self.program_charge(&program);
+        if let Some((worker, _)) = charge {
+            self.prefix_accounting
+                .remove(worker, &program.prefix_hashes);
+        }
         self.subtract_charge(charge);
         self.paused_programs.remove(session_id);
         Some(program)
@@ -425,6 +516,10 @@ impl State {
         changed |= self.admit_front_requests(capacities, now);
         let mut usage = self.worker_usage(now);
         changed |= self.greedy_resume(capacities, &mut usage, now);
+        if self.reclaim_idle_reservations(capacities, &mut usage, now) {
+            changed = true;
+            changed |= self.greedy_resume(capacities, &mut usage, now);
+        }
         let forced_resumes = self.force_timed_out(capacities, &mut usage, now);
         changed |= forced_resumes > 0;
         changed |= self.pause_until_safe(capacities, &mut usage, now);
@@ -441,6 +536,10 @@ impl State {
 
     pub(crate) fn needs_reconcile(&self) -> bool {
         !self.programs.is_empty()
+    }
+
+    pub(crate) fn has_waiting_demand(&self) -> bool {
+        !self.waiting_arrivals.is_empty()
     }
 
     fn admit_front_requests(&mut self, capacities: &WorkerCapacitySnapshot, now: Instant) -> bool {
@@ -487,7 +586,6 @@ impl State {
             return false;
         };
         let session_id = request.session_id.clone();
-        let input_tokens = request.input_tokens;
         let pinned_worker = request.pinned_worker;
         let was_new = request.prior_program.is_none();
         let Some(program) = self.programs.get(&session_id) else {
@@ -507,14 +605,12 @@ impl State {
             && capacities.is_live(pin)
             && let Some(capacity) = capacities.capacity(pin)
         {
-            let used = self.normal_usage.get(&pin).copied().unwrap_or(0);
-            let current_charge = (assigned_worker == Some(pin))
-                .then(|| self.program_charge(program))
-                .flatten()
-                .map_or(0, |(_, tokens)| tokens);
-            let projected = used
-                .saturating_sub(current_charge)
-                .saturating_add(self.buffered_program_tokens(&session_id));
+            let used = self.worker_used(pin);
+            let projected = if assigned_worker == Some(pin) {
+                used
+            } else {
+                used.saturating_add(self.incremental_cost(&session_id, pin))
+            };
             if projected > capacity {
                 return self.defer_program(&session_id, now);
             }
@@ -536,16 +632,21 @@ impl State {
             changed = true;
         }
 
-        if was_new && !self.paused_programs.is_empty() {
+        if was_new
+            && self
+                .paused_programs
+                .iter()
+                .any(|session| self.has_waiting_request(session))
+        {
             return self.defer_program(&session_id, now) || changed;
         }
 
-        let required = self.request_cost(input_tokens);
         let selected = capacities
             .iter()
             .filter(|(worker, _)| capacities.is_live(*worker))
             .filter_map(|(worker, capacity)| {
-                let used = self.normal_usage.get(&worker).copied().unwrap_or(0);
+                let used = self.worker_used(worker);
+                let required = self.incremental_cost(&session_id, worker);
                 capacity
                     .checked_sub(used)
                     .is_some_and(|remaining| remaining >= required)
@@ -589,11 +690,13 @@ impl State {
         let session_id = request.session_id.clone();
         let input_tokens = request.input_tokens;
         let progress = request.progress.clone();
+        let hashes = Arc::clone(&request.prefix_hashes);
         let prior_program = self.programs.get(&session_id).cloned();
 
         if self.programs.contains_key(&session_id) {
             self.update_program(&session_id, |program| {
                 program.status = ProgramStatus::Reasoning;
+                program.prefix_hashes = hashes;
                 if input_tokens > 0 {
                     program.token_total = input_tokens;
                 }
@@ -603,6 +706,7 @@ impl State {
             });
         } else {
             let mut program = Program::new(input_tokens);
+            program.prefix_hashes = hashes;
             program.request_progress = Some(progress);
             self.insert_program(session_id, program);
         }
@@ -693,6 +797,9 @@ impl State {
         usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
         now: Instant,
     ) -> bool {
+        if self.config.shared_prefix_accounting {
+            return self.greedy_resume_shared(capacities, usage, now);
+        }
         let ceiling = (self.config.pause_threshold - self.config.resume_hysteresis).max(0.0);
         let mut remaining: Vec<(WorkerWithDpRank, usize)> = capacities
             .iter()
@@ -711,7 +818,7 @@ impl State {
         let mut paused: Vec<String> = self
             .paused_programs
             .iter()
-            .filter(|session_id| self.programs.contains_key(*session_id))
+            .filter(|session_id| self.has_waiting_request(session_id))
             .cloned()
             .collect();
         debug_assert!(
@@ -796,6 +903,177 @@ impl State {
         changed
     }
 
+    fn shared_resume_candidates(&self) -> Vec<String> {
+        let mut pending: Vec<_> = self
+            .paused_programs
+            .iter()
+            .filter(|session| self.has_waiting_request(session))
+            .cloned()
+            .collect();
+        pending.sort_unstable_by_key(|session| {
+            (
+                self.resume_group(session),
+                current_token_total(&self.programs[session]),
+                session.clone(),
+            )
+        });
+        pending
+    }
+
+    fn greedy_resume_shared(
+        &mut self,
+        capacities: &WorkerCapacitySnapshot,
+        usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
+        now: Instant,
+    ) -> bool {
+        let ceiling = (self.config.pause_threshold - self.config.resume_hysteresis).max(0.0);
+        let mut changed = false;
+        for session in self.shared_resume_candidates() {
+            let pin = self.waiting_pin(&session);
+            let target = capacities
+                .iter()
+                .filter(|(worker, _)| {
+                    capacities.is_live(*worker) && pin.is_none_or(|pin| pin == *worker)
+                })
+                .filter_map(|(worker, capacity)| {
+                    let used = self.worker_used(worker);
+                    let required = self.incremental_cost(&session, worker);
+                    (used.saturating_add(required) <= scale_tokens(capacity, ceiling))
+                        .then_some((worker, required, used))
+                })
+                .min_by_key(|(worker, required, used)| (*required, *used, *worker))
+                .map(|(worker, _, _)| worker);
+            if let Some(worker) = target {
+                changed |= self.resume_shared(&session, worker, usage, now);
+            }
+        }
+        changed
+    }
+
+    fn resume_shared(
+        &mut self,
+        session: &str,
+        worker: WorkerWithDpRank,
+        usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
+        now: Instant,
+    ) -> bool {
+        if !self.resume_program(session, Some(worker)) {
+            return false;
+        }
+        let u = usage.entry(worker).or_default();
+        u.used = self.worker_used(worker);
+        u.decayed = u
+            .decayed
+            .saturating_add(self.program_tokens(&self.programs[session], true, now))
+            .saturating_add(self.config.buffer_per_program);
+        true
+    }
+
+    fn reclaim_idle_shared(
+        &mut self,
+        capacities: &WorkerCapacitySnapshot,
+        usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
+        now: Instant,
+    ) -> bool {
+        let ceiling = (self.config.pause_threshold - self.config.resume_hysteresis).max(0.0);
+        let pending = self.shared_resume_candidates();
+        if pending.is_empty() {
+            return false;
+        }
+        let mut idle: HashMap<WorkerWithDpRank, Vec<_>> = HashMap::new();
+        for (session, program) in &self.programs {
+            if program.lifecycle == ProgramLifecycle::Active
+                && program.status == ProgramStatus::Acting
+                && !self.sessions.contains_key(session)
+                && let Some(worker) = program.assigned_worker
+            {
+                idle.entry(worker)
+                    .or_default()
+                    .push((program.acting_since, session.clone()));
+            }
+        }
+        let mut workers: Vec<_> = capacities
+            .iter()
+            .filter(|(worker, _)| capacities.is_live(*worker))
+            .collect();
+        workers.sort_unstable();
+        let mut changed = false;
+        for (worker, capacity) in workers {
+            let Some(mut candidates) = idle.remove(&worker) else {
+                continue;
+            };
+            candidates.sort_unstable();
+            let limit = scale_tokens(capacity, ceiling);
+            let block_size = self.prefix_accounting.block_size;
+            // Check feasibility after reclaim before changing any reservation. Removing
+            // a shared owner releases only its private tail and last-owned blocks.
+            let mut without_idle = self.prefix_accounting.snapshot(worker);
+            let mut gross_without_idle = self.normal_usage.get(&worker).copied().unwrap_or(0);
+            for (_, session) in &candidates {
+                let program = &self.programs[session];
+                without_idle.remove(&program.prefix_hashes);
+                gross_without_idle =
+                    gross_without_idle.saturating_sub(self.program_charge(program).unwrap().1);
+            }
+            let used_before = self.worker_used(worker);
+            let mut candidates = candidates.into_iter();
+            let mut reclaimed = 0;
+            for session in &pending {
+                if !self.paused_programs.contains(session)
+                    || self.waiting_pin(session).is_some_and(|pin| pin != worker)
+                {
+                    continue;
+                }
+                let program = &self.programs[session];
+                let full = self.buffered_program_tokens(session);
+                let possible_cost =
+                    without_idle.incremental_cost(&program.prefix_hashes, full, block_size);
+                let possible_used =
+                    gross_without_idle.saturating_sub(without_idle.savings(block_size));
+                if possible_used.saturating_add(possible_cost) > limit {
+                    continue;
+                }
+                while self
+                    .worker_used(worker)
+                    .saturating_add(self.incremental_cost(session, worker))
+                    > limit
+                {
+                    let Some((_, idle_session)) = candidates.next() else {
+                        break;
+                    };
+                    let program = &self.programs[&idle_session];
+                    let decayed = self
+                        .program_tokens(program, true, now)
+                        .saturating_add(self.config.buffer_per_program);
+                    if self.pause_acting(&idle_session) {
+                        let u = usage.entry(worker).or_default();
+                        u.used = self.worker_used(worker);
+                        u.decayed = u.decayed.saturating_sub(decayed);
+                        reclaimed += 1;
+                        changed = true;
+                    }
+                }
+                if self
+                    .worker_used(worker)
+                    .saturating_add(self.incremental_cost(session, worker))
+                    <= limit
+                    && self.resume_shared(session, worker, usage, now)
+                {
+                    without_idle.add(&self.programs[session].prefix_hashes);
+                    gross_without_idle = gross_without_idle.saturating_add(full);
+                    changed = true;
+                }
+            }
+            if reclaimed > 0 {
+                tracing::debug!(target: "thunderagent_admission", ?worker,
+                    resume_limit_tokens = limit, used_before, used_after = self.worker_used(worker),
+                    idle_programs_reclaimed = reclaimed,
+                    "Reclaimed idle reservations for waiting model calls");
+            }
+        }
+        changed
+    }
+
     fn resume_group(&self, session_id: &str) -> u8 {
         let program = &self.programs[session_id];
         if program.step_count <= 1 {
@@ -805,6 +1083,146 @@ impl State {
         } else {
             2
         }
+    }
+
+    fn has_waiting_request(&self, session_id: &str) -> bool {
+        self.sessions.get(session_id).is_some_and(|session| {
+            session.current.is_none()
+                && session.waiting.front().is_some_and(|waiting| {
+                    self.requests
+                        .get(&waiting.request_id)
+                        .is_some_and(|request| {
+                            request.phase == RequestPhase::Waiting
+                                && Arc::ptr_eq(&request.notify, &waiting.notify)
+                        })
+                })
+        })
+    }
+
+    fn reclaim_idle_reservations(
+        &mut self,
+        capacities: &WorkerCapacitySnapshot,
+        usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
+        now: Instant,
+    ) -> bool {
+        if self.config.shared_prefix_accounting {
+            return self.reclaim_idle_shared(capacities, usage, now);
+        }
+        let ceiling = (self.config.pause_threshold - self.config.resume_hysteresis).max(0.0);
+        let mut limits: Vec<_> = capacities
+            .iter()
+            .filter(|(worker, _)| capacities.is_live(*worker))
+            .map(|(worker, capacity)| (worker, scale_tokens(capacity, ceiling)))
+            .collect();
+        let mut pending: Vec<_> = self
+            .paused_programs
+            .iter()
+            .filter(|session| self.has_waiting_request(session))
+            .map(|session| {
+                (
+                    self.buffered_program_tokens(session),
+                    self.waiting_pin(session),
+                    session.clone(),
+                )
+            })
+            .collect();
+        if pending.is_empty() {
+            return false;
+        }
+        pending.sort_unstable();
+
+        // Completed turns can retain most of the budget while their agents
+        // wait on tools (including child agents). Reclaim those reservations
+        // for real demand even below pause_threshold; never interrupt a call.
+        let mut idle: HashMap<WorkerWithDpRank, Vec<_>> = HashMap::new();
+        for (session_id, program) in &self.programs {
+            if program.lifecycle == ProgramLifecycle::Active
+                && program.status == ProgramStatus::Acting
+                && !self.sessions.contains_key(session_id)
+                && let Some(worker) = program.assigned_worker
+            {
+                idle.entry(worker)
+                    .or_default()
+                    .push((program.acting_since, session_id.clone()));
+            }
+        }
+        limits.sort_unstable_by_key(|(worker, _)| *worker);
+        let mut changed = false;
+        for (worker, limit) in limits {
+            if pending.is_empty() {
+                break;
+            }
+            let Some(candidates) = idle.get_mut(&worker) else {
+                continue;
+            };
+            candidates.sort_unstable();
+            let idle_tokens = candidates.iter().fold(0usize, |total, (_, session)| {
+                total.saturating_add(self.program_charge(&self.programs[session]).unwrap().1)
+            });
+            let used_before = usage.get(&worker).map_or(0, |u| u.used);
+            let possible = limit.saturating_sub(used_before.saturating_sub(idle_tokens));
+            // Plan concrete placements before reclaiming. Aggregate demand can
+            // exceed what fits, and a later global resume pass may select a
+            // different set that cannot fit on any individual worker.
+            let mut target = 0usize;
+            let mut selected = Vec::new();
+            for (required, pin, session) in &pending {
+                if pin.is_none_or(|pin| pin == worker)
+                    && *required <= possible.saturating_sub(target)
+                {
+                    target += *required;
+                    selected.push(session.clone());
+                }
+            }
+            if selected.is_empty() {
+                continue;
+            }
+            let mut reclaimed = 0usize;
+            for (_, session) in candidates.iter() {
+                if limit.saturating_sub(usage.get(&worker).map_or(0, |u| u.used)) >= target {
+                    break;
+                }
+                let program = &self.programs[session];
+                let normal = self.program_tokens(program, false, now);
+                let decayed = self.program_tokens(program, true, now);
+                if self.pause_acting(session) {
+                    usage.entry(worker).or_default().remove_program(
+                        normal,
+                        decayed,
+                        self.config.buffer_per_program,
+                    );
+                    usage.entry(worker).or_default().used = self.worker_used(worker);
+                    reclaimed += 1;
+                    changed = true;
+                }
+            }
+            for session in selected {
+                if self.resume_program(&session, Some(worker)) {
+                    let program = &self.programs[&session];
+                    usage.entry(worker).or_default().add_program(
+                        self.program_tokens(program, false, now),
+                        self.program_tokens(program, true, now),
+                        self.config.buffer_per_program,
+                    );
+                    usage.entry(worker).or_default().used = self.worker_used(worker);
+                    changed = true;
+                }
+            }
+            pending.retain(|(_, _, session)| self.paused_programs.contains(session));
+            let used_after = usage.get(&worker).map_or(0, |u| u.used);
+            if reclaimed > 0 {
+                tracing::debug!(
+                    target: "thunderagent_admission",
+                    ?worker,
+                    resume_limit_tokens = limit,
+                    used_before,
+                    used_after,
+                    idle_programs_reclaimed = reclaimed,
+                    "Reclaimed idle reservations for waiting model calls"
+                );
+            }
+        }
+        changed
     }
 
     fn buffered_program_tokens(&self, session_id: &str) -> usize {
@@ -823,11 +1241,12 @@ impl State {
             .paused_programs
             .iter()
             .filter(|session_id| {
-                self.programs.get(*session_id).is_some_and(|program| {
-                    program
-                        .deferred_since
-                        .is_some_and(|since| now.saturating_duration_since(since) >= timeout)
-                })
+                self.has_waiting_request(session_id)
+                    && self.programs.get(*session_id).is_some_and(|program| {
+                        program
+                            .deferred_since
+                            .is_some_and(|since| now.saturating_duration_since(since) >= timeout)
+                    })
             })
             .cloned()
             .collect();
@@ -860,6 +1279,7 @@ impl State {
                         self.program_tokens(program, true, now),
                         self.config.buffer_per_program,
                     );
+                    usage.entry(worker).or_default().used = self.worker_used(worker);
                 }
                 forced_resumes += 1;
             }
@@ -971,6 +1391,7 @@ impl State {
                         decayed,
                         self.config.buffer_per_program,
                     );
+                    usage.entry(worker).or_default().used = self.worker_used(worker);
                     changed = true;
                 }
             }
@@ -1255,7 +1676,15 @@ impl State {
     fn normal_worker_usage(&self) -> HashMap<WorkerWithDpRank, WorkerUsage> {
         self.normal_usage
             .iter()
-            .map(|(&worker, &used)| (worker, WorkerUsage { used, decayed: 0 }))
+            .map(|(&worker, _)| {
+                (
+                    worker,
+                    WorkerUsage {
+                        used: self.worker_used(worker),
+                        decayed: 0,
+                    },
+                )
+            })
             .collect()
     }
 
@@ -1273,10 +1702,6 @@ impl State {
             self.config.acting_token_weight
         };
         scale_tokens(token_total, weight)
-    }
-
-    fn request_cost(&self, input_tokens: usize) -> usize {
-        input_tokens.saturating_add(self.config.buffer_per_program)
     }
 
     fn set_assignment(&mut self, session_id: &str, worker: Option<WorkerWithDpRank>) {
@@ -1373,11 +1798,391 @@ mod tests {
             lifecycle: ProgramLifecycle::Paused,
             assigned_worker: None,
             token_total: tokens,
+            prefix_hashes: Arc::from([]),
             request_progress: None,
             step_count: 2,
             marked_for_pause: false,
             acting_since: Some(now),
             deferred_since: Some(now),
+        }
+    }
+
+    fn register_request(
+        state: &mut State,
+        id: &str,
+        session: &str,
+        tokens: usize,
+        capacities: &WorkerCapacitySnapshot,
+        now: Instant,
+    ) {
+        state
+            .register(
+                RequestRegistration::new(
+                    id.into(),
+                    session.into(),
+                    tokens,
+                    RequestProgress::new(tokens).0,
+                    false,
+                ),
+                capacities,
+                now,
+            )
+            .unwrap();
+    }
+
+    fn complete_request(
+        state: &mut State,
+        id: &str,
+        tokens: usize,
+        capacities: &WorkerCapacitySnapshot,
+        now: Instant,
+    ) {
+        let worker = state.requests[id].placement_target.unwrap();
+        state.on_event(
+            ClassifyEvent::Completed {
+                request_id: id.into(),
+                worker,
+                context_tokens: Some(tokens),
+            },
+            capacities,
+            now,
+        );
+    }
+
+    #[test]
+    fn admission_reclaims_idle_reservations_below_pause_threshold() {
+        let now = Instant::now();
+        let mut state = state(ThunderAgentConfig::default());
+        let capacities = capacities(&[(1, 100_000)]);
+        let worker = WorkerWithDpRank::new(1, 0);
+        // Three completed turns retain 90% of the logical budget while their
+        // agents run tools. One of those tools now needs a child model call.
+        for i in 0..3 {
+            let id = format!("parent-{i}");
+            register_request(&mut state, &id, &id, 29_900, &capacities, now);
+            complete_request(&mut state, &id, 29_900, &capacities, now);
+        }
+        register_request(
+            &mut state,
+            "child-request",
+            "child",
+            14_900,
+            &capacities,
+            now,
+        );
+        assert_eq!(
+            state.wait_status("child-request", &state.requests["child-request"].notify),
+            WaitStatus::Waiting
+        );
+        let tick = now + state.config.scheduler_interval();
+        state.reconcile(&capacities, tick);
+        assert_eq!(
+            state.wait_status("child-request", &state.requests["child-request"].notify),
+            WaitStatus::Released(Some(worker))
+        );
+        assert_eq!(state.normal_usage[&worker], 75_000);
+        assert_eq!(
+            state.programs["parent-0"].lifecycle,
+            ProgramLifecycle::Paused
+        );
+        assert_eq!(
+            state.programs["parent-1"].lifecycle,
+            ProgramLifecycle::Active
+        );
+        assert_eq!(
+            state.programs["parent-2"].lifecycle,
+            ProgramLifecycle::Active
+        );
+        state.reconcile(&capacities, tick + state.config.scheduler_interval());
+        assert_eq!(
+            state.programs["parent-0"].lifecycle,
+            ProgramLifecycle::Paused
+        );
+        // An idle paused reservation must not block unrelated new work.
+        register_request(
+            &mut state,
+            "fresh-request",
+            "fresh",
+            4_900,
+            &capacities,
+            tick,
+        );
+        assert_eq!(
+            state.wait_status("fresh-request", &state.requests["fresh-request"].notify),
+            WaitStatus::Released(Some(worker))
+        );
+        complete_request(&mut state, "child-request", 14_900, &capacities, tick);
+        register_request(
+            &mut state,
+            "parent-next",
+            "parent-0",
+            30_000,
+            &capacities,
+            tick,
+        );
+        state.reconcile(&capacities, tick + state.config.scheduler_interval());
+        assert_eq!(
+            state.wait_status("parent-next", &state.requests["parent-next"].notify),
+            WaitStatus::Released(Some(worker))
+        );
+        assert!(state.normal_usage[&worker] <= 85_000);
+    }
+
+    #[test]
+    fn idle_reclamation_only_reserves_capacity_for_selected_waiters() {
+        let now = Instant::now();
+        let mut state = state(ThunderAgentConfig::default());
+        let capacities = capacities(&[(1, 100_000)]);
+        let worker = WorkerWithDpRank::new(1, 0);
+        for i in 0..3 {
+            let id = format!("parent-{i}");
+            register_request(&mut state, &id, &id, 29_900, &capacities, now);
+            complete_request(&mut state, &id, 29_900, &capacities, now);
+        }
+        register_request(&mut state, "small", "small", 14_900, &capacities, now);
+        register_request(&mut state, "large", "large", 79_900, &capacities, now);
+
+        state.reconcile(&capacities, now + state.config.scheduler_interval());
+
+        assert_eq!(
+            state.wait_status("small", &state.requests["small"].notify),
+            WaitStatus::Released(Some(worker))
+        );
+        assert_eq!(
+            state.wait_status("large", &state.requests["large"].notify),
+            WaitStatus::Waiting
+        );
+        assert_eq!(state.normal_usage[&worker], 75_000);
+        assert_eq!(
+            state.programs["parent-0"].lifecycle,
+            ProgramLifecycle::Paused
+        );
+        for id in ["parent-1", "parent-2"] {
+            assert_eq!(state.programs[id].lifecycle, ProgramLifecycle::Active);
+        }
+    }
+
+    #[test]
+    fn idle_reclamation_releases_a_fitting_waiter_despite_fragmentation() {
+        let now = Instant::now();
+        let mut state = state(ThunderAgentConfig::default());
+        let capacities = capacities(&[(0, 100_000), (1, 100_000)]);
+        let worker = |id| WorkerWithDpRank::new(id, 0);
+        state.insert_program("returning".into(), paused_program(79_900, now));
+        for (id, tokens, pinned, complete) in [
+            ("running-a", 39_900, worker(0), false),
+            ("idle", 44_900, worker(0), true),
+            ("running-b", 45_900, worker(1), false),
+        ] {
+            state
+                .register(
+                    RequestRegistration::new(
+                        id.into(),
+                        id.into(),
+                        tokens,
+                        RequestProgress::new(tokens).0,
+                        false,
+                    )
+                    .with_pinned_worker(Some(pinned)),
+                    &capacities,
+                    now,
+                )
+                .unwrap();
+            if complete {
+                complete_request(&mut state, id, tokens, &capacities, now);
+            }
+        }
+        register_request(
+            &mut state,
+            "returning-next",
+            "returning",
+            79_900,
+            &capacities,
+            now,
+        );
+        register_request(&mut state, "new", "new", 39_900, &capacities, now);
+
+        state.reconcile(&capacities, now + state.config.scheduler_interval());
+
+        assert_eq!(
+            state.wait_status("new", &state.requests["new"].notify),
+            WaitStatus::Released(Some(worker(0)))
+        );
+        assert_eq!(
+            state.wait_status("returning-next", &state.requests["returning-next"].notify),
+            WaitStatus::Waiting
+        );
+        assert_eq!(state.programs["idle"].lifecycle, ProgramLifecycle::Paused);
+        assert_eq!(state.normal_usage[&worker(0)], 80_000);
+        assert_eq!(state.normal_usage[&worker(1)], 46_000);
+        for id in ["running-a", "running-b"] {
+            assert_eq!(state.programs[id].lifecycle, ProgramLifecycle::Active);
+        }
+    }
+
+    #[test]
+    fn idle_reservations_are_retained_without_waiting_demand() {
+        let now = Instant::now();
+        let mut state = state(ThunderAgentConfig::default());
+        let capacities = capacities(&[(1, 100_000)]);
+        register_request(&mut state, "request", "idle", 29_900, &capacities, now);
+        complete_request(&mut state, "request", 29_900, &capacities, now);
+        state.insert_program("paused-idle".into(), paused_program(100, now));
+        state.reconcile(&capacities, now + Duration::from_secs(10));
+        assert_eq!(state.programs["idle"].lifecycle, ProgramLifecycle::Active);
+        assert_eq!(
+            state.programs["paused-idle"].lifecycle,
+            ProgramLifecycle::Paused
+        );
+    }
+
+    #[test]
+    fn admission_pressure_does_not_reclaim_inflight_generations() {
+        let now = Instant::now();
+        let mut state = state(ThunderAgentConfig::default());
+        let capacities = capacities(&[(1, 100_000)]);
+        register_request(&mut state, "running", "running", 89_900, &capacities, now);
+        register_request(&mut state, "waiting", "waiting", 14_900, &capacities, now);
+        state.reconcile(&capacities, now + Duration::from_secs(10));
+        assert_eq!(
+            state.wait_status("waiting", &state.requests["waiting"].notify),
+            WaitStatus::Waiting
+        );
+        assert_eq!(
+            state.programs["running"].lifecycle,
+            ProgramLifecycle::Active
+        );
+        assert!(!state.programs["running"].marked_for_pause);
+    }
+
+    #[test]
+    fn oversized_waiter_does_not_evict_idle_reservations_without_progress() {
+        let now = Instant::now();
+        let mut state = state(ThunderAgentConfig::default());
+        let capacities = capacities(&[(1, 100_000)]);
+        register_request(&mut state, "parent", "parent", 29_900, &capacities, now);
+        complete_request(&mut state, "parent", 29_900, &capacities, now);
+        register_request(
+            &mut state,
+            "oversized",
+            "oversized",
+            110_000,
+            &capacities,
+            now,
+        );
+        state.reconcile(&capacities, now + Duration::from_secs(10));
+        assert_eq!(
+            state.wait_status("oversized", &state.requests["oversized"].notify),
+            WaitStatus::Waiting
+        );
+        assert_eq!(state.programs["parent"].lifecycle, ProgramLifecycle::Active);
+    }
+
+    #[test]
+    fn idle_reclamation_for_a_hard_pin_only_reclaims_its_worker() {
+        let now = Instant::now();
+        let mut state = state(ThunderAgentConfig::default());
+        let capacities = capacities(&[(0, 100_000), (1, 100_000)]);
+        for worker_id in 0..2 {
+            for i in 0..3 {
+                let id = format!("parent-{worker_id}-{i}");
+                state
+                    .register(
+                        RequestRegistration::new(
+                            id.clone(),
+                            id.clone(),
+                            29_900,
+                            RequestProgress::new(29_900).0,
+                            false,
+                        )
+                        .with_pinned_worker(Some(WorkerWithDpRank::new(worker_id, 0))),
+                        &capacities,
+                        now,
+                    )
+                    .unwrap();
+                complete_request(&mut state, &id, 29_900, &capacities, now);
+            }
+        }
+        let pinned = WorkerWithDpRank::new(1, 0);
+        let notify = state
+            .register(
+                RequestRegistration::new(
+                    "child".into(),
+                    "child".into(),
+                    14_900,
+                    RequestProgress::new(14_900).0,
+                    false,
+                )
+                .with_pinned_worker(Some(pinned)),
+                &capacities,
+                now,
+            )
+            .unwrap();
+        assert_eq!(state.wait_status("child", &notify), WaitStatus::Waiting);
+
+        state.reconcile(&capacities, now + state.config.scheduler_interval());
+        assert_eq!(
+            state.wait_status("child", &notify),
+            WaitStatus::Released(Some(pinned))
+        );
+        for i in 0..3 {
+            assert_eq!(
+                state.programs[&format!("parent-0-{i}")].lifecycle,
+                ProgramLifecycle::Active
+            );
+        }
+        assert_eq!(
+            state.programs["parent-1-0"].lifecycle,
+            ProgramLifecycle::Paused
+        );
+        assert_eq!(state.normal_usage[&WorkerWithDpRank::new(0, 0)], 90_000);
+        assert_eq!(state.normal_usage[&pinned], 75_000);
+    }
+
+    #[test]
+    fn oversized_hard_pin_does_not_reclaim_idle_reservations() {
+        let now = Instant::now();
+        let mut state = state(ThunderAgentConfig::default());
+        let capacities = capacities(&[(0, 20_000), (1, 100_000)]);
+        for (worker_id, tokens) in [(0, 17_900), (1, 29_900)] {
+            let id = format!("parent-{worker_id}");
+            state
+                .register(
+                    RequestRegistration::new(
+                        id.clone(),
+                        id.clone(),
+                        tokens,
+                        RequestProgress::new(tokens).0,
+                        false,
+                    )
+                    .with_pinned_worker(Some(WorkerWithDpRank::new(worker_id, 0))),
+                    &capacities,
+                    now,
+                )
+                .unwrap();
+            complete_request(&mut state, &id, tokens, &capacities, now);
+        }
+        let notify = state
+            .register(
+                RequestRegistration::new(
+                    "child".into(),
+                    "child".into(),
+                    19_900,
+                    RequestProgress::new(19_900).0,
+                    false,
+                )
+                .with_pinned_worker(Some(WorkerWithDpRank::new(0, 0))),
+                &capacities,
+                now,
+            )
+            .unwrap();
+        state.reconcile(&capacities, now + state.config.scheduler_interval());
+        assert_eq!(state.wait_status("child", &notify), WaitStatus::Waiting);
+        for worker_id in 0..2 {
+            assert_eq!(
+                state.programs[&format!("parent-{worker_id}")].lifecycle,
+                ProgramLifecycle::Active
+            );
         }
     }
 
@@ -1845,6 +2650,9 @@ mod tests {
             state.insert_program(session_id.to_owned(), paused_program(tokens, now));
         }
         let capacities = capacities(&[(1, 301), (2, 301)]);
+        for (session_id, tokens) in [("small", 1), ("medium", 100), ("large", 201)] {
+            register_request(&mut state, session_id, session_id, tokens, &capacities, now);
+        }
         let mut usage = state.worker_usage(now);
 
         assert!(state.greedy_resume(&capacities, &mut usage, now));
@@ -2135,3 +2943,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "shared_tests.rs"]
+mod shared_tests;
