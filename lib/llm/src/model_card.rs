@@ -19,8 +19,8 @@ use std::sync::{Arc, OnceLock};
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::{
-    ModelRuntimeConfig, SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1, TokenizerBackend,
-    VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    ModelRuntimeConfig, SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1,
+    SPEC_DECODE_RUNTIME_KEY, TokenizerBackend, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
@@ -1257,7 +1257,10 @@ impl ModelDeploymentCard {
             && self.needs.is_empty()
             && self.lora.is_none()
             && self.migration_limit == 0
-            && !self.runtime_config.runtime_data.contains_key("spec_decode")
+            && !self
+                .runtime_config
+                .runtime_data
+                .contains_key(SPEC_DECODE_RUNTIME_KEY)
     }
 
     pub fn mdcsum(&self) -> &str {

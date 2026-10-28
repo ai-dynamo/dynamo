@@ -34,6 +34,9 @@ use crate::types::{
     },
 };
 
+const SYSTEMONE_MAX_QUESTIONS: usize = 128;
+const SYSTEMONE_MAX_CANDIDATES: usize = 255;
+
 /// Emit a one-time deprecation warning when serving-readiness falls back to
 /// the legacy path because a namespace still contains a legacy card (a
 /// worker with no declared `worker_type`). Logged once per process to avoid
@@ -102,6 +105,7 @@ pub(crate) struct SystemOneExecutionSelection {
     pub(crate) card: ModelDeploymentCard,
     pub(crate) preprocessor: Arc<OpenAIPreprocessor>,
     pub(crate) admitted_ids: Option<tokio::sync::watch::Receiver<Vec<u64>>>,
+    pub(crate) lifecycle_cancellation: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl SystemOneExecutionSelection {
@@ -113,7 +117,15 @@ impl SystemOneExecutionSelection {
         &self,
         pinned_worker: Option<u64>,
     ) -> Result<(), SystemOneSelectionError> {
+        if self
+            .lifecycle_cancellation
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(SystemOneSelectionError::Unavailable);
+        }
         let Some(admitted) = &self.admitted_ids else {
+            // In-process engines have one trusted local worker and no discovery watcher.
             return Ok(());
         };
         if admitted.has_changed().is_err() {
@@ -132,8 +144,8 @@ impl SystemOneExecutionSelection {
         // contract, including vocabulary logprobs and meta_info.cached_tokens.
         // Tokenizer-specific candidate limits are checked during preflight.
         dynamo_decisions::Capabilities {
-            max_questions: 128,
-            max_candidates: 255,
+            max_questions: SYSTEMONE_MAX_QUESTIONS,
+            max_candidates: SYSTEMONE_MAX_CANDIDATES,
             supports_predicate: true,
             supports_choice: true,
             supports_score: true,
@@ -787,17 +799,27 @@ impl Model {
         &self,
         capability: &str,
     ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
-        self.select_worker_set_with(|ws| self.systemone_execution_inputs(ws, capability))
-            .ok_or_else(|| {
-                if self.worker_sets.load().values().any(|worker_set| {
-                    self.systemone_execution_inputs(worker_set, capability)
-                        .is_some()
-                }) {
-                    SystemOneSelectionError::Unavailable
-                } else {
-                    SystemOneSelectionError::Unsupported
-                }
-            })
+        self.select_worker_set_with_worker_count(
+            |ws| self.systemone_execution_inputs(ws, capability),
+            WorkerSet::decision_worker_count,
+        )
+        .ok_or_else(|| {
+            if self
+                .worker_sets
+                .load()
+                .values()
+                .any(|worker_set| Self::supports_systemone_profile(worker_set, capability))
+            {
+                SystemOneSelectionError::Unavailable
+            } else {
+                SystemOneSelectionError::Unsupported
+            }
+        })
+    }
+
+    fn supports_systemone_profile(worker_set: &WorkerSet, capability: &str) -> bool {
+        worker_set.supports_runtime_capability(capability)
+            && worker_set.card().is_systemone_serial_eligible()
     }
 
     fn systemone_execution_inputs(
@@ -806,9 +828,7 @@ impl Model {
         capability: &str,
     ) -> Option<SystemOneExecutionSelection> {
         let card = worker_set.card();
-        if !worker_set.supports_runtime_capability(capability)
-            || !card.is_systemone_serial_eligible()
-        {
+        if !Self::supports_systemone_profile(worker_set, capability) {
             return None;
         }
         Some(SystemOneExecutionSelection {
@@ -816,7 +836,8 @@ impl Model {
             engine: worker_set.generate_engine.clone()?,
             card: card.clone(),
             preprocessor: worker_set.systemone_preprocessor.clone()?,
-            admitted_ids: worker_set.decision_admissions(),
+            admitted_ids: worker_set.decision_admissions().cloned(),
+            lifecycle_cancellation: worker_set.lifecycle_cancellation(),
         })
     }
 
@@ -910,6 +931,18 @@ impl Model {
     where
         F: Fn(&WorkerSet) -> Option<T>,
     {
+        self.select_worker_set_with_worker_count(extract, WorkerSet::worker_count)
+    }
+
+    fn select_worker_set_with_worker_count<T, F, C>(
+        &self,
+        extract: F,
+        count_workers: C,
+    ) -> Option<T>
+    where
+        F: Fn(&WorkerSet) -> Option<T>,
+        C: Fn(&WorkerSet) -> usize,
+    {
         // One immutable membership map drives both the readiness filter and
         // candidate eligibility, so a concurrent add/remove can't make us treat a
         // namespace as complete while routing to a set that lost a peer.
@@ -935,7 +968,7 @@ impl Model {
         // Fast path: single set (same zero-worker filtering as the multi-set path below)
         if snapshot.len() == 1 {
             let ws = snapshot[0];
-            if ws.worker_count() == 0 || !ready_namespaces.contains(ws.namespace()) {
+            if count_workers(ws) == 0 || !ready_namespaces.contains(ws.namespace()) {
                 return None;
             }
             return extract(ws);
@@ -948,7 +981,7 @@ impl Model {
         let eligible: Vec<(T, usize)> = snapshot
             .iter()
             .filter_map(|&ws| {
-                let count = ws.worker_count();
+                let count = count_workers(ws);
                 if count == 0 || !ready_namespaces.contains(ws.namespace()) {
                     return None;
                 }
@@ -1440,7 +1473,15 @@ mod tests {
         model.add_worker_set("ns".to_string(), worker_set);
         assert!(matches!(
             model.get_systemone_execution_selection(capability),
-            Err(SystemOneSelectionError::Unsupported)
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+        let model = Model::new("scoring-model".to_string());
+        let (mut worker_set, _workers) = systemone_worker_set("ns", |_| {});
+        Arc::get_mut(&mut worker_set).unwrap().generate_engine = None;
+        model.add_worker_set("ns".to_string(), worker_set);
+        assert!(matches!(
+            model.get_systemone_execution_selection(capability),
+            Err(SystemOneSelectionError::Unavailable)
         ));
         let model = Model::new("scoring-model".to_string());
         let (worker_set, workers) = systemone_worker_set("ns", |_| {});
@@ -1450,6 +1491,115 @@ mod tests {
             model.get_systemone_execution_selection(capability),
             Err(SystemOneSelectionError::Unavailable)
         ));
+    }
+
+    #[test]
+    fn systemone_retained_selection_rejects_lifecycle_retirement() {
+        let model = Model::new("scoring-model".to_string());
+        let (mut workers, _tx) = systemone_worker_set("ns", |_| {});
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        Arc::get_mut(&mut workers)
+            .unwrap()
+            .set_lifecycle_cancellation(cancellation.clone());
+        model.add_worker_set("ns".to_string(), workers);
+        let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+        let selection = model.get_systemone_execution_selection(capability).unwrap();
+        assert_eq!(selection.validate_dispatch(Some(1)), Ok(()));
+        cancellation.cancel();
+        assert_eq!(
+            selection.validate_dispatch(Some(1)),
+            Err(SystemOneSelectionError::Unavailable)
+        );
+        assert!(matches!(
+            model.get_systemone_execution_selection(capability),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn systemone_in_process_selection_does_not_require_discovery_admissions() {
+        let model = Model::new("scoring-model".to_string());
+        let (registered, _tx) = systemone_worker_set("ns", |_| {});
+        let mut local = WorkerSet::new(
+            "local".to_string(),
+            "local".to_string(),
+            registered.card().clone(),
+        );
+        local.generate_engine = registered.generate_engine.clone();
+        local.systemone_preprocessor = registered.systemone_preprocessor.clone();
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        local.set_lifecycle_cancellation(cancellation.clone());
+        assert_eq!(local.decision_worker_count(), 1);
+        model.add_worker_set("local".to_string(), Arc::new(local));
+        let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+        let selection = model.get_systemone_execution_selection(capability).unwrap();
+        assert!(selection.admitted_ids.is_none());
+        assert_eq!(selection.validate_dispatch(None), Ok(()));
+        cancellation.cancel();
+        assert_eq!(
+            selection.validate_dispatch(None),
+            Err(SystemOneSelectionError::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn systemone_selection_excludes_discovered_but_unadmitted_workers() {
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let component = distributed
+            .namespace("decision-admission-test".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap();
+        let model = Model::new("scoring-model".to_string());
+        let (mut unadmitted, discovered) = systemone_worker_set("ns-a", |_| {});
+        let (admitted_tx, admitted_rx) = watch::channel(Vec::new());
+        let selected_card = Arc::new(unadmitted.card().clone());
+        Arc::get_mut(&mut unadmitted).unwrap().set_topology_target(
+            super::super::worker_set::CommittedWorkerSetTarget {
+                endpoint: component.endpoint("generate".to_string()),
+                group: "group-a".to_string(),
+                generation: 1,
+                card: selected_card,
+                admitted_ids: admitted_rx,
+            },
+        );
+        model.add_worker_set("ns-a".to_string(), unadmitted);
+        let capability = crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+        assert!(matches!(
+            model.get_systemone_execution_selection(capability),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+        let (available, _available_tx) = systemone_worker_set("ns-b", |_| {});
+        model.add_worker_set("ns-b".to_string(), available.clone());
+        let selection = model.get_systemone_execution_selection(capability).unwrap();
+        assert!(Arc::ptr_eq(
+            &selection.engine,
+            available.generate_engine.as_ref().unwrap()
+        ));
+        admitted_tx.send(vec![1, 2]).unwrap();
+        let workers = model.get_worker_set("ns-a").unwrap();
+        assert_eq!(workers.worker_count(), 1);
+        assert_eq!(workers.decision_worker_count(), 1);
+        admitted_tx.send(vec![2]).unwrap();
+        assert_eq!(workers.decision_worker_count(), 0);
+        admitted_tx.send(vec![1]).unwrap();
+        assert_eq!(workers.decision_worker_count(), 1);
+        drop(discovered);
+        assert_eq!(workers.decision_worker_count(), 0);
+        drop(admitted_tx);
+        assert_eq!(workers.decision_worker_count(), 0);
+        let selection = model.get_systemone_execution_selection(capability).unwrap();
+        assert!(Arc::ptr_eq(
+            &selection.engine,
+            available.generate_engine.as_ref().unwrap()
+        ));
+        runtime.shutdown();
     }
 
     fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {

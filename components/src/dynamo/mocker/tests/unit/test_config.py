@@ -242,6 +242,8 @@ async def test_systemone_serial_launch_advertisement_matches_engine(
         ["--sglang-generate", "--engine-type", "sglang", "--data-parallel-size", "2"],
         ["--sglang-generate", "--engine-type", "sglang", "--max-num-seqs", "2"],
         ["--sglang-generate", "--engine-type", "sglang", "--max-num-seqs=2"],
+        ["--sglang-generate", "--engine-type", "sglang", "--max-num-seqs=256"],
+        ["--sglang-generate", "--engine-type", "sglang", "--max-num-s=2"],
     ],
 )
 def test_systemone_serial_rejects_incompatible_launch_options(flags):

@@ -485,11 +485,43 @@ impl WorkerSet {
         self.instance_count_rx = Some(rx);
     }
 
-    pub(crate) fn decision_admissions(&self) -> Option<watch::Receiver<Vec<u64>>> {
+    pub(crate) fn decision_admissions(&self) -> Option<&watch::Receiver<Vec<u64>>> {
         self.topology_target
             .as_ref()
-            .map(|target| target.admitted_ids.clone())
-            .or_else(|| self.instance_count_rx.clone())
+            .map(|target| &target.admitted_ids)
+            .or(self.instance_count_rx.as_ref())
+    }
+
+    pub(crate) fn decision_worker_count(&self) -> usize {
+        if self
+            .lifecycle_cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return 0;
+        }
+        let Some(available) = &self.instance_count_rx else {
+            return usize::from(self.topology_target.is_none());
+        };
+        if available.has_changed().is_err() {
+            return 0;
+        }
+        let Some(target) = &self.topology_target else {
+            return available.borrow().len();
+        };
+        if target.admitted_ids.has_changed().is_err() {
+            return 0;
+        }
+        let admitted = target.admitted_ids.borrow();
+        available
+            .borrow()
+            .iter()
+            .filter(|id| admitted.contains(id))
+            .count()
+    }
+
+    pub(crate) fn lifecycle_cancellation(&self) -> Option<CancellationToken> {
+        self.lifecycle_cancellation.clone()
     }
 
     pub(crate) fn set_lifecycle_cancellation(&mut self, cancellation: CancellationToken) {

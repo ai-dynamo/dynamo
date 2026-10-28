@@ -708,6 +708,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.systemone_serial:
         explicit_max_num_seqs = any(
             token.startswith("--")
+            and token != "--"
             and "--max-num-seqs".startswith(token.split("=", 1)[0])
             for token in argv
         )
