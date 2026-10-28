@@ -70,6 +70,7 @@ impl HarnessService {
     pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
+            .timeout(Duration::from_secs(10))
             .build()
             .expect("failed to build harness HTTP client");
         let (listener, port) = bind_random_port().await;
