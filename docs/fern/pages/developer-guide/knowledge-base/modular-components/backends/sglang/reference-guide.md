@@ -55,6 +55,18 @@ These arguments are added by Dynamo on top of SGLang's native arguments. For the
 
 The current supported parser names for both flags are documented in [Tool Call Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#supported-reasoning-parsers).
 
+## Startup Warmups
+
+For aggregated workers launched with `python -m dynamo.sglang`, pass SGLang's
+`--warmups` option to run a comma-separated list of registered warmups before
+Dynamo serves endpoints or registers the model. With no configured warmups,
+startup is unchanged.
+
+`SGLANG_WARMUP_TIMEOUT` sets the timeout in seconds for the configured warmups.
+A non-positive value uses a 600-second timeout. A warmup failure or timeout aborts
+worker startup and runs worker cleanup. This applies to the Python worker path;
+the native gRPC sidecar manages its own startup.
+
 ## Tokenizer Behavior
 
 By default, Dynamo handles tokenization and detokenization through its Rust-based frontend, passing `input_ids` to SGLang. This enables all frontend endpoints (`v1/chat/completions`, `v1/completions`, `v1/embeddings`).

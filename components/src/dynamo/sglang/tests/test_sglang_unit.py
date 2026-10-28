@@ -2540,3 +2540,79 @@ def test_main_preserves_worker_failure(monkeypatch):
 
     with pytest.raises(RuntimeError, match="worker failed"):
         sglang_main.main()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        None,
+        ValueError("warmup failed"),
+        asyncio.TimeoutError(),
+        asyncio.CancelledError(),
+    ],
+)
+async def test_configured_warmups_gate_registration(monkeypatch, failure):
+    import dynamo.sglang.init_llm as init_llm_mod
+
+    args = Mock(
+        node_rank=0,
+        enable_trace=False,
+        enable_forward_pass_metrics=False,
+        warmups="voice_chat,prefill_shapes",
+        disaggregation_mode="null",
+    )
+    config = Mock(
+        server_args=args,
+        serving_mode=DisaggregationMode.AGGREGATED,
+        dynamo_args=Mock(
+            freeze_gc_after_init=False,
+            custom_jinja_template=None,
+            endpoint_types="chat",
+        ),
+    )
+    config.use_resolved_server_args.return_value = args
+    engine = Mock(server_args=args)
+    warmup = AsyncMock(side_effect=failure)
+
+    async def serve(*args, **kwargs):
+        warmup.assert_awaited_once()
+
+    endpoint = Mock(
+        first_token_source=AsyncMock(), serve_endpoint=AsyncMock(side_effect=serve)
+    )
+    register = AsyncMock(side_effect=serve)
+    teardown = AsyncMock()
+    for name, value in {
+        "gateway_worker_count": lambda *args: 1,
+        "setup_sgl_metrics": AsyncMock(return_value=(Mock(), None, {})),
+        "DecodeWorkerHandler": Mock(),
+        "SglangHealthCheckPayload": Mock(),
+        "register_model_with_readiness_gate": register,
+        "execute_warmups": warmup,
+        "finish_worker_teardown": teardown,
+    }.items():
+        monkeypatch.setattr(init_llm_mod, name, value)
+    monkeypatch.setattr(init_llm_mod.envs.SGLANG_WARMUP_TIMEOUT, "get", lambda: 30)
+    startup = init_llm_mod.init_decode(
+        Mock(endpoint=Mock(return_value=endpoint)),
+        config,
+        asyncio.Event(),
+        [],
+        snapshot_engine=engine,
+    )
+    if failure is not None:
+        with pytest.raises(type(failure)):
+            await startup
+        endpoint.serve_endpoint.assert_not_awaited()
+        register.assert_not_awaited()
+    else:
+        await startup
+        register.assert_awaited_once()
+    warmup.assert_awaited_once_with(
+        disaggregation_mode="null",
+        warmup_names=["voice_chat", "prefill_shapes"],
+        tokenizer_manager=engine.tokenizer_manager,
+    )
+    teardown.assert_awaited_once()
+    assert teardown.call_args.kwargs["body_failed"] is (failure is not None)
