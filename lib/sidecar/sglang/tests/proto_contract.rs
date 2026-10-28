@@ -40,3 +40,20 @@ fn release_0522_fields_keep_their_wire_tags() {
     // status_code is optional field 3.
     assert_eq!(chunk.encode_to_vec(), [0x18, 0x94, 0x03]);
 }
+
+#[test]
+fn generate_request_keeps_media_wire_tags() {
+    let request = dynamo_sglang_sidecar::proto::GenerateRequest {
+        image_data: vec!["i".to_string()],
+        video_data: vec!["v".to_string()],
+        audio_data: vec!["a".to_string()],
+        ..Default::default()
+    };
+    // image_data, video_data, and audio_data are repeated fields 19 to 21 on SGLang main.
+    assert_eq!(
+        request.encode_to_vec(),
+        [
+            0x9a, 0x01, 0x01, b'i', 0xa2, 0x01, 0x01, b'v', 0xaa, 0x01, 0x01, b'a'
+        ]
+    );
+}

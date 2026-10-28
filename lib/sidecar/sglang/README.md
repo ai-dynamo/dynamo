@@ -27,6 +27,17 @@ server. See the [sidecar overview](../README.md) for installation.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Image and video input | Yes; disaggregated serving is untested |
+| Audio input | Untested |
+
+The sidecar sends a media kind only when the SGLang gRPC server lists it in
+`grpc_features` (`image_inputs`, `video_inputs`, or `audio_inputs`), and returns
+400 for other media requests.
+
+> [!WARNING]
+> SGLang downloads `http://` and `https://` media URLs itself, from any host by
+> default, including `127.0.0.1` and its own HTTP API. Start SGLang with
+> `--allowed-media-domains` to limit the hosts it fetches.
 
 ## Run locally
 
