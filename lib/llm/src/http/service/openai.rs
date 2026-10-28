@@ -3585,6 +3585,36 @@ async fn chat_completions(
         return Err(err_response);
     }
 
+    tracing::trace!("Getting chat completions engine for model: {}", model);
+
+    // Selected once: the Beam request normalization below reads this engine's parsing
+    // options and dispatch uses this same engine, so the two cannot disagree on the
+    // worker set when one served name fronts Beam and non-Beam pools.
+    let (engine, parsing_options) = state
+        .manager()
+        .get_chat_completions_engine_with_parsing(&model)
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_model_error(&e);
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+
+    // Beam route, before generic validation (which rejects what these normalize): a
+    // `strict` tool whose schema is outside OpenAI's strict subset is served as
+    // non-strict instead of rejected, and a legacy `builtin_tools` declaration is
+    // promoted into `tools` (see `tool_choice::relax_noncompliant_strict_tools_for_beam`
+    // and `tool_choice::declare_legacy_builtin_tools_for_beam`).
+    crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
+        &mut request,
+        parsing_options.tool_call_parser.as_deref(),
+        parsing_options.reasoning_parser.as_deref(),
+    );
+    crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
+        &mut request,
+        parsing_options.tool_call_parser.as_deref(),
+        parsing_options.reasoning_parser.as_deref(),
+    );
+
     // Handle Rest of Validation Errors
     if let Err(err_response) = validate_chat_completion_fields_generic(&request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -3598,33 +3628,6 @@ async fn chat_completions(
     if request.inner.max_completion_tokens.is_none() {
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
     }
-
-    tracing::trace!("Getting chat completions engine for model: {}", model);
-
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
-
-    // Beam route: a `strict` tool whose schema is outside OpenAI's strict subset is
-    // served as non-strict instead of rejected (see
-    // `tool_choice::relax_noncompliant_strict_tools_for_beam`). This reads the parsing
-    // options of the engine selected above, so normalization and dispatch always agree
-    // on the worker set when one served name fronts Beam and non-Beam pools.
-    crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
-        &mut request,
-        parsing_options.tool_call_parser.as_deref(),
-        parsing_options.reasoning_parser.as_deref(),
-    );
-    crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
-        &mut request,
-        parsing_options.tool_call_parser.as_deref(),
-        parsing_options.reasoning_parser.as_deref(),
-    );
 
     // Request policy controls whether parser-produced tool calls may be exposed.
     // Assistant response/guided constraints are handled separately during

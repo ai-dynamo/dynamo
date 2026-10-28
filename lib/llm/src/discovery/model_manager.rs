@@ -1689,6 +1689,27 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIChatCompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        self.add_chat_completions_model_with_card(
+            model,
+            card_checksum,
+            Self::aggregated_local_card(),
+            engine,
+        )
+    }
+
+    /// Like [`Self::add_chat_completions_model`], but the worker set carries `card`, so
+    /// the parsing options the HTTP handlers read (tool-call / reasoning parser, structural
+    /// tag, ...) reflect that card instead of the defaults. The card is still stamped as a
+    /// synthetic aggregated in-process worker.
+    pub fn add_chat_completions_model_with_card(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        mut card: ModelDeploymentCard,
+        engine: OpenAIChatCompletionsStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.needs = Vec::new();
         let _reservation = self.reservation_lock.lock();
         self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
@@ -1696,11 +1717,7 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_chat_{}", model);
-        let mut ws = WorkerSet::new(
-            namespace.clone(),
-            card_checksum.to_string(),
-            Self::aggregated_local_card(),
-        );
+        let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         ws.chat_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         self.publish_catalog_locked();
