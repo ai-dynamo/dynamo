@@ -21,14 +21,14 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
-dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env", "string"] }
 futures = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }

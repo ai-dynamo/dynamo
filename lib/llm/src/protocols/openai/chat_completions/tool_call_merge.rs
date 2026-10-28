@@ -155,6 +155,7 @@ mod tests {
                 name: name.map(str::to_string),
                 arguments: arguments.map(str::to_string),
             }),
+            custom: None,
         }
     }
 

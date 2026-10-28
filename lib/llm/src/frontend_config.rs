@@ -8,12 +8,19 @@
 //! them by domain so each service consumes an explicit typed contract. Defaults
 //! read the legacy environment variables only for direct Rust/non-Python callers.
 
+use std::sync::LazyLock;
+
 use dynamo_runtime::config::{
     env_is_truthy,
     environment_names::llm::{self as env_llm, metrics as env_metrics},
+    is_truthy,
 };
 
 use crate::reasoning_field::ReasoningField;
+
+/// Process-wide strict-schema policy, initialized before the HTTP service accepts requests.
+pub(crate) static DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: LazyLock<bool> =
+    LazyLock::new(|| env_is_truthy(env_llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION));
 
 /// Metrics naming controls for frontend-owned services.
 ///
@@ -89,7 +96,9 @@ impl Default for AnthropicApiConfig {
     fn default() -> Self {
         Self {
             enabled: env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API),
-            strip_preamble: env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE),
+            strip_preamble: std::env::var(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE)
+                .map(|value| is_truthy(&value))
+                .unwrap_or(true),
         }
     }
 }

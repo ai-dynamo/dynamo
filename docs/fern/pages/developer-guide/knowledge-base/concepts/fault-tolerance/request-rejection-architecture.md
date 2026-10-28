@@ -2,15 +2,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Request Rejection Architecture
-subtitle: Worker-load event processing, busy-state aggregation, overload errors, and hard worker admission limits.
+subtitle: Worker-load event processing, busy-state aggregation, and overload errors.
 ---
 
-Dynamo implements request rejection (load shedding) at two layers: Frontend routing can avoid workers
-reported as busy, and each worker can enforce a hard request-plane concurrency cap.
+Dynamo implements request rejection (load shedding) in Frontend routing. The router avoids workers
+reported as busy and rejects requests when every eligible worker is busy.
+
+Frontend discovery uses first-wins admission for each model and target group. The first observed checksum
+cohort remains the incumbent; an incompatible newcomer is excluded by its individual worker ID and does
+not remove or change the incumbent. If the incumbent cohort disappears, the next remaining cohort can
+become its successor after initialization. Each Frontend observes this lifecycle independently, so
+separate Frontends can choose different incumbents.
 
 For deployment steps, see [Request Rejection](../../../../kubernetes/fault-tolerance/request-rejection.md). For exact
-configuration fields, see [Frontend Configuration](../../../../reference/components/frontend-configuration.mdx#fault-tolerance)
-and [Runtime Configuration](../../../../reference/components/runtime-configuration.mdx#operations).
+configuration fields, see [Frontend Configuration](../../../../reference/components/frontend-configuration.mdx#fault-tolerance).
 
 ## Request Flow
 
@@ -96,48 +101,28 @@ When a request arrives:
 
 The Frontend also exports the latest observed worker values through
 `dynamo_frontend_worker_active_decode_blocks` and
-`dynamo_frontend_worker_active_prefill_tokens`, which help distinguish missing telemetry from a
-threshold that is simply too high.
+`dynamo_frontend_worker_active_prefill_tokens`. These gauges include only currently committed,
+available workers. A missing sample can mean that the worker was removed or excluded, not only
+that load telemetry is missing.
 
-## Worker-Side Request Admission
-
-A worker can impose a hard cap independently of Frontend busy detection. Setting
-`--engine-request-limit N` creates `N` engine slots. Requests that arrive while those slots are full
-enter a small Dynamo overflow queue of size `Q`. When the engine and queue are both full, the worker
-returns `Server overloaded: worker at capacity`; the Frontend maps the resulting
-rejection to the worker-scoped `WorkerOverloaded` error. When request migration is enabled, it can
-retry the request without changing its allowlist or routing constraints.
-
-The worker rejection does not add a failed-worker exclusion to the routing request or change the
-standalone router protocol. An in-process router can exclude the failed worker with request-local
-state while retrying. In a split or standalone deployment, selection uses the router's current global
-overload and fault state, so a retry can select the same worker again. Worker-local overload
-migration is therefore best-effort in that topology. Pool-scoped `ResourceExhausted` remains
-non-migratable because no eligible worker has known capacity. If either overload error reaches the
-client, the Frontend returns the configured overload status, HTTP 529 by default.
-
-The effective maximum is `N + Q` requests. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` defaults to `16`, is an
-advanced override, must be at least `2`, and is read only when the engine limit is enabled.
-
-### Overflow Channel Sizing
-
-The channel capacity is `Q - 1` because one dispatcher task can hold a request between the queue and
-an engine slot. This produces an exact `N + Q` cap for `Q >= 2`. A value of `1` would still require a
-channel capacity of one and could permit two queued requests, which is why the supported minimum is
-`2`.
-
-Worker admission exports:
-
-- `dynamo_rejection_request_total`
-- `dynamo_engine_request`
-- `dynamo_request_queue`
-
-See [Cancellation and Rejection](../../../../reference/observability/metrics-catalog.mdx#cancellation-and-rejection)
-for metric types and labels.
+Use `dynamo_frontend_router_worker_state` on the same Frontend to check the worker's current state
+and exclusion reason before diagnosing its load feed. For example, `state="excluded"` with
+`reason="checksum_mismatch"` identifies an individual worker whose Model Deployment Card checksum
+differs from the incumbent. During incumbent initialization, the incumbent remains
+`state="pending",reason="initializing"`; rejecting a newcomer never makes the incumbent pending or
+excluded. A worker removed from discovery has no per-worker state sample;
+`dynamo_frontend_router_workers` disappears when discovery withdraws the group after its last worker
+is removed. An observed group with pending or excluded workers still reports `available=0`; alerts
+for worker loss must also handle absent series. If the worker is available but its load sample is missing, investigate load
+publication and subscriptions. Transient overload is separate from this availability check, so busy
+workers can still expose load samples for comparison with the configured threshold. Do not aggregate
+inventory across Frontends as worker-global readiness.
+See [Router Worker Inventory](../../../../reference/observability/metrics-catalog.mdx#router-worker-inventory)
+for state, label, and lifetime semantics.
 
 ## Related Documentation
 
+- [Admission Control Architecture](admission-control-architecture.md) - Backend admission limits and queueing
 - [Request Rejection](../../../../kubernetes/fault-tolerance/request-rejection.md) - Enable, tune, verify, and troubleshoot load shedding
 - [Frontend Configuration](../../../../reference/components/frontend-configuration.mdx#fault-tolerance) - Threshold and overload response fields
-- [Runtime Configuration](../../../../reference/components/runtime-configuration.mdx#operations) - Worker hard-cap fields
 - [Observability Architecture](../observability-architecture.md#active-worker-health-checks) - Worker health monitoring

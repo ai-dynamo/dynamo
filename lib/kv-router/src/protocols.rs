@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::Range;
@@ -13,6 +14,7 @@ use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::identity::CacheOwnerId;
+use crate::kv_hints::{CacheOwnerKvTransferKeys, KvTransferSourceChoice, WorkerKvTransferKeys};
 use xxhash_rust::xxh3;
 
 const fn default_track_prefill_tokens() -> bool {
@@ -304,7 +306,8 @@ pub trait WorkerConfigLike {
     ///
     /// `None` means this worker/rank does not support TRANSFER. Backends that
     /// support TRANSFER but cannot serve as a source may return `Some` with
-    /// `source_control_endpoint: None`.
+    /// `source_control_endpoint: None`. Capability and `worker_type` are the
+    /// same for every rank of a worker; only the source endpoint may differ.
     fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         _dp_rank: DpRank,
@@ -355,6 +358,12 @@ pub trait WorkerConfigLike {
     /// Returns the taint preference weight used when KV transfer topology enforcement is preferred.
     fn kv_transfer_preferred_weight(&self) -> Option<f32> {
         None
+    }
+
+    /// This worker's router-hint identity with hashed labels, used to choose
+    /// KV fetch sources. Configs read by many selections should cache it.
+    fn kv_transfer_keys(&self) -> Cow<'_, WorkerKvTransferKeys> {
+        Cow::Owned(WorkerKvTransferKeys::new(self))
     }
 }
 
@@ -648,12 +657,17 @@ impl ResidencyProjection {
 pub struct RouterHintSourceMetadata {
     pub source_control_endpoint: String,
     pub worker_type: String,
+    /// Topology labels of the cache, like a worker's `topology_domains`. Hint
+    /// targets with a `kv_transfer_domain` only fetch from the same island.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub topology_domains: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRouterHintSource {
     pub metadata: RouterHintSourceMetadata,
     pub attached_worker: Option<WorkerWithDpRank>,
+    pub kv_transfer_keys: CacheOwnerKvTransferKeys,
 }
 
 /// One immutable lookup snapshot for scheduling projection and persistent hint sources.
@@ -687,6 +701,7 @@ impl ResidencyRoutingSnapshot {
                 (
                     ResidencyOwner::cache_owner(owner).compact_key(),
                     ResolvedRouterHintSource {
+                        kv_transfer_keys: CacheOwnerKvTransferKeys::new(&metadata),
                         metadata,
                         attached_worker,
                     },
@@ -1099,6 +1114,71 @@ pub struct WorkerSelectionResult {
     /// Selected worker's projected decode load after adding this request's
     /// prompt blocks, in scheduler-tracked block units.
     pub potential_decode_blocks: usize,
+
+    /// The source the selected worker fetches its KV prefix from, chosen with
+    /// the same rule that credited the fetch during selection.
+    pub kv_transfer_source: Option<KvTransferSourceChoice>,
+}
+
+/// How many candidates a selection trace retains: the `top_k` lowest-cost rows
+/// plus the selected worker, or every candidate when `top_k` is zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionTraceSpec {
+    pub top_k: usize,
+}
+
+/// A scored candidate: the worker and its total cost after every scorer ran, in
+/// the policy's cost units (scheduler-tracked KV blocks for the builtin policy).
+/// Lower is better.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelectionTraceRow {
+    pub worker: WorkerWithDpRank,
+    pub cost: f64,
+}
+
+/// Per-candidate costs captured for one worker selection.
+///
+/// Rows are unordered. When `rows.len() < candidate_count`, the selection was
+/// truncated to the `top_k` lowest-cost candidates plus the selected worker,
+/// which is always present.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectionTrace {
+    /// Eligible candidates the policy scored, before truncation.
+    pub candidate_count: usize,
+    /// Whether the host pinned the selection to one worker and rank.
+    pub pinned: bool,
+    /// Retained candidates, unordered.
+    pub rows: Vec<SelectionTraceRow>,
+}
+
+/// One router scheduler's view of a worker rank's in-flight load.
+///
+/// Routers publish this on the scheduler-load subject; workers never do.
+/// Fields added after the first release must be `#[serde(default)]`, and `Option`
+/// when absent does not mean zero.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SchedulerLoad {
+    pub worker_id: WorkerId,
+    pub dp_rank: DpRank,
+    pub active_decode_blocks: u64,
+    pub active_prefill_tokens: u64,
+    pub group: SchedulerGroup,
+}
+
+/// Which schedulers' views describe the same requests.
+///
+/// Views within one group overlap, so consumers take their maximum; views from
+/// different groups are disjoint, so consumers sum them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SchedulerGroup {
+    /// A scheduler that only knows the requests it routed itself.
+    Standalone { scheduler_id: u64 },
+    /// Schedulers that replicate request state, so each reports the group's full load.
+    ReplicaGroup { group_id: String },
+    /// Future aggregation kinds are decoded but cannot contribute to load totals.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Active load metrics for a worker, used for overload detection.
@@ -2525,6 +2605,18 @@ mod tests {
     }
 
     #[test]
+    fn router_hint_source_topology_is_optional_on_the_wire() {
+        let without_topology = serde_json::json!({
+            "source_control_endpoint": "tcp://owner:23280",
+            "worker_type": "prefill",
+        });
+        let metadata: RouterHintSourceMetadata =
+            serde_json::from_value(without_topology.clone()).unwrap();
+        assert!(metadata.topology_domains.is_empty());
+        assert_eq!(serde_json::to_value(&metadata).unwrap(), without_topology);
+    }
+
+    #[test]
     fn test_worker_config_like_topology_domains_default() {
         // A minimal implementor that does NOT override topology_domains()
         struct MinimalConfig;
@@ -2847,5 +2939,46 @@ mod tests {
             serde_json::to_string(&load).unwrap(),
             r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4,"active_requests":2}"#
         );
+    }
+
+    #[test]
+    fn scheduler_load_accepts_unknown_fields_but_requires_identity_and_measurements() {
+        let frame = serde_json::json!({
+            "worker_id": 7,
+            "dp_rank": 2,
+            "active_decode_blocks": 10,
+            "active_prefill_tokens": 20,
+            "group": {"kind": "standalone", "scheduler_id": 42, "future_group_field": true},
+            "future_measurement": 99
+        });
+        let batch: Vec<SchedulerLoad> =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&vec![frame.clone()]).unwrap()).unwrap();
+        assert_eq!(
+            batch,
+            [SchedulerLoad {
+                worker_id: 7,
+                dp_rank: 2,
+                active_decode_blocks: 10,
+                active_prefill_tokens: 20,
+                group: SchedulerGroup::Standalone { scheduler_id: 42 },
+            }]
+        );
+        for required in [
+            "worker_id",
+            "dp_rank",
+            "group",
+            "active_decode_blocks",
+            "active_prefill_tokens",
+        ] {
+            let mut incomplete = frame.clone();
+            incomplete.as_object_mut().unwrap().remove(required);
+            assert!(
+                rmp_serde::from_slice::<Vec<SchedulerLoad>>(
+                    &rmp_serde::to_vec_named(&vec![incomplete]).unwrap(),
+                )
+                .is_err(),
+                "missing {required} must not become a valid zero-load report"
+            );
+        }
     }
 }

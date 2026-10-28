@@ -3,7 +3,9 @@
 
 import asyncio
 import logging
+import os
 import re as re_mod
+import threading
 from copy import deepcopy
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -29,7 +31,7 @@ from tensorrt_llm.llmapi.llm import SamplingParams
 from dynamo.common.backend.logprobs import extract_from_completion_output
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
-from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
+from dynamo.trtllm.health_check import HEALTH_CHECK_CACHE_SALT, TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.request_handlers.handler_base import (
     BYPASS_REMOTE_PREFILL_ANNOTATION,
@@ -157,6 +159,18 @@ class TestOverrideSamplingParams:
 
         assert result.n == 2
         assert result.best_of == 2
+
+    def test_logit_bias_is_rejected(self):
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "logit_bias": {"18": -100},
+                "temperature": 0.5,
+            }
+        }
+
+        with pytest.raises(InvalidArgument, match="logit_bias"):
+            HandlerBase._override_sampling_params(sampling_params, request)
 
     def test_unknown_attributes_raise_error(self):
         """Test that unknown attributes raise a TypeError.
@@ -431,6 +445,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         # Make generation_result iterable (background task will try to read it)
         generation_result.__aiter__ = MagicMock(return_value=generation_result)
         never_resolve = asyncio.get_event_loop().create_future()
@@ -448,6 +463,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         guard = _DeferredAbort(generation_result)
 
         guard.signal_first_token()
@@ -462,6 +478,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         result_queue = asyncio.Queue()
 
         async def mock_anext(self_mock):
@@ -485,10 +502,48 @@ class TestDeferredAbortGuard:
         generation_result.abort.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_deferred_task_skips_abort_when_first_result_finishes(
+        self, monkeypatch
+    ):
+        from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
+
+        generation_result = MagicMock()
+        generation_result.finished = False
+        result_queue = asyncio.Queue()
+
+        async def mock_anext(self_mock):
+            val = await result_queue.get()
+            generation_result.finished = True
+            return val
+
+        generation_result.__aiter__ = MagicMock(return_value=generation_result)
+        generation_result.__anext__ = lambda self: mock_anext(self)
+
+        original_create_task = asyncio.create_task
+        deferred_tasks = []
+
+        def track_deferred_task(coro):
+            task = original_create_task(coro)
+            deferred_tasks.append(task)
+            return task
+
+        monkeypatch.setattr(asyncio, "create_task", track_deferred_task)
+
+        guard = _DeferredAbort(generation_result)
+        guard.abort()
+
+        await result_queue.put("only_token")
+        await deferred_tasks[0]
+
+        generation_result.abort.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_no_guard_in_non_disagg_mode(self):
         """Without _DeferredAbort wrapper, abort fires immediately on cancel."""
         handler = self._make_handler()
         generation_result = MagicMock()
+        generation_result.finished = False
         context = MagicMock()
         killed_future = asyncio.get_event_loop().create_future()
         killed_future.set_result(None)
@@ -500,12 +555,27 @@ class TestDeferredAbortGuard:
         generation_result.abort.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_finished_request_is_not_aborted(self):
+        handler = self._make_handler()
+        generation_result = MagicMock()
+        generation_result.finished = True
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-finished"
+
+        await handler._handle_cancellation(generation_result, context)
+        generation_result.abort.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_cancellation_monitor_cleans_up_waiters_on_normal_completion(
         self, monkeypatch
     ):
         handler = self._make_handler()
         handler.shutdown_event = asyncio.Event()
         generation_result = MagicMock()
+        generation_result.finished = False
         context = MagicMock()
         killed_future = asyncio.get_event_loop().create_future()
         context.async_killed_or_stopped.return_value = killed_future
@@ -541,6 +611,7 @@ class TestDeferredAbortGuard:
         from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 
         generation_result = MagicMock()
+        generation_result.finished = False
         guard = _DeferredAbort(generation_result)
 
         context = MagicMock()
@@ -1136,6 +1207,52 @@ class TestGenerateLocally:
         handler._initiate_shutdown.assert_awaited_once_with(error)
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(10)
+    async def test_engine_dead_error_exits_without_engine_teardown(self, monkeypatch):
+        """After an MPI rank dies, TRT-LLM teardown can block forever on IPC to
+        the dead rank. The fatal path must skip it and exit promptly."""
+        from tensorrt_llm.executor.utils import EngineDeadError
+
+        from dynamo.trtllm import engine_monitor as engine_monitor_module
+
+        exit_calls = []
+        monkeypatch.setattr(os, "_exit", exit_calls.append)
+        monkeypatch.setattr(
+            engine_monitor_module, "_fatal_exit_lock", threading.Lock(), raising=False
+        )
+
+        handler = self._make_handler()
+        error = EngineDeadError(RuntimeError("MPI worker rank 0 exited unexpectedly"))
+        release = threading.Event()
+        engine = MagicMock()
+        engine.get_health_check_fatal_error.return_value = error
+        engine.shutdown.side_effect = lambda: release.wait()
+        engine.cleanup = mock.AsyncMock(side_effect=lambda: release.wait())
+        engine.llm.generate_async = MagicMock(side_effect=error)
+        handler.engine = engine
+        handler.runtime = MagicMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        try:
+            chunks = [
+                chunk
+                async for chunk in handler.generate_locally(
+                    request, self._make_context()
+                )
+            ]
+        finally:
+            release.set()
+
+        assert chunks == [{"finish_reason": {"error": str(error)}, "token_ids": []}]
+        assert exit_calls == [1]
+        handler.runtime.shutdown.assert_called_once()
+        engine.shutdown.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_zero_prompt_logprobs_is_forwarded_and_returned(self):
         handler = self._make_handler()
         prompt_logprob = MagicMock(
@@ -1308,6 +1425,29 @@ class TestGenerateLocally:
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["cache_salt"] == "tenant-a"
+
+    @pytest.mark.asyncio
+    async def test_health_check_gets_dedicated_cache_salt(self):
+        """Keep the default canary out of the attention-DP dummy's cache namespace."""
+        handler = self._make_handler()
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        # An unsalted canary of [1] collides with TRT-LLM's attention-DP dummy
+        # request prefix, so the canary must use its own salt.
+        request = TrtllmHealthCheckPayload(
+            disaggregation_mode=DisaggregationMode.AGGREGATED,
+        ).to_dict()
+        assert request["token_ids"] == [1]
+
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+        assert len(chunks) > 0
+
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["cache_salt"] == HEALTH_CHECK_CACHE_SALT
 
     @pytest.mark.asyncio
     async def test_prefill_applies_stop_conditions_matching_native_context_only(self):
@@ -1513,7 +1653,6 @@ class TestRequestHasImages:
 
 
 class _FakeConversationParams:
-
     """Stand-in for tensorrt_llm.llmapi.ConversationParams. Only ``conversation_id``
     is read back by the assertions."""
 

@@ -207,7 +207,7 @@ spec:
               --enable-prefix-caching \
               --no-disable-hybrid-kv-cache-manager \
               --async-scheduling \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
               --disaggregation-mode prefill \
               --dyn-tool-call-parser qwen3_coder \
               --dyn-reasoning-parser nemotron3 \
@@ -350,7 +350,7 @@ spec:
               --enable-prefix-caching \
               --no-disable-hybrid-kv-cache-manager \
               --async-scheduling \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' \
               --disaggregation-mode decode \
               --dyn-tool-call-parser qwen3_coder \
               --dyn-reasoning-parser nemotron3 \

@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::common::handoff::HandoffId;
 use crate::common::protocols::{
-    DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
+    DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockerConfig, OutputSignal,
 };
 use crate::engine::{LiveEngineScheduler, create_engine_with_rank_sink};
 #[cfg(test)]
@@ -364,13 +364,13 @@ impl Drop for LiveEngineGroup {
 
 impl LiveEngine {
     /// Start one live scheduler at `dp_rank`.
-    pub fn start(args: MockEngineArgs, dp_rank: u32) -> anyhow::Result<Self> {
+    pub fn start(args: MockerConfig, dp_rank: u32) -> anyhow::Result<Self> {
         Self::start_internal(args, dp_rank, LiveEngineOptions::default())
     }
 
     /// Start one live scheduler with runtime-owned KV and FPM publishers.
     pub fn start_with_config(
-        args: MockEngineArgs,
+        args: MockerConfig,
         dp_rank: u32,
         config: LiveEngineConfig,
     ) -> anyhow::Result<Self> {
@@ -385,7 +385,7 @@ impl LiveEngine {
     /// Start one live scheduler with runtime-owned publishers and an explicit
     /// per-request output buffering policy.
     pub fn start_with_config_and_request_output_buffering(
-        args: MockEngineArgs,
+        args: MockerConfig,
         dp_rank: u32,
         config: LiveEngineConfig,
         request_output_buffering: RequestOutputBuffering,
@@ -408,7 +408,7 @@ impl LiveEngine {
     /// and handoff API, while all ranks share one scheduler actor and one
     /// [`aisimulate_core::engine::generalized::GeneralizedMockerEngine`] barrier.
     pub fn start_grouped_with_configs(
-        args: MockEngineArgs,
+        args: MockerConfig,
         configs: Vec<LiveEngineConfig>,
     ) -> anyhow::Result<Vec<Self>> {
         Self::start_grouped_with_configs_and_request_output_buffering(
@@ -421,7 +421,7 @@ impl LiveEngine {
     /// Start all attention-DP ranks with an explicit per-request output
     /// buffering policy.
     pub fn start_grouped_with_configs_and_request_output_buffering(
-        args: MockEngineArgs,
+        args: MockerConfig,
         configs: Vec<LiveEngineConfig>,
         request_output_buffering: RequestOutputBuffering,
     ) -> anyhow::Result<Vec<Self>> {
@@ -438,14 +438,19 @@ impl LiveEngine {
     }
 
     pub(crate) fn start_grouped_with_options(
-        args: MockEngineArgs,
-        options: Vec<LiveEngineOptions>,
+        args: MockerConfig,
+        mut options: Vec<LiveEngineOptions>,
     ) -> anyhow::Result<Vec<Self>> {
         let runtime = Handle::try_current()
             .context("LiveEngine::start_grouped_with_options requires an active Tokio runtime")?;
         let args = args
             .normalized()
             .context("invalid Mocker engine arguments")?;
+        if args.backend == EngineType::Sglang {
+            for options_for_rank in &mut options {
+                options_for_rank.allow_zero_output = true;
+            }
+        }
         anyhow::ensure!(
             options.len() == args.dp_size as usize,
             "grouped live Mocker requires one options value per DP rank: expected {}, got {}",
@@ -496,7 +501,7 @@ impl LiveEngine {
 
     #[cfg(test)]
     pub(crate) fn start_with_options(
-        args: MockEngineArgs,
+        args: MockerConfig,
         dp_rank: u32,
         options: LiveEngineOptions,
     ) -> anyhow::Result<Self> {
@@ -505,7 +510,7 @@ impl LiveEngine {
 
     #[cfg(test)]
     fn start_with_output_gate(
-        args: MockEngineArgs,
+        args: MockerConfig,
         dp_rank: u32,
         output_gate: Option<watch::Receiver<bool>>,
         request_output_capacity: usize,
@@ -526,15 +531,18 @@ impl LiveEngine {
     }
 
     fn start_internal(
-        args: MockEngineArgs,
+        args: MockerConfig,
         dp_rank: u32,
-        options: LiveEngineOptions,
+        mut options: LiveEngineOptions,
     ) -> anyhow::Result<Self> {
         let runtime =
             Handle::try_current().context("LiveEngine::start requires an active Tokio runtime")?;
         let args = args
             .normalized()
             .context("invalid Mocker engine arguments")?;
+        if args.backend == EngineType::Sglang {
+            options.allow_zero_output = true;
+        }
         let group_cancel = CancellationToken::new();
         let routes = Arc::new(RequestRoutes::default());
         let LiveEngineScheduler {
@@ -628,7 +636,7 @@ impl LiveEngine {
         );
         let output_length = request.effective_max_output_tokens();
         anyhow::ensure!(
-            self.inner.allow_zero_output || output_length > 0,
+            output_length > 0 || (self.inner.allow_zero_output && request.max_output_tokens == 0),
             "live requests must generate at least one output token"
         );
         request.max_output_tokens = output_length;

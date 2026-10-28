@@ -409,6 +409,7 @@ fn create_response_with_linear_probs(
         nvext: None,
         prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 
@@ -494,5 +495,6 @@ fn create_multi_choice_response(
         nvext: None,
         prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
