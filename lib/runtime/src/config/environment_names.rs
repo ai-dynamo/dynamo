@@ -862,6 +862,18 @@ pub mod request_plane {
     /// whose readers accept the packed form.
     pub const DYN_TOKEN_IDS_AS_BYTES: &str = "DYN_TOKEN_IDS_AS_BYTES";
 
+    /// Timeout in seconds for sending a TCP request and receiving its acknowledgement. Defaults to 5.
+    pub const DYN_TCP_REQUEST_TIMEOUT: &str = "DYN_TCP_REQUEST_TIMEOUT";
+
+    /// Maximum TCP request-plane connections per destination host. Defaults to 100.
+    pub const DYN_TCP_POOL_SIZE: &str = "DYN_TCP_POOL_SIZE";
+
+    /// Timeout in seconds for establishing a TCP request-plane connection. Defaults to 5.
+    pub const DYN_TCP_CONNECT_TIMEOUT: &str = "DYN_TCP_CONNECT_TIMEOUT";
+
+    /// Maximum in-flight requests per TCP request-plane connection. Defaults to 1024.
+    pub const DYN_TCP_CHANNEL_BUFFER: &str = "DYN_TCP_CHANNEL_BUFFER";
+
     /// Maximum TCP request-plane message size, in bytes.
     pub const DYN_TCP_MAX_MESSAGE_SIZE: &str = "DYN_TCP_MAX_MESSAGE_SIZE";
 
@@ -1262,6 +1274,10 @@ mod tests {
             request_plane::DYN_REQUEST_PLANE_CODEC,
             response_plane::DYN_RESPONSE_PLANE,
             response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS,
+            request_plane::DYN_TCP_REQUEST_TIMEOUT,
+            request_plane::DYN_TCP_POOL_SIZE,
+            request_plane::DYN_TCP_CONNECT_TIMEOUT,
+            request_plane::DYN_TCP_CHANNEL_BUFFER,
             request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
             request_plane::DYN_TCP_SHRINK_MESSAGE_SIZE,
             request_plane::DYN_TCP_RPC_HOST,

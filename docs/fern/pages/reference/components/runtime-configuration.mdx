@@ -142,6 +142,38 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>json</Badge> <Badge intent="note" minimal>msgpack</Badge></span>
 </ParamField>
 
+<ParamField path="DYN_TCP_REQUEST_TIMEOUT" type="integer" default="5">
+  Timeout in seconds for sending a request on an acquired TCP connection and receiving the
+  worker's acknowledgement. Includes waiting for admission on that connection; excludes connection
+  establishment, response-stream establishment, and model generation.
+
+  With fault detection enabled, an acknowledgement timeout can temporarily inhibit the destination
+  according to `DYN_RUNTIME_INHIBITED_DURATION_SECS`, even if the worker is still registered. If no
+  routable workers remain, subsequent requests can fail with `No workers available`.
+</ParamField>
+
+<ParamField path="DYN_TCP_CONNECT_TIMEOUT" type="integer" default="5">
+  Timeout in seconds for opening a TCP request-plane socket. Also bounds each wait for another
+  task to finish connecting when the pool has no usable connection. TLS handshakes use the separate
+  `DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS` setting.
+</ParamField>
+
+<ParamField path="DYN_TCP_POOL_SIZE" type="integer" default="100">
+  Maximum number of TCP request-plane connections per destination host. Connections are shared by
+  concurrent requests and opened on demand.
+</ParamField>
+
+<ParamField path="DYN_TCP_CHANNEL_BUFFER" type="integer" default="1024">
+  Maximum number of in-flight requests admitted per TCP request-plane connection. A request waiting
+  for a permit consumes its acknowledgement timeout budget. Permits are released when the request
+  completes, fails, or is cancelled; they do not cover the subsequent generation stream.
+</ParamField>
+
+These four TCP client settings are read when the client configuration is created and affect outbound
+requests from that process. Set them on the calling frontend or worker before startup. Unset values
+and values that cannot be parsed as unsigned integers retain the defaults. Use positive values for
+both timeouts and capacities; `0` does not disable a timeout or provide unlimited capacity.
+
 <ParamField path="DYN_TCP_MAX_MESSAGE_SIZE" type="integer" default="33554432">
   Maximum TCP request-plane frame size in bytes (default 32 MiB). The frontend
   rejects an oversized frame with HTTP 400 before writing it. This limit is
