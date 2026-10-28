@@ -1081,6 +1081,45 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 	}
 }
 
+func TestDynamoGraphDeploymentRunSpecIsImmutable(t *testing.T) {
+	tests := []struct {
+		name       string
+		oldRun     *nvidiacomv1beta2.DynamoGraphDeploymentRun
+		run        *nvidiacomv1beta2.DynamoGraphDeploymentRun
+		wantCELErr string
+	}{
+		{
+			name:   "metadata-only update keeps the immutable spec",
+			oldRun: v1beta2RunForAdmission(v1beta2AdmissionModel, nil),
+			run:    v1beta2RunForAdmission(v1beta2AdmissionModel, map[string]string{"updated": "true"}),
+		},
+		{
+			name:       "spec update is rejected by the API server",
+			oldRun:     v1beta2RunForAdmission(v1beta2AdmissionModel, nil),
+			run:        v1beta2RunForAdmission(alternateAdmissionModel, nil),
+			wantCELErr: `<nil>: Invalid value: spec is immutable`,
+		},
+		{
+			name:       "model-only Run is rejected before controller reconciliation",
+			run:        v1beta2ModelOnlyRunForAdmission(v1beta2AdmissionModel),
+			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			test := admissionTestCase{object: tt.run, wantCELError: tt.wantCELErr}
+			if tt.oldRun != nil {
+				test.oldObject = tt.oldRun
+			}
+			actual := runAdmissionTest(t, test)
+			if tt.wantCELErr == "" && actual.GetGeneration() != 1 {
+				t.Fatalf("generation = %d, want 1 for a metadata-only update", actual.GetGeneration())
+			}
+		})
+	}
+}
+
 func TestDynamoGraphDeploymentRequestStatusRepresentationMatchesSpec(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -1271,6 +1310,35 @@ func beta2DGDRForAdmission(
 		mutate(request)
 	}
 	return request
+}
+
+func v1beta2RunForAdmission(model string, labels map[string]string) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+	metric := nvidiacomv1beta2.ObjectiveMetric("ThroughputPerGPU")
+	return &nvidiacomv1beta2.DynamoGraphDeploymentRun{
+		APIVersion: nvidiacomv1beta2.GroupVersion.String(),
+		Kind:       "DynamoGraphDeploymentRun",
+		Name:       "test-v1beta2-dgdr-run", Namespace: "default", Labels: labels,
+		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRunSpec{NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
+			Model:    &nvidiacomv1beta2.ModelSpec{Name: model},
+			Backends: []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM},
+			Hardware: &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{
+				SKU: new("h200_sxm"), Budget: new(int32(8)),
+			}},
+			Workload: &nvidiacomv1beta2.WorkloadSpec{Static: &nvidiacomv1beta2.StaticWorkloadSpec{}},
+			Objective: &nvidiacomv1beta2.ObjectiveSpec{
+				Mode: nvidiacomv1beta2.ObjectiveModeOptimize, Metric: &metric, SLA: &nvidiacomv1beta2.ObjectiveSLASpec{},
+			},
+			Recommendation: &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: 1},
+		}},
+	}
+}
+
+func v1beta2ModelOnlyRunForAdmission(model string) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+	run := v1beta2RunForAdmission(model, nil)
+	run.Spec.NativeSearchInput = nvidiacomv1beta2.NativeSearchInput{
+		Model: &nvidiacomv1beta2.ModelSpec{Name: model},
+	}
+	return run
 }
 
 const v1beta2AdmissionModel = "Qwen/Qwen3-0.6B"

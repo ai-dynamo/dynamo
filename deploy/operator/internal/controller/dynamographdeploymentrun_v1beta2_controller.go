@@ -320,7 +320,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 	if err != nil {
 		return dgdrRunExecution{}, err
 	}
-	execution.RuntimeImageSource, err = dgdrRunRuntimeImageSource(execution.PlannerImage, execution.DynamoVersion)
+	execution.RuntimeImageSource, err = dgdrRunRuntimeImageSource(execution.PlannerImage)
 	if err != nil {
 		return dgdrRunExecution{}, err
 	}
@@ -386,9 +386,20 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) discoverGPUsPerNode(
 	if run.Spec.Hardware == nil || run.Spec.Hardware.GPU == nil || run.Spec.Hardware.GPU.SKU == nil {
 		return 0, errors.New("discover GPUs per node: spec.hardware.gpu.sku was not resolved by Request admission")
 	}
-	info, err := r.Hardware.Discover(ctx, nvidiacomv1beta1.GPUSKUType(*run.Spec.Hardware.GPU.SKU))
+	sku := *run.Spec.Hardware.GPU.SKU
+	filterSKU := nvidiacomv1beta1.GPUSKUType("")
+	if aisimulate.IsKnownHardwareSKU(sku) {
+		filterSKU = nvidiacomv1beta1.GPUSKUType(sku)
+	}
+	info, err := r.Hardware.Discover(ctx, filterSKU)
 	if err != nil {
 		return 0, fmt.Errorf("discover GPUs per node: %w", err)
+	}
+	if filterSKU == "" && info != nil && len(info.OtherModels) > 0 {
+		return 0, fmt.Errorf(
+			"discover GPUs per node for external AISimulate SKU %q: cluster discovery selected %q among multiple GPU models (%s)",
+			sku, info.Model, strings.Join(info.OtherModels, ", "),
+		)
 	}
 	if info == nil || info.GPUsPerNode < 1 {
 		return 0, errors.New("discover GPUs per node: discovery returned no positive GPU count")
@@ -458,18 +469,21 @@ func dgdrRunDynamoVersion(plannerImage, dynamoVersion string) (string, error) {
 	return version.String(), nil
 }
 
-func dgdrRunRuntimeImageSource(plannerImage, dynamoVersion string) (string, error) {
+func dgdrRunRuntimeImageSource(plannerImage string) (string, error) {
 	ref := strings.TrimSpace(plannerImage)
 	nameAndTag, _, hasDigest := strings.Cut(ref, "@")
 	lastSlash, lastColon := strings.LastIndex(nameAndTag, "/"), strings.LastIndex(nameAndTag, ":")
 	if lastColon > lastSlash && lastColon < len(nameAndTag)-1 {
 		return ref, nil
 	}
-	if hasDigest && nameAndTag != "" {
-		return nameAndTag + ":" + dynamoVersion, nil
+	if hasDigest {
+		return "", fmt.Errorf(
+			"resolve runtime images for planner image %q: a digest-only planner image cannot identify sibling runtime images; configure a shared release tag, optionally with a digest",
+			plannerImage,
+		)
 	}
 	return "", fmt.Errorf(
-		"resolve runtime images for planner image %q: a shared release tag or repository-specific digest is required",
+		"resolve runtime images for planner image %q: a shared release tag is required, optionally with a repository-specific digest",
 		plannerImage,
 	)
 }
@@ -630,8 +644,14 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 					ServiceAccountName:           name,
 					AutomountServiceAccountToken: new(false),
 					RestartPolicy:                corev1.RestartPolicyNever,
-					SecurityContext:              &corev1.PodSecurityContext{FSGroup: ptr.To[int64](65532)},
-					ImagePullSecrets:             append([]corev1.LocalObjectReference(nil), execution.ImagePullSecrets...),
+					SecurityContext: &corev1.PodSecurityContext{
+						FSGroup:      ptr.To[int64](65532),
+						RunAsNonRoot: new(true),
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
+						},
+					},
+					ImagePullSecrets: append([]corev1.LocalObjectReference(nil), execution.ImagePullSecrets...),
 					Containers: []corev1.Container{
 						{
 							Name:            dgdrRunSweeperContainer,
@@ -645,6 +665,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 								"--output-dir", execution.SnapshotPath,
 								"--overwrite",
 							},
+							SecurityContext: dgdrRunContainerSecurityContext(),
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: dgdrRunInputVolume, MountPath: dgdrRunInputMountPath, ReadOnly: true},
 								{Name: dgdrRunSnapshotVolume, MountPath: execution.SnapshotPath},
@@ -665,6 +686,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 								{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
 								{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
 							},
+							SecurityContext: dgdrRunContainerSecurityContext(),
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: dgdrRunSnapshotVolume, MountPath: execution.SnapshotPath},
 								{Name: dgdrRunServiceAccountVolume, MountPath: dgdrRunServiceAccountMountPath, ReadOnly: true},
@@ -686,6 +708,15 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 		},
 	}
 	return job
+}
+
+func dgdrRunContainerSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: new(false),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+	}
 }
 
 func dgdrRunPublisherKubeAPIVolume() corev1.Volume {
@@ -768,43 +799,72 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) dgdrRunFailure(
 		log.FromContext(ctx).Error(err, "Could not inspect failed AISimulate Job pods", "job", job.Name)
 		return dgdrRunReasonJobFailed, condition.Message
 	}
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		if !metav1.IsControlledBy(pod, job) {
-			continue
+	if terminated := dgdrRunFailedContainer(pods.Items, job, dgdrRunPublisherContainer); terminated != nil {
+		message := dgdrRunPublisherFailureMessage(terminated)
+		switch int(terminated.ExitCode) {
+		case dgdrrunpublisher.ExitRunFailed:
+			return dgdrRunReasonSearchFailed, message
+		case dgdrrunpublisher.ExitProtocolViolation:
+			return dgdrRunReasonProtocolViolation, message
+		case dgdrrunpublisher.ExitReconcileFailed:
+			return dgdrRunReasonPublicationFailed, message
+		default:
+			return dgdrRunReasonJobFailed, message
 		}
-		for _, status := range pod.Status.ContainerStatuses {
-			terminated := status.State.Terminated
-			if terminated == nil || terminated.ExitCode == 0 {
-				continue
-			}
-			message := terminated.Message
-			if message == "" {
-				message = terminated.Reason
-			}
-			if message == "" {
-				message = fmt.Sprintf("container %s exited with code %d", status.Name, terminated.ExitCode)
-			}
-			if status.Name == dgdrRunPublisherContainer {
-				switch int(terminated.ExitCode) {
-				case dgdrrunpublisher.ExitRunFailed:
-					return dgdrRunReasonSearchFailed, message
-				case dgdrrunpublisher.ExitProtocolViolation:
-					return dgdrRunReasonProtocolViolation, message
-				case dgdrrunpublisher.ExitReconcileFailed:
-					return dgdrRunReasonPublicationFailed, message
-				}
-			}
-			if status.Name == dgdrRunSweeperContainer {
-				return dgdrRunReasonSearchFailed, message
-			}
-		}
+	}
+	if terminated := dgdrRunFailedContainer(pods.Items, job, dgdrRunSweeperContainer); terminated != nil {
+		return dgdrRunReasonSearchFailed, dgdrRunFailureMessage(dgdrRunSweeperContainer, terminated)
 	}
 	message := condition.Message
 	if message == "" {
 		message = "AISimulate Job failed"
 	}
 	return dgdrRunReasonJobFailed, message
+}
+
+func dgdrRunFailedContainer(
+	pods []corev1.Pod,
+	job *batchv1.Job,
+	containerName string,
+) *corev1.ContainerStateTerminated {
+	for i := range pods {
+		if !metav1.IsControlledBy(&pods[i], job) {
+			continue
+		}
+		for j := range pods[i].Status.ContainerStatuses {
+			status := &pods[i].Status.ContainerStatuses[j]
+			if status.Name == containerName && status.State.Terminated != nil && status.State.Terminated.ExitCode != 0 {
+				return status.State.Terminated
+			}
+		}
+	}
+	return nil
+}
+
+func dgdrRunPublisherFailureMessage(terminated *corev1.ContainerStateTerminated) string {
+	var outcome dgdrrunpublisher.TerminalOutcome
+	if err := json.Unmarshal([]byte(terminated.Message), &outcome); err == nil {
+		parts := make([]string, 0, 2)
+		for _, part := range []string{outcome.Message, outcome.Error} {
+			if part = strings.TrimSpace(part); part != "" {
+				parts = append(parts, part)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, ": ")
+		}
+	}
+	return dgdrRunFailureMessage(dgdrRunPublisherContainer, terminated)
+}
+
+func dgdrRunFailureMessage(containerName string, terminated *corev1.ContainerStateTerminated) string {
+	if terminated.Message != "" {
+		return terminated.Message
+	}
+	if terminated.Reason != "" {
+		return terminated.Reason
+	}
+	return fmt.Sprintf("container %s exited with code %d", containerName, terminated.ExitCode)
 }
 
 func dgdrRunCompletionTime(job *batchv1.Job) *metav1.Time {
