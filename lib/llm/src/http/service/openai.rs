@@ -7498,6 +7498,7 @@ mod tests {
     async fn lifecycle_disabled_spawn_preserves_http_parent() {
         use tracing::instrument::WithSubscriber;
 
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::registry();
         async {
             let http = tracing::info_span!("http-request");
@@ -7575,6 +7576,7 @@ mod tests {
         use tracing_subscriber::prelude::*;
 
         let capture = LifecycleOutcomeCapture::default();
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
         tracing::subscriber::with_default(subscriber, || {
             let request = LifecycleTrace::new(true).start_request();
@@ -7598,6 +7600,7 @@ mod tests {
             (ErrorType::Internal, "failed"),
         ] {
             let capture = LifecycleOutcomeCapture::default();
+            let _interest_guard = crate::test_utils::tracing_interest_guard();
             let subscriber = tracing_subscriber::registry().with(capture.clone());
             async {
                 let request = LifecycleTrace::new(true).start_request();
@@ -7636,6 +7639,7 @@ mod tests {
         use tracing_subscriber::prelude::*;
 
         let capture = LifecycleOutcomeCapture::default();
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
         async {
             let request = LifecycleTrace::new(true).start_request();
@@ -7698,6 +7702,7 @@ mod tests {
             (ErrorClass::DeadlineExceeded, true, true, "timed_out"),
         ] {
             let capture = LifecycleOutcomeCapture::default();
+            let _interest_guard = crate::test_utils::tracing_interest_guard();
             let subscriber = tracing_subscriber::registry().with(capture.clone());
             async {
                 let request = LifecycleTrace::new(true).start_request();
@@ -7745,6 +7750,7 @@ mod tests {
         use tracing_subscriber::prelude::*;
 
         let capture = LifecycleOutcomeCapture::default();
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
         async {
             let request = LifecycleTrace::new(true).start_request();
@@ -8373,6 +8379,27 @@ mod tests {
             .expect_err("non-object json_schema must be rejected");
         assert_eq!(code, StatusCode::BAD_REQUEST);
         assert!(body.message.contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn test_validate_responses_fields_allows_configured_client_tool_search() {
+        let mut request = make_base_request();
+        request.inner.tool_choice =
+            Some(serde_json::from_value(serde_json::json!({"type": "tool_search"})).unwrap());
+        request.inner.tools = Some(
+            serde_json::from_value(serde_json::json!([
+                {"type":"tool_search","execution":"client"}
+            ]))
+            .unwrap(),
+        );
+        // Validate the native choice before any lossy SDK projection.
+        validate_responses_fields(&request).unwrap();
+        NvCreateChatCompletionRequest::try_from(request.clone()).unwrap();
+        request.inner.tools = None;
+        let response = responses_conversion_error_response(
+            NvCreateChatCompletionRequest::try_from(request).unwrap_err(),
+        );
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
     }
 
     #[test]

@@ -1863,20 +1863,19 @@ mod tests {
         );
         let test_name = TEST.split_once("::").unwrap().1;
         if std::env::var("DYNAMO_ALIAS_TEST").as_deref() != Ok(test_name) {
-            let output = tokio::time::timeout(
-                Duration::from_secs(30),
-                tokio::process::Command::from(crate::test_utils::isolated_command(test_name))
-                    .env("DYNAMO_ALIAS_TEST", test_name)
-                    .env("DYN_TCP_RPC_HOST", "127.0.0.1")
-                    .env("DYN_TCP_RPC_PORT", "0")
-                    .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
-                    .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await
-            .expect("classify subprocess must finish within its deadline")
-            .expect("classify subprocess must start");
+            let mut command = crate::test_utils::isolated_command(test_name);
+            command
+                .env("DYNAMO_ALIAS_TEST", test_name)
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                .env("DYN_TCP_RPC_PORT", "0")
+                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0");
+            let mut command = command.into_tokio();
+            command.kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+                .await
+                .expect("classify subprocess must finish within its deadline")
+                .expect("classify subprocess must start");
             crate::test_utils::assert_isolated_success(&output);
             return;
         }
@@ -2209,21 +2208,20 @@ mod tests {
         if std::env::var("DYNAMO_CLASSIFIER_CATALOG_TEST").as_deref() != Ok(test_name) {
             // Isolate the process-global request plane and give the debug routing future
             // more than libtest's default 2 MiB stack, like the prefill routing tests.
-            let output = tokio::time::timeout(
-                Duration::from_secs(30),
-                tokio::process::Command::from(crate::test_utils::isolated_command(test_name))
-                    .env("DYNAMO_CLASSIFIER_CATALOG_TEST", test_name)
-                    .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
-                    .env("DYN_TCP_RPC_HOST", "127.0.0.1")
-                    .env("DYN_TCP_RPC_PORT", "0")
-                    .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
-                    .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await
-            .expect("classifier subprocess timed out")
-            .unwrap();
+            let mut command = crate::test_utils::isolated_command(test_name);
+            command
+                .env("DYNAMO_CLASSIFIER_CATALOG_TEST", test_name)
+                .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                .env("DYN_TCP_RPC_PORT", "0")
+                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0");
+            let mut command = command.into_tokio();
+            command.kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+                .await
+                .expect("classifier subprocess timed out")
+                .unwrap();
             crate::test_utils::assert_isolated_success(&output);
             return;
         }

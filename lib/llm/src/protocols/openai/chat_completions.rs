@@ -816,6 +816,35 @@ mod tests {
     use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
     use serde_json::json;
 
+    #[test]
+    fn test_validate_custom_tools_respects_supported_locations() {
+        let function_tool = json!({"type":"function","function":{"name":"lookup"}});
+        let custom_tool = json!({"type":"custom","custom":{"name":"patch"}});
+        let base = json!({"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[function_tool]});
+        let parse = |value| serde_json::from_value::<NvCreateChatCompletionRequest>(value).unwrap();
+        ValidateRequest::validate(&parse(base.clone())).unwrap();
+        let mut tools = base.clone();
+        tools["tools"] = json!([function_tool, custom_tool]);
+        // The function bridge admits request custom tools and custom history.
+        ValidateRequest::validate(&parse(tools)).unwrap();
+        let mut history = base.clone();
+        history["messages"] = json!([
+            {"role":"user","content":"hi"},
+            {"role":"assistant","tool_calls":[{"id":"c1","type":"custom","custom":{"name":"patch","input":"x"}}]},
+            {"role":"tool","tool_call_id":"c1","content":"ok"}
+        ]);
+        ValidateRequest::validate(&parse(history)).unwrap();
+        let mut choice = base.clone();
+        choice["tool_choice"] = json!({"type":"custom","custom":{"name":"lookup"}});
+        assert!(ValidateRequest::validate(&parse(choice)).is_err());
+        let mut system = base;
+        system["messages"] = json!([
+            {"role":"system","content":"s","tools":[custom_tool]},
+            {"role":"user","content":"hi"}
+        ]);
+        assert!(ValidateRequest::validate(&parse(system)).is_err());
+    }
+
     /// Builds a minimal chat request and merges `extra` into its top-level fields.
     fn chat_request_with(extra: &serde_json::Value) -> NvCreateChatCompletionRequest {
         let mut body = json!({

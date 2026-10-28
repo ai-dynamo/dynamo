@@ -3891,11 +3891,50 @@ mod tests {
     fn capture_events<T>(body: impl FnOnce() -> T) -> (T, Vec<CapturedEvent>) {
         use tracing_subscriber::layer::SubscriberExt;
 
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
         let out = tracing::subscriber::with_default(subscriber, body);
         let events = captured.lock().unwrap().clone();
         (out, events)
+    }
+
+    #[test]
+    fn capture_events_keeps_interest_when_another_thread_registers_the_callsite() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::capture_events_keeps_interest_when_another_thread_registers_the_callsite"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        fn shared_callsite() {
+            tracing::info!("capture interest probe");
+        }
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let first_logged = Arc::new(std::sync::Barrier::new(2));
+        let worker_ready = Arc::clone(&ready);
+        let worker_first_logged = Arc::clone(&first_logged);
+        let worker = std::thread::spawn(move || {
+            capture_events(|| {
+                worker_ready.wait();
+                worker_first_logged.wait();
+                shared_callsite();
+            })
+        });
+        ready.wait();
+        shared_callsite();
+        first_logged.wait();
+        let (_, events) = worker.join().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.message == "capture interest probe")
+                .count(),
+            1
+        );
     }
 
     fn alias_claim_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
