@@ -10,6 +10,7 @@ use crate::request_trace::RequestReplayMetrics;
 use crate::request_trace::RequestTraceEventSource;
 use crate::request_trace::RequestTracePayload;
 
+use super::FinishReasonMetadata;
 use super::RequestTraceEventType;
 use super::RequestTraceMetrics;
 use super::RequestTraceRecord;
@@ -68,6 +69,8 @@ pub(crate) fn emit_request_end(
     tracker: &RequestTracker,
     replay: RequestReplayMetrics,
     output_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    finish_reason_metadata: Option<FinishReasonMetadata>,
 ) {
     let timing = tracker.get_timing_info();
     let event_time_unix_ms = timing.total_time_ms.map_or_else(unix_time_ms, |elapsed| {
@@ -90,6 +93,7 @@ pub(crate) fn emit_request_end(
         model: None,
         input_tokens: tracker.isl_tokens().map(|v| v as u64),
         output_tokens: Some(tracker.osl_tokens()),
+        reasoning_tokens,
         cached_tokens: tracker.cached_tokens().map(|v| v as u64),
         request_received_ms: Some(timing.request_received_ms),
         prefill_wait_time_ms: timing.prefill_wait_time_ms,
@@ -102,7 +106,7 @@ pub(crate) fn emit_request_end(
         queue_depth: timing.router_queue_depth.map(|v| v as u64),
         worker,
         replay: Some(replay),
-        finish_reason_metadata: None,
+        finish_reason_metadata,
     };
     set_output_tokens(&mut request, output_tokens);
     sanitize_request(&mut request);
@@ -261,6 +265,8 @@ mod tests {
                 input_length: 3,
                 input_sequence_hashes: vec![11, 22],
             },
+            None,
+            None,
             None,
         );
 

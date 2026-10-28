@@ -44,7 +44,8 @@ use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
 use crate::request_trace::{
-    RequestEndTraceState, build_request_end_trace_state, wrap_engine_output_request_end_stream,
+    GenerateOutputParsers, RequestEndTraceState, build_request_end_trace_state,
+    wrap_engine_output_request_end_stream,
 };
 
 pub(super) const DEFAULT_PATH: &str = "/generate";
@@ -400,6 +401,7 @@ async fn handler(
         inflight_guard,
         collector,
         trace_state,
+        output_parsers: selection.output_parsers,
         request_id,
         model,
         state: state.clone(),
@@ -475,6 +477,7 @@ struct Dispatch {
     inflight_guard: super::metrics::InflightGuard,
     collector: GenerateMetricCollector,
     trace_state: Option<RequestEndTraceState>,
+    output_parsers: Option<GenerateOutputParsers>,
     request_id: String,
     model: String,
     state: Arc<service_v2::State>,
@@ -494,6 +497,7 @@ impl Dispatch {
             mut inflight_guard,
             mut collector,
             trace_state,
+            output_parsers,
             request_id,
             model,
             state,
@@ -548,7 +552,8 @@ impl Dispatch {
             collector.observe(&mut item);
             item
         });
-        let stream = wrap_engine_output_request_end_stream(Box::pin(stream), trace_state);
+        let stream =
+            wrap_engine_output_request_end_stream(Box::pin(stream), trace_state, output_parsers);
         if !streaming {
             let fold = async {
                 pin_mut!(stream);

@@ -17,8 +17,9 @@ use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionStreamResponse, completions::NvCreateCompletionResponse,
 };
 use crate::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
+use crate::request_trace::generate_output::{GenerateOutputSummary, summarize};
 use crate::request_trace::{
-    AgentContextTraceState, RequestReplayMetrics, SharedFinishReasonMetadata,
+    AgentContextTraceState, GenerateOutputParsers, RequestReplayMetrics, SharedFinishReasonMetadata,
 };
 
 struct RequestTraceRequestEndState {
@@ -26,6 +27,14 @@ struct RequestTraceRequestEndState {
     replay_metrics: Arc<RequestReplayMetrics>,
     // Router guards can overwrite the shared tracker with per-attempt counts.
     output_tokens: Option<Arc<AtomicUsize>>,
+    generate_output: Option<GenerateOutputCapture>,
+}
+
+/// What a native `/generate` stream collects for its request-end row.
+struct GenerateOutputCapture {
+    finish_reason_metadata: SharedFinishReasonMetadata,
+    /// Output token IDs, collected only when the model has parsers to run.
+    token_ids: Option<(GenerateOutputParsers, Arc<parking_lot::Mutex<Vec<u32>>>)>,
 }
 
 pub(crate) struct RequestEndTraceState {
@@ -132,6 +141,7 @@ fn build_request_end_trace_state_for_policy<T: Send + Sync + 'static>(
         request_tracker,
         replay_metrics,
         output_tokens: None,
+        generate_output: None,
     };
 
     Some(RequestEndTraceState {
@@ -143,7 +153,33 @@ fn build_request_end_trace_state_for_policy<T: Send + Sync + 'static>(
 }
 
 impl RequestEndTraceState {
+    /// Parses collected `/generate` output once, off the response path.
+    async fn summarize_generate_output(&self) -> Option<GenerateOutputSummary> {
+        let capture = self.request.as_ref()?.generate_output.as_ref()?;
+        let (parsers, token_ids) = capture.token_ids.as_ref()?;
+        let token_ids = std::mem::take(&mut *token_ids.lock());
+        summarize(parsers, &token_ids)
+            .await
+            .inspect_err(|error| {
+                tracing::warn!(
+                    request_id = %self.request_id,
+                    %error,
+                    "request trace could not parse generate output"
+                );
+            })
+            .ok()
+    }
+
+    async fn emit_completed(&mut self) {
+        let summary = self.summarize_generate_output().await;
+        self.emit_with(summary);
+    }
+
     fn emit(&mut self) {
+        self.emit_with(None);
+    }
+
+    fn emit_with(&mut self, summary: Option<GenerateOutputSummary>) {
         let Some(request_state) = self.request.take() else {
             return;
         };
@@ -151,12 +187,20 @@ impl RequestEndTraceState {
             .output_tokens
             .as_ref()
             .map(|tokens| tokens.load(Ordering::Relaxed) as u64);
+        let finish_reason_metadata = request_state
+            .generate_output
+            .map(|capture| capture.finish_reason_metadata);
+        if let (Some(metadata), Some(summary)) = (&finish_reason_metadata, &summary) {
+            super::record_generate_tool_calls(metadata, &summary.tool_names);
+        }
+        let reasoning_tokens = summary.and_then(|summary| summary.reasoning_tokens);
         if let Some(agent_state) = self.agent.take() {
             let (agent_context, mut metrics) =
                 super::request_metrics_from_agent_state(agent_state, self.request_id.clone());
             metrics.replay = Some(super::into_owned_replay_metrics(
                 request_state.replay_metrics,
             ));
+            metrics.reasoning_tokens = reasoning_tokens;
             super::record::set_output_tokens(&mut metrics, output_tokens);
             super::record::emit_agent_request_end(agent_context, metrics);
         } else {
@@ -165,6 +209,10 @@ impl RequestEndTraceState {
                 &request_state.request_tracker,
                 super::into_owned_replay_metrics(request_state.replay_metrics),
                 output_tokens,
+                reasoning_tokens,
+                finish_reason_metadata
+                    .as_ref()
+                    .and_then(super::snapshot_finish_reason_metadata),
             );
         }
     }
@@ -204,7 +252,7 @@ where
     let (stream, done) = crate::telemetry::stream::notify_on_completion(stream);
     tokio::spawn(async move {
         done.await;
-        trace_state.emit();
+        trace_state.emit_completed().await;
     });
     stream
 }
@@ -244,7 +292,10 @@ pub(crate) fn wrap_completion_request_end_stream(
 pub(crate) fn wrap_engine_output_request_end_stream(
     stream: Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>>,
     mut trace_state: Option<RequestEndTraceState>,
+    parsers: Option<GenerateOutputParsers>,
 ) -> Pin<Box<dyn Stream<Item = Annotated<LLMEngineOutput>> + Send>> {
+    // Agent rows share the agent handle; plain rows get their own.
+    let finish_reason_metadata = finish_reason_metadata_handle(&trace_state).unwrap_or_default();
     let Some(request) = trace_state.as_mut().and_then(|s| s.request.as_mut()) else {
         return wrap_request_end_stream(stream, trace_state);
     };
@@ -252,7 +303,12 @@ pub(crate) fn wrap_engine_output_request_end_stream(
     let input_tokens = request.replay_metrics.input_length;
     let logical_output_tokens = Arc::new(AtomicUsize::new(0));
     request.output_tokens = Some(logical_output_tokens.clone());
-    let finish_reason_metadata = finish_reason_metadata_handle(&trace_state);
+    let token_ids = parsers.map(|parsers| (parsers, Arc::default()));
+    let collected_ids = token_ids.as_ref().map(|(_, ids)| Arc::clone(ids));
+    request.generate_output = Some(GenerateOutputCapture {
+        finish_reason_metadata: finish_reason_metadata.clone(),
+        token_ids,
+    });
     let mut output_tokens = 0usize;
     let stream = stream.map(move |response| {
         if let Some(output) = response.data.as_ref() {
@@ -260,13 +316,16 @@ pub(crate) fn wrap_engine_output_request_end_stream(
             // It must not mark a request that is cancelled before decode as stopped.
             if response.event.as_deref() != Some(PREFILL_OUTPUT_ANNOTATION) {
                 super::record_backend_finish_reason_metadata(
-                    finish_reason_metadata.as_ref(),
+                    Some(&finish_reason_metadata),
                     output.index,
                     output.finish_reason.as_ref(),
                     output.stop_reason.as_ref(),
                 );
             }
             output_tokens = output_tokens.saturating_add(output.token_ids.len());
+            if let Some(ids) = collected_ids.as_ref() {
+                ids.lock().extend_from_slice(&output.token_ids);
+            }
             logical_output_tokens.store(output_tokens, Ordering::Relaxed);
             // ISL was recorded at request construction (first write wins).
             if let Some(cached_tokens) = output.cached_tokens_for_prompt(input_tokens) {
@@ -338,6 +397,7 @@ mod tests {
                 request: Some(RequestTraceRequestEndState {
                     request_tracker: tracker,
                     output_tokens: None,
+                    generate_output: None,
                     replay_metrics: Arc::new(RequestReplayMetrics {
                         trace_block_size: 2,
                         input_length: 2,
@@ -415,7 +475,8 @@ mod tests {
                     ..Default::default()
                 });
                 let source = futures::stream::iter([prefill, output]);
-                let mut stream = wrap_engine_output_request_end_stream(Box::pin(source), state);
+                let mut stream =
+                    wrap_engine_output_request_end_stream(Box::pin(source), state, None);
                 assert!(stream.next().await.is_some());
                 if complete {
                     assert_eq!(stream.next().await.unwrap().data.unwrap().token_ids, [4, 5]);
@@ -443,7 +504,7 @@ mod tests {
                 assert_eq!(metrics.input_tokens, Some(3));
                 assert_eq!(metrics.output_tokens, Some(if complete { 2 } else { 0 }));
                 assert_eq!(metrics.avg_itl_ms.is_some(), complete);
-                if complete && agent {
+                if complete {
                     let metadata = metrics.finish_reason_metadata.unwrap();
                     assert_eq!(metadata.backend_finish_reason.as_deref(), Some("length"));
                 } else {

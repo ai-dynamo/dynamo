@@ -227,6 +227,8 @@ pub struct WorkerSet {
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
+    /// Tokenizer loaded for this set's local pipelines, reused to trace `/generate` output.
+    pub(crate) tokenizer: Option<crate::tokenizers::Tokenizer>,
 
     /// Cached tokenizer and prompt formatter for the System One API.
     pub(crate) systemone_preprocessor: Option<Arc<OpenAIPreprocessor>>,
@@ -280,6 +282,7 @@ impl WorkerSet {
             realtime_engine: None,
             generate_engine: None,
             systemone_preprocessor: None,
+            tokenizer: None,
             load_context: None,
             load_thresholds: None,
             prefill_router: None,
@@ -601,6 +604,7 @@ impl WorkerSet {
             realtime_engine: None,
             generate_engine,
             systemone_preprocessor: None,
+            tokenizer: self.tokenizer.clone(),
             load_context: self.load_context.clone(),
             load_thresholds: self.load_thresholds.clone(),
             prefill_router: self.prefill_router.clone(),

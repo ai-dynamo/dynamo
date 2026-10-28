@@ -110,6 +110,9 @@ pub struct RequestTraceMetrics {
     pub input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
+    /// Output tokens spent in the model's reasoning section.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -343,6 +346,7 @@ mod tests {
                 model: None,
                 input_tokens: None,
                 output_tokens: Some(4),
+                reasoning_tokens: None,
                 cached_tokens: None,
                 request_received_ms: Some(1_000),
                 prefill_wait_time_ms: None,

@@ -74,7 +74,7 @@ For every request-trace environment variable and default, see [Request Trace Ref
 
 ### Record Tool Calls Automatically
 
-When request tracing is enabled and the worker uses `--dyn-tool-call-parser`, Dynamo records the final finish reason and each parsed tool call's name and ID in `request_end.finish_reason_metadata`. Tool-call arguments are intentionally omitted.
+When request tracing is enabled and the worker uses `--dyn-tool-call-parser`, Dynamo records the final finish reason and each parsed tool call's name and ID in `request_end.finish_reason_metadata`. Tool-call arguments are intentionally omitted. Native `/generate` rows get the same metadata, without tool-call IDs, from a request-end parse of the generated tokens; reasoning-parser models also report `request.reasoning_tokens`.
 
 The Perfetto converter infers a tool span from the end of a tool-call response to the next request in the same trajectory. You can calculate the same interval from the trace:
 
