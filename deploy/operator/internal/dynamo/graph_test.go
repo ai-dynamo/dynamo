@@ -4491,6 +4491,73 @@ func oneGPUDRAObjects() (*resourcev1.ResourceClaimTemplate, *resourcev1.DeviceCl
 	}, &resourcev1.DeviceClass{Name: "gpu.nvidia.com"}
 }
 
+func TestGenerateGrovePodCliqueSet_PreservesPVCWithExtraVolumes(t *testing.T) {
+	t.Log("Build the NVBug 6418068 reproducer: a service PVC mount alongside an extra ConfigMap volume")
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		Name: "volume-regression", Namespace: "default",
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(BackendFrameworkVLLM),
+			PVCs:             []v1alpha1.PVC{{Name: new("shared-model-cache"), Create: new(false)}},
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      new(int32(1)),
+					VolumeMounts:  []v1alpha1.VolumeMount{{Name: "shared-model-cache", MountPoint: "/opt/models"}},
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+						PodSpec: &corev1.PodSpec{
+							Volumes: []corev1.Volume{{
+								Name:      "probe-cfg",
+								ConfigMap: &corev1.ConfigMapVolumeSource{Name: "probe-cfg"},
+							}},
+							InitContainers: []corev1.Container{{
+								Name: "fix-perm", Image: "busybox:1.36", Command: []string{"sh", "-c", "true"},
+								VolumeMounts: []corev1.VolumeMount{{Name: "shared-model-cache", MountPath: "/opt/models"}},
+							}},
+						},
+						MainContainer: &corev1.Container{
+							Image: "busybox:1.36", Command: []string{"sleep", "600"},
+							VolumeMounts: []corev1.VolumeMount{{Name: "probe-cfg", MountPath: "/probe"}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Convert the deployment and assemble the final Grove clique pod spec")
+	converted := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, dgd.ConvertTo(converted))
+	got, err := GenerateGrovePodCliqueSet(t.Context(), converted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+	require.NoError(t, err)
+	require.Len(t, got.Spec.Template.Cliques, 1)
+	podSpec := got.Spec.Template.Cliques[0].Spec.PodSpec
+
+	t.Log("Verify all three volumes survive exactly once with their sources intact")
+	volumes := make(map[string]corev1.Volume)
+	for _, volume := range podSpec.Volumes {
+		require.NotContains(t, volumes, volume.Name, "duplicate volume")
+		volumes[volume.Name] = volume
+	}
+	require.Len(t, volumes, 3)
+	assert.Equal(t, &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "shared-model-cache"}, volumes["shared-model-cache"].PersistentVolumeClaim)
+	assert.Equal(t, &corev1.ConfigMapVolumeSource{Name: "probe-cfg"}, volumes["probe-cfg"].ConfigMap)
+	require.NotNil(t, volumes["shared-memory"].EmptyDir)
+	assert.Equal(t, corev1.StorageMediumMemory, volumes["shared-memory"].EmptyDir.Medium)
+
+	t.Log("Verify the service, extra, and init mounts survive and resolve to declared volumes")
+	require.Len(t, podSpec.Containers, 1)
+	require.Len(t, podSpec.InitContainers, 1)
+	assert.Contains(t, podSpec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "shared-model-cache", MountPath: "/opt/models"})
+	assert.Contains(t, podSpec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "probe-cfg", MountPath: "/probe"})
+	assert.Equal(t, []corev1.VolumeMount{{Name: "shared-model-cache", MountPath: "/opt/models"}}, podSpec.InitContainers[0].VolumeMounts)
+	for _, container := range append(podSpec.Containers, podSpec.InitContainers...) {
+		// Kubernetes requires every mount to reference a pod-level volume.
+		for _, mount := range container.VolumeMounts {
+			assert.Contains(t, volumes, mount.Name, "container %s has an unresolved mount", container.Name)
+		}
+	}
+}
+
 func TestGenerateGrovePodCliqueSet_DoesNotResolveUnusedContainerGPUCount(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -6323,6 +6390,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			name: "frontend with runtime 1.6.0",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType:          commonconsts.ComponentTypeFrontend,
+				Annotations:            map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"},
 				RuntimeVersionOverride: "1.6.0",
 			},
 			backendFramework: BackendFrameworkVLLM,
@@ -10379,6 +10447,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			name: "frontendSidecar uses its runtime 1.6.0 startup allowance",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType:          commonconsts.ComponentTypeWorker,
+				Annotations:            map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"},
 				RuntimeVersionOverride: "1.5.0",
 				FrontendSidecar:        &v1alpha1.FrontendSidecarSpec{Image: "my-frontend:1.6.0"},
 			},

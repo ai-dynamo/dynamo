@@ -12,7 +12,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::Response;
+use axum::http::{Response, Version, header};
 use axum::response::IntoResponse;
 
 use super::Metrics;
@@ -100,6 +100,19 @@ fn path_within_namespace(path: &str, namespace: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
+fn draining_inference_response(version: Version) -> axum::response::Response {
+    let mut response = super::openai::ErrorMessage::_service_unavailable().into_response();
+    if version <= Version::HTTP_11 {
+        *response.version_mut() = version;
+        // Do not let connection pools keep sending requests to a retiring frontend.
+        response.headers_mut().insert(
+            header::CONNECTION,
+            header::HeaderValue::from_static("close"),
+        );
+    }
+    response
+}
+
 async fn track_inflight_inference(
     axum::extract::State(state): axum::extract::State<Arc<State>>,
     request: axum::extract::Request,
@@ -109,7 +122,7 @@ async fn track_inflight_inference(
 
     // Requests rejected during draining should not extend the drain window.
     if !state.is_ready() {
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return draining_inference_response(request.version());
     }
 
     let permit = state.acquire_inflight();
@@ -117,7 +130,7 @@ async fn track_inflight_inference(
     // before this request is counted as inflight.
     if !state.is_ready() {
         drop(permit);
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return draining_inference_response(request.version());
     }
 
     let response = next.run(request).await;
@@ -857,7 +870,7 @@ pub struct HttpServiceConfig {
     rl_port: u16,
 
     /// Distributed runtime used by the RL worker discovery API and to publish
-    /// frontend load to the KV DC Relay.
+    /// frontend load to the Pool Relay.
     #[builder(default = "None")]
     runtime: Option<DistributedRuntime>,
 
@@ -1046,7 +1059,7 @@ impl HttpService {
     }
 
     fn start_frontend_load_publisher(&self, cancel_token: &CancellationToken) {
-        if !crate::kv_dc_relay::serving_load_publishing_enabled() {
+        if !crate::pool_relay::serving_load_publishing_enabled() {
             return;
         }
         let Some(target) = &self.frontend_load_target else {
@@ -1279,6 +1292,7 @@ impl HttpServiceConfigBuilder {
 
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
+        super::image_edits::validate_config()?;
         LazyLock::force(&DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION);
         let metrics_config = config.metrics_config.clone();
         let model_ready_metrics_prefix = metrics_config.prefix();
