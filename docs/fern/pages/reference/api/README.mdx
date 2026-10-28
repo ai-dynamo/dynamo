@@ -20,10 +20,12 @@ subtitle: Language-by-language public surface for Dynamo, discovered from the so
   </Card>
 </CardGroup>
 
-The API Reference is a machine-generated view of Dynamo's public surface, kept
-honest by static analysis of the source tree. Each module page lists every
-class and function, expands into per-symbol signatures and public methods,
-and deep-links to the exact file and line on `main`.
+The language and Kubernetes references are generated from Dynamo's source tree.
+Each module page lists every class and function, expands into per-symbol
+signatures and public methods, and deep-links to the exact file and line on `main`.
+
+For HTTP request contracts, see the [frontend endpoints](../components/frontend-configuration.mdx#http-endpoints)
+and the [Image Edits API](image-edits.mdx).
 
 ## Coverage
 

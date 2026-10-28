@@ -661,6 +661,7 @@ mod tests {
                                     name: Some("web_search".to_string()),
                                     arguments: None,
                                 }),
+                                custom: None,
                             }]),
                             role: None,
                             refusal: None,
