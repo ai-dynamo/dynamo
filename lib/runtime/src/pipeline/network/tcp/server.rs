@@ -159,6 +159,8 @@ struct State {
     /// `cancel_instance_streams` vs `associate_instance` race; entries expire
     /// after [`TOMBSTONE_TTL`].
     removed_instances: HashMap<EndpointInstanceId, Instant>,
+    /// Refresh and clear can leave an earlier deadline, but never a later one.
+    next_tombstone_expiry: Option<Instant>,
     handle: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
@@ -185,10 +187,19 @@ impl Drop for ResponseRegistrationGuard {
     }
 }
 
-/// Drop tombstones older than [`TOMBSTONE_TTL`]. Called lazily on every
-/// `associate_instance` / `cancel_instance_streams` to bound the set size.
-fn prune_tombstones(tombstones: &mut HashMap<EndpointInstanceId, Instant>, now: Instant) {
-    tombstones.retain(|_, ts| now.saturating_duration_since(*ts) < TOMBSTONE_TTL);
+impl State {
+    fn prune_tombstones(&mut self, now: Instant) {
+        if self.next_tombstone_expiry.is_none_or(|expiry| now < expiry) {
+            return;
+        }
+        self.removed_instances
+            .retain(|_, ts| now < *ts + TOMBSTONE_TTL);
+        self.next_tombstone_expiry = self
+            .removed_instances
+            .values()
+            .min()
+            .map(|ts| *ts + TOMBSTONE_TTL);
+    }
 }
 
 impl TcpStreamServer {
@@ -270,7 +281,7 @@ impl TcpStreamServer {
     ) -> bool {
         let mut state = self.state.lock();
         let now = Instant::now();
-        prune_tombstones(&mut state.removed_instances, now);
+        state.prune_tombstones(now);
         if state.removed_instances.contains_key(id) {
             // Instance was already removed -- cancel immediately.
             tracing::warn!(
@@ -310,7 +321,7 @@ impl TcpStreamServer {
     pub async fn associate_request_instance(&self, subject: &str, id: &EndpointInstanceId) -> bool {
         let mut state = self.state.lock();
         let now = Instant::now();
-        prune_tombstones(&mut state.removed_instances, now);
+        state.prune_tombstones(now);
         if state.removed_instances.contains_key(id) {
             state.tx_subjects.remove(subject);
             return false;
@@ -369,8 +380,11 @@ impl TcpStreamServer {
     pub async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
         let mut state = self.state.lock();
         let now = Instant::now();
-        prune_tombstones(&mut state.removed_instances, now);
+        state.prune_tombstones(now);
         state.removed_instances.insert(id.clone(), now);
+        state
+            .next_tombstone_expiry
+            .get_or_insert(now + TOMBSTONE_TTL);
         let subjects = match state.instance_subjects.remove(id) {
             Some(subjects) => subjects,
             None => return 0,
@@ -2333,8 +2347,8 @@ mod tests {
             assert!(state.removed_instances.contains_key(&id));
         }
 
-        // Advance past the TTL.
-        tokio::time::advance(TOMBSTONE_TTL + Duration::from_secs(1)).await;
+        // Advance to the expiry boundary.
+        tokio::time::advance(TOMBSTONE_TTL).await;
 
         // associate_instance for the same identity should now succeed (no
         // longer tombstoned). Any new subject must be tracked normally.
@@ -2373,6 +2387,41 @@ mod tests {
             "tombstone within TTL must still block association"
         );
         assert!(provider.await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_tombstone_refresh_and_clear_preserve_expiry() {
+        let server = test_server().await;
+        let refreshed = make_eid("ns", "comp", "generate", 1);
+        let cleared = make_eid("ns", "comp", "generate", 2);
+        let start = Instant::now();
+        server.cancel_instance_streams(&refreshed).await;
+        server.cancel_instance_streams(&cleared).await;
+
+        tokio::time::advance(TOMBSTONE_TTL - Duration::from_secs(1)).await;
+        server.cancel_instance_streams(&refreshed).await;
+        server.clear_instance_tombstone(&cleared).await;
+        assert_eq!(
+            server.state.lock().next_tombstone_expiry,
+            Some(start + TOMBSTONE_TTL)
+        );
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let (send, provider, recv, _) = register_and_get_bidi_subjects(&server).await;
+        assert!(!server.associate_request_instance(&send, &refreshed).await);
+        assert!(provider.await.is_err());
+        server.cancel_recv_stream(&recv).await;
+        assert_eq!(
+            server.state.lock().next_tombstone_expiry,
+            Some(start + TOMBSTONE_TTL * 2 - Duration::from_secs(1)),
+        );
+
+        tokio::time::advance(TOMBSTONE_TTL - Duration::from_secs(1)).await;
+        let (subject, _) = register_and_get_subject(&server).await;
+        assert!(server.associate_instance(&subject, None, &refreshed).await);
+        let state = server.state.lock();
+        assert!(state.removed_instances.is_empty());
+        assert_eq!(state.next_tombstone_expiry, None);
     }
 
     #[tokio::test(start_paused = true)]
