@@ -818,7 +818,7 @@ func validatePlanPreflight(transition TransitionStatus, planDigest string) error
 		if transition.Outcome != TransitionOutcomeBlocked {
 			return errors.New("rejected plan preflight did not block the transition")
 		}
-		if !sameFailure(transition.Failure, plan.Rejection) {
+		if !sameFailure(transition.Failure, plan.Rejection) && !transition.RequiresRecovery() {
 			return errors.New("transition failure differs from its plan rejection")
 		}
 	}
@@ -852,7 +852,7 @@ func validateTargetPreflight(status GroupStatus) error {
 			transition.Outcome != TransitionOutcomeBlocked {
 			return errors.New("rejected target preflight did not stop membership progress")
 		}
-		if !sameFailure(transition.Failure, target.Rejection) {
+		if !sameFailure(transition.Failure, target.Rejection) && !transition.RequiresRecovery() {
 			return errors.New("transition failure differs from its target rejection")
 		}
 		return nil
