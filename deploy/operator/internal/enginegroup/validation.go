@@ -582,6 +582,23 @@ func validateTransition(status GroupStatus) error {
 	if err := validateVerificationStatus(status); err != nil {
 		return err
 	}
+	return validateTransitionOutcome(status)
+}
+
+func validateTransitionOutcome(status GroupStatus) error {
+	// Coordinator block classification is independent of adapter-supplied diagnostic reasons.
+	transition := status.Transition
+	if transition.Outcome == TransitionOutcomeBlocked {
+		if transition.BlockKind != TransitionBlockKindMembershipAuthority && transition.BlockKind != TransitionBlockKindSubsystemFailure {
+			return fmt.Errorf("blocked transition has invalid block kind %q", transition.BlockKind)
+		}
+		if transition.BlockKind == TransitionBlockKindMembershipAuthority &&
+			(status.Membership.Desired == nil || !membershipTargetMatchesTransition(*status.Membership.Desired, *transition)) {
+			return errors.New("membership authority block lacks its exact desired transition")
+		}
+	} else if transition.BlockKind != "" {
+		return errors.New("unblocked transition carries a block kind")
+	}
 
 	switch transition.Outcome {
 	case TransitionOutcomeProgressing:
@@ -818,7 +835,7 @@ func validatePlanPreflight(transition TransitionStatus, planDigest string) error
 		if transition.Outcome != TransitionOutcomeBlocked {
 			return errors.New("rejected plan preflight did not block the transition")
 		}
-		if !sameFailure(transition.Failure, plan.Rejection) && !transition.RequiresRecovery() {
+		if !sameFailure(transition.Failure, plan.Rejection) {
 			return errors.New("transition failure differs from its plan rejection")
 		}
 	}
@@ -852,7 +869,7 @@ func validateTargetPreflight(status GroupStatus) error {
 			transition.Outcome != TransitionOutcomeBlocked {
 			return errors.New("rejected target preflight did not stop membership progress")
 		}
-		if !sameFailure(transition.Failure, target.Rejection) && !transition.RequiresRecovery() {
+		if !sameFailure(transition.Failure, target.Rejection) {
 			return errors.New("transition failure differs from its target rejection")
 		}
 		return nil
