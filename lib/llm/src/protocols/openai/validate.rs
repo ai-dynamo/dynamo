@@ -4,12 +4,15 @@
 use std::{borrow::Cow, fmt::Display, sync::LazyLock};
 
 use dynamo_protocols::types::{
-    ChatCompletionTool, ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
+    ChatCompletionRequestMessage, ChatCompletionTool, ChatCompletionToolType,
+    CreateChatCompletionRequest, FunctionObject,
 };
 use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
 };
 use serde_json::Value;
+
+use crate::frontend_config::DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
 
 use super::{
     common_ext::{CommonExt, CommonExtProvider, extract_guided_decoding_options},
@@ -68,7 +71,10 @@ pub const MAX_TOP_LOGPROBS: u8 = 20;
 /// Minimum allowed value for `logprobs` in completion requests
 pub const MIN_LOGPROBS: u8 = 0;
 /// Maximum allowed value for `logprobs` in completion requests
-pub const MAX_LOGPROBS: u8 = 5;
+///
+/// Matches the chat `top_logprobs` limit and vLLM's default `--max-logprobs`,
+/// rather than the legacy OpenAI completions limit of 5.
+pub const MAX_LOGPROBS: u8 = 20;
 
 /// Minimum allowed value for `n` (number of choices)
 pub const MIN_N: u8 = 1;
@@ -116,7 +122,12 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "allowed_token_ids",
     "bad_words_token_ids",
     "logprob_token_ids",
+    "vllm_xargs",
 ];
+
+/// `vllm_xargs` keys vLLM itself fills from dedicated request fields. Dynamo only
+/// forwards router-generated `kv_transfer_params`, so clients may not set them.
+const RESERVED_VLLM_XARGS_KEYS: &[&str] = &["kv_transfer_params", "ec_transfer_params"];
 
 /// Treat null passthrough fields as omitted while preserving unknown fields for validation.
 pub(super) fn deserialize_extra_fields<'de, D>(
@@ -196,6 +207,36 @@ fn validate_no_unsupported_fields_with_ignore(
     if let Some(value) = unsupported_fields.get("logprob_token_ids") {
         serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
             .map_err(|_| anyhow::anyhow!("`logprob_token_ids` must be an array of token IDs"))?;
+    }
+    if let Some(value) = unsupported_fields.get("vllm_xargs") {
+        validate_vllm_xargs(value)?;
+    }
+    Ok(())
+}
+
+/// Validates `vllm_xargs` against vLLM's OpenAI schema: an object whose values are
+/// strings, numbers or booleans, or arrays of those.
+fn validate_vllm_xargs(value: &serde_json::Value) -> Result<(), anyhow::Error> {
+    fn is_scalar(value: &serde_json::Value) -> bool {
+        value.is_string() || value.is_number() || value.is_boolean()
+    }
+
+    let Some(args) = value.as_object() else {
+        anyhow::bail!("`vllm_xargs` must be an object");
+    };
+    for (key, arg) in args {
+        if RESERVED_VLLM_XARGS_KEYS.contains(&key.as_str()) {
+            anyhow::bail!("`vllm_xargs.{key}` is not supported");
+        }
+        let valid = match arg {
+            serde_json::Value::Array(items) => items.iter().all(is_scalar),
+            other => is_scalar(other),
+        };
+        if !valid {
+            anyhow::bail!(
+                "`vllm_xargs.{key}` must be a string, number, boolean, or an array of those"
+            );
+        }
     }
     Ok(())
 }
@@ -394,7 +435,8 @@ pub fn validate_min_p(min_p: Option<f32>) -> Result<(), anyhow::Error> {
 }
 
 /// Validates logit bias map: each key must be a token id (the string form of a
-/// `u32`) and each value a number within the allowed bias range.
+/// `u32`), each value a number within the allowed bias range, and no two keys
+/// may parse to the same token id.
 pub fn validate_logit_bias(
     logit_bias: &Option<std::collections::HashMap<String, serde_json::Value>>,
 ) -> Result<(), anyhow::Error> {
@@ -403,10 +445,15 @@ pub fn validate_logit_bias(
         None => return Ok(()),
     };
 
+    let mut seen_ids = std::collections::HashSet::new();
     for (token, bias_value) in logit_bias {
-        token.parse::<u32>().map_err(|_| {
+        let token_id = token.parse::<u32>().map_err(|_| {
             anyhow::anyhow!("Logit bias key must be a non-negative 32-bit integer token id")
         })?;
+
+        if !seen_ids.insert(token_id) {
+            anyhow::bail!("Logit bias token id {token_id} is specified more than once");
+        }
 
         let bias = bias_value.as_f64().ok_or_else(|| {
             anyhow::anyhow!(
@@ -593,6 +640,25 @@ pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Err
     Ok(())
 }
 
+/// Rejects custom tools anywhere in a chat request: request tools, a custom named
+/// choice, custom calls in assistant history, and tools declared in system messages.
+/// dynamo-protocols parses these since 8.3, but they used to fail to parse and
+/// Dynamo's templates and parsers still serve only function tools.
+pub fn validate_no_custom_tools(
+    request: &CreateChatCompletionRequest,
+) -> Result<(), anyhow::Error> {
+    // System-message tools stay raw JSON until `validated_effective_tools` parses them.
+    let is_custom = |tool: &Value| tool.get("type").and_then(Value::as_str) == Some("custom");
+    let system_custom = request.messages.iter().any(|message| {
+        matches!(message, ChatCompletionRequestMessage::System(system)
+            if system.tools.iter().flatten().any(is_custom))
+    });
+    if request.has_custom_tools() || system_custom {
+        anyhow::bail!("Custom tools are not supported; use function tools");
+    }
+    Ok(())
+}
+
 /// Merges and validates request tools and tools declared in system messages.
 /// An explicitly empty request list is invalid unless system messages supply tools.
 pub(crate) fn validated_effective_tools(
@@ -682,7 +748,10 @@ fn normalize_dynamic_system_tool(
             description,
             parameters,
             strict,
+            defer_loading: None,
         },
+        custom: None,
+        defer_loading: None,
     })
 }
 
@@ -715,6 +784,7 @@ pub fn validate_tools(
         );
     }
 
+    let skip_strict_schema_validation = *DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION;
     for (i, tool) in tools.iter().enumerate() {
         if tool.function.name.len() > MAX_FUNCTION_NAME_LENGTH {
             anyhow::bail!(
@@ -731,11 +801,11 @@ pub fn validate_tools(
             .function
             .name
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
         {
             anyhow::bail!(
                 "Function at index {} has an invalid name: \"{}\". \
-                 Only a-z, A-Z, 0-9, underscores, and dashes are allowed.",
+                 Only a-z, A-Z, 0-9, underscores, dashes, and dots are allowed.",
                 i,
                 tool.function.name,
             );
@@ -749,7 +819,10 @@ pub fn validate_tools(
                 tool.function.name,
             );
         }
-        super::strict_schema::validate_strict_function(&tool.function)?;
+        super::strict_schema::validate_strict_function(
+            &tool.function,
+            skip_strict_schema_validation,
+        )?;
     }
     Ok(())
 }
@@ -1117,6 +1190,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_validate_logit_bias_rejects_duplicate_token_ids() {
+        for second_key in ["+18", "018"] {
+            let bias = Some(HashMap::from([
+                ("18".to_string(), json!(-100)),
+                (second_key.to_string(), json!(100)),
+            ]));
+            let msg = validate_logit_bias(&bias).unwrap_err().to_string();
+            assert_eq!(
+                msg, "Logit bias token id 18 is specified more than once",
+                "second key: {second_key}"
+            );
+        }
+
+        let distinct = Some(HashMap::from([
+            ("18".to_string(), json!(-100)),
+            ("19".to_string(), json!(100)),
+        ]));
+        assert!(validate_logit_bias(&distinct).is_ok());
+    }
+
     /// A valid token ID must still reach the numeric and range checks for its
     /// bias value, rather than letting key validation mask a missing value check.
     #[test]
@@ -1282,6 +1376,7 @@ mod tests {
             "allowed_token_ids": [1],
             "bad_words_token_ids": [[2]],
             "logprob_token_ids": [3],
+            "vllm_xargs": {"flag": true},
         }))
         .unwrap();
         validate_no_unsupported_fields_with_ignore(&fields.fields, false).unwrap();
@@ -1296,6 +1391,7 @@ mod tests {
             ("allowed_token_ids", json!([-1])),
             ("bad_words_token_ids", json!([1])),
             ("logprob_token_ids", json!(["1"])),
+            ("vllm_xargs", json!([1])),
             ("experimental_field", json!({"nested": null})),
         ] {
             let fields: ExtraFields = serde_json::from_value(json!({field: bad})).unwrap();
@@ -1318,6 +1414,51 @@ mod tests {
             let fields = HashMap::from([("logprob_token_ids".to_string(), bad)]);
             let err = validate_no_unsupported_fields_with_ignore(&fields, false).unwrap_err();
             assert!(err.to_string().contains("must be an array of token IDs"));
+        }
+    }
+
+    #[test]
+    fn validate_logprobs_matches_top_logprobs_limit() {
+        validate_logprobs(Some(MAX_TOP_LOGPROBS)).unwrap();
+        let err = validate_logprobs(Some(MAX_TOP_LOGPROBS + 1)).unwrap_err();
+        assert!(err.to_string().contains("between 0 and 20"), "{err}");
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_accepts_vllm_xargs() {
+        let fields = HashMap::from([(
+            "vllm_xargs".to_string(),
+            json!({
+                "diffusion_seed_canvas": [100, 45518, 0],
+                "diffusion_max_steps": 1,
+                "diffusion_read_only": true,
+                "temperature_scale": 0.5,
+                "tag": "read",
+            }),
+        )]);
+        validate_no_unsupported_fields_with_ignore(&fields, false).unwrap();
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_rejects_malformed_vllm_xargs() {
+        for (bad, message) in [
+            (json!("x"), "`vllm_xargs` must be an object"),
+            (json!([1]), "`vllm_xargs` must be an object"),
+            (json!({"a": null}), "`vllm_xargs.a` must be"),
+            (json!({"a": {"nested": 1}}), "`vllm_xargs.a` must be"),
+            (json!({"a": [[1]]}), "`vllm_xargs.a` must be"),
+            (
+                json!({"kv_transfer_params": {"do_remote_prefill": true}}),
+                "`vllm_xargs.kv_transfer_params` is not supported",
+            ),
+            (
+                json!({"ec_transfer_params": 1}),
+                "`vllm_xargs.ec_transfer_params` is not supported",
+            ),
+        ] {
+            let fields = HashMap::from([("vllm_xargs".to_string(), bad)]);
+            let err = validate_no_unsupported_fields_with_ignore(&fields, false).unwrap_err();
+            assert!(err.to_string().contains(message), "{err}");
         }
     }
 

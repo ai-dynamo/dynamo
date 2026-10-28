@@ -110,11 +110,15 @@ pub fn anthropic_models_router(
     let retrieve_path = format!("{}/{{*model_id}}", models_path);
     let list_doc = RouteDoc::new(axum::http::Method::GET, &models_path);
     let retrieve_doc = RouteDoc::new(axum::http::Method::GET, &retrieve_path);
+    let readiness_doc = RouteDoc::new(
+        axum::http::Method::GET,
+        format!("{}/{{model_id}}/ready", models_path),
+    );
     let router = Router::new()
         .route(&models_path, get(list_models))
         .route(&retrieve_path, get(get_model))
         .with_state(state);
-    (vec![list_doc, retrieve_doc], router)
+    (vec![list_doc, retrieve_doc, readiness_doc], router)
 }
 
 // ---------------------------------------------------------------------------
@@ -655,7 +659,8 @@ async fn anthropic_messages(
             request.chat_template_args.as_ref(),
         );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = inflight_guard.response_collector();
+    inflight_guard.request_metrics().attach_to(&mut request);
 
     tracing::trace!("Issuing generate call for Anthropic messages");
 
@@ -1120,10 +1125,17 @@ async fn get_model(
     headers: HeaderMap,
     axum::extract::Path(model_id): axum::extract::Path<String>,
 ) -> Result<Response, super::openai::ErrorResponse> {
-    super::openai::check_ready(&state)?;
-
     // Strip leading slash from wildcard capture (axum `/{*key}` includes it).
     let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
+
+    if state.manager().get_committed_model(model_id).is_none()
+        && let Some(base) = model_id.strip_suffix("/ready")
+        && state.manager().get_committed_model(base).is_some()
+    {
+        return super::openai::get_model_readiness(&state, base);
+    }
+
+    super::openai::check_ready(&state)?;
 
     let models: HashSet<String> = state.manager().model_display_names();
     if !models.contains(model_id) {

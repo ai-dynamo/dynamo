@@ -32,6 +32,7 @@ pub struct KvDcRelayGrpcConfig {
     pub max_initialized_pool_hubs: usize,
     pub max_readiness_subscribers: usize,
     pub max_load_subscribers: usize,
+    pub max_serving_load_subscribers: usize,
 }
 
 impl KvDcRelayGrpcConfig {
@@ -56,6 +57,7 @@ impl KvDcRelayGrpcConfig {
             max_initialized_pool_hubs: 64,
             max_readiness_subscribers: 64,
             max_load_subscribers: 64,
+            max_serving_load_subscribers: 64,
         }
     }
 
@@ -100,7 +102,8 @@ impl KvDcRelayGrpcConfig {
                 && self.max_subscribers_per_pool != 0
                 && self.max_initialized_pool_hubs != 0
                 && self.max_readiness_subscribers != 0
-                && self.max_load_subscribers != 0,
+                && self.max_load_subscribers != 0
+                && self.max_serving_load_subscribers != 0,
             "KV DC Relay WAN stream and publication limits must be positive"
         );
         anyhow::ensure!(
@@ -123,6 +126,10 @@ impl KvDcRelayGrpcConfig {
             ("max_initialized_pool_hubs", self.max_initialized_pool_hubs),
             ("max_readiness_subscribers", self.max_readiness_subscribers),
             ("max_load_subscribers", self.max_load_subscribers),
+            (
+                "max_serving_load_subscribers",
+                self.max_serving_load_subscribers,
+            ),
         ] {
             anyhow::ensure!(
                 capacity <= tokio::sync::Semaphore::MAX_PERMITS,
@@ -174,6 +181,10 @@ mod tests {
 
         let mut config = valid_config();
         config.max_initialized_pool_hubs = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = valid_config();
+        config.max_serving_load_subscribers = 0;
         assert!(config.validate().is_err());
 
         let mut config = valid_config();
@@ -237,6 +248,7 @@ mod tests {
         assert_invalid!(max_initialized_pool_hubs, above_semaphore_limit);
         assert_invalid!(max_readiness_subscribers, above_semaphore_limit);
         assert_invalid!(max_load_subscribers, above_semaphore_limit);
+        assert_invalid!(max_serving_load_subscribers, above_semaphore_limit);
     }
 
     #[test]

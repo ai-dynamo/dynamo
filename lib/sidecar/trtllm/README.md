@@ -21,6 +21,9 @@ gRPC server. See the [sidecar overview](../README.md) for installation.
 > which carries the latest gRPC server updates. Nightly builds are the
 > `nvcr.io/nvidia/tensorrt-llm/release:<version>.dev<date>` tags on
 > [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/tensorrt-llm/containers/release/-).
+> KV routing is available in
+> `nvcr.io/nvidia/tensorrt-llm/release:1.4.0a0.dev202610180820`, which includes
+> native KVCM2 event streaming and OpenEngine routing load support.
 
 ## Support matrix
 
@@ -28,7 +31,9 @@ gRPC server. See the [sidecar overview](../README.md) for installation.
 |---------|-----------|
 | Aggregated | Yes |
 | Disaggregated | Yes |
-| KV routing | No |
+| KV routing | Yes |
+
+For child-agent context affinity, enable frontend session affinity and TensorRT-LLM conversation affinity. Set `TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY` on the prefill sidecar and set `internal_request_auth_key` to the same private value in the OpenEngine server YAML configuration. The sidecar requires the server to advertise signed affinity support. It sends the child's own conversation ID and a signed parent hint for context requests; decode requests retain the child's identity. The gateway must authorize client parent-session headers before they reach the router.
 
 ## Run locally
 
@@ -40,6 +45,8 @@ export DYN_DISCOVERY_BACKEND=file   # single host: no etcd or NATS needed
 lib/sidecar/trtllm/launch/agg.sh
 ```
 
+For KV-aware routing, use `launch/agg_kv_router.sh` (two GPUs) or `launch/disagg_kv_router.sh` (four GPUs). Both enable OpenEngine load metrics and publish one ZMQ event source per worker.
+
 In a second terminal:
 
 ```bash
@@ -50,9 +57,11 @@ curl -s localhost:8000/v1/chat/completions \
 
 ## Deploy on Kubernetes
 
-Before applying, replace `<your-registry>/dynamo-sidecar` in the manifest with a
-[sidecar image](../README.md#docker) and create the `hf-token-secret`
-Secret that the manifest reads.
+The manifests pin compatible Dynamo frontend and TensorRT-LLM runtime nightlies
+with `runtimeVersionOverride: "1.6.0"`. Use an operator that supports the
+engine-primary native-sidecar layout. If you change the images, keep the
+frontend, runtime, and operator versions compatible. Create the
+`hf-token-secret` Secret that the manifests read before applying them.
 
 See [`deploy/`](deploy/) for all manifests. For example, aggregated serving:
 
@@ -63,11 +72,11 @@ kubectl apply -f lib/sidecar/trtllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 ```
 
+For KV routing, use `deploy/agg_kv_router.yaml` or `deploy/disagg_kv_router.yaml`. These examples pin matching Dynamo frontend and sidecar nightlies (`20261023-75d0686`) and `nvcr.io/nvidia/tensorrt-llm/release:1.4.0a0.dev202610180820` for the engine.
+
 ## Topologies
 
-The frontend reaches each sidecar over Dynamo's request, discovery, and event
-planes; the sidecar reaches the engine over its native gRPC API. The
-TensorRT-LLM sidecar does not publish KV cache events.
+The frontend sends inference requests to each engine's leader sidecar, which forwards them to OpenEngine over gRPC and polls routing load for all attention-DP ranks. Each sidecar discovers its node's KV event sources through OpenEngine and relays local KV events through Dynamo's event plane. Follower sidecars do not serve inference requests.
 
 ### Single-Node TP
 
@@ -84,7 +93,6 @@ node holds the remaining TP ranks.
 
 ### Multi-Node DP
 
-Not supported yet. The TensorRT-LLM sidecar does not target DP ranks or
-publish KV events.
+The sidecar forwards the selected attention-DP rank to OpenEngine for KV-aware routing.
 
 ![TensorRT-LLM data parallelism across two nodes. Only the leader sidecar serves requests: the Dynamo Frontend router picks a DP rank and sends requests over the request plane to the node 0 Dynamo Sidecar, which registers DP ranks 0-3 and calls its local TensorRT-LLM over native gRPC.](../../../docs/fern/assets/img/sidecar-trtllm-multinode-dp.svg)

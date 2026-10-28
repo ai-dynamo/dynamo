@@ -15,17 +15,19 @@ use crate::{Endpoint, to_pyerr};
 pub struct KvStateAgentHost {
     endpoint: dynamo_runtime::component::Endpoint,
     max_slots: usize,
+    slots_per_socket: usize,
     inner: Arc<OnceCell<Arc<llm_rs::kv_router::publisher::KvStateAgentHost>>>,
 }
 
 #[pymethods]
 impl KvStateAgentHost {
     #[new]
-    #[pyo3(signature = (endpoint, max_slots=8))]
-    fn new(endpoint: Endpoint, max_slots: usize) -> Self {
+    #[pyo3(signature = (endpoint, max_slots=8, slots_per_socket=1))]
+    fn new(endpoint: Endpoint, max_slots: usize, slots_per_socket: usize) -> Self {
         Self {
             endpoint: endpoint.inner,
             max_slots,
+            slots_per_socket,
             inner: Arc::new(OnceCell::new()),
         }
     }
@@ -33,6 +35,7 @@ impl KvStateAgentHost {
     fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let endpoint = self.endpoint.clone();
         let max_slots = self.max_slots;
+        let slots_per_socket = self.slots_per_socket;
         let inner = self.inner.clone();
         crate::future_into_py(py, async move {
             inner
@@ -41,6 +44,7 @@ impl KvStateAgentHost {
                         llm_rs::kv_router::publisher::KvStateAgentHostConfig {
                             endpoint,
                             max_slots,
+                            slots_per_socket,
                         },
                     )
                     .await

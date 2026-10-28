@@ -52,7 +52,7 @@ huggingface-cli download openai/gpt-oss-120b --exclude "original/*" --exclude "m
 
 Set the container image:
 ```bash
-export DYNAMO_CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0
+export DYNAMO_CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0
 ```
 
 Launch the Dynamo TensorRT-LLM container with the necessary configurations:
@@ -178,7 +178,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
 
 Poll the `/health` endpoint to verify that both the prefill and decode worker endpoints have started:
 ```
-curl http://localhost:8000/health
+curl 'http://localhost:8000/health?instances=true'
 ```
 
 Make sure that both of the endpoints are available before sending an inference request:
@@ -188,6 +188,7 @@ Make sure that both of the endpoints are available before sending an inference r
     "dyn://dynamo.backend.generate",
     "dyn://dynamo.prefill.generate"
   ],
+  "stage": "ready",
   "status": "healthy"
 }
 ```

@@ -10,6 +10,7 @@ from typing import Any, List, Optional
 
 import sglang as sgl
 import yaml
+from sglang.srt.environ import envs
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
@@ -62,6 +63,7 @@ from dynamo.sglang.gateway import (
     effective_gateway_workers,
     gateway_engine_id,
 )
+from dynamo.sglang.kv_hints import publish_kvcr_hint_capabilities
 from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
@@ -185,6 +187,7 @@ async def _register_model_with_runtime_config(
     worker_type: WorkerType,
     needs: Optional[List[List[WorkerType]]] = None,
     serves_lora_load: bool = False,
+    forwards_kv_hints: bool = False,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
@@ -200,11 +203,15 @@ async def _register_model_with_runtime_config(
         needs: DNF list of peer roles this worker requires to serve. Empty (or
             `None`) means no peer dependency, which is the correct value for
             Aggregated workers.
+        forwards_kv_hints: Whether the registered handler forwards router hints
+            to the engine. Only LLM decode and prefill handlers opt in.
 
     Returns:
         True if registration succeeded, False otherwise.
     """
     runtime_config = await get_runtime_config(engine, server_args, dynamo_args)
+    if runtime_config is not None and forwards_kv_hints:
+        publish_kvcr_hint_capabilities(runtime_config, engine, server_args, worker_type)
 
     if dynamo_args.use_sglang_tokenizer and not (
         output_type.supports_embedding() or output_type.supports_rerank()
@@ -381,6 +388,26 @@ def _mooncake_key_prefix(
     return "_".join(parts) if parts else None
 
 
+def _mooncake_tenant_id(extra_config: dict[str, Any]) -> str:
+    # Older SGLang releases, such as 0.5.11, have no Mooncake tenant support.
+    if not hasattr(envs, "MOONCAKE_TENANT_ID"):
+        return "default"
+    # Match the tenant precedence of SGLang's MooncakeBaseStore._load_config.
+    if (
+        extra_config.get("master_server_address") is not None
+        or extra_config.get("client_server_address") is not None
+    ):
+        tenant = extra_config.get("tenant_id", "default")
+    elif (config_path := os.getenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH")) is not None:
+        with open(config_path, encoding="utf-8") as config_file:
+            tenant = json.load(config_file).get("tenant_id", "default")
+    else:
+        tenant = os.getenv("MOONCAKE_TENANT_ID", "default")
+    if tenant is None:
+        return "default"
+    return str(tenant).strip() or "default"
+
+
 def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
     if getattr(server_args, "hicache_storage_backend", None) != "mooncake":
         return None
@@ -428,6 +455,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
 
     return {
         "backend": "mooncake",
+        "tenant_id": _mooncake_tenant_id(extra_config),
         "page_size": int(getattr(server_args, "page_size", 1) or 1),
         "tp_size": tp_size,
         "pp_size": pp_size,
@@ -721,6 +749,7 @@ async def register_model_with_readiness_gate(
     worker_type: WorkerType,
     needs: Optional[List[List[WorkerType]]] = None,
     serves_lora_load: bool = False,
+    forwards_kv_hints: bool = False,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
 
@@ -734,6 +763,7 @@ async def register_model_with_readiness_gate(
         readiness_gate: Optional event to signal when registration completes.
         worker_type: Topology role; see `_register_model_with_runtime_config`.
         needs: DNF peer requirements; see `_register_model_with_runtime_config`.
+        forwards_kv_hints: Whether this handler forwards router hints to the engine.
 
     Raises:
         RuntimeError: If model registration fails.
@@ -748,6 +778,7 @@ async def register_model_with_readiness_gate(
         worker_type=worker_type,
         needs=needs,
         serves_lora_load=serves_lora_load,
+        forwards_kv_hints=forwards_kv_hints,
     )
     if not registration_success:
         logging.error("Model registration failed; shutting down")
