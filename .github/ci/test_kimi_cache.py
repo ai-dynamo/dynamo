@@ -55,12 +55,16 @@ def test_nightly_consumers_share_pinned_read_only_snapshots(tmp_path, variant, w
     resources = {doc["metadata"]["name"]: doc for doc in documents}
     benchmark = resources[benchmark_name]["spec"]["template"]["spec"]["containers"][0]
     env = {entry["name"]: entry.get("value") for entry in benchmark["env"]}
-    model_path = env["TOKENIZER_PATH"]
-    assert "/snapshots/" in model_path
+    revision = env["TOKENIZER_REVISION"]
+    assert len(revision) == 40
+    model_path = (
+        f"/model-cache/hub/models--nvidia--Kimi-K2.5-NVFP4/snapshots/{revision}"
+    )
     assert env["TARGET_MODEL"] == "nvidia/Kimi-K2.5-NVFP4"
     assert env["HF_HUB_OFFLINE"] == "1"
     assert env["HF_MODULES_CACHE"].startswith("/tmp/")
-    assert benchmark["command"][2].count("${TOKENIZER_PATH:-${TARGET_MODEL}}") == 2
+    assert benchmark["command"][2].count("${TOKENIZER_REVISION:-main}") == 2
+    assert benchmark["command"][2].count('--tokenizer "${TARGET_MODEL}"') == 2
     assert next(m for m in benchmark["volumeMounts"] if m["name"] == "model-cache")[
         "readOnly"
     ]

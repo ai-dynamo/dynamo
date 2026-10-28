@@ -8,6 +8,7 @@ set -euo pipefail
 manifest=$1
 export KIMI_MODEL_PATH=/model-cache/hub/models--nvidia--Kimi-K2.5-NVFP4/snapshots/2fd3a800dedd098b8327eb49e93ebc75f85da19f
 export KIMI_EAGLE_PATH=/model-cache/hub/models--nvidia--Kimi-K2.5-Thinking-Eagle3/snapshots/b71566cc726ec39db7b93dce0f6939b16febb362
+export KIMI_TOKENIZER_REVISION=${KIMI_MODEL_PATH##*/}
 export CACHE_PREFLIGHT_CODE
 CACHE_PREFLIGHT_CODE=$(cat "$(dirname "$0")/validate-kimi-cache.py")
 
@@ -24,7 +25,7 @@ yq -i 'with(select(.kind == "ConfigMap" and .metadata.name == strenv(DGD) + "-co
     .data[] |= (from_yaml | .speculative_config.speculative_model_dir = strenv(KIMI_EAGLE_PATH) | to_yaml)) |
   with(select(.kind == "Job" and .metadata.name == strenv(BENCHMARK));
     .spec.template.spec.containers[0].env += [
-      {"name": "TOKENIZER_PATH", "value": strenv(KIMI_MODEL_PATH)},
+      {"name": "TOKENIZER_REVISION", "value": strenv(KIMI_TOKENIZER_REVISION)},
       {"name": "HF_HUB_OFFLINE", "value": "1"},
       {"name": "HF_MODULES_CACHE", "value": "/tmp/hf_modules"}] |
     (.spec.template.spec.containers[0].volumeMounts[] | select(.name == "model-cache").readOnly) = true)' "$manifest"

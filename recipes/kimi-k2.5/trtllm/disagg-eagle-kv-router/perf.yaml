@@ -103,7 +103,8 @@ spec:
           mkdir -p "$WARMUP_DIR"
           aiperf profile \
             -m "${TARGET_MODEL}" \
-            --tokenizer "${TOKENIZER_PATH:-${TARGET_MODEL}}" \
+            --tokenizer "${TARGET_MODEL}" \
+            --tokenizer-revision "${TOKENIZER_REVISION:-main}" \
             --tokenizer-trust-remote-code \
             --url "http://${ENDPOINT}" \
             --streaming \
@@ -126,7 +127,8 @@ spec:
 
             aiperf profile \
               -m "${TARGET_MODEL}" \
-              --tokenizer "${TOKENIZER_PATH:-${TARGET_MODEL}}" \
+              --tokenizer "${TARGET_MODEL}" \
+              --tokenizer-revision "${TOKENIZER_REVISION:-main}" \
               --tokenizer-trust-remote-code \
               --input-file "${TRACE_FILE}" \
               --custom-dataset-type mooncake_trace \
