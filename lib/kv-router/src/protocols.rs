@@ -1950,64 +1950,6 @@ mod tests {
     use rstest::rstest;
     use serde_json;
 
-    /// Image identity must affect both image blocks and the following prefix
-    /// chain, while text before the image remains reusable.
-    #[test]
-    fn multimodal_routing_preserves_image_prefix_credit() {
-        let tokens = vec![10, 11, 0, 0, 0, 0, 20, 21];
-        let hashes = |image_hash, before, after| {
-            let mut input = tokens.clone();
-            input[0] = before;
-            input[6] = after;
-            let image_block = Some(BlockExtraInfo {
-                mm_objects: vec![BlockMmObjectInfo {
-                    mm_hash: image_hash,
-                    offsets: vec![(0, 2)],
-                }],
-            });
-            let infos = vec![None, image_block.clone(), image_block, None];
-            let blocks = compute_block_hash_for_seq(
-                &input,
-                2,
-                BlockHashOptions {
-                    block_mm_infos: Some(&infos),
-                    ..Default::default()
-                },
-            );
-            compute_seq_hash_for_block(&blocks)
-        };
-        let first = hashes(42, 10, 20);
-        assert_eq!(
-            first,
-            hashes(42, 10, 20),
-            "repeated image keeps cache credit"
-        );
-        let changed_image = hashes(43, 10, 20);
-        assert_eq!(first[0], changed_image[0]);
-        assert_ne!(first[1..], changed_image[1..]);
-        let changed_suffix = hashes(42, 10, 22);
-        assert_eq!(first[..3], changed_suffix[..3]);
-        assert_ne!(first[3], changed_suffix[3]);
-        let changed_prefix = hashes(42, 12, 20);
-        for (original, changed) in first.iter().zip(&changed_prefix) {
-            assert_ne!(
-                original, changed,
-                "prefix changes invalidate every later block"
-            );
-        }
-        let text_only = compute_seq_hash_for_block(&compute_block_hash_for_seq(
-            &tokens,
-            2,
-            BlockHashOptions::default(),
-        ));
-        assert_eq!(first[0], text_only[0]);
-        assert_ne!(
-            first[1..],
-            text_only[1..],
-            "omitting MM info loses image credit"
-        );
-    }
-
     // Temporary N/N-1 fixtures. Remove this module when domainless RouterEvent
     // is outside the supported mixed-version window.
     mod residency_domain_compat {

@@ -339,6 +339,8 @@ impl Router {
         let cache_namespace = cache_namespace_from_request(request, headers);
 
         let start = Instant::now();
+        // A configured media decoder hashes decoded pixels; keep that identity even though
+        // EPP discards the decoded payload. Worker media loading is a separate step.
         let (preprocessed, _, _) = preprocessor.preprocess_request(request, None).await?;
         tracing::debug!(
             preprocessing_seconds = start.elapsed().as_secs_f64(),
@@ -1717,10 +1719,13 @@ mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::Pod;
 
+    /// Exercise image identity and prefix reuse through EPP preprocessing, with Frontend parity.
     #[cfg(feature = "mm-routing")]
     #[tokio::test]
     async fn chat_images_match_frontend_routing_without_expanding_worker_tokens() {
-        use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+        use dynamo_kv_router::protocols::{
+            BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
+        };
 
         // Reuse the local tokenizer with a minimal Qwen vision contract;
         // preprocessing needs no model weights, network access, or GPU.
@@ -1763,13 +1768,22 @@ mod tests {
             "iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAIAAAD9b0jDAAAAI0lEQVR4nGNg+M9AfTRq6Kiho4aOGjpq6Kiho4aOGjoyDAUAAa0NHvjGCKUAAAAASUVORK5CYII=",
         ];
         let mut observed_hashes = Vec::new();
-        for image in [images[0], images[0], images[1]] {
+        let mut routing_tokens = Vec::new();
+        let prefix = "Inspect this image carefully: ";
+        let suffix = " Describe the scene.";
+        for (image, before, after) in [
+            (images[0], prefix, suffix),
+            (images[0], prefix, suffix),
+            (images[1], prefix, suffix),
+            (images[0], prefix, " Count the objects."),
+            (images[0], "Different preceding text: ", suffix),
+        ] {
             let request = serde_json::from_value(serde_json::json!({
                 "model": "vision", "max_tokens": 1,
                 "messages": [{"role": "user", "content": [
-                    {"type": "text", "text": "Inspect this image carefully: "},
+                    {"type": "text", "text": before},
                     {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{image}")}},
-                    {"type": "text", "text": " Describe the scene."}
+                    {"type": "text", "text": after}
                 ]}]
             })).unwrap();
             let epp = Router::tokenize_chat(&preprocessor, &request, &[])
@@ -1791,17 +1805,73 @@ mod tests {
                 view.0.len() > epp.tokens.len(),
                 "only routing expands the image"
             );
-            observed_hashes.push(compute_block_hash_for_seq(
+            routing_tokens.push(view.0.to_vec());
+            observed_hashes.push(compute_seq_hash_for_block(&compute_block_hash_for_seq(
                 view.0,
                 2,
                 BlockHashOptions {
                     block_mm_infos: view.1,
                     ..Default::default()
                 },
-            ));
+            )));
         }
-        assert_eq!(observed_hashes[0], observed_hashes[1]);
-        assert_ne!(observed_hashes[0], observed_hashes[2]);
+        let original = &observed_hashes[0];
+        assert_eq!(
+            *original, observed_hashes[1],
+            "repeated image reuses the prefix"
+        );
+        // Image-only routing may encode identity in virtual tokens instead of block metadata.
+        let changed_positions: Vec<_> = routing_tokens[0]
+            .iter()
+            .zip(&routing_tokens[2])
+            .enumerate()
+            .filter_map(|(i, (a, b))| (a != b).then_some(i))
+            .collect();
+        assert!(
+            !changed_positions.is_empty(),
+            "image identity must affect routing"
+        );
+        let first_image_block = changed_positions[0] / 2;
+        let last_image_block = changed_positions.last().unwrap() / 2;
+        assert!(
+            first_image_block > 0,
+            "fixture needs a complete text-prefix block"
+        );
+        assert_eq!(
+            original[..first_image_block],
+            observed_hashes[2][..first_image_block]
+        );
+        for (before, after) in original[first_image_block..]
+            .iter()
+            .zip(&observed_hashes[2][first_image_block..])
+        {
+            assert_ne!(
+                before, after,
+                "changed image invalidates its block and later blocks"
+            );
+        }
+        let unchanged_suffix_blocks = routing_tokens[0]
+            .iter()
+            .zip(&routing_tokens[3])
+            .take_while(|(a, b)| a == b)
+            .count()
+            / 2;
+        assert!(unchanged_suffix_blocks >= last_image_block);
+        assert!(unchanged_suffix_blocks > first_image_block);
+        assert_eq!(
+            original[..unchanged_suffix_blocks],
+            observed_hashes[3][..unchanged_suffix_blocks]
+        );
+        assert_ne!(
+            *original, observed_hashes[3],
+            "changed suffix affects later hashes"
+        );
+        for (before, after) in original.iter().zip(&observed_hashes[4]) {
+            assert_ne!(
+                before, after,
+                "changed preceding text invalidates the image prefix chain"
+            );
+        }
 
         let text_request = serde_json::from_value(serde_json::json!({
             "model": "vision", "max_tokens": 1,
@@ -1822,6 +1892,7 @@ mod tests {
         assert!(epp.mm_routing_info.is_none());
     }
 
+    /// Keep expanded routing and empty-metadata fallback consistent with the Frontend.
     #[test]
     fn multimodal_routing_view_matches_frontend() {
         use dynamo_kv_router::protocols::{
