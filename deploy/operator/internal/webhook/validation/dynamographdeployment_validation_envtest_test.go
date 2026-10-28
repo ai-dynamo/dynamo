@@ -312,7 +312,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.components[1].roles: Required value: the leader template must declare runtime to select sidecar mode`, `spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
 		},
 		{
-			name: "sglang sidecar role templates own opaque engine configuration",
+			name: "sglang beta accepts multinode sidecar with runtime on both roles and opaque engine configuration",
 			deployment: func() runtime.Object {
 				dgd := sglangMultinodeDGDForAdmission(t, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
 				for i := range betaWorkerComponent(dgd).Roles {
@@ -357,15 +357,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}(),
 			wantWebhookErrs: []string{`spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
 		},
-		// SGLang multinode sidecars resolve runtime compatibility independently of engine images.
-		{name: "sglang sidecar multinode alpha=False roles=False workerRuntime=False", deployment: sglangMultinodeDGDForAdmission(t, false, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "sglang sidecar multinode alpha=False roles=False workerRuntime=True", deployment: sglangMultinodeDGDForAdmission(t, false, false, true), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "sglang sidecar multinode alpha=False roles=True workerRuntime=False", deployment: sglangMultinodeDGDForAdmission(t, false, true, false)},
-		{name: "sglang sidecar multinode alpha=False roles=True workerRuntime=True", deployment: sglangMultinodeDGDForAdmission(t, false, true, true)},
-		{name: "sglang sidecar multinode alpha=True roles=False workerRuntime=False", deployment: sglangMultinodeDGDForAdmission(t, true, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "sglang sidecar multinode alpha=True roles=False workerRuntime=True", deployment: sglangMultinodeDGDForAdmission(t, true, false, true), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "sglang sidecar multinode alpha=True roles=True workerRuntime=False", deployment: sglangMultinodeDGDForAdmission(t, true, true, false)},
-		{name: "sglang sidecar multinode alpha=True roles=True workerRuntime=True", deployment: sglangMultinodeDGDForAdmission(t, true, true, true)},
+		// Both API versions require explicit sidecar role templates and allow compute-only workers.
+		{name: "sglang beta rejects multinode sidecar without role templates", deployment: sglangMultinodeDGDForAdmission(t, false, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "sglang beta accepts multinode sidecar with compute-only worker", deployment: sglangMultinodeDGDForAdmission(t, false, true, false)},
+		{name: "sglang alpha rejects multinode sidecar without role templates", deployment: sglangMultinodeDGDForAdmission(t, true, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "sglang alpha accepts multinode sidecar with compute-only worker", deployment: sglangMultinodeDGDForAdmission(t, true, true, false)},
+		{name: "sglang alpha accepts multinode sidecar with runtime on both roles", deployment: sglangMultinodeDGDForAdmission(t, true, true, true)},
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
 		{name: "native sidecar beta create", deployment: nativeDGDForAdmission(t, false, nil)},
 		{name: "native sidecar beta update", oldDeployment: nativeDGDForAdmission(t, false, nil), deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
