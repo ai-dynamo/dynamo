@@ -88,7 +88,8 @@ jobs:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
     - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd  # v3.0.1
-      timeout-minutes: 3
+      # A cold hook cache (a PR that edits .pre-commit-config.yaml) can take over 3 minutes.
+      timeout-minutes: 6
 
   planner-gym:
     name: Planner Gym CPU, adapters excluded (Python ${{ matrix.python }})
