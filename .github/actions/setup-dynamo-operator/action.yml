@@ -467,7 +467,7 @@ runs:
       shell: bash
       env:
         # Keep in lockstep with .github/actions/setup-snapshot-agent/action.yml.
-        SNAPSHOT_CHART_VERSION: 0.2.0-rc.1
+        SNAPSHOT_CHART_VERSION: 0.2.0
       run: |
         echo "::group::Install snapshot CRDs before operator start"
         set -euo pipefail
@@ -887,6 +887,12 @@ runs:
         kubectl logs -n "${NAMESPACE}" \
           -l "app=vcluster,release=${VCLUSTER_NAME}" \
           --all-containers --tail=300 --prefix=true 2>&1 || true
+        echo "::endgroup::"
+
+        echo "::group::Previous vCluster syncer logs (host namespace)"
+        kubectl logs -n "${NAMESPACE}" \
+          -l "app=vcluster,release=${VCLUSTER_NAME}" \
+          -c syncer --previous --tail=300 --prefix=true 2>&1 || true
         echo "::endgroup::"
 
         if [ ! -f "${VKUBECONFIG}" ]; then

@@ -23,7 +23,6 @@ import (
 	"sort"
 	"strings"
 
-	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -92,12 +91,10 @@ func (v *DynamoGraphDeploymentValidator) validate(
 	ratchetRuntimeVersion bool,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                   ctx,
-			mgr:                   v.mgr,
-			runtimeVersionSource:  runtimeVersionSource,
-			ratchetRuntimeVersion: ratchetRuntimeVersion,
-		},
+		ctx:                   ctx,
+		mgr:                   v.mgr,
+		runtimeVersionSource:  runtimeVersionSource,
+		ratchetRuntimeVersion: ratchetRuntimeVersion,
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment, oldDeployment)
@@ -122,14 +119,12 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                   ctx,
-			mgr:                   v.mgr,
-			runtimeVersionSource:  runtimeVersionSource,
-			ratchetRuntimeVersion: true,
-		},
-		userInfo:          userInfo,
-		operatorPrincipal: operatorPrincipal,
+		ctx:                   ctx,
+		mgr:                   v.mgr,
+		runtimeVersionSource:  runtimeVersionSource,
+		ratchetRuntimeVersion: true,
+		userInfo:              userInfo,
+		operatorPrincipal:     operatorPrincipal,
 	}
 
 	allErrs := validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)
@@ -175,13 +170,11 @@ func (v *DynamoGraphDeploymentValidator) ValidateTerminatingUpdate(
 	// it, and the Disabled variant went away when runtime-version validation
 	// moved to the ratchet flag, so this carries the v1beta1 default.
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{
-			ctx:                  ctx,
-			mgr:                  v.mgr,
-			runtimeVersionSource: runtimeVersionSourceV1Beta1,
-		},
-		userInfo:          userInfo,
-		operatorPrincipal: operatorPrincipal,
+		ctx:                  ctx,
+		mgr:                  v.mgr,
+		runtimeVersionSource: runtimeVersionSourceV1Beta1,
+		userInfo:             userInfo,
+		operatorPrincipal:    operatorPrincipal,
 	}
 
 	allErrs := validation.validateObjectMetaUpdate(
@@ -202,6 +195,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		&dgd.ObjectMeta,
 		field.NewPath("metadata"),
 		hasIntraPodFailover(&dgd.Spec),
+		dgd.HasLPXComponent(),
 	)...)
 
 	// Validate desired strategy intent; admission has no observed PCS rollout state.
@@ -257,18 +251,11 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 	objectMeta *metav1.ObjectMeta,
 	fldPath *field.Path,
 	hasIntraPodFailover bool,
+	hasLPXComponent bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	annotationsPath := fldPath.Child("annotations")
-	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
-		if _, err := semver.NewVersion(value); err != nil {
-			allErrs = append(allErrs, field.Invalid(
-				annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),
-				value,
-				"must be valid semver",
-			))
-		}
-	}
+	allErrs = append(allErrs, v.sharedValidation.validateObjectMeta(objectMeta, nil, fldPath)...)
 	if value, invalid := invalidVLLMDistributedExecutorBackendAnnotation(objectMeta.Annotations); invalid {
 		allErrs = append(allErrs, field.Invalid(
 			annotationsPath.Key(consts.KubeAnnotationVLLMDistributedExecutorBackend),
@@ -278,8 +265,18 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 	}
 	// Parse strategy annotations with the same value set used by the renderer.
 	if value, exists := objectMeta.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists {
-		if _, err := dynamo.ParseGroveUpdateStrategy(value); err != nil {
+		strategy, err := dynamo.ParseGroveUpdateStrategy(value)
+		if err != nil {
 			allErrs = append(allErrs, field.NotSupported(annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy), value, dynamo.SupportedGroveUpdateStrategies()))
+		}
+
+		// OnDelete leaves LPX Pods on stale templates, which the LPX scheduler treats as dependency loss.
+		if hasLPXComponent && strategy == grovev1alpha1.OnDeleteStrategy {
+			allErrs = append(allErrs, field.Invalid(
+				annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy),
+				value,
+				`must be "Coherent" or "RollingRecreate" when LPX components are configured`,
+			))
 		}
 	}
 	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]; exists && value != "pod" && value != "container" {
@@ -327,7 +324,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	for i := range spec.Components {
 		if spec.Components[i].IsLPX() {
 			lpxComponentCount++
-			if spec.Components[i].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) != nil {
+			if dynamolpx.ServesEndpoint(&spec.Components[i]) {
 				independentEngineCount++
 			}
 		}
@@ -382,7 +379,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		// Draft fanout expands models; the target owns the shared endpoint and availability.
 		if lpxComponentCount == 2 && independentEngineCount == 1 && component.IsLPX() {
 			replicas := k8sptr.Deref(component.Replicas, 1)
-			if component.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil {
+			if !dynamolpx.ServesEndpoint(component) {
 				if replicas > dynamolpx.MaxSpecDecodeNumDrafts {
 					allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "draft replicas must be between 1 and 8"))
 				}
@@ -392,8 +389,17 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				if k8sptr.Deref(component.MinAvailable, 1) != 1 {
 					allErrs = append(allErrs, field.Forbidden(componentPath.Child("minAvailable"), "draft minAvailable must be omitted or 1; the shared target owns minimum availability"))
 				}
-			} else if replicas != 1 {
-				allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "shared target replicas must be one"))
+			} else {
+				// Draft replicas count models; the target stands for the one shared engine.
+				if replicas != 1 {
+					allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "shared target replicas must be one"))
+				}
+
+				// The target's conductor launches the shared speculative runtime; an agent sidecar serves only a single model.
+				if component.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil {
+					allErrs = append(allErrs, field.Forbidden(componentPath.Child("roles"), fmt.Sprintf(
+						"a shared draft and target pair requires the target's conductor role; the agent %q sidecar serves only a single model", consts.RuntimeContainerName)))
+				}
 			}
 		}
 
@@ -486,7 +492,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		}
 	}
 	if hasLPXComponent && independentEngineCount != lpxComponentCount && !(lpxComponentCount == 2 && independentEngineCount == 1) {
-		allErrs = append(allErrs, field.Forbidden(componentsPath, "LPX components must each declare a conductor role or form a shared draft and target pair"))
+		allErrs = append(allErrs, field.Forbidden(componentsPath, fmt.Sprintf(
+			"LPX components must each declare a conductor role or an agent %q sidecar, or form a shared draft and target pair", consts.RuntimeContainerName)))
 	}
 
 	if spec.Restart != nil {
@@ -814,23 +821,10 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMetaUpdate(
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	annotationsPath := fldPath.Child("annotations")
-	newOrigin, newOriginExists := newObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
-	oldOrigin, oldOriginExists := oldObjectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
 	newProvider, newProviderExists := newObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
 	oldProvider, oldProviderExists := oldObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
 
-	// Keep creation provenance immutable, including whether it exists at all.
-	if newOriginExists != oldOriginExists || newOrigin != oldOrigin {
-		var invalidValue any
-		if newOriginExists {
-			invalidValue = newOrigin
-		}
-		allErrs = append(allErrs, field.Invalid(
-			annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),
-			invalidValue,
-			apivalidation.FieldImmutableErrorMsg,
-		))
-	}
+	allErrs = append(allErrs, v.sharedValidation.validateObjectMetaUpdate(newObjectMeta, oldObjectMeta, fldPath)...)
 
 	// Reserve the initial legacy-provider materialization for the configured operator identity.
 	if !oldProviderExists && newProviderExists && v.operatorPrincipal != "" &&

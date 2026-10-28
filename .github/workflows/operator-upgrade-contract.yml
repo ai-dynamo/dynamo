@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Operator upgrade contract
+
+on:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: operator-upgrade-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      operator: ${{ steps.filter.outputs.operator }}
+      base: ${{ steps.filter.outputs.base }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+          base = os.environ['BASE_SHA']
+          paths = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines() if base else []
+          def affects_operator(path):
+              return (
+                  (path.startswith('deploy/operator/') and not path.endswith(('.md', '.log')))
+                  or path.startswith('deploy/helm/charts/platform/components/operator/')
+                  or path == '.github/workflows/operator-upgrade-contract.yml'
+              )
+          changed = os.environ['EVENT_NAME'] == 'workflow_dispatch' or any(map(affects_operator, paths))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'operator={str(changed).lower()}\nbase={base}\n')
+          PY
+  replay:
+    name: Operator lowering and upgrade tests
+    needs: changes
+    if: needs.changes.outputs.operator == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version-file: deploy/operator/go.mod
+          cache-dependency-path: deploy/operator/go.sum
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+      - name: Install fixture tooling
+        run: python3 -m pip install PyYAML==6.0.3
+      - name: Verify frozen inputs and version-bump boundary
+        env:
+          BASE_SHA: ${{ needs.changes.outputs.base }}
+        run: |
+          args=()
+          if [[ -n "$BASE_SHA" ]]; then args=(--base "$BASE_SHA"); fi
+          python3 deploy/operator/hack/generate_upgrade_fixtures.py --check "${args[@]}"
+          python3 -m unittest discover -s deploy/operator/hack -p 'test_upgrade*.py'
+          go test -C deploy/operator ./internal/testing/golden ./internal/testing/clusterenv ./internal/controller -run 'TestUpgradeSafetyIndependentOfGolden|TestReadManifests|TestApply|TestMatch|TestLoadRESTConfig' -count=1
+      - name: Replay with the shared exclusive clustertest lifecycle
+        shell: bash
+        run: make -C deploy/operator clustertest-upgrade-contract 2>&1 | tee "$RUNNER_TEMP/operator-upgrade.log"
+      - name: Retain concrete golden differences
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: operator-upgrade-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/operator-upgrade.log
+            deploy/operator/internal/controller/testdata/upgrade/**/*.new
+          if-no-files-found: ignore

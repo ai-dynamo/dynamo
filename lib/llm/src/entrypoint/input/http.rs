@@ -212,6 +212,7 @@ async fn run_with_router_plugins(
         http_service_builder.with_request_template(engine_config.local_model().request_template());
     http_service_builder = http_service_builder
         .metrics_config(local_model.metrics_config().clone())
+        .batch_gateway_url(local_model.batch_gateway_url().map(str::to_owned))
         .frontend_api_config(local_model.frontend_api_config().clone());
     // Inject the DRT's metrics registry so that component-scoped metrics
     // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
@@ -222,8 +223,9 @@ async fn run_with_router_plugins(
     // with the instance_id as the router_id label.
     http_service_builder =
         http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
-    http_service_builder =
-        http_service_builder.runtime(Some(Arc::new(distributed_runtime.clone())));
+    http_service_builder = http_service_builder
+        .runtime(Some(distributed_runtime.clone()))
+        .namespace(local_model.namespace().map(str::to_owned));
     for extension in frontend_route_extensions {
         http_service_builder = http_service_builder.add_frontend_route_extension_arc(extension);
     }

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"maps"
+	"path"
 	"regexp"
 	"slices"
 	"sort"
@@ -482,7 +483,7 @@ func normalizeDGDComponent(
 	}
 
 	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicaTargetsByComponent[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(string(normalized.ComponentType)) && ok {
-		normalized.Replicas = ptr.To(newReplicas)
+		normalized.Replicas = new(newReplicas)
 	}
 
 	return normalized, nil
@@ -542,10 +543,8 @@ func applyDGDComponentAlphaCompatibilityToDCD(parentDGD *v1beta1.DynamoGraphDepl
 		return nil
 	}
 	alphaDCD := &v1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      dcd.Name,
-			Namespace: dcd.Namespace,
-		},
+		Name:      dcd.Name,
+		Namespace: dcd.Namespace,
 		Spec: v1alpha1.DynamoComponentDeploymentSpec{
 			BackendFramework:                    dcd.Spec.BackendFramework,
 			DynamoComponentDeploymentSharedSpec: *component.DeepCopy(),
@@ -661,7 +660,7 @@ func applyDynDeploymentConfigToComponent(
 			if configuredWorkers != nil && *configuredWorkers != *workers {
 				return fmt.Errorf("pod templates configure conflicting worker counts %d and %d", *configuredWorkers, *workers)
 			}
-			configuredWorkers = ptr.To(*workers)
+			configuredWorkers = new(*workers)
 		}
 		if err := applyDynDeploymentResources(main, serviceConfig.ServiceArgs.Resources); err != nil {
 			return fmt.Errorf("apply deployment config resources to pod template %d: %w", templateIndex, err)
@@ -970,7 +969,7 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 			Port:        commonconsts.EPPGRPCPort,
 			TargetPort:  intstr.FromInt(commonconsts.EPPGRPCPort),
 			Protocol:    corev1.ProtocolTCP,
-			AppProtocol: ptr.To("http2"),
+			AppProtocol: new("http2"),
 		}
 	default:
 		servicePort = corev1.ServicePort{
@@ -982,9 +981,7 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 	}
 
 	labels := make(map[string]string)
-	for k, v := range params.Labels {
-		labels[k] = v
-	}
+	maps.Copy(labels, params.Labels)
 	if params.IsK8sDiscovery {
 		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
@@ -997,19 +994,15 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 	}
 
 	annotations := make(map[string]string)
-	for k, v := range params.Annotations {
-		annotations[k] = v
-	}
+	maps.Copy(annotations, params.Annotations)
 
 	service := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			// Service names must be DNS-1035 labels (no dots). Replace dots with
-			// hyphens so model names like "Qwen3-0.6B" don't cause rejections.
-			Name:        NormalizeKubeResourceName(params.ServiceName),
-			Namespace:   params.Namespace,
-			Labels:      labels,
-			Annotations: annotations,
-		},
+		// Service names must be DNS-1035 labels (no dots). Replace dots with
+		// hyphens so model names like "Qwen3-0.6B" don't cause rejections.
+		Name:        NormalizeKubeResourceName(params.ServiceName),
+		Namespace:   params.Namespace,
+		Labels:      labels,
+		Annotations: annotations,
 		Spec: corev1.ServiceSpec{
 			Selector: selector,
 			Ports:    []corev1.ServicePort{servicePort},
@@ -1059,14 +1052,10 @@ func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Ser
 	// Copy the caller's metadata so the Service carries the component's labels and
 	// annotations without aliasing the caller's maps.
 	labels := make(map[string]string)
-	for k, v := range params.Labels {
-		labels[k] = v
-	}
+	maps.Copy(labels, params.Labels)
 
 	annotations := make(map[string]string)
-	for k, v := range params.Annotations {
-		annotations[k] = v
-	}
+	maps.Copy(annotations, params.Annotations)
 
 	// Select the elastic-EP component itself; the caller's single-pod gate is what makes
 	// this resolve to the one leader pod.
@@ -1077,12 +1066,10 @@ func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Ser
 	}
 
 	return &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        ElasticEPLeaderServiceName(params.ServiceName),
-			Namespace:   params.Namespace,
-			Labels:      labels,
-			Annotations: annotations,
-		},
+		Name:        ElasticEPLeaderServiceName(params.ServiceName),
+		Namespace:   params.Namespace,
+		Labels:      labels,
+		Annotations: annotations,
 		Spec: corev1.ServiceSpec{
 			ClusterIP:                corev1.ClusterIPNone,
 			PublishNotReadyAddresses: true,
@@ -1111,10 +1098,8 @@ func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Ser
 func GenerateComponentIngress(ctx context.Context, componentName, componentNamespace string, ingressSpec IngressSpec) *networkingv1.Ingress {
 	resourceName := NormalizeKubeResourceName(componentName)
 	ingress := &networkingv1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      resourceName,
-			Namespace: componentNamespace,
-		},
+		Name:      resourceName,
+		Namespace: componentNamespace,
 	}
 	host := getIngressHost(ingressSpec)
 	ingress.Spec = networkingv1.IngressSpec{
@@ -1122,18 +1107,16 @@ func GenerateComponentIngress(ctx context.Context, componentName, componentNames
 		Rules: []networkingv1.IngressRule{
 			{
 				Host: host,
-				IngressRuleValue: networkingv1.IngressRuleValue{
-					HTTP: &networkingv1.HTTPIngressRuleValue{
-						Paths: []networkingv1.HTTPIngressPath{
-							{
-								Path:     "/",
-								PathType: &[]networkingv1.PathType{networkingv1.PathTypePrefix}[0],
-								Backend: networkingv1.IngressBackend{
-									Service: &networkingv1.IngressServiceBackend{
-										Name: resourceName,
-										Port: networkingv1.ServiceBackendPort{
-											Number: commonconsts.DynamoServicePort,
-										},
+				HTTP: &networkingv1.HTTPIngressRuleValue{
+					Paths: []networkingv1.HTTPIngressPath{
+						{
+							Path:     "/",
+							PathType: &[]networkingv1.PathType{networkingv1.PathTypePrefix}[0],
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: resourceName,
+									Port: networkingv1.ServiceBackendPort{
+										Number: commonconsts.DynamoServicePort,
 									},
 								},
 							},
@@ -1169,10 +1152,8 @@ func getIngressHost(ingressSpec IngressSpec) string {
 func GenerateComponentVirtualService(ctx context.Context, componentName, componentNamespace string, ingressSpec IngressSpec) *networkingv1beta1.VirtualService {
 	resourceName := NormalizeKubeResourceName(componentName)
 	vs := &networkingv1beta1.VirtualService{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      resourceName,
-			Namespace: componentNamespace,
-		},
+		Name:      resourceName,
+		Namespace: componentNamespace,
 	}
 	if ingressSpec.IsVirtualServiceEnabled() {
 		vs.Spec = istioNetworking.VirtualService{
@@ -1215,10 +1196,8 @@ func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig config
 	normalizedName := NormalizeKubeResourceName(serviceName)
 
 	dr := &networkingv1beta1.DestinationRule{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      normalizedName,
-			Namespace: namespace,
-		},
+		Name:      normalizedName,
+		Namespace: namespace,
 	}
 
 	if configv1alpha1.ServiceMeshProvider(meshConfig.Provider) != configv1alpha1.ServiceMeshProviderIstio || meshConfig.Istio == nil {
@@ -1435,7 +1414,7 @@ func expandSingleNodeGMSRoles(componentName string, totalEnginePods int32) []Ser
 
 func expandMultinodeGMSRoles(componentName string, numberOfNodes int32, totalEnginePods int32) []ServiceRole {
 	roles := make([]ServiceRole, 0, numberOfNodes*2)
-	for rank := int32(0); rank < numberOfNodes; rank++ {
+	for rank := range numberOfNodes {
 		gmsName := fmt.Sprintf("%s-%s-%d", componentName, commonconsts.GroveRoleSuffixGMS, rank)
 		roles = append(roles, ServiceRole{Name: gmsName, Role: RoleGMS, Replicas: 1, Rank: rank})
 
@@ -1807,6 +1786,13 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	if main := GetMainContainer(component); main != nil {
 		// Copy the authored container before merging fields and environment variables.
 		main = main.DeepCopy()
+
+		// Authored frontend commands replace the default invocation; other components retain their launch arguments.
+		if component.ComponentType == v1beta1.ComponentTypeFrontend && len(main.Command) > 0 {
+			container.Args = nil
+		}
+
+		// Merge authored fields and environment variables into the component defaults.
 		baseEnv := container.Env
 		if err := mergo.Merge(&container, *main, mergo.WithOverride); err != nil {
 			return nil, fmt.Errorf("failed to merge podTemplate main container: %w", err)
@@ -2113,10 +2099,8 @@ func applyCompilationCacheVolume(podSpec *corev1.PodSpec, compilationCache *v1be
 	}
 	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
 		Name: compilationCache.PVCName,
-		VolumeSource: corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-				ClaimName: compilationCache.PVCName,
-			},
+		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+			ClaimName: compilationCache.PVCName,
 		},
 	})
 	return nil
@@ -2144,10 +2128,8 @@ func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.V
 		}
 		ordered = append(ordered, corev1.Volume{
 			Name: mount.Name,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: mount.Name,
-				},
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: mount.Name,
 			},
 		})
 		seen[mount.Name] = struct{}{}
@@ -2184,6 +2166,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			Infrastructure:                 parentContext.Infrastructure,
 			DynamoNamespace:                parentContext.DynamoNamespace,
 			RuntimeVersion:                 resolvedRuntimeVersion,
+			Annotations:                    parentContext.Annotations,
 		}
 
 		frontendDefaults := NewFrontendDefaults()
@@ -2194,10 +2177,26 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		base.Name = sidecarName
 		baseEnv := base.Env
 		user := podSpec.Containers[i].DeepCopy()
+		// An authored command owns the argv; mergo would keep default args under it.
+		if len(user.Command) > 0 {
+			base.Args = nil
+		}
 		if err := mergo.Merge(&base, *user, mergo.WithOverride); err != nil {
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
 		}
 		base.Env = MergeEnvs(baseEnv, user.Env)
+
+		// Replace complete probes so handlers cannot merge with the defaults.
+		if user.LivenessProbe != nil {
+			base.LivenessProbe = user.LivenessProbe.DeepCopy()
+		}
+		if user.ReadinessProbe != nil {
+			base.ReadinessProbe = user.ReadinessProbe.DeepCopy()
+		}
+		if user.StartupProbe != nil {
+			base.StartupProbe = user.StartupProbe.DeepCopy()
+		}
+
 		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)
 		podSpec.Containers[i] = base
 		return nil
@@ -2238,7 +2237,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 	dynamoNamespace := v1beta1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
 	labels := GetPodTemplateLabels(component)
-	if workerHash := labels[commonconsts.KubeLabelDynamoWorkerHash]; IsWorkerComponent(string(component.ComponentType)) && workerHash != "" {
+	if workerHash := labels[commonconsts.KubeLabelDynamoWorkerHash]; (IsWorkerComponent(string(component.ComponentType)) || component.IsLPX()) && workerHash != "" {
 		workerHashSuffix = workerHash
 	}
 
@@ -2266,6 +2265,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
 		RuntimeVersion:                 resolvedRuntimeVersion,
+		Annotations:                    GetPodTemplateAnnotations(component),
 	}
 
 	// A native sidecar owns the worker runtime identity.
@@ -2721,7 +2721,7 @@ func buildCliqueFromTemplate(p cliqueParams, template corev1.PodTemplateSpec) (*
 		Spec: grovev1alpha1.PodCliqueSpec{
 			RoleName:     strings.ToLower(p.r.Name),
 			Replicas:     replicas,
-			MinAvailable: ptr.To(minAvailable),
+			MinAvailable: new(minAvailable),
 			PodSpec:      template.Spec,
 		},
 	}
@@ -2807,7 +2807,7 @@ func resolveGroveClusterTopologyDomains(ctx context.Context, reader ctrlclient.R
 	}
 
 	domains := topologyDomainsFromClusterTopology(ct)
-	if !topologyDomainsContain(domains, kvt.Domain) {
+	if !slices.Contains(domains, kvt.Domain) {
 		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.domain %q does not exist in ClusterTopologyBinding %q; available domains: %v",
 			kvt.Domain, kvt.ClusterTopologyName, domains)
 	}
@@ -2823,15 +2823,6 @@ func topologyDomainsFromClusterTopology(ct *grovev1alpha1.ClusterTopologyBinding
 		domains = append(domains, v1beta1.TopologyDomain(level.Domain))
 	}
 	return domains
-}
-
-func topologyDomainsContain(domains []v1beta1.TopologyDomain, want v1beta1.TopologyDomain) bool {
-	for _, domain := range domains {
-		if domain == want {
-			return true
-		}
-	}
-	return false
 }
 
 func resolveGroveSchedulerQueue(
@@ -3116,9 +3107,9 @@ func buildGroveScalingGroupConfig(
 	isInterPodGMS bool,
 ) grovev1alpha1.PodCliqueScalingGroupConfig {
 	replicas := component.Replicas
-	minAvailable := ptr.To(provideroverride.EffectiveGroveMinAvailable(component))
+	minAvailable := new(provideroverride.EffectiveGroveMinAvailable(component))
 	if shouldGateGroveScalingGroupReplicas(checkpointInfo) {
-		replicas = ptr.To(int32(0))
+		replicas = new(int32(0))
 	}
 	pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
 		Name:               strings.ToLower(componentName),
@@ -3302,11 +3293,16 @@ func GetDGDPreservedAlphaPVCs(dgd *v1beta1.DynamoGraphDeployment) []v1alpha1.PVC
 
 // DetectBackendFrameworkFromArgs detects the backend framework from command/args.
 func DetectBackendFrameworkFromArgs(command []string, args []string) (BackendFramework, error) {
+	// Kubernetes command is argv, not shell source. Wrapped native launches
+	// require an explicit backendFramework rather than shell interpretation.
+	if len(command) > 0 && !strings.Contains(command[0], "$(") && path.Base(command[0]) == "vllm-rs" {
+		return BackendFrameworkVLLM, nil
+	}
+
 	// Combine command and args to search through all parts
-	allParts := append(command, args...)
+	allParts := slices.Concat(command, args)
 	fullCommand := strings.Join(allParts, " ")
 
-	// Pattern to match python -m dynamo.{backend}.something
 	patterns := map[BackendFramework]*regexp.Regexp{
 		BackendFrameworkVLLM:   regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.vllm[^|&;]*`),
 		BackendFrameworkSGLang: regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.sglang[^|&;]*`),
@@ -3504,7 +3500,7 @@ func GenerateBasePodSpecForController(
 
 	numberOfNodes := componentSpec.GetNumberOfNodes()
 
-	// Determine backend framework using hybrid approach
+	// Backend configuration belongs to the engine in main, independently of the runtime launch.
 	var command, args []string
 	if main := GetMainContainer(componentSpec); main != nil {
 		command = main.Command

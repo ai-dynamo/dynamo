@@ -151,6 +151,21 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 > [!TIP]
 > All `helm install` commands can be customized with your own values file: `helm install ... -f your-values.yaml`
 
+> [!WARNING]
+> **Experimental. Development clusters only.** The unfinished DGDR v1beta2 schemas are disabled by
+> default. The `1.2.1` chart shown above does not support this feature gate. To test the API before
+> a supporting release is available, use a development chart built from the current `main` branch
+> and add
+> `--set "dynamo-operator.dgdrV1Beta2.enabled=true"` to the Helm command.
+> The flag adds the v1beta2 `DynamoGraphDeploymentRequest` schema and installs the
+> `DynamoGraphDeploymentRun` and `DynamoGraphDeploymentCandidate` Custom Resource Definitions
+> (CRDs). It does not enable v1beta2 reconciliation, so the operator does not process resources
+> created with these schemas.
+>
+> Kubernetes persists Run and Candidate objects in etcd. Because the schemas are not finalized,
+> later schema changes can make stored objects unreadable or prevent a CRD upgrade. Do not enable
+> this API on production or shared clusters.
+
 > [!TIP]
 > **Shared/Multi-Tenant Clusters**: If a cluster-wide Dynamo operator is already running, do **not** install another one. Check with:
 > ```bash
@@ -184,9 +199,11 @@ The Dynamo install command above includes commented flags for each optional comp
 
 ### Multinode:
 
-Multinode deployments require either Grove + KAI Scheduler or an alternative orchestrator setup (LeaderWorkerSet + Volcano) to enable gang scheduling for workloads that span multiple nodes. See [Multinode Orchestration](multinode-orchestration.md) for details on orchestrator selection and configuration.
+Multinode deployments require an orchestrator for workloads that span multiple nodes. Gang scheduling is strongly recommended to schedule all required Pods together and avoid partial resource allocation that can leave workloads stalled. See [Multinode Orchestration](multinode-orchestration.md) for details on orchestrator selection and configuration.
 
 DisaggregatedSet is an opt-in multinode pathway below Grove. To request it for a new DGD, install an LWS release that serves `disaggregatedset.x-k8s.io/v1` and set `nvidia.com/enable-disaggregatedset: "true"`. When Grove is available and enabled, also set `nvidia.com/enable-grove: "false"`. Dynamo persists the selected provider in `nvidia.com/workload-provider`; installing the DS API or changing the enable annotations does not change existing deployments. If the selected provider becomes unavailable, Dynamo reports `Ready=False` instead of silently switching providers. Delete and recreate the DGD to choose a different pathway.
+
+The following sections describe how to enable gang scheduling for each supported orchestrator.
 
 #### Grove + KAI Scheduler
 
@@ -207,7 +224,7 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
 > | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.10 |
 > | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
-> | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14 |
+> | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
 >
 > Upgrade Grove in lockstep with Dynamo while the Grove APIs remain unstable. Dynamo 1.3.x expects
 > Grove's earlier `ClusterTopology` API and is incompatible with the newer
@@ -262,7 +279,7 @@ helm install prometheus prometheus-community/kube-prometheus-stack \
   --set-json 'prometheus.prometheusSpec.probeNamespaceSelector={}'
 ```
 
-Then uncomment the `prometheusEndpoint` line in the Dynamo install command. The Dynamo operator automatically creates PodMonitors for its components. See [Metrics](../operations/observability.mdx) for dashboard setup and available metrics, and [Logging](observability.md) for the Grafana Loki + Alloy logging stack.
+Then uncomment the `prometheusEndpoint` line in the Dynamo install command. The Dynamo operator automatically creates PodMonitors for its components. See [Metrics](../operations/observability.mdx) for dashboard setup and available metrics, and [Logging](../../reference/observability/logging.mdx) for the Grafana Loki + Alloy logging stack.
 
 ### Shared Storage for Model Caching
 
@@ -293,56 +310,7 @@ This checks kubectl connectivity, default StorageClass configuration, GPU node a
 
 ## Alternative: Install with AICR
 
-Steps 1–3 install each component — GPU Operator, Dynamo Platform, Grove, RDMA — with its own Helm command. [NVIDIA AI Cluster Runtime (AICR)](https://github.com/NVIDIA/aicr) is an alternative that generates one version-locked **recipe** for the whole stack, then renders it into deployment-ready bundles for Helm, Argo CD, Flux, or Helmfile. For a supported environment, the `aicr` CLI drives the entire installation flow from a single recipe: GPU Operator, NVIDIA DRA driver, Network Operator (RDMA), Grove, KAI Scheduler, cert-manager, kube-prometheus-stack, and the Dynamo Platform.
-
-> [!NOTE]
-> AICR is a new, separately maintained project. It validates **specific combinations** of cloud, GPU, and OS, so it fits a cluster that matches a validated Dynamo recipe rather than an arbitrary environment. You still bring your own Kubernetes cluster — AICR generates and validates the runtime configuration, it does not provision clusters. See the [AICR documentation](https://docs.nvidia.com/aicr) for the authoritative support matrix.
-
-AICR validates recipes across these dimensions; not every combination has a Dynamo recipe, so check the AICR docs for the validated set:
-
-| Dimension | Supported values |
-|-----------|------------------|
-| Cloud / service | AKS, BCM, EKS, GKE, Kind, LKE, OKE |
-| GPU | A100, B200, GB200, H100, H200, L40, RTX PRO 6000 |
-| Operating system | Amazon Linux, COS, RHEL, Talos, Ubuntu |
-
-Dynamo recipes use Dynamic Resource Allocation (DRA) for GPUs, which requires **Kubernetes 1.34+**.
-
-### Install Dynamo with the AICR CLI
-
-1. Install the CLI with Homebrew:
-
-```bash
-brew tap NVIDIA/aicr
-brew install aicr
-```
-
-Or use the install script:
-
-```bash
-curl -sfL https://raw.githubusercontent.com/NVIDIA/aicr/main/install | bash -s --
-```
-
-2. Generate a recipe for your environment. Set `--platform dynamo` and match `--service`, `--accelerator`, and `--os` to your cluster:
-
-```bash
-aicr recipe --service eks --accelerator h100 --os ubuntu \
-  --intent inference --platform dynamo -o recipe.yaml
-```
-
-3. Render the recipe into deployment bundles. Choose the deployer that matches your workflow (`helm`, `argocd`, `flux`, or `helmfile`):
-
-```bash
-aicr bundle --recipe recipe.yaml --deployer helm --output ./bundles
-```
-
-4. Deploy the generated bundles to your cluster, then validate the running cluster against the recipe:
-
-```bash
-aicr validate --recipe recipe.yaml
-```
-
-For manual installation, the full command reference, and the supported environment matrix, see the [AICR documentation](https://docs.nvidia.com/aicr). Once AICR has installed the Dynamo Platform, continue with the verification steps above and Next Steps below.
+[NVIDIA AI Cluster Runtime (AICR)](https://github.com/NVIDIA/aicr) generates a version-locked recipe for the whole GPU and Dynamo stack, then deploys and validates it. Choose AICR when your cluster matches a validated Dynamo recipe and you want one reproducible install. Use the manual steps above for any other cluster. For the full walkthrough, see [Install with AICR](install-with-aicr.md).
 
 ## Next Steps
 

@@ -18,7 +18,6 @@ from typing import Any
 
 from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
-from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.exceptions import VLLMClientError
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -41,7 +40,7 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import HttpError
+from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
 from dynamo.vllm.errors import vllm_client_error_to_http_error
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
@@ -50,15 +49,19 @@ from .structural_tag_policy import (
     runtime_structural_tag_options,
 )
 from .thinking import runtime_default_thinking_mode
+from .usage import response_usage, update_usage_metadata
 from .utils import (
+    PromptLogprobsAccumulator,
     as_error_envelope,
     backend_invalid_argument_to_http_error,
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
+    nvext_extra_field_requested,
     random_uuid,
     resolve_chat_template,
 )
+from .vllm_protocol import load_chat_template
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +70,6 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "eos": FinishReason.STOP,
     "stop": FinishReason.STOP,
     "length": FinishReason.LENGTH,
-    "error": FinishReason.ERROR,
     "cancelled": FinishReason.ABORT,
     "content_filter": FinishReason.STOP,
 }
@@ -391,11 +393,27 @@ class _ReasoningUsageAnnotator:
         return annotated
 
 
-def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
+def _finish_reason_error_message(
+    raw_reason: str | dict[str, Any] | None,
+) -> str | None:
+    """Extract a backend error before OpenAI finish-reason projection."""
+    if isinstance(raw_reason, dict):
+        error_message = raw_reason.get("error")
+        return error_message if isinstance(error_message, str) else None
+    if isinstance(raw_reason, str) and raw_reason.startswith("error"):
+        _, separator, detail = raw_reason.partition(":")
+        return detail.strip() if separator and detail.strip() else raw_reason
+    return None
+
+
+def map_finish_reason(
+    raw_reason: str | dict[str, Any] | None,
+) -> FinishReason | None:
     if raw_reason is None:
         return None
-    if raw_reason.startswith("error"):
-        return FinishReason.ERROR
+    if isinstance(raw_reason, dict):
+        logger.warning("Malformed error finish_reason from router")
+        return None
     if raw_reason.startswith("abort"):
         return FinishReason.ABORT
     if raw_reason.startswith("content_filter"):
@@ -718,14 +736,20 @@ class VllmProcessor:
         self._sender: MmKwargsSender | None = None
         # Set DYNAMO_DISABLE_NIXL_MM=1 to disable mm_kwargs transfer entirely.
         # Set DYNAMO_MM_TRANSFER to choose transfer mode:
-        #   shm (default): shared memory. Same-node only (~2ms). If the
-        #     backend can't read the segment (cross-node), it falls back to
-        #     normal processing (backend runs HF processor).
+        #   shm (default): shared memory. The frontend and worker must share an
+        #     IPC namespace. A failed read uses raw-media fallback only when the
+        #     request already carries it; otherwise the worker fails closed.
         #   nixl: NIXL RDMA. Works cross-node via IB.
         self.nixl_mm_enabled = os.environ.get("DYNAMO_DISABLE_NIXL_MM", "") != "1"
         transfer_mode = os.environ.get("DYNAMO_MM_TRANSFER", "shm").lower()
         self.use_shm_transfer = transfer_mode == "shm"
         logger.info("[mm-routing] Transfer mode: %s", transfer_mode)
+        if self.nixl_mm_enabled and self.use_shm_transfer:
+            logger.info(
+                "[mm-routing] SHM transfer requires the frontend and worker to "
+                "share /dev/shm; use DYNAMO_MM_TRANSFER=nixl for separate "
+                "pods or nodes"
+            )
 
     def _get_eos_token_ids(self) -> list[int]:
         """Return EOS token ids using tokenizer metadata.
@@ -841,8 +865,8 @@ class VllmProcessor:
             # Transfer pre-processed mm_kwargs to the backend so it can skip
             # the HF processor.  Strategy:
             #   - shm (default): shared memory, same-node only (~2ms).
-            #     Cross-node backends fail gracefully and fall back to
-            #     normal processing.
+            #     The worker fails closed if it cannot read the segment and
+            #     the request does not carry raw media.
             #   - nixl: NIXL RDMA (works cross-node via IB).
             if not self.nixl_mm_enabled:
                 logger.debug(
@@ -989,12 +1013,16 @@ class VllmProcessor:
                 setattr(sampling_params, k, v)
         # Chat logprobs is a boolean. SamplingParams.logprobs is the integer
         # alternative count, so it stays out of the field copy above.
-        sampling_logprobs = _sampling_logprobs_count(
+        sampling_params.logprobs = _sampling_logprobs_count(
             request_for_sampling.logprobs,
             getattr(request_for_sampling, "top_logprobs", None),
         )
-        if sampling_logprobs is not None:
-            sampling_params.logprobs = sampling_logprobs
+        # Response metadata is opt-in, even if generation_config enables it.
+        if request.get("prompt_logprobs") is None or (
+            request.get("stream") is True
+            and not nvext_extra_field_requested(request, "prompt_logprobs")
+        ):
+            sampling_params.prompt_logprobs = None
         # nvext.max_thinking_tokens is enforced on the worker, not here. The
         # frontend's InputProcessor is built without reasoning_config (it only
         # tokenizes), so setting sampling_params.thinking_token_budget would
@@ -1231,6 +1259,7 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
+        usage_metadata: dict[str, Any] = {}
         # Per-request reasoning-token usage (NVBug 6678449b); see
         # _ReasoningUsageAnnotator. Must be per-request, never module-level.
         # The counts live on the post-processors, which are per-request too.
@@ -1247,6 +1276,19 @@ class VllmProcessor:
             request.get("top_logprobs"),
         )
         return_tokens_as_token_ids = request.get("return_tokens_as_token_ids") is True
+        prompt_logprobs = PromptLogprobsAccumulator(request)
+        pending_terminals: dict[int, dict[str, Any]] = {}
+        locally_stopped_requests: set[str] = set()
+
+        def attach_usage(output: dict[str, Any], *, finished: bool) -> None:
+            if usage := response_usage(
+                request,
+                usage_metadata,
+                prompt_tokens=input_tokens,
+                completion_tokens=cumulative_output_tokens,
+                finished=finished,
+            ):
+                output["usage"] = reasoning_usage.annotate(usage)
 
         try:
             _inject_routing_metadata(dynamo_preproc, dynamo_preproc, mm_routing_info)
@@ -1287,10 +1329,23 @@ class VllmProcessor:
                     )
                     break
 
-                # Count before any choice gate — tool/reasoning parsers may
-                # consume tokens without emitting a visible delta.
-                chunk_tokens = len(engine_response.get("token_ids") or [])
-                cumulative_output_tokens += chunk_tokens
+                raw_finish_reason = engine_response.get("finish_reason")
+                error_message = _finish_reason_error_message(raw_finish_reason)
+                if error_message is not None:
+                    logger.error(
+                        "Router reported a generation error for request %s: %s",
+                        request_id,
+                        error_message,
+                    )
+                    yield as_error_envelope(
+                        make_internal_error(request_id, error_message)
+                    )
+                    break
+
+                prompt_logprobs.update(engine_response)
+                # Keep sparse metadata even when a choice is suppressed locally.
+                if backend_usage := engine_response.get("completion_usage"):
+                    update_usage_metadata(usage_metadata, backend_usage)
 
                 output_idx = engine_response.get("index", 0) or 0
                 output_request_id = output_request_ids.get(output_idx)
@@ -1308,16 +1363,43 @@ class VllmProcessor:
                     )
                     break
 
-                _append_worker_logprobs(
-                    pending_choice_logprobs.setdefault(output_idx, []),
-                    list(engine_response.get("token_ids") or []),
-                    engine_response.get("log_probs"),
-                    engine_response.get("top_logprobs"),
-                )
-
-                raw_finish_reason = engine_response.get("finish_reason")
                 finish_reason = map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
+                if pending_terminals and finish_reason in (
+                    FinishReason.ERROR,
+                    FinishReason.ABORT,
+                ):
+                    yield as_error_envelope(
+                        make_internal_error(request_id, raw_finish_reason)
+                    )
+                    break
+
+                if pending_terminals and (
+                    not prompt_logprobs.needs_payload or finish_reason is not None
+                ):
+                    for pending_idx in list(pending_terminals):
+                        if prompt_logprobs.needs_payload and pending_idx != output_idx:
+                            continue
+                        terminal = pending_terminals.pop(pending_idx)
+                        attach_usage(terminal, finished=True)
+                        prompt_logprobs.attach(terminal)
+                        yield {"_dynamo_annotated": True, "data": terminal}
+
+                if output_request_id in locally_stopped_requests:
+                    continue
+
+                # Count before any choice gate — tool/reasoning parsers may
+                # consume tokens without emitting a visible delta.
+                chunk_tokens = len(engine_response.get("token_ids") or [])
+                cumulative_output_tokens += chunk_tokens
+
+                if choice_top_logprobs is not None:
+                    _append_worker_logprobs(
+                        pending_choice_logprobs.setdefault(output_idx, []),
+                        engine_response["token_ids"],
+                        engine_response.get("log_probs"),
+                        engine_response.get("top_logprobs"),
+                    )
 
                 output_kwargs: dict[str, Any] = {
                     "request_id": output_request_id,
@@ -1340,8 +1422,7 @@ class VllmProcessor:
                     [vllm_response]
                 )
 
-                if vllm_out.reqs_to_abort:
-                    pass
+                locally_stopped_requests.update(vllm_out.reqs_to_abort)
 
                 choices = []
                 postprocess_error = False
@@ -1364,15 +1445,20 @@ class VllmProcessor:
                             break
                         choice = post.process_output(output)
                         if output.index == output_idx:
-                            _apply_choice_logprobs(
-                                choice,
-                                post,
-                                output,
-                                pending_choice_logprobs.setdefault(output.index, []),
-                                emitted_choice_tokens.setdefault(output.index, []),
-                                choice_top_logprobs,
-                                return_tokens_as_token_ids=return_tokens_as_token_ids,
-                            )
+                            if choice_top_logprobs is not None:
+                                _apply_choice_logprobs(
+                                    choice,
+                                    post,
+                                    output,
+                                    pending_choice_logprobs.setdefault(
+                                        output.index, []
+                                    ),
+                                    emitted_choice_tokens.setdefault(output.index, []),
+                                    choice_top_logprobs,
+                                    return_tokens_as_token_ids=return_tokens_as_token_ids,
+                                )
+                            elif choice is not None:
+                                choice["logprobs"] = None
                         if choice:
                             choices.append(choice)
 
@@ -1391,9 +1477,21 @@ class VllmProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    if usage := engine_response.get("completion_usage"):
-                        dynamo_out["usage"] = reasoning_usage.annotate(usage)
-                    envelope["data"] = dynamo_out
+                    attach_usage(
+                        dynamo_out,
+                        finished=bool(raw_finish_reason)
+                        or output_request_id in locally_stopped_requests,
+                    )
+                    prompt_logprobs.attach(dynamo_out)
+                    if (
+                        output_request_id in locally_stopped_requests
+                        and prompt_logprobs.needs_payload
+                    ):
+                        # vLLM removed this choice's state at the local stop.
+                        # Keep its DELTA response until worker metadata arrives.
+                        pending_terminals[output_idx] = dynamo_out
+                    else:
+                        envelope["data"] = dynamo_out
 
                 metrics = {
                     "input_tokens": input_tokens,
@@ -1415,11 +1513,22 @@ class VllmProcessor:
                     envelope["comment"] = [json.dumps(metrics)]
 
                 yield envelope
+            else:
+                for terminal in pending_terminals.values():
+                    attach_usage(terminal, finished=True)
+                    yield {"_dynamo_annotated": True, "data": terminal}
             _nvtx.end_range(rng_stream)
         except VLLMClientError:
             # Preserve request-side 400/404/422 errors for generator(), which
             # translates them at Dynamo's HTTP boundary. The generic handler
             # below is reserved for genuine internal failures.
+            raise
+        except WorkerUnavailable:
+            # The routed pipeline rejected the request as retryable (for example,
+            # prefill routing is still activating). An error envelope would turn
+            # that 503 into a 500; let the binding restore the class instead.
+            raise
+        except InvalidArgument:
             raise
         except Exception as e:
             backend_error = backend_invalid_argument_to_http_error(e)

@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 
-from aisimulate.config.common import Choices, NumericRange
+from aisimulate.config.common import Choices
 from aisimulate.config_adapter import (
     PredictionAdapterContext,
     RecommendationAdapterContext,
@@ -24,18 +24,25 @@ from aisimulate.sweeper.provider import (
     SweepContext,
 )
 
+from dynamo.aisimulate.domains import ContinuousDomain, expand_domain
+
 from .config import (
-    OVERLAP_SCORE_CREDIT_DEFAULTS,
-    PREFILL_LOAD_SCALE_DEFAULTS,
-    TEMPERATURE_DEFAULTS,
+    ROUTER_KNOB_DEFAULTS,
+    ROUTER_PUBLIC_TO_LIVE,
     RouterPredictionConfig,
     RouterRecommendationConfig,
     RouterSearchSpace,
-    _stepped_numeric_values,
 )
 
 _PROVIDER_API_VERSION = 1
 _ROUTER_HOOK_API_VERSION = 1
+# KV-router knob values a prediction materializes when the config omits them;
+# ``RouterPredictionConfig`` fills the same values for ``policy: kv_router``.
+_PREDICTION_DEFAULTS: dict[str, float] = {
+    "overlap_score_credit": 1.0,
+    "prefill_load_scale": 1.0,
+    "temperature": 0.0,
+}
 _HOOK = RuntimeHookSpec(
     provider="dynamo.router",
     kind="placement_policy",
@@ -202,18 +209,13 @@ class DynamoRouterSweepConfigProvider:
         concrete = public.model_dump(mode="json", exclude_none=True)
         if public.policy == "round_robin":
             return AdapterReplaySpec(config=concrete)
-        router_config: dict[str, JSONValue] = {
-            "overlap_score_credit": public.overlap_score_credit
-            if public.overlap_score_credit is not None
-            else 1.0,
-            "prefill_load_scale": public.prefill_load_scale
-            if public.prefill_load_scale is not None
-            else 1.0,
-            "router_temperature": public.temperature
-            if public.temperature is not None
-            else 0.0,
-            "router_prefill_load_model": public.prefill_load_model.type,
-        }
+        router_config: dict[str, JSONValue] = {}
+        for name, default in _PREDICTION_DEFAULTS.items():
+            value = getattr(public, name)
+            router_config[ROUTER_PUBLIC_TO_LIVE[name]] = (
+                value if value is not None else default
+            )
+        router_config["router_prefill_load_model"] = public.prefill_load_model.type
         return AdapterReplaySpec(
             config=concrete,
             runtime_hooks=(
@@ -257,17 +259,6 @@ class DynamoRouterSweepConfigProvider:
             if isinstance(load_model, Choices)
             else [load_model]
         )
-        numeric_specs = {
-            "overlap_score_credit": (
-                public.overlap_score_credit,
-                list(OVERLAP_SCORE_CREDIT_DEFAULTS),
-            ),
-            "prefill_load_scale": (
-                public.prefill_load_scale,
-                list(PREFILL_LOAD_SCALE_DEFAULTS),
-            ),
-            "temperature": (public.temperature, list(TEMPERATURE_DEFAULTS)),
-        }
         modes = _deployment_modes(context.core_search_space)
         if policies == ["round_robin"]:
             fragment = SearchSpaceFragment(
@@ -281,30 +272,21 @@ class DynamoRouterSweepConfigProvider:
                 },
             )
 
+        # One expansion for both KV-router plan shapes: finite domains become
+        # choices, continuous ones go to the sampler's float ranges.
+        expanded: dict[str, list[JSONValue]] = {}
+        ranges: dict[str, tuple[float, float]] = {}
+        log_ranges: list[str] = []
+        for name, defaults in ROUTER_KNOB_DEFAULTS.items():
+            domain = expand_domain(getattr(public, name), defaults)
+            if isinstance(domain, ContinuousDomain):
+                ranges[name] = (domain.minimum, domain.maximum)
+                if domain.log:
+                    log_ranges.append(name)
+            else:
+                expanded[name] = domain
+
         if set(policies) == {"round_robin", "kv_router"}:
-            expanded: dict[str, list[float]] = {}
-            ranges: dict[str, tuple[float, float]] = {}
-            log_ranges: list[str] = []
-            for name, (value, defaults) in numeric_specs.items():
-                if isinstance(value, NumericRange):
-                    raw = value.range
-                    if raw.min == raw.max:
-                        expanded[name] = [raw.min]
-                        continue
-                    if raw.step is None:
-                        ranges[name] = (raw.min, raw.max)
-                        if raw.scale == "log":
-                            log_ranges.append(name)
-                    else:
-                        expanded[name] = _stepped_numeric_values(
-                            raw.min, raw.max, raw.step
-                        )
-                elif isinstance(value, Choices):
-                    expanded[name] = list(value.choices)
-                elif value is None:
-                    expanded[name] = list(defaults)
-                else:
-                    expanded[name] = [float(value)]
             conditional = ConditionalSearchSpace(
                 selector="mode",
                 values=["kv_router"],
@@ -332,26 +314,8 @@ class DynamoRouterSweepConfigProvider:
         choices: dict[str, list[JSONValue]] = {
             "mode": ["kv_router"],
             "prefill_load_model_type": list(load_models),
+            **expanded,
         }
-        ranges = {}
-        log_ranges = []
-        for name, (value, defaults) in numeric_specs.items():
-            if isinstance(value, NumericRange):
-                raw = value.range
-                if raw.min == raw.max:
-                    choices[name] = [raw.min]
-                elif raw.step is not None:
-                    choices[name] = _stepped_numeric_values(raw.min, raw.max, raw.step)
-                else:
-                    ranges[name] = (raw.min, raw.max)
-                    if raw.scale == "log":
-                        log_ranges.append(name)
-            elif isinstance(value, Choices):
-                choices[name] = list(value.choices)
-            elif value is None:
-                choices[name] = list(defaults)
-            else:
-                choices[name] = [value]
         return AdapterSearchPlan(
             fragment=SearchSpaceFragment(
                 choices_by_branch={mode: deepcopy(choices) for mode in modes},
@@ -443,9 +407,8 @@ class DynamoRouterSweepConfigProvider:
             raise ValueError(f"unsupported Router mode {mode!r}")
 
         router_config: dict[str, JSONValue] = {
-            "overlap_score_credit": _float_selection(selection, "overlap_score_credit"),
-            "prefill_load_scale": _float_selection(selection, "prefill_load_scale"),
-            "router_temperature": _float_selection(selection, "temperature"),
+            live: _float_selection(selection, public)
+            for public, live in ROUTER_PUBLIC_TO_LIVE.items()
         }
         load_model = str(selection.get("prefill_load_model_type", "none"))
         if public_schema:
@@ -455,9 +418,10 @@ class DynamoRouterSweepConfigProvider:
             concrete_config = {
                 "policy": mode,
                 "prefill_load_model": {"type": load_model},
-                "overlap_score_credit": router_config["overlap_score_credit"],
-                "prefill_load_scale": router_config["prefill_load_scale"],
-                "temperature": router_config["router_temperature"],
+                **{
+                    public: router_config[live]
+                    for public, live in ROUTER_PUBLIC_TO_LIVE.items()
+                },
             }
         else:
             concrete_config = {"mode": mode, **router_config}

@@ -122,6 +122,8 @@ ignore:
   # pipeline (it is excluded from the `deploy` filter below).
   - 'deploy/utils/convert_api_version.py'
   - 'deploy/utils/tests/**'
+  # The path-triggered protocol tooling workflow owns these CPU tooling tests.
+  - 'scripts/protocol_compatibility/**'
   - 'dev/*'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
@@ -158,6 +160,7 @@ ci: &ci
   - '.github/filters.yaml'
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
+  - '.github/scripts/pytest-local.sh'
   - '.github/scripts/route_buildkit.sh'
   - 'container/Dockerfile.test'
 
@@ -170,6 +173,7 @@ core:
   - 'container/templates/dynamo_*'
   - 'container/templates/wheel_builder.Dockerfile'
   - 'container/templates/compliance.Dockerfile'
+  - 'container/templates/verify_ca_certificates.Dockerfile'
   - '.dockerignore'
   - 'container/deps/*'
   - 'container/compliance/**'
@@ -184,6 +188,7 @@ core:
   - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'components/src/dynamo/artifacts/**'
   - 'components/src/dynamo/experimental/**'
   - 'components/src/dynamo/gpu_memory_service/**'
   # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
@@ -202,6 +207,7 @@ core:
   # Rust sidecars have their own classification and do not use the framework
   # container or E2E pipelines triggered by `core`.
   - '!lib/sidecar/**'
+  - '!components/src/dynamo/artifacts/vllm/**'
   - '!tests/test_generate_kustomize_openapi.py'
   - '!tests/test_kustomize_matrix.py'
   - '!**/*.md'
@@ -275,6 +281,10 @@ snapshot:
   - 'tests/deploy/test_dynamocheckpoint.py'
   - '.github/actions/setup-dynamo-operator/action.yml'
   - '.github/actions/setup-snapshot-agent/action.yml'
+  # Exercise the full checkpoint lifecycle when its scheduling or cleanup changes.
+  - '.github/actions/teardown-dynamo-operator/action.yml'
+  - '.github/workflows/pr.yaml'
+  - '.github/workflows/post-merge-ci.yml'
   # Where the pinned github.com/ai-dynamo/snapshot chart version/values live --
   # a version bump or install-config change must trigger the deploy-snapshot-
   # agent-checkpoint-*/deploy-test-checkpoint-* jobs, not just 'operator'.
@@ -384,6 +394,7 @@ vllm:
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
+  - 'components/src/dynamo/artifacts/vllm/**'
   - 'container/templates/vllm_*'
   - '!**/*.md'
   - '!**/*.rst'
@@ -437,9 +448,11 @@ frontend:
   - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'components/src/dynamo/artifacts/**'
   - 'tests/frontend/router_ais_image_smoke.py'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
+  - 'container/templates/verify_ca_certificates.Dockerfile'
   # The frontend image is rendered from these two: render.py generates its
   # Dockerfile, and context.yaml supplies EPP_IMAGE -- the `FROM` that the
   # compliance stages read /sbom-rust-epp.cdx.json and /rust-licenses out of.
@@ -450,6 +463,7 @@ frontend:
   # Sidecars are standalone Rust binaries and are not part of the frontend
   # image or its E2E test pipeline.
   - '!lib/sidecar/**'
+  - '!components/src/dynamo/artifacts/vllm/**'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -459,6 +473,8 @@ rust:
   - '**/Cargo.toml'
   - '**/Cargo.lock'
   - 'deny.toml'
+  # Compiled into the native OpenAPI serializer/deserializer tests.
+  - 'lib/llm/tests/fixtures/openapi/*.json'
   # Sidecar protobuf contracts are compiled by crate build scripts and need the
   # same workspace checks as sidecar Rust sources.
   - 'lib/sidecar/**/*.proto'

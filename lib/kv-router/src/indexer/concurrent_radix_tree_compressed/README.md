@@ -77,6 +77,10 @@ Each node contains:
   means the worker has cached `edge[0..k]`, with `0 < k < edge.len()`.
 - `children`: child nodes keyed by the first `LocalBlockHash` of the child
   edge.
+- `parent_tail`: the hash of the block before `edge[0]`, or 0 under the root.
+  A node's head never moves, so however often the tree splits, its parent is
+  the node whose edge ends with this block. See
+  [Dead Leaf Reclamation](#dead-leaf-reclamation).
 - `shape_gate` and `shape_version`: a per-node shape guard used to validate
   plans across lock gaps.
 - `internal`: a sticky marker that becomes true once the node has had children.
@@ -174,6 +178,44 @@ After the coverage update, removal may clear children only when no full-edge
 workers remain. Because `internal` is sticky, clearing those children does not
 make the node eligible for future leaf extension.
 
+A removal that takes a node's last holder leaves it linked as a dead leaf; the
+lane queues it for [reclamation](#dead-leaf-reclamation).
+
+## Dead Leaf Reclamation
+
+Removal changes coverage only, so a leaf whose last holder evicts it stays
+linked under its parent until something unlinks it. Under tail-first eviction
+almost every dead node is such a leaf, and they can hold most of the tree's
+memory. Unlinking one is a structural change on the parent: it takes the
+parent's exclusive shape gate and bumps `shape_version`. Neither reclaimer
+waits for that gate.
+
+- **Per-lane drain.** When a removal takes a leaf's last holder, the lane finds
+  the leaf's parent and queues the pair. The parent is the root, or the node
+  whose edge ends with the leaf's `parent_tail`: an anchor, or the node the
+  evicting worker's lookup names for that block. The parent is verified by
+  identity, and a stale lookup entry is not repaired on this path. The lane
+  unlinks queued leaves whenever no task is waiting, at most 256 at a time,
+  and all of them before a `Flush` completes. A queue that reaches 4,096
+  drains a quarter at once. Each parent's leaves go under one try-locked gate
+  and one version bump. A split that races an eviction on another lane can
+  produce a suffix that is dead from birth, which no removal will kill; the
+  splitting lane queues it with the prefix as its parent.
+- **Background sweep.** `ThreadPoolIndexer` runs a `kv-maint` thread that
+  sweeps once 1,024 nodes have died since the last sweep or 30 s have passed,
+  checking every 50 ms. The walk takes no gates: it records holder-less
+  children under the root and every anchor, descending only into nodes with
+  children. Each parent's candidates are re-checked and unlinked under one
+  try-locked gate, deepest parents first. The sweep catches what the drain
+  missed: leaves whose parent was busy or not in the evicting worker's lookup,
+  and leaves something still referenced.
+
+Both unlink a child only while it is still attached, holder-less and
+childless, its own shape gate is free, and nothing references it but the
+parent's map and the unlinker (`Arc::strong_count == 2`). A lane lookup that
+still names the leaf, or a reader mid-walk, keeps it for a later sweep. A store
+that reaches a dead leaf before it is unlinked re-covers it.
+
 ## Lookup Repair
 
 Cross-thread splits can make a worker lookup entry stale: the lookup still points
@@ -226,7 +268,10 @@ Node internals use separate protection for edge state and child maps:
 
 - `CrtcNodeState` is protected by a `parking_lot::RwLock`.
 - `children` publishes compact snapshots through `ArcSwap`, promoting to a
-  `DashMap` when fanout exceeds four children.
+  `DashMap` when fanout exceeds four children. A node allocates its `ArcSwap`
+  only when it gets its first child, which seeds it directly: dropping or
+  swapping one walks every thread's `arc_swap` debt list, and most nodes that
+  cleanup frees are leaves that never had a child.
 - `shape_gate` and `shape_version` coordinate plans that depend on the relation
   between the edge and child map.
 
@@ -238,23 +283,24 @@ exclusive shape gate.
 `find_matches` is best-effort during concurrent shape changes. It reads node
 state and child pointers without taking `shape_gate` on the hot step, so it may
 observe adjacent tree shapes during a split and undercount. It must not panic,
-and apart from the equal-size skip below it must not return a match past a
-valid reachable prefix.
+and apart from a fingerprint collision in the equal-set skip below it must not
+return a match past a valid reachable prefix.
 
-### Equal-size skip
+### Equal-set skip
 
 After the first node, the walk intersects its active workers with each node's
-full-edge coverage. When the two sets have the same size, it skips that
-intersection and treats them as equal. This is an accepted approximation.
-Removal does not cascade to children, so after a worker's head blocks are
-evicted a child can still list it, and an equal-sized coverage set can then hold
-a different worker than the walk carries. The walk credits the carried worker
-with the child's depth, past its cached prefix.
+full-edge coverage. When the two sets are equal it skips that intersection,
+which saves a pass over up to all workers at most hops: on the Mooncake replay
+with 128 workers, always intersecting raised lookup service p50 by 34%.
 
-The skip saves a pass over up to all workers at most hops. On the Mooncake
-replay with 128 workers it fired about 4.3M times and was wrong in 0 of them at a
-keep-up load and 2 of about 741K when overloaded, while always intersecting
-raised lookup service p50 by 34%.
+Size alone does not prove the sets equal. Removal does not cascade to
+children, so after a worker's head blocks are evicted a child can still list
+it, and an equal-sized coverage set can then hold a different worker than the
+walk carries. Both sets are therefore `WorkerSet`s, which keep the XOR of a
+64-bit mix of each member, and the walk skips only when the sizes and these
+fingerprints match. The check is probabilistic: unequal sets collide with
+probability about 2^-64 per comparison, and a collision overcounts exactly as
+the size-only check did. That is the one remaining overcount path.
 
 ## Wire Compatibility
 

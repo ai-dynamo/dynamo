@@ -329,7 +329,9 @@ These fields default from environment variables and are excluded from serialized
 ## Advisory mode
 
 <ParamField path="advisory" type="boolean" default="false">
-  Suggestion-only mode. The Planner computes, logs, exports, and reports recommended replica counts without executing scaling actions or changing the deployment. Use it to evaluate a new configuration or validate SLA targets against production traffic.
+  Suggestion-only mode. The Planner computes, logs, exports, and reports recommended replica counts and [retune](#retune-experimental-simulation-only) decisions without executing any of them or changing the deployment. Use it to evaluate a new configuration or validate SLA targets against production traffic. The runtime configuration APIs, such as `PATCH /v1/min-endpoints`, still change the Planner's own settings.
+
+  Planner-in-the-loop replay honors it too: an advisory replay keeps the simulated deployment at its starting replicas and router parameters, reports the recommendations in `planner.recommended_scaling_events`, and records a retune decision that would apply with outcome `advisory`. See [Replay in Advisory Mode](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx#replay-in-advisory-mode).
 </ParamField>
 
 ## Diagnostics and reporting
@@ -383,6 +385,102 @@ curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
 
 PATCH is atomic. Malformed JSON, unknown fields, and empty patches return HTTP `400`. `null`, a negative `min_endpoint`, component-specific minimums below `1`, fields that are inactive for the current mode, and minimums that exceed the configured GPU or power budget return HTTP `422` without changing the active configuration.
 
+### System-port reconfiguration API
+
+<ParamField path="enable_runtime_reconfiguration" type="boolean" default="false">
+  Enable the Planner control API on the existing `DYN_SYSTEM_PORT` listener.
+  The runtime must have a system listener enabled. Kubernetes Planner deployments
+  configure this port as `9090`.
+</ParamField>
+
+<ParamField path="runtime_warmup_trace_dir" type="string" default="null">
+  Directory containing permitted runtime warmup traces. Required when submitting
+  `warmup_trace`; paths must remain inside this directory, and symlinks are rejected.
+  This setting cannot be changed through the runtime API.
+</ParamField>
+
+<Warning>
+  This API changes scaling behavior and has no application authentication. Restrict
+  access to the system listener to trusted controllers and operators before enabling it.
+  The existing localhost `9086` API remains available with its original configuration.
+</Warning>
+
+| Method and path | Response |
+| --- | --- |
+| `GET /engine/planner/config` | Applied settings, `instance_id`, `revision`, and `supported_fields`. |
+| `PATCH /engine/planner/config` | `202` with an operation ID after validation and admission. |
+| `GET /engine/planner/operations/{request_id}` | Operation state: `preparing`, `warming`, `applied`, or `failed`. |
+
+The supported configuration groups are:
+
+| Group | Fields |
+| --- | --- |
+| Endpoint floors and GPU budgets | Mode-specific minimum endpoint fields from the table above, `min_gpu_budget`, `max_gpu_budget`. |
+| SLA targets | `ttft_ms`, `itl_ms`. |
+| Scaling policy | `max_throughput_scaling_replicas`, `load_scaling_down_sensitivity`, `prefill_scale_up_queue_tokens`, `prefill_scale_down_queue_tokens`, `decode_scale_up_kv_rate`, `decode_scale_down_kv_rate`. |
+| Load prediction | `load_predictor`, `load_predictor_log1p`, `prophet_window_size`, `kalman_q_level`, `kalman_q_trend`, `kalman_r`, `kalman_min_points`. |
+
+Fields retain their normal mode-specific meaning. For example, the explicit queue/KV
+thresholds are used by `optimization_target: load`. Predictor replacement requires
+`optimization_target: sla` with throughput scaling enabled. Scheduling intervals,
+AIS performance models, deployment topology, and other fields are rejected by this API.
+
+Use the instance ID and revision returned by GET when submitting an update:
+
+```json
+{
+  "instance_id": "<instance_id from GET>",
+  "expected_revision": 0,
+  "request_id": "sweep-42",
+  "config": {
+    "ttft_ms": 800,
+    "load_predictor": "kalman",
+    "kalman_min_points": 5
+  },
+  "warmup_trace": "recent-traffic.jsonl"
+}
+```
+
+`config` is a nonempty partial update. A predictor change requires either `warmup_trace`
+or explicit `cold_start: true`. The trace must be a single regular Dynamo/Mooncake JSONL
+or JSONL.GZ file inside `runtime_warmup_trace_dir`. Relative paths are resolved from
+that directory; absolute paths must also be inside it. Runtime warmup accepts at most
+16 MiB of stored data and 16 MiB after decompression, and at most 4,096 aggregation
+intervals (including idle gaps). Directories and globs remain supported by the startup
+`load_predictor_warmup_trace` option but are rejected by runtime reconfiguration.
+Observations use the unchanged throughput adjustment interval. Warmup must provide enough
+effective samples for request count, ISL, and OSL and complete a successful forecast.
+SLA/budget-only updates do not require warmup. Supplying a trace explicitly also allows rewarming an unchanged predictor.
+
+The active configuration continues serving while a candidate is prepared. Preparation
+has a 120-second deadline and only one preparation can run at a time. If a background
+fit outlives its deadline, its result cannot activate and further preparations are
+rejected until that work exits; updates that do not replace the predictor remain available.
+Invalid data, failed fitting, or a changed revision leave the active settings unchanged.
+Successful activation occurs between decisions and increments the revision. Updates preserve
+the existing prediction and scaling cadence, including changes to SLA targets,
+`max_throughput_scaling_replicas`, and predictor settings. The next scheduled throughput
+decision uses the active settings and the full trailing traffic window; predictor replacement
+does not delay that decision. Performance models, worker state, and already-admitted
+scaling operations are retained. `applied` means the
+configuration is active; it does not mean the deployment has finished scaling.
+
+A successful write through the legacy minimum-endpoint API also changes the revision
+reported here. If it happens during preparation, the pending update fails with
+`error_type: conflict`.
+Updates are process-local and are not written to the Planner ConfigMap. A restart creates
+a new `instance_id` and restores startup settings. Address the intended Planner instance
+directly rather than distributing a conditional write across replicas.
+
+Retry the identical request with the same `request_id` to retrieve its retained operation
+without applying it twice. The last 32 operations are retained in memory. Reusing an ID
+for different content returns `409`; an evicted operation returns `404`, so inspect the applied revision before submitting another update.
+
+Malformed JSON returns `400`; invalid or unsupported updates return `422`; instance,
+revision, idempotency, and concurrent-update conflicts return `409`; unavailable control
+returns `503`. Requests exceeding 64 KiB return `413`. Preparation failures after `202`
+are reported by the operation's `state`, `error`, and `error_type` fields.
+
 ## Scheduling and plugin pipeline
 
 The Planner runs the builtin plugin pipeline by default. `scheduling` controls pipeline cadence; `plugin_registration` controls how plugins register, authenticate, and communicate. For the pipeline model, see the [Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md#scheduling--plugin-pipeline).
@@ -396,7 +494,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
     Base pipeline cadence. The pipeline wakes once per interval; each plugin's `execution_interval_seconds` decides whether it fires. When unset, computed as the gcd of `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`. Must be greater than 0 and evenly divide both adjustment intervals.
   </ParamField>
   <ParamField path="tick_max_duration_seconds" type="number" default="30.0">
-    Outer deadline wrapping the full 4-stage pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. Must be greater than 0.
+    Outer wall-clock deadline wrapping the full 4-stage pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. Replay does not apply it: a replayed tick runs to completion, however long it takes on the host. Must be greater than 0.
   </ParamField>
   <ParamField path="external_plugins" type="[]ExternalPluginEntry" default="[]">
     Static external-plugin registrations applied at startup. Per-entry failures are logged but do not crash the Planner. See [ExternalPluginEntry](#externalpluginentry).
@@ -443,7 +541,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
       Allow plaintext `grpc://` plugin endpoints. Required to use any `grpc://` endpoint; mTLS support is not yet shipped.
     </ParamField>
     <ParamField path="request_timeout_seconds" type="number" default="5.0">
-      Per-RPC timeout applied to every plugin call. Must be greater than 0.
+      Per-RPC timeout applied to every plugin call. Replay does not apply it to in-process plugins: a replayed tick runs to completion, however long it takes on the host. Must be greater than 0.
     </ParamField>
     <ParamField path="keepalive_time_ms" type="integer" default="30000">
       gRPC keepalive time, in milliseconds.
@@ -476,6 +574,135 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
     </ParamField>
   </Indent>
 </Indent>
+
+## Retune (Experimental, Simulation Only)
+
+`retune` makes the Planner periodically replay the last window of recorded traffic against a grid of router and Planner parameters and apply the best point by SLA goodput per GPU. This section is the field contract. For the concept, see [Periodic Retune](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md#periodic-retune-experimental); for windows, scoring, and decision timing, see [Planner Design](../../developer-guide/knowledge-base/modular-components/planner/planner-design.md#retune-experimental-simulation-only); to run it, see [Simulate Retune](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx#simulate-retune-experimental).
+
+<Warning>
+**Experimental.** In this release, retune runs only inside planner-in-the-loop offline replay: `dynamo.replay.run_trace_replay` with `trace_format="dynamo"`, or `aisimulate predict --stack dynamo` on a Dynamo request trace. A live Planner rejects a config that sets `retune` at startup.
+</Warning>
+
+<ParamField path="retune" type="RetuneConfig" default="null">
+  Periodic replay-based retune. Rejects unknown fields. Requires `mode` `agg` or `disagg`, and a non-empty `router` or `planner` search domain.
+
+  To retune with fixed replicas (retune-only mode), set **both** `enable_load_scaling: false` and `enable_throughput_scaling: false` explicitly. Only that combination skips the easy-mode forcing and the "at least one scaling mode" rule; every other combination keeps them. A retune-only Planner never scales, not even to fit `min_gpu_budget`/`max_gpu_budget` or a minimum endpoint count, runs no load loop, and pulls no forward-pass metrics. It still ticks every `scheduling.scale_interval_seconds` (by default the 5-second load interval); to tick less often, set `scheduling.scale_interval_seconds` and `load_adjustment_interval_seconds` together.
+
+  With load or throughput scaling enabled, `scheduling.external_plugins` must be empty and `scheduling.gateway.enabled` must be `false`, because every candidate replay runs an inner Planner. That inner Planner always scales and never runs batch scheduling, even when the Planner is advisory.
+
+  With [`advisory: true`](#advisory-mode), retune keeps sweeping and scoring, but a decision that would apply is recorded with outcome `advisory` and the point it recommends, and nothing changes.
+</ParamField>
+
+<Indent>
+  <ParamField path="interval_seconds" type="number" required={true}>
+    Window length and decision cadence `T`. Must be greater than 0 and a multiple of `scheduling.scale_interval_seconds`.
+  </ParamField>
+  <ParamField path="grace_seconds" type="number" default="60.0">
+    Delay after a window ends before its sweep launches. Requests that complete after the launch time are excluded from the window. Must be 0 or greater.
+  </ParamField>
+  <ParamField path="history_seconds" type="number" default="null">
+    Trace history before each window that warms the load predictors of candidate planners and of a newly selected predictor. With throughput scaling, replay reads this history from the replayed trace and, before its first request, from `load_predictor_warmup_trace`, which must then be a Dynamo request trace that ends at or before the first replayed request; without throughput scaling no history is read. `null` resolves to the minimum the predictors need: `throughput_adjustment_interval_seconds` × max(`prophet_window_size`, `kalman_min_points`) over the current predictor and the load-predictor candidates, or 0 without throughput scaling. An explicit value must be 0 or greater, and a value smaller than that minimum is rejected.
+  </ParamField>
+  <ParamField path="decision_latency_seconds" type="number | measured" default="0.0">
+    Delay from sweep launch to decision. A number is a fixed delay, 0 or greater. `measured` uses the sweep's own wall-clock time, capped at `timeout_seconds`, times `decision_latency_scale`; it depends on the replay host, so it is not reproducible across hosts or runs. The decision lands no earlier than one Planner tick after launch. See [Decision Timing](../../developer-guide/knowledge-base/modular-components/planner/planner-design.md#decision-timing) for the mechanics and [Decision Latency](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx#decision-latency) for choosing a value.
+  </ParamField>
+  <ParamField path="decision_latency_scale" type="number" default="1.0">
+    Multiplier on the measured sweep time, for example to model a production sweep host that is slower or faster than the replay host. Must be greater than 0. A value other than 1 requires `decision_latency_seconds: measured`. Above 1, set `timeout_seconds` ≤ `interval_seconds` / scale (the default, `interval_seconds`, is rejected); the modeled deadline is then scale × `timeout_seconds`.
+  </ParamField>
+  <ParamField path="timeout_seconds" type="number" default="null">
+    Wall-clock deadline for one sweep; its workers are killed after it and the decision is `timeout`. `null` means `interval_seconds`. Must be greater than 0. Requires `timeout_seconds` ≤ `interval_seconds`. A numeric `decision_latency_seconds` must also be ≤ `timeout_seconds`; with `measured`, `decision_latency_scale` × `timeout_seconds` must also be ≤ `interval_seconds`. This keeps at most one sweep in flight.
+  </ParamField>
+  <ParamField path="sla_ttft_ms" type="number" default="null">
+    Scoring TTFT SLA. Must be greater than 0. `null` uses the Planner's `ttft_ms`; in `aisimulate predict`, `null` takes `evaluation.sla.ttft_ms` when it is set (see [Requirements](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx#requirements)).
+  </ParamField>
+  <ParamField path="sla_itl_ms" type="number" default="null">
+    Scoring ITL SLA. Must be greater than 0. `null` uses the Planner's `itl_ms`; in `aisimulate predict`, `null` takes `evaluation.sla.itl_ms` when it is set (see [Requirements](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx#requirements)).
+  </ParamField>
+  <ParamField path="min_improvement_percentage" type="number" default="3.0">
+    Apply the best candidate only if its score exceeds the current point's score on the same window by more than this percentage. Must be in [0, 100). Candidate replays share one random seed, so a candidate that changes no routing or scaling decision scores exactly the current point and is kept. With the pinned AISimulate release, an inner Planner with `optimization_target: sla` is not guaranteed to be bitwise reproducible, so such a candidate can miss an exact tie; see [Candidates and the Sweep](../../developer-guide/knowledge-base/modular-components/planner/planner-design.md#candidates-and-the-sweep). To choose a value, see [Measure the Gain](../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx#measure-the-gain).
+  </ParamField>
+  <ParamField path="max_candidates" type="integer" default="512">
+    Upper bound on the expanded grid size (the product of all domain sizes), on the values of each knob, and separately on the number of load-predictor candidates. Must be at least 1. A grid that exceeds it is rejected with the size of each dimension. For the candidate set a sweep replays, see [Candidates and the Sweep](../../developer-guide/knowledge-base/modular-components/planner/planner-design.md#candidates-and-the-sweep).
+  </ParamField>
+  <ParamField path="max_parallel" type="integer" default="2">
+    Number of sweep worker processes. Must be at least 1. Each worker replays one candidate at a time, so memory grows with this value and the window size.
+  </ParamField>
+  <ParamField path="router" type="object | string" default="null">
+    Router search domain, written like the `router` section of `aisimulate recommend --stack dynamo` (see [Search domains](#search-domains)). A knob omitted from the map searches its AISimulate default domain; write a scalar to pin it. `default` searches the whole AISimulate default domain. `null` (or no `router` field) keeps every router parameter at its startup value; an empty map `{}` is rejected. A searched router requires `router_mode="kv_router"` (`router.policy: kv_router` in `aisimulate predict`) with the default worker-selection policy, no `overlap_score_weight`, and conditional disaggregation disabled.
+  </ParamField>
+  <ParamField path="planner" type="object | string" default="null">
+    Planner search domain, written like the `planner` section of `aisimulate recommend --stack dynamo` and limited to what a running Planner can change (see [Search domains](#search-domains)). `default` searches the parts of the AISimulate default domain that apply to this Planner. `null` (or no `planner` field) keeps every Planner field unchanged; an empty map `{}` is rejected. A written knob or group requires load or throughput scaling, and the scaling mode that uses it: for example, `load_sensitivity` needs load scaling, and `load_predictor` needs `optimization_target: sla` with throughput scaling. A searched field must have a value in the Planner config. `ttft_ms` and `itl_ms` are never searched.
+  </ParamField>
+</Indent>
+
+### Search domains
+
+`retune.router` and `retune.planner` use the knob names, value syntax, and default domains of the Dynamo router and Planner adapters of `aisimulate recommend --stack dynamo`:
+
+- **Values.** A knob takes the [domain syntax](dynosim-sweep-reference.mdx#domain-syntax) of `aisimulate recommend`: a scalar, `{choices: [...]}`, `{range: {min, max, step}}`, or, for the `load_sensitivity` and `load_predictor` groups, `{preset: ...}`. Retune adds these rules:
+  - A range must be enumerable: a range without `step` and a `scale: log` range are rejected. A range with `min` equal to `max` is one value. Stepped ranges are computed in decimal, so `{min: 0.0, max: 0.3, step: 0.1}` ends at 0.3.
+  - Each knob may expand to at most `max_candidates` values.
+  - A bare list (`[0.5, 1.0]`) is rejected; write `{choices: [0.5, 1.0]}`.
+  - In YAML, write floats with a decimal point and a signed exponent (`1.0e-3`): YAML 1.1 reads `1e-3` as a string, which the schema rejects.
+- **Infeasible points.** When the Planner starts, a Planner grid point that fails `PlannerConfig` validation or does not fit the deployment, such as a `min_workers` above what `max_num_gpus` allows, is dropped, and one warning reports how many points were dropped. Startup fails only when some value of a searched Planner knob fits in no grid point, or when a load-predictor candidate is invalid. A decision that would apply Planner fields that no longer validate or fit, for example after a budget change, is `failed`.
+- **Omitted knobs.** A knob that has an AISimulate default domain searches it when omitted, as in `aisimulate recommend`. The retune-only knobs in the tables below keep their current value unless written. Knobs fixed at startup always keep their running value.
+- **Names.** Write the public names below. A live name, such as `router_temperature`, `min_endpoint`, or `max_gpu_budget`, is rejected with the public name to use. Decisions and `report.planner.retune_events` record the live names: the PATCH `/router_policy` parameter names and the `PlannerConfig` field names.
+
+Router knobs:
+
+| Knob | Live name | Omitted | Written |
+|---|---|---|---|
+| `policy` | `router_mode` (startup) | `kv_router` | Must be `kv_router` |
+| `prefill_load_model.type` | `router_prefill_load_model` (startup) | Startup value | Must equal the startup value (`none` or `ais`) |
+| `overlap_score_credit` | `overlap_score_credit` | `{0, 0.5, 1}`; `{0}` when the startup credit is 0 | Domain; a positive value is rejected when the startup credit is 0 |
+| `prefill_load_scale` | `prefill_load_scale` | `{0, 0.25, 0.5, 1, 2, 4, 8, 16, 32}` | Domain |
+| `temperature` | `router_temperature` | `{0, 0.2, 0.5, 1}` | Domain |
+| `overlap_score_credit_decay`, `decode_active_request_weight` (retune only) | Same | Startup value | Domain, non-negative |
+
+`router: default` is 3 × 9 × 4 = 108 points.
+
+The other router policy parameters are not retunable and are rejected:
+
+- `host_cache_hit_weight` and `disk_cache_hit_weight`: the startup router configuration also uses them to count a request's cached tokens, which a runtime update does not change. A candidate replay would start its router with the candidate's weights and score a router that no applied update can produce.
+- `shared_cache_multiplier`: replay reports no shared cache hits, so every value would score the same.
+
+Planner knobs:
+
+| Knob | Live name | Omitted | Written |
+|---|---|---|---|
+| `load_sensitivity` group | `load_scaling_down_sensitivity` | With load scaling: `{70, 80, 90}`, from the `aggressive`, `default`, and `conservative` presets | `{preset: [...]}` with preset names or mappings, or `{preset: false}` with `load_scaling_down_sensitivity` as a domain |
+| `load_predictor` group | Predictor fields | With `optimization_target: sla` and throughput scaling: the 11 simulation predictor presets | `{preset: [...]}` with preset names or complete mappings, or `{preset: false}` with `type` and the predictor knobs as domains |
+| `min_workers` | `min_endpoint` | Current value | Domain; `mode: agg` only |
+| `prefill_min_workers`, `decode_min_workers` | `prefill_min_endpoint`, `decode_min_endpoint` | Current value | Domain; `mode: disagg` only; `null` is rejected |
+| `max_num_gpus`, `min_num_gpus` | `max_gpu_budget`, `min_gpu_budget` | Current value | Domain; values follow `max_gpu_budget` and `min_gpu_budget` (`min_num_gpus: -1` disables the floor) |
+| `max_throughput_scaling_replicas` | Same | Current value | Domain; requires throughput scaling |
+| `prefill_scale_up_queue_tokens`, `prefill_scale_down_queue_tokens` (retune only) | Same | Current value | Domain; requires `optimization_target: load` and `mode: disagg` |
+| `decode_scale_up_kv_rate`, `decode_scale_down_kv_rate` (retune only) | Same | Current value | Domain; requires `optimization_target: load` |
+| `policy`, `scaling_policy`, `fpm_sampling` and their knobs, `load_min_observations` | — | Running value | Rejected: fixed when the Planner starts |
+| `ttft_ms`, `itl_ms` | — | Fixed | Rejected: set `sla_ttft_ms` and `sla_itl_ms` to change the scoring SLA |
+
+The group rules are those of `aisimulate recommend`: to write a knob of a group, set the group to `{preset: false}`; a group that is omitted or `{preset: default}` cannot be combined with its knobs. Within these groups:
+
+- **Load sensitivity.** Retune searches only `load_scaling_down_sensitivity`; `load_min_observations` keeps its running value. A preset name contributes its sensitivity alone, so with a running `load_min_observations` other than 5 the `default` preset is applied only in part. A preset mapping must set `load_min_observations` to the running value.
+- **Load predictor.** The predictor is never a grid dimension: a [pre-sweep](../../developer-guide/knowledge-base/modular-components/planner/planner-design.md#load-predictor-pre-sweep) picks one candidate per sweep. Candidates that give the same predictor are evaluated once (`{preset: false}` with the default knob domains is 256 combinations and 40 predictors). Records label a candidate with its preset name, or `custom_<i>` for the `i`-th entry. The number of candidates must not exceed `max_candidates`.
+- **Planner defaults.** `planner: default` searches `load_scaling_down_sensitivity` ∈ `{70, 80, 90}` with load scaling and the 11 predictor presets with `optimization_target: sla` and throughput scaling. Without scaling it expands to nothing.
+
+An explicit domain for a disaggregated SLA Planner with load and throughput scaling. The router grid is 3 × 1 × 3 × 2 = 18 points and the Planner grid 3 × 2 = 6, so the sweep replays 108 grid points, after a pre-sweep over three predictors:
+
+```yaml
+retune:
+  interval_seconds: 21600
+  router:
+    overlap_score_credit: {choices: [0.5, 1.0, 2.0]}
+    prefill_load_scale: 1.0                               # pinned
+    temperature: {range: {min: 0.0, max: 0.2, step: 0.1}} # 0, 0.1, 0.2
+    decode_active_request_weight: {choices: [0.5, 1.0]}   # retune-only knob
+  planner:
+    load_sensitivity: {preset: false}
+    load_scaling_down_sensitivity: {choices: [70, 80, 90]}
+    decode_min_workers: {choices: [1, 2]}
+    load_predictor: {preset: [arima_log1p, kalman_default_raw, kalman_reactive_log1p]}
+```
 
 ## Additional types
 
@@ -651,10 +878,11 @@ The Planner enforces these cross-field rules at startup and rejects a config tha
 - `fpm_sample_bucket_size` must be a perfect square.
 - `global_planner_namespace` is required when `environment` is `global-planner`.
 - Under `optimization_target: load`, prefill modes require `prefill_scale_up_queue_tokens` > `prefill_scale_down_queue_tokens`, and decode modes require `decode_scale_up_kv_rate` > `decode_scale_down_kv_rate`.
-- At least one scaling mode must be enabled. Under any `optimization_target` other than `sla`, the Planner forces load scaling on and throughput scaling off and ignores `ttft_ms` / `itl_ms`.
+- At least one scaling mode must be enabled. Under any `optimization_target` other than `sla`, the Planner forces load scaling on and throughput scaling off and ignores `ttft_ms` / `itl_ms`. The only exception is retune-only mode: `retune` set with both `enable_load_scaling` and `enable_throughput_scaling` explicitly `false` (see [Retune](#retune-experimental-simulation-only)).
 - When `ais_perf_model` is set, its `roles` must cover the deployment: `prefill` and `decode` for `disagg`, the matching role for `prefill`/`decode`, or `aggregated` for `agg`. Role keys must agree with `worker_type`. Unknown canonical fields and the retired `aic_perf_model` input are rejected.
 - `scheduling.scale_interval_seconds` must evenly divide `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`.
 - When both scaling modes are enabled, `load_adjustment_interval_seconds` must be shorter than `throughput_adjustment_interval_seconds`.
+- `retune` has its own cross-field rules, listed with its fields in [Retune](#retune-experimental-simulation-only). A live Planner rejects any config that sets `retune`.
 
 ## Related pages
 
@@ -664,6 +892,9 @@ The Planner enforces these cross-field rules at startup and rejects a config tha
   </Card>
   <Card title="Planner Overview" icon="circle-info" href="../../developer-guide/knowledge-base/modular-components/planner/overview.md">
     Why LLM inference needs a different autoscaler.
+  </Card>
+  <Card title="Simulate Planner Decisions with AISimulate" icon="flask" href="../../developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx">
+    Replay a trace through the Planner offline, including retune.
   </Card>
   <Card title="DGDR Reference" icon="diagram-project" href="../kubernetes-api/dynamo-graph-deployment-request.mdx">
     The custom resource whose `spec.features.planner` carries this config.

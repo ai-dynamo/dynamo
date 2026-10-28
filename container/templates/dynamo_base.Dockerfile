@@ -7,12 +7,57 @@
 ########## Base Image ############
 ##################################
 
+# Rebuild bundled Go services so crypto/x509 includes the intermediate-key blocklist.
+FROM --platform=$BUILDPLATFORM golang:{{ context.dynamo.go_version }} AS go_tools_builder
+ARG TARGETARCH
+ARG NATS_VERSION
+ARG NATS_COMMIT
+ARG ETCD_VERSION
+ARG ETCD_COMMIT
+ENV CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} GOTOOLCHAIN=local
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
+RUN for attempt in 1 2 3; do \
+        git clone --depth 1 --branch "${NATS_VERSION}" https://github.com/nats-io/nats-server.git /src/nats && break; \
+        rm -rf /src/nats; \
+        [ "$attempt" -lt 3 ] || exit 1; \
+        sleep 5; \
+    done && \
+    test "$(git -C /src/nats rev-parse HEAD)" = "${NATS_COMMIT}" && \
+    cd /src/nats && go build -trimpath -o /out/nats-server .
+RUN for attempt in 1 2 3; do \
+        git clone --depth 1 --branch "${ETCD_VERSION}" https://github.com/etcd-io/etcd.git /src/etcd && break; \
+        rm -rf /src/etcd; \
+        [ "$attempt" -lt 3 ] || exit 1; \
+        sleep 5; \
+    done && \
+    test "$(git -C /src/etcd rev-parse HEAD)" = "${ETCD_COMMIT}" && \
+    cd /src/etcd && ./build.sh && \
+    mkdir -p /out/etcd && cp bin/etcd bin/etcdctl bin/etcdutl /out/etcd/
+
+ARG ENABLE_SOURCE_ARCHIVAL=false
+RUN mkdir -p /out/native-sources && \
+    if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        git -C /src/nats archive --format=tar.gz --prefix="nats-server-${NATS_VERSION}/" \
+            -o "/out/native-sources/nats-server-${NATS_VERSION}.tar.gz" HEAD && \
+        git -C /src/etcd archive --format=tar.gz --prefix="etcd-${ETCD_VERSION}/" \
+            -o "/out/native-sources/etcd-${ETCD_VERSION}.tar.gz" HEAD && \
+        tar --exclude=./cache -czf /out/native-sources/go-service-modules.tar.gz -C /go/pkg/mod .; \
+    fi
+
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dynamo_base
 
 ARG TARGETARCH
 
 USER root
 WORKDIR /opt/dynamo
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
 
 {% if device == "cpu" %}
 RUN apt clean && apt-get update -y && \
@@ -39,18 +84,9 @@ RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
 COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
 
-# Install NATS server
-ARG NATS_VERSION
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/${NATS_VERSION}/nats-server-${NATS_VERSION}-${TARGETARCH}.deb && \
-    dpkg -i nats-server-${NATS_VERSION}-${TARGETARCH}.deb && rm nats-server-${NATS_VERSION}-${TARGETARCH}.deb
-
-# Install etcd
-ARG ETCD_VERSION
-RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${TARGETARCH}.tar.gz -O /tmp/etcd.tar.gz && \
-    mkdir -p /usr/local/bin/etcd && \
-    tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
-    rm /tmp/etcd.tar.gz
+COPY --from=go_tools_builder /out/nats-server /usr/bin/nats-server
+COPY --from=go_tools_builder /out/etcd/ /usr/local/bin/etcd/
+RUN ln -s /usr/bin/nats-server /usr/local/bin/nats-server
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
 # Rust Setup
@@ -62,7 +98,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 # Install Rust — ARCH_ALT (x86_64/aarch64) is derived from TARGETARCH at build time
 RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
     RUSTARCH="${ARCH_ALT}-unknown-linux-gnu" && \
-    wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+    wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.29.2/${RUSTARCH}/rustup-init" && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     rm rustup-init && \

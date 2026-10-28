@@ -8,8 +8,6 @@ package lpx
 import (
 	"crypto/sha256"
 	"fmt"
-	"net/url"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,7 +17,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 const lpuConfigVolumeName = "config"
@@ -27,7 +24,7 @@ const lpuConfigVolumeName = "config"
 func renderRuntimeConfigMap(namePrefix string, data map[string]string) (*corev1.ConfigMap, string, error) {
 	// Name immutable configuration from the content hash used by Pod templates.
 	configMap := &corev1.ConfigMap{
-		Immutable: ptr.To(true),
+		Immutable: new(true),
 		Data:      data,
 	}
 	configHash := LPUConfigMapHash(configMap)
@@ -82,59 +79,24 @@ func lpuModelStoragePath(spec corev1.PodSpec) (string, error) {
 	return mount.MountPath, nil
 }
 
-func lpuRuntimeBuildRef(projection *ModelProjection, modelStoragePath string) string {
-	buildRef := projection.configuredBuild.Path
-	snapshotRef, snapshotErr := url.Parse(buildRef)
-	runtimeRef := strings.TrimSpace(projection.runtimeBuildRef)
-	runtimeURL, runtimeErr := url.Parse(runtimeRef)
-	if snapshotErr != nil || runtimeErr != nil || snapshotRef.Scheme != BuildSchemeFile ||
-		runtimeRef == "" || runtimeURL.Scheme != "" || filepath.IsAbs(runtimeRef) {
-		return buildRef
-	}
-	cleaned := filepath.Clean(runtimeRef)
-	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-		return buildRef
-	}
-	return (&url.URL{Scheme: BuildSchemeFile, Path: filepath.Join(modelStoragePath, cleaned)}).String()
-}
-
 func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 	keys := [...]string{"nodes_per_partition", "partition_indices", "partition_ids", "partition_models",
-		"partition_node_offsets", "partition_paths", "topologies"}
+		"partition_node_offsets", "partition_paths"}
 
-	// Omit model-identity columns that the XT Single runtime never consumes.
-	includeModelColumns := projections[0].configuredBuild.Family != BuildFamilyXT ||
-		projections[0].pipeline != PipelineSingle
 	var columns [len(keys)]strings.Builder
 
-	// Accumulate each projection's runtime partitions into the surviving columns.
+	// Keep partitions grouped by model in canonical projection order.
 	for _, projection := range projections {
 		// Render runtime partitions, including XT's collapsed prop-sync chains.
 		offset := int64(0)
-		for index, partition := range projection.configuredBuild.Partitions {
-			var nodes string
-			var endpointCount int64
-			if projection.configuredBuild.Family == BuildFamilyXT {
-				nodeCount := partition.effectiveNodeCount()
-				nodes, endpointCount = strconv.Itoa(nodeCount), int64(nodeCount)
-			} else {
-				endpointCount = partition.HXExtent[1] * partition.HXExtent[2] * partition.HXExtent[3]
-				nodes = strconv.FormatInt(endpointCount, 10)
-			}
-			// Project one row and populate optional model identity only when consumed.
-			row := [len(keys)]string{nodes, "",
-				strconv.FormatUint(uint64(uint32(partition.SourcePartitionID)), 10), "",
-				strconv.FormatInt(offset, 10), partition.PartPath, partition.Topology.Raw}
-			if includeModelColumns {
-				row[1] = strconv.Itoa(index)
-				row[3] = projection.model
-			}
+		for index, partition := range projection.configuredBuild.partitions {
+			endpointCount := int64(partition.effectiveNodeCount())
+			row := [len(keys)]string{strconv.FormatInt(endpointCount, 10), strconv.Itoa(index),
+				strconv.FormatUint(uint64(uint32(partition.sourcePartitionID)), 10), projection.model,
+				strconv.FormatInt(offset, 10), partition.partPath}
 
-			// Write only columns that survive into the ConfigMap.
+			// Preserve compiler order across the parallel runtime columns.
 			for column := range row {
-				if !includeModelColumns && (column == 1 || column == 3) {
-					continue
-				}
 				columns[column].WriteString(row[column])
 				columns[column].WriteByte('\n')
 			}
@@ -143,39 +105,28 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 	}
 	data := make(map[string]string, len(keys))
 
-	// Materialize only the runtime-visible columns.
-	for column := range keys {
-		if !includeModelColumns && (column == 1 || column == 3) {
+	// Model columns disambiguate rows only when several models share the table.
+	includeModelColumns := len(projections) > 1
+	for column, key := range keys {
+		if !includeModelColumns && (key == "partition_indices" || key == "partition_models") {
 			continue
 		}
-		data[keys[column]] = strings.TrimSuffix(columns[column].String(), "\n")
+		data[key] = strings.TrimSuffix(columns[column].String(), "\n")
 	}
 	return data
 }
 
-func withLPUConfigVolume(spec *corev1.PodSpec, configMapName string, allowOverrides bool) error {
-	found := false
-	for _, volume := range spec.Volumes {
-		if volume.Name != lpuConfigVolumeName {
-			continue
-		}
-		if !allowOverrides && (found ||
-			volume.ConfigMap == nil ||
-			volume.ConfigMap.Name != configMapName ||
-			len(volume.ConfigMap.Items) != 0 ||
-			volume.ConfigMap.DefaultMode != nil ||
-			volume.ConfigMap.Optional != nil) {
-			return fmt.Errorf("selected LPX podTemplate volume %q is reserved for ConfigMap %q", lpuConfigVolumeName, configMapName)
-		}
-		found = true
+// ensureLPUConfigVolume adds the generated configuration only when the nonnil
+// PodSpec has no authored config volume. Both LPU families preserve overrides.
+func ensureLPUConfigVolume(spec *corev1.PodSpec, configMapName string) {
+	if slices.ContainsFunc(spec.Volumes, func(volume corev1.Volume) bool { return volume.Name == lpuConfigVolumeName }) {
+		return
 	}
-	if !found {
-		spec.Volumes = append(spec.Volumes, corev1.Volume{
-			Name: lpuConfigVolumeName,
-			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
-			}},
-		})
-	}
-	return nil
+
+	spec.Volumes = append(spec.Volumes, corev1.Volume{
+		Name: lpuConfigVolumeName,
+		ConfigMap: &corev1.ConfigMapVolumeSource{
+			Name: configMapName,
+		},
+	})
 }

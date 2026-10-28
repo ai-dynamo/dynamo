@@ -25,6 +25,7 @@ from ..http import (
 )
 from ..http.media_reference import max_media_bytes
 from ..http.url_validator import (
+    MediaSizeError,
     UrlValidationError,
     UrlValidationPolicy,
     describe_media_source,
@@ -145,6 +146,7 @@ class ImageLoader:
         url_policy: UrlValidationPolicy | None = None,
         max_bytes: int | None = None,
         session_scoped_cache: bool | None = None,
+        max_pixels: int | None = None,
     ):
         """
         Initialize the ImageLoader with caching, HTTP settings, and optional NIXL config for
@@ -165,10 +167,18 @@ class ImageLoader:
                 in-flight, and shared-cache keys. ``None`` (default) reads
                 DYN_MM_IMAGE_CACHE_SESSION_SCOPED (default off). When enabled,
                 HTTP loads without a scope bypass all image caches.
+            max_pixels: Optional per-image pixel limit, checked before RGB decode.
         """
         self._http_timeout = http_timeout
         self._cache_size = cache_size
         self._configured_max_bytes = max_bytes
+        if max_pixels is not None and (
+            isinstance(max_pixels, bool)
+            or not isinstance(max_pixels, int)
+            or max_pixels < 1
+        ):
+            raise ValueError("max_pixels must be a positive integer")
+        self._max_pixels = max_pixels
         if session_scoped_cache is None:
             session_scoped_cache = image_cache_session_scoped_from_env()
         self._session_scoped_cache = session_scoped_cache
@@ -177,13 +187,10 @@ class ImageLoader:
         self._shared_image_cache = SharedImageCache.from_env()
         self._enable_frontend_decoding = enable_frontend_decoding
         self._url_policy = url_policy or UrlValidationPolicy.from_env()
-        # Lazy-init NIXL connector only when frontend decoding is enabled
         self._nixl_connector = None
         if self._enable_frontend_decoding:
             self._nixl_connector = _create_nixl_connector()
-            run_async(
-                self._nixl_connector.initialize
-            )  # Synchronously wait for async init
+            run_async(self._nixl_connector.warmup)
 
     def _max_bytes(self) -> int:
         if self._configured_max_bytes is not None:
@@ -224,19 +231,29 @@ class ImageLoader:
         )
 
     @staticmethod
-    def _open_image_sync(image_data: BytesIO) -> Image.Image:
+    def _open_image_sync(
+        image_data: BytesIO, max_pixels: int | None = None
+    ) -> Image.Image:
         """Open, validate, and decode an image from raw bytes. Runs in a thread."""
-        image = Image.open(image_data, formats=["JPEG", "PNG", "WEBP"])
-        if image.format not in ("JPEG", "PNG", "WEBP"):
-            raise ValueError(f"Unsupported image format: {image.format}")
-        # Image.open() is lazy — convert() forces the actual pixel decode
-        return image.convert("RGB")
+        # formats= is the allowlist. Its JPEG plugin also opens multi-picture JPEGs
+        # (most phone cameras), which report image.format == "MPO".
+        with Image.open(image_data, formats=["JPEG", "PNG", "WEBP"]) as image:
+            if max_pixels is not None and image.width * image.height > max_pixels:
+                raise HttpStatusError(
+                    413, "Image exceeds the decoded pixel limit", "image"
+                )
+            # Image.open() is lazy — check dimensions before RGB expansion.
+            return image.convert("RGB")
 
     @staticmethod
-    async def _open_image(image_data: BytesIO) -> Image.Image:
+    async def _open_image(
+        image_data: BytesIO, max_pixels: int | None = None
+    ) -> Image.Image:
         """Open and validate an image from raw bytes, converting to RGB."""
         with _nvtx.annotate("mm:img:pil_open_convert", color="lime"):
-            return await asyncio.to_thread(ImageLoader._open_image_sync, image_data)
+            return await asyncio.to_thread(
+                ImageLoader._open_image_sync, image_data, max_pixels
+            )
 
     def _cache_put(self, key: str, image: Image.Image) -> None:
         """Insert into cache if not already present. Sync — no awaits."""
@@ -249,7 +266,9 @@ class ImageLoader:
                 self._image_cache.popitem(last=False)
             self._image_cache[key] = image
 
-    async def _fetch_and_process(self, key: str | None, image_url: str) -> Image.Image:
+    async def _fetch_and_process(
+        self, key: str | None, image_url: str, max_pixels: int | None = None
+    ) -> Image.Image:
         """Fetch image via HTTP(S), decode with PIL, return RGB Image.
 
         Checks the optional shared encoded-image cache before hitting the
@@ -262,8 +281,13 @@ class ImageLoader:
             if self._shared_image_cache is not None and key is not None:
                 cached_content = await self._shared_image_cache.get(key)
                 if cached_content is not None:
+                    if len(cached_content) > self._max_bytes():
+                        raise MediaSizeError("Cached image exceeds the byte limit")
                     try:
-                        return await self._open_image(BytesIO(cached_content))
+                        return await self._open_image(
+                            BytesIO(cached_content),
+                            max_pixels if max_pixels is not None else self._max_pixels,
+                        )
                     except (OSError, ValueError) as exc:
                         logger.warning(
                             "Discarding invalid shared image cache entry for '%s': %s",
@@ -283,7 +307,9 @@ class ImageLoader:
                     raise ValueError("Empty response content from image URL")
                 image_data = BytesIO(content)
 
-            image = await self._open_image(image_data)
+            image = await self._open_image(
+                image_data, max_pixels if max_pixels is not None else self._max_pixels
+            )
             if self._shared_image_cache is not None and key is not None:
                 # Cache fills are awaited deliberately so Redis acknowledges a
                 # successful write before this request returns. A cache outage
@@ -308,7 +334,7 @@ class ImageLoader:
             )
             raise HttpStatusError(
                 408,
-                f"Timeout loading image: '{image_url}' "
+                f"Timeout loading image: '{describe_media_source(image_url)}' "
                 f"(timeout={self._http_timeout}s)",
                 image_url,
             ) from e
@@ -322,7 +348,8 @@ class ImageLoader:
             )
             raise HttpStatusError(
                 400,
-                f"Connection error loading image: '{image_url}': {e}",
+                "Connection error loading image: "
+                f"'{describe_media_source(image_url)}': {e}",
                 image_url,
             ) from e
         except HttpError as e:
@@ -348,18 +375,14 @@ class ImageLoader:
             )
             raise
         except ValueError as e:
-            if "Unsupported image format" in str(e):
-                logger.error(
-                    "Unsupported image format loading: '%s'",
-                    describe_media_source(image_url),
-                )
-                raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
             logger.error(
                 "%s loading image: '%s'",
                 type(e).__name__,
                 describe_media_source(image_url),
             )
-            raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
+            raise ValueError(
+                f"Failed to load image: '{describe_media_source(image_url)}': {e}"
+            ) from e
         except Exception as e:
             logger.error(
                 "%s loading image: '%s'",
@@ -390,9 +413,27 @@ class ImageLoader:
 
     @_nvtx.annotate("mm:img:load_image", color="lime")
     async def load_image(
-        self, image_url: str, *, cache_scope: str | None = None
+        self,
+        image_url: str,
+        *,
+        cache_scope: str | None = None,
+        max_pixels: int | None = None,
     ) -> Image.Image:
-        """Load and decode one media URL through the validated image cache."""
+        """Load one image, optionally with a request-specific remaining pixel budget.
+
+        A request-specific budget uses a cancellable private fetch on cache miss;
+        it cannot join an in-flight decode with a different budget. Completed
+        cache entries remain shareable and are checked against the caller's limit.
+        """
+        private_fetch = max_pixels is not None
+        if self._max_pixels is not None:
+            max_pixels = (
+                self._max_pixels
+                if max_pixels is None
+                else min(max_pixels, self._max_pixels)
+            )
+        if max_pixels is not None and max_pixels < 1:
+            raise HttpStatusError(413, "Image exceeds the decoded pixel limit", "image")
 
         parsed_url = urlsplit(image_url)
         if parsed_url.scheme in ("", "file"):
@@ -406,7 +447,7 @@ class ImageLoader:
             key = self._cache_key(normalized_url, cache_scope)
 
             if key is None:
-                return await self._fetch_and_process(None, normalized_url)
+                return await self._fetch_and_process(None, normalized_url, max_pixels)
 
             if key in self._image_cache:
                 if logger.isEnabledFor(logging.DEBUG):
@@ -415,7 +456,17 @@ class ImageLoader:
                         describe_media_source(image_url),
                     )
                 self._image_cache.move_to_end(key)
-                return self._image_cache[key]
+                image = self._image_cache[key]
+                if max_pixels is not None and image.width * image.height > max_pixels:
+                    raise HttpStatusError(
+                        413, "Image exceeds the decoded pixel limit", "image"
+                    )
+                return image
+
+            if private_fetch:
+                image = await self._fetch_and_process(key, normalized_url, max_pixels)
+                self._cache_put(key, image)
+                return image
 
             if key not in self._inflight:
                 task = asyncio.create_task(self._fetch_and_cache(key, normalized_url))
@@ -437,24 +488,18 @@ class ImageLoader:
                         normalized_url, max_bytes=self._max_bytes()
                     )
                     image_data = BytesIO(image_bytes)
-                return await self._open_image(image_data)
+                return await self._open_image(image_data, max_pixels)
             except Image.UnidentifiedImageError as e:
                 logger.error(
                     "Unsupported image format decoding: '%s'",
                     describe_media_source(image_url),
                 )
                 raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
+            except MediaSizeError:
+                raise
             except UrlValidationError as e:
                 raise ValueError(f"Failed to decode image: {e}") from e
             except ValueError as e:
-                if "Unsupported image format" in str(e):
-                    logger.error(
-                        "Unsupported image format decoding: '%s'",
-                        describe_media_source(image_url),
-                    )
-                    raise HttpStatusError(
-                        415, "Unsupported Media Type", image_url
-                    ) from e
                 source = describe_media_source(image_url)
                 logger.error("%s decoding image: '%s': %s", type(e).__name__, source, e)
                 raise ValueError(f"Failed to decoding image: '{source}': {e}") from e

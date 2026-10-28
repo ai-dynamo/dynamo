@@ -20,21 +20,27 @@ futures = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-dynamo-sidecar-common = { workspace = true }
+# `tonic-v14`: the PD scenario reads vLLM's prost 0.14 handoff as JSON.
+dynamo-sidecar-common = { workspace = true, features = ["tonic-v14"] }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 dynamo-mocker = { workspace = true }
 dynamo-vllm-mocker = { path = "../../mocker/servers/vllm" }
 dynamo-sglang-mocker = { path = "../../mocker/servers/sglang" }
 dynamo-vllm-sidecar = { path = "../vllm" }
 dynamo-sglang-sidecar = { path = "../sglang" }
+dynamo-trtllm-sidecar = { path = "../trtllm" }
+# Also plays an LPX engine, which speaks the same OpenEngine contract.
+dynamo-trtllm-mocker = { path = "../../mocker/servers/trtllm" }
+dynamo-lpx-sidecar = { path = "../lpx" }
 tokio-stream = { workspace = true, features = ["net"] }
 tonic = { workspace = true }
 tonic-v14 = { workspace = true }
 tonic-health-v14 = { workspace = true }
 serde_json = { workspace = true }
 dynamo-runtime = { workspace = true }
-dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-llm = { workspace = true }
 tempfile = { workspace = true }
 tokio-util = { workspace = true }
 libc = { workspace = true }
 prost-types-v14 = { workspace = true }
+reqwest = { workspace = true }

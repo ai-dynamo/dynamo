@@ -47,7 +47,6 @@ use dynamo_runtime::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
         async_trait, error::PipelineError,
     },
-    protocols::EndpointId,
     protocols::annotated::Annotated,
     traits::DistributedRuntimeProvider,
 };
@@ -398,6 +397,13 @@ pub(crate) fn to_worker_selection_session_context(
     .with_agent_headers(agent_headers.clone())
 }
 
+/// Whether a policy reads the KV index: its overlaps (`CACHE`) or the prefixes
+/// workers could fetch (`KV_TRANSFER`). Each component still reads only the
+/// inputs it declares.
+pub(crate) fn needs_kv_index(inputs: WorkerInputs) -> bool {
+    inputs.contains(WorkerInputs::CACHE) || inputs.contains(WorkerInputs::KV_TRANSFER)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KvEventSourceRequirement {
     NotRequired,
@@ -412,10 +418,7 @@ impl KvEventSourceRequirement {
         config: &KvRouterConfig,
         inputs: WorkerInputs,
     ) -> Self {
-        if !inputs.contains(WorkerInputs::CACHE)
-            || config.use_remote_indexer
-            || !config.use_kv_events
-        {
+        if !needs_kv_index(inputs) || config.use_remote_indexer || !config.use_kv_events {
             return Self::NotRequired;
         }
 
@@ -523,6 +526,11 @@ fn cache_hit_for_worker(
 
 // for metric publishing (push-based)
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
+/// Router scheduler views of per-worker load, consumed by the KV DC Relay.
+///
+/// Kept separate from [`KV_METRICS_SUBJECT`] so one router's view never
+/// overwrites another router's worker-overload state.
+pub const SCHEDULER_LOAD_SUBJECT: &str = "scheduler_load";
 pub const MULTIMODAL_EMBEDDING_CACHE_SUBJECT: &str = "multimodal_embedding_cache";
 
 // for inter-router comms
@@ -578,18 +586,6 @@ fn cancelled_error(context_id: &str) -> anyhow::Error {
         .into()
 }
 
-// for router discovery registration
-pub const KV_ROUTER_ENDPOINT: &str = "router-discovery";
-
-/// Creates an EndpointId for the KV router in the given namespace.
-pub fn router_endpoint_id(namespace: String, component: String) -> EndpointId {
-    EndpointId {
-        namespace,
-        component,
-        name: KV_ROUTER_ENDPOINT.to_string(),
-    }
-}
-
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
@@ -611,7 +607,6 @@ pub struct KvRouter {
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
     shared_cache: Option<Arc<dyn SharedKvCache>>,
-    endpoint_registration: Option<dynamo_runtime::discovery::EndpointRegistrationLease>,
     teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     /// Optional session-aware logical prefix index.
     session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
@@ -918,17 +913,9 @@ impl KvRouter {
             approximate_lru_ranks,
             request_leases,
             shared_cache,
-            endpoint_registration: None,
             teardown_task_guard: None,
             session_prefix_index,
         })
-    }
-
-    pub(crate) fn set_endpoint_registration(
-        &mut self,
-        registration: dynamo_runtime::discovery::EndpointRegistrationLease,
-    ) {
-        self.endpoint_registration = Some(registration);
     }
 
     /// Attach a request classifier before placing this router into service.
@@ -1000,6 +987,12 @@ impl KvRouter {
 
     pub fn kv_router_config(&self) -> &KvRouterConfig {
         &self.kv_router_config
+    }
+
+    pub fn policy_control(
+        &self,
+    ) -> &Arc<dynamo_kv_router::scheduling::queue::RuntimePolicyControl> {
+        self.selection.scheduler().policy_control()
     }
 
     pub fn required_worker_inputs(&self) -> dynamo_kv_router::selector::WorkerInputs {
@@ -1411,7 +1404,7 @@ impl KvRouter {
             Err(error) => return Err(error.into()),
         };
         let Selected {
-            response,
+            mut response,
             advisory_load,
             isl_tokens,
             kv_hint,
@@ -1422,6 +1415,13 @@ impl KvRouter {
         } = selected;
         if update_states && is_admitted_routing && booking.is_none() {
             anyhow::bail!("booked selection returned no booking handle");
+        }
+        // Publish the selection trace here, on the routing task and before any
+        // awaited bookkeeping (the session prefix refresh below can be cancelled),
+        // so every caller of this method (routing hosts, prefill reservations, the
+        // Python binding) emits exactly one row.
+        if let (Some(request_id), Some(trace)) = (context_id, response.selection_trace.take()) {
+            crate::request_trace::emit_router_selection(request_id, self.worker_type(), trace);
         }
         // Indexing failures never affect routing.
         if let (Some(session_id), Some(block_hashes)) =
@@ -2108,7 +2108,11 @@ mod tests {
             Some(WorkerType::Decode),
             Some(WorkerType::Encode),
         ] {
-            for inputs in [WorkerInputs::LOAD, WorkerInputs::CACHE | WorkerInputs::LOAD] {
+            for inputs in [
+                WorkerInputs::LOAD,
+                WorkerInputs::CACHE | WorkerInputs::LOAD,
+                WorkerInputs::KV_TRANSFER | WorkerInputs::LOAD,
+            ] {
                 for overlap_score_credit in [0.0, 1.0, 2.0] {
                     for use_kv_events in [false, true] {
                         for use_remote_indexer in [false, true] {
@@ -2120,28 +2124,26 @@ mod tests {
                                     conditional_disagg_enabled,
                                     ..Default::default()
                                 };
-                                let expected = if !inputs.contains(WorkerInputs::CACHE)
-                                    || !use_kv_events
-                                    || use_remote_indexer
-                                {
-                                    KvEventSourceRequirement::NotRequired
-                                } else if role.is_none() {
-                                    KvEventSourceRequirement::Unknown
-                                } else if role == Some(WorkerType::Decode)
-                                    && conditional_disagg_enabled
-                                {
-                                    KvEventSourceRequirement::ConditionalDisaggDecodeCache
-                                } else {
-                                    KvEventSourceRequirement::CacheAwareRouting
-                                };
+                                let reads_index = inputs.contains(WorkerInputs::CACHE)
+                                    || inputs.contains(WorkerInputs::KV_TRANSFER);
+                                let expected =
+                                    if !reads_index || !use_kv_events || use_remote_indexer {
+                                        KvEventSourceRequirement::NotRequired
+                                    } else if role.is_none() {
+                                        KvEventSourceRequirement::Unknown
+                                    } else if role == Some(WorkerType::Decode)
+                                        && conditional_disagg_enabled
+                                    {
+                                        KvEventSourceRequirement::ConditionalDisaggDecodeCache
+                                    } else {
+                                        KvEventSourceRequirement::CacheAwareRouting
+                                    };
                                 let actual =
                                     KvEventSourceRequirement::derive(role, &config, inputs);
                                 assert_eq!(actual, expected);
                                 assert_eq!(
                                     actual.should_subscribe(),
-                                    inputs.contains(WorkerInputs::CACHE)
-                                        && use_kv_events
-                                        && !use_remote_indexer,
+                                    reads_index && use_kv_events && !use_remote_indexer,
                                 );
                             }
                         }

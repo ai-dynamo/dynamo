@@ -17,6 +17,11 @@ import (
 
 const testPart11Path = "part-11"
 
+const (
+	localPartitionTopologyA = "stage-a"
+	localPartitionTopologyB = "stage-b"
+)
+
 func TestProjectModelV2LocalPartitions(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -31,35 +36,35 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 		wantLocalIDs    []int
 	}{
 		{
-			name: "independent partition runs locally", pipeline: PipelineLPX,
+			name: "independent partition runs locally", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{11}},
 			wantAgents: 9, wantCompilerIDs: []int64{7, 8}, wantConnectors: 1,
 			wantRuntimeIDs: "7", wantLocalIDs: []int{11},
 		},
 		{
-			name: "selected chain runs locally as one runtime partition", pipeline: PipelineLPX,
+			name: "selected chain runs locally as one runtime partition", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{7}},
 			wantAgents: 8, wantCompilerIDs: []int64{11}, wantConnectors: 0,
 			wantRuntimeIDs: "11", wantLocalIDs: []int{7},
 		},
 		{
-			name: "every partition runs locally", pipeline: PipelineLPX,
+			name: "every partition runs locally", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
 			wantAgents: 0, wantCompilerIDs: []int64{}, wantConnectors: 0,
 			wantRuntimeIDs: "", wantLocalIDs: []int{7, 11},
 		},
 		{
-			name: "chain member is not a runtime partition", pipeline: PipelineLPX,
+			name: "chain member is not a runtime partition", pipeline: PipelineHybrid,
 			selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{8}},
 			wantErr:   "localPartitions references partition 8 of the prop-sync chain that starts at partition 7; select 7",
 		},
 		{
-			name: "unknown partition", pipeline: PipelineLPX,
+			name: "unknown partition", pipeline: PipelineHybrid,
 			selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{99}},
 			wantErr:   "localPartitions references partition 99, which the build does not contain",
 		},
 		{
-			name: "unsupported mode", pipeline: PipelineLPX,
+			name: "unsupported mode", pipeline: PipelineHybrid,
 			selection: &dynamov1beta1.LPXLocalPartitions{Mode: "Roles"},
 			wantErr:   `localPartitions has unsupported mode "Roles"`,
 		},
@@ -75,20 +80,21 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 			t.Parallel()
 
 			t.Log("Create a hybrid build with chain 7-8 and an independent partition 11")
-			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
-			build := normalized.build
-			build.CompilationMode = BuildCompilationModeHybrid
-			build.Partitions[0].Topology = Topology{Raw: "stage-a", ChipCount: 8}
-			build.Partitions[1].Topology = Topology{Raw: "stage-b", ChipCount: 64}
-			third := build.Partitions[1]
-			third.SourcePartitionID = 11
-			third.PartPath = testPart11Path
-			build.Partitions = append(build.Partitions, third)
-			build.SelectedPropSyncChains = [][]int{{7, 8}}
+			normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
+			build := normalized
+			build.partitions[0].topology = localPartitionTopologyA
+			build.partitions[0].numChips = 8
+			build.partitions[1].topology = localPartitionTopologyB
+			build.partitions[1].numChips = 64
+			third := build.partitions[1]
+			third.sourcePartitionID = 11
+			third.partPath = testPart11Path
+			build.partitions = append(build.partitions, third)
+			build.selectedPropSyncChains = [][]int{{7, 8}}
 
 			t.Log("Project the build with the selected local partitions")
 			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: test.pipeline, Models: []string{"default"}, BuildSnapshot: normalized,
+				Pipeline: test.pipeline, Models: []string{"default"}, Build: normalized,
 				LocalPartitions: test.selection,
 			})
 			if test.wantErr != "" {
@@ -114,7 +120,7 @@ func TestProjectModelV2LocalPartitions(t *testing.T) {
 			require.Equal(t, test.wantLocalIDs, projection.localPartitionIDs)
 
 			t.Log("Change the workload digest when partitions move to the GPU")
-			baseline := projectTestBuild(t, normalized, PipelineLPX)
+			baseline := projectTestBuild(t, normalized, PipelineHybrid)
 			require.NotEqual(t, baseline.Digest(), projection.Digest())
 		})
 	}
@@ -136,7 +142,7 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 		},
 		{
 			name:    "no local partitions shadows envFrom sources",
-			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "authored"}}}},
+			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "authored"}}},
 			wantEnv: []corev1.EnvVar{{Name: localPartitionIDsEnv}},
 		},
 		{
@@ -163,7 +169,7 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 		},
 		{
 			name:    "envFrom shadow precedes dependent values",
-			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "authored"}}}},
+			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{Name: "authored"}}},
 			env: []corev1.EnvVar{
 				{Name: "FIRST", Value: "kept"},
 				{Name: "LOCAL_IDS", Value: "$(" + localPartitionIDsEnv + ")"},
@@ -213,18 +219,19 @@ func TestRenderHybridLocalPartitions(t *testing.T) {
 			t.Parallel()
 
 			t.Log("Project a hybrid build with chain 7-8 and an independent partition 11")
-			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
-			build := normalized.build
-			build.CompilationMode = BuildCompilationModeHybrid
-			build.Partitions[0].Topology = Topology{Raw: "stage-a", ChipCount: 8}
-			build.Partitions[1].Topology = Topology{Raw: "stage-b", ChipCount: 64}
-			third := build.Partitions[1]
-			third.SourcePartitionID = 11
-			third.PartPath = testPart11Path
-			build.Partitions = append(build.Partitions, third)
-			build.SelectedPropSyncChains = [][]int{{7, 8}}
+			normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
+			build := normalized
+			build.partitions[0].topology = localPartitionTopologyA
+			build.partitions[0].numChips = 8
+			build.partitions[1].topology = localPartitionTopologyB
+			build.partitions[1].numChips = 64
+			third := build.partitions[1]
+			third.sourcePartitionID = 11
+			third.partPath = testPart11Path
+			build.partitions = append(build.partitions, third)
+			build.selectedPropSyncChains = [][]int{{7, 8}}
 			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
+				Pipeline: PipelineHybrid, Models: []string{"default"}, Build: normalized,
 				RuntimeBuildRef: "model-build", LocalPartitions: test.selection,
 			})
 			require.NoError(t, err)
@@ -263,21 +270,20 @@ func TestProjectModelV2LocalPartitionsKeepsPhysicalBuildBound(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Create a hybrid build with one more physical partition than the LPX limit")
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
-	build := normalized.build
-	build.CompilationMode = BuildCompilationModeHybrid
-	build.SelectedPropSyncChains = nil
-	template := build.Partitions[0]
-	build.Partitions = make([]BuildPartition, 0, maxLPXPartitions+1)
+	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
+	build := normalized
+	build.selectedPropSyncChains = nil
+	template := build.partitions[0]
+	build.partitions = make([]buildPartition, 0, maxLPXPartitions+1)
 	for id := range maxLPXPartitions + 1 {
 		partition := template
-		partition.SourcePartitionID = id
-		build.Partitions = append(build.Partitions, partition)
+		partition.sourcePartitionID = id
+		build.partitions = append(build.partitions, partition)
 	}
 
 	t.Log("Reject the oversized build even when every partition runs locally")
 	_, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
+		Pipeline: PipelineHybrid, Models: []string{"default"}, Build: normalized,
 		LocalPartitions: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
 	})
 	require.EqualError(t, err, "LPX projection has 257 partitions, limit is 1..256")
@@ -299,7 +305,7 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 		wantPropSyncInfo string
 	}{
 		{
-			name: "partition before the chain runs locally", pipeline: PipelineLPX,
+			name: "partition before the chain runs locally", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{1}},
 			wantAgents: 3, wantCompilerIDs: []int64{2, 3, 4},
 			wantConnectors: [][2]string{{"partition-000", "partition-001"}},
@@ -313,7 +319,7 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 				"num_supported_lanes":[4,2,1]}]}`,
 		},
 		{
-			name: "selected chain runs locally as one runtime partition", pipeline: PipelineLPX,
+			name: "selected chain runs locally as one runtime partition", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{2}},
 			wantAgents: 2, wantCompilerIDs: []int64{1, 4}, wantConnectors: [][2]string{},
 			wantRuntimeIDs: "1\n4", wantLocalIDs: []int{2},
@@ -323,7 +329,7 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			wantPropSyncInfo: `{"version":1,"prop_sync_pairs":[]}`,
 		},
 		{
-			name: "every partition runs locally", pipeline: PipelineLPX,
+			name: "every partition runs locally", pipeline: PipelineHybrid,
 			selection:  &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
 			wantAgents: 0, wantCompilerIDs: []int64{}, wantConnectors: [][2]string{},
 			wantRuntimeIDs: "", wantLocalIDs: []int{1, 2, 4},
@@ -331,12 +337,12 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			wantPropSyncInfo: `{"version":1,"prop_sync_pairs":[]}`,
 		},
 		{
-			name: "chain member is not a runtime partition", pipeline: PipelineLPX,
+			name: "chain member is not a runtime partition", pipeline: PipelineHybrid,
 			selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{3}},
 			wantErr:   "localPartitions references partition 3 of the prop-sync chain that starts at partition 2; select 2",
 		},
 		{
-			name: "unknown partition", pipeline: PipelineLPX,
+			name: "unknown partition", pipeline: PipelineHybrid,
 			selection: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{5}},
 			wantErr:   "localPartitions references partition 5, which the build does not contain",
 		},
@@ -349,7 +355,6 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			t.Log("Create a hybrid HX build with partitions 1-4, a selected chain 2-3, and one CUDA artifact")
 			fixture := newV3CompilerFixture()
 			fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-			fixture.numLPUNodes = 4
 			for id := uint32(2); id <= 4; id++ {
 				partition := fixture.partitions[0]
 				partition.id = id
@@ -357,11 +362,11 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			}
 			fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 5, deviceType: manifestcapnp.DeviceType_cuda})
 			fixture.selectedPropSyncChains = [][]uint32{{2, 3}}
-			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+			normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 
 			t.Log("Project the build with the selected local partitions")
 			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: test.pipeline, Models: []string{"default"}, BuildSnapshot: normalized,
+				Pipeline: test.pipeline, Models: []string{"default"}, Build: normalized,
 				LocalPartitions: test.selection,
 			})
 			if test.wantErr != "" {
@@ -401,7 +406,7 @@ func TestProjectModelV3LocalPartitions(t *testing.T) {
 			require.Equal(t, test.wantLocalIDs, projection.localPartitionIDs)
 
 			t.Log("Change the workload digest when partitions move to the GPU")
-			baseline := projectTestBuild(t, normalized, PipelineLPX)
+			baseline := projectTestBuild(t, normalized, PipelineHybrid)
 			require.NotEqual(t, baseline.Digest(), projection.Digest())
 		})
 	}
@@ -420,7 +425,7 @@ func TestProjectModelV3LocalPartitionsRejectsUnsupportedBuilds(t *testing.T) {
 			wantErr: "unsupported LPX runtime: localPartitions requires a hybrid build with a Cyborg conductor",
 		},
 		{
-			name: "packed prop-sync partitions cannot be split", pipeline: PipelineLPX, numChips: 8,
+			name: "packed prop-sync partitions cannot be split", pipeline: PipelineHybrid, numChips: 8,
 			wantErr: "unsupported LPX runtime: localPartitions cannot split packed HX prop-sync partitions, which require an LPU-only workload",
 		},
 	}
@@ -437,11 +442,11 @@ func TestProjectModelV3LocalPartitionsRejectsUnsupportedBuilds(t *testing.T) {
 			second.id = 2
 			fixture.partitions = append(fixture.partitions, second)
 			fixture.selectedPropSyncChains = [][]uint32{{1, 2}}
-			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+			normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 
 			t.Log("Reject a local selection that the build cannot serve")
 			_, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: test.pipeline, Models: []string{"default"}, BuildSnapshot: normalized,
+				Pipeline: test.pipeline, Models: []string{"default"}, Build: normalized,
 				LocalPartitions: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeIDs, IDs: []int64{1}},
 			})
 			require.EqualError(t, err, test.wantErr)
@@ -455,17 +460,16 @@ func TestProjectModelV3LocalPartitionsKeepsPhysicalBuildBound(t *testing.T) {
 	t.Log("Create a hybrid HX build with one more partition than the LPX limit")
 	fixture := newV3CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	fixture.numLPUNodes = maxLPXPartitions + 1
 	for id := uint32(2); id <= maxLPXPartitions+1; id++ {
 		partition := fixture.partitions[0]
 		partition.id = id
 		fixture.partitions = append(fixture.partitions, partition)
 	}
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+	normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 
 	t.Log("Reject the oversized build even when every partition runs locally")
 	_, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
+		Pipeline: PipelineHybrid, Models: []string{"default"}, Build: normalized,
 		LocalPartitions: &dynamov1beta1.LPXLocalPartitions{Mode: dynamov1beta1.LPXLocalPartitionsModeAll},
 	})
 	require.EqualError(t, err, "LPX projection has 257 partitions, limit is 1..256")

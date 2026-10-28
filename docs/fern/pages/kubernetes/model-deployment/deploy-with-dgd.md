@@ -221,21 +221,21 @@ The worker in the previous step runs **vLLM**. Dynamo also supports **SGLang** a
 <Tab title="vLLM" language="vllm">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
 ```
 
 </Tab>
 <Tab title="SGLang" language="sglang">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0
 ```
 
 </Tab>
 <Tab title="TensorRT-LLM" language="trtllm">
 
 ```bash
-export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0
+export RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0
 ```
 
 </Tab>
@@ -723,18 +723,19 @@ This runs eight TP-2 workers (16 GPUs). To turn it into one of the variations ab
 
 Grove uses RollingRecreate by default for every DGD. To opt into Coherent, set `metadata.annotations["nvidia.com/grove-update-strategy"]: Coherent`. New Grove DGDs created by operator 1.6.0 or later default provider-native `minAvailable` to `1` unless the manifest uses a deprecated component minimum. Existing DGDs retain their persisted legacy minima. Moving those minima to provider overrides preserves their effective values and does not select Coherent.
 
-For deployments that explicitly select Coherent, review the [known recovery limitation](https://github.com/ai-dynamo/grove/issues/873) and complete these checks before changing worker images or pod templates:
+For deployments that explicitly select Coherent, use Grove v0.1.0-alpha.15 or later with its matching CRDs, which includes the [corrective-update recovery fix](https://github.com/ai-dynamo/grove/issues/873), and complete these checks before changing worker images or pod templates:
 
 1. Review each component's effective `minAvailable` and whether it uses the deprecated field or a provider override. It defines the minimum viable replacement unit under Coherent. For new deployments, start at `1` unless the application requires a larger unit; the field is immutable after creation.
-2. Check how much serving capacity remains while that unit is unavailable. With eight replicas and `minAvailable: 4`, the default disruption budget allows four unavailable replicas. A changed component with only one replica can become completely unavailable.
-3. Plan with existing capacity: Grove has no surge support in alpha.14, and replica changes are deferred throughout an active coherent rollout. Do not depend on an HPA or the Planner adding replicas mid-rollout.
-4. Update compatible worker components together. Dynamo's shared worker hash can roll all workers when one worker template changes; a frontend participates when its own rendered template changes. Validate latency and throughput under representative traffic before increasing the disruption budget.
+2. Review any `providerOverride.value.rollingUpdate.maxUnavailable`. It is a ceiling on unavailable replicas, defaults to the effective minimum under Coherent, and must be at least that minimum.
+3. Check how much serving capacity remains while that unit is unavailable. With eight replicas and `minAvailable: 4`, the default disruption budget allows four unavailable replicas. A changed component with only one replica can become completely unavailable.
+4. Plan with existing capacity: Grove has no surge support, and replica changes are deferred throughout an active coherent rollout. Do not depend on an HPA or the Planner adding replicas mid-rollout.
+5. Update compatible worker components together. Dynamo's shared worker hash can roll all workers when one worker template changes; a frontend participates when its own rendered template changes. Validate latency and throughput under representative traffic before increasing the disruption budget.
 
 See [Coherent capacity and disruption](../../reference/kubernetes-api/dynamo-graph-deployment.mdx#coherent-capacity-and-disruption) for budget semantics and examples. Coherent coordination applies within one PCS and does not guarantee zero downtime.
 
 ### Recover from a stalled Coherent update
 
-If an update stalls because already-unavailable replicas exhaust the disruption budget, changing or removing the strategy annotation cannot unblock it: Dynamo waits for the active Grove update to finish before applying a strategy change. See [Grove issue #873](https://github.com/ai-dynamo/grove/issues/873).
+On Grove alpha.14, a corrective update can stall because old replicas are already unavailable. [Grove issue #873](https://github.com/ai-dynamo/grove/issues/873) is fixed in v0.1.0-alpha.15; upgrade Grove and its matching CRDs together. For an older installation with a stalled update, changing or removing the strategy annotation cannot unblock it: Dynamo waits for the active Grove update to finish before applying a strategy change.
 
 > [!WARNING]
 > Recreating the DGD stops its workloads and interrupts serving. Plan downtime or move traffic to another deployment before using this reset path.
