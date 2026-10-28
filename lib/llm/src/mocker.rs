@@ -305,6 +305,9 @@ struct DpBudget {
 }
 
 impl DpBudget {
+    /// Refreshes per-rank load from any new scheduler snapshots, picks the least-loaded rank
+    /// (or `forced_rank` when the request carries an explicit hint), and charges the request
+    /// to that rank so later dispatches see it before the next snapshot.
     fn dispatch(
         &mut self,
         method: DpLoadBalanceMethod,
@@ -312,6 +315,7 @@ impl DpBudget {
         dp_size: u32,
         block_size: usize,
         estimated_tokens: usize,
+        forced_rank: Option<u32>,
     ) -> u32 {
         let ranks = dp_size as usize;
         self.total_requests.resize(ranks, 0);
@@ -333,7 +337,9 @@ impl DpBudget {
             }
         }
 
-        let target = if method == DpLoadBalanceMethod::TotalTokens {
+        let target = if let Some(rank) = forced_rank {
+            rank as usize
+        } else if method == DpLoadBalanceMethod::TotalTokens {
             (0..ranks)
                 .min_by_key(|&rank| (self.total_tokens[rank], self.total_requests[rank]))
                 .unwrap_or(0)
@@ -444,18 +450,36 @@ impl MockerExecutionContext {
         }
     }
 
+    /// Picks the data-parallel rank for a request. An explicit `dp_rank` hint wins; otherwise
+    /// the configured load-balance method decides.
     fn resolve_dp_rank(&self, request: &PreprocessedRequest) -> Result<u32, String> {
+        let dp_size = self.engine_args.dp_size;
+        let method = self.dp_load_balance_method();
         if let Some(dp_rank) = request.routing.as_ref().and_then(|routing| routing.dp_rank) {
+            // Charge hinted requests to the budget too, so the load-based policies do not
+            // pick the same rank again before its next scheduler snapshot.
+            if matches!(
+                method,
+                DpLoadBalanceMethod::TotalRequests | DpLoadBalanceMethod::TotalTokens
+            ) && dp_rank < dp_size
+            {
+                self.dp_budget.lock().dispatch(
+                    method,
+                    self.engines.get().map(Vec::as_slice),
+                    dp_size,
+                    self.engine_args.block_size,
+                    request.token_ids.len(),
+                    Some(dp_rank),
+                );
+            }
             return Ok(dp_rank);
         }
-        let dp_size = self.engine_args.dp_size;
         // SGLang only starts its data-parallel controller, and so its load-balance policy, for
         // more than one rank.
         if dp_size <= 1 {
             return Ok(0);
         }
 
-        let method = self.dp_load_balance_method();
         match method {
             DpLoadBalanceMethod::FollowBootstrapRoom => {
                 // SGLang asserts here rather than falling back to another rank.
@@ -476,6 +500,7 @@ impl MockerExecutionContext {
                     dp_size,
                     self.engine_args.block_size,
                     request.token_ids.len(),
+                    None,
                 ))
             }
             DpLoadBalanceMethod::Auto | DpLoadBalanceMethod::RoundRobin => {
@@ -1766,6 +1791,26 @@ mod tests {
             })
             .collect();
         assert_eq!(ranks, [0, 1, 2, 0, 1]);
+    }
+
+    #[test]
+    fn total_requests_counts_explicit_rank_hints() {
+        let engine = dp_rank_engine_with_method(
+            EngineType::Sglang,
+            WorkerType::Decode,
+            3,
+            DpLoadBalanceMethod::TotalRequests,
+        );
+        let ranks: Vec<_> = [Some(0), Some(1), None, None]
+            .into_iter()
+            .map(|rank| {
+                engine
+                    .resolve_dp_rank(&dp_rank_request(None, rank))
+                    .unwrap()
+            })
+            .collect();
+        // The hinted requests load ranks 0 and 1, so the first unhinted one goes to rank 2.
+        assert_eq!(ranks, [0, 1, 2, 0]);
     }
 
     #[test]
