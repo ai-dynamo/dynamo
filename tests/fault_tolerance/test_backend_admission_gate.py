@@ -47,6 +47,12 @@ has answered, and a request the gate admits while every sequence is busy waits
 inside the engine without a response, holding both, until the test closes a
 stream ahead of it.
 
+Neither engine limit is set by default, which leaves the gate disabled: every
+request passes straight to the engine, uncounted, whatever the queue limit. So
+every scenario that exercises the gate sets an engine limit, an engine limit it
+leaves unset is unlimited yet still has its occupancy reported, and one
+scenario checks the disabled gate against the engine's own gauges.
+
 A caller that disconnects while its request is queued is a separate question
 from the gate's own cancellation handling, which its unit tests cover: whether
 the cancellation reaches the queued request at all. On the default path the
@@ -487,6 +493,17 @@ class Gate:
                 occupancy[engine] = occupancy.get(engine, 0.0) + value
         return occupancy
 
+    async def await_engine_occupancy(self, expected: dict[str, int], what: str) -> None:
+        """Poll until the mocker holds exactly `expected` requests, running or
+        waiting, on each engine rank."""
+        deadline = time.monotonic() + SETTLE_TIMEOUT_S
+        while (observed := await self.engine_occupancy()) != expected:
+            assert time.monotonic() < deadline, (
+                f"timed out waiting for {what}: the engine holds {observed}, "
+                f"expected {expected}"
+            )
+            await asyncio.sleep(0.05)
+
     async def await_engine_agreement(self, what: str) -> None:
         """Poll until the mocker serves on each rank exactly the requests the
         gate admitted under that rank: the gate's rank is the engine's rank."""
@@ -776,9 +793,10 @@ def test_waiting_limit_holds_requests_until_a_first_response(
     the first response of the one ahead of it, which keeps running and keeps
     its request capacity.
 
-    The request limit is set far above use, so the waiting limit alone is what
-    holds the queue back. The refusal leaves the worker marked overloaded and
-    never reported down, and it serves new work once the lease ends.
+    The request limit is unset, so unlimited, yet the gate still reports its
+    occupancy: the waiting limit alone is what holds the queue back. The
+    refusal leaves the worker marked overloaded and never reported down, and it
+    serves new work once the lease ends.
     """
     queue_limit = WAITING_SCENARIO_QUEUE_LIMIT
 
@@ -885,7 +903,6 @@ def test_waiting_limit_holds_requests_until_a_first_response(
         )
 
     settings = {
-        ENGINE_REQUEST_LIMIT_ENV: 100,
         ENGINE_REQUEST_WAITING_LIMIT_ENV: 1,
         REQUEST_QUEUE_LIMIT_ENV: queue_limit,
     }
@@ -910,8 +927,8 @@ def test_request_limit_holds_requests_until_one_finishes(
 ):
     """Requests that have answered keep their request capacity until they
     finish. The engine has a sequence for every admitted request and the
-    waiting limit follows it, so the request limit alone holds the next one
-    back, and only a stream finishing lets it in."""
+    waiting limit is unset, so unlimited: the request limit alone holds the
+    next one back, and only a stream finishing lets it in."""
 
     async def scenario(
         gate: Gate, session: aiohttp.ClientSession, url: str, worker_id: int
@@ -962,57 +979,67 @@ def test_request_limit_holds_requests_until_one_finishes(
         _run(dynamo_dynamic_ports.frontend_port, deployment, scenario)
 
 
-######################### CAPACITY-DERIVED DEFAULTS #########################
+######################### DISABLED BY DEFAULT #########################
 
 
 @pytest.mark.timeout(60)
-def test_automatic_limits_follow_the_reported_capacity(
+@pytest.mark.parametrize(
+    "settings",
+    [{}, {REQUEST_QUEUE_LIMIT_ENV: 4}],
+    ids=["defaults", "queue-limit-only"],
+)
+def test_unset_engine_limits_pass_every_request_to_the_engine(
     request,
     runtime_services_session,
     predownload_tokenizers,
     request_plane,
     dynamo_dynamic_ports,
+    settings,
 ):
-    """With no setting given, every limit follows the `max_num_seqs` the worker
-    reports, one sequence: one request in the engine, one awaiting its first
-    response, and a queue of twice that. With the first request running, the
-    second and third queue, the fourth is refused, and the queue drains in
-    order."""
+    """With neither engine limit set, by default or with only a queue limit,
+    the gate is disabled and every request passes straight to the engine.
+
+    The engine runs one sequence. With one stream running, three more streams
+    all reach the engine, which holds them in its own queue, while the gate
+    counts, queues and refuses none of them and the frontend never marks the
+    worker overloaded. Freeing the engine's sequence lets one of them answer.
+    """
+    followers = 3
 
     async def scenario(
         gate: Gate, session: aiohttp.ClientSession, url: str, worker_id: int
     ) -> None:
-        runner = await _start_running(gate, session, url, (1, 0, 0), "running")
-        queued = [
-            await _stage_waiting(
-                gate, session, url, _hold, (1, 0, index + 1), f"queued-{index}"
-            )
-            for index in range(2)
-        ]
-        await _shed(gate, session, url)
-        await gate.assert_counters(
-            "the automatic request limit queues and the automatic queue limit refuses",
-            received=4,
-            direct=1,
-            rejected=1,
+        runner = await _hold(session, url)
+        await gate.await_engine_occupancy({"0": 1}, "the running stream")
+        waiting = [asyncio.create_task(_hold(session, url)) for _ in range(followers)]
+        await gate.await_engine_occupancy(
+            {"0": 1 + followers}, "every stream to reach the engine"
         )
+        assert not any(
+            task.done() for task in waiting
+        ), "only the running stream has the engine's sequence"
+        assert await gate.totals() == (0, 0, 0)
+        for rank in gate.ranks:
+            await gate.assert_counters("every stream reaching the engine", rank)
 
-        released = runner
-        for index, task in enumerate(queued):
-            released.close()
-            released = await _result(task, f"queued-{index}")
-            await gate.await_counter("queue", index + 1, f"queued-{index} to enter")
-            await gate.await_occupancy(
-                1, 0, 1 - index, f"queued-{index} to answer in FIFO order"
-            )
-        released.close()
-        await gate.await_idle()
-        await gate.assert_counters(
-            "the queue has drained", received=4, direct=1, queue=2, rejected=1
+        runner.close()
+        done, pending = await asyncio.wait(
+            waiting, timeout=OUTCOME_TIMEOUT_S, return_when=asyncio.FIRST_COMPLETED
         )
+        assert len(done) == 1, f"one stream answers on the freed sequence: {done}"
+        done.pop().result().close()
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        await gate.await_engine_occupancy({"0": 0}, "the engine to drain")
+        for rank in gate.ranks:
+            await gate.assert_counters("the engine draining", rank)
+        assert not _routing_events(
+            gate, "worker_overloaded"
+        ), "a disabled gate must never refuse work"
 
     with _deployment(
-        request, dynamo_dynamic_ports, request_plane, {}, max_num_seqs=1
+        request, dynamo_dynamic_ports, request_plane, settings, max_num_seqs=1
     ) as deployment:
         _run(dynamo_dynamic_ports.frontend_port, deployment, scenario)
 
@@ -1532,8 +1559,11 @@ def test_a_failed_worker_is_still_reported_down(
     for the worker — the record no worker refusing for capacity may ever
     produce."""
 
+    # An engine limit enables the gate, whose occupancy shows the stream
+    # admitted.
+    settings = {ENGINE_REQUEST_LIMIT_ENV: 1}
     with _deployment(
-        request, dynamo_dynamic_ports, request_plane, {}, max_num_seqs=1
+        request, dynamo_dynamic_ports, request_plane, settings, max_num_seqs=1
     ) as deployment:
 
         async def main() -> None:

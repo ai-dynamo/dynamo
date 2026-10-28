@@ -11,7 +11,9 @@ before they register, as a worker that serves and registers concurrently may:
 until registration, an endpoint serves exactly as before and never touches the
 gate, and from then on it admits every request. Requests that arrive before the
 card reports the worker's ranks are admitted under the gate's fallbacks, which
-the gate's own unit tests cover.
+the gate's own unit tests cover. Admission is disabled until an engine limit is
+set, so every worker here sets limits, which its requests never reach unless a
+test says otherwise.
 
 A Python worker's ingress decodes each unary request body straight into the
 object its handler receives, recording the body's ``routing.dp_rank`` in the
@@ -89,9 +91,17 @@ DP_RANK_LABEL = re.compile(r'dp_rank="([^"]*)"')
 WORKER_ID_LABEL = re.compile(r'worker_id="([^"]*)"')
 UNSPECIFIED = "unspecified"
 
+# Backend admission is disabled until an engine limit is set, so every gate
+# here is configured, under the canonical names, with the aliases cleared so
+# none can shadow them. By default it admits under limits no test reaches, so
+# it admits and counts every request a model backend receives.
+ADMITTING_LIMITS = {
+    "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT": "10000",
+    "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT": "10000",
+    "DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT": "0",
+}
 # A gate admitting one engine request, waiting until its first token, and
-# queueing none, under the canonical names; the aliases are cleared so none can
-# shadow them.
+# queueing none.
 ONE_REQUEST_LIMITS = {
     "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT": "1",
     "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT": "1",
@@ -413,9 +423,14 @@ class Gate:
 
 
 @contextlib.asynccontextmanager
-async def _runtimes(tmp_path, codec: str, count: int):
+async def _runtimes(tmp_path, codec: str, count: int, limits=ADMITTING_LIMITS):
     """`count` runtimes in this one process — each a Python worker, with a
-    metrics endpoint of its own — and a session to scrape them."""
+    metrics endpoint of its own, whose gate admits under `limits` — and a
+    session to scrape them."""
+    # Each gate reads its limits as it is created, when its worker registers.
+    for alias in LIMIT_ALIASES:
+        os.environ.pop(alias, None)
+    os.environ.update(limits)
     # The system port must fit the runtime's port range, which the shared
     # allocator respects; an arbitrary ephemeral port may not.
     with reserved_ports(count, DefaultPort.SYSTEM1.value) as ports:
@@ -445,18 +460,11 @@ async def _runtimes(tmp_path, codec: str, count: int):
 
 
 @contextlib.asynccontextmanager
-async def _runtime(tmp_path, codec: str):
-    """A runtime with a metrics endpoint, and a session to scrape it."""
-    async with _runtimes(tmp_path, codec, 1) as (runtimes, servers, gates):
+async def _runtime(tmp_path, codec: str, limits=ADMITTING_LIMITS):
+    """A runtime with a metrics endpoint, whose gate admits under `limits`, and
+    a session to scrape it."""
+    async with _runtimes(tmp_path, codec, 1, limits) as (runtimes, servers, gates):
         yield runtimes[0], servers, gates[0]
-
-
-def _admit_one_request_per_worker() -> None:
-    """Configure every gate created from now on to admit one engine request,
-    waiting until its first token, and to queue none."""
-    for alias in LIMIT_ALIASES:
-        os.environ.pop(alias, None)
-    os.environ.update(ONE_REQUEST_LIMITS)
 
 
 async def _refused_as_overloaded(client, body) -> None:
@@ -1217,8 +1225,11 @@ async def test_python_workers_in_one_process_admit_through_their_own_gates(
     if _run_in_fresh_process(request, tmp_path):
         return
 
-    _admit_one_request_per_worker()
-    async with _runtimes(tmp_path, "msgpack", 2) as (runtimes, servers, gates):
+    async with _runtimes(tmp_path, "msgpack", 2, ONE_REQUEST_LIMITS) as (
+        runtimes,
+        servers,
+        gates,
+    ):
         scripted = [Scripted([{"token_ids": [11]}]) for _ in runtimes]
         clients = []
         for index, (runtime, handler) in enumerate(zip(runtimes, scripted)):
@@ -1273,8 +1284,11 @@ async def test_endpoints_of_one_python_worker_share_its_gate(request, tmp_path):
     if _run_in_fresh_process(request, tmp_path):
         return
 
-    _admit_one_request_per_worker()
-    async with _runtime(tmp_path, "msgpack") as (runtime, servers, gate):
+    async with _runtime(tmp_path, "msgpack", ONE_REQUEST_LIMITS) as (
+        runtime,
+        servers,
+        gate,
+    ):
         scripted = {path: Scripted([{"token_ids": [11]}]) for path in ("pull", "push")}
         endpoints = {}
         clients = {}

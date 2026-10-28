@@ -98,44 +98,57 @@ apply to the whole worker.
 ### Configuration
 
 > [!NOTE]
-> **Tune these limits to your traffic shape.** The engine-based defaults are starting points; validate
-> the limits with representative request sizes, concurrency, and bursts, watching goodput and latency.
-> Dynamic adaptation to changing traffic is planned as separate router work.
+> **Backend admission control is disabled by default.** To enable it, apply the
+> [recommended starting limits](#best-practices), then tune them to your traffic shape and SLOs.
 
 Set these on the backend worker. All values apply **per DP rank**; the worker's total capacity is the
-combined capacity of its ranks. Restart the worker to change an explicit setting.
+combined capacity of its ranks. Restart the worker to change a setting.
 
 | Setting | Environment variable | Also configured by | Default |
 |---|---|---|---|
-| Engine request limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` | `--engine-request-limit`; alias `DYN_ENGINE_REQUEST_LIMIT` | Engine-reported `max_num_seqs`; `10000` until reported. |
-| Engine request waiting limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` | Alias `DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT` | Engine-reported `max_num_seqs`; `10000` until reported. |
-| Request queue limit | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | Alias `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | Twice the engine-reported `max_num_seqs`; `20000` until reported. |
+| Engine request limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` | `--engine-request-limit`; alias `DYN_ENGINE_REQUEST_LIMIT` | Unset: unlimited |
+| Engine request waiting limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` | Alias `DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT` | Unset: unlimited |
+| Request queue limit | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | Alias `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | `0`: no queue |
 
 Both engine limits accept positive integers. The queue limit accepts non-negative integers; `0`
 disables queueing, so requests that cannot enter immediately are rejected.
+
+Setting either engine limit enables admission control. An engine limit left unset stays unlimited, but
+the gate still reports its occupancy. With both engine limits unset, the gate is disabled whatever the
+queue limit: requests pass straight to the engine, and existing engine and transport behavior governs
+them.
 
 An explicit `--engine-request-limit` takes precedence over environment variables. Each canonical
 variable takes precedence over its alias. Invalid environment values log a warning and fall back to
 the next source; an invalid CLI value fails startup.
 
-Defaults follow the engine's reported capacity, while explicit settings remain fixed. Until the engine
-reports its ranks, the gate assumes one rank and handles all requests as unranked. Each setting is
-independent: overriding an engine limit does not change the queue default.
+Until the engine reports its ranks, the gate assumes one rank and handles all requests as unranked.
 
 ### Best Practices
 
-**Start with the engine-based defaults.** Both engine limits default to `max_num_seqs` per rank,
-keeping excess work outside the engine once that many requests are admitted. Raising the limits does
-not increase the engine's batch capacity.
+**Enable admission control with engine-based starting limits.** Set the three limits below using the
+engine's `max_num_seqs` (may be found in the worker log):
 
-**Adjust engine limits only for your workload.** Use the request limit to bound ongoing work,
-including requests already streaming, and the waiting limit to bound work still awaiting a first token
-or completion. Validate changes under representative load, watching goodput and latency.
+| Setting | Starting value per DP rank |
+|---|---|
+| `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` | `max_num_seqs` |
+| `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` | `max_num_seqs` |
+| `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | `2 × max_num_seqs` |
 
-**Keep the default queue unless your bursts require a different size.** The default provides a
-backlog of twice `max_num_seqs` per rank. A deeper queue absorbs longer bursts at the cost of longer
-waits; the gate does not reject requests based on how long they have waited. Set the limit to `0`
-for immediate rejection when engine capacity is unavailable.
+These settings keep excess work outside the engine once it holds `max_num_seqs` requests, with a
+queue to absorb bursts. Increasing either engine limit does not increase the engine's batch
+capacity.
+
+> [!NOTE]
+> **Set the queue limit together with the engine limits.** The queue limit defaults to `0`. If you set
+> an engine limit and leave the queue at `0`, the worker rejects every request that does not fit under
+> that limit at once, with no waiting at the gate.
+
+**Tune from there for your workload and SLOs.** Use the request limit to bound ongoing work, including
+requests already streaming, and the waiting limit to bound work still awaiting a first token or
+completion; size the waiting limit with Little's law, as described below. A deeper queue absorbs
+longer bursts at the cost of longer waits; the gate does not reject requests based on how long they
+have waited. Validate each change under representative load, watching goodput and latency.
 
 #### Size the waiting limit with Little's law
 
@@ -150,9 +163,10 @@ For the engine waiting stage, `L` is the average number of waiting requests, `C`
 rate in requests per second, and `W` is the mean time in seconds from admission to the first generated
 token or completion.
 
-Measure a warmed-up worker at the highest steady load that meets your latency SLO. During this
-calibration, keep both engine limits high enough that the gate does not constrain admission, and
-confirm there is no gate queueing or rejection. Measure prefill and decode workers separately.
+Measure a warmed-up worker at the highest steady load that meets your latency SLO. The gate reports
+occupancy only while it is enabled, so during this calibration set an engine limit high enough that
+the gate does not constrain admission, and confirm there is no gate queueing or rejection. Measure
+prefill and decode workers separately.
 
 For one worker and one known `dp_rank`, use the same steady interval to measure:
 
@@ -191,7 +205,8 @@ Each worker exposes the following metrics. In the **Labels** column, `dp_rank` i
 | `dynamo_backend_admission_cancellation_total` | Counter | `dp_rank` | Requests cancelled before engine admission. |
 
 Each request is counted under one `dp_rank` value. Sum across all values, including `unspecified`, for
-worker totals.
+worker totals. The gate counts requests only while admission control is enabled; while it is
+disabled, these metrics stay at zero.
 
 Compare engine and queue counts with their configured limits to identify where work accumulates.
 Watch admission and rejection rates alongside client-visible goodput when tuning under load.

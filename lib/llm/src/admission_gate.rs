@@ -47,6 +47,10 @@
 //!   [`AdmissionResponse`]; the gate never parses a payload. Obtaining the
 //!   stream is not a response.
 //!
+//! Either limit may be unlimited: it then always has room, but its occupancy is
+//! still counted and published. With both unlimited, admission control is
+//! disabled (see [Configuration](#configuration)).
+//!
 //! Admission reserves both together, under one lock, so no request ever holds
 //! one while it waits for the other. A request whose stream never produces a
 //! response that ends its wait — `generate` fails, the stream ends or fails
@@ -111,11 +115,11 @@
 //! Each setting is a per-rank limit, read once when a worker's gate is created,
 //! from the first of its environment names that holds a valid value:
 //!
-//! | Setting | Environment names, in precedence order | Automatic value |
+//! | Setting | Environment names, in precedence order | Default |
 //! |---|---|---|
-//! | Engine request limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT`, `DYN_ENGINE_REQUEST_LIMIT` | `max_num_seqs` |
-//! | Engine request waiting limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT`, `DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT` | `max_num_seqs` |
-//! | Request queue limit | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT`, `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | `2 * max_num_seqs` |
+//! | Engine request limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT`, `DYN_ENGINE_REQUEST_LIMIT` | unlimited |
+//! | Engine request waiting limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT`, `DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT` | unlimited |
+//! | Request queue limit | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT`, `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | `0` |
 //!
 //! Engine limits must be positive integers, and the queue limit a non-negative
 //! one. A value that is set but invalid is warned about and passed over. A
@@ -123,13 +127,20 @@
 //! canonical engine request limit name before the gate is created, so an
 //! explicit flag takes precedence over both environment names.
 //!
-//! A setting without an explicit value is automatic: it follows the
-//! `max_num_seqs` the engine reports through its worker's model card, and
-//! assumes [`FALLBACK_MAX_NUM_SEQS`] until then. Capacity and rank reports
-//! update the automatic limits and the rank count at any time, without
-//! resetting live occupancy; they never replace an explicit value. A lower
-//! limit evicts nothing: it holds further admission back until occupancy falls
-//! below it.
+//! Setting either engine limit enables admission control, and an engine limit
+//! left unset stays unlimited. With both unset, the default, admission control
+//! is disabled whatever the queue limit: [`BackendAdmissionGate::admit`] passes
+//! every request straight to its engine without taking the gate's lock,
+//! counting it or queueing it, so the gate neither delays nor refuses any
+//! request and its metrics stay at zero. Queue storage follows the queue limit
+//! either way, so the default queue allocates none.
+//!
+//! The per-rank limits never change once the gate is created. The engine's
+//! reported `max_num_seqs` is only logged, to help tune them. Its reported DP
+//! ranks set how many ranks the worker-wide limits aggregate over, at any time,
+//! without resetting live occupancy; until they are reported the gate assumes
+//! one rank. A lower aggregate evicts nothing: it holds further admission back
+//! until occupancy falls below it.
 //!
 //! TCP requests pass through the TCP work queue and worker pool before reaching
 //! this gate, then keep their worker-pool permit while waiting here. The TCP
@@ -150,7 +161,6 @@ use dynamo_runtime::engine::{
     EngineStream,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType};
-use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::pipeline::{ManyOut, ServiceEngine, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::Stream;
@@ -186,21 +196,17 @@ const DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT: &str = "DYN_BACKEND_ADMISSION_R
 /// Legacy alias of [`DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT`].
 const DYN_DYNAMO_REQUEST_QUEUE_LIMIT: &str = "DYN_DYNAMO_REQUEST_QUEUE_LIMIT";
 
-/// The `max_num_seqs` the automatic limits assume until the engine reports its
-/// own.
-const FALLBACK_MAX_NUM_SEQS: usize = 10_000;
+const DEFAULT_REQUEST_QUEUE_LIMIT: usize = 0;
 
 /// How far a limit may exceed the engine's reported capacity before the gate
 /// warns that it is unlikely to hold any work back.
 const CAPACITY_WARNING_FACTOR: usize = 10;
 
-/// One configuration setting: its environment names in precedence order, the
-/// smallest value it accepts, and its automatic value as a multiple of the
-/// engine's `max_num_seqs`.
+/// One configuration setting: its environment names in precedence order, and
+/// the smallest value it accepts.
 struct Setting {
     names: &'static [&'static str],
     min: usize,
-    capacity_multiple: usize,
 }
 
 const ENGINE_REQUEST_LIMIT: Setting = Setting {
@@ -209,7 +215,6 @@ const ENGINE_REQUEST_LIMIT: Setting = Setting {
         DYN_ENGINE_REQUEST_LIMIT,
     ],
     min: 1,
-    capacity_multiple: 1,
 };
 
 const ENGINE_REQUEST_WAITING_LIMIT: Setting = Setting {
@@ -218,7 +223,6 @@ const ENGINE_REQUEST_WAITING_LIMIT: Setting = Setting {
         DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT,
     ],
     min: 1,
-    capacity_multiple: 1,
 };
 
 /// Zero is valid: it disables queueing.
@@ -228,22 +232,21 @@ const REQUEST_QUEUE_LIMIT: Setting = Setting {
         DYN_DYNAMO_REQUEST_QUEUE_LIMIT,
     ],
     min: 0,
-    capacity_multiple: 2,
 };
 
 impl Setting {
-    /// The value of the first name `lookup` finds valid, and that name, or
-    /// `None` when the setting is left automatic.
+    /// The value of the first name `lookup` finds valid, or `None` when the
+    /// setting is left at its default.
     ///
     /// A value that is set but is not an integer of at least `min` is warned
     /// about and passed over, so it cannot hide a valid value behind it.
-    fn resolve(&self, lookup: &impl Fn(&str) -> Option<String>) -> Option<Explicit> {
+    fn resolve(&self, lookup: &impl Fn(&str) -> Option<String>) -> Option<usize> {
         for &name in self.names {
             let Some(raw) = lookup(name) else {
                 continue;
             };
             match raw.trim().parse::<usize>() {
-                Ok(value) if value >= self.min => return Some(Explicit { value, name }),
+                Ok(value) if value >= self.min => return Some(value),
                 _ => tracing::warn!(
                     env = name,
                     value = %raw,
@@ -255,32 +258,15 @@ impl Setting {
         }
         None
     }
-
-    /// The per-rank limit in force: the explicit value, or the automatic
-    /// multiple of `max_num_seqs`.
-    fn value(&self, explicit: Option<Explicit>, max_num_seqs: usize) -> usize {
-        explicit.map_or_else(
-            || max_num_seqs.saturating_mul(self.capacity_multiple),
-            |explicit| explicit.value,
-        )
-    }
 }
 
-/// A setting's explicit per-rank value, and the environment name it came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Explicit {
-    value: usize,
-    name: &'static str,
-}
-
-/// The per-rank values configured explicitly, each `None` when left
-/// automatic. Read once, when the gate is created; no capacity report ever
-/// replaces one, including a queue limit of zero.
+/// The per-rank values configured explicitly, each `None` when left at its
+/// default. Read once, when the gate is created; nothing ever replaces one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ExplicitLimits {
-    engine_request_limit: Option<Explicit>,
-    engine_request_waiting_limit: Option<Explicit>,
-    request_queue_limit: Option<Explicit>,
+    engine_request_limit: Option<usize>,
+    engine_request_waiting_limit: Option<usize>,
+    request_queue_limit: Option<usize>,
 }
 
 impl ExplicitLimits {
@@ -297,6 +283,12 @@ impl ExplicitLimits {
             engine_request_waiting_limit: ENGINE_REQUEST_WAITING_LIMIT.resolve(&lookup),
             request_queue_limit: REQUEST_QUEUE_LIMIT.resolve(&lookup),
         }
+    }
+
+    /// Whether these settings enable admission control: either engine limit is
+    /// set. A queue limit alone does not.
+    fn admission_enabled(&self) -> bool {
+        self.engine_request_limit.is_some() || self.engine_request_waiting_limit.is_some()
     }
 }
 
@@ -330,13 +322,14 @@ impl std::fmt::Display for RankRange {
 }
 
 /// The limits the gate enforces. Each is per DP rank; its worker-wide limit is
-/// the same capacity aggregated over `rank_count` ranks.
+/// the same capacity aggregated over `rank_count` ranks. An engine limit of
+/// `None` is unlimited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AdmissionLimits {
     /// Admitted requests that have not finished.
-    engine_request_limit: usize,
+    engine_request_limit: Option<usize>,
     /// Admitted requests still waiting for the engine's output.
-    engine_request_waiting_limit: usize,
+    engine_request_waiting_limit: Option<usize>,
     /// Requests waiting in a queue.
     request_queue_limit: usize,
     /// The ranks the worker serves: one until it reports them.
@@ -344,19 +337,17 @@ struct AdmissionLimits {
 }
 
 impl AdmissionLimits {
-    /// The limits for these explicit settings, reported `max_num_seqs` and
-    /// rank count. Each setting resolves independently: an explicit value wins,
-    /// and an automatic one derives from `max_num_seqs` alone, never from
-    /// another setting.
-    fn resolve(explicit: &ExplicitLimits, max_num_seqs: Option<usize>, rank_count: usize) -> Self {
-        let max_num_seqs = max_num_seqs.unwrap_or(FALLBACK_MAX_NUM_SEQS);
+    /// The limits for these explicit settings over `rank_count` ranks. Each
+    /// setting resolves independently, to its explicit value or its default:
+    /// unlimited for an engine limit, and no queue. The engine's capacity never
+    /// enters into them.
+    fn resolve(explicit: &ExplicitLimits, rank_count: usize) -> Self {
         Self {
-            engine_request_limit: ENGINE_REQUEST_LIMIT
-                .value(explicit.engine_request_limit, max_num_seqs),
-            engine_request_waiting_limit: ENGINE_REQUEST_WAITING_LIMIT
-                .value(explicit.engine_request_waiting_limit, max_num_seqs),
-            request_queue_limit: REQUEST_QUEUE_LIMIT
-                .value(explicit.request_queue_limit, max_num_seqs),
+            engine_request_limit: explicit.engine_request_limit,
+            engine_request_waiting_limit: explicit.engine_request_waiting_limit,
+            request_queue_limit: explicit
+                .request_queue_limit
+                .unwrap_or(DEFAULT_REQUEST_QUEUE_LIMIT),
             rank_count,
         }
     }
@@ -367,51 +358,39 @@ impl AdmissionLimits {
     }
 }
 
-/// The effective configuration, captured under the lock to be logged after it.
-#[derive(Clone, Copy, Debug)]
-struct LimitsSnapshot {
-    limits: AdmissionLimits,
-    explicit: ExplicitLimits,
+/// The capacity a worker's engine has reported to its gate: its `max_num_seqs`
+/// per rank and the DP ranks it serves, each `None` until reported. Logged with
+/// the configuration to help tune the limits; it never sets one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DetectedCapacity {
     max_num_seqs: Option<usize>,
     served: Option<RankRange>,
 }
 
-impl LimitsSnapshot {
-    /// Where a limit's value comes from: the environment name that set it, or
-    /// the capacity its automatic value follows.
-    fn source(&self, explicit: Option<Explicit>) -> &'static str {
-        match (explicit, self.max_num_seqs) {
-            (Some(explicit), _) => explicit.name,
-            (None, Some(_)) => "reported max_num_seqs",
-            (None, None) => "default until max_num_seqs is reported",
-        }
-    }
+/// The effective configuration, copied out of the gate's state so it is logged
+/// with no lock held.
+#[derive(Clone, Copy, Debug)]
+struct LimitsSnapshot {
+    limits: AdmissionLimits,
+    detected: DetectedCapacity,
+}
 
-    /// Log the limits in force for `owner`'s worker, with each one's source and
-    /// scope.
-    fn log(&self, owner: &GateOwner, message: &str) {
+impl LimitsSnapshot {
+    /// Log it at INFO: each per-rank limit, an unset engine limit as
+    /// `unlimited`, and the engine's detected DP ranks and `max_num_seqs`,
+    /// each still unreported as `unavailable`.
+    fn log(&self) {
+        fn shown(value: Option<impl std::fmt::Display>, missing: &str) -> String {
+            value.map_or_else(|| missing.to_string(), |value| value.to_string())
+        }
         let limits = self.limits;
-        let served = self
-            .served
-            .map_or_else(|| "unreported".to_string(), |served| served.to_string());
         tracing::info!(
-            component = %owner.component,
-            worker_id = %owner.worker_id,
-            engine_request_limit = limits.engine_request_limit,
-            engine_request_limit_source = self.source(self.explicit.engine_request_limit),
-            engine_request_waiting_limit = limits.engine_request_waiting_limit,
-            engine_request_waiting_limit_source =
-                self.source(self.explicit.engine_request_waiting_limit),
+            engine_request_limit = %shown(limits.engine_request_limit, "unlimited"),
+            engine_request_waiting_limit = %shown(limits.engine_request_waiting_limit, "unlimited"),
             request_queue_limit = limits.request_queue_limit,
-            request_queue_limit_source = self.source(self.explicit.request_queue_limit),
-            limit_scope = "per DP rank",
-            dp_rank_count = limits.rank_count,
-            dp_ranks = %served,
-            worker_engine_request_limit = limits.aggregate(limits.engine_request_limit),
-            worker_engine_request_waiting_limit =
-                limits.aggregate(limits.engine_request_waiting_limit),
-            worker_request_queue_limit = limits.aggregate(limits.request_queue_limit),
-            "{message}"
+            detected_dp_ranks = %shown(self.detected.served, "unavailable"),
+            detected_max_num_seqs = %shown(self.detected.max_num_seqs, "unavailable"),
+            "Backend admission configuration"
         );
     }
 }
@@ -428,8 +407,9 @@ struct CapacityWarning {
 
 impl CapacityWarning {
     /// Every limit in `limits` that exceeds `max_num_seqs` by more than the
-    /// warning factor. A per-rank limit is compared with per-rank capacity; the
-    /// worker-wide one with the worker's capacity, which is the same ratio.
+    /// warning factor; an unlimited one is no such limit. A per-rank limit is
+    /// compared with per-rank capacity; the worker-wide one with the worker's
+    /// capacity, which is the same ratio.
     fn check(limits: &AdmissionLimits, max_num_seqs: usize) -> Vec<Self> {
         let threshold = max_num_seqs.saturating_mul(CAPACITY_WARNING_FACTOR);
         [
@@ -443,10 +423,11 @@ impl CapacityWarning {
             ),
             (
                 DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT,
-                limits.request_queue_limit,
+                Some(limits.request_queue_limit),
             ),
         ]
         .into_iter()
+        .filter_map(|(setting, limit)| limit.map(|limit| (setting, limit)))
         .filter(|&(_, limit)| limit > threshold)
         .map(|(setting, per_rank_limit)| Self {
             setting,
@@ -457,10 +438,8 @@ impl CapacityWarning {
         .collect()
     }
 
-    fn log(&self, owner: &GateOwner) {
+    fn log(&self) {
         tracing::warn!(
-            component = %owner.component,
-            worker_id = %owner.worker_id,
             setting = self.setting,
             per_rank_limit = self.per_rank_limit,
             per_rank_capacity = self.max_num_seqs,
@@ -761,13 +740,14 @@ fn classify(
 /// unspecified one counts only in the total, through the unspecified count. The
 /// total is therefore always the ranks' counts plus the unspecified count, and
 /// both kinds draw on the one aggregate limit: unspecified requests have no
-/// capacity of their own.
+/// capacity of their own. An unlimited measure always has room, and counts all
+/// the same.
 #[derive(Debug)]
 struct DpRankCounts {
-    /// Each rank's limit.
-    per_rank_limit: usize,
+    /// Each rank's limit, or `None` when unlimited.
+    per_rank_limit: Option<usize>,
     /// The worker-wide limit: the per-rank limit over every served rank.
-    aggregate_limit: usize,
+    aggregate_limit: Option<usize>,
     /// Each rank's count, for ranks with any; a rank that drains is dropped.
     ranks: HashMap<u32, usize>,
     /// Requests counted without a rank.
@@ -777,10 +757,10 @@ struct DpRankCounts {
 }
 
 impl DpRankCounts {
-    fn new(per_rank_limit: usize, rank_count: usize) -> Self {
+    fn new(per_rank_limit: Option<usize>, rank_count: usize) -> Self {
         Self {
             per_rank_limit,
-            aggregate_limit: per_rank_limit.saturating_mul(rank_count),
+            aggregate_limit: per_rank_limit.map(|limit| limit.saturating_mul(rank_count)),
             ranks: HashMap::new(),
             unspecified: 0,
             total: 0,
@@ -789,15 +769,15 @@ impl DpRankCounts {
 
     /// Replace the limits, keeping every count: a lower limit evicts nothing,
     /// it only holds further acquisitions back until the counts fall below it.
-    fn set_limits(&mut self, per_rank_limit: usize, rank_count: usize) {
+    fn set_limits(&mut self, per_rank_limit: Option<usize>, rank_count: usize) {
         self.per_rank_limit = per_rank_limit;
-        self.aggregate_limit = per_rank_limit.saturating_mul(rank_count);
+        self.aggregate_limit = per_rank_limit.map(|limit| limit.saturating_mul(rank_count));
     }
 
     /// Whether one more request fits under the worker-wide limit, whatever
     /// its rank.
     fn has_aggregate_room(&self) -> bool {
-        self.total < self.aggregate_limit
+        self.aggregate_limit.is_none_or(|limit| self.total < limit)
     }
 
     /// Whether one more request of `rank` fits under its rank's own limit,
@@ -805,7 +785,9 @@ impl DpRankCounts {
     /// has no rank limit.
     fn has_rank_room(&self, rank: AdmissionRank) -> bool {
         match rank {
-            AdmissionRank::Rank(_) => self.count(rank) < self.per_rank_limit,
+            AdmissionRank::Rank(_) => self
+                .per_rank_limit
+                .is_none_or(|limit| self.count(rank) < limit),
             AdmissionRank::Unspecified => true,
         }
     }
@@ -1103,10 +1085,9 @@ impl QueueSlots {
 /// The gate's state, behind its one lock.
 struct GateState {
     explicit: ExplicitLimits,
-    /// The engine's `max_num_seqs` per rank, once a model card reports it.
-    max_num_seqs: Option<usize>,
-    /// The ranks the worker serves, once a model card reports them.
-    served: Option<RankRange>,
+    /// The engine's `max_num_seqs` per rank and the ranks the worker serves,
+    /// each once a model card reports it.
+    detected: DetectedCapacity,
     limits: AdmissionLimits,
     /// Admitted requests that have not finished, including those whose wait
     /// for the engine's output has already ended.
@@ -1156,18 +1137,17 @@ struct RankMetrics {
 
 impl GateState {
     fn new(explicit: ExplicitLimits, metrics: BackendAdmissionMetrics) -> Self {
-        let limits = AdmissionLimits::resolve(&explicit, None, 1);
+        let limits = AdmissionLimits::resolve(&explicit, 1);
         let mut state = Self {
             explicit,
-            max_num_seqs: None,
-            served: None,
+            detected: DetectedCapacity::default(),
             limits,
             engine_requests: DpRankCounts::new(limits.engine_request_limit, limits.rank_count),
             engine_requests_waiting: DpRankCounts::new(
                 limits.engine_request_waiting_limit,
                 limits.rank_count,
             ),
-            queued: DpRankCounts::new(limits.request_queue_limit, limits.rank_count),
+            queued: DpRankCounts::new(Some(limits.request_queue_limit), limits.rank_count),
             queues: HashMap::new(),
             schedule: BTreeMap::new(),
             slots: QueueSlots::with_capacity(limits.aggregate(limits.request_queue_limit)),
@@ -1189,9 +1169,7 @@ impl GateState {
     fn snapshot(&self) -> LimitsSnapshot {
         LimitsSnapshot {
             limits: self.limits,
-            explicit: self.explicit,
-            max_num_seqs: self.max_num_seqs,
-            served: self.served,
+            detected: self.detected,
         }
     }
 
@@ -1480,39 +1458,49 @@ impl GateState {
         self.admit_queued();
     }
 
-    /// Apply a model card's report, returning what changed for logging.
+    /// Apply a model card's report, returning what changed for logging. The
+    /// reported ranks set the rank count the limits aggregate over; a reported
+    /// `max_num_seqs` changes no limit.
     fn apply_report(
         &mut self,
         max_num_seqs: Option<usize>,
         served: Option<RankRange>,
     ) -> ReportOutcome {
+        let before = self.detected;
         if max_num_seqs.is_some() {
-            self.max_num_seqs = max_num_seqs;
+            self.detected.max_num_seqs = max_num_seqs;
         }
         if served.is_some() {
-            self.served = served;
+            self.detected.served = served;
         }
-        let rank_count = self.served.map_or(1, |served| served.count as usize);
-        let limits = AdmissionLimits::resolve(&self.explicit, self.max_num_seqs, rank_count);
-        let changed = limits != self.limits;
-        if changed {
+        let rank_count = self
+            .detected
+            .served
+            .map_or(1, |served| served.count as usize);
+        let limits = AdmissionLimits::resolve(&self.explicit, rank_count);
+        if limits != self.limits {
             self.set_limits(limits);
         }
-        if let Some(served) = self.served {
+        if let Some(served) = self.detected.served {
             // Every served rank is scrapeable at zero before its first request.
             for rank in served.ranks() {
                 self.series(AdmissionRank::Rank(rank));
             }
         }
-        let warnings = match self.max_num_seqs {
-            Some(max_num_seqs) if self.capacity_checked != Some((limits, max_num_seqs)) => {
+        // Only an enabled gate's limits can hold work back: a disabled gate
+        // leaves even its queue unused.
+        let warnings = match self.detected.max_num_seqs {
+            Some(max_num_seqs)
+                if self.explicit.admission_enabled()
+                    && self.capacity_checked != Some((limits, max_num_seqs)) =>
+            {
                 self.capacity_checked = Some((limits, max_num_seqs));
                 CapacityWarning::check(&limits, max_num_seqs)
             }
             _ => Vec::new(),
         };
         ReportOutcome {
-            changed: changed.then(|| self.snapshot()),
+            changed: (self.detected != before).then(|| self.snapshot()),
             warnings,
         }
     }
@@ -1527,7 +1515,7 @@ impl GateState {
         self.engine_requests_waiting
             .set_limits(limits.engine_request_waiting_limit, limits.rank_count);
         self.queued
-            .set_limits(limits.request_queue_limit, limits.rank_count);
+            .set_limits(Some(limits.request_queue_limit), limits.rank_count);
         self.slots
             .reserve(limits.aggregate(limits.request_queue_limit));
         self.reschedule_all();
@@ -1537,25 +1525,19 @@ impl GateState {
 
 /// What a model card's report changed, logged once the lock is released.
 struct ReportOutcome {
-    /// The new limits, when they changed.
+    /// The configuration, when the report changed the detected capacity.
     changed: Option<LimitsSnapshot>,
     warnings: Vec<CapacityWarning>,
-}
-
-/// Which worker a gate admits for, as its logs name it.
-#[derive(Debug, Default)]
-struct GateOwner {
-    /// The component the worker serves, as `namespace.component`.
-    component: String,
-    /// The worker's runtime connection ID, in hex as its metrics label it.
-    worker_id: String,
 }
 
 /// One worker's two engine limits plus bounded FIFO queues, per DP rank,
 /// shared by every endpoint serving for that worker. Reached only through the
 /// [`WorkerAdmissionGate`] its worker holds.
 pub struct BackendAdmissionGate {
-    owner: GateOwner,
+    /// Whether admission control is enabled: either engine limit is set.
+    /// Fixed as the gate is created; while it is not, every request bypasses
+    /// `state`.
+    enabled: bool,
     state: Mutex<GateState>,
 }
 
@@ -1565,21 +1547,7 @@ impl BackendAdmissionGate {
     /// as the component's own metrics are.
     fn for_component(component: &Component) -> Arc<Self> {
         let metrics = BackendAdmissionMetrics::new(component);
-        let owner = GateOwner {
-            component: component.to_string(),
-            worker_id: component
-                .connection_id()
-                .map(|worker_id| format!("{worker_id:x}"))
-                .unwrap_or_default(),
-        };
-        let gate = Self::with_metrics(owner, ExplicitLimits::from_environment(), metrics);
-        // Logged once per worker, as the effective configuration: the limits
-        // are not exported as metrics.
-        gate.state
-            .lock()
-            .snapshot()
-            .log(&gate.owner, "Backend admission gate created");
-        gate
+        Self::with_metrics(ExplicitLimits::from_environment(), metrics)
     }
 
     /// Build a standalone gate whose metrics are exposed nowhere, so tests
@@ -1587,20 +1555,20 @@ impl BackendAdmissionGate {
     #[cfg(test)]
     fn new(explicit: ExplicitLimits) -> Arc<Self> {
         Self::with_metrics(
-            GateOwner::default(),
             explicit,
             BackendAdmissionMetrics::new(&metrics::TestHierarchy::standalone()),
         )
     }
 
-    fn with_metrics(
-        owner: GateOwner,
-        explicit: ExplicitLimits,
-        metrics: BackendAdmissionMetrics,
-    ) -> Arc<Self> {
+    /// Build the gate and log its configuration, with no capacity detected
+    /// yet.
+    fn with_metrics(explicit: ExplicitLimits, metrics: BackendAdmissionMetrics) -> Arc<Self> {
+        let state = GateState::new(explicit, metrics);
+        // The limits are not exported as metrics.
+        state.snapshot().log();
         Arc::new(Self {
-            owner,
-            state: Mutex::new(GateState::new(explicit, metrics)),
+            enabled: explicit.admission_enabled(),
+            state: Mutex::new(state),
         })
     }
 
@@ -1620,6 +1588,10 @@ impl BackendAdmissionGate {
     /// `context` while the request is queued, and refuses it as
     /// [`ErrorType::Cancelled`] once stopped. An engine failure keeps its own
     /// error untouched.
+    ///
+    /// While admission control is disabled, with neither engine limit set,
+    /// this is `generate` alone: the request is neither counted, queued nor
+    /// refused, and its stream is returned as the engine produced it.
     pub async fn admit<R, F>(
         self: &Arc<Self>,
         context: &Arc<dyn AsyncEngineContext>,
@@ -1674,7 +1646,9 @@ impl BackendAdmissionGate {
     /// Every request entering here is counted as received, and one that
     /// reaches `generate` as admitted, under the rank it is admitted as. A
     /// refusal is traced and classified here and surfaces as the standardized
-    /// [`DynamoError`]; an engine failure keeps its own error untouched.
+    /// [`DynamoError`]; an engine failure keeps its own error untouched. While
+    /// admission control is disabled, nothing here happens: the request goes
+    /// straight to `generate`.
     async fn admit_inner<R, F>(
         self: &Arc<Self>,
         context: Option<&Arc<dyn AsyncEngineContext>>,
@@ -1685,6 +1659,9 @@ impl BackendAdmissionGate {
         R: Data + AdmissionResponse,
         F: Future<Output = anyhow::Result<EngineStream<R>>>,
     {
+        if !self.enabled {
+            return generate.await;
+        }
         let (permit, source) = self
             .acquire(context, dp_rank)
             .await
@@ -1720,7 +1697,7 @@ impl BackendAdmissionGate {
         }
 
         let (rank, fallback, series, decision) = self.transition(|state| {
-            let (rank, fallback) = classify(dp_rank, state.served);
+            let (rank, fallback) = classify(dp_rank, state.detected.served);
             let series = state.series(rank);
             series.received();
             // A caller that has already gone away must neither queue nor enter
@@ -1809,32 +1786,28 @@ impl BackendAdmissionGate {
     /// `max_num_seqs` per rank, and the ranks `data_parallel_start_rank`
     /// through `data_parallel_start_rank + data_parallel_size - 1`.
     ///
-    /// Updates the automatic limits and the rank count the worker-wide limits
-    /// aggregate over, whenever a report arrives or changes. Explicit settings,
-    /// live occupancy, queued requests and outstanding permits are kept; a
-    /// request already classified keeps its rank.
+    /// Sets the rank count the worker-wide limits aggregate over, whenever a
+    /// report arrives or changes; no report changes a per-rank limit. A report
+    /// that changes the detected `max_num_seqs` or ranks logs the
+    /// configuration again, with them, to help tune the limits; one that
+    /// changes neither logs no configuration. Live occupancy, queued requests
+    /// and outstanding permits are kept; a request already classified keeps its
+    /// rank.
     pub fn record_engine_capacity(
         &self,
         max_num_seqs: Option<u64>,
         data_parallel_start_rank: u32,
         data_parallel_size: u32,
     ) {
-        let owner = &self.owner;
         let max_num_seqs = match max_num_seqs {
             Some(0) => {
-                tracing::warn!(
-                    component = %owner.component,
-                    worker_id = %owner.worker_id,
-                    "Ignoring a reported max_num_seqs of 0 for backend admission sizing"
-                );
+                tracing::warn!("Ignoring a reported max_num_seqs of 0 for backend admission");
                 None
             }
             max_num_seqs => max_num_seqs.map(|value| usize::try_from(value).unwrap_or(usize::MAX)),
         };
         let served = if data_parallel_size == 0 {
             tracing::warn!(
-                component = %owner.component,
-                worker_id = %owner.worker_id,
                 data_parallel_start_rank,
                 "Ignoring a reported data_parallel_size of 0 for backend admission"
             );
@@ -1847,13 +1820,10 @@ impl BackendAdmissionGate {
         };
         let outcome = self.transition(|state| state.apply_report(max_num_seqs, served));
         if let Some(snapshot) = outcome.changed {
-            snapshot.log(
-                owner,
-                "Backend admission limits updated from the reported engine capacity",
-            );
+            snapshot.log();
         }
         for warning in outcome.warnings {
-            warning.log(owner);
+            warning.log();
         }
     }
 }
@@ -2081,14 +2051,6 @@ mod tests {
 
     use dynamo_runtime::pipeline::context::Controller;
 
-    /// An explicit per-rank value, as if read from the environment.
-    fn explicit(value: usize) -> Option<Explicit> {
-        Some(Explicit {
-            value,
-            name: "test",
-        })
-    }
-
     /// A gate with these explicit per-rank limits, whose process has not
     /// reported its ranks: one rank's worth of capacity, every request
     /// unspecified.
@@ -2098,9 +2060,9 @@ mod tests {
         request_queue_limit: usize,
     ) -> Arc<BackendAdmissionGate> {
         BackendAdmissionGate::new(ExplicitLimits {
-            engine_request_limit: explicit(engine_request_limit),
-            engine_request_waiting_limit: explicit(engine_request_waiting_limit),
-            request_queue_limit: explicit(request_queue_limit),
+            engine_request_limit: Some(engine_request_limit),
+            engine_request_waiting_limit: Some(engine_request_waiting_limit),
+            request_queue_limit: Some(request_queue_limit),
         })
     }
 
@@ -2313,19 +2275,22 @@ mod tests {
         })
     }
 
-    /// The explicit values alone, without the names that set them.
-    fn values(explicit: ExplicitLimits) -> (Option<usize>, Option<usize>, Option<usize>) {
-        let value = |explicit: Option<Explicit>| explicit.map(|explicit| explicit.value);
-        (
-            value(explicit.engine_request_limit),
-            value(explicit.engine_request_waiting_limit),
-            value(explicit.request_queue_limit),
-        )
-    }
-
+    /// With nothing set, both engine limits are unlimited and there is no
+    /// queue, which leaves admission control disabled.
     #[test]
-    fn unset_settings_are_left_automatic() {
-        assert_eq!(explicit_from(&[]), ExplicitLimits::default());
+    fn unset_settings_keep_their_defaults() {
+        let defaults = explicit_from(&[]);
+        assert_eq!(defaults, ExplicitLimits::default());
+        assert_eq!(
+            AdmissionLimits::resolve(&defaults, 1),
+            AdmissionLimits {
+                engine_request_limit: None,
+                engine_request_waiting_limit: None,
+                request_queue_limit: 0,
+                rank_count: 1,
+            }
+        );
+        assert!(!defaults.admission_enabled());
     }
 
     /// The canonical name outranks its legacy alias, and a value that is not a
@@ -2336,31 +2301,21 @@ mod tests {
         const CANONICAL: &str = DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT;
         const LEGACY: &str = DYN_ENGINE_REQUEST_LIMIT;
         for (env, expected) in [
-            (vec![(CANONICAL, "7")], Some((7, CANONICAL))),
-            (vec![(LEGACY, "5")], Some((5, LEGACY))),
-            (vec![(CANONICAL, "7"), (LEGACY, "5")], Some((7, CANONICAL))),
-            (
-                vec![(CANONICAL, "7"), (LEGACY, "invalid")],
-                Some((7, CANONICAL)),
-            ),
-            (vec![(CANONICAL, "7"), (LEGACY, "0")], Some((7, CANONICAL))),
-            (vec![(CANONICAL, " 7 ")], Some((7, CANONICAL))),
-            (vec![(CANONICAL, "0"), (LEGACY, "5")], Some((5, LEGACY))),
-            (vec![(CANONICAL, "-1"), (LEGACY, "5")], Some((5, LEGACY))),
-            (
-                vec![(CANONICAL, "invalid"), (LEGACY, "5")],
-                Some((5, LEGACY)),
-            ),
-            (vec![(CANONICAL, ""), (LEGACY, "5")], Some((5, LEGACY))),
+            (vec![(CANONICAL, "7")], Some(7)),
+            (vec![(LEGACY, "5")], Some(5)),
+            (vec![(CANONICAL, "7"), (LEGACY, "5")], Some(7)),
+            (vec![(CANONICAL, "7"), (LEGACY, "invalid")], Some(7)),
+            (vec![(CANONICAL, "7"), (LEGACY, "0")], Some(7)),
+            (vec![(CANONICAL, " 7 ")], Some(7)),
+            (vec![(CANONICAL, "0"), (LEGACY, "5")], Some(5)),
+            (vec![(CANONICAL, "-1"), (LEGACY, "5")], Some(5)),
+            (vec![(CANONICAL, "invalid"), (LEGACY, "5")], Some(5)),
+            (vec![(CANONICAL, ""), (LEGACY, "5")], Some(5)),
             (vec![(CANONICAL, "0"), (LEGACY, "0")], None),
             (vec![(CANONICAL, "99999999999999999999999999999999")], None),
         ] {
             let resolved = explicit_from(&env);
-            assert_eq!(
-                resolved.engine_request_limit,
-                expected.map(|(value, name)| Explicit { value, name }),
-                "{env:?}"
-            );
+            assert_eq!(resolved.engine_request_limit, expected, "{env:?}");
             assert_eq!(
                 (
                     resolved.engine_request_waiting_limit,
@@ -2380,22 +2335,19 @@ mod tests {
         const CANONICAL: &str = DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT;
         const FORMER: &str = DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT;
         for (env, expected) in [
-            (vec![(CANONICAL, "3")], Some((3, CANONICAL))),
-            (vec![(CANONICAL, " 3 ")], Some((3, CANONICAL))),
-            (vec![(FORMER, "4")], Some((4, FORMER))),
-            (vec![(CANONICAL, "3"), (FORMER, "4")], Some((3, CANONICAL))),
-            (vec![(CANONICAL, "0"), (FORMER, "4")], Some((4, FORMER))),
-            (
-                vec![(CANONICAL, "invalid"), (FORMER, "4")],
-                Some((4, FORMER)),
-            ),
+            (vec![(CANONICAL, "3")], Some(3)),
+            (vec![(CANONICAL, " 3 ")], Some(3)),
+            (vec![(FORMER, "4")], Some(4)),
+            (vec![(CANONICAL, "3"), (FORMER, "4")], Some(3)),
+            (vec![(CANONICAL, "0"), (FORMER, "4")], Some(4)),
+            (vec![(CANONICAL, "invalid"), (FORMER, "4")], Some(4)),
             (vec![(CANONICAL, "0")], None),
             (vec![(CANONICAL, "-1")], None),
             (vec![(FORMER, "invalid")], None),
         ] {
             assert_eq!(
                 explicit_from(&env).engine_request_waiting_limit,
-                expected.map(|(value, name)| Explicit { value, name }),
+                expected,
                 "{env:?}"
             );
         }
@@ -2417,32 +2369,19 @@ mod tests {
         const CANONICAL: &str = DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT;
         const LEGACY: &str = DYN_DYNAMO_REQUEST_QUEUE_LIMIT;
         for (env, expected) in [
-            (vec![(CANONICAL, "17")], Some((17, CANONICAL))),
-            (vec![(LEGACY, "9")], Some((9, LEGACY))),
-            (
-                vec![(CANONICAL, "17"), (LEGACY, "9")],
-                Some((17, CANONICAL)),
-            ),
-            (
-                vec![(CANONICAL, "17"), (LEGACY, "invalid")],
-                Some((17, CANONICAL)),
-            ),
-            (vec![(CANONICAL, "0")], Some((0, CANONICAL))),
-            (vec![(LEGACY, "0")], Some((0, LEGACY))),
-            (
-                vec![(CANONICAL, " 0 "), (LEGACY, "9")],
-                Some((0, CANONICAL)),
-            ),
-            (vec![(CANONICAL, "0"), (LEGACY, "-1")], Some((0, CANONICAL))),
-            (vec![(CANONICAL, "-1"), (LEGACY, "9")], Some((9, LEGACY))),
+            (vec![(CANONICAL, "17")], Some(17)),
+            (vec![(LEGACY, "9")], Some(9)),
+            (vec![(CANONICAL, "17"), (LEGACY, "9")], Some(17)),
+            (vec![(CANONICAL, "17"), (LEGACY, "invalid")], Some(17)),
+            (vec![(CANONICAL, "0")], Some(0)),
+            (vec![(LEGACY, "0")], Some(0)),
+            (vec![(CANONICAL, " 0 "), (LEGACY, "9")], Some(0)),
+            (vec![(CANONICAL, "0"), (LEGACY, "-1")], Some(0)),
+            (vec![(CANONICAL, "-1"), (LEGACY, "9")], Some(9)),
             (vec![(CANONICAL, "invalid")], None),
             (vec![(CANONICAL, "")], None),
         ] {
-            assert_eq!(
-                explicit_from(&env).request_queue_limit,
-                expected.map(|(value, name)| Explicit { value, name }),
-                "{env:?}"
-            );
+            assert_eq!(explicit_from(&env).request_queue_limit, expected, "{env:?}");
         }
     }
 
@@ -2465,7 +2404,14 @@ mod tests {
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| value.to_string())
         });
-        assert_eq!(values(resolved), (Some(7), Some(3), Some(0)));
+        assert_eq!(
+            resolved,
+            ExplicitLimits {
+                engine_request_limit: Some(7),
+                engine_request_waiting_limit: Some(3),
+                request_queue_limit: Some(0),
+            }
+        );
         assert_eq!(
             *read.borrow(),
             [
@@ -2476,89 +2422,112 @@ mod tests {
         );
     }
 
-    /// Before any report the gate starts at `10000` / `10000` / `20000` with
-    /// one rank; a reported `max_num_seqs` `S` makes them `S` / `S` / `2S`, and
-    /// every process-wide limit is the per-rank one times the reported rank
-    /// count, multiplied once.
+    /// Reports never change a per-rank limit, default or explicit: a reported
+    /// `max_num_seqs` changes none, and a reported rank count only multiplies
+    /// each worker-wide limit, once, leaving unlimited ones unlimited. Queue
+    /// storage holds the whole worker-wide queue, so the default allocates
+    /// none.
     #[test]
-    fn automatic_limits_follow_the_reported_capacity_and_rank_count() {
-        let automatic = ExplicitLimits::default();
-        assert_eq!(
-            AdmissionLimits::resolve(&automatic, None, 1),
-            AdmissionLimits {
-                engine_request_limit: 10_000,
-                engine_request_waiting_limit: 10_000,
-                request_queue_limit: 20_000,
-                rank_count: 1,
-            }
-        );
-        let reported = AdmissionLimits::resolve(&automatic, Some(256), 4);
-        assert_eq!(
-            reported,
-            AdmissionLimits {
-                engine_request_limit: 256,
-                engine_request_waiting_limit: 256,
-                request_queue_limit: 512,
-                rank_count: 4,
-            }
-        );
-        assert_eq!(
-            (
-                reported.aggregate(reported.engine_request_limit),
-                reported.aggregate(reported.engine_request_waiting_limit),
-                reported.aggregate(reported.request_queue_limit),
-            ),
-            (1_024, 1_024, 2_048)
-        );
+    fn reports_set_only_the_rank_count_the_limits_aggregate_over() {
+        let reports = [(Some(8), 0, 1), (Some(256), 4, 4), (None, 4, 3)];
+        let defaults = BackendAdmissionGate::new(ExplicitLimits::default());
+        for (max_num_seqs, start, count) in reports {
+            defaults.record_engine_capacity(max_num_seqs, start, count);
+        }
+        {
+            let state = defaults.state.lock();
+            assert_eq!(
+                state.limits,
+                AdmissionLimits {
+                    engine_request_limit: None,
+                    engine_request_waiting_limit: None,
+                    request_queue_limit: 0,
+                    rank_count: 3,
+                }
+            );
+            assert_eq!(
+                (
+                    state.engine_requests.aggregate_limit,
+                    state.engine_requests_waiting.aggregate_limit,
+                    state.queued.aggregate_limit,
+                ),
+                (None, None, Some(0))
+            );
+            assert_eq!(state.slots.capacity(), 0, "no queue, no queue storage");
+        }
 
-        // The live gate applies the same, from its own reports.
-        let gate = BackendAdmissionGate::new(automatic);
+        let configured = BackendAdmissionGate::new(ExplicitLimits {
+            engine_request_limit: Some(5),
+            engine_request_waiting_limit: Some(3),
+            request_queue_limit: Some(7),
+        });
+        for (max_num_seqs, start, count) in reports {
+            configured.record_engine_capacity(max_num_seqs, start, count);
+        }
+        let state = configured.state.lock();
         assert_eq!(
-            gate.state.lock().limits,
-            AdmissionLimits::resolve(&automatic, None, 1)
+            state.limits,
+            AdmissionLimits {
+                engine_request_limit: Some(5),
+                engine_request_waiting_limit: Some(3),
+                request_queue_limit: 7,
+                rank_count: 3,
+            }
         );
-        gate.record_engine_capacity(Some(256), 4, 4);
-        let state = gate.state.lock();
-        assert_eq!(state.limits, reported);
         assert_eq!(
             (
                 state.engine_requests.aggregate_limit,
                 state.engine_requests_waiting.aggregate_limit,
                 state.queued.aggregate_limit,
             ),
-            (1_024, 1_024, 2_048)
+            (Some(15), Some(9), Some(21))
         );
-        assert!(
-            state.slots.capacity() >= 2_048,
-            "queue storage holds the whole aggregate queue"
+        assert_eq!(
+            state.slots.capacity(),
+            28,
+            "queue storage held four ranks' queues once, and never shrinks"
         );
     }
 
-    /// Overriding one setting leaves the others automatic; in particular the
-    /// queue's automatic value follows `max_num_seqs`, not an overridden engine
-    /// limit. Explicit values stay per-rank, and a queue of zero or one deeper
-    /// than twice the capacity are kept.
+    /// Each setting resolves on its own: one engine limit set leaves the other
+    /// unlimited and no queue, and a queue limit set alone leaves both engine
+    /// limits unlimited. Explicit values stay per-rank.
     #[test]
     fn each_setting_resolves_independently() {
-        let engine_only = ExplicitLimits {
-            engine_request_limit: explicit(5),
+        let request_only = ExplicitLimits {
+            engine_request_limit: Some(5),
+            ..ExplicitLimits::default()
+        };
+        let waiting_only = ExplicitLimits {
+            engine_request_waiting_limit: Some(3),
             ..ExplicitLimits::default()
         };
         assert_eq!(
-            AdmissionLimits::resolve(&engine_only, Some(64), 2),
-            AdmissionLimits {
-                engine_request_limit: 5,
-                engine_request_waiting_limit: 64,
-                request_queue_limit: 128,
-                rank_count: 2,
-            }
+            [
+                AdmissionLimits::resolve(&request_only, 2),
+                AdmissionLimits::resolve(&waiting_only, 2)
+            ],
+            [
+                AdmissionLimits {
+                    engine_request_limit: Some(5),
+                    engine_request_waiting_limit: None,
+                    request_queue_limit: 0,
+                    rank_count: 2,
+                },
+                AdmissionLimits {
+                    engine_request_limit: None,
+                    engine_request_waiting_limit: Some(3),
+                    request_queue_limit: 0,
+                    rank_count: 2,
+                },
+            ]
         );
         for queue in [0, 1_000] {
             let queue_only = ExplicitLimits {
-                request_queue_limit: explicit(queue),
+                request_queue_limit: Some(queue),
                 ..ExplicitLimits::default()
             };
-            let limits = AdmissionLimits::resolve(&queue_only, Some(64), 2);
+            let limits = AdmissionLimits::resolve(&queue_only, 2);
             assert_eq!(
                 (
                     limits.request_queue_limit,
@@ -2566,42 +2535,68 @@ mod tests {
                 ),
                 (queue, queue * 2)
             );
-            assert_eq!(limits.engine_request_limit, 64);
+            assert_eq!(
+                (
+                    limits.engine_request_limit,
+                    limits.engine_request_waiting_limit
+                ),
+                (None, None)
+            );
         }
     }
 
-    /// Reports update the automatic limits as they arrive or change, but never
-    /// replace an explicit value — a queue limit of zero included.
+    /// Either engine limit enables admission control, under any of its names;
+    /// with neither set, by default or with only a queue limit, it is disabled.
     #[test]
-    fn reports_never_replace_explicit_settings() {
-        let gate = BackendAdmissionGate::new(ExplicitLimits {
-            engine_request_waiting_limit: explicit(3),
-            request_queue_limit: explicit(0),
-            ..ExplicitLimits::default()
-        });
-        for (max_num_seqs, start, count) in [(Some(8), 0, 1), (Some(16), 4, 2), (None, 4, 3)] {
-            gate.record_engine_capacity(max_num_seqs, start, count);
+    fn only_an_engine_limit_enables_admission_control() {
+        for (env, enabled) in [
+            (vec![], false),
+            (
+                vec![(DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT, "8")],
+                false,
+            ),
+            (vec![(DYN_DYNAMO_REQUEST_QUEUE_LIMIT, "8")], false),
+            (
+                vec![(DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT, "0")],
+                false,
+            ),
+            (
+                vec![(DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT, "4")],
+                true,
+            ),
+            (vec![(DYN_ENGINE_REQUEST_LIMIT, "4")], true),
+            (
+                vec![(DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT, "2")],
+                true,
+            ),
+            (vec![(DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT, "2")], true),
+            (
+                vec![
+                    (DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT, "4"),
+                    (DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT, "2"),
+                    (DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT, "8"),
+                ],
+                true,
+            ),
+        ] {
+            let explicit = explicit_from(&env);
+            assert_eq!(explicit.admission_enabled(), enabled, "{env:?}");
+            assert_eq!(
+                BackendAdmissionGate::new(explicit).enabled,
+                enabled,
+                "{env:?}"
+            );
         }
-        assert_eq!(
-            gate.state.lock().limits,
-            AdmissionLimits {
-                engine_request_limit: 16,
-                engine_request_waiting_limit: 3,
-                request_queue_limit: 0,
-                rank_count: 3,
-            },
-            "a report without max_num_seqs keeps the last one"
-        );
     }
 
-    /// The warning compares each nonzero limit with the reported capacity, per
-    /// rank and process-wide, and fires only beyond ten times it. Automatic
-    /// limits never trigger it.
+    /// The warning compares each finite, nonzero limit with the reported
+    /// capacity, per rank and process-wide, and fires only beyond ten times
+    /// it. An unlimited engine limit and no queue never trigger it.
     #[test]
     fn capacity_warnings_name_every_limit_more_than_ten_times_the_capacity() {
         let limits = AdmissionLimits {
-            engine_request_limit: 2_561,
-            engine_request_waiting_limit: 2_560,
+            engine_request_limit: Some(2_561),
+            engine_request_waiting_limit: Some(2_560),
             request_queue_limit: 40_000,
             rank_count: 2,
         };
@@ -2622,39 +2617,187 @@ mod tests {
                 },
             ]
         );
-        let automatic = AdmissionLimits::resolve(&ExplicitLimits::default(), Some(256), 2);
-        assert!(CapacityWarning::check(&automatic, 256).is_empty());
-        let disabled_queue = AdmissionLimits {
-            request_queue_limit: 0,
-            ..automatic
+        let unlimited = AdmissionLimits::resolve(&ExplicitLimits::default(), 2);
+        assert!(CapacityWarning::check(&unlimited, 256).is_empty());
+        let within = AdmissionLimits {
+            engine_request_limit: Some(2_560),
+            request_queue_limit: 2_560,
+            ..unlimited
         };
-        assert!(CapacityWarning::check(&disabled_queue, 256).is_empty());
+        assert!(CapacityWarning::check(&within, 256).is_empty());
     }
 
     /// The warning is evaluated when capacity first arrives, never guessed
-    /// before it, and not repeated by a report that changes nothing.
+    /// before it, and not repeated by a report that changes nothing. A disabled
+    /// gate is never warned about: even its queue holds nothing back.
     #[test]
     fn the_capacity_warning_is_evaluated_once_per_change() {
         let gate = BackendAdmissionGate::new(ExplicitLimits {
-            engine_request_limit: explicit(10_000),
+            engine_request_limit: Some(10_000),
             ..ExplicitLimits::default()
         });
-        let report = |max_num_seqs, count| {
+        let report = |gate: &Arc<BackendAdmissionGate>, max_num_seqs, count| {
             gate.state
                 .lock()
                 .apply_report(max_num_seqs, Some(RankRange { start: 0, count }))
                 .warnings
                 .len()
         };
-        assert_eq!(report(None, 1), 0, "no capacity, no guess");
-        assert_eq!(report(Some(256), 1), 1, "evaluated when capacity arrives");
-        assert_eq!(report(Some(256), 1), 0, "not repeated");
+        assert_eq!(report(&gate, None, 1), 0, "no capacity, no guess");
         assert_eq!(
-            report(Some(256), 2),
+            report(&gate, Some(256), 1),
+            1,
+            "evaluated when capacity arrives"
+        );
+        assert_eq!(report(&gate, Some(256), 1), 0, "not repeated");
+        assert_eq!(
+            report(&gate, Some(256), 2),
             1,
             "re-evaluated when the limits change"
         );
-        assert_eq!(report(Some(2_000), 2), 0, "and when capacity changes");
+        assert_eq!(
+            report(&gate, Some(2_000), 2),
+            0,
+            "and when capacity changes"
+        );
+
+        let disabled = BackendAdmissionGate::new(ExplicitLimits {
+            request_queue_limit: Some(10_000),
+            ..ExplicitLimits::default()
+        });
+        assert_eq!(report(&disabled, Some(256), 1), 0);
+    }
+
+    /// Assert that `line` is the configuration record at INFO, ending in
+    /// exactly its message and fields: the three per-rank limits, then the
+    /// detected DP ranks and `max_num_seqs`.
+    fn assert_configuration(
+        line: &str,
+        [request, waiting, queue]: [&str; 3],
+        [dp_ranks, max_num_seqs]: [&str; 2],
+    ) {
+        let expected = format!(
+            "Backend admission configuration engine_request_limit={request} \
+             engine_request_waiting_limit={waiting} request_queue_limit={queue} \
+             detected_dp_ranks={dp_ranks} detected_max_num_seqs={max_num_seqs}"
+        );
+        assert!(
+            line.contains("INFO") && line.ends_with(&expected),
+            "{expected}: {line}"
+        );
+    }
+
+    /// The configuration is logged once as the gate is created, at INFO and
+    /// with nothing at WARN, whether admission control is disabled — by
+    /// default, or with a queue limit alone — or enabled: each per-rank limit,
+    /// whichever name set it, unset engine limits as `unlimited`, and the
+    /// detected DP ranks and `max_num_seqs`, `unavailable` until reported.
+    #[test]
+    fn the_configuration_is_logged_at_info_as_the_gate_is_created() {
+        for (env, limits) in [
+            (vec![], ["unlimited", "unlimited", "0"]),
+            (
+                vec![(DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT, "8")],
+                ["unlimited", "unlimited", "8"],
+            ),
+            (
+                vec![(DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT, "3")],
+                ["unlimited", "3", "0"],
+            ),
+            (
+                vec![
+                    (DYN_ENGINE_REQUEST_LIMIT, "4"),
+                    (DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT, "2"),
+                    (DYN_DYNAMO_REQUEST_QUEUE_LIMIT, "8"),
+                ],
+                ["4", "2", "8"],
+            ),
+        ] {
+            let (_, logged) = logged(tracing::Level::INFO, || {
+                BackendAdmissionGate::new(explicit_from(&env))
+            });
+            let lines: Vec<_> = logged.lines().collect();
+            assert_eq!(lines.len(), 1, "{env:?}: {logged}");
+            assert_configuration(lines[0], limits, ["unavailable"; 2]);
+        }
+    }
+
+    /// A report that changes the detected DP ranks or `max_num_seqs` logs the
+    /// configuration again, once and at INFO, with them; one that changes
+    /// neither — a repeat, or one without `max_num_seqs`, which keeps the last
+    /// — logs nothing. The limits logged stay the configured ones, enabled or
+    /// not: the detected capacity never sets them.
+    #[test]
+    fn the_configuration_is_logged_again_only_when_the_detected_capacity_changes() {
+        let request_limit = ExplicitLimits {
+            engine_request_limit: Some(5),
+            ..ExplicitLimits::default()
+        };
+        for (settings, limits) in [
+            (ExplicitLimits::default(), ["unlimited", "unlimited", "0"]),
+            (request_limit, ["5", "unlimited", "0"]),
+        ] {
+            let gate = BackendAdmissionGate::new(settings);
+            for (report, detected) in [
+                ((None, 0, 1), Some(["[0, 1)", "unavailable"])),
+                ((Some(256), 0, 1), Some(["[0, 1)", "256"])),
+                ((Some(256), 0, 1), None),
+                ((None, 0, 1), None),
+                ((Some(256), 4, 2), Some(["[4, 6)", "256"])),
+                ((None, 4, 3), Some(["[4, 7)", "256"])),
+                ((Some(128), 4, 3), Some(["[4, 7)", "128"])),
+            ] {
+                let ((), logged) = logged(tracing::Level::INFO, || {
+                    gate.record_engine_capacity(report.0, report.1, report.2)
+                });
+                let Some(detected) = detected else {
+                    assert_eq!(logged, "", "{report:?}");
+                    continue;
+                };
+                let lines: Vec<_> = logged.lines().collect();
+                assert_eq!(lines.len(), 1, "{report:?}: {logged}");
+                assert_configuration(lines[0], limits, detected);
+            }
+        }
+    }
+
+    /// Invalid settings and reports are still warned about, while the
+    /// configuration they leave in force is logged at INFO: an invalid setting
+    /// is passed over for the next source, and a report of zero `max_num_seqs`
+    /// or DP ranks changes nothing, so it logs no configuration.
+    #[test]
+    fn invalid_settings_and_reports_are_still_warned_about() {
+        let (gate, created) = logged(tracing::Level::INFO, || {
+            BackendAdmissionGate::new(explicit_from(&[
+                (DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT, "0"),
+                (DYN_ENGINE_REQUEST_LIMIT, "5"),
+            ]))
+        });
+        let lines: Vec<_> = created.lines().collect();
+        assert_eq!(lines.len(), 2, "{created}");
+        for expected in [
+            "WARN",
+            "Ignoring invalid backend admission setting",
+            "env=\"DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT\"",
+        ] {
+            assert!(lines[0].contains(expected), "{expected}: {created}");
+        }
+        assert_configuration(lines[1], ["5", "unlimited", "0"], ["unavailable"; 2]);
+
+        let ((), reported) = logged(tracing::Level::INFO, || {
+            gate.record_engine_capacity(Some(0), 0, 0)
+        });
+        let lines: Vec<_> = reported.lines().collect();
+        assert_eq!(lines.len(), 2, "{reported}");
+        for (line, expected) in lines
+            .into_iter()
+            .zip(["max_num_seqs of 0", "data_parallel_size of 0"])
+        {
+            assert!(
+                line.contains("WARN") && line.contains(expected),
+                "{expected}: {reported}"
+            );
+        }
     }
 
     ///////////////////// RANK CLASSIFICATION /////////////////////
@@ -2726,6 +2869,22 @@ mod tests {
 
     /// Everything the gate logs at warning level or above while `run` runs.
     fn warnings_during(run: impl FnOnce()) -> String {
+        logged(tracing::Level::WARN, run).1
+    }
+
+    /// What `run` returns, and everything the gate logs at `level` or above
+    /// while it runs.
+    fn logged<T>(level: tracing::Level, run: impl FnOnce() -> T) -> (T, String) {
+        // Tracing caches each callsite's interest process-wide. While at most
+        // one dispatcher is registered, it takes a new callsite's interest from
+        // the registering thread's default alone, so a concurrent test without
+        // a subscriber could disable a callsite this capture needs. A permanent
+        // dispatcher that records nothing makes it consult every registered
+        // dispatcher, this capture's included.
+        static IDLE_DISPATCHER: OnceLock<tracing::Dispatch> = OnceLock::new();
+        IDLE_DISPATCHER
+            .get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+
         #[derive(Clone, Default)]
         struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -2746,10 +2905,11 @@ mod tests {
         let subscriber = tracing_subscriber::fmt()
             .with_writer(move || writer.clone())
             .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
+            .with_max_level(level)
             .finish();
-        tracing::subscriber::with_default(subscriber, run);
-        String::from_utf8(captured.0.lock().unwrap().clone()).unwrap()
+        let returned = tracing::subscriber::with_default(subscriber, run);
+        let logged = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        (returned, logged)
     }
 
     /// A supplied rank the gate cannot use warns with the rank, and the range
@@ -2822,7 +2982,7 @@ mod tests {
     /// one only in the total; release undoes exactly what was counted.
     #[test]
     fn specified_and_unspecified_requests_count_at_their_own_scopes() {
-        let mut counts = DpRankCounts::new(2, 3);
+        let mut counts = DpRankCounts::new(Some(2), 3);
         counts.acquire(rank(1));
         counts.acquire(UNSPECIFIED);
         assert_eq!(
@@ -2856,7 +3016,7 @@ mod tests {
     /// `[1, 1, 2]`, unspecified `1`, and a process count of `5` of `6`.
     #[test]
     fn three_ranks_with_limit_two_share_their_aggregate_with_unspecified_work() {
-        let mut counts = DpRankCounts::new(2, 3);
+        let mut counts = DpRankCounts::new(Some(2), 3);
         for rank_id in 0..3 {
             counts.acquire(rank(rank_id));
         }
@@ -2868,7 +3028,7 @@ mod tests {
             [1, 1, 2]
         );
         assert_eq!(counts.count(UNSPECIFIED), 1);
-        assert_eq!((counts.total(), counts.aggregate_limit), (5, 6));
+        assert_eq!((counts.total(), counts.aggregate_limit), (5, Some(6)));
         counts.assert_consistent();
 
         // Rank 2 is at its own limit; the others and unspecified work still fit.
@@ -2888,7 +3048,7 @@ mod tests {
     /// has no capacity beyond the aggregate.
     #[test]
     fn per_rank_and_aggregate_limits_bound_exactly() {
-        let mut counts = DpRankCounts::new(2, 2);
+        let mut counts = DpRankCounts::new(Some(2), 2);
         counts.acquire(rank(7));
         assert!(counts.has_room(rank(7)));
         counts.acquire(rank(7));
@@ -2913,16 +3073,39 @@ mod tests {
         counts.assert_consistent();
     }
 
+    /// An unlimited measure always has room, at every rank and worker-wide,
+    /// and still counts each request at its own scope.
+    #[test]
+    fn an_unlimited_measure_always_has_room_and_still_counts() {
+        let mut counts = DpRankCounts::new(None, 2);
+        for _ in 0..1_000 {
+            counts.acquire(rank(7));
+            counts.acquire(UNSPECIFIED);
+        }
+        assert!(counts.has_room(rank(7)) && counts.has_room(UNSPECIFIED));
+        assert_eq!(
+            (
+                counts.count(rank(7)),
+                counts.count(UNSPECIFIED),
+                counts.total()
+            ),
+            (1_000, 1_000, 2_000)
+        );
+        counts.set_limits(None, 4);
+        assert_eq!(counts.aggregate_limit, None);
+        counts.assert_consistent();
+    }
+
     /// New limits keep every count; a lower one only blocks until the counts
     /// fall below it.
     #[test]
     fn changing_limits_keeps_every_count() {
-        let mut counts = DpRankCounts::new(4, 2);
+        let mut counts = DpRankCounts::new(Some(4), 2);
         for _ in 0..3 {
             counts.acquire(rank(0));
         }
         counts.acquire(UNSPECIFIED);
-        counts.set_limits(1, 1);
+        counts.set_limits(Some(1), 1);
         assert_eq!(
             (
                 counts.count(rank(0)),
@@ -3166,12 +3349,17 @@ mod tests {
 
     ///////////////////// ENGINE LIMITS /////////////////////
 
-    /// Request capacity is free, but the one request still waiting holds all
-    /// the waiting capacity, so the next request queues until its wait ends.
-    /// The request that answered keeps its request capacity.
+    /// The request limit is unlimited, but the one request still waiting holds
+    /// all the waiting capacity, so the next request queues until its wait
+    /// ends. The request that answered keeps its request capacity, which is
+    /// counted and published although unlimited.
     #[tokio::test]
     async fn the_waiting_limit_alone_holds_admission_until_a_wait_ends() {
-        let gate = gate(10, 1, 4);
+        let gate = BackendAdmissionGate::new(ExplicitLimits {
+            engine_request_waiting_limit: Some(1),
+            request_queue_limit: Some(4),
+            ..ExplicitLimits::default()
+        });
         let mut waiting = permit(gate.acquire(None, None).await);
         let queued = spawn_queued_admit(&gate).await;
         assert_eq!(published(&gate), (1, 1, 1));
@@ -3189,11 +3377,16 @@ mod tests {
         assert_eq!(published(&gate), (0, 0, 0));
     }
 
-    /// Waiting capacity is free, because the one admitted request's wait has
-    /// ended, but it keeps its request capacity until it finishes.
+    /// The waiting limit is unlimited, and the one admitted request's wait has
+    /// ended, but it keeps its request capacity until it finishes. Waiting
+    /// occupancy is counted and published although unlimited.
     #[tokio::test]
     async fn the_request_limit_alone_holds_admission_until_a_request_finishes() {
-        let gate = gate(1, 10, 4);
+        let gate = BackendAdmissionGate::new(ExplicitLimits {
+            engine_request_limit: Some(1),
+            request_queue_limit: Some(4),
+            ..ExplicitLimits::default()
+        });
         let mut running = permit(gate.acquire(None, None).await);
         running.end_waiting();
         let queued = spawn_queued_admit(&gate).await;
@@ -3283,25 +3476,33 @@ mod tests {
 
     #[tokio::test]
     async fn zero_queue_rejects_without_capacity_and_admits_after_release() {
-        let gate = gate(1, 1, 0);
-        let held = permit(gate.acquire(None, None).await);
-        let overflow = gate
-            .acquire(None, None)
-            .now_or_never()
-            .expect("must not wait");
-        assert!(is_queue_full(&overflow));
-        assert_eq!(published(&gate), (1, 1, 0));
-        assert_eq!(rejections(&gate), 1);
-
-        drop(held);
-        let next = permit(
-            gate.acquire(None, None)
+        // Whichever engine limit is set, the other unlimited or not.
+        for (request_limit, waiting_limit) in [(Some(1), Some(1)), (Some(1), None), (None, Some(1))]
+        {
+            let gate = BackendAdmissionGate::new(ExplicitLimits {
+                engine_request_limit: request_limit,
+                engine_request_waiting_limit: waiting_limit,
+                request_queue_limit: Some(0),
+            });
+            let held = permit(gate.acquire(None, None).await);
+            let overflow = gate
+                .acquire(None, None)
                 .now_or_never()
-                .expect("capacity is free"),
-        );
-        assert_eq!(published(&gate), (1, 1, 0));
-        drop(next);
-        assert_eq!(published(&gate), (0, 0, 0));
+                .expect("must not wait");
+            assert!(is_queue_full(&overflow));
+            assert_eq!(published(&gate), (1, 1, 0));
+            assert_eq!(rejections(&gate), 1);
+
+            drop(held);
+            let next = permit(
+                gate.acquire(None, None)
+                    .now_or_never()
+                    .expect("capacity is free"),
+            );
+            assert_eq!(published(&gate), (1, 1, 0));
+            drop(next);
+            assert_eq!(published(&gate), (0, 0, 0));
+        }
     }
 
     #[tokio::test]
@@ -3707,39 +3908,38 @@ mod tests {
         assert_eq!(published(&gate), (0, 0, 0));
     }
 
-    /// A late capacity report raises automatic limits and admits queued work
-    /// at once; a lower one evicts nothing and admits again only once
+    /// A late rank report raises the worker-wide limits and admits queued work
+    /// at once; a lower rank count evicts nothing and admits again only once
     /// occupancy falls below it. Queue handles and permits survive both.
     #[tokio::test]
-    async fn capacity_changes_never_disturb_live_requests() {
-        let gate = BackendAdmissionGate::new(ExplicitLimits::default());
-        gate.record_engine_capacity(Some(1), 0, 1);
-        let held = permit(gate.acquire(None, Some(0)).await);
-        let first = spawn_queued_at(&gate, Some(0), None).await;
-        let second = spawn_queued_at(&gate, Some(0), None).await;
-        assert_eq!(occupancy(&gate, rank(0)), (1, 1, 2));
+    async fn rank_count_changes_never_disturb_live_requests() {
+        let gate = ranked_gate((1, 1, 2), 0, 1);
+        let held = permit(gate.acquire(None, None).await);
+        let first = spawn_queued_at(&gate, None, None).await;
+        let second = spawn_queued_at(&gate, None, None).await;
+        assert_eq!(occupancy(&gate, UNSPECIFIED), (1, 1, 2));
 
-        // Capacity increase: both queued requests now fit.
-        gate.record_engine_capacity(Some(3), 0, 1);
+        // Three ranks: both queued requests now fit.
+        gate.record_engine_capacity(None, 0, 3);
         let first = permit(outcome(first).await);
         let second = permit(outcome(second).await);
-        assert_eq!(occupancy(&gate, rank(0)), (3, 3, 0));
+        assert_eq!(occupancy(&gate, UNSPECIFIED), (3, 3, 0));
 
-        // Capacity decrease below occupancy: nothing is evicted, and a new
+        // One rank again, below occupancy: nothing is evicted, and a new
         // request queues until occupancy is below the new limit.
-        gate.record_engine_capacity(Some(1), 0, 1);
-        assert_eq!(occupancy(&gate, rank(0)), (3, 3, 0));
-        let third = spawn_queued_at(&gate, Some(0), None).await;
+        gate.record_engine_capacity(None, 0, 1);
+        assert_eq!(occupancy(&gate, UNSPECIFIED), (3, 3, 0));
+        let third = spawn_queued_at(&gate, None, None).await;
         drop(held);
         drop(first);
         assert_eq!(
-            occupancy(&gate, rank(0)),
+            occupancy(&gate, UNSPECIFIED),
             (1, 1, 1),
             "still at the lower limit"
         );
         drop(second);
         let third = permit(outcome(third).await);
-        assert_eq!(occupancy(&gate, rank(0)), (1, 1, 0));
+        assert_eq!(occupancy(&gate, UNSPECIFIED), (1, 1, 0));
         drop(third);
         assert_eq!(published(&gate), (0, 0, 0));
     }
@@ -3751,12 +3951,12 @@ mod tests {
     #[tokio::test]
     async fn rank_changes_keep_requests_under_the_rank_they_were_admitted_as() {
         let gate = ranked_gate((1, 1, 1), 0, 3);
-        assert_eq!(gate.state.lock().engine_requests.aggregate_limit, 3);
+        assert_eq!(gate.state.lock().engine_requests.aggregate_limit, Some(3));
         let two = permit(gate.acquire(None, Some(2)).await);
         let queued_two = spawn_queued_at(&gate, Some(2), None).await;
 
         gate.record_engine_capacity(None, 0, 2);
-        assert_eq!(gate.state.lock().engine_requests.aggregate_limit, 2);
+        assert_eq!(gate.state.lock().engine_requests.aggregate_limit, Some(2));
         assert_eq!(occupancy(&gate, rank(2)), (1, 1, 1));
         let fallback = permit(gate.acquire(None, Some(2)).await);
         assert_eq!(fallback.rank, UNSPECIFIED, "rank 2 is no longer served");
@@ -3945,50 +4145,59 @@ mod tests {
         assert_eq!(published(&gate), (0, 0, 0));
     }
 
-    /// A change of limits or ranks reschedules every queue, including the queue
-    /// of a rank no longer served, whose requests keep their rank. A higher
-    /// limit admits the oldest heads it makes room for; a lower one evicts
-    /// nothing and unschedules the heads it leaves without room.
+    /// A change of ranks reschedules every queue, including the queue of a
+    /// rank no longer served, whose requests keep their rank and their place
+    /// in the schedule. A higher rank count admits the oldest heads its
+    /// worker-wide room fits, a retired rank's among them; a lower one evicts
+    /// nothing.
     #[tokio::test]
-    async fn limit_and_rank_changes_reschedule_every_queue_including_retired_ranks() {
-        let gate = BackendAdmissionGate::new(ExplicitLimits::default());
-        gate.record_engine_capacity(Some(1), 0, 3);
-        let held: Vec<_> =
-            futures::future::join_all((0..3).map(|dp_rank| handoff(&gate, None, Some(dp_rank))))
-                .await
-                .into_iter()
-                .map(permit)
-                .collect();
+    async fn rank_changes_reschedule_every_queue_including_retired_ranks() {
+        let gate = ranked_gate((2, 2, 4), 0, 3);
+        // Ranks 2 and 0 and unspecified work fill the worker-wide limits, while
+        // each rank keeps room of its own.
+        let held: Vec<_> = futures::future::join_all(
+            [Some(2), Some(0), None, None, None, None].map(|dp_rank| handoff(&gate, None, dp_rank)),
+        )
+        .await
+        .into_iter()
+        .map(permit)
+        .collect();
         let mut two = queue_at(&gate, Some(2), None);
         let mut zero = queue_at(&gate, Some(0), None);
         let mut two_again = queue_at(&gate, Some(2), None);
-        assert!(scheduled(&gate).is_empty(), "every rank is full");
-
-        // Rank 2 is retired; its queue stays, under its own rank.
-        gate.record_engine_capacity(Some(1), 0, 2);
-        assert!(scheduled(&gate).is_empty());
-        assert_eq!(occupancy(&gate, rank(2)), (1, 1, 2));
-
-        // Twice the capacity per rank: every rank has room again, retired rank
-        // 2 included, and the process has room for one more, which goes to the
-        // oldest head: retired rank 2's, under its own rank.
-        gate.record_engine_capacity(Some(2), 0, 2);
-        let admitted = permit(decided(&mut two).expect("the oldest scheduled head"));
-        assert_eq!(admitted.rank, rank(2));
         assert_eq!(
             scheduled(&gate),
-            [(1, rank(0))],
-            "rank 2 is full again; rank 0's head waits for process-wide room"
+            [(0, rank(2)), (1, rank(0))],
+            "heads stay scheduled while only the process is full"
         );
 
-        // Back below occupancy: nothing is evicted, and no head has room.
-        gate.record_engine_capacity(Some(1), 0, 2);
-        assert!(scheduled(&gate).is_empty());
-        assert!(decided(&mut zero).is_none() && decided(&mut two_again).is_none());
-        assert_eq!(occupancy(&gate, rank(2)), (2, 2, 1));
+        // Rank 2 is retired; its queue stays, under its own rank, and still
+        // scheduled, while the process is still full.
+        gate.record_engine_capacity(None, 0, 2);
+        assert_eq!(scheduled(&gate), [(0, rank(2)), (1, rank(0))]);
+        assert_eq!(occupancy(&gate, rank(2)), (1, 1, 2));
 
-        drop((zero, two_again));
-        drop((held, admitted));
+        // Ranks 3 to 6 alone are served now, which retires rank 0 too, with
+        // room for two more worker-wide: they go to the two oldest heads,
+        // retired rank 2's, which fills its rank, and retired rank 0's, each
+        // under its own rank.
+        gate.record_engine_capacity(None, 3, 4);
+        let admitted_two = permit(decided(&mut two).expect("the oldest scheduled head"));
+        let admitted_zero = permit(decided(&mut zero).expect("the next oldest"));
+        assert_eq!((admitted_two.rank, admitted_zero.rank), (rank(2), rank(0)));
+        assert!(
+            scheduled(&gate).is_empty(),
+            "rank 2 is full, so the head behind its first waits unscheduled"
+        );
+
+        // Back below occupancy: nothing is evicted.
+        gate.record_engine_capacity(None, 3, 2);
+        assert!(decided(&mut two_again).is_none());
+        assert_eq!(occupancy(&gate, rank(2)), (2, 2, 1));
+        assert_eq!(occupancy(&gate, rank(0)), (2, 2, 0));
+
+        drop(two_again);
+        drop((held, admitted_two, admitted_zero));
         assert_eq!(published(&gate), (0, 0, 0));
         assert!(scheduled(&gate).is_empty());
     }
@@ -4049,11 +4258,27 @@ mod tests {
     /// with and without a usable rank, admissions, ended waits, completions,
     /// cancellations observed while queued or first seen at the dequeue,
     /// refused offers, abandoned waiters, and reports that raise, lower and
-    /// retire capacity and ranks. Every request is accounted for once at the
-    /// end.
+    /// retire ranks. Every request is accounted for once at the end, with both
+    /// engine limits set, and with either one unlimited.
     #[tokio::test]
     async fn the_schedule_stays_exact_through_every_kind_of_transition() {
-        let gate = BackendAdmissionGate::new(ExplicitLimits::default());
+        for (request_limit, waiting_limit) in [(Some(2), Some(1)), (None, Some(1)), (Some(1), None)]
+        {
+            let gate = BackendAdmissionGate::new(ExplicitLimits {
+                engine_request_limit: request_limit,
+                engine_request_waiting_limit: waiting_limit,
+                request_queue_limit: Some(2),
+            });
+            // The driver polls every request itself, all within this one task
+            // poll, so Tokio's cooperative budget must not apply: spent, it
+            // would leave a granted request pending until it was cancelled.
+            tokio::task::unconstrained(async { fuzz_the_schedule(&gate) }).await;
+        }
+    }
+
+    /// Drive `gate` through random transitions, checking its schedule and
+    /// counts after each, then drain it and check every request's outcome.
+    fn fuzz_the_schedule(gate: &Arc<BackendAdmissionGate>) {
         let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
         let mut next = |bound: usize| {
             seed ^= seed << 13;
@@ -4071,7 +4296,7 @@ mod tests {
                         dp_rank => Some(dp_rank as u32),
                     };
                     let (controller, context) = stoppable();
-                    let arriving = Arc::clone(&gate);
+                    let arriving = Arc::clone(gate);
                     let mut request: QueuedRequest =
                         Box::pin(async move { handoff(&arriving, Some(&context), dp_rank).await });
                     match (&mut request).now_or_never() {
@@ -4123,11 +4348,16 @@ mod tests {
 
         drop(waiting);
         drop(permits);
-        assert_eq!(published(&gate), (0, 0, 0));
-        assert!(scheduled(&gate).is_empty());
-        let (received, direct, queue, rejected, cancelled) = outcomes(&gate);
+        assert_eq!(published(gate), (0, 0, 0));
+        assert!(scheduled(gate).is_empty());
+        let counted = outcomes(gate);
+        let (received, direct, queue, rejected, cancelled) = counted;
         assert_eq!(received, direct + queue + rejected + cancelled);
-        assert!(direct > 0 && queue > 0 && rejected > 0 && cancelled > 0);
+        let limits = gate.state.lock().limits;
+        assert!(
+            direct > 0 && queue > 0 && rejected > 0 && cancelled > 0,
+            "every outcome occurs under {limits:?}: {counted:?}"
+        );
     }
 
     ///////////////////// CANCELLATION AND REFUND /////////////////////
@@ -5028,6 +5258,71 @@ mod tests {
         );
     }
 
+    ///////////////////// DISABLED ADMISSION CONTROL /////////////////////
+
+    /// With neither engine limit set, by default or with only a queue limit,
+    /// every request goes straight to the engine without the gate's lock: here
+    /// another thread holds it throughout. However many requests the engine
+    /// holds, with a rank or without, even one already cancelled, none is
+    /// counted, queued or refused, and each stream is the engine's own.
+    #[test]
+    fn a_disabled_gate_passes_every_request_straight_to_the_engine() {
+        for queue in [None, Some(4)] {
+            let gate = BackendAdmissionGate::new(ExplicitLimits {
+                request_queue_limit: queue,
+                ..ExplicitLimits::default()
+            });
+            gate.record_engine_capacity(Some(1), 0, 1);
+            let ran = Arc::new(AtomicUsize::new(0));
+            let (controller, cancelled) = stoppable();
+            controller.stop_generating();
+            let requests = [
+                (None, None),
+                (None, Some(0)),
+                (None, Some(7)),
+                (Some(cancelled), None),
+            ];
+
+            let lock = gate.state.lock();
+            let (sender, received) = std::sync::mpsc::channel();
+            std::thread::spawn({
+                let (gate, ran) = (Arc::clone(&gate), Arc::clone(&ran));
+                move || {
+                    let streams: Vec<_> = requests
+                        .into_iter()
+                        .map(|(context, dp_rank)| {
+                            gate.admit_inner(
+                                context.as_ref(),
+                                dp_rank,
+                                generate(Arc::clone(&ran), engine_context()),
+                            )
+                            .now_or_never()
+                        })
+                        .collect();
+                    let _ = sender.send(streams);
+                }
+            });
+            let streams = received
+                .recv_timeout(Duration::from_secs(5))
+                .expect("admitted while another thread holds the gate's lock");
+            drop(lock);
+
+            assert_eq!(ran.load(Ordering::SeqCst), 4, "every request ran");
+            for stream in streams {
+                let stream = stream.expect("never waits").expect("never refused");
+                let items: Vec<_> = futures::executor::block_on(stream.collect());
+                assert_eq!(items, [token(1), token(2)]);
+            }
+            assert_eq!(published(&gate), (0, 0, 0));
+            assert_eq!(outcomes(&gate), (0, 0, 0, 0, 0), "nothing is counted");
+            assert_eq!(
+                gate.state.lock().series.len(),
+                2,
+                "rank 0 and unspecified exist at zero"
+            );
+        }
+    }
+
     ///////////////////// METRICS /////////////////////
 
     /// [`spawn_queued_admit`] through the public interface, with the
@@ -5090,31 +5385,29 @@ mod tests {
         gate.state.lock().publications
     }
 
-    /// One transition can change many ranks, each several times — here a
-    /// capacity report admits a queued request on each of 512 ranks, which
-    /// changes both its queue and its engine counts — and publishes each of
-    /// them exactly once, from the authoritative counts, leaving none listed
-    /// for the next transition, which publishes only the rank it changes.
+    /// One transition can change many ranks, each several times — here a rank
+    /// report doubles the worker-wide limits, which admits a queued request on
+    /// each of 512 ranks, changing both its queue and its engine counts — and
+    /// publishes each of them exactly once, from the authoritative counts,
+    /// leaving none listed for the next transition, which publishes only the
+    /// rank it changes.
     #[tokio::test]
     async fn a_transition_publishes_each_rank_it_changes_once() {
         const RANKS: u32 = 512;
-        let gate = BackendAdmissionGate::new(ExplicitLimits::default());
-        gate.record_engine_capacity(Some(1), 0, RANKS);
+        let gate = ranked_gate((2, 2, 1), 0, RANKS);
+        // Unspecified work and one request on each rank fill the worker-wide
+        // limits, so each rank's next request queues with room of its own.
         let mut held: Vec<_> = (0..RANKS)
-            .map(|dp_rank| {
-                permit(
-                    gate.acquire(None, Some(dp_rank))
-                        .now_or_never()
-                        .expect("room"),
-                )
-            })
+            .map(|_| None)
+            .chain((0..RANKS).map(Some))
+            .map(|dp_rank| permit(gate.acquire(None, dp_rank).now_or_never().expect("room")))
             .collect();
         let queued: Vec<_> = (0..RANKS)
             .map(|dp_rank| queue_at(&gate, Some(dp_rank), None))
             .collect();
 
         let before = publications(&gate);
-        gate.record_engine_capacity(Some(2), 0, RANKS);
+        gate.record_engine_capacity(None, 0, 2 * RANKS);
         assert_eq!(publications(&gate) - before, RANKS as usize);
         for dp_rank in 0..RANKS {
             assert_eq!(occupancy(&gate, rank(dp_rank)), (2, 2, 0), "{dp_rank}");
