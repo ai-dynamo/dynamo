@@ -5655,7 +5655,10 @@ impl OpenAIPreprocessor {
             && Self::is_force_reasoning_parser(reasoning_parser)
             && !inspect_force_reasoning_guided_output;
 
-        let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
+        let reasoning_disabled_by_request = !Self::keeps_gemma4_reasoning_with_tool_parser(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) && Self::is_reasoning_disabled_by_request(
             self.runtime_config.reasoning_parser.as_deref(),
             request.chat_template_args.as_ref(),
         );
@@ -7167,9 +7170,7 @@ impl OpenAIPreprocessor {
                 _ => thinking == Some(false),
             };
         }
-        if Self::is_gemma4_tool_parser(tool_parser)
-            && matches!(reasoning_parser, Some("gemma4" | "gemma-4"))
-        {
+        if Self::keeps_gemma4_reasoning_with_tool_parser(tool_parser, reasoning_parser) {
             return false;
         }
         Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args.as_ref())
@@ -7183,6 +7184,16 @@ impl OpenAIPreprocessor {
     /// pass through unchanged.
     fn is_gemma4_tool_parser(tool_parser: Option<&str>) -> bool {
         matches!(tool_parser, Some("gemma4" | "gemma-4"))
+    }
+
+    /// Legacy split route: the Gemma 4 reasoning parser stays on with the Gemma 4
+    /// tool-call parser (see `is_gemma4_tool_parser`).
+    fn keeps_gemma4_reasoning_with_tool_parser(
+        tool_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+    ) -> bool {
+        Self::is_gemma4_tool_parser(tool_parser)
+            && matches!(reasoning_parser, Some("gemma4" | "gemma-4"))
     }
 
     fn is_reasoning_disabled_by_request(

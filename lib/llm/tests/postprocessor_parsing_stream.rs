@@ -3860,7 +3860,10 @@ async fn assert_gemma4_without_enable_thinking() {
             }}]
         }))
         .unwrap();
-        let parsed = tool_selector.is_some();
+        // The legacy split route (DYN_PARSER_VERSION=1) runs no reasoning parser for a
+        // tool-only selector; the unified route owns both channels.
+        let legacy = std::env::var(env_llm::DYN_PARSER_VERSION).as_deref() == Ok("1");
+        let parsed = tool_selector.is_some() && (reasoning_selector.is_some() || !legacy);
         for (text, parsed_reasoning, parsed_content, expected_calls) in cases {
             if expected_calls > 0 && tool_selector.is_none() {
                 continue;
@@ -3915,6 +3918,20 @@ async fn assert_gemma4_without_enable_thinking() {
 
 #[tokio::test]
 async fn gemma4_without_enable_thinking_parses_only_with_gemma4_tool_parser() {
+    assert_gemma4_without_enable_thinking().await;
+}
+
+#[tokio::test]
+async fn gemma4_without_enable_thinking_parses_only_with_gemma4_tool_parser_parser_v1() {
+    if test_utils::run_isolated(
+        concat!(
+            module_path!(),
+            "::gemma4_without_enable_thinking_parses_only_with_gemma4_tool_parser_parser_v1"
+        ),
+        &[(env_llm::DYN_PARSER_VERSION, "1")],
+    ) {
+        return;
+    }
     assert_gemma4_without_enable_thinking().await;
 }
 
