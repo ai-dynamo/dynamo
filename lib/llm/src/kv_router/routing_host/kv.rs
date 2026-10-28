@@ -304,34 +304,17 @@ impl RoutingHost {
         let RoutePlan {
             mut selection,
             cleanup,
-            mut affinity,
+            affinity,
             budget,
             ..
         } = plan;
-        let selected_target = route_target(selection.worker);
-        let guard = match self
+        let guard = self
             .track_planned_selection(&request, &mut selection, cleanup, &budget)
+            .await?;
+        let plan = self.kv_dispatch_plan(&request, selection, guard, affinity);
+        self.dispatch_plan(request, plan, &budget, |_, _| Ok(()))
             .await
-        {
-            Ok(guard) => guard,
-            Err(error) => return Err(error),
-        };
-        let stream = match self
-            .dispatch_selection(request, selection, guard, &budget)
-            .await
-        {
-            Ok(stream) => stream,
-            Err(error) => {
-                if self.session_affinity_mode == SessionAffinityMode::Hard
-                    && !self.affinity_target_is_valid(selected_target)
-                    && let Some(operation) = affinity.take()
-                {
-                    operation.invalidate();
-                }
-                return Err(error);
-            }
-        };
-        self.bind_affinity(affinity, selected_target, stream)
+            .map(|((), stream)| stream)
     }
 
     pub(crate) async fn prefill_worker_busy(
@@ -504,22 +487,10 @@ impl RoutingHost {
                 let isl_blocks = routing_parts.token_ids.len().div_ceil(block_size);
                 tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
                 tracker.record_isl(routing_parts.token_ids.len(), Some(selection.cached_tokens));
-                tracker.record_worker(
-                    selection.worker.worker_id,
-                    Some(selection.worker.dp_rank),
-                    chooser.worker_type(),
-                );
                 tracker.record_router_queue_depth(chooser.pending_count());
                 if let Some(hit_rate) = tracker.kv_hit_rate() {
                     guard.request_metrics().kv_hit_rate.observe(hit_rate);
                 }
-            }
-            if !is_query_only {
-                guard
-                    .request_metrics()
-                    .input_sequence_tokens
-                    .with_label_values(&[request.phase().as_str(), &request.model])
-                    .observe(request.token_ids.len() as f64);
             }
             Ok(())
         }
@@ -532,88 +503,44 @@ impl RoutingHost {
         Ok(guard)
     }
 
+    /// The dispatch half of a KV route: hand the admitted worker to the shared
+    /// dispatch path.
+    pub(super) fn kv_dispatch_plan(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        selection: WorkerSelection,
+        guard: RequestGuard,
+        affinity: Option<Hold>,
+    ) -> DispatchPlan {
+        // KV-only: replay-token consumption is declared in the worker runtime
+        // config, which only the KV plane reads.
+        self.warn_if_output_replay_annotation_ignored(request, &selection);
+        DispatchPlan {
+            guard,
+            affinity,
+            phase: request.phase(),
+            route: PlannedRoute::Kv(KvAdmission {
+                worker: selection.worker,
+                kv_hint: selection.kv_hint,
+                overlap_blocks: selection.overlap_amount,
+                worker_type: self.kv_router().worker_type(),
+            }),
+        }
+    }
+
+    /// Dispatch a tracked selection outside a session hold.
+    #[cfg(test)]
     pub(super) async fn dispatch_selection(
         &self,
         request: SingleIn<PreprocessedRequest>,
         selection: WorkerSelection,
-        mut guard: RequestGuard,
+        guard: RequestGuard,
         budget: &CleanupBudget,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        let context_id = request.context().id().to_string();
-        let request_context = request.context().clone();
-        let route_trace_context = get_route_trace_context(&request);
-        let phase = request.phase();
-        let staged_kv = StagedKv::for_request(request.content());
-        let phase_label = phase.to_string();
-        guard.start_dispatch(&phase_label);
-        self.warn_if_output_replay_annotation_ignored(&request, &selection);
-
-        let (mut backend_input, context) = request.into_parts();
-        backend_input.routing_mut().dp_rank = Some(selection.worker.dp_rank);
-        backend_input.kv_hint = selection.kv_hint;
-        let updated_request = context.map(|_| backend_input);
-        guard.record_prefill_start(updated_request.content());
-
-        let dispatch = self
-            .inner
-            .dispatch_kv_admitted(updated_request, selection.worker.worker_id);
-        let route_span = tracing::info_span!(
-            target: "request_span",
-            "kv_router.route_request",
-            otel.kind = "client",
-            request_id = %context_id,
-            worker_id = tracing::field::Empty,
-            dp_rank = selection.worker.dp_rank,
-            overlap_blocks = selection.overlap_amount,
-            phase = ?phase,
-            "request.attempt" = tracing::field::Empty,
-            "request.outcome" = tracing::field::Empty,
-            "migration.is_retry" = tracing::field::Empty,
-            "migration.reason" = tracing::field::Empty,
-            "migration.from_worker_id" = tracing::field::Empty,
-            "migration.tokens_completed" = tracing::field::Empty,
-            "cancellation.signal" = tracing::field::Empty,
-            "error.type" = tracing::field::Empty,
-            otel.status_code = tracing::field::Empty,
-            otel.status_description = tracing::field::Empty,
-        );
-        record_route_span_start(
-            &route_span,
-            route_trace_context.as_deref(),
-            selection.worker.worker_id,
-        );
-        let dispatch_result = await_with_cleanup_policy(
-            request_context.as_ref(),
-            phase,
-            staged_kv,
-            "kv.dispatch",
-            budget,
-            dispatch.instrument(route_span.clone()),
-        )
-        .await
-        .and_then(|result| result);
-        let response_stream = match dispatch_result {
-            Ok(stream) => stream,
-            Err(error) => {
-                record_route_error(&route_span, error.as_ref());
-                let typed_error = error
-                    .chain()
-                    .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
-                guard.record_migration_failure(typed_error);
-                if !crate::migration::is_migratable(error.as_ref())
-                    || !guard.release_for_retry().await
-                {
-                    guard.abort_with_error(Some(error.as_ref())).await;
-                }
-                return Err(error);
-            }
-        };
-
-        guard.mark_dispatched();
-        Ok(wrap_route_span(
-            into_monitored_response(response_stream, guard),
-            route_span,
-        ))
+        let plan = self.kv_dispatch_plan(&request, selection, guard, None);
+        self.dispatch_plan(request, plan, budget, |_, _| Ok(()))
+            .await
+            .map(|((), stream)| stream)
     }
 
     fn warn_if_output_replay_annotation_ignored(
@@ -650,7 +577,7 @@ impl RoutingHost {
 
     pub(super) async fn select_and_dispatch_kv_prefill<M, F>(
         &self,
-        mut request: SingleIn<PreprocessedRequest>,
+        request: SingleIn<PreprocessedRequest>,
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
     where
@@ -661,43 +588,14 @@ impl RoutingHost {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-        let (mut selection, mut operation) = self
+        let (mut selection, operation) = self
             .select_with_affinity(&request, phase, is_query_only, &budget)
             .await?;
-        let mut guard = match self
+        let guard = self
             .track_selection(&request, &mut selection, phase, is_query_only, &budget)
-            .await
-        {
-            Ok(guard) => guard,
-            Err(error) => return Err(error),
-        };
-        let selected_target = route_target(selection.worker);
-        let metadata = match prepare(&mut request, selected_target) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                guard.abort_with_error(Some(error.as_ref())).await;
-                return Err(error);
-            }
-        };
+            .await?;
         drop(route_guard);
-        let stream = match self
-            .dispatch_selection(request, selection, guard, &budget)
-            .await
-        {
-            Ok(stream) => stream,
-            Err(error) => {
-                if self.session_affinity_mode == SessionAffinityMode::Hard
-                    && !self.affinity_target_is_valid(selected_target)
-                    && let Some(operation) = operation.take()
-                {
-                    operation.invalidate();
-                }
-                return Err(error);
-            }
-        };
-        Ok((
-            metadata,
-            self.bind_affinity(operation, selected_target, stream)?,
-        ))
+        let plan = self.kv_dispatch_plan(&request, selection, guard, operation);
+        self.dispatch_plan(request, plan, &budget, prepare).await
     }
 }

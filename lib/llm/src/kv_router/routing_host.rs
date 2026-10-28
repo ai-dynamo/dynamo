@@ -47,6 +47,7 @@ use crate::{
 
 mod builtin;
 mod cancellation;
+mod dispatch;
 mod kv;
 mod kv_selection;
 mod occupancy;
@@ -54,6 +55,7 @@ mod request_guard;
 
 use builtin::BuiltinWorkerSelector;
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
+use dispatch::{DispatchPlan, HostedDispatch, HostedTransport, KvAdmission, PlannedRoute};
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;
@@ -857,7 +859,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let phase = request.phase();
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let (mut selection, mut operation) = self
+        let (mut selection, operation) = self
             .select_with_affinity(&request, phase, is_query_only, &budget)
             .await?;
         if is_query_only {
@@ -910,23 +912,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             Err(error) => return Err(error),
         };
         drop(route_guard);
-        let selected_target = route_target(selection.worker);
-        let stream = match self
-            .dispatch_selection(request, selection, guard, &budget)
+        let plan = self.kv_dispatch_plan(&request, selection, guard, operation);
+        self.dispatch_plan(request, plan, &budget, |_, _| Ok(()))
             .await
-        {
-            Ok(stream) => stream,
-            Err(error) => {
-                if self.session_affinity_mode == SessionAffinityMode::Hard
-                    && !self.affinity_target_is_valid(selected_target)
-                    && let Some(operation) = operation.take()
-                {
-                    operation.invalidate();
-                }
-                return Err(error);
-            }
-        };
-        self.bind_affinity(operation, selected_target, stream)
+            .map(|((), stream)| stream)
     }
 }
 

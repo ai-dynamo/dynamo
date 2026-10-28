@@ -279,7 +279,7 @@ impl RoutingHost {
 
     pub(super) async fn select_and_dispatch_builtin<M, F>(
         &self,
-        mut request: SingleIn<PreprocessedRequest>,
+        request: SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
@@ -300,7 +300,6 @@ impl RoutingHost {
         // Declared before worker selection because the session-affinity wait is
         // the first stage that can spend it.
         let budget = CleanupBudget::default();
-        let staged_kv = StagedKv::for_request(request.content());
         let (lora_target, lora_fallback, lora_load) =
             match self.select_lora_target(request.content())? {
                 Some(selection) => (
@@ -310,7 +309,7 @@ impl RoutingHost {
                 ),
                 None => (None, None, None),
             };
-        let (selection, mut operation) = if let Some(target) = lora_target {
+        let (selection, operation) = if let Some(target) = lora_target {
             (
                 HostedSelection {
                     initial_worker: target,
@@ -346,184 +345,52 @@ impl RoutingHost {
             selected_occupancy,
             device_aware_telemetry,
         } = selection;
-        let soft_affinity_target = if self.session_affinity_mode == SessionAffinityMode::Soft {
-            operation.as_ref().and_then(Hold::target).map(from_table)
-        } else {
-            None
-        };
-        let target_for_worker = |worker_id| {
-            AffinityTarget::new(
-                worker_id,
-                soft_affinity_target.and_then(|target| target.dp_rank),
-            )
+        let soft_dp_rank = match self.session_affinity_mode {
+            SessionAffinityMode::Soft => operation
+                .as_ref()
+                .and_then(Hold::target)
+                .map(from_table)
+                .and_then(|target| target.dp_rank),
+            SessionAffinityMode::Hard => None,
         };
         let uses_occupancy = self
             .required_worker_inputs()
             .contains(WorkerInputs::OCCUPANCY);
-        let mut guard: RequestGuard = RequestGuard::new_builtin(
+        let guard = RequestGuard::new_builtin(
             self.request_metrics.clone(),
             initial_worker,
             occupancy_reservation,
             lora_load,
             &request,
         );
-        let tracker = request.tracker.clone();
-        let request_context = request.context().clone();
-        self.request_metrics
-            .input_sequence_tokens
-            .with_label_values(&[request.phase().as_str(), &request.model])
-            .observe(request.token_ids.len() as f64);
         drop(route_guard);
 
-        guard.start_dispatch(&phase_label);
-        guard.record_prefill_start(request.content());
-        let dispatch_result = if is_direct && !has_affinity_session {
-            let target = target_constraint.expect("Direct routing requires an explicit target");
-            await_with_cleanup_policy(
-                request_context.as_ref(),
-                phase,
-                staged_kv,
-                "builtin.dispatch_direct",
-                &budget,
-                self.inner.direct_within_prepared(
-                    request,
-                    target.worker_id,
-                    None,
-                    |request, worker_id| {
-                        let occupancy = guard.retarget_worker(worker_id);
-                        let target = AffinityTarget::new(
-                            worker_id,
-                            target.dp_rank.filter(|_| worker_id == target.worker_id),
-                        );
-                        request.routing_mut().dp_rank = target.dp_rank;
-                        prepare(request, target).map(|metadata| (metadata, target, occupancy))
-                    },
-                ),
+        let transport = if is_direct && !has_affinity_session {
+            HostedTransport::Direct(
+                target_constraint.expect("Direct routing requires an explicit target"),
             )
-            .await
-            .and_then(|result| result)
-            .map(|((metadata, target, occupancy), stream)| (metadata, target, occupancy, stream))
         } else if let Some(target) = target_constraint {
-            request.routing_mut().dp_rank = target.dp_rank;
-            let metadata = match prepare(&mut request, target) {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    guard.abort().await;
-                    return Err(error);
-                }
-            };
-            await_with_cleanup_policy(
-                request_context.as_ref(),
-                phase,
-                staged_kv,
-                "builtin.dispatch_exact",
-                &budget,
-                self.inner.dispatch_exact(request, target.worker_id),
-            )
-            .await
-            .and_then(|result| result)
-            .map(|stream| (metadata, target, selected_occupancy, stream))
+            HostedTransport::Exact(target)
         } else if uses_occupancy {
-            await_with_cleanup_policy(
-                request_context.as_ref(),
-                phase,
-                staged_kv,
-                "builtin.dispatch_occupancy",
-                &budget,
-                self.inner.dispatch_preselected_prepared(
-                    request,
-                    initial_worker,
-                    |request, worker_id| {
-                        let occupancy = guard.retarget_worker(worker_id);
-                        let target = target_for_worker(worker_id);
-                        request.routing_mut().dp_rank = target.dp_rank;
-                        prepare(request, target).map(|metadata| (metadata, target, occupancy))
-                    },
-                ),
-            )
-            .await
-            .and_then(|result| result)
-            .map(|((metadata, target, occupancy), stream)| (metadata, target, occupancy, stream))
+            HostedTransport::Occupancy
         } else {
-            await_with_cleanup_policy(
-                request_context.as_ref(),
-                phase,
-                staged_kv,
-                "builtin.dispatch",
-                &budget,
-                self.inner.direct_within_prepared(
-                    request,
-                    initial_worker,
-                    lora_fallback.as_ref(),
-                    |request, worker_id| {
-                        let occupancy = guard.retarget_worker(worker_id);
-                        let target = target_for_worker(worker_id);
-                        request.routing_mut().dp_rank = target.dp_rank;
-                        prepare(request, target).map(|metadata| (metadata, target, occupancy))
-                    },
-                ),
-            )
-            .await
-            .and_then(|result| result)
-            .map(|((metadata, target, occupancy), stream)| (metadata, target, occupancy, stream))
+            HostedTransport::Within(lora_fallback)
         };
-
-        let (metadata, target, final_occupancy, response_stream) = match dispatch_result {
-            Ok(result) => result,
-            Err(error) => {
-                let expected_target =
-                    target_constraint.unwrap_or_else(|| target_for_worker(initial_worker));
-                if self.session_affinity_mode == SessionAffinityMode::Hard
-                    && !self.affinity_target_is_valid(expected_target)
-                    && let Some(operation) = operation.take()
-                {
-                    operation.invalidate();
-                }
-                let typed_error = error
-                    .chain()
-                    .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
-                guard.record_migration_failure(typed_error);
-                guard.abort().await;
-                return Err(error);
-            }
+        let plan = DispatchPlan {
+            guard,
+            affinity: operation,
+            phase,
+            route: PlannedRoute::Hosted(HostedDispatch {
+                transport,
+                initial_worker,
+                soft_dp_rank,
+                uses_occupancy,
+                candidate_count,
+                selected_occupancy,
+                device_aware_telemetry,
+            }),
         };
-        guard.retarget_worker(target.worker_id);
-        if let Some(telemetry) = device_aware_telemetry {
-            let selection_survived_transport = target.worker_id == initial_worker;
-            tracing::info!(
-                router_mode = "device-aware-weighted",
-                worker_id = target.worker_id,
-                candidate_count,
-                occupancy = ?final_occupancy,
-                endpoint = %self.inner.client.endpoint.id(),
-                is_cpu = ?selection_survived_transport.then_some(telemetry.is_cpu),
-                embedding_cache_hit = ?selection_survived_transport
-                    .then_some(telemetry.embedding_cache_hit),
-                request_cache_keys = telemetry.request_cache_keys,
-                transport_fallback = !selection_survived_transport,
-                "Selected worker"
-            );
-        } else if uses_occupancy {
-            tracing::info!(
-                router_mode = self.inner.router_mode().telemetry_label(),
-                worker_id = target.worker_id,
-                candidate_count,
-                occupancy = ?final_occupancy,
-                transport_fallback = target.worker_id != initial_worker,
-                "Selected worker"
-            );
-        }
-        if let Some(tracker) = tracker {
-            let worker_type = if tracker.phase() == RequestPhase::Prefill {
-                WORKER_TYPE_PREFILL
-            } else {
-                WORKER_TYPE_DECODE
-            };
-            tracker.record_worker(target.worker_id, target.dp_rank, worker_type);
-        }
-        guard.mark_dispatched();
-        let stream = into_monitored_response(response_stream, guard);
-        Ok((metadata, self.bind_affinity(operation, target, stream)?))
+        self.dispatch_plan(request, plan, &budget, prepare).await
     }
 }
 
