@@ -44,7 +44,7 @@ func (r *Reconciler) reconcileEngineGroupRetirement(
 	}
 
 	// Persist progress before publishing its projection, including a failed or ambiguous retirement.
-	store := engineGroupCheckpointStore(r, group)
+	store := engineGroupCheckpointStore(r.Client, group)
 	if err := persistEngineGroupCheckpoint(ctx, store, snapshot, checkpoint, next); err != nil {
 		return r.reconcileCheckpointFailure(ctx, group, err)
 	}
