@@ -21,12 +21,12 @@ logger = logging.getLogger(__name__)
 _OWNER_PATTERN = re.compile(r"^[0-9a-f]{32}:[0-9a-f]{32}/[0-9a-f]{16}/[0-9a-f]{32}$")
 
 
-def inventory_sources(engine) -> dict[int, dict]:
+def inventory_sources(engine) -> dict[int, Mapping[str, object]]:
     """Read capabilities from scheduler metadata, never backend configuration."""
     initialization = getattr(engine, "_scheduler_init_result", None)
     if initialization is None:
         return {}
-    sources = {}
+    sources: dict[int, Mapping[str, object]] = {}
     for info in initialization.scheduler_infos:
         hints = info.get("kv_hint_sources", [])
         if not isinstance(hints, list):
@@ -81,7 +81,7 @@ def state_agent_descriptors(engine, config) -> list[dict]:
         raise ValueError(
             "KVCR inventory requires a router_hint source for every managed DP rank"
         )
-    raw_sources = {}
+    raw_sources: dict[int, Mapping[str, object]] = {}
     for info in infos:
         for source in info.get("kv_event_sources", []):
             rank = source.get("dp_rank")
