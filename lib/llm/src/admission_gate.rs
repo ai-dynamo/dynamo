@@ -591,6 +591,9 @@ where
     Resp: Data + AdmissionResponse,
 {
     async fn generate(&self, request: SingleIn<Req>) -> anyhow::Result<ManyOut<Resp>> {
+        if !self.gate.enabled {
+            return self.engine.generate(request).await;
+        }
         let context = request.context();
         let dp_rank = AdmissionRequest::dp_rank(&*request);
         self.gate
@@ -5259,6 +5262,55 @@ mod tests {
     }
 
     ///////////////////// DISABLED ADMISSION CONTROL /////////////////////
+
+    #[tokio::test]
+    async fn the_disabled_native_gate_forwards_without_reading_admission_metadata() {
+        struct Request;
+        impl AdmissionRequest for Request {
+            fn dp_rank(&self) -> Option<u32> {
+                panic!("an unlimited gate needs no admission rank");
+            }
+        }
+
+        struct Response;
+        impl AdmissionResponse for Response {
+            fn admission_output(&self) -> ResponseOutput {
+                panic!("an unlimited gate needs no response classification");
+            }
+        }
+
+        struct Inner;
+        #[async_trait::async_trait]
+        impl AsyncEngine<SingleIn<Request>, ManyOut<Response>, anyhow::Error> for Inner {
+            async fn generate(
+                &self,
+                request: SingleIn<Request>,
+            ) -> anyhow::Result<ManyOut<Response>> {
+                Ok(dynamo_runtime::engine::ResponseStream::new(
+                    Box::pin(futures::stream::iter([Response, Response])),
+                    request.context(),
+                ))
+            }
+        }
+
+        for queue in [None, Some(4)] {
+            let gate = BackendAdmissionGate::new(ExplicitLimits {
+                request_queue_limit: queue,
+                ..ExplicitLimits::default()
+            });
+            let inner: ServiceEngine<SingleIn<Request>, ManyOut<Response>> = Arc::new(Inner);
+            let served: ServiceEngine<SingleIn<Request>, ManyOut<Response>> =
+                AdmissionEngine::new(Arc::clone(&gate), Arc::clone(&inner));
+            assert!(
+                !Arc::ptr_eq(&served, &inner),
+                "the admission gate stays in the request path"
+            );
+            let responses = served.generate(SingleIn::new(Request)).await.unwrap();
+            assert_eq!(responses.count().await, 2);
+            assert_eq!(outcomes(&gate), (0, 0, 0, 0, 0));
+            assert_eq!(published(&gate), (0, 0, 0));
+        }
+    }
 
     /// With neither engine limit set, by default or with only a queue limit,
     /// every request goes straight to the engine without the gate's lock: here
