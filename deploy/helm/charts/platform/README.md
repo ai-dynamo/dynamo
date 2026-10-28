@@ -48,7 +48,43 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### v1.7.0
 
+#### Runtime Compatibility
+
+##### Frontend Startup Probe Defaults
+
+**Change:** Generated frontend startup probes require both a workload origin of operator
+1.7.0 or later and a frontend runtime of 1.6.0 or later. Standalone DCDs record their
+immutable origin only on CREATE; UPDATE never backfills existing resources. DGD-managed
+DCDs inherit the parent graph origin, even when the child is created by a newer operator.
+Frontend sidecars use the same origin and resolve their own image version.
+
+**Existing deployments:** Workloads created by operator 1.6.x or earlier, and resources
+without a resolvable origin, retain their previous frontend defaults during operator-only
+upgrades. Explicitly authored complete probes remain effective.
+
+**Action:** To enable startup protection on an existing workload, configure a complete
+`startupProbe` on its frontend container. This is an intentional Pod-template update;
+plan for frontend replacement, including a possible single-replica Grove Service outage.
+
 #### Operator behavior breaking changes
+
+##### Legacy LWS migration cleanup removed
+
+**Change:** The operator no longer cleans up the per-replica LWS objects
+and Volcano PodGroups created by Dynamo v1.1.x and earlier.
+
+**Affected:** LWS deployments that still use the legacy per-replica layout.
+
+**Action:**
+
+> [!WARNING]
+> Complete the native-scaling migration before upgrading to v1.7.0.
+> Use an intermediate operator version that includes migration cleanup,
+> such as v1.2.x. Verify that reconciliation has removed excess indexed
+> LWS objects and legacy Volcano PodGroups before proceeding.
+
+**Existing deployments:** Unmigrated legacy resources remain after
+upgrading, and excess LWS objects can continue consuming cluster resources.
 
 ##### Native sidecar backend inference
 
@@ -79,6 +115,44 @@ in addition to worker metadata access. If an older Planner service account recei
 HTTP 403 when listing Pods, Planner warns and uses existing status/default fallbacks.
 Grant Pod-list access to enable registered native names, models, and capabilities;
 other API errors still propagate.
+
+##### LPX model paths in every container
+
+**Change:** The operator sets the LPX model-path variables (`LPX_MODEL_PATH`, or
+`LPX_DRAFT_MODEL_PATH` and `LPX_TARGET_MODEL_PATH` for a speculative pair) in every
+regular and init container of every LPX role. Previously it set them only in `main`
+of the conductor role for LPU-only builds and of the agent role for hybrid builds.
+The operator's value replaces any value authored under these names.
+
+**Affected:** Every DGD with an LPX component: at least the agent template of an
+LPU-only build or the conductor template of a hybrid build gains these variables.
+
+**Action:** Plan for a one-time rollout of LPX workloads when upgrading to v1.7.0.
+No manifest change is needed unless a container sets one of these variables to its
+own value; rename that variable before upgrading.
+
+**Existing deployments:** Reconciliation rolls each LPX workload once without an
+authored manifest change.
+
+#### New behavior
+
+##### LWS no longer requires Volcano
+
+**Change:** LWS auto-detection and explicit enablement require only the
+LWS API.
+
+**Affected:** Clusters with LWS installed but without the Volcano API.
+
+**Action:** Configure gang scheduling separately through LWS. For the
+documented Volcano setup, install Volcano and set the LWS Helm value
+`gangSchedulingManagement.schedulerProvider=volcano`. Native Kubernetes
+gang scheduling is not supported for Dynamo-managed LWS workloads.
+
+**Existing deployments:** After the operator upgrade, clusters with LWS
+installed but no Volcano API automatically enable LWS orchestration.
+Without separately configured gang scheduling or group admission
+(e.g., through Kueue), multinode DGD/DCD workloads using LWS may remain
+partially scheduled.
 
 ### v1.6.0
 

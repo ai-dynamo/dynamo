@@ -38,7 +38,7 @@ from dynamo.planner.core.types import (
     WorkerCapabilities,
     WorkerCounts,
 )
-from dynamo.planner.plugins.clock import Clock, VirtualClock
+from dynamo.planner.plugins.clock import Clock, VirtualClock, WallClock
 from dynamo.planner.plugins.merge.types import ChainAugmentOutcome, ComponentKey
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome
@@ -71,6 +71,33 @@ def _agg_config_throughput_on() -> PlannerConfig:
         optimization_target="sla",
         served_model_name="test",
     )
+
+
+@pytest.mark.parametrize(
+    ("clock_type", "live"), [(WallClock, True), (VirtualClock, False)]
+)
+def test_wall_clock_budgets_bound_only_a_wall_clock_engine(clock_type, live):
+    # A replay (VirtualClock) tick takes no simulated time, so it runs with
+    # neither the tick deadline nor the in-process plugin call timeout.
+    cfg = PlannerConfig.model_validate(
+        {
+            "mode": "agg",
+            "enable_load_scaling": True,
+            "enable_throughput_scaling": True,
+            "optimization_target": "sla",
+            "served_model_name": "test",
+            "scheduling": {"tick_max_duration_seconds": 7.0},
+            "plugin_registration": {"transport": {"request_timeout_seconds": 3.0}},
+        }
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=clock_type())
+
+    orchestrator = adapter._orchestrator
+    assert orchestrator._tick_max_duration_seconds == (7.0 if live else None)
+    timeouts = {
+        p.transport.timeout_seconds for p in orchestrator.registry.all_plugins()
+    }
+    assert timeouts == {3.0 if live else None}
 
 
 def test_tick_input_to_context_maps_batch_observations():
