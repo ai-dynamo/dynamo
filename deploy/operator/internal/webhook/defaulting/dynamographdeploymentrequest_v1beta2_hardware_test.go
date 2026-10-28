@@ -22,78 +22,166 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	admissionv1 "k8s.io/api/admission/v1"
 )
 
+type fakeDiscoverer struct {
+	found   gpu.GPUInfo
+	err     error
+	calls   int
+	filter  string
+	timeout time.Duration
+}
+
+func (f *fakeDiscoverer) Discover(ctx context.Context, filterSKU nvidiacomv1beta1.GPUSKUType) (*gpu.GPUInfo, error) {
+	f.calls++
+	f.filter = string(filterSKU)
+	if deadline, ok := ctx.Deadline(); ok {
+		f.timeout = time.Until(deadline)
+	}
+	found := f.found
+	return &found, f.err
+}
+
 func hardwareOfV1beta2(sku *string, budget *int32) *nvidiacomv1beta2.HardwareSpec {
 	return &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{SKU: sku, Budget: budget}}
 }
 
-func TestResolveHardwareCompletesTheTypedHardwareOrRejects(t *testing.T) {
+func hardwareSpecV1beta2(hardware *nvidiacomv1beta2.HardwareSpec) *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec {
+	return &nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
+		DynamoGraphDeploymentRequestNativeSpec: nvidiacomv1beta2.DynamoGraphDeploymentRequestNativeSpec{
+			NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{Hardware: hardware},
+		},
+	}
+}
+
+func TestResolveHardwareV1beta2(t *testing.T) {
 	str := func(s string) *string { return &s }
 	num := func(n int32) *int32 { return &n }
 	h200x8 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8}
 	h200x64 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 8, TotalGPUs: 64}
+	completeH100 := hardwareOfV1beta2(str("h100_sxm"), num(4))
 	tests := []struct {
-		name       string
-		hardware   *nvidiacomv1beta2.HardwareSpec
-		found      gpu.GPUInfo
-		err        error
-		wantSKU    string
-		wantBudget int32
-		wantCalls  int
-		wantFilter string
-		wantErr    string
+		name              string
+		op                admissionv1.Operation
+		oldHardware       *nvidiacomv1beta2.HardwareSpec
+		hardware          *nvidiacomv1beta2.HardwareSpec
+		found             gpu.GPUInfo
+		discoveryErr      error
+		withoutDiscoverer bool
+		maxBudget         int32
+		timeout           time.Duration
+		wantSKU           string
+		wantBudget        int32
+		wantCalls         int
+		wantFilter        string
+		wantErr           string
+		wantMinTimeout    time.Duration
+		wantMaxTimeout    time.Duration
 	}{
-		{"omitted hardware discovers the SKU and the budget", nil, h200x8, nil, "h200_sxm", 8, 1, "", ""},
-		{"an empty hardware object is automatic discovery", &nvidiacomv1beta2.HardwareSpec{}, h200x8, nil, "h200_sxm", 8, 1, "", ""},
-		{"same-SKU nodes with different GPU counts use the aggregate", nil,
-			gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 2, TotalGPUs: 12},
-			nil, "h200_sxm", 12, 1, "", ""},
-		{"an empty gpu object is automatic discovery",
-			&nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{}}, h200x8, nil, "h200_sxm", 8, 1, "", ""},
-		{"the discovered budget is capped", nil, h200x64, nil, "h200_sxm", 32, 1, "", ""},
-		{"a SKU alone keeps the SKU, filters the cluster and persists the capped budget",
-			hardwareOfV1beta2(str("h200_sxm"), nil), h200x64, nil, "", 32, 1, "h200_sxm", ""},
-		{"a budget alone keeps the budget and discovers the SKU", hardwareOfV1beta2(nil, num(4)), h200x8, nil, "h200_sxm", 0, 1, "", ""},
-		{"an explicit budget above the cluster size is kept", hardwareOfV1beta2(nil, num(64)), h200x8, nil, "h200_sxm", 0, 1, "", ""},
-		{"an explicit budget above the cap is kept", hardwareOfV1beta2(str("h200_sxm"), num(64)), h200x8, nil, "", 0, 1, "h200_sxm", ""},
-		{"a SKU and a budget verify the SKU", hardwareOfV1beta2(str("h100_sxm"), num(4)),
-			gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8},
-			nil, "", 0, 1, "h100_sxm", ""},
-		{"complete hardware rejects failed verification", hardwareOfV1beta2(str("h100_sxm"), num(4)),
-			gpu.GPUInfo{}, errors.New("down"), "", 0, 1, "h100_sxm",
-			`spec.hardware.gpu.sku: Invalid value: "h100_sxm": could not be verified against the cluster's GPUs (down)`},
-		{"a failed discovery rejects", nil, gpu.GPUInfo{}, errors.New("no GPUs found"), "", 0, 1, "",
-			"spec.hardware.gpu: Required value: the cluster's GPUs could not be discovered (no GPUs found)"},
-		{"a GPU model the catalog does not know rejects", nil,
-			gpu.GPUInfo{Model: "Mystery GPU", GPUsPerNode: 8, NodesWithGPUs: 1}, nil, "", 0, 1, "",
-			`spec.hardware.gpu.sku: Required value: the cluster's GPU model "Mystery GPU" maps to no AISimulate SKU`},
-		{"no GPUs of the SKU reject the SKU", hardwareOfV1beta2(str("h100_sxm"), nil),
-			gpu.GPUInfo{System: "h100_sxm"}, nil, "", 0, 1, "h100_sxm",
-			`spec.hardware.gpu.sku: Invalid value: "h100_sxm": no GPUs of this SKU were found in the cluster`},
-		{"a heterogeneous cluster rejects an omitted SKU", nil,
-			gpu.GPUInfo{System: "h200_sxm", Model: "H200", GPUsPerNode: 8, NodesWithGPUs: 1, OtherModels: []string{"H100"}},
-			nil, "", 0, 1, "",
-			"spec.hardware.gpu.sku: Required value: the cluster has several GPU types (H200, H100); set spec.hardware.gpu.sku"},
-		{"a heterogeneous cluster rejects a budget alone too", hardwareOfV1beta2(nil, num(4)),
-			gpu.GPUInfo{System: "h200_sxm", Model: "H200", GPUsPerNode: 8, NodesWithGPUs: 1, OtherModels: []string{"H100"}},
-			nil, "", 0, 1, "",
-			"spec.hardware.gpu.sku: Required value: the cluster has several GPU types (H200, H100)"},
-		{"a pinned SKU is not ambiguous in a heterogeneous cluster", hardwareOfV1beta2(str("h200_sxm"), nil),
-			gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8}, nil, "", 8, 1, "h200_sxm", ""},
-		{"no GPUs at all reject the missing budget", nil, gpu.GPUInfo{System: "h200_sxm"}, nil, "", 0, 1, "",
-			`spec.hardware.gpu.budget: Required value: no GPUs of SKU "h200_sxm" were found in the cluster`},
+		{name: "no discoverer leaves omitted hardware unresolved", op: admissionv1.Create, withoutDiscoverer: true},
+		{name: "omitted hardware discovers the SKU and the budget", op: admissionv1.Create, found: h200x8, wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1, wantMinTimeout: time.Millisecond, wantMaxTimeout: defaultHardwareDiscoveryTimeout},
+		{name: "an empty hardware object is automatic discovery", op: admissionv1.Create, hardware: &nvidiacomv1beta2.HardwareSpec{}, found: h200x8, wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1},
+		{
+			name: "same-SKU nodes with different GPU counts use the aggregate", op: admissionv1.Create,
+			found:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 2, TotalGPUs: 12},
+			wantSKU: "h200_sxm", wantBudget: 12, wantCalls: 1,
+		},
+		{
+			name: "an empty gpu object is automatic discovery", op: admissionv1.Create,
+			hardware: &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{}}, found: h200x8,
+			wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1,
+		},
+		{name: "the discovered budget is capped", op: admissionv1.Create, found: h200x64, wantSKU: "h200_sxm", wantBudget: 32, wantCalls: 1},
+		{name: "the discovered budget honors a configured cap", op: admissionv1.Create, found: h200x64, maxBudget: 8, wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1},
+		{
+			name: "a SKU alone keeps the SKU, filters the cluster and persists the capped budget", op: admissionv1.Create,
+			hardware: hardwareOfV1beta2(str("h200_sxm"), nil), found: h200x64,
+			wantBudget: 32, wantCalls: 1, wantFilter: "h200_sxm",
+		},
+		{name: "a budget alone keeps the budget and discovers the SKU", op: admissionv1.Create, hardware: hardwareOfV1beta2(nil, num(4)), found: h200x8, wantSKU: "h200_sxm", wantCalls: 1},
+		{name: "an explicit budget above the cluster size is kept", op: admissionv1.Create, hardware: hardwareOfV1beta2(nil, num(64)), found: h200x8, wantSKU: "h200_sxm", wantCalls: 1},
+		{name: "an explicit budget above the cap is kept", op: admissionv1.Create, hardware: hardwareOfV1beta2(str("h200_sxm"), num(64)), found: h200x8, wantCalls: 1, wantFilter: "h200_sxm"},
+		{
+			name: "a SKU and a budget verify the SKU", op: admissionv1.Create,
+			hardware:  hardwareOfV1beta2(str("h100_sxm"), num(4)),
+			found:     gpu.GPUInfo{System: "h100_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8},
+			wantCalls: 1, wantFilter: "h100_sxm",
+		},
+		{
+			name: "complete hardware rejects failed verification", op: admissionv1.Create,
+			hardware: hardwareOfV1beta2(str("h100_sxm"), num(4)), discoveryErr: errors.New("down"),
+			wantCalls: 1, wantFilter: "h100_sxm",
+			wantErr: `spec.hardware.gpu.sku: Invalid value: "h100_sxm": could not be verified against the cluster's GPUs (down)`,
+		},
+		{name: "a failed discovery rejects", op: admissionv1.Create, discoveryErr: errors.New("no GPUs found"), wantCalls: 1,
+			wantErr: "spec.hardware.gpu: Required value: the cluster's GPUs could not be discovered (no GPUs found)"},
+		{
+			name: "a GPU model the catalog does not know rejects", op: admissionv1.Create,
+			found: gpu.GPUInfo{Model: "Mystery GPU", GPUsPerNode: 8, NodesWithGPUs: 1}, wantCalls: 1,
+			wantErr: `spec.hardware.gpu.sku: Required value: the cluster's GPU model "Mystery GPU" maps to no AISimulate SKU`,
+		},
+		{
+			name: "no GPUs of the SKU reject the SKU", op: admissionv1.Create,
+			hardware: hardwareOfV1beta2(str("h100_sxm"), nil), found: gpu.GPUInfo{System: "h100_sxm"},
+			wantCalls: 1, wantFilter: "h100_sxm",
+			wantErr: `spec.hardware.gpu.sku: Invalid value: "h100_sxm": no GPUs of this SKU were found in the cluster`,
+		},
+		{
+			name: "a heterogeneous cluster rejects an omitted SKU", op: admissionv1.Create,
+			found:     gpu.GPUInfo{System: "h200_sxm", Model: "H200", GPUsPerNode: 8, NodesWithGPUs: 1, OtherModels: []string{"H100"}},
+			wantCalls: 1,
+			wantErr:   "spec.hardware.gpu.sku: Required value: the cluster has several GPU types (H200, H100); set spec.hardware.gpu.sku",
+		},
+		{
+			name: "a heterogeneous cluster rejects a budget alone too", op: admissionv1.Create,
+			hardware:  hardwareOfV1beta2(nil, num(4)),
+			found:     gpu.GPUInfo{System: "h200_sxm", Model: "H200", GPUsPerNode: 8, NodesWithGPUs: 1, OtherModels: []string{"H100"}},
+			wantCalls: 1,
+			wantErr:   "spec.hardware.gpu.sku: Required value: the cluster has several GPU types (H200, H100)",
+		},
+		{
+			name: "a pinned SKU is not ambiguous in a heterogeneous cluster", op: admissionv1.Create,
+			hardware: hardwareOfV1beta2(str("h200_sxm"), nil), found: h200x8,
+			wantBudget: 8, wantCalls: 1, wantFilter: "h200_sxm",
+		},
+		{
+			name: "no GPUs at all reject the missing budget", op: admissionv1.Create,
+			found: gpu.GPUInfo{System: "h200_sxm"}, wantCalls: 1,
+			wantErr: `spec.hardware.gpu.budget: Required value: no GPUs of SKU "h200_sxm" were found in the cluster`,
+		},
+		{name: "a configured timeout bounds discovery", op: admissionv1.Create, found: h200x8, timeout: time.Hour, wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1, wantMinTimeout: time.Minute, wantMaxTimeout: time.Hour},
+		{name: "an unchanged incomplete update does not discover", op: admissionv1.Update, oldHardware: hardwareOfV1beta2(str("h100_sxm"), nil), hardware: hardwareOfV1beta2(str("h100_sxm"), nil), discoveryErr: errors.New("down")},
+		{name: "an update without a stored spec does not discover", op: admissionv1.Update, found: h200x8},
+		{name: "removing only the budget discovers only the budget", op: admissionv1.Update, oldHardware: completeH100, hardware: hardwareOfV1beta2(str("h100_sxm"), nil), found: h200x8, wantBudget: 8, wantCalls: 1, wantFilter: "h100_sxm"},
+		{name: "removing only the SKU discovers only the SKU", op: admissionv1.Update, oldHardware: completeH100, hardware: hardwareOfV1beta2(nil, num(4)), found: h200x8, wantSKU: "h200_sxm", wantCalls: 1},
+		{name: "removing all hardware discovers both fields", op: admissionv1.Update, oldHardware: completeH100, found: h200x8, wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1},
+		{name: "changing complete hardware verifies the new SKU", op: admissionv1.Update, oldHardware: completeH100, hardware: hardwareOfV1beta2(str("b200_sxm"), num(2)), found: gpu.GPUInfo{System: "b200_sxm", TotalGPUs: 4}, wantCalls: 1, wantFilter: "b200_sxm"},
+		{name: "delete never discovers", op: admissionv1.Delete, oldHardware: completeH100, found: h200x8},
+		{name: "connect never discovers", op: admissionv1.Connect, oldHardware: completeH100, found: h200x8},
+		{name: "an unknown operation never discovers", oldHardware: completeH100, found: h200x8},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			probe := &fakeDiscoverer{found: tt.found, err: tt.err}
-			spec := &nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{}
-			spec.Hardware = tt.hardware
-			got, err := DGDRV1beta2Options{Hardware: probe}.resolveHardware(context.Background(), admissionv1.Create, nil, spec)
+			probe := &fakeDiscoverer{found: tt.found, err: tt.discoveryErr}
+			options := DGDRV1beta2Options{
+				Hardware:                 probe,
+				MaxHardwareBudget:        tt.maxBudget,
+				HardwareDiscoveryTimeout: tt.timeout,
+			}
+			if tt.withoutDiscoverer {
+				options.Hardware = nil
+			}
+			var old *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec
+			if tt.oldHardware != nil {
+				old = hardwareSpecV1beta2(tt.oldHardware)
+			}
+			got, err := options.resolveHardware(context.Background(), tt.op, old, hardwareSpecV1beta2(tt.hardware))
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
@@ -110,16 +198,12 @@ func TestResolveHardwareCompletesTheTypedHardwareOrRejects(t *testing.T) {
 			if tt.wantCalls > 0 && probe.filter != tt.wantFilter {
 				t.Fatalf("discovery filter = %q, want %q", probe.filter, tt.wantFilter)
 			}
+			if tt.wantMinTimeout > 0 && probe.timeout < tt.wantMinTimeout {
+				t.Fatalf("discovery timeout = %v, want at least %v", probe.timeout, tt.wantMinTimeout)
+			}
+			if tt.wantMaxTimeout > 0 && probe.timeout > tt.wantMaxTimeout {
+				t.Fatalf("discovery timeout = %v, want at most %v", probe.timeout, tt.wantMaxTimeout)
+			}
 		})
-	}
-}
-
-func TestResolveHardwareLeavesAnUnchangedUpdateAlone(t *testing.T) {
-	probe := &fakeDiscoverer{err: errors.New("down")}
-	spec := &nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{}
-	got, err := DGDRV1beta2Options{Hardware: probe}.resolveHardware(context.Background(), admissionv1.Update, spec.DeepCopy(), spec)
-	if err != nil || got.sku != "" || got.budget != 0 || probe.calls != 0 {
-		t.Fatalf("got %+v, %v after %d calls; an update that leaves spec.hardware unchanged must not read the cluster",
-			got, err, probe.calls)
 	}
 }
