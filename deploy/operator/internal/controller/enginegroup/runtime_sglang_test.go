@@ -12,7 +12,9 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	domain "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/grovecapacity"
 	sglangruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/sglang"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
@@ -24,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -39,7 +42,7 @@ func TestGroveRuntimeJournalsArePhysicalLifetimeScoped(t *testing.T) {
 		Name: "group", Namespace: "test", UID: "logical-world",
 		Labels:      map[string]string{consts.KubeLabelDynamoEngineGroupRuntime: consts.KubeLabelDynamoEngineGroupSGLang},
 		Annotations: map[string]string{consts.KubeAnnotationDynamoEngineGroupPodClique: clique.Name, consts.KubeAnnotationDynamoEngineGroupPodCliqueUID: string(clique.UID)}}
-	provider := &groveRuntimeProvider{Client: kube, HTTP: &http.Client{}}
+	provider := newSGLangRuntimeTestProvider(t, kube, group)
 	previous, err := provider.Resolve(t.Context(), group)
 	require.NoError(t, err)
 
@@ -57,7 +60,7 @@ func TestGroveRuntimeJournalsArePhysicalLifetimeScoped(t *testing.T) {
 	assert.Equal(t, previous.Profile, current.Profile)
 
 	t.Log("all three adapters use new stores, so old pending requests and release targets cannot leak")
-	assert.NotEqual(t, previous.Capacity.(*SGLangGroveCapacity).Grove.Journal.Name, current.Capacity.(*SGLangGroveCapacity).Grove.Journal.Name)
+	assert.NotEqual(t, previous.Capacity.(*SGLangCapacity).Physical.(*grovecapacity.Adapter).Journal.Name, current.Capacity.(*SGLangCapacity).Physical.(*grovecapacity.Adapter).Journal.Name)
 	assert.NotEqual(t, previous.Membership.(*sglangruntime.MembershipAdapter).Journal.Name, current.Membership.(*sglangruntime.MembershipAdapter).Journal.Name)
 	assert.NotEqual(t, previous.Traffic.(*sglangruntime.TrafficProjection).Journal.Name, current.Traffic.(*sglangruntime.TrafficProjection).Journal.Name)
 	assert.Equal(t, group.UID, current.Membership.(*sglangruntime.MembershipAdapter).Journal.Owner.UID)
@@ -95,7 +98,6 @@ func TestProductionRuntimeProviderResolvesConfiguredSGLangProfile(t *testing.T) 
 			clique.Spec.Replicas = tc.initial
 			clique.Spec.MinAvailable = new(tc.initial)
 			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(primary, clique).Build()
-			provider := &groveRuntimeProvider{Client: kubeClient, HTTP: &http.Client{}}
 			group := &nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup{
 				Namespace: "test", Name: "group", UID: types.UID("group-uid"),
 				Labels: map[string]string{consts.KubeLabelDynamoEngineGroupRuntime: consts.KubeLabelDynamoEngineGroupSGLang},
@@ -109,13 +111,14 @@ func TestProductionRuntimeProviderResolvesConfiguredSGLangProfile(t *testing.T) 
 			}
 
 			t.Log("resolve profile bounds from launch configuration rather than the live scale target")
+			provider := newSGLangRuntimeTestProvider(t, kubeClient, group)
 			resolved, err := provider.Resolve(t.Context(), group)
 			require.NoError(t, err)
 			assert.Equal(t, "sglang", resolved.Profile.Backend)
 			assert.Equal(t, int32(1), resolved.Profile.PodsPerReplica)
 			assert.Equal(t, tc.initial, resolved.Profile.MinSupportedReplicas)
 			assert.Equal(t, tc.maximum, resolved.Profile.MaxSupportedReplicas)
-			_, groveCapacity := resolved.Capacity.(*SGLangGroveCapacity)
+			_, groveCapacity := resolved.Capacity.(*SGLangCapacity)
 			assert.True(t, groveCapacity)
 			assert.NotNil(t, resolved.Membership)
 			assert.NotNil(t, resolved.Traffic)
@@ -134,7 +137,7 @@ func TestProductionRuntimeProviderRequiresGroveBootstrap(t *testing.T) {
 		want     string
 	}{
 		{name: "opaque launcher cannot launch joiners from its template", command: []string{"sh", "-c", "python3 -m dynamo.sglang"}, boundUID: "clique-uid", want: "template-invariant bootstrap"},
-		{name: "clique recreation cannot reuse the old group", command: []string{"python3", "-m", "dynamo.sglang"}, boundUID: "previous-clique-uid", want: "replaced"},
+		{name: "clique recreation cannot reuse the old group", command: []string{"python3", "-m", "dynamo.sglang"}, boundUID: "previous-clique-uid", want: "incarnation changed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -155,7 +158,7 @@ func TestProductionRuntimeProviderRequiresGroveBootstrap(t *testing.T) {
 				}}
 
 			t.Log("refuse to construct a runtime whose capacity or bootstrap cannot be proven")
-			_, err := (&groveRuntimeProvider{Client: kubeClient, HTTP: &http.Client{}}).Resolve(t.Context(), group)
+			_, err := (newSGLangRuntimeTestProvider(t, kubeClient, group)).Resolve(t.Context(), group)
 			require.ErrorContains(t, err, tc.want)
 		})
 	}
@@ -256,10 +259,28 @@ func testSGLangPrimaryPod() *corev1.Pod {
 	}
 }
 
+func newSGLangRuntimeTestProvider(t *testing.T, kube client.Client, group *nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup) *runtimeProvider {
+	t.Helper()
+
+	// Build the complete physical owner chain consumed by the production workload provider.
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(kube.Scheme()))
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{Name: "deployment", Namespace: group.Namespace, UID: "dgd-uid"}
+	pcs := &grovev1alpha1.PodCliqueSet{Name: dynamo.PCSNameForDGD(dgd, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController), Namespace: group.Namespace, UID: "pcs-uid",
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, nvidiacomv1beta1.DynamoGraphDeploymentGVK)}}
+	world := &grovev1alpha1.PodCliqueScalingGroup{Name: "world", Namespace: group.Namespace, UID: "world-uid",
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}}
+	for _, object := range []client.Object{dgd, pcs, world} {
+		require.NoError(t, kube.Create(t.Context(), object))
+	}
+	group.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, nvidiacomv1beta1.DynamoGraphDeploymentGVK)}
+	group.Labels[consts.KubeLabelDynamoEngineGroupWorldIndex] = "0"
+	return &runtimeProvider{Client: kube, HTTP: &http.Client{}, Workload: &GroveWorkloadProvider{Client: kube}}
+}
+
 func testSGLangMemberClique(primary *corev1.Pod) *grovev1alpha1.PodClique {
 	return &grovev1alpha1.PodClique{
 		Namespace: primary.Namespace, Name: "world-0-members", UID: "clique-uid",
-		Labels: map[string]string{consts.KubeLabelDynamoEngineGroup: "group"},
+		Labels: map[string]string{consts.KubeLabelDynamoEngineGroup: "group", grovecommon.LabelPodCliqueScalingGroupReplicaIndex: "0"},
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Kind: "PodCliqueScalingGroup",
 			Name: "world", UID: "world-uid", Controller: new(true),

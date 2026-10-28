@@ -14,7 +14,6 @@ import (
 	"testing"
 
 	api "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -28,7 +27,8 @@ import (
 
 func engineGroupControllerTestCheckpoint(t *testing.T, ctx context.Context, kubeClient client.Client, group *api.DynamoGraphDeploymentEngineGroup) engineGroupCheckpoint {
 	t.Helper()
-	checkpoint, snapshot, err := loadEngineGroupCheckpoint(ctx, engineGroupCheckpointStore(&Reconciler{Client: kubeClient}, group), group)
+	var checkpoint engineGroupCheckpoint
+	snapshot, err := engineGroupCheckpointStore(kubeClient, group).Load(ctx, &checkpoint)
 	require.NoError(t, err)
 	require.True(t, snapshot.Exists())
 	return checkpoint
@@ -40,7 +40,7 @@ func TestEngineGroupCheckpointRejectsInvalidRecoveryAuthority(t *testing.T) {
 		{"corrupt", "decode journal"},
 		{"unknown version", "unsupported checkpoint version"},
 		{"wrong profile", "checkpoint profile"},
-		{"wrong binding", "different PodClique incarnation"},
+		{"wrong binding", "different physical world incarnation"},
 		{"wrong owner", "not owned by Engine Group"},
 		{"empty state", "no authoritative base topology"},
 		{"invalid state", "invalid checkpoint state"},
@@ -66,7 +66,7 @@ func TestEngineGroupCheckpointRejectsInvalidRecoveryAuthority(t *testing.T) {
 				require.NoError(t, err)
 			}
 			require.NoError(t, kubeClient.Get(ctx, req.NamespacedName, group))
-			store := engineGroupCheckpointStore(controller, group)
+			store := engineGroupCheckpointStore(controller.Client, group)
 			checkpoint := engineGroupControllerTestCheckpoint(t, ctx, kubeClient, group)
 			journal := &corev1.ConfigMap{}
 			require.NoError(t, kubeClient.Get(ctx, client.ObjectKey{Namespace: store.Namespace, Name: store.Name}, journal))
@@ -82,8 +82,7 @@ func TestEngineGroupCheckpointRejectsInvalidRecoveryAuthority(t *testing.T) {
 			case "wrong profile":
 				checkpoint.ProfileFingerprint = "other-profile"
 			case "wrong binding":
-				group.Annotations = map[string]string{consts.KubeAnnotationDynamoEngineGroupPodCliqueUID: "new-clique"}
-				require.NoError(t, kubeClient.Update(ctx, group))
+				checkpoint.BindingUID = "another-physical-world"
 			case "wrong owner":
 				journal.OwnerReferences[0].UID = "other-group"
 			case "empty state":
@@ -158,7 +157,7 @@ func TestEngineGroupCheckpointRejectsForgedReleaseBeforeFirstApply(t *testing.T)
 
 	t.Log("corrupt the durable victim UID without changing canonical allocations or the committed retirement")
 	checkpoint.State.Capacity.Desired.ReleaseFences[0].CapacityRefs[0].UID = "uid-0"
-	store := engineGroupCheckpointStore(controller, group)
+	store := engineGroupCheckpointStore(controller.Client, group)
 	journal := &corev1.ConfigMap{}
 	require.NoError(t, kube.Get(ctx, client.ObjectKey{Namespace: store.Namespace, Name: store.Name}, journal))
 	encoded, err := json.Marshal(checkpoint)

@@ -18,10 +18,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	domain "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/grovecapacity"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/kubejournal"
 	sglangruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/sglang"
-	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/workload"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,16 +30,17 @@ const (
 	defaultSGLangServingPort = 8000
 )
 
-// sglangRuntimeProvider composes Grove capacity with SGLang growth control.
-// Its traffic projection does not independently observe discovery registration or drain.
-type sglangRuntimeProvider struct {
+// sglangRuntimeResolver composes physical capacity with native SGLang membership and drain.
+// Its traffic projection does not independently observe discovery registration.
+type sglangRuntimeResolver struct {
 	client     client.Client
 	httpClient *http.Client
 }
 
-func (p *sglangRuntimeProvider) Resolve(
+func (p *sglangRuntimeResolver) Resolve(
 	ctx context.Context,
 	group *nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup,
+	world WorkloadBinding,
 ) (Runtime, error) {
 	if group.Labels[consts.KubeLabelDynamoEngineGroupRuntime] != consts.KubeLabelDynamoEngineGroupSGLang {
 		return Runtime{}, ErrRuntimeUnavailable
@@ -49,24 +48,12 @@ func (p *sglangRuntimeProvider) Resolve(
 	if group.UID == "" {
 		return Runtime{}, fmt.Errorf("Engine Group UID is required")
 	}
-	// Bind one live member clique by UID; its PCSG count remains the world-count dimension.
-	cliqueName := group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodClique]
-	cliqueUID := group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID]
-	if cliqueName == "" || cliqueUID == "" {
-		return Runtime{}, fmt.Errorf("%w: waiting for a Grove member-clique binding", ErrRuntimeUnavailable)
-	}
-	capacity := &SGLangGroveCapacity{Grove: &grovecapacity.Adapter{
-		Client:    p.client,
-		Clique:    types.NamespacedName{Namespace: group.Namespace, Name: cliqueName},
-		CliqueUID: types.UID(cliqueUID),
-		GroupName: group.Name,
-		Journal:   groveRuntimeJournal(p.client, group, "grove-capacity"),
-	}}
-	allocations, err := capacity.Observe(ctx, engineGroupID(group))
+	capacity := &SGLangCapacity{Physical: world.Capacity, Reader: p.client, Namespace: group.Namespace}
+	allocations, err := world.Capacity.Observe(ctx, engineGroupID(group))
 	if err != nil {
 		return Runtime{}, err
 	}
-	primary, err := p.primaryPod(ctx, group.Namespace, allocations)
+	primary, workloadRevision, err := p.primaryPod(ctx, group.Namespace, allocations)
 	if err != nil {
 		return Runtime{}, err
 	}
@@ -82,15 +69,14 @@ func (p *sglangRuntimeProvider) Resolve(
 	}
 	if len(main.Command) != 3 || (main.Command[0] != "python" && main.Command[0] != "python3") ||
 		main.Command[1] != "-m" || main.Command[2] != "dynamo.sglang" {
-		return Runtime{}, fmt.Errorf("Grove SGLang capacity requires the supported template-invariant bootstrap entrypoint")
+		return Runtime{}, fmt.Errorf("SGLang capacity requires the supported template-invariant bootstrap entrypoint")
 	}
 	if argumentValue(main.Args, "--elastic-ep-join-mode") != "auto" {
 		return Runtime{}, fmt.Errorf("SGLang Engine Groups require native automatic bootstrap")
 	}
-	workloadRevision := primary.Labels[grovecommon.LabelPodTemplateHash]
 	if workloadRevision == "" {
 		return Runtime{}, fmt.Errorf(
-			"SGLang primary Pod needs the stable Grove pod-template-hash label",
+			"SGLang primary allocation needs a stable workload template revision",
 		)
 	}
 	gpuLimit := main.Resources.Limits[corev1.ResourceName("nvidia.com/gpu")]
@@ -102,7 +88,7 @@ func (p *sglangRuntimeProvider) Resolve(
 		Args:                       main.Args,
 		MainContainerGPUs:          gpuLimit.Value(),
 		DedicatedMainGPUAllocation: true,
-		WorkloadRevisionDigest:     "grove-pod-template:" + workloadRevision,
+		WorkloadRevisionDigest:     workloadRevision,
 	})
 	if err != nil {
 		return Runtime{}, fmt.Errorf("resolve SGLang Engine Group profile: %w", err)
@@ -132,7 +118,7 @@ func (p *sglangRuntimeProvider) Resolve(
 		return Runtime{}, err
 	}
 
-	// Growth-only control cannot reduce the world below its configured initial membership.
+	// This profile retains the complete initial world; only appended allocations may retire.
 	profile := nvidiacomv1beta1.EngineGroupProfileStatus{
 		Backend:                     resolved.Geometry.Backend,
 		Fingerprint:                 resolved.Geometry.Fingerprint,
@@ -144,57 +130,58 @@ func (p *sglangRuntimeProvider) Resolve(
 		MaxSupportedReplicas:        resolved.MaximumReplicas,
 	}
 	capacity.MembersPerReplica = resolved.NativeMembersPerReplica
+	if _, err := capacity.Observe(ctx, engineGroupID(group)); err != nil {
+		return Runtime{}, err
+	}
 	membership := &sglangruntime.MembershipAdapter{
 		Client:             control,
 		Capacity:           capacity,
 		ProfileFingerprint: profile.Fingerprint,
 		MembersPerReplica:  resolved.NativeMembersPerReplica,
 		InitialEPSize:      resolved.InitialReplicas * resolved.NativeMembersPerReplica,
-		Journal:            groveRuntimeJournal(p.client, group, "sglang-membership"),
+		Journal:            runtimeJournal(p.client, group, world.ID, "sglang-membership"),
 	}
 	traffic := &sglangruntime.TrafficProjection{
 		Client:   control,
 		Capacity: capacity,
-		Journal:  groveRuntimeJournal(p.client, group, "sglang-traffic"),
+		Journal:  runtimeJournal(p.client, group, world.ID, "sglang-traffic"),
 	}
 	return Runtime{
+		Workload:   world,
 		Profile:    profile,
 		Capacity:   capacity,
 		Membership: membership,
 		Traffic:    traffic,
 		Verifier:   verifier,
-		Planner:    sglangScalePlanner{profileFingerprint: profile.Fingerprint, worldUID: types.UID(cliqueUID), membersPerReplica: resolved.NativeMembersPerReplica},
+		Planner: sglangScalePlanner{
+			profileFingerprint: profile.Fingerprint,
+			worldUID:           world.ID,
+			membersPerReplica:  resolved.NativeMembersPerReplica,
+		},
 	}, nil
 }
 
-// groveRuntimeJournal isolates native acceptance evidence by physical world lifetime.
-// Old journals remain owned by the logical group but cannot be replayed against a new clique UID.
-func groveRuntimeJournal(kubeClient client.Client, group *nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup, suffix string) kubejournal.Store {
-	return kubejournal.NewStore(kubeClient, group.Namespace, group.Name, group.UID,
-		suffix+"-"+group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID])
-}
-
-func (p *sglangRuntimeProvider) primaryPod(
+func (p *sglangRuntimeResolver) primaryPod(
 	ctx context.Context,
 	namespace string,
-	observation domain.CapacityObservation,
-) (*corev1.Pod, error) {
-	// Primary ownership follows the validated Grove slot, not a mutable role label.
+	observation workload.Observation,
+) (*corev1.Pod, string, error) {
+	// Primary ownership follows the validated physical slot, not a mutable role label.
 	for _, allocation := range observation.Allocations {
-		if allocation.Incarnation.ReplicaID != "replica-0" {
+		if allocation.ReplicaID != "replica-0" {
 			continue
 		}
-		ref := allocation.Incarnation.CapacityRefs[0]
+		ref := allocation.Pod
 		primary := &corev1.Pod{}
 		if err := p.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, primary); err != nil {
-			return nil, fmt.Errorf("get SGLang primary Pod: %w", err)
+			return nil, "", fmt.Errorf("get SGLang primary Pod: %w", err)
 		}
 		if domain.PodUID(primary.UID) != ref.UID || primary.DeletionTimestamp != nil {
-			return nil, fmt.Errorf("SGLang primary Pod changed after capacity observation")
+			return nil, "", fmt.Errorf("SGLang primary Pod changed after capacity observation")
 		}
-		return primary, nil
+		return primary, allocation.TemplateRevision, nil
 	}
-	return nil, fmt.Errorf("SGLang Engine Group primary allocation is missing")
+	return nil, "", fmt.Errorf("SGLang Engine Group primary allocation is missing")
 }
 
 type sglangScalePlanner struct {
@@ -313,5 +300,4 @@ func argumentValue(args []string, names ...string) string {
 	return ""
 }
 
-var _ RuntimeProvider = (*sglangRuntimeProvider)(nil)
 var _ ScalePlanResolver = sglangScalePlanner{}
