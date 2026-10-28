@@ -88,15 +88,7 @@ fn configuration() -> RealtimeClientEventSessionUpdate {
 }
 
 fn session(engine: RealtimeBidirectionalEngine, limit: u32) -> RealtimeSession {
-    RealtimeSession {
-        engine,
-        migration_limit: limit,
-        attempts: 0,
-        deadline: None,
-        incoming: None,
-        cancel: CancellationToken::new(),
-        journal: Journal::new(&configuration()),
-    }
+    RealtimeSession::new(engine, &configuration(), limit, CancellationToken::new())
 }
 
 #[tokio::test]
@@ -151,7 +143,7 @@ async fn replacement_attempts_share_one_absolute_deadline() {
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), "realtime recovery timed out");
-    assert_eq!(started.elapsed(), RECOVERY_TIMEOUT);
+    assert_eq!(started.elapsed(), Duration::from_secs(5));
     assert_eq!(engine.calls.load(Ordering::SeqCst), 3);
     assert!(engine.contexts.lock().iter().all(|ctx| ctx.is_stopped()));
 }
@@ -194,7 +186,6 @@ async fn client_close_and_shutdown_cancel_a_connecting_replacement() {
 async fn blocked_socket_write_cannot_keep_a_disconnected_worker_running() {
     let engine = Arc::new(FailingEngine::new(ErrorType::InvalidRequest, None));
     let mut session = session(engine.clone(), 0);
-    session.journal = None;
     let (tx, rx) = mpsc::channel(2);
     let mut incoming = ReceiverStream::new(rx).map(Ok);
     let writing = Notify::new();
@@ -220,6 +211,33 @@ async fn blocked_socket_write_cannot_keep_a_disconnected_worker_running() {
     tokio::time::timeout(Duration::from_secs(6), task)
         .await
         .expect("blocked output must not retain a disconnected session")
+        .unwrap();
+    assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
+    assert!(engine.contexts.lock().iter().all(|ctx| ctx.is_stopped()));
+}
+
+#[tokio::test]
+async fn client_write_error_does_not_retry_workers() {
+    let engine = Arc::new(FailingEngine::new(ErrorType::Disconnected, None));
+    let mut session = session(engine.clone(), 1);
+    let mut incoming = futures::stream::pending();
+    let outgoing = futures::sink::unfold((), |(), _: Message| async {
+        Err::<(), _>(axum::Error::new(
+            DynamoError::builder()
+                .error_type(ErrorType::Disconnected)
+                .message("client disconnected")
+                .build(),
+        ))
+    });
+    tokio::pin!(outgoing);
+    session
+        .run(
+            &mut incoming,
+            &mut outgoing,
+            &Mutex::new(None),
+            configuration(),
+        )
+        .await
         .unwrap();
     assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
     assert!(engine.contexts.lock().iter().all(|ctx| ctx.is_stopped()));

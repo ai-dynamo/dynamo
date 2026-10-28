@@ -53,12 +53,10 @@ use tokio::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
-mod journal;
 #[cfg(test)]
 mod tests;
-use journal::Journal;
 
-const RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const WORKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bound on the per-connection request queue. Picks backpressure over
@@ -73,6 +71,7 @@ const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 use super::{RouteDoc, error::SanitizedError, service_v2};
 use crate::discovery::ModelManagerError;
+use crate::migration::realtime::{RealtimeRecovery, UnexpectedEnd};
 use crate::types::RealtimeBidirectionalEngine;
 use dynamo_protocols::types::realtime::{
     DynamoRealtimeClientEvent, EventType, RealtimeAPIError, RealtimeClientEvent,
@@ -160,18 +159,12 @@ async fn handle_socket(
         return;
     };
 
-    let journal = (state.migration_limit > 0)
-        .then(|| Journal::new(&session_update))
-        .flatten();
-    let mut session = RealtimeSession {
+    let mut session = RealtimeSession::new(
         engine,
-        journal,
-        incoming: None,
-        migration_limit: state.migration_limit,
-        attempts: 0,
-        deadline: None,
-        cancel: state.cancel_token().clone(),
-    };
+        &session_update,
+        state.migration_limit,
+        state.cancel_token().clone(),
+    );
     if let Err(error) = session
         .run(&mut ws_rx, &mut *writer, &close_reason, session_update)
         .await
@@ -194,10 +187,6 @@ async fn handle_socket(
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("realtime worker stream ended unexpectedly")]
-struct UnexpectedEnd;
-
 struct StopGeneration(dynamo_runtime::engine::Context);
 
 impl Drop for StopGeneration {
@@ -206,7 +195,7 @@ impl Drop for StopGeneration {
     }
 }
 
-async fn recovery_deadline(deadline: Option<Instant>) {
+async fn wait_for_deadline(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
@@ -215,15 +204,26 @@ async fn recovery_deadline(deadline: Option<Instant>) {
 
 struct RealtimeSession {
     engine: RealtimeBidirectionalEngine,
-    journal: Option<Journal>,
+    recovery: RealtimeRecovery,
     incoming: Option<DynamoRealtimeClientEvent>,
-    migration_limit: u32,
-    attempts: u32,
-    deadline: Option<Instant>,
     cancel: CancellationToken,
 }
 
 impl RealtimeSession {
+    fn new(
+        engine: RealtimeBidirectionalEngine,
+        session: &RealtimeClientEventSessionUpdate,
+        migration_limit: u32,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            engine,
+            recovery: RealtimeRecovery::new(session, migration_limit),
+            incoming: None,
+            cancel,
+        }
+    }
+
     async fn run<S, T>(
         &mut self,
         ws_rx: &mut S,
@@ -237,28 +237,11 @@ impl RealtimeSession {
     {
         let mut setup = RealtimeClientEvent::SessionUpdate(session).into();
         loop {
-            let result = self.run_attempt(ws_rx, ws_tx, close_reason, setup).await;
-            let Err(error) = result else { return Ok(()) };
-            let is_retryable =
-                crate::migration::is_migratable(error.as_ref()) || error.is::<UnexpectedEnd>();
-            let Some(journal) = self.journal.as_mut().filter(|j| j.can_recover()) else {
-                return Err(error);
-            };
-            if !is_retryable || self.attempts >= self.migration_limit {
-                return Err(error);
+            self.recovery.start_attempt()?;
+            match self.run_attempt(ws_rx, ws_tx, close_reason, setup).await {
+                Ok(()) => return Ok(()),
+                Err(error) => setup = self.recovery.retry(error)?,
             }
-            let recovery_end = *self
-                .deadline
-                .get_or_insert_with(|| Instant::now() + RECOVERY_TIMEOUT);
-            anyhow::ensure!(Instant::now() < recovery_end, "realtime recovery timed out");
-            self.attempts += 1;
-            tracing::info!(
-                attempt = self.attempts,
-                "Recovering realtime transcription worker"
-            );
-            setup = journal
-                .start_replay()
-                .ok_or_else(|| anyhow::anyhow!("realtime replay unavailable"))?;
         }
     }
 
@@ -275,14 +258,10 @@ impl RealtimeSession {
     {
         let Self {
             engine,
-            journal,
+            recovery,
             incoming,
-            deadline,
-            attempts,
             cancel,
-            ..
         } = self;
-        let attempt = *attempts;
         let (req_tx, req_rx) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
         req_tx.try_send(setup)?;
         let input = Context::new(RequestStream::new(Box::pin(ReceiverStream::new(req_rx))));
@@ -292,7 +271,7 @@ impl RealtimeSession {
         let mut responses = loop {
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
-                _ = recovery_deadline(*deadline) => anyhow::bail!("realtime recovery timed out"),
+                _ = wait_for_deadline(recovery.deadline()) => anyhow::bail!("realtime recovery timed out"),
                 response = &mut connecting => break response?,
                 msg = ws_rx.next(), if incoming.is_none() => {
                     if !queue_client_message(msg, incoming, close_reason) { return Ok(()); }
@@ -304,50 +283,26 @@ impl RealtimeSession {
         let mut sender_deadline = None;
         loop {
             if pending.is_none() {
-                if deadline.is_some() {
-                    let journal = journal
-                        .as_mut()
-                        .ok_or_else(|| anyhow::anyhow!("realtime replay unavailable"))?;
-                    anyhow::ensure!(journal.can_recover(), "realtime replay disabled by worker");
-                    pending = journal.next_replay();
-                    if pending.is_none() && !journal.waiting_for_session {
-                        let elapsed = RECOVERY_TIMEOUT
-                            - deadline
-                                .map(|d| d.saturating_duration_since(Instant::now()))
-                                .unwrap_or_default();
-                        tracing::info!(
-                            attempt,
-                            elapsed_ms = elapsed.as_millis(),
-                            "Realtime transcription worker recovered"
-                        );
-                        *deadline = None;
-                        continue;
-                    }
-                } else if let Some(event) = incoming.take() {
-                    if let Some(journal) = journal {
-                        journal.record(&event);
-                    }
+                pending = recovery.next_replay()?;
+                if pending.is_none()
+                    && !recovery.is_replaying()
+                    && let Some(event) = incoming.take()
+                {
+                    recovery.record(&event);
                     pending = Some(event);
                 }
             }
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
-                _ = recovery_deadline(*deadline) => anyhow::bail!("realtime recovery timed out"),
-                _ = recovery_deadline(sender_deadline) => return Err(UnexpectedEnd.into()),
+                _ = wait_for_deadline(recovery.deadline()) => anyhow::bail!("realtime recovery timed out"),
+                _ = wait_for_deadline(sender_deadline) => return Err(UnexpectedEnd.into()),
                 response = responses.next() => {
                     let Some(annotated) = response else {
-                        return if journal.as_ref().is_some_and(Journal::can_recover) {
-                            Err(UnexpectedEnd.into())
-                        } else {
-                            Ok(())
-                        };
+                        return recovery.stream_ended();
                     };
                     if let Some(error) = annotated.error { return Err(error.into()); }
                     let Some(mut event) = annotated.data else { continue; };
-                    if let Some(journal) = journal {
-                        let forward = journal.reconcile(&mut event).map_err(anyhow::Error::msg)?;
-                        if !forward { continue; }
-                    }
+                    if !recovery.reconcile(&mut event)? { continue; }
                     let payload = serde_json::to_string(&event)?;
                     // Bounded input buffering can hide a Close behind a text frame
                     // while output is blocked, so every write needs a deadline.
@@ -359,7 +314,7 @@ impl RealtimeSession {
                     loop {
                         tokio::select! {
                             _ = cancel.cancelled() => return Ok(()),
-                            _ = recovery_deadline(*deadline) => anyhow::bail!("realtime recovery timed out"),
+                            _ = wait_for_deadline(recovery.deadline()) => anyhow::bail!("realtime recovery timed out"),
                             result = &mut writing => {
                                 if !matches!(result, Ok(Ok(()))) { return Ok(()); }
                                 break;
@@ -379,7 +334,7 @@ impl RealtimeSession {
                             // Drain terminal output before classifying a closed sender: a pending
                             // application error must not be mistaken for a transport failure.
                             is_sender_closed = true;
-                            sender_deadline = Some(Instant::now() + RECOVERY_TIMEOUT);
+                            sender_deadline = Some(Instant::now() + WORKER_DRAIN_TIMEOUT);
                         }
                     }
                 }

@@ -213,7 +213,7 @@ impl Journal {
         }
     }
 
-    /// Called immediately before writing to the socket; a failed write ends the session.
+    /// Called immediately before delivering output; a failed write ends the session.
     pub(super) fn reconcile(
         &mut self,
         event: &mut RealtimeServerEvent,
