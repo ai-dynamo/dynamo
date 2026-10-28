@@ -1012,16 +1012,9 @@ impl DistributedConfig {
             None => discovery_backend.resolve_event_transport_kind()?,
         };
 
-        // NATS is used for more than just NATS request-plane RPC:
-        // - KV router events (NATS core event plane)
-        // - inter-router replica sync (NATS core)
-        //
-        // Enable the NATS client when any of these hold:
-        // 1. Request plane is NATS
-        // 2. NATS_SERVER is explicitly configured by the user
-        // 3. The resolved event transport kind is NATS
+        // Connect to NATS only when a plane uses it. NATS_SERVER alone says where NATS is, not
+        // that this process needs it: the operator sets it in every pod when NATS is installed.
         let nats_enabled = request_plane.is_nats()
-            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
             || matches!(
                 event_transport_kind,
                 crate::discovery::EventTransportKind::Nats
@@ -1054,7 +1047,6 @@ impl DistributedConfig {
             DiscoveryBackend::KvStore(kv::Selector::Etcd(Box::new(etcd_config)));
         let event_transport_kind = discovery_backend.resolve_event_transport_kind()?;
         let nats_enabled = request_plane.is_nats()
-            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
             || matches!(
                 event_transport_kind,
                 crate::discovery::EventTransportKind::Nats
@@ -1264,6 +1256,39 @@ mod event_plane_env_tests {
         assert!(
             err.to_string().contains("not valid Unicode"),
             "error should say the value was not valid Unicode, got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod nats_enablement_tests {
+    use super::DistributedConfig;
+    use crate::config::environment_names::{event_plane::DYN_EVENT_PLANE, nats::NATS_SERVER};
+
+    #[test]
+    fn ambient_nats_server_does_not_enable_nats_on_tcp_and_zmq() {
+        temp_env::with_vars(
+            [
+                (NATS_SERVER, Some("nats://127.0.0.1:9")),
+                (DYN_EVENT_PLANE, None),
+            ],
+            || {
+                let config = DistributedConfig::from_settings_with_overrides(
+                    Some("file"),
+                    Some("tcp"),
+                    None,
+                )
+                .unwrap();
+                assert!(config.nats_config.is_none());
+
+                let config = DistributedConfig::from_settings_with_overrides(
+                    Some("file"),
+                    Some("tcp"),
+                    Some("nats"),
+                )
+                .unwrap();
+                assert!(config.nats_config.is_some());
+            },
         );
     }
 }
