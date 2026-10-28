@@ -102,6 +102,10 @@ kubectl wait --for=condition=ready pod \
 kubectl apply -f trtllm/disagg-eagle-kv-router/perf.yaml -n ${NAMESPACE}
 ```
 
+The `agg-eagle-kv-router` and `disagg-eagle-kv-router` benchmark jobs accept an optional `TOKENIZER_PATH` environment variable pointing to a local model snapshot. It defaults to `TARGET_MODEL`. Use a complete snapshot and set `HF_HUB_OFFLINE=1` and `HF_MODULES_CACHE=/tmp/hf_modules` when mounting a shared model cache read-only.
+
+The Kimi nightly CI pins worker model loading, the Eagle head, and benchmark tokenizer loading to explicit local snapshots. A CPU-only preflight checks configuration, tokenization, and weight-file presence before deployment. Snapshot pins are maintained in [the CI cache preparation script](https://github.com/ai-dynamo/dynamo/blob/main/.github/ci/prepare-kimi-cache.sh).
+
 ## Expected metrics
 
 The approximate values below come from the earlier one-hour qualification. The current manifests cap each measured run
