@@ -926,102 +926,6 @@ Shutdown the KServe gRPC service by cancelling its internal token.
 [source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1737)
 </Accordion>
 
-<Accordion id="api-dynamo-core-kvdcrelay" title="KvDcRelay (class)">
-No summary available.
-
-```python
-from dynamo.llm import KvDcRelay
-```
-
-```python
-KvDcRelay(endpoint: Endpoint, dc_id: str, namespace_filter: Optional[str] = None, endpoint_prefix: Optional[str] = None, publication_threshold: int = 16, publication_delay_ms: int = 1, recovery_attempt_timeout_ms: int = 30000, *, namespaces: Optional[List[str]] = None, endpoint_prefixes: Optional[List[str]] = None, watch_all: Optional[bool] = None, expected_unique_blocks: int = 1048576, bind: Optional[str] = None, tuning: Optional[Dict[str, int]] = None, sources_file: Optional[str] = None, connection_revision: Optional[str] = None) -> None
-```
-
-[`lib/bindings/python/src/dynamo/_core.pyi#L2807`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2807)
-
-**Public methods**
-
-<h4 id="api-dynamo-core-kvdcrelay-init">__init__</h4>
-
-```python
-__init__(endpoint: Endpoint, dc_id: str, namespace_filter: Optional[str] = None, endpoint_prefix: Optional[str] = None, publication_threshold: int = 16, publication_delay_ms: int = 1, recovery_attempt_timeout_ms: int = 30000, *, namespaces: Optional[List[str]] = None, endpoint_prefixes: Optional[List[str]] = None, watch_all: Optional[bool] = None, expected_unique_blocks: int = 1048576, bind: Optional[str] = None, tuning: Optional[Dict[str, int]] = None, sources_file: Optional[str] = None, connection_revision: Optional[str] = None) -> None
-```
-
-No summary available.
-
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2808)
-
-<h4 id="api-dynamo-core-kvdcrelay-start">start</h4>
-
-```python
-start() -> None
-```
-
-No summary available.
-
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2829)
-
-<h4 id="api-dynamo-core-kvdcrelay-health">health</h4>
-
-```python
-health() -> Dict[str, Any]
-```
-
-No summary available.
-
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2832)
-
-<h4 id="api-dynamo-core-kvdcrelay-stats">stats</h4>
-
-```python
-stats() -> Dict[str, Any]
-```
-
-Available only in builds with the ckf-diagnostics Cargo feature.
-
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2835)
-
-<h4 id="api-dynamo-core-kvdcrelay-snapshot">snapshot</h4>
-
-```python
-snapshot(serving_endpoint: str) -> Dict[str, Any]
-```
-
-Available only in builds with the ckf-diagnostics Cargo feature.
-
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2839)
-
-<h4 id="api-dynamo-core-kvdcrelay-flush">flush</h4>
-
-```python
-flush() -> None
-```
-
-No summary available.
-
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2843)
-
-<h4 id="api-dynamo-core-kvdcrelay-shutdown">shutdown</h4>
-
-```python
-shutdown() -> None
-```
-
-No summary available.
-
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2846)
-
-<h4 id="api-dynamo-core-kvdcrelay-wait-for-shutdown">wait_for_shutdown</h4>
-
-```python
-wait_for_shutdown() -> None
-```
-
-Resolve once the relay has stopped, whether by shutdown() or a terminal host failure.
-
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2849)
-</Accordion>
-
 <Accordion id="api-dynamo-core-kveventpublisher" title="KvEventPublisher (class)">
 A KV event publisher will publish KV events corresponding to the component.
 
@@ -2346,6 +2250,102 @@ from dynamo.llm import OverlapScores
 ```
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L1004`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L1004)
+</Accordion>
+
+<Accordion id="api-dynamo-core-poolrelay" title="PoolRelay (class)">
+No summary available.
+
+```python
+from dynamo.llm import PoolRelay
+```
+
+```python
+PoolRelay(endpoint: Endpoint, cluster_id: str, namespace_filter: Optional[str] = None, endpoint_prefix: Optional[str] = None, publication_threshold: int = 16, publication_delay_ms: int = 1, recovery_attempt_timeout_ms: int = 30000, *, namespaces: Optional[List[str]] = None, endpoint_prefixes: Optional[List[str]] = None, watch_all: Optional[bool] = None, expected_unique_blocks: int = 1048576, bind: Optional[str] = None, tuning: Optional[Dict[str, int]] = None, sources_file: Optional[str] = None, connection_revision: Optional[str] = None) -> None
+```
+
+[`lib/bindings/python/src/dynamo/_core.pyi#L2807`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2807)
+
+**Public methods**
+
+<h4 id="api-dynamo-core-poolrelay-init">__init__</h4>
+
+```python
+__init__(endpoint: Endpoint, cluster_id: str, namespace_filter: Optional[str] = None, endpoint_prefix: Optional[str] = None, publication_threshold: int = 16, publication_delay_ms: int = 1, recovery_attempt_timeout_ms: int = 30000, *, namespaces: Optional[List[str]] = None, endpoint_prefixes: Optional[List[str]] = None, watch_all: Optional[bool] = None, expected_unique_blocks: int = 1048576, bind: Optional[str] = None, tuning: Optional[Dict[str, int]] = None, sources_file: Optional[str] = None, connection_revision: Optional[str] = None) -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2808)
+
+<h4 id="api-dynamo-core-poolrelay-start">start</h4>
+
+```python
+start() -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2829)
+
+<h4 id="api-dynamo-core-poolrelay-health">health</h4>
+
+```python
+health() -> Dict[str, Any]
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2832)
+
+<h4 id="api-dynamo-core-poolrelay-stats">stats</h4>
+
+```python
+stats() -> Dict[str, Any]
+```
+
+Available only in builds with the ckf-diagnostics Cargo feature.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2835)
+
+<h4 id="api-dynamo-core-poolrelay-snapshot">snapshot</h4>
+
+```python
+snapshot(serving_endpoint: str) -> Dict[str, Any]
+```
+
+Available only in builds with the ckf-diagnostics Cargo feature.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2839)
+
+<h4 id="api-dynamo-core-poolrelay-flush">flush</h4>
+
+```python
+flush() -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2843)
+
+<h4 id="api-dynamo-core-poolrelay-shutdown">shutdown</h4>
+
+```python
+shutdown() -> None
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2846)
+
+<h4 id="api-dynamo-core-poolrelay-wait-for-shutdown">wait_for_shutdown</h4>
+
+```python
+wait_for_shutdown() -> None
+```
+
+Resolve once the relay has stopped, whether by shutdown() or a terminal host failure.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2849)
 </Accordion>
 
 <Accordion id="api-dynamo-core-pythonasyncengine" title="PythonAsyncEngine (class)">

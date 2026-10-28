@@ -1,22 +1,22 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Multi-Datacenter KV Relay Configuration
+title: Pool Relay Configuration
 subtitle: CLI arguments, environment variables, resource limits, and diagnostic endpoints
 ---
 
-**Experimental.** The DC KV Relay collects worker KV-cache events within a data center and
+**Experimental.** The Pool Relay (formerly KV DC Relay) collects worker KV-cache events within a discovery cluster and
 publishes compact cache-locality, serving-readiness, and load information for external consumers.
 
-This reference describes `python -m dynamo.kv_dc_relay`. For deployment, see
-[Deploy the DC KV Relay](../../kubernetes/kv-aware-routing/kv-dc-relay.md); for an overview and architecture,
-see [DC KV Relay Concepts](../../developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md).
+This reference describes `python -m dynamo.pool_relay`. For deployment, see
+[Deploy the Pool Relay](../../kubernetes/kv-aware-routing/pool-relay.md); for an overview and architecture,
+see [Pool Relay Concepts](../../developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md).
 
 ## CLI Arguments
 
 | Argument | Environment variable | Default | Meaning |
 | --- | --- | --- | --- |
-| `--dc-id` | `DYN_DC_ID` | Required | Logical data-center identity. Keep stable across restarts; must be nonempty without surrounding whitespace. |
+| `--cluster-id` | `DYN_CLUSTER_ID` | Required | Discovery-cluster identity. Keep stable across restarts; must be nonempty without surrounding whitespace. |
 | `--namespaces` | `DYN_RELAY_NAMESPACES` | All visible Dynamo namespaces | Comma-separated Dynamo namespace allowlist. |
 | `--namespace-filter` | None | Unset | Legacy single-namespace form of `--namespaces`. |
 | `--watch-all` | `DYN_RELAY_WATCH_ALL` | Enabled when no scope is set | Include model cards from every Dynamo namespace visible to the discovery backend. |
@@ -28,7 +28,7 @@ see [DC KV Relay Concepts](../../developer-guide/knowledge-base/modular-componen
 The protocol and gRPC server are included in the standard build. Omitting `--bind` disables only
 the WAN listener; local discovery and pool maintenance still run. Relay has no TLS flags or
 certificate configuration. Protect a listener across a trust boundary with an
-[optional external sidecar](../../kubernetes/kv-aware-routing/kv-dc-relay.md#optional-mtls-sidecar).
+[optional external sidecar](../../kubernetes/kv-aware-routing/pool-relay.md#optional-mtls-sidecar).
 
 ## Precedence and Scope
 
@@ -68,8 +68,8 @@ Relay uses the shared `DistributedRuntime`, created by `@dynamo_worker()`.
 
 For connection settings and runtime defaults, see [Runtime Configuration](runtime-configuration.mdx).
 For direct event transport and TCP response-stream addressing, see
-[TCP-only deployment](../../kubernetes/kv-aware-routing/kv-dc-relay.md#tcp-only-local-planes-no-nats).
-For Kubernetes pod identity and RBAC, see [Deploy the DC KV Relay](../../kubernetes/kv-aware-routing/kv-dc-relay.md).
+[TCP-only deployment](../../kubernetes/kv-aware-routing/pool-relay.md#tcp-only-local-planes-no-nats).
+For Kubernetes pod identity and RBAC, see [Deploy the Pool Relay](../../kubernetes/kv-aware-routing/pool-relay.md).
 Relay's CLI does not accept the Frontend's runtime CLI flags; configure the runtime through its
 environment variables.
 
@@ -154,13 +154,13 @@ hold a maximum CBI1 frame plus its required overhead.
 A complete snapshot chunk contains 4 MiB of bucket words plus framing. Configure clients and
 sidecars to accept the server's message size; tonic's default 4 MiB receive limit is insufficient
 for a maximum chunk. Resource exhaustion and snapshot progress deadlines are described in the
-[gRPC contract](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/docs/grpc-contract.md).
+[gRPC contract](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/pool_relay/docs/grpc-contract.md).
 
 ## Diagnostic Endpoints
 
 The component registers Dynamo runtime endpoints under
-`<DYN_NAMESPACE>.kv_dc_relay_<dc-hash>`, where `dc-hash` is the first 32 hexadecimal characters
-of SHA-256 over the UTF-8 DC ID. These are not HTTP paths or WAN RPCs.
+`<DYN_NAMESPACE>.pool_relay_<cluster-hash>`, where `cluster-hash` is the first 32 hexadecimal characters
+of SHA-256 over the UTF-8 cluster ID. These are not HTTP paths or WAN RPCs.
 
 | Endpoint | Availability | Request and response |
 | --- | --- | --- |
@@ -169,12 +169,13 @@ of SHA-256 over the UTF-8 DC ID. These are not HTTP paths or WAN RPCs.
 | `snapshot` | `ckf-diagnostics` build feature | Requires `serving_endpoint`; returns that endpoint's diagnostic snapshot. |
 
 The WAN listener also exposes gRPC reflection and the standard gRPC health service for
-`dynamo.kvrelay.v1.KvEventRelay`. Transport readiness does not prove that pools have been
+`dynamo.kvrelay.v1.KvEventRelay`. The gRPC service name changes in a separate update.
+Transport readiness does not prove that pools have been
 discovered or that a model can serve requests. Inspect catalog and serving-readiness streams
 separately. Terminal host or transport failures stop the component with a nonzero exit status.
 
 ## Sources
 
-- [Python argument parsing](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/kv_dc_relay/cli.py)
-- [Producer defaults](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/host.rs)
-- [gRPC adapter defaults and validation](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/wan/grpc/config.rs)
+- [Python argument parsing](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/pool_relay/cli.py)
+- [Producer defaults](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/pool_relay/host.rs)
+- [gRPC adapter defaults and validation](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/pool_relay/wan/grpc/config.rs)

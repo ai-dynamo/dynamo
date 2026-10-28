@@ -124,6 +124,10 @@ versions:
     path: ./versions/v0.7.0.yml
     availability: stable
 redirects:
+  - source: "/dynamo/dev/kubernetes/kv-aware-routing/deploy-the-dc-kv-relay-experimental"
+    destination: "/dynamo/dev/kubernetes/kv-aware-routing/deploy-the-pool-relay-experimental"
+  - source: "/dynamo/dev/reference/components/dc-kv-relay-configuration"
+    destination: "/dynamo/dev/reference/components/pool-relay-configuration"
   # Exact paths that published pages link to but that no longer resolve.
   # Found by crawling every published version, English and zh-CN, counting
   # Fern's "Page Not Found" 200 responses as dead. Each maps to the page the
