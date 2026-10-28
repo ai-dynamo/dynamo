@@ -75,6 +75,41 @@ fn allowed_tools_filter_legacy_prompt() {
     );
 }
 
+#[test]
+fn tool_less_responses_do_not_enable_template_tool_instructions() {
+    use dynamo_renderer::OAIChatLikeRequest;
+    let f = formatter("{% if tools is not none %}TOOLS{% else %}CHAT{% endif %}");
+    for tools in [Value::Null, json!([])] {
+        for native in [false, true] {
+            let request: NvCreateResponse =
+                serde_json::from_value(json!({"model":"m","input":"hi","tools":tools})).unwrap();
+            let mut chat: NvCreateChatCompletionRequest = request.try_into().unwrap();
+            chat.normalize_responses_tools(native).unwrap();
+            assert!(chat.tools().is_none());
+            assert_eq!(f.render(&chat).unwrap(), "CHAT");
+        }
+    }
+}
+
+#[test]
+fn phase_replay_is_independent_of_native_tool_template_support() {
+    let template = TEMPLATE.replace("deferred_render_mode", "tool_render_style");
+    let f = formatter(&template);
+    let request: NvCreateResponse = serde_json::from_value(json!({"model":"m","input":[
+        {"role":"assistant","phase":"commentary","content":"Checking."},
+        {"role":"assistant","phase":"final_answer","content":"Done."},
+        {"role":"user","content":"Continue."}
+    ]}))
+    .unwrap();
+    let mut chat: NvCreateChatCompletionRequest = request.try_into().unwrap();
+    chat.normalize_responses_history_phases(true);
+    assert!(!f.supports_native_tools(&chat));
+    chat.normalize_responses_tools(false).unwrap();
+    let prompt = f.render(&chat).unwrap();
+    assert!(prompt.contains("assistant to=commentary<|message|>Checking.<|eom|>"));
+    assert!(prompt.contains("assistant to=user<|message|>Done.<|eot|>"));
+}
+
 /// Native top-level names remain allowed across a namespace collision; the
 /// unselected namespace member stays forbidden.
 #[test]

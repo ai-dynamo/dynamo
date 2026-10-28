@@ -67,6 +67,9 @@ pub struct ResponseStreamConverter {
     active_reasoning_index: Option<usize>,
     // Function call tracking
     function_call_items: Vec<FunctionCallState>,
+    // Hold custom calls and following tool headers until a completion boundary,
+    // so dropping a partial custom input cannot leave an item or an index gap.
+    deferred_tool_calls: Vec<usize>,
     // Output index counter
     next_output_index: u32,
     // Usage stats from the backend's final chunk
@@ -112,6 +115,7 @@ struct FunctionCallState {
     pending_arg_deltas: Vec<String>,
     output_index: Option<u32>,
     started: bool,
+    deferred: bool,
     output_status: Option<OutputStatus>,
 }
 
@@ -156,6 +160,7 @@ impl ResponseStreamConverter {
             reasoning_items: Vec::new(),
             active_reasoning_index: None,
             function_call_items: Vec::new(),
+            deferred_tool_calls: Vec::new(),
             next_output_index: 0,
             usage: None,
             incomplete_reason: None,
@@ -178,6 +183,13 @@ impl ResponseStreamConverter {
     fn start_message(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
         self.append_active_reasoning_done_events(events, OutputStatus::Completed);
         if !self.message_started {
+            if !self.deferred_tool_calls.is_empty() {
+                self.append_pending_function_call_done_events(
+                    events,
+                    OutputStatus::Completed,
+                    false,
+                );
+            }
             self.message_started = true;
             self.message_output_index = self.next_output_index;
             self.next_output_index += 1;
@@ -492,6 +504,45 @@ impl ResponseStreamConverter {
             });
         }
 
+        // Terminal status must be known before phase/text boundaries can flush
+        // a buffered custom call from this same chunk.
+        if let Some(reason) = chunk
+            .inner
+            .choices
+            .iter()
+            .find_map(|choice| responses_incomplete_reason(choice.finish_reason))
+        {
+            self.incomplete_reason = Some(reason);
+        }
+        // A visible boundary may arrive with the last argument fragment. Merge
+        // buffered bytes first, so a completed call is not mistaken for a cut tail.
+        let boundary_can_flush = matches!(
+            &chunk.message_boundary,
+            Some(super::super::chat_completions::MessageBoundary::Start(_))
+        ) || chunk.inner.choices.iter().any(|choice| {
+            matches!(choice.delta.content.as_ref(), Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty())
+                || choice.delta.refusal.as_deref().is_some_and(|text| !text.is_empty())
+                || choice.delta.reasoning_content.as_deref().is_some_and(|text| !text.is_empty())
+        });
+        let mut merged_arguments = HashSet::new();
+        if boundary_can_flush && !self.deferred_tool_calls.is_empty() {
+            for choice in &chunk.inner.choices {
+                for call in choice.delta.tool_calls.iter().flatten() {
+                    if self.params.parallel_tool_calls == Some(false) && call.index > 0 {
+                        continue;
+                    }
+                    if let Some(state) = self.function_call_items.get_mut(call.index as usize)
+                        && state.deferred
+                        && let Some(arguments) =
+                            call.function.as_ref().and_then(|f| f.arguments.as_ref())
+                    {
+                        state.accumulated_args.push_str(arguments);
+                        state.pending_arg_deltas.push(arguments.clone());
+                        merged_arguments.insert((choice.index, call.index));
+                    }
+                }
+            }
+        }
         let mut should_finish_function_calls = false;
         match &chunk.message_boundary {
             Some(super::super::chat_completions::MessageBoundary::Start(phase)) => {
@@ -513,10 +564,6 @@ impl ResponseStreamConverter {
         }
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
-
-            if let Some(reason) = responses_incomplete_reason(choice.finish_reason) {
-                self.incomplete_reason = Some(reason);
-            }
 
             if let Some(reasoning) = delta.reasoning_content.as_deref()
                 && !reasoning.is_empty()
@@ -628,6 +675,7 @@ impl ResponseStreamConverter {
                             pending_arg_deltas: Vec::new(),
                             output_index: None,
                             started: false,
+                            deferred: false,
                             output_status: None,
                         });
                     }
@@ -652,7 +700,9 @@ impl ResponseStreamConverter {
                             self.function_call_items[tc_index].namespace =
                                 namespace.map(str::to_owned);
                         }
-                        if let Some(args) = &func.arguments {
+                        if let Some(args) = &func.arguments
+                            && !merged_arguments.contains(&(choice.index, tc.index))
+                        {
                             self.function_call_items[tc_index]
                                 .accumulated_args
                                 .push_str(args);
@@ -662,20 +712,22 @@ impl ResponseStreamConverter {
                         }
                     }
 
-                    // Within a single call, identity (id/name) and arguments can arrive in
-                    // either order — arguments may begin before the identity chunk. Do not
-                    // publish an output item with empty required fields; once identity is
-                    // complete, publish the item and any argument fragments already received.
-                    // Across parallel calls, the in-tree parsers emit one call at a time with
-                    // a monotonically increasing index, so indices are not interleaved today;
-                    // keying state by `tc_index` would handle interleaving too, but that path
-                    // is defensive rather than exercised by any current backend.
-                    let (should_start, disallowed_name) = {
+                    // Identity and arguments can arrive in either order. Custom
+                    // items have no incomplete status, so defer their publication
+                    // and preserve the order of any following parallel calls.
+                    let (should_start, should_defer, disallowed_name) = {
                         let state = &self.function_call_items[tc_index];
                         let has_identity = state.has_identity();
                         let is_allowed = state.is_allowed;
+                        let new_call = !state.started
+                            && !state.deferred
+                            && state.output_status.is_none()
+                            && has_identity
+                            && is_allowed;
+                        let defer = state.custom || !self.deferred_tool_calls.is_empty();
                         (
-                            !state.started && has_identity && is_allowed,
+                            new_call && !defer,
+                            new_call && defer,
                             (has_identity && !is_allowed).then(|| state.name.clone()),
                         )
                     };
@@ -692,79 +744,17 @@ impl ResponseStreamConverter {
                         self.terminal_failure_emitted = true;
                         return true;
                     }
-                    if should_start {
+                    if should_defer {
+                        self.function_call_items[tc_index].deferred = true;
+                        self.deferred_tool_calls.push(tc_index);
+                    }
+                    if should_start || should_defer {
                         // Starting an allowed tool call is an explicit reasoning
                         // phase boundary, independent of the finish reason.
                         self.append_active_reasoning_done_events(events, OutputStatus::Completed);
                     }
-                    let new_output_index = should_start.then(|| {
-                        let output_index = self.next_output_index;
-                        self.next_output_index += 1;
-                        output_index
-                    });
-                    let (item_added, argument_target, argument_deltas) = {
-                        let state = &mut self.function_call_items[tc_index];
-                        let item_added = if let Some(output_index) = new_output_index {
-                            state.started = true;
-                            state.output_index = Some(output_index);
-                            Some((
-                                state.item_id.clone(),
-                                state.call_id.clone(),
-                                state.backend_name.clone(),
-                                output_index,
-                            ))
-                        } else {
-                            None
-                        };
-                        let argument_deltas = if state.started && !state.custom && !state.search {
-                            std::mem::take(&mut state.pending_arg_deltas)
-                        } else {
-                            Vec::new()
-                        };
-                        (
-                            item_added,
-                            state
-                                .output_index
-                                .map(|output_index| (state.item_id.clone(), output_index)),
-                            argument_deltas,
-                        )
-                    };
-
-                    if let Some((item_id, call_id, name, output_index)) = item_added {
-                        match self.params.tool_output(
-                            item_id,
-                            call_id,
-                            &name,
-                            "",
-                            OutputStatus::InProgress,
-                        ) {
-                            Ok(item) => {
-                                let item_added = ResponseStreamEvent::ResponseOutputItemAdded(
-                                    ResponseOutputItemAddedEvent {
-                                        sequence_number: self.next_seq(),
-                                        output_index,
-                                        item,
-                                    },
-                                );
-                                events.push(self.make_sse_event(&item_added));
-                            }
-                            Err(error) => self.custom_tool_error = Some(error.to_string()),
-                        }
-                    }
-
-                    if let Some((item_id, output_index)) = argument_target {
-                        for delta in argument_deltas {
-                            let args_delta =
-                                ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(
-                                    ResponseFunctionCallArgumentsDeltaEvent {
-                                        sequence_number: self.next_seq(),
-                                        item_id: item_id.clone(),
-                                        output_index,
-                                        delta,
-                                    },
-                                );
-                            events.push(self.make_sse_event(&args_delta));
-                        }
+                    if should_start || self.function_call_items[tc_index].started {
+                        self.append_function_call_delta_events(tc_index, events);
                     }
                 }
             }
@@ -796,16 +786,96 @@ impl ResponseStreamConverter {
         false
     }
 
+    fn append_function_call_delta_events(
+        &mut self,
+        tc_index: usize,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) {
+        let state = &mut self.function_call_items[tc_index];
+        let item_added = if !state.started {
+            let output_index = self.next_output_index;
+            self.next_output_index += 1;
+            state.started = true;
+            state.output_index = Some(output_index);
+            Some((
+                state.item_id.clone(),
+                state.call_id.clone(),
+                state.backend_name.clone(),
+                output_index,
+            ))
+        } else {
+            None
+        };
+        let output_index = state
+            .output_index
+            .expect("started call has an output index");
+        let item_id = state.item_id.clone();
+        let argument_deltas = if !state.custom && !state.search {
+            std::mem::take(&mut state.pending_arg_deltas)
+        } else {
+            Vec::new()
+        };
+        if let Some((item_id, call_id, name, output_index)) = item_added {
+            match self
+                .params
+                .tool_output(item_id, call_id, &name, "", OutputStatus::InProgress)
+            {
+                Ok(item) => {
+                    let event = ResponseStreamEvent::ResponseOutputItemAdded(
+                        ResponseOutputItemAddedEvent {
+                            sequence_number: self.next_seq(),
+                            output_index,
+                            item,
+                        },
+                    );
+                    events.push(self.make_sse_event(&event));
+                }
+                Err(error) => self.custom_tool_error = Some(error.to_string()),
+            }
+        }
+        for delta in argument_deltas {
+            let event = ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(
+                ResponseFunctionCallArgumentsDeltaEvent {
+                    sequence_number: self.next_seq(),
+                    item_id: item_id.clone(),
+                    output_index,
+                    delta,
+                },
+            );
+            events.push(self.make_sse_event(&event));
+        }
+    }
+
     fn append_pending_function_call_done_events(
         &mut self,
         events: &mut Vec<Result<Event, anyhow::Error>>,
         output_status: OutputStatus,
         only_terminal_is_incomplete: bool,
     ) {
+        let deferred = std::mem::take(&mut self.deferred_tool_calls);
+        let last = deferred.len().saturating_sub(1);
+        let interrupted = self.incomplete_reason.is_some();
+        let mut dropped_terminal = false;
+        for (position, index) in deferred.into_iter().enumerate() {
+            let state = &mut self.function_call_items[index];
+            state.deferred = false;
+            let incomplete = output_status == OutputStatus::Incomplete
+                && (!only_terminal_is_incomplete || position == last);
+            if state.custom
+                && (incomplete || interrupted)
+                && serde_json::from_str::<serde_json::Value>(&state.accumulated_args).is_err()
+            {
+                state.output_status = Some(OutputStatus::Incomplete);
+                dropped_terminal = position == last;
+                continue;
+            }
+            self.append_function_call_delta_events(index, events);
+        }
         // `started` is set only after `has_identity()` observes both required
         // fields, matching Anthropic's `is_emit_ready()` identity requirement.
         let terminal_output_index = (only_terminal_is_incomplete
-            && output_status == OutputStatus::Incomplete)
+            && output_status == OutputStatus::Incomplete
+            && !dropped_terminal)
             .then(|| {
                 self.function_call_items
                     .iter()
@@ -917,6 +987,11 @@ impl ResponseStreamConverter {
     }
 
     fn terminal_output_index(&self) -> Option<u32> {
+        // A buffered tool is the terminal item even before it receives an index;
+        // preceding visible text must not inherit that tool's truncation status.
+        if !self.deferred_tool_calls.is_empty() {
+            return None;
+        }
         self.function_call_items
             .iter()
             .filter_map(|call| call.output_index)
@@ -1038,6 +1113,8 @@ impl ResponseStreamConverter {
         if !self.message_started {
             return;
         }
+        // Final reconstruction must retain the status sent in output_item.done.
+        self.message_output_status.get_or_insert(output_status);
         if self.text_content_index.is_none() && self.refusal_content_index.is_none() {
             let index = self.append_message_part(
                 OutputContent::OutputText(OutputTextContent {

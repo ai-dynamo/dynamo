@@ -712,40 +712,192 @@ fn client_search_fallback_alias_does_not_shadow_a_namespaced_function() {
 
 #[tokio::test]
 async fn custom_call_length_stop_never_exposes_a_truncated_input_wrapper() {
+    use crate::protocols::openai::chat_completions::MessageBoundary;
+    use dynamo_protocols::types::responses::MessagePhase;
+
     let response = request(
         json!([{"type":"custom","name":"run"}]),
         json!("Run a tool."),
     );
-    for (arguments, expected, finish) in [
-        (r#"{"input":"*** Begin"#, "", "length"),
-        (r#"{"input":"print(1)"}"#, "print(1)", "length"),
-        ("raw payload", "raw payload", "stop"),
-    ] {
+    for (tail, phase_boundary) in [("", false), ("tail", false), ("tail", true)] {
+        for (arguments, suffix, expected, finish) in [
+            (r#"{"input":"*** Begin"#, "", None, "length"),
+            (r#"{"input":"*** Begin"#, "", None, "content_filter"),
+            (r#"{"input":"print(1)"}"#, "", Some("print(1)"), "length"),
+            (r#"{"input":""}"#, "", Some(""), "length"),
+            (r#"{"input":"print("#, r#"1)"}"#, Some("print(1)"), "length"),
+            (r#"{"input":"print("#, r#"1)"}"#, Some("print(1)"), "stop"),
+            (r#"{"input":"print("#, "1)", None, "length"),
+            ("raw payload", "", Some("raw payload"), "stop"),
+        ] {
+            let mut converter =
+                stream_converter::ResponseStreamConverter::new("/model".into(), params(&response));
+            let mut events = converter.emit_start_events();
+            events.extend(converter.process_chunk(&tool_chunk(
+                Some("run"),
+                Some("c1"),
+                arguments,
+                None,
+            )));
+            let mut observed = stream_json(std::mem::take(&mut events)).await;
+            assert!(
+                observed
+                    .iter()
+                    .all(|event| event["type"] != "response.output_item.added")
+            );
+            let mut terminal_chunk = raw_chunk(tail, Some(finish));
+            if !suffix.is_empty() {
+                terminal_chunk.inner.choices[0].delta.tool_calls =
+                    tool_chunk(None, None, suffix, None).inner.choices[0]
+                        .delta
+                        .tool_calls
+                        .take();
+            }
+            if phase_boundary {
+                terminal_chunk.message_boundary =
+                    Some(MessageBoundary::Start(MessagePhase::FinalAnswer));
+            }
+            events.extend(converter.process_chunk(&terminal_chunk));
+            events.extend(converter.emit_end_events());
+            observed.extend(stream_json(events).await);
+            let terminal = observed.last().unwrap();
+            assert_eq!(
+                terminal["type"],
+                if finish == "stop" {
+                    "response.completed"
+                } else {
+                    "response.incomplete"
+                }
+            );
+            let output = &terminal["response"]["output"];
+            if let Some(expected) = expected {
+                assert_eq!(output[0]["input"], expected);
+                assert_eq!(output[0]["call_id"], "c1");
+                assert_eq!(output[0]["name"], "run");
+                let added = observed
+                    .iter()
+                    .find(|e| {
+                        e["type"] == "response.output_item.added"
+                            && e["item"]["type"] == "custom_tool_call"
+                    })
+                    .unwrap();
+                assert_eq!(added["output_index"], 0);
+                let done = observed
+                    .iter()
+                    .find(|e| e["type"] == "response.custom_tool_call_input.done")
+                    .unwrap();
+                assert_eq!(done["input"], expected);
+            } else {
+                assert_eq!(
+                    output.as_array().unwrap().len(),
+                    usize::from(!tail.is_empty())
+                );
+                assert!(!observed.iter().any(|event| {
+                    event["item"]["type"] == "custom_tool_call"
+                        || event["type"] == "response.custom_tool_call_input.done"
+                }));
+            }
+            if !tail.is_empty() {
+                let message = &output[usize::from(expected.is_some())];
+                assert_eq!(message["content"][0]["text"], tail);
+                assert_eq!(
+                    message["status"],
+                    if finish == "stop" {
+                        "completed"
+                    } else {
+                        "incomplete"
+                    }
+                );
+            }
+            for (sequence, event) in observed.iter().enumerate() {
+                assert_eq!(event["sequence_number"], sequence);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn custom_call_buffering_preserves_siblings_and_output_indices() {
+    let response = request(
+        json!([{"type":"custom","name":"run"},
+            {"type":"function","name":"lookup","parameters":{"type":"object"}}]),
+        json!("Run tools."),
+    );
+    for truncated in [false, true] {
         let mut converter =
             stream_converter::ResponseStreamConverter::new("/model".into(), params(&response));
         let mut events = converter.emit_start_events();
-        events.extend(converter.process_chunk(&tool_chunk(
-            Some("run"),
-            Some("c1"),
-            arguments,
-            Some(finish),
-        )));
-        events.extend(converter.emit_end_events());
-        let events = stream_json(events).await;
-        let terminal = events.last().unwrap();
-        assert_eq!(
-            terminal["type"],
-            if finish == "length" {
-                "response.incomplete"
-            } else {
-                "response.completed"
-            }
+        let mut function = tool_chunk(Some("lookup"), Some("c1"), "{}", None);
+        function.inner.choices[0].delta.tool_calls.as_mut().unwrap()[0].index =
+            u32::from(!truncated);
+        if truncated {
+            events.extend(converter.process_chunk(&function));
+        }
+        let mut custom = tool_chunk(Some("run"), Some("c0"), "{\"input\":", None);
+        custom.inner.choices[0].delta.tool_calls.as_mut().unwrap()[0].index = u32::from(truncated);
+        if truncated {
+            custom.inner.choices[0].delta.content = Some(
+                dynamo_protocols::types::ChatCompletionMessageContent::Text("Checking.".into()),
+            );
+        }
+        events.extend(converter.process_chunk(&custom));
+        if !truncated {
+            events.extend(converter.process_chunk(&function));
+            // Interleaved argument fragments still belong to the buffered custom call.
+            events.extend(converter.process_chunk(&tool_chunk(None, None, "\"print(1)\"}", None)));
+        }
+        let mut observed = stream_json(events).await;
+        assert!(
+            !observed
+                .iter()
+                .any(|e| e["item"]["type"] == "custom_tool_call")
         );
-        assert_eq!(terminal["response"]["output"][0]["input"], expected);
-        let done = events
+        let mut events = converter.process_chunk(&raw_chunk(
+            if truncated { "" } else { "Done." },
+            Some(if truncated { "length" } else { "stop" }),
+        ));
+        events.extend(converter.emit_end_events());
+        observed.extend(stream_json(events).await);
+        let output = &observed.last().unwrap()["response"]["output"];
+        if truncated {
+            assert_eq!(output.as_array().unwrap().len(), 2);
+            assert_eq!(output[0]["type"], "function_call");
+            assert_eq!(output[0]["status"], "completed");
+            assert_eq!(output[1]["content"][0]["text"], "Checking.");
+            assert_eq!(output[1]["status"], "completed");
+            assert_eq!(observed.last().unwrap()["type"], "response.incomplete");
+        } else {
+            assert_eq!(output.as_array().unwrap().len(), 3);
+            assert_eq!(output[0]["type"], "custom_tool_call");
+            assert_eq!(output[0]["input"], "print(1)");
+            assert_eq!(output[1]["type"], "function_call");
+            assert_eq!(output[1]["arguments"], "{}");
+            assert_eq!(output[2]["content"][0]["text"], "Done.");
+            let tool_done = observed
+                .iter()
+                .rposition(|e| {
+                    e["type"] == "response.output_item.done" && e["item"]["type"] != "message"
+                })
+                .unwrap();
+            let text_added = observed
+                .iter()
+                .position(|e| {
+                    e["type"] == "response.output_item.added" && e["item"]["type"] == "message"
+                })
+                .unwrap();
+            assert!(tool_done < text_added);
+        }
+        let added_indices: Vec<_> = observed
             .iter()
-            .find(|event| event["type"] == "response.custom_tool_call_input.done")
-            .unwrap();
-        assert_eq!(done["input"], expected);
+            .filter(|e| e["type"] == "response.output_item.added")
+            .map(|e| e["output_index"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            added_indices,
+            (0..output.as_array().unwrap().len() as u64).collect::<Vec<_>>()
+        );
+        for (sequence, event) in observed.iter().enumerate() {
+            assert_eq!(event["sequence_number"], sequence);
+        }
     }
 }

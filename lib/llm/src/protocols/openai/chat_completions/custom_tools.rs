@@ -21,7 +21,14 @@ pub(crate) struct ChatCustomToolAdapter {
     names: HashSet<String>,
     single_tool_call: bool,
     // Choices may interleave, and tool indices restart independently per choice.
-    pending: BTreeMap<(u32, u32), String>,
+    pending: BTreeMap<(u32, u32), PendingToolCall>,
+    // Named function continuations can pass through without being buffered again.
+    streamed: HashSet<(u32, u32)>,
+}
+
+struct PendingToolCall {
+    header: ChatCompletionMessageToolCallChunk,
+    arguments: String,
 }
 
 impl ChatCustomToolAdapter {
@@ -34,6 +41,7 @@ impl ChatCustomToolAdapter {
                 .collect(),
             single_tool_call: request.inner.parallel_tool_calls == Some(false),
             pending: BTreeMap::new(),
+            streamed: HashSet::new(),
         })
     }
 
@@ -68,7 +76,7 @@ impl ChatCustomToolAdapter {
         }
         for choice in &mut response.inner.choices {
             let mut output = Vec::new();
-            for mut call in choice.delta.tool_calls.take().into_iter().flatten() {
+            for call in choice.delta.tool_calls.take().into_iter().flatten() {
                 // Apply the HTTP single-call cap before validating discarded calls.
                 if self.single_tool_call && call.index > 0 {
                     continue;
@@ -80,27 +88,61 @@ impl ChatCustomToolAdapter {
                     .and_then(|f| f.name.as_ref())
                     .filter(|name| self.names.contains(*name))
                     .cloned();
-                if custom_name.is_some() {
-                    self.pending.entry(key).or_default();
+                // Keep later indices behind a buffered custom call as well;
+                // otherwise clients can receive index 1 before index 0 exists.
+                // The first unnamed fragment may still belong to a custom call.
+                let unnamed_start = !self.streamed.contains(&key)
+                    && call
+                        .function
+                        .as_ref()
+                        .and_then(|f| f.name.as_deref())
+                        .is_none_or(str::is_empty);
+                if custom_name.is_some()
+                    || unnamed_start
+                    || self.pending.range((choice.index, 0)..=key).next().is_some()
+                {
+                    self.pending.entry(key).or_insert_with(|| {
+                        let mut header = call.clone();
+                        if let Some(function) = &mut header.function {
+                            function.arguments = None;
+                        }
+                        PendingToolCall {
+                            header,
+                            arguments: String::new(),
+                        }
+                    });
                 }
-                if let Some(arguments) = self.pending.get_mut(&key) {
-                    if let Some(fragment) =
-                        call.function.as_ref().and_then(|f| f.arguments.as_ref())
-                    {
-                        arguments.push_str(fragment);
-                    }
-                    // The bridge's JSON escapes can cross chunks. Buffer custom input
-                    // until complete, then expose text without leaking the wrapper.
-                    call.function = None;
-                    if custom_name.is_some() || call.id.is_some() {
-                        call.r#type = Some(FunctionType::Custom);
-                        call.custom = Some(CustomToolCallStream {
-                            name: custom_name,
-                            input: Some(String::new()),
+                if let Some(pending) = self.pending.get_mut(&key) {
+                    if let Some(name) = custom_name {
+                        pending.header.function = None;
+                        pending.header.r#type = Some(FunctionType::Custom);
+                        pending.header.custom = Some(CustomToolCallStream {
+                            name: Some(name),
+                            input: None,
                         });
-                        output.push(call);
                     }
+                    if call.id.is_some() {
+                        pending.header.id = call.id;
+                    }
+                    if pending.header.custom.is_none() && call.r#type.is_some() {
+                        pending.header.r#type = call.r#type;
+                    }
+                    if let Some(function) = &call.function {
+                        if let Some(fragment) = &function.arguments {
+                            pending.arguments.push_str(fragment);
+                        }
+                        if pending.header.custom.is_none() && function.name.is_some() {
+                            pending
+                                .header
+                                .function
+                                .get_or_insert_with(Default::default)
+                                .name = function.name.clone();
+                        }
+                    }
+                    // Buffer identity too: an early empty input cannot be retracted
+                    // when generation later truncates inside the adapter wrapper.
                 } else {
+                    self.streamed.insert(key);
                     output.push(call);
                 }
             }
@@ -112,40 +154,40 @@ impl ChatCustomToolAdapter {
                     .copied()
                     .collect();
                 for key in keys {
-                    let arguments = self
+                    let PendingToolCall {
+                        mut header,
+                        arguments,
+                    } = self
                         .pending
                         .remove(&key)
                         .expect("key belongs to pending call");
-                    let input = match custom_input(&arguments) {
-                        Ok(input) => input,
-                        // Match unary truncation handling before applying the raw-output
-                        // fallback: a token limit must not turn a partial call into input.
-                        Err(_)
-                            if matches!(choice.finish_reason, Some(FinishReason::Length))
-                                && serde_json::from_str::<serde_json::Value>(&arguments)
+                    if let Some(custom) = &mut header.custom {
+                        let input = match custom_input(&arguments) {
+                            Ok(input) => input,
+                            // Match unary truncation handling before applying the raw-output
+                            // fallback: a token limit must not turn a partial call into input.
+                            Err(_)
+                                if matches!(
+                                    choice.finish_reason,
+                                    Some(FinishReason::Length | FinishReason::ContentFilter)
+                                ) && serde_json::from_str::<serde_json::Value>(&arguments)
                                     .is_err() =>
-                        {
-                            output.retain(|call| call.index != key.1);
-                            continue;
-                        }
-                        Err(_) => custom_input_or_raw(&arguments),
-                    };
-                    // One entry per index: older SDKs read repeats as separate calls.
-                    if let Some(opened) = output.iter_mut().find(|call| call.index == key.1) {
-                        opened.custom.get_or_insert_with(Default::default).input = Some(input);
-                        continue;
+                            {
+                                continue;
+                            }
+                            Err(_) => custom_input_or_raw(&arguments),
+                        };
+                        // Publish one complete entry, including its original identity.
+                        custom.input = Some(input);
+                    } else {
+                        header
+                            .function
+                            .get_or_insert_with(Default::default)
+                            .arguments = Some(arguments);
                     }
-                    output.push(ChatCompletionMessageToolCallChunk {
-                        index: key.1,
-                        id: None,
-                        r#type: None,
-                        function: None,
-                        custom: Some(CustomToolCallStream {
-                            name: None,
-                            input: Some(input),
-                        }),
-                    });
+                    output.push(header);
                 }
+                output.sort_unstable_by_key(|call| call.index);
             }
             choice.delta.tool_calls = (!output.is_empty()).then_some(output);
         }
@@ -250,60 +292,84 @@ mod tests {
     async fn chat_custom_stream_decodes_every_split_and_isolates_choices() {
         let input = "print(\"café 日本語\")\n# \\backslash";
         let arguments = json!({"input":input}).to_string();
-        for split in arguments
-            .char_indices()
-            .map(|(i, _)| i)
-            .chain([arguments.len()])
-        {
-            let adapter = ChatCustomToolAdapter::prepare(&mut request()).unwrap();
-            let source = vec![
-                chunk(
-                    0,
-                    json!([{"index":0,"id":"c1","type":"function","function":{"name":"run_python","arguments":&arguments[..split]}}]),
-                    json!(null),
-                ),
-                chunk(
-                    1,
-                    json!([{"index":0,"id":"c2","type":"function","function":{"name":"lookup","arguments":"{}"}}]),
-                    json!("tool_calls"),
-                ),
-                chunk(
-                    0,
-                    json!([{"index":0,"function":{"arguments":&arguments[split..]}}]),
-                    json!(null),
-                ),
-                chunk(0, json!(null), json!("tool_calls")),
-            ];
-            let out: Vec<_> = adapter
-                .stream(futures::stream::iter(
-                    source.into_iter().map(Annotated::from_data),
-                ))
-                .collect()
-                .await;
-            assert!(out.iter().all(|item| !item.is_error()));
-            let values: Vec<_> = out
-                .into_iter()
-                .map(|item| serde_json::to_value(item.data.unwrap()).unwrap())
-                .collect();
-            assert_eq!(
-                values[0]["choices"][0]["delta"]["tool_calls"][0]["type"],
-                "custom"
-            );
-            assert_eq!(
-                values[1]["choices"][0]["delta"]["tool_calls"][0]["type"],
-                "function"
-            );
-            assert_eq!(
-                values[3]["choices"][0]["delta"]["tool_calls"][0]["custom"]["input"],
-                input
-            );
-            for (index, value) in values.iter().enumerate().filter(|(i, _)| *i != 1) {
-                for call in value["choices"][0]["delta"]["tool_calls"]
-                    .as_array()
+        for late_identity in [false, true] {
+            for split in arguments
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain([arguments.len()])
+            {
+                let adapter = ChatCustomToolAdapter::prepare(&mut request()).unwrap();
+                let mut first = json!([{"index":0,"id":"c1","type":"function","function":{"name":"run_python","arguments":&arguments[..split]}}]);
+                let mut rest = json!([{"index":0,"function":{"arguments":&arguments[split..]}}]);
+                if late_identity {
+                    first[0]["id"] = Value::Null;
+                    first[0]["type"] = Value::Null;
+                    first[0]["function"]["name"] = Value::Null;
+                    rest[0]["id"] = json!("c1");
+                    rest[0]["type"] = json!("function");
+                    rest[0]["function"]["name"] = json!("run_python");
+                }
+                let source = vec![
+                    chunk(0, first, json!(null)),
+                    chunk(
+                        1,
+                        json!([{"index":0,"id":"c2","type":"function","function":{"name":"lookup","arguments":"{"}}]),
+                        json!(null),
+                    ),
+                    chunk(0, rest, json!(null)),
+                    chunk(0, json!(null), json!("tool_calls")),
+                    chunk(
+                        1,
+                        json!([{"index":0,"function":{"arguments":"}"}}]),
+                        json!(null),
+                    ),
+                    chunk(1, json!(null), json!("tool_calls")),
+                ];
+                let out: Vec<_> = adapter
+                    .stream(futures::stream::iter(
+                        source.into_iter().map(Annotated::from_data),
+                    ))
+                    .collect()
+                    .await;
+                assert!(out.iter().all(|item| !item.is_error()));
+                let values: Vec<_> = out
                     .into_iter()
-                    .flatten()
+                    .map(|item| serde_json::to_value(item.data.unwrap()).unwrap())
+                    .collect();
+                assert!(values[0]["choices"][0]["delta"]["tool_calls"].is_null());
+                assert_eq!(
+                    values[1]["choices"][0]["delta"]["tool_calls"][0]["type"],
+                    "function"
+                );
+                // A known ordinary function must keep streaming unnamed continuations.
+                assert_eq!(
+                    values[4]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+                    "}"
+                );
+                assert_eq!(
+                    values[3]["choices"][0]["delta"]["tool_calls"][0]["custom"]["input"],
+                    input
+                );
+                assert_eq!(
+                    values[3]["choices"][0]["delta"]["tool_calls"][0]["id"],
+                    "c1"
+                );
+                assert_eq!(
+                    values[3]["choices"][0]["delta"]["tool_calls"][0]["custom"]["name"],
+                    "run_python"
+                );
+                for (index, value) in values
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, value)| value["choices"][0]["index"] == 0)
                 {
-                    assert!(call.get("function").is_none(), "chunk {index}");
+                    for call in value["choices"][0]["delta"]["tool_calls"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                    {
+                        assert!(call.get("function").is_none(), "chunk {index}");
+                    }
                 }
             }
         }
@@ -361,20 +427,35 @@ mod tests {
             let out: Vec<_> = adapter.stream(futures::stream::iter([
                 Annotated::from_data(chunk(0, json!([
                     {"index":0,"id":"c1","type":"function","function":{"name":"run_python","arguments":arguments}},
-                    {"index":1,"id":"c2","type":"function","function":{"name":"lookup","arguments":"{}"}}
+                    {"index":1,"function":{"arguments":"{"}}
+                ]), json!(null))),
+                Annotated::from_data(chunk(0, json!([
+                    {"index":1,"id":"c2","type":"function","function":{"name":"lookup","arguments":"}"}}
                 ]), json!(null))),
                 Annotated::from_data(terminal),
             ])).collect().await;
             assert!(out.iter().all(|item| !item.is_error()), "{arguments:?}");
             let value = serde_json::to_value(out[0].data.as_ref().unwrap()).unwrap();
-            assert_eq!(
-                value["choices"][0]["delta"]["tool_calls"][1]["function"]["arguments"],
-                "{}"
-            );
+            assert!(value["choices"][0]["delta"]["tool_calls"].is_null());
             let value = serde_json::to_value(out.last().unwrap().data.as_ref().unwrap()).unwrap();
             assert_eq!(
                 value["choices"][0]["delta"]["tool_calls"][0]["custom"]["input"],
                 arguments
+            );
+            assert_eq!(
+                value["choices"][0]["delta"]["tool_calls"][1]["function"]["arguments"],
+                "{}"
+            );
+            assert_eq!(value["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
+            assert_eq!(value["choices"][0]["delta"]["tool_calls"][1]["index"], 1);
+            assert_eq!(value["choices"][0]["delta"]["tool_calls"][1]["id"], "c2");
+            assert_eq!(
+                value["choices"][0]["delta"]["tool_calls"][1]["type"],
+                "function"
+            );
+            assert_eq!(
+                value["choices"][0]["delta"]["tool_calls"][1]["function"]["name"],
+                "lookup"
             );
             assert_eq!(value["choices"][0]["delta"]["content"], "Checking.");
             assert_eq!(value["choices"][0]["finish_reason"], "tool_calls");
@@ -446,6 +527,7 @@ mod tests {
     async fn chat_custom_stream_length_preserves_complete_input_and_drops_truncated_tail() {
         for (arguments, expected) in [
             (r#"{"input":"print(1)"}"#, Some("print(1)")),
+            (r#"{"input":""}"#, Some("")),
             (r#"{"code":"print(1)"}"#, Some(r#"{"code":"print(1)"}"#)),
             (r#"{"input":"print("#, None),
         ] {
@@ -477,23 +559,38 @@ mod tests {
 
     #[tokio::test]
     async fn chat_custom_stream_length_stop_drops_truncated_input() {
-        let adapter = ChatCustomToolAdapter::prepare(&mut request()).unwrap();
-        let out: Vec<_> = adapter
-            .stream(futures::stream::iter([
-                Annotated::from_data(chunk(
-                    0,
-                    json!([{"index":0,"id":"c1","type":"function","function":{"name":"run_python","arguments":"{\"input\":\"print("}}]),
-                    json!(null),
-                )),
-                Annotated::from_data(chunk(0, json!(null), json!("length"))),
-            ]))
-            .collect()
-            .await;
-        // The unary aggregator drops a truncated call; streaming keeps the length stop.
-        assert!(out.iter().all(|item| !item.is_error()));
-        let last = serde_json::to_value(out.last().unwrap().data.as_ref().unwrap()).unwrap();
-        assert_eq!(last["choices"][0]["finish_reason"], "length");
-        assert!(last["choices"][0]["delta"]["tool_calls"].is_null());
+        for finish in ["length", "content_filter"] {
+            for late_identity in [false, true] {
+                let adapter = ChatCustomToolAdapter::prepare(&mut request()).unwrap();
+                let partial = json!([{
+                    "index":0,"id":if late_identity {Value::Null} else {json!("c1")},
+                    "type":"function","function":{
+                        "name":if late_identity {Value::Null} else {json!("run_python")},
+                        "arguments":"{\"input\":\"print("
+                    }
+                }]);
+                let out: Vec<_> = adapter
+                    .stream(futures::stream::iter([
+                        Annotated::from_data(chunk(0, partial, json!(null))),
+                        Annotated::from_data(chunk(0,
+                            json!([{"index":0,"id":"c1","type":"function","function":{"name":"run_python"}}]),
+                            json!(null))),
+                        Annotated::from_data(chunk(0, json!(null), json!(finish))),
+                    ]))
+                    .collect()
+                    .await;
+                // No earlier chunk may advertise an executable empty custom call either.
+                assert!(out.iter().all(|item| !item.is_error()));
+                for chunk in &out {
+                    let value = serde_json::to_value(chunk.data.as_ref().unwrap()).unwrap();
+                    assert!(value["choices"][0]["delta"]["tool_calls"].is_null());
+                }
+                let last =
+                    serde_json::to_value(out.last().unwrap().data.as_ref().unwrap()).unwrap();
+                assert_eq!(last["choices"][0]["finish_reason"], finish);
+                assert!(last["choices"][0]["delta"]["tool_calls"].is_null());
+            }
+        }
     }
 
     #[tokio::test]

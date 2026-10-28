@@ -338,9 +338,7 @@ impl NvCreateChatCompletionRequest {
     }
 
     pub(crate) fn normalize_responses_tools(&mut self, native: bool) -> anyhow::Result<()> {
-        if !native {
-            self.normalize_responses_history_phases(false);
-        }
+        // Parser capability selects phase replay independently of tool rendering.
         if let Some(context) = &mut self.responses_tools {
             context.native = native;
         }
@@ -476,7 +474,8 @@ impl NvCreateChatCompletionRequest {
     fn allowed_template_tools(&self) -> Option<Vec<RequestTool>> {
         let context = self.responses_tools.as_ref()?;
         let Some(selected) = &context.selected_tools else {
-            return Some(context.declared_tools.clone());
+            // Templates can distinguish absent tools from an empty tool list.
+            return Some(context.declared_tools.clone()).filter(|tools| !tools.is_empty());
         };
         Some(
             context
