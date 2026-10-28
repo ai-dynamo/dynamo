@@ -356,6 +356,10 @@ jobs:
       # build exceed 60m with room to spare in run 34547963529.
       build_timeout_minutes: 90
       artifact_retention_days: '7'
+      # Nothing in PR CI runs these binaries; the build checks that the image
+      # and its license policy still build. Post-merge builds the shipping
+      # profile, including the LTO link.
+      fast_release_profile: true
       diff_event_context: pr
       diff_current_branch: ${{ github.ref_name }}
       diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
