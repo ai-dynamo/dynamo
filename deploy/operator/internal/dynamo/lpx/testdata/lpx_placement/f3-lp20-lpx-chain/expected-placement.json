@@ -1,0 +1,51 @@
+{
+  "fixture": "f3-lp20-lpx-chain",
+  "description": "LP20 hybrid LPX bundle with a prop-sync chain (gpt-oss-20b-lpx-lp20). LPU partitions 0-13 have 16 chips each on 8-device nodes, so every reservation is two nodes. The selected chain [12, 13] is one unit and is never packed in LPX; every other partition is its own unit. The localPartitions scenario keeps two non-adjacent single units (roots 1 and 11) and the chain unit (root 12) on remote Agents and makes roots 0 and 2-10 local.",
+  "architecture": "lp20",
+  "compilationMode": "lpx",
+  "devicesPerNode": 8,
+  "localPartitions": {"mode": "ids", "ids": [0, 2, 3, 4, 5, 6, 7, 8, 9, 10]},
+  "units": [
+    {"reservations": [{"partitionIds": [0], "size": {"nodes": 2}}], "connectors": []},
+    {"reservations": [{"partitionIds": [1], "size": {"nodes": 2}}], "connectors": []},
+    {"reservations": [{"partitionIds": [2], "size": {"nodes": 2}}], "connectors": []},
+    {"reservations": [{"partitionIds": [3], "size": {"nodes": 2}}], "connectors": []},
+    {"reservations": [{"partitionIds": [4], "size": {"nodes": 2}}], "connectors": []},
+    {"reservations": [{"partitionIds": [5], "size": {"nodes": 2}}], "connectors": []},
+    {"reservations": [{"partitionIds": [6], "size": {"nodes": 2}}], "connectors": []},
+    {"reservations": [{"partitionIds": [7], "size": {"nodes": 2}}], "connectors": []},
+    {"reservations": [{"partitionIds": [8], "size": {"nodes": 2}}], "connectors": []},
+    {"reservations": [{"partitionIds": [9], "size": {"nodes": 2}}], "connectors": []},
+    {"reservations": [{"partitionIds": [10], "size": {"nodes": 2}}], "connectors": []},
+    {"reservations": [{"partitionIds": [11], "size": {"nodes": 2}}], "connectors": []},
+    {"reservations": [{"partitionIds": [12], "size": {"nodes": 2}}, {"partitionIds": [13], "size": {"nodes": 2}}], "connectors": [{"xt8888Gap": {"maxInterPartitionOffset": 0}}]}
+  ],
+  "localPartitionIds": [0, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+  "lpr": {
+    "partitions": [
+      {"id": "partition-000", "ordinal": 0, "compilerPartitionId": 1, "xtShape": "c16"},
+      {"id": "partition-001", "ordinal": 1, "compilerPartitionId": 11, "xtShape": "c16"},
+      {"id": "partition-002", "ordinal": 2, "compilerPartitionId": 12, "xtShape": "c16"},
+      {"id": "partition-003", "ordinal": 3, "compilerPartitionId": 13, "xtShape": "c16"}
+    ],
+    "propSyncConnectors": [
+      {"fromPartitionId": "partition-002", "toPartitionId": "partition-003", "requirement": {"kind": "xt8888Gap", "maxInterPartitionOffset": 0}}
+    ]
+  },
+  "agentCount": 8,
+  "agentPods": [
+    {"podIndex": 0, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 0, "groupSize": 2, "leaderPodIndex": 0},
+    {"podIndex": 1, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 1, "groupSize": 2, "leaderPodIndex": 0},
+    {"podIndex": 2, "unitRoot": 11, "lprPartitionId": "partition-001", "rank": 0, "groupSize": 2, "leaderPodIndex": 2},
+    {"podIndex": 3, "unitRoot": 11, "lprPartitionId": "partition-001", "rank": 1, "groupSize": 2, "leaderPodIndex": 2},
+    {"podIndex": 4, "unitRoot": 12, "lprPartitionId": "partition-002", "rank": 0, "groupSize": 4, "leaderPodIndex": 4},
+    {"podIndex": 5, "unitRoot": 12, "lprPartitionId": "partition-002", "rank": 1, "groupSize": 4, "leaderPodIndex": 4},
+    {"podIndex": 6, "unitRoot": 12, "lprPartitionId": "partition-003", "rank": 2, "groupSize": 4, "leaderPodIndex": 4},
+    {"podIndex": 7, "unitRoot": 12, "lprPartitionId": "partition-003", "rank": 3, "groupSize": 4, "leaderPodIndex": 4}
+  ],
+  "cyborgEndpoints": [
+    {"unitRoot": 1, "agentPodIndex": 0},
+    {"unitRoot": 11, "agentPodIndex": 2},
+    {"unitRoot": 12, "agentPodIndex": 4}
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "fixture": "f1-lp20-lpu-chain",
+  "description": "LP20 LPU-only prop-sync chain (llama3.2-1b-ursa-2p-topk-1-c2c-invoke-prop-sync-lp20, the E2E LPU scenario). The host serves token embeddings, so the deployed LPU partitions are 1 and 2 (8 chips each, 8 devices per node). The chain [1, 2] is one unit; full-node stages do not pack, so each reservation is one node, joined by an XT gap connector.",
+  "architecture": "lp20",
+  "compilationMode": "lpuOnly",
+  "devicesPerNode": 8,
+  "localPartitions": null,
+  "units": [
+    {"reservations": [{"partitionIds": [1], "size": {"nodes": 1}}, {"partitionIds": [2], "size": {"nodes": 1}}], "connectors": [{"xt8888Gap": {"maxInterPartitionOffset": 0}}]}
+  ],
+  "localPartitionIds": [],
+  "lpr": {
+    "partitions": [
+      {"id": "partition-000", "ordinal": 0, "compilerPartitionId": 1, "xtShape": "c8"},
+      {"id": "partition-001", "ordinal": 1, "compilerPartitionId": 2, "xtShape": "c8"}
+    ],
+    "propSyncConnectors": [
+      {"fromPartitionId": "partition-000", "toPartitionId": "partition-001", "requirement": {"kind": "xt8888Gap", "maxInterPartitionOffset": 0}}
+    ]
+  },
+  "agentCount": 2,
+  "agentPods": [
+    {"podIndex": 0, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 0, "groupSize": 2, "leaderPodIndex": 0},
+    {"podIndex": 1, "unitRoot": 1, "lprPartitionId": "partition-001", "rank": 1, "groupSize": 2, "leaderPodIndex": 0}
+  ],
+  "novaStages": [
+    {"partitionId": 1, "nodeCount": 1, "podIndices": [0]},
+    {"partitionId": 2, "nodeCount": 1, "podIndices": [1]}
+  ]
+}

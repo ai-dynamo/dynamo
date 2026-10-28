@@ -1,0 +1,25 @@
+{
+  "fixture": "f7-lp30-lpu-single-16c",
+  "description": "LP30 LPU-only single partition (llama3.2-1b-16c-lp30). The host serves token embeddings, so the only deployed LPU partition is 1: 16 chips on 16-device nodes with HX16x8x2 extent [16, 1, 1, 1], so the reservation is hx {1, 1, 1} and the LPX partition extent is [16, 1, 1, 1].",
+  "architecture": "lp30",
+  "compilationMode": "lpuOnly",
+  "devicesPerNode": 16,
+  "localPartitions": null,
+  "units": [
+    {"reservations": [{"partitionIds": [1], "size": {"hx": {"traysPerHemisphere": 1, "hemispheres": 1, "racks": 1}}}], "connectors": []}
+  ],
+  "localPartitionIds": [],
+  "lpr": {
+    "partitions": [
+      {"id": "partition-000", "ordinal": 0, "compilerPartitionId": 1, "extent": [16, 1, 1, 1]}
+    ],
+    "propSyncConnectors": []
+  },
+  "agentCount": 1,
+  "agentPods": [
+    {"podIndex": 0, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 0, "groupSize": 1, "leaderPodIndex": 0}
+  ],
+  "novaStages": [
+    {"partitionId": 1, "nodeCount": 1, "podIndices": [0]}
+  ]
+}

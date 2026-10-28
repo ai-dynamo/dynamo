@@ -1,0 +1,56 @@
+{
+  "fixture": "f9-lp30-lpu-chain",
+  "description": "Builder-generated LP30 LPU-only prop-sync chain of two single-tray partitions (1 and 2, 16 chips each, LYRA_LP30__HX16x8x2__16C, extent [16, 1, 1, 1]). The chain [1, 2] is one unit with two hx {1, 1, 1} reservations. Its connector lists the compiled default-dimension (INTRA_HALF_RACK) load set: chip i of one tray to chip i of the next tray, i = 0..15.",
+  "architecture": "lp30",
+  "compilationMode": "lpuOnly",
+  "devicesPerNode": 16,
+  "localPartitions": null,
+  "units": [
+    {
+      "reservations": [
+        {"partitionIds": [1], "size": {"hx": {"traysPerHemisphere": 1, "hemispheres": 1, "racks": 1}}},
+        {"partitionIds": [2], "size": {"hx": {"traysPerHemisphere": 1, "hemispheres": 1, "racks": 1}}}
+      ],
+      "connectors": [
+        {"hxPropSyncV1": {
+          "connections": [
+            {"fromDevice": 0, "toDevice": 0}, {"fromDevice": 1, "toDevice": 1}, {"fromDevice": 2, "toDevice": 2}, {"fromDevice": 3, "toDevice": 3},
+            {"fromDevice": 4, "toDevice": 4}, {"fromDevice": 5, "toDevice": 5}, {"fromDevice": 6, "toDevice": 6}, {"fromDevice": 7, "toDevice": 7},
+            {"fromDevice": 8, "toDevice": 8}, {"fromDevice": 9, "toDevice": 9}, {"fromDevice": 10, "toDevice": 10}, {"fromDevice": 11, "toDevice": 11},
+            {"fromDevice": 12, "toDevice": 12}, {"fromDevice": 13, "toDevice": 13}, {"fromDevice": 14, "toDevice": 14}, {"fromDevice": 15, "toDevice": 15}
+          ],
+          "acceptableLaneMultiplicities": [4, 2, 1],
+          "topologyDimension": 1
+        }}
+      ]
+    }
+  ],
+  "localPartitionIds": [],
+  "lpr": {
+    "partitions": [
+      {"id": "partition-000", "ordinal": 0, "compilerPartitionId": 1, "extent": [16, 1, 1, 1]},
+      {"id": "partition-001", "ordinal": 1, "compilerPartitionId": 2, "extent": [16, 1, 1, 1]}
+    ],
+    "propSyncConnectors": [
+      {"fromPartitionId": "partition-000", "toPartitionId": "partition-001", "requirement": {
+        "kind": "hxPropSyncV1",
+        "connections": [
+          {"fromLogicalDevice": 0, "toLogicalDevice": 0}, {"fromLogicalDevice": 1, "toLogicalDevice": 1}, {"fromLogicalDevice": 2, "toLogicalDevice": 2}, {"fromLogicalDevice": 3, "toLogicalDevice": 3},
+          {"fromLogicalDevice": 4, "toLogicalDevice": 4}, {"fromLogicalDevice": 5, "toLogicalDevice": 5}, {"fromLogicalDevice": 6, "toLogicalDevice": 6}, {"fromLogicalDevice": 7, "toLogicalDevice": 7},
+          {"fromLogicalDevice": 8, "toLogicalDevice": 8}, {"fromLogicalDevice": 9, "toLogicalDevice": 9}, {"fromLogicalDevice": 10, "toLogicalDevice": 10}, {"fromLogicalDevice": 11, "toLogicalDevice": 11},
+          {"fromLogicalDevice": 12, "toLogicalDevice": 12}, {"fromLogicalDevice": 13, "toLogicalDevice": 13}, {"fromLogicalDevice": 14, "toLogicalDevice": 14}, {"fromLogicalDevice": 15, "toLogicalDevice": 15}
+        ],
+        "acceptableLaneMultiplicities": [4, 2, 1]
+      }}
+    ]
+  },
+  "agentCount": 2,
+  "agentPods": [
+    {"podIndex": 0, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 0, "groupSize": 2, "leaderPodIndex": 0},
+    {"podIndex": 1, "unitRoot": 1, "lprPartitionId": "partition-001", "rank": 1, "groupSize": 2, "leaderPodIndex": 0}
+  ],
+  "novaStages": [
+    {"partitionId": 1, "nodeCount": 1, "podIndices": [0]},
+    {"partitionId": 2, "nodeCount": 1, "podIndices": [1]}
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "fixture": "f6b-lp20-packed-6x4c",
+  "description": "LP20 LPU-only packed chain on several hosts (llama3.2-1b-4k-quasar-6x4c-1u-lp20). Partitions 1-6 have 4 chips each with one topology on 8-device nodes, so the chain [1..6] packs into one reservation of ceil(6 * 4 / 8) = 3 hosts (xtShape c24). Two stages share each host: stage k sits on host floor(k / 2).",
+  "architecture": "lp20",
+  "compilationMode": "lpuOnly",
+  "devicesPerNode": 8,
+  "localPartitions": null,
+  "units": [
+    {"reservations": [{"partitionIds": [1, 2, 3, 4, 5, 6], "size": {"nodes": 3}}], "connectors": []}
+  ],
+  "localPartitionIds": [],
+  "lpr": {
+    "partitions": [
+      {"id": "partition-000", "ordinal": 0, "compilerPartitionId": 1, "xtShape": "c24"}
+    ],
+    "propSyncConnectors": []
+  },
+  "agentCount": 3,
+  "agentPods": [
+    {"podIndex": 0, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 0, "groupSize": 3, "leaderPodIndex": 0},
+    {"podIndex": 1, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 1, "groupSize": 3, "leaderPodIndex": 0},
+    {"podIndex": 2, "unitRoot": 1, "lprPartitionId": "partition-000", "rank": 2, "groupSize": 3, "leaderPodIndex": 0}
+  ],
+  "novaStages": [
+    {"partitionId": 1, "nodeCount": 1, "podIndices": [0]},
+    {"partitionId": 2, "nodeCount": 1, "podIndices": [0]},
+    {"partitionId": 3, "nodeCount": 1, "podIndices": [1]},
+    {"partitionId": 4, "nodeCount": 1, "podIndices": [1]},
+    {"partitionId": 5, "nodeCount": 1, "podIndices": [2]},
+    {"partitionId": 6, "nodeCount": 1, "podIndices": [2]}
+  ]
+}
