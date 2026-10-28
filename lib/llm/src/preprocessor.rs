@@ -6515,8 +6515,6 @@ impl OpenAIPreprocessor {
         tool_choice: Option<&ChatCompletionToolChoiceOption>,
         has_tools: bool,
     ) -> std::result::Result<bool, Error> {
-        // K3 and MiniMax-M3 need their parser on every response, regardless of
-        // tool or reasoning usage. See `parser_unwraps_all_responses`.
         if tool_call_parser
             .is_some_and(|parser| Self::parser_unwraps_all_responses(parser.as_str()))
         {
@@ -14263,12 +14261,13 @@ responses_tools: None,
             );
         }
 
-        for parser in ["hermes", "llama3_json", "minimax_m2", "qwen3"] {
-            assert!(
-                !OpenAIPreprocessor::parser_unwraps_all_responses(parser),
-                "{parser} must not decode responses when the request has no tools"
-            );
-        }
+        // minimax_m2 guards specifically against widening the MiniMax family;
+        // unrelated parsers are covered through the downstream helper in
+        // test_tool_jail_still_skipped_without_parser_and_tools.
+        assert!(
+            !OpenAIPreprocessor::parser_unwraps_all_responses("minimax_m2"),
+            "minimax_m2 must not decode responses when the request has no tools"
+        );
     }
 
     #[test]
