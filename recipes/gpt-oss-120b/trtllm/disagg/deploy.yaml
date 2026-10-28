@@ -7,8 +7,8 @@ metadata:
 data:
   prefill.yaml: |
     cache_transceiver_config:
-      backend: UCX
-      transceiver_runtime: CPP
+      backend: NIXL
+      transceiver_runtime: PYTHON
       max_tokens_in_buffer: 9216
     cuda_graph_config:
       enable_padding: true
@@ -16,8 +16,6 @@ data:
     disable_overlap_scheduler: true
     enable_attention_dp: false
     kv_cache_config:
-      # The C++ transceiver required by UCX runs on KV cache manager v1.
-      use_kv_cache_manager_v2: false
       dtype: fp8
       enable_block_reuse: false
       free_gpu_memory_fraction: 0.8
@@ -37,8 +35,8 @@ data:
     attention_dp_config:
       enable_balance: true
     cache_transceiver_config:
-      backend: UCX
-      transceiver_runtime: CPP
+      backend: NIXL
+      transceiver_runtime: PYTHON
       max_tokens_in_buffer: 9216
     cuda_graph_config:
       enable_padding: true
@@ -46,8 +44,6 @@ data:
     disable_overlap_scheduler: false
     enable_attention_dp: false
     kv_cache_config:
-      # The C++ transceiver required by UCX runs on KV cache manager v1.
-      use_kv_cache_manager_v2: false
       dtype: fp8
       enable_block_reuse: false
       free_gpu_memory_fraction: 0.85

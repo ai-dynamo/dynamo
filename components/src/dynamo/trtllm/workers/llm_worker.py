@@ -530,8 +530,8 @@ async def init_llm_worker(
         if use_v2 is not False:
             raise ValueError(
                 f"kv_cache_config.use_kv_cache_manager_v2={use_v2!r} is not supported "
-                "with polled KV events; set it to false, or enable streaming KV "
-                "events via kv_cache_config.kv_events_config"
+                "with polled KV events on TensorRT-LLM 1.4.0rc1; "
+                "set it to false to use KV cache manager v1."
             )
 
         # TRT-LLM enables block reuse by default; warn only when it is explicitly
