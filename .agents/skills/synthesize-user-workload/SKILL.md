@@ -201,5 +201,5 @@ supporting context for `perf-analyzer`, `hypothesis-generator`, and `hypothesis-
 
 End with an operator handoff line before any deployment starts: state that the interview is complete, give the
 contract path, and tell the operator that the engagement now runs a long unattended loop — without goal mode the
-session pauses for input at every turn end — and that this is the moment to arm it (AGENTS.md, Long-Running Runs,
+session pauses for input at every turn end — and that this is the moment to arm it (`agent-docs/guides/optimization/optimize-loop.md`, Long-Running Runs,
 has the condition template; fill in the budget).

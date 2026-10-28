@@ -48,6 +48,58 @@ LOOP itself has no recipe-discovery or recipe-selection step.
 When using Codex multi-agent mode, dispatch registered roles through `.codex/config.toml`. Each launcher must read and
 follow its corresponding `agents/<role>/AGENTS.md` contract.
 
+## Long-Running Runs And Harness Compatibility
+
+An optimization loop is long-running, unattended work. Know which harness you are in: in a SINGLE-SHOT harness
+(headless `-p`/print mode, one-turn API calls), background-job completion notifications can never reach you - the
+session is gone when your turn ends. There, poll synchronously with bounded loops and never park the engagement on
+a wake-up you cannot receive; parking is only valid where the harness can re-invoke you (interactive sessions, goal
+mode). An interactive harness ends its turn whenever the agent stops
+calling tools — a turn that ends on narrated intent ("now I'll test disagg") silently stalls the loop until a human
+notices. Two rules:
+
+1. **Operators: launch unattended runs inside your harness's goal mode.** Goal mode is an operator action at launch,
+   not something these instructions can enable mid-run. On Codex CLI, wrap the run in `/goal` with a token budget. On
+   Claude Code (v2.1.139+), wrap it in `/goal`; its completion condition is model-evaluated and may include a bound
+   such as "or stop after N turns" as part of the condition text (a soft limit, not a hard budget). A validated
+   condition template: "Test every lever family that is testable within the authorized budget. Never stop because a
+   report exists. Parked on pending asks with nothing else testable is a valid pause, not completion. Valid stops: an
+   operator-granted stop-request, the authorized budget exhausted, access lost, or operator interrupt." Always name
+   the budget (GPU-hours, wall-clock, failed-deployment limit) in the condition; a bare "never stop" silently relies
+   on credential expiry as its budget. Tell the operator at the START of any optimization
+   engagement — not only when they say "unattended" — that this is long-running work and how to arm goal mode; the
+   user-interviewer's contract handoff is the natural moment. Arm goal mode only AFTER the contract questions are
+   answered: a goal hook armed while questions are outstanding forces the run past them onto its own defaults. The template's parked-on-asks pause assumes a
+   reachable operator: for runs where the operator will be away, instruct the agent not to park on asks (asks are
+   logged and the loop continues) and keep only the hard stops. Blocking question tools suspend the turn BEFORE the
+   goal hook can evaluate, so one blocking question can hang an unattended run for hours; harnesses that support
+   tool restrictions should disallow blocking question tools in goal mode.
+2. **Never end a turn on narrated intent during a loop.** Either perform the next step in the same turn, launch it as
+   background work that will re-invoke you, or return the specific blocking question you need answered.
+
+**Harness tiers.** These roles and skills are developed and tested on Claude Code and Codex CLI. Isolated role
+configurations currently ship for Codex only (`.codex/agents/*.toml`); on Claude Code the roles run in-context within
+one session (no `.claude/agents/` configurations yet), so adversarial review there is same-context review, not an
+independent reviewer. The skills follow the Agent Skills open standard and load on other compliant harnesses (for
+example, OpenCode includes `.agents/skills/` among its standard skill search paths), with the same in-context role
+caveat plus two more degradations: no native goal mode (run lights-out sessions under an external loop), and every
+rule in this pack is prompt-enforced, so discipline depends on the driver model. If you hit an instruction gap on any
+harness, prepare a sanitized issue describing the gap and ask your operator to approve filing it on this repository.
+
+## Improving These Instructions
+
+If these skills, instructions, role contracts, or this file misled you, blocked you, contradicted what you verified
+live, or left a component or situation uncovered, do not route around it silently: invoke the
+`report-skillpack-issue` skill (`.agents/skills/report-skillpack-issue/`), which every role contract declares and
+which owns the full procedure. Dispatched roles record drafts in `<EXP_ROOT>/analysis/skillpack-defects.md` and return
+them; only the top-level agent, with operator approval, files, at most one new issue per session with findings
+batched, plus comments on duplicates. If your harness cannot surface the skill, follow this minimum, which the skill
+also enforces: search existing reports by title, body, and comments first; identify yourself as an AI agent with
+your driver model and the skills commit; sanitize every emitted string (title, body, comment, search term: no
+workload details, traffic numbers, cluster or namespace names, company names, or credentials); keep drafts as
+run-scoped files, never in a shared temp path; and show the operator the exact draft and file only on their
+approval, using the `[AGENT]: ` title prefix and verifying the label landed.
+
 ## 1. Interview, Capture The DGD, And Synthesize The Workload
 
 Immediately dispatch `user-interviewer` with the user's first optimization message and any supplied attachments. It
