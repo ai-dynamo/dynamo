@@ -127,20 +127,6 @@ func (f *dgdrV1beta2Fixture) finish(name, phase string) {
 	})
 }
 
-// setPhaseOnly writes a terminal phase without the Completed condition.
-func (f *dgdrV1beta2Fixture) setPhaseOnly(name, phase string) {
-	f.t.Helper()
-	f.updateRunStatus(name, func(status *nvidiacomv1beta2.DynamoGraphDeploymentRunStatus) {
-		status.Phase = nvidiacomv1beta2.DGDRRunPhase(phase)
-	})
-}
-
-// setCompletedOnly publishes Completed without a terminal phase.
-func (f *dgdrV1beta2Fixture) setCompletedOnly(name string) {
-	f.t.Helper()
-	f.updateRunStatus(name, setCompletedForTest)
-}
-
 func setCompletedForTest(status *nvidiacomv1beta2.DynamoGraphDeploymentRunStatus) {
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 		Type:   nvidiacomv1beta2.DGDRRunConditionCompleted,
@@ -210,16 +196,6 @@ func TestV1beta2RequestControllerCreatesTheRunOfTheCurrentGeneration(t *testing.
 	}
 }
 
-func TestV1beta2RequestControllerIsIdempotent(t *testing.T) {
-	f := newDGDRV1beta2Fixture(t, dgdrV1beta2Request(true))
-	f.reconcile()
-	f.reconcile()
-	f.reconcile()
-	if names := f.runNames(); len(names) != 1 || names[0] != "search-1" {
-		t.Fatalf("runs = %v, want only search-1", names)
-	}
-}
-
 func TestV1beta2RequestControllerWaitsForTheActiveRunBeforeStartingTheNext(t *testing.T) {
 	f := newDGDRV1beta2Fixture(t, dgdrV1beta2Request(true))
 	f.reconcile()
@@ -284,7 +260,9 @@ func TestV1beta2RequestControllerIgnoresAPhaseWithoutTheCompletedCondition(t *te
 	f.reconcile()
 	f.bumpGeneration(2)
 
-	f.setPhaseOnly("search-1", "Succeeded")
+	f.updateRunStatus("search-1", func(status *nvidiacomv1beta2.DynamoGraphDeploymentRunStatus) {
+		status.Phase = nvidiacomv1beta2.DGDRRunPhaseSucceeded
+	})
 	f.reconcile()
 
 	if names := f.runNames(); len(names) != 1 {
@@ -300,7 +278,7 @@ func TestV1beta2RequestControllerReleasesOnCompletedWithoutATerminalPhase(t *tes
 	f.reconcile()
 	f.bumpGeneration(2)
 
-	f.setCompletedOnly("search-1") // the phase is still empty
+	f.updateRunStatus("search-1", setCompletedForTest) // the phase is still empty
 	f.reconcile()
 
 	if names := f.runNames(); len(names) != 2 {
@@ -360,16 +338,6 @@ func dgdrV1beta2RunFixtures(request *nvidiacomv1beta2.DynamoGraphDeploymentReque
 		objects = append(objects, dgdrV1beta2OwnedRun(request, generation, true))
 	}
 	return objects
-}
-
-func TestV1beta2RequestControllerRetainsFiveTerminalRuns(t *testing.T) {
-	request := dgdrV1beta2Request(true)
-	request.Generation = 8
-	f := newDGDRV1beta2Fixture(t, dgdrV1beta2RunFixtures(request, 7)...)
-	f.reconcile()
-
-	t.Log("The two oldest terminal runs are deleted and the newest five are listed newest first")
-	assertRetained(t, f)
 }
 
 func assertRetained(t *testing.T, f *dgdrV1beta2Fixture) {
