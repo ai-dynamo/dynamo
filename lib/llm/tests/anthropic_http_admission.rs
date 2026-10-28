@@ -322,24 +322,17 @@ async fn valid_choices_and_shapes_preserve_backend_requests_and_assigned_ids() {
 async fn handler_errors_and_token_counts_have_request_ids() {
     temp_env::async_with_vars(ENV, async {
         let svc = HarnessService::start([]).await;
-        for (field, value, status, error_type) in [(
-            "max_tokens",
-            json!(0),
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-        )] {
-            let mut body = request();
-            body[field] = value;
-            let response = svc
-                .client
-                .post(format!("{}/v1/messages", svc.base_url))
-                .timeout(Duration::from_secs(10))
-                .json(&body)
-                .send()
-                .await
-                .unwrap();
-            assert_error(response, status, error_type).await;
-        }
+        let mut invalid_max_tokens = request();
+        invalid_max_tokens["max_tokens"] = json!(0);
+        let response = svc
+            .client
+            .post(format!("{}/v1/messages", svc.base_url))
+            .timeout(Duration::from_secs(10))
+            .json(&invalid_max_tokens)
+            .send()
+            .await
+            .unwrap();
+        assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
         let response = svc
             .client
             .post(format!("{}/v1/messages/count_tokens", svc.base_url))
