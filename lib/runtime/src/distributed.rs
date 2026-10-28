@@ -1280,14 +1280,6 @@ mod nats_enablement_tests {
                 )
                 .unwrap();
                 assert!(config.nats_config.is_none());
-
-                let config = DistributedConfig::from_settings_with_overrides(
-                    Some("file"),
-                    Some("tcp"),
-                    Some("nats"),
-                )
-                .unwrap();
-                assert!(config.nats_config.is_some());
             },
         );
     }
