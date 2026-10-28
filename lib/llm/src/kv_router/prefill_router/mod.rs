@@ -394,6 +394,8 @@ impl
     /// 12. Build the decode request (KV handoff, prefill topology constraints,
     ///     decode router override) and dispatch it. When prefill is still
     ///     running, merge its completion into the decode stream.
+    ///
+    /// `README.md` in this module records why the steps run in this order.
     async fn generate(
         &self,
         request: SingleIn<PreprocessedRequest>,
