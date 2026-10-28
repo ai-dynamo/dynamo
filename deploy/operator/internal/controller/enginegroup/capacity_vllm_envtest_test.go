@@ -63,8 +63,9 @@ func TestVLLMGroveNativeBootstrapUsesRealScaleAndPodUIDs(t *testing.T) {
 		Spec: grove.PodCliqueSpec{Replicas: 2, MinAvailable: new(int32(2)), PodSpec: template.Spec},
 	}
 	require.NoError(t, env.Client().Create(ctx, clique))
-	capacity := &VLLMGroveCapacity{
-		Grove: &grovecapacity.Adapter{
+	capacity := &VLLMCapacity{
+		Client: env.Client(), WorldID: clique.UID,
+		Physical: &grovecapacity.Adapter{
 			Client: env.Client(), Clique: client.ObjectKeyFromObject(clique), CliqueUID: clique.UID, GroupName: group.Name,
 			Journal: kubejournal.NewStore(env.Client(), group.Namespace, group.Name, group.UID, "grove-capacity"),
 		},

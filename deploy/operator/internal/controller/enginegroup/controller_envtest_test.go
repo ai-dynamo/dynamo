@@ -286,14 +286,25 @@ func TestEngineGroupControllerDoesNotTrapUnownedResources(t *testing.T) {
 }
 
 type engineGroupControllerTestRuntimeProvider struct {
-	backend *engineGroupControllerTestBackend
+	backend  *engineGroupControllerTestBackend
+	workload WorkloadProvider
 }
 
 func (p engineGroupControllerTestRuntimeProvider) Resolve(
-	context.Context,
-	*nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup,
+	ctx context.Context,
+	group *nvidiacomv1beta1.DynamoGraphDeploymentEngineGroup,
 ) (Runtime, error) {
+	// Compose a physical fixture only when the scenario exercises workload lifecycle ownership.
+	var world WorkloadBinding
+	if p.workload != nil {
+		binding, err := p.workload.Resolve(ctx, group)
+		if err != nil {
+			return Runtime{}, err
+		}
+		world = binding
+	}
 	return Runtime{
+		Workload: world,
 		Profile: nvidiacomv1beta1.EngineGroupProfileStatus{
 			Backend:                     "sglang",
 			Fingerprint:                 "profile-v1",
@@ -304,9 +315,9 @@ func (p engineGroupControllerTestRuntimeProvider) Resolve(
 			MinSupportedReplicas:        1,
 			MaxSupportedReplicas:        8,
 		},
-		Capacity:   engineGroupControllerTestCapacityAdapter(p),
-		Membership: engineGroupControllerTestMembershipAdapter(p),
-		Traffic:    engineGroupControllerTestTrafficAdapter(p),
+		Capacity:   engineGroupControllerTestCapacityAdapter{backend: p.backend},
+		Membership: engineGroupControllerTestMembershipAdapter{backend: p.backend},
+		Traffic:    engineGroupControllerTestTrafficAdapter{backend: p.backend},
 		Verifier:   p.backend,
 		Planner:    p.backend,
 	}, nil

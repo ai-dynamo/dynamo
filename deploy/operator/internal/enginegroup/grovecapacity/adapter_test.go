@@ -13,6 +13,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/kubejournal"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/workload"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -325,7 +326,7 @@ func grovePod(clique *grovev1alpha1.PodClique, name string, uid types.UID, index
 	}
 }
 
-func growthTarget(allocation Allocation) enginegroup.CapacityTarget {
+func growthTarget(allocation workload.Allocation) enginegroup.CapacityTarget {
 	primary := physicalAssertion(allocation)
 	return enginegroup.CapacityTarget{
 		ControlRevision: 1, TransitionID: "grow", ProfileFingerprint: "profile",
@@ -339,7 +340,7 @@ func growthTarget(allocation Allocation) enginegroup.CapacityTarget {
 	}
 }
 
-func physicalAssertion(allocation Allocation) enginegroup.ReplicaIncarnation {
+func physicalAssertion(allocation workload.Allocation) enginegroup.ReplicaIncarnation {
 	return enginegroup.ReplicaIncarnation{ReplicaID: allocation.ReplicaID, SlotID: allocation.SlotID, CapacityRefs: []enginegroup.CapacityRef{allocation.Pod}}
 }
 

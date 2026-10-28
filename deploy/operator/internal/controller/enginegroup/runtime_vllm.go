@@ -18,20 +18,16 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	domain "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/grovecapacity"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/kubejournal"
 	vllmruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/vllm"
-	grove "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ResolveVLLMGroveCapacity binds the native declaration to the exact DGD-owned physical world.
-// kube and group must not be nil. Resolution is read-only and never waits for an engine API.
-// This is not a complete RuntimeProvider: serving verification and worker admission remain required.
-func ResolveVLLMGroveCapacity(ctx context.Context, kube client.Client, group *api.DynamoGraphDeploymentEngineGroup) (*VLLMGroveCapacity, error) {
+// resolveVLLMCapacity binds the native declaration to an independently validated physical world.
+// kube, group and world.Capacity must not be nil. Resolution is read-only and never waits for an engine API.
+func resolveVLLMCapacity(ctx context.Context, kube client.Client, group *api.DynamoGraphDeploymentEngineGroup, world WorkloadBinding) (*VLLMCapacity, error) {
 	// A logical name or mutable label alone cannot establish native execution authority.
 	owner := metav1.GetControllerOf(group)
 	if group.UID == "" || owner == nil || owner.APIVersion != api.GroupVersion.String() || owner.Kind != api.DynamoGraphDeploymentGVK.Kind ||
@@ -43,7 +39,7 @@ func ResolveVLLMGroveCapacity(ctx context.Context, kube client.Client, group *ap
 	if err := kube.Get(ctx, client.ObjectKey{Namespace: group.Namespace, Name: owner.Name}, dgd); err != nil {
 		return nil, fmt.Errorf("observe vLLM parent declaration: %w", err)
 	}
-	if dgd.UID != owner.UID || !dgd.DeletionTimestamp.IsZero() || dgd.Spec.ProviderOverride != nil ||
+	if dgd.UID != owner.UID || !dgd.DeletionTimestamp.IsZero() ||
 		(dgd.Spec.BackendFramework != "" && dgd.Spec.BackendFramework != string(dynamo.BackendFrameworkVLLM)) {
 		return nil, fmt.Errorf("%w: vLLM parent lifetime or launch authority changed", domain.ErrRecoveryRequired)
 	}
@@ -59,31 +55,8 @@ func ResolveVLLMGroveCapacity(ctx context.Context, kube client.Client, group *ap
 		return nil, fmt.Errorf("%w: vLLM declaration no longer matches the frozen profile", domain.ErrRecoveryRequired)
 	}
 
-	// Verify every owner link rather than trusting the stored clique name after recreation.
-	pcs := &grove.PodCliqueSet{}
-	if err := kube.Get(ctx, client.ObjectKey{Namespace: dgd.Namespace, Name: dynamo.PCSNameForDGD(dgd, (*api.DynamoComponentDeploymentSharedSpec).ManagedByExternalController)}, pcs); err != nil {
-		return nil, fmt.Errorf("observe vLLM PodCliqueSet: %w", err)
-	}
-	if !metav1.IsControlledBy(pcs, dgd) || !pcs.DeletionTimestamp.IsZero() {
-		return nil, fmt.Errorf("%w: vLLM PodCliqueSet has a different owner or is terminating", domain.ErrRecoveryRequired)
-	}
-	clique, err := resolveGroveMemberClique(ctx, kube, group, pcs, 0)
-	if err != nil {
-		return nil, err
-	}
-	if clique == nil || group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodClique] == "" {
-		return nil, fmt.Errorf("%w: waiting for the vLLM member clique binding", ErrRuntimeUnavailable)
-	}
-	if clique.Name != group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodClique] ||
-		string(clique.UID) != group.Annotations[consts.KubeAnnotationDynamoEngineGroupPodCliqueUID] {
-		return nil, fmt.Errorf("%w: vLLM member clique incarnation changed", domain.ErrRecoveryRequired)
-	}
-	capacity := &VLLMGroveCapacity{
-		Grove: &grovecapacity.Adapter{
-			Client: kube, Clique: client.ObjectKeyFromObject(clique), CliqueUID: clique.UID, GroupName: group.Name,
-			Journal:          kubejournal.NewStore(kube, group.Namespace, group.Name, group.UID, "grove-capacity-"+string(clique.UID)),
-			ReadinessScaleIn: true,
-		},
+	capacity := &VLLMCapacity{
+		Physical: world.Capacity, Client: kube, WorldID: world.ID,
 		Group: group, Source: source,
 	}
 	if err := capacity.validateRendezvous(ctx); err != nil {
@@ -92,13 +65,13 @@ func ResolveVLLMGroveCapacity(ctx context.Context, kube client.Client, group *ap
 	return capacity, nil
 }
 
-func (a *VLLMGroveCapacity) validateRendezvous(ctx context.Context) error {
+func (a *VLLMCapacity) validateRendezvous(ctx context.Context) error {
 	// The exact rank-zero Pod supplies rendezvous before any participant exposes its API.
 	bindings, err := a.capacityBindings()
 	if err != nil {
 		return err
 	}
-	observation, err := a.Grove.Observe(ctx, domain.GroupID(a.Group.UID))
+	observation, err := a.Physical.Observe(ctx, domain.GroupID(a.Group.UID))
 	if err != nil {
 		return err
 	}
@@ -110,7 +83,7 @@ func (a *VLLMGroveCapacity) validateRendezvous(ctx context.Context) error {
 			return fmt.Errorf("%w: rank-zero slot belongs to a previous Pod UID", domain.ErrRecoveryRequired)
 		}
 		pod := &corev1.Pod{}
-		err := a.Grove.Client.Get(ctx, client.ObjectKey{Namespace: a.Group.Namespace, Name: allocation.Pod.Name}, pod)
+		err := a.Client.Get(ctx, client.ObjectKey{Namespace: a.Group.Namespace, Name: allocation.Pod.Name}, pod)
 		if err != nil {
 			return err
 		}
@@ -145,7 +118,7 @@ func vllmParentComponent(dgd *api.DynamoGraphDeployment, group *api.DynamoGraphD
 // ResolveVLLMMembership composes native membership control with an exact physical world.
 // capacity and httpClient must not be nil. Resolution is read-only; native API lifetimes and epochs
 // remain authoritative in the adapter's later observations, not in Pod readiness.
-func ResolveVLLMMembership(ctx context.Context, capacity *VLLMGroveCapacity, httpClient *http.Client) (*vllmruntime.MembershipAdapter, error) {
+func ResolveVLLMMembership(ctx context.Context, capacity *VLLMCapacity, httpClient *http.Client) (*vllmruntime.MembershipAdapter, error) {
 	// Bind the same immutable profile and physical lifetime used by capacity acceptance.
 	profile, err := dynamo.ResolveVLLMLaunchProfile(capacity.Source)
 	if err != nil {
@@ -167,11 +140,11 @@ func ResolveVLLMMembership(ctx context.Context, capacity *VLLMGroveCapacity, htt
 	return &vllmruntime.MembershipAdapter{
 		Processes: processes, ProfileFingerprint: profile.Geometry.Fingerprint,
 		Layout: layout, MinDataParallelSize: minimum, MaxDataParallelSize: maximum,
-		Journal: kubejournal.NewStore(capacity.Grove.Client, capacity.Group.Namespace, capacity.Group.Name, capacity.Group.UID, "vllm-membership-"+string(capacity.Grove.CliqueUID)),
+		Journal: runtimeJournal(capacity.Client, capacity.Group, capacity.WorldID, "vllm-membership"),
 	}, nil
 }
 
-func resolveVLLMProcesses(ctx context.Context, capacity *VLLMGroveCapacity, httpClient *http.Client) ([]vllmruntime.Process, error) {
+func resolveVLLMProcesses(ctx context.Context, capacity *VLLMCapacity, httpClient *http.Client) ([]vllmruntime.Process, error) {
 	// Allocation readiness and API reachability are independent; neither is inferred from the other.
 	observation, err := capacity.Observe(ctx, domain.GroupID(capacity.Group.UID))
 	if err != nil {
@@ -219,11 +192,11 @@ func resolveVLLMProcesses(ctx context.Context, capacity *VLLMGroveCapacity, http
 	return processes, nil
 }
 
-func (a *VLLMGroveCapacity) resolvePod(ctx context.Context, incarnation domain.ReplicaIncarnation) (*corev1.Pod, error) {
+func (a *VLLMCapacity) resolvePod(ctx context.Context, incarnation domain.ReplicaIncarnation) (*corev1.Pod, error) {
 	// The engine capacity observation has proved one Pod per allocation and rejected process restarts.
 	ref := incarnation.CapacityRefs[0]
 	pod := &corev1.Pod{}
-	if err := a.Grove.Client.Get(ctx, types.NamespacedName{Namespace: a.Group.Namespace, Name: ref.Name}, pod); err != nil {
+	if err := a.Client.Get(ctx, types.NamespacedName{Namespace: a.Group.Namespace, Name: ref.Name}, pod); err != nil {
 		return nil, fmt.Errorf("observe vLLM native process Pod: %w", err)
 	}
 	if domain.PodUID(pod.UID) != ref.UID {

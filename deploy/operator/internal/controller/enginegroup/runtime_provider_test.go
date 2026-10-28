@@ -17,9 +17,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestGroveRuntimeProviderRejectsUnknownBackend(t *testing.T) {
+func TestRuntimeProviderRejectsUnknownBackend(t *testing.T) {
 	t.Log("resolve an unrecognized runtime without contacting an engine")
-	provider := &groveRuntimeProvider{Client: fake.NewClientBuilder().Build(), HTTP: &http.Client{}}
+	provider := &runtimeProvider{Client: fake.NewClientBuilder().Build(), HTTP: &http.Client{}}
 	group := &api.DynamoGraphDeploymentEngineGroup{
 		Labels: map[string]string{consts.KubeLabelDynamoEngineGroupRuntime: "unknown"}}
 	_, err := provider.Resolve(t.Context(), group)
