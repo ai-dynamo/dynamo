@@ -316,6 +316,27 @@ class TestOutputGate:  # FRONTEND.4
         assert _finish(choices) == "stop"
         assert _content(choices) == ""
 
+    @pytest.mark.parametrize("batch_size", [1, 3, 1000])
+    def test_echo_after_a_held_closing_delimiter_stays_content(
+        self, tokenizer, batch_size
+    ):
+        """Text released together with a held delimiter is routed per boundary."""
+        echoed = f"\nThe file said:\n{INJECTED_CALL}"
+        ids = tokenizer.encode(
+            INJECTED_CALL, add_special_tokens=False
+        ) + _encode_without_markers(tokenizer, echoed)
+        choices = _run(tokenizer, ids, batch_size, stop=["</tool_call>STOP"])
+        assert len(_tool_calls(choices)) == 1
+        assert _content(choices) == echoed
+
+    def test_text_held_ahead_of_a_delimiter_is_content(self, tokenizer):
+        ids = tokenizer.encode("xy", add_special_tokens=False) + tokenizer.encode(
+            INJECTED_CALL, add_special_tokens=False
+        )
+        choices = _run(tokenizer, ids, 1, stop=["xy<tool_call>STOP"])
+        assert len(_tool_calls(choices)) == 1
+        assert _content(choices) == "xy"
+
 
 class TestInputIsolation:  # FRONTEND.1
     def test_off_by_default_keeps_delimiter_ids(self, tokenizer, markers):

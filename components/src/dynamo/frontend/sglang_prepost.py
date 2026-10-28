@@ -1880,25 +1880,27 @@ class SglangStreamingPostProcessor:
         finish_reason: str | None,
         stop_reason: Any,
         marker: str | None = None,
-    ) -> tuple[str, bool, list[str]]:
+    ) -> tuple[str, bool, list[tuple[int | None, str]]]:
         """Apply request stop strings to *text*.
 
-        Returns ``(text to emit, locally finished, delimiters)``: the delimiters
-        whose token id the emitted text carries, in order. *marker* is the
+        Returns ``(text to emit, locally finished, delimiters)``, where each
+        delimiter is ``(offset in the emitted text, delimiter)`` for a
+        delimiter whose token id the emitted text carries. *marker* is the
         delimiter of the current segment (see :meth:`process_output`); when
         its text is held back as a possible stop-string prefix, the whole
         delimiter is held and released together with its identity, so the
-        parser gate still flips on it.
+        parser gate still flips on it. A delimiter whose text cannot be
+        located is reported with offset ``None``.
         """
         held_len = len(self._pending_stop_text)
         positions = list(self._pending_stop_markers)
-        unlocated: list[str] = []
+        unlocated: list[tuple[int | None, str]] = []
         if marker is not None:
             index = text.find(marker)
             if index >= 0:
                 positions.append((held_len + index, marker))
             else:
-                unlocated.append(marker)
+                unlocated.append((None, marker))
         text = self._pending_stop_text + text
         self._pending_stop_text = ""
         self._pending_stop_markers = []
@@ -1915,11 +1917,13 @@ class SglangStreamingPostProcessor:
                 del self._pending_logprobs_content[-suppressed_count:]
             self._locally_finished = True
             self._local_stop_reason = matched_stop_string
-            released = [m for off, m in positions if off + len(m) <= retained_end]
+            released: list[tuple[int | None, str]] = [
+                (off, m) for off, m in positions if off + len(m) <= retained_end
+            ]
             return text[:retained_end], True, released + unlocated
 
         if finish_reason or not text or not self._stop_strings:
-            return text, False, [m for _, m in positions] + unlocated
+            return text, False, [(off, m) for off, m in positions] + unlocated
 
         pending_len = trailing_stop_prefix_len(text, self._stop_strings)
         if pending_len:
@@ -1932,9 +1936,9 @@ class SglangStreamingPostProcessor:
             self._pending_stop_markers = [
                 (off - cut, m) for off, m in positions if off >= cut
             ]
-            released = [m for off, m in positions if off < cut]
+            released = [(off, m) for off, m in positions if off < cut]
             return text[:cut], False, released + unlocated
-        return text, False, [m for _, m in positions] + unlocated
+        return text, False, [(off, m) for off, m in positions] + unlocated
 
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
@@ -2135,12 +2139,59 @@ class SglangStreamingPostProcessor:
             if openai_logprobs is not None:
                 self._pending_logprobs_content.extend(openai_logprobs["content"])
         self._logprob_context_ids = (self._logprob_context_ids + token_ids)[-4:]
-        delta_text, locally_finished, markers = self._filter_stop_string_delta(
+        delta_text, locally_finished, positions = self._filter_stop_string_delta(
             delta_text, finish_reason, stop_reason, marker
         )
         if locally_finished:
             finish_reason = "stop"
 
+        # Text released from the stop-string buffer can hold a delimiter
+        # together with text that came before or after it; route each part
+        # by the gate state at its own delimiter boundary.
+        pieces = self._split_at_markers(delta_text, positions)
+        merged: dict[str, Any] | None = None
+        for index, (text, markers) in enumerate(pieces):
+            last = index == len(pieces) - 1
+            choice = self._process_text(text, finish_reason if last else None, markers)
+            merged = self._merge_choices(merged, choice)
+        return merged
+
+    @staticmethod
+    def _split_at_markers(
+        text: str, positions: list[tuple[int | None, str]]
+    ) -> list[tuple[str, list[str]]]:
+        """Cut *text* so each delimiter is its own piece.
+
+        *positions* holds ``(offset, delimiter)`` for the delimiters whose
+        token id the text carries. An unknown offset keeps the text whole
+        with every delimiter attached, which is the pre-split behaviour.
+        """
+        if not positions:
+            return [(text, [])]
+        if any(offset is None for offset, _ in positions):
+            return [(text, [m for _, m in positions])]
+        located = sorted((o, m) for o, m in positions if o is not None)
+        pieces: list[tuple[str, list[str]]] = []
+        pos = 0
+        for offset, marker in located:
+            if offset > pos:
+                pieces.append((text[pos:offset], []))
+            pieces.append((text[offset : offset + len(marker)], [marker]))
+            pos = offset + len(marker)
+        if pos < len(text):
+            pieces.append((text[pos:], []))
+        return pieces
+
+    def _process_text(
+        self,
+        delta_text: str,
+        finish_reason: str | None,
+        markers: list[str],
+    ) -> dict[str, Any] | None:
+        """Run already stop-filtered text through reasoning and tool parsing.
+
+        *markers* are the delimiters whose token id *delta_text* carries.
+        """
         if self._fast_plain_text:
             if delta_text:
                 return {
