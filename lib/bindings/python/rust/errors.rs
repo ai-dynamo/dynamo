@@ -11,7 +11,7 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
-use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass};
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, ErrorReason};
 use dynamo_runtime::protocols::annotated::Annotated;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -295,10 +295,15 @@ fn build_http_like_error(code: u16, message: String) -> DynamoError {
     })
     .to_string();
 
-    DynamoError::builder()
+    let builder = DynamoError::builder()
         .class(error_class_for_http_status(code))
-        .diagnostic(legacy_message)
-        .build()
+        .diagnostic(legacy_message);
+    let builder = if code == 422 {
+        builder.reason(ErrorReason::unprocessable_entity())
+    } else {
+        builder
+    };
+    builder.build()
 }
 
 #[cfg(test)]
@@ -422,21 +427,55 @@ mod tests {
     }
 
     #[test]
+    fn http_like_status_attributes_keep_unprocessable_reason_after_wire_round_trip() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            for attribute in ["code", "status"] {
+                let exception = pyo3::exceptions::PyRuntimeError::new_err("private detail");
+                exception.value(py).setattr(attribute, 422).unwrap();
+                exception
+                    .value(py)
+                    .setattr("message", "private token=secret")
+                    .unwrap();
+                let error = http_like_error_to_dynamo(py, &exception).unwrap();
+                let delivered: DynamoError =
+                    serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+                assert_eq!(delivered.class(), ErrorClass::InvalidRequest);
+                assert_eq!(delivered.reason().as_str(), "request.unprocessable_entity");
+                assert!(delivered.public_message().is_none());
+            }
+        });
+    }
+
+    #[test]
     fn http_like_errors_support_semantic_and_legacy_readers() {
         for (code, expected_class) in [
+            (400, ErrorClass::InvalidRequest),
+            (404, ErrorClass::NotFound),
             (409, ErrorClass::Conflict),
             (415, ErrorClass::UnsupportedMedia),
+            (422, ErrorClass::InvalidRequest),
+            (429, ErrorClass::RateLimited),
             (503, ErrorClass::Unavailable),
+            (504, ErrorClass::DeadlineExceeded),
+            (500, ErrorClass::Internal),
         ] {
             let error = build_http_like_error(code, "private backend detail".to_string());
             assert_eq!(error.class(), expected_class);
             assert_eq!(error.public_message(), None);
 
             let wire = serde_json::to_value(&error).expect("serialize DynamoError");
+            if code == 422 {
+                assert_eq!(wire["reason"], "request.invalid");
+                assert_eq!(wire["http_status"], 422);
+            }
             let semantic: DynamoError =
                 serde_json::from_value(wire.clone()).expect("semantic reader");
             assert_eq!(semantic.class(), expected_class);
             assert_eq!(semantic.public_message(), None);
+            if code == 422 {
+                assert_eq!(semantic.reason().as_str(), "request.unprocessable_entity");
+            }
 
             let legacy: LegacyDynamoError = serde_json::from_value(wire).expect("legacy reader");
             let legacy_http: LegacyHttpError =

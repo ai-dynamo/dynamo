@@ -64,6 +64,7 @@ use crate::local_model::runtime_config::{
 use crate::local_model::runtime_config::{
     SGLANG_GENERATE_CAPABILITY, TOKEN_BUDGET_RUNTIME_KEY, TokenBudget,
 };
+use crate::lora::runtime::RuntimeLoraSelection;
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
@@ -1906,6 +1907,7 @@ pub struct OpenAIPreprocessor {
 }
 
 pub(crate) const LORA_NAME_CONTEXT_KEY: &str = "discovery.lora_name";
+pub(crate) const RUNTIME_LORA_CONTEXT_KEY: &str = "runtime_lora.selection";
 
 /// Exclusive bound for client token ids: the larger of the model's vocab size
 /// and the tokenizer's largest id plus one, so ids that only the model or only
@@ -3225,6 +3227,7 @@ impl OpenAIPreprocessor {
                 tracker,
                 PreprocessRequestOptions::default(),
                 None,
+                None,
             )
             .await?;
         Ok((request, annotations, prompt_injected_reasoning))
@@ -3245,6 +3248,7 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
         options: PreprocessRequestOptions,
         lora_name: Option<String>,
+        runtime_lora: Option<&RuntimeLoraSelection>,
     ) -> Result<(
         PreprocessedRequest,
         HashMap<String, String>,
@@ -3253,7 +3257,7 @@ impl OpenAIPreprocessor {
     )> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
-        let mut builder = self.builder_with_lora(request, lora_name)?;
+        let mut builder = self.builder_with_lora(request, lora_name, runtime_lora)?;
 
         let template_start = Instant::now();
         let (formatted_prompt, prompt_injected_reasoning) = {
@@ -3362,7 +3366,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
     ) -> Result<PreprocessedRequestBuilder> {
-        self.builder_with_lora(request, None)
+        self.builder_with_lora(request, None, None)
     }
 
     fn validate_model_request<R: OAIChatLikeRequest>(&self, request: &R) -> Result<()> {
@@ -3395,10 +3399,26 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
         lora_name_override: Option<String>,
+        runtime_lora: Option<&RuntimeLoraSelection>,
     ) -> Result<PreprocessedRequestBuilder> {
         let mut builder = PreprocessedRequest::builder();
-        builder.model(request.model());
+        builder.model(
+            runtime_lora
+                .map(|selection| selection.base_model_name.clone())
+                .unwrap_or_else(|| request.model()),
+        );
         self.validate_model_request(request)?;
+        if runtime_lora.is_some()
+            && request
+                .nvext()
+                .and_then(|ext| ext.agent_hints.as_ref())
+                .and_then(|hints| hints.speculative_prefill)
+                == Some(true)
+        {
+            return Err(invalid_argument_error(
+                "runtime_lora_speculative_prefill_unsupported",
+            ));
+        }
 
         let mut stop_conditions = request.extract_stop_conditions()?;
         let eos_token_ids = self.model_info.eos_token_ids();
@@ -3489,8 +3509,14 @@ impl OpenAIPreprocessor {
         builder.output_options(output_options);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
-        let lora_name = self.lora_name.clone().or(lora_name_override);
+        let lora_name = runtime_lora
+            .map(|selection| selection.adapter_key.clone())
+            .or_else(|| self.lora_name.clone())
+            .or(lora_name_override);
         let cache_namespace = request_cache_salt(request).map(str::to_owned);
+        let base_model_name = runtime_lora.map(|selection| selection.base_model_name.clone());
+        let lora_source_uri = runtime_lora.map(|selection| selection.source_uri.clone());
+        let lora_resolution_version = runtime_lora.map(|selection| selection.protocol_version);
 
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
@@ -3498,6 +3524,16 @@ impl OpenAIPreprocessor {
             let hints = nvext.agent_hints.as_ref();
             let (priority_jump, strict_priority, priority) = routing_priorities(hints);
             builder.request_timestamp_ms(nvext.request_timestamp_ms);
+            let mut routing_constraints = nvext
+                .routing_constraints
+                .clone()
+                .map(routing_constraints_to_kv);
+            if let Some(runtime_lora) = runtime_lora {
+                routing_constraints
+                    .get_or_insert_default()
+                    .required_taints
+                    .insert(runtime_lora.capability_taint());
+            }
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
@@ -3509,20 +3545,31 @@ impl OpenAIPreprocessor {
                 strict_priority,
                 priority,
                 lora_name,
+                base_model_name,
+                lora_source_uri,
+                lora_resolution_version,
                 cache_namespace: cache_namespace.clone(),
                 allowed_worker_ids: None,
-                routing_constraints: nvext
-                    .routing_constraints
-                    .clone()
-                    .map(routing_constraints_to_kv),
+                routing_constraints,
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() || cache_namespace.is_some() {
             // Ensure routing hints exist when we have LoRA or a legacy
             // top-level cache_salt, even when nvext is absent.
+            let routing_constraints = runtime_lora.map(|selection| {
+                let mut constraints = dynamo_kv_router::protocols::RoutingConstraints::default();
+                constraints
+                    .required_taints
+                    .insert(selection.capability_taint());
+                constraints
+            });
             builder.routing(Some(RoutingHints {
                 lora_name,
+                base_model_name,
+                lora_source_uri,
+                lora_resolution_version,
                 cache_namespace,
+                routing_constraints,
                 ..Default::default()
             }));
         }
@@ -8053,10 +8100,17 @@ impl
         } else {
             None
         };
-        let payload_handle = crate::request_trace::payload::create_handle(
+        let runtime_lora = context
+            .get_optional::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY)
+            .ok()
+            .flatten();
+        let payload_handle = crate::request_trace::payload::create_handle_with_model_override(
             &request,
             &request_id,
             payload_http_headers,
+            runtime_lora
+                .as_deref()
+                .map(|selection| selection.base_model_name.as_str()),
         );
 
         // For non-streaming requests (stream=false), enable usage by default
@@ -8100,6 +8154,7 @@ impl
                     .ok()
                     .flatten()
                     .map(|name| name.as_ref().clone()),
+                runtime_lora.as_deref(),
             )
             .instrument(preprocessing.clone())
             .await?;
@@ -8307,6 +8362,11 @@ impl
                 .ok()
                 .flatten()
                 .map(|name| name.as_ref().clone()),
+            context
+                .get_optional::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY)
+                .ok()
+                .flatten()
+                .as_deref(),
         )?;
 
         // Check if embeddings are provided - skip tokenization path
@@ -13544,6 +13604,88 @@ mod tests {
     }
 
     #[test]
+    fn runtime_lora_preprocessor_preserves_wire_identity_and_constraints() {
+        let card = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(card).unwrap())
+            .unwrap_or_else(|_| panic!("unshared test preprocessor"));
+        preprocessor.lora_name = Some("preloaded".to_string());
+        let source = "provider-value?token=private";
+        let selection = crate::lora::runtime::resolve_runtime_lora_model(
+            &format!("base|{source}"),
+            &crate::lora::runtime::RuntimeLoraConfig { enabled: true },
+            |_| false,
+            |_| Some("base".to_string()),
+            || unreachable!(),
+        )
+        .unwrap()
+        .unwrap();
+        for with_nvext in [false, true] {
+            let mut value = serde_json::json!({"model": selection.requested_model, "messages": [{"role": "user", "content": "hello"}]});
+            if with_nvext {
+                value["nvext"] = serde_json::json!({"routing_constraints": {"required_taints": ["caller"], "preferred_taints": {"zone-a": 0.5}}});
+            }
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(value).unwrap();
+            let output = preprocessor
+                .builder_with_lora(&request, Some("override".to_string()), Some(&selection))
+                .unwrap()
+                .token_ids(vec![1])
+                .build()
+                .unwrap();
+            assert_eq!(output.model, "base");
+            let routing = output.routing.as_ref().unwrap();
+            assert_eq!(
+                routing.lora_name.as_deref(),
+                Some(selection.adapter_key.as_str())
+            );
+            assert_eq!(routing.base_model_name.as_deref(), Some("base"));
+            assert_eq!(routing.lora_source_uri.as_ref().unwrap().as_str(), source);
+            assert_eq!(
+                routing.lora_resolution_version,
+                Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION)
+            );
+            let constraints = routing.routing_constraints.as_ref().unwrap();
+            assert!(
+                constraints
+                    .required_taints
+                    .contains("dynamo.runtime-lora/v2")
+            );
+            assert_eq!(constraints.required_taints.contains("caller"), with_nvext);
+            assert_eq!(
+                constraints.preferred_taints.get("zone-a"),
+                with_nvext.then_some(&0.5)
+            );
+            assert!(!format!("{routing:?}").contains(source));
+            let wire = serde_json::to_value(&output).unwrap();
+            assert_eq!(wire["routing"]["lora_source_uri"], source);
+            let roundtrip: PreprocessedRequest = serde_json::from_value(wire).unwrap();
+            assert_eq!(
+                roundtrip
+                    .routing
+                    .unwrap()
+                    .lora_source_uri
+                    .as_ref()
+                    .unwrap()
+                    .as_str(),
+                source
+            );
+        }
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({"model": "base", "messages": [{"role": "user", "content": "hello"}], "nvext": {"agent_hints": {"speculative_prefill": true}}})).unwrap();
+        let error = match preprocessor.builder_with_lora(&request, None, Some(&selection)) {
+            Err(error) => error,
+            Ok(_) => panic!("runtime LoRA warmups must retain adapter identity"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("runtime_lora_speculative_prefill_unsupported")
+        );
+    }
+
+    #[test]
     fn special_token_requirements_are_resolved_once_per_model() {
         if crate::test_utils::run_isolated(
             concat!(
@@ -13574,7 +13716,7 @@ mod tests {
             request.common.skip_special_tokens = skip;
             for lora in [None, Some("adapter".to_string())] {
                 let output = preprocessor
-                    .builder_with_lora(&request, lora)
+                    .builder_with_lora(&request, lora, None)
                     .unwrap()
                     .token_ids(vec![])
                     .build()
