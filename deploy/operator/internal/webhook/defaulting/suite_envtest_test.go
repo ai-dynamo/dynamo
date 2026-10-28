@@ -219,7 +219,7 @@ func TestDynamoComponentDeploymentDefaultingAdmission(t *testing.T) {
 	}
 }
 
-func TestDynamoGraphDeploymentRequestDefaultingAdmission(t *testing.T) {
+func TestDynamoGraphDeploymentRequestV1beta1DefaultingAdmission(t *testing.T) {
 	wantDefaultSpec := nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 		Model:          "Qwen/Qwen3-8B",
 		Backend:        nvidiacomv1beta1.BackendTypeAuto,
@@ -301,7 +301,9 @@ func TestDynamoGraphDeploymentRequestDefaultingAdmission(t *testing.T) {
 			}
 		})
 	}
+}
 
+func TestDynamoGraphDeploymentRequestV1beta2DefaultingAdmission(t *testing.T) {
 	discoveredH200 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8}
 	v1beta2Tests := []struct {
 		name          string
@@ -329,17 +331,7 @@ func TestDynamoGraphDeploymentRequestDefaultingAdmission(t *testing.T) {
 				spec.Objective = &nvidiacomv1beta2.ObjectiveSpec{SLA: &nvidiacomv1beta2.ObjectiveSLASpec{}}
 			}),
 			discovered: discoveredH200,
-			check: func(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
-				if got := request.Spec.Workload.Static; got == nil || got.InputTokens != nil || got.OutputTokens != nil || got.Load != nil {
-					t.Fatalf("workload.static = %#v, want explicit empty opt-out", got)
-				}
-				if got := request.Spec.Objective.SLA; got == nil || got.TTFTMs != nil || got.ITLMs != nil || got.E2EMs != nil {
-					t.Fatalf("objective.sla = %#v, want explicit empty opt-out", got)
-				}
-				if request.Spec.Objective.Mode != nvidiacomv1beta2.ObjectiveModeOptimize || request.Spec.Objective.Metric == nil {
-					t.Fatalf("objective = %#v, want mode and metric defaults beside empty SLA", request.Spec.Objective)
-				}
-			},
+			check:      expectV1beta2ExplicitEmptyOptOuts,
 		},
 		{
 			name: "v1beta2 explicit empty parent objects receive their defaults",
@@ -364,39 +356,7 @@ func TestDynamoGraphDeploymentRequestDefaultingAdmission(t *testing.T) {
 				}}
 			}),
 			discovered: discoveredH200,
-			check: func(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
-				if want := []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM}; !reflect.DeepEqual(request.Spec.Backends, want) {
-					t.Fatalf("backends = %v, want %v", request.Spec.Backends, want)
-				}
-				if request.Spec.Workload == nil || request.Spec.Workload.Static == nil {
-					t.Fatalf("workload = %#v, want the partial static workload", request.Spec.Workload)
-				}
-				static := request.Spec.Workload.Static
-				if ptr.Deref(static.InputTokens, 0) != 10 || ptr.Deref(static.OutputTokens, 0) != 128 || static.Load == nil || ptr.Deref(static.Load.Concurrency, 0) != 10 {
-					t.Fatalf("workload.static = %#v, want explicit inputTokens and omitted-member defaults", static)
-				}
-				if request.Spec.Objective.Mode != nvidiacomv1beta2.ObjectiveModeOptimize || ptr.Deref(request.Spec.Objective.Metric, "") != nvidiacomv1beta2.ObjectiveMetric("TTFT") {
-					t.Fatalf("objective = %#v, want explicit TTFT metric with Optimize default", request.Spec.Objective)
-				}
-				if request.Spec.Recommendation.MaxCandidates != 3 {
-					t.Fatalf("maxCandidates = %d, want 3", request.Spec.Recommendation.MaxCandidates)
-				}
-				if request.Spec.AISimulate == nil || request.Spec.AISimulate.InputOverrides == nil {
-					t.Fatalf("aisimulate = %#v, want input overrides", request.Spec.AISimulate)
-				}
-				var overrides map[string]any
-				if err := json.Unmarshal(request.Spec.AISimulate.InputOverrides.Raw, &overrides); err != nil {
-					t.Fatalf("decode input overrides: %v", err)
-				}
-				if overrides["custom"] != "kept" {
-					t.Fatalf("inputOverrides = %#v, want custom value untouched", overrides)
-				}
-				engine, _ := overrides["engine"].(map[string]any)
-				if engine["hardware"] != "h100_sxm" {
-					t.Fatalf("inputOverrides = %#v, want engine.hardware untouched", overrides)
-				}
-				expectV1beta2Hardware(t, request, "h200_sxm", 8)
-			},
+			check:      expectV1beta2ExplicitValues,
 		},
 		{
 			name: "v1beta2 unresolved explicit hardware reports its public field path",
@@ -418,12 +378,7 @@ func TestDynamoGraphDeploymentRequestDefaultingAdmission(t *testing.T) {
 			beforeUpdate: func() {
 				defaultingAdmissionHardware.set(gpu.GPUInfo{}, errors.New("cluster unreadable"))
 			},
-			checkUpdate: func(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
-				expectV1beta2Hardware(t, request, "h200_sxm", 8)
-				if request.Generation != 1 {
-					t.Fatalf("generation = %d, want 1 after metadata-only update", request.Generation)
-				}
-			},
+			checkUpdate: expectV1beta2MetadataOnlyUpdate,
 		},
 		{
 			name: "v1beta2 removing hardware on update rediscovers both fields",
@@ -436,12 +391,7 @@ func TestDynamoGraphDeploymentRequestDefaultingAdmission(t *testing.T) {
 			update: func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
 				request.Spec.Hardware = nil
 			},
-			checkUpdate: func(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
-				expectV1beta2Hardware(t, request, "h200_sxm", 8)
-				if request.Generation != 2 {
-					t.Fatalf("generation = %d, want 2 after hardware update", request.Generation)
-				}
-			},
+			checkUpdate: expectV1beta2HardwareUpdate,
 		},
 	}
 
@@ -507,7 +457,7 @@ func expectV1beta2ModelOnlyDefaults(t *testing.T, request *nvidiacomv1beta2.Dyna
 	if want := []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM, nvidiacomv1beta2.BackendSGLang, nvidiacomv1beta2.BackendTRTLLM}; !reflect.DeepEqual(request.Spec.Backends, want) {
 		t.Fatalf("backends = %v, want %v", request.Spec.Backends, want)
 	}
-	expectV1beta2Hardware(t, request, "h200_sxm", 8)
+	expectV1beta2H200x8Hardware(t, request)
 	if request.Spec.Workload == nil {
 		t.Fatal("workload is nil, want model-only defaults")
 	}
@@ -524,11 +474,75 @@ func expectV1beta2ModelOnlyDefaults(t *testing.T, request *nvidiacomv1beta2.Dyna
 	}
 }
 
-func expectV1beta2Hardware(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest, sku string, budget int32) {
+func expectV1beta2ExplicitEmptyOptOuts(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+	t.Helper()
+	if got := request.Spec.Workload.Static; got == nil || got.InputTokens != nil || got.OutputTokens != nil || got.Load != nil {
+		t.Fatalf("workload.static = %#v, want explicit empty opt-out", got)
+	}
+	if got := request.Spec.Objective.SLA; got == nil || got.TTFTMs != nil || got.ITLMs != nil || got.E2EMs != nil {
+		t.Fatalf("objective.sla = %#v, want explicit empty opt-out", got)
+	}
+	if request.Spec.Objective.Mode != nvidiacomv1beta2.ObjectiveModeOptimize || request.Spec.Objective.Metric == nil {
+		t.Fatalf("objective = %#v, want mode and metric defaults beside empty SLA", request.Spec.Objective)
+	}
+}
+
+func expectV1beta2ExplicitValues(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+	t.Helper()
+	if want := []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM}; !reflect.DeepEqual(request.Spec.Backends, want) {
+		t.Fatalf("backends = %v, want %v", request.Spec.Backends, want)
+	}
+	if request.Spec.Workload == nil || request.Spec.Workload.Static == nil {
+		t.Fatalf("workload = %#v, want the partial static workload", request.Spec.Workload)
+	}
+	static := request.Spec.Workload.Static
+	if ptr.Deref(static.InputTokens, 0) != 10 || ptr.Deref(static.OutputTokens, 0) != 128 || static.Load == nil || ptr.Deref(static.Load.Concurrency, 0) != 10 {
+		t.Fatalf("workload.static = %#v, want explicit inputTokens and omitted-member defaults", static)
+	}
+	if request.Spec.Objective.Mode != nvidiacomv1beta2.ObjectiveModeOptimize || ptr.Deref(request.Spec.Objective.Metric, "") != nvidiacomv1beta2.ObjectiveMetric("TTFT") {
+		t.Fatalf("objective = %#v, want explicit TTFT metric with Optimize default", request.Spec.Objective)
+	}
+	if request.Spec.Recommendation.MaxCandidates != 3 {
+		t.Fatalf("maxCandidates = %d, want 3", request.Spec.Recommendation.MaxCandidates)
+	}
+	if request.Spec.AISimulate == nil || request.Spec.AISimulate.InputOverrides == nil {
+		t.Fatalf("aisimulate = %#v, want input overrides", request.Spec.AISimulate)
+	}
+	var overrides map[string]any
+	if err := json.Unmarshal(request.Spec.AISimulate.InputOverrides.Raw, &overrides); err != nil {
+		t.Fatalf("decode input overrides: %v", err)
+	}
+	if overrides["custom"] != "kept" {
+		t.Fatalf("inputOverrides = %#v, want custom value untouched", overrides)
+	}
+	engine, _ := overrides["engine"].(map[string]any)
+	if engine["hardware"] != "h100_sxm" {
+		t.Fatalf("inputOverrides = %#v, want engine.hardware untouched", overrides)
+	}
+	expectV1beta2H200x8Hardware(t, request)
+}
+
+func expectV1beta2MetadataOnlyUpdate(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+	t.Helper()
+	expectV1beta2H200x8Hardware(t, request)
+	if request.Generation != 1 {
+		t.Fatalf("generation = %d, want 1 after metadata-only update", request.Generation)
+	}
+}
+
+func expectV1beta2HardwareUpdate(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+	t.Helper()
+	expectV1beta2H200x8Hardware(t, request)
+	if request.Generation != 2 {
+		t.Fatalf("generation = %d, want 2 after hardware update", request.Generation)
+	}
+}
+
+func expectV1beta2H200x8Hardware(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
 	t.Helper()
 	hardware := request.Spec.Hardware
-	if hardware == nil || hardware.GPU == nil || ptr.Deref(hardware.GPU.SKU, "") != sku || ptr.Deref(hardware.GPU.Budget, 0) != budget {
-		t.Fatalf("hardware = %#v, want SKU %q and budget %d", hardware, sku, budget)
+	if hardware == nil || hardware.GPU == nil || ptr.Deref(hardware.GPU.SKU, "") != "h200_sxm" || ptr.Deref(hardware.GPU.Budget, 0) != 8 {
+		t.Fatalf("hardware = %#v, want SKU h200_sxm and budget 8", hardware)
 	}
 }
 

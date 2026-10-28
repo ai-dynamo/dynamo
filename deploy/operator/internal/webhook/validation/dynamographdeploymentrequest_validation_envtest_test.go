@@ -553,7 +553,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 					"generator":                 "aic",
 					"snapshot_interval_seconds": int64(30),
 				}})
-			}, nil),
+			}),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			check: func(t *testing.T, result *unstructured.Unstructured) {
@@ -575,7 +575,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 					"runtime_version_override": "1.2.3",
 					"snapshot_dir":             "/tmp/snapshots",
 				}})
-			}, nil),
+			}),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
@@ -593,7 +593,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name: "v1beta2 dgdr run input cannot be deleted",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				setV1beta2InputOverrides(spec, map[string]any{"dgdr_run": nil})
-			}, nil),
+			}),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
@@ -604,7 +604,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name: "v1beta2 dgdr run input cannot be replaced by a scalar",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				setV1beta2InputOverrides(spec, map[string]any{"dgdr_run": "wrong"})
-			}, nil),
+			}),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
@@ -615,7 +615,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name: "v1beta2 dgdr run input cannot be replaced by a list",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				setV1beta2InputOverrides(spec, map[string]any{"dgdr_run": []any{"wrong"}})
-			}, nil),
+			}),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
@@ -626,7 +626,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name: "v1beta2 pareto objective is reserved until Candidate publication supports it",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["objective"] = map[string]any{"mode": "Pareto", "metrics": []any{"ThroughputPerGPU", "ThroughputPerUser"}}
-			}, nil),
+			}),
 			gpuDiscovery:  true,
 			discovered:    discoveredH200,
 			wantSchemaErr: `spec.objective.mode: Unsupported value: "Pareto": supported values: "Optimize"`,
@@ -635,7 +635,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name: "v1beta2 optimize rejects the reserved Pareto metrics field",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["objective"] = map[string]any{"mode": "Optimize", "metrics": []any{"ThroughputPerGPU", "ThroughputPerUser"}}
-			}, nil),
+			}),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantCELErr:   `spec.objective: Invalid value: metrics is reserved for the future Pareto implementation`,
@@ -644,14 +644,14 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name: "v1beta2 duplicate backends are rejected on create",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["backends"] = []any{"vllm", "vllm"}
-			}, nil),
+			}),
 			gpuDiscovery:  true,
 			discovered:    discoveredH200,
 			wantSchemaErr: `spec.backends[1]: Duplicate value: "vllm"`,
 		},
 		{
 			name:         "v1beta2 missing model is rejected by the representation CEL",
-			request:      v1beta2DGDRForAdmission(func(spec map[string]any) { delete(spec, "model") }, nil),
+			request:      v1beta2DGDRForAdmission(func(spec map[string]any) { delete(spec, "model") }),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantCELErr:   `spec: Invalid value: exactly one of native v1beta2 fields or v1beta1 must be specified`,
@@ -660,7 +660,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name: "v1beta2 empty model name is rejected by the schema",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["model"] = map[string]any{"name": ""}
-			}, nil),
+			}),
 			gpuDiscovery:  true,
 			discovered:    discoveredH200,
 			wantSchemaErr: `spec.model.name: Invalid value: "": spec.model.name in body should be at least 1 chars long`,
@@ -671,7 +671,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				spec["workload"] = map[string]any{"static": map[string]any{"load": map[string]any{
 					"kvCapacityFraction": map[string]any{"range": map[string]any{"min": 0.9, "max": 0.1}},
 				}}}
-			}, nil),
+			}),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantCELErr:   `spec.workload.static.load.kvCapacityFraction.range: Invalid value: min must be less than max`,
@@ -682,7 +682,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				spec["workload"] = map[string]any{"static": map[string]any{"load": map[string]any{
 					"kvCapacityFraction": map[string]any{"value": 0.0},
 				}}}
-			}, nil),
+			}),
 			gpuDiscovery:  true,
 			discovered:    discoveredH200,
 			wantSchemaErr: `spec.workload.static.load.kvCapacityFraction.value: Invalid value: 0: spec.workload.static.load.kvCapacityFraction.value in body should be greater than 0`,
@@ -693,7 +693,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				spec["workload"] = map[string]any{"static": map[string]any{"load": map[string]any{
 					"concurrency": int64(10), "requestsPerSecond": 10.0,
 				}}}
-			}, nil),
+			}),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantCELErr:   `spec.workload.static.load: Invalid value: exactly one of requestsPerSecond, concurrency, or kvCapacityFraction must be specified`,
@@ -702,17 +702,17 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name: "v1beta2 empty load is not a second default opt-out",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["workload"] = map[string]any{"static": map[string]any{"load": map[string]any{}}}
-			}, nil),
+			}),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantCELErr:   `spec.workload.static.load: Invalid value: exactly one of requestsPerSecond, concurrency, or kvCapacityFraction must be specified`,
 		},
 		{
 			name:       "v1beta2 update to duplicate backends is rejected",
-			oldRequest: v1beta2DGDRForAdmission(nil, nil),
+			oldRequest: v1beta2DGDRForAdmission(nil),
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["backends"] = []any{"sglang", "sglang"}
-			}, nil),
+			}),
 			gpuDiscovery:  true,
 			discovered:    discoveredH200,
 			wantSchemaErr: `spec.backends[1]: Duplicate value: "sglang"`,
@@ -1005,15 +1005,12 @@ const v1beta2AdmissionModel = "Qwen/Qwen3-0.6B"
 // defaults. It is unstructured on purpose: an omitted field,
 // an explicit empty object and a null are different requests, and typed Go cannot tell them
 // apart.
-func v1beta2DGDRForAdmission(mutate func(spec map[string]any), labels map[string]any) *unstructured.Unstructured {
+func v1beta2DGDRForAdmission(mutate func(spec map[string]any)) *unstructured.Unstructured {
 	spec := map[string]any{"model": map[string]any{"name": v1beta2AdmissionModel}}
 	if mutate != nil {
 		mutate(spec)
 	}
 	metadata := map[string]any{"name": "test-v1beta2-dgdr", "namespace": "default"}
-	if labels != nil {
-		metadata["labels"] = labels
-	}
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "nvidia.com/v1beta2",
 		"kind":       "DynamoGraphDeploymentRequest",
@@ -1029,23 +1026,6 @@ func v1beta2Field(t *testing.T, obj *unstructured.Unstructured, path ...string) 
 		t.Fatalf("read %v: %v", path, err)
 	}
 	return value, found
-}
-
-func v1beta2Number(t *testing.T, obj *unstructured.Unstructured, path ...string) float64 {
-	t.Helper()
-	value, found := v1beta2Field(t, obj, path...)
-	if !found {
-		t.Fatalf("%v is not set", path)
-	}
-	switch n := value.(type) {
-	case int64:
-		return float64(n)
-	case float64:
-		return n
-	default:
-		t.Fatalf("%v = %#v, want a number", path, value)
-		return 0
-	}
 }
 
 func v1beta2String(t *testing.T, obj *unstructured.Unstructured, path ...string) string {
