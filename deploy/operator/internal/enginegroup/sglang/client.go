@@ -7,17 +7,14 @@
 package sglang
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/controlhttp"
 )
 
 const (
@@ -72,32 +69,24 @@ type ScaleResponse struct {
 }
 
 // Client calls the Dynamo SGLang worker's backend-neutral system routes.
-// BaseURL identifies one primary worker and must not contain a route path.
+// Its transport identifies one primary worker and must not contain a route path.
 type Client struct {
-	BaseURL            *url.URL
-	HTTPClient         *http.Client
+	transport          *controlhttp.Client
 	ObservationTimeout time.Duration
 	ScaleTimeout       time.Duration
 }
 
 // NewClient validates and constructs a control client.
 func NewClient(rawBaseURL string, httpClient *http.Client) (*Client, error) {
-	parsed, err := url.Parse(rawBaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse SGLang control URL: %w", err)
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return nil, fmt.Errorf("SGLang control URL must use http or https")
-	}
-	if parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return nil, fmt.Errorf("SGLang control URL must identify a host without query or fragment")
-	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	transport, err := controlhttp.New(rawBaseURL, httpClient)
+	if err != nil {
+		return nil, fmt.Errorf("SGLang control URL: %w", err)
+	}
 	return &Client{
-		BaseURL: parsed, HTTPClient: httpClient,
+		transport:          transport,
 		ObservationTimeout: defaultObservationTimeout, ScaleTimeout: defaultScaleTimeout,
 	}, nil
 }
@@ -108,9 +97,13 @@ func (c *Client) Observe(ctx context.Context) (ScaleState, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.ObservationTimeout)
 	defer cancel()
 
+	data, err := c.transport.Request(ctx, http.MethodGet, statePath, nil)
+	if err != nil {
+		return ScaleState{}, fmt.Errorf("SGLang %w", err)
+	}
 	var state ScaleState
-	if err := c.doJSON(ctx, http.MethodGet, statePath, nil, &state); err != nil {
-		return ScaleState{}, err
+	if err := json.Unmarshal(data, &state); err != nil {
+		return ScaleState{}, fmt.Errorf("decode SGLang %s response: %w", statePath, err)
 	}
 	if state.Status == "error" {
 		return ScaleState{}, fmt.Errorf("SGLang rejected state observation: %s", state.Message)
@@ -143,42 +136,13 @@ func (c *Client) Scale(ctx context.Context, target ScaleRequest) (ScaleResponse,
 	ctx, cancel := context.WithTimeout(ctx, c.ScaleTimeout)
 	defer cancel()
 
+	data, err := c.transport.Request(ctx, http.MethodPost, scalePath, target)
+	if err != nil {
+		return ScaleResponse{}, fmt.Errorf("SGLang %w", err)
+	}
 	var response ScaleResponse
-	if err := c.doJSON(ctx, http.MethodPost, scalePath, target, &response); err != nil {
-		return ScaleResponse{}, err
+	if err := json.Unmarshal(data, &response); err != nil {
+		return ScaleResponse{}, fmt.Errorf("decode SGLang %s response: %w", scalePath, err)
 	}
 	return response, nil
-}
-
-func (c *Client) doJSON(ctx context.Context, method, path string, body any, out any) error {
-	var reader io.Reader
-	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("encode SGLang request: %w", err)
-		}
-		reader = bytes.NewReader(encoded)
-	}
-	endpoint := *c.BaseURL
-	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
-	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), reader)
-	if err != nil {
-		return fmt.Errorf("build SGLang request: %w", err)
-	}
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	response, err := c.HTTPClient.Do(request)
-	if err != nil {
-		return fmt.Errorf("call SGLang %s: %w", path, err)
-	}
-	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		payload, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("SGLang %s returned HTTP %d: %s", path, response.StatusCode, strings.TrimSpace(string(payload)))
-	}
-	if err := json.NewDecoder(response.Body).Decode(out); err != nil {
-		return fmt.Errorf("decode SGLang %s response: %w", path, err)
-	}
-	return nil
 }

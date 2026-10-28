@@ -66,9 +66,6 @@ func TestResolveSGLangComponentEngineGroup(t *testing.T) {
 		{name: "omitted control port uses the shared worker default", mutate: func(c *api.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Env = c.PodTemplate.Spec.Containers[0].Env[:1]
 		}},
-		{name: "Grove identity cannot be shadowed", mutate: func(c *api.DynamoComponentDeploymentSharedSpec) {
-			c.PodTemplate.Spec.Containers[0].Env = append(c.PodTemplate.Spec.Containers[0].Env, corev1.EnvVar{Name: "GROVE_PCLQ_POD_INDEX", Value: "0"})
-		}, want: "cannot be shadowed"},
 		{name: "restart default is not injected", mutate: func(c *api.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.RestartPolicy = ""
 		}, want: "restartPolicy must explicitly be Never"},

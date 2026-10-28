@@ -315,7 +315,7 @@ func TestResolveDesiredEngineGroupPlanDoesNotTreatCardinalityAsConvergence(t *te
 			{ReplicaID: "replica-1", SlotID: "slot-1", NativeMembers: []domain.NativeMemberID{"dp-3"}},
 		}},
 	})
-	planner := &engineGroupControllerTestPlanResolver{resolution: ScalePlanResolution{Plan: &plan}}
+	planner := &engineGroupControllerTestPlanResolver{resolution: domain.ScalePlanResolution{Plan: &plan}}
 	runtime := Runtime{
 		Profile: nvidiacomv1beta1.EngineGroupProfileStatus{
 			MinSupportedReplicas: 1,
@@ -355,16 +355,16 @@ func TestResolveDesiredEngineGroupPlanDistinguishesEveryPlannerOutcome(t *testin
 
 	tests := []struct {
 		name               string
-		resolution         ScalePlanResolution
+		resolution         domain.ScalePlanResolution
 		err                error
 		wantPlan           bool
 		wantValidation     bool
 		wantResolutionFail bool
 	}{
-		{name: "resolved plan", resolution: ScalePlanResolution{Plan: &plan}, wantPlan: true},
+		{name: "resolved plan", resolution: domain.ScalePlanResolution{Plan: &plan}, wantPlan: true},
 		{
 			name: "definitive rejection",
-			resolution: ScalePlanResolution{Rejection: &domain.Failure{
+			resolution: domain.ScalePlanResolution{Rejection: &domain.Failure{
 				Classification: domain.FailureClassificationTerminal,
 				Reason:         "UnsupportedShape",
 				Message:        "the backend cannot express this target",
@@ -373,7 +373,7 @@ func TestResolveDesiredEngineGroupPlanDistinguishesEveryPlannerOutcome(t *testin
 		},
 		{
 			name: "definitive rejection with optional empty message",
-			resolution: ScalePlanResolution{Rejection: &domain.Failure{
+			resolution: domain.ScalePlanResolution{Rejection: &domain.Failure{
 				Classification: domain.FailureClassificationTerminal,
 				Reason:         "UnsupportedShape",
 			}},
@@ -560,7 +560,7 @@ func TestProjectEngineGroupTrafficStatusUsesAcceptedTargetCorrelation(t *testing
 }
 
 type engineGroupControllerTestPlanResolver struct {
-	resolution ScalePlanResolution
+	resolution domain.ScalePlanResolution
 	err        error
 	calls      int
 }
@@ -570,7 +570,7 @@ func (p *engineGroupControllerTestPlanResolver) ResolveScalePlan(
 	domain.GroupID,
 	int32,
 	domain.GroupStatus,
-) (ScalePlanResolution, error) {
+) (domain.ScalePlanResolution, error) {
 	p.calls++
 	return p.resolution, p.err
 }

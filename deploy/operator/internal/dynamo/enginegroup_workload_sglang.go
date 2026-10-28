@@ -17,7 +17,7 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-// ResolveSGLangComponentEngineGroup validates the implemented Grove growth profile before creation.
+// ResolveSGLangComponentEngineGroup validates the supported native SGLang declaration before creation.
 // component and component.EngineGroup must not be nil. parentEnv may be nil. No input is mutated.
 func ResolveSGLangComponentEngineGroup(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentEnv []corev1.EnvVar) (ResolvedSGLangElasticEPProfile, error) {
 	// Resolve only explicitly declared parent/component environment, with component precedence.
@@ -40,9 +40,6 @@ func ResolveSGLangComponentEngineGroup(component *v1beta1.DynamoComponentDeploym
 	}
 	if component.PodTemplate == nil {
 		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("Engine Group capacity requires an explicit podTemplate")
-	}
-	if component.PodTemplate.Spec.HostNetwork {
-		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("SGLang Engine Groups require Pod networking")
 	}
 	if err := validateEngineGroupPodTemplate(component.PodTemplate); err != nil {
 		return ResolvedSGLangElasticEPProfile{}, err
@@ -124,34 +121,6 @@ func validateSGLangEngineGroupLaunch(main *corev1.Container) error {
 		}
 	}
 	return nil
-}
-
-// resolveEngineGroupGPUAllocation proves scalar GPU ownership for the implemented profile.
-// podSpec and main must not be nil; main must be the pod's main container.
-func resolveEngineGroupGPUAllocation(podSpec *corev1.PodSpec, main *corev1.Container) (int64, error) {
-	// Dynamic claims cannot establish geometry before allocation, and sidecars must not own GPUs.
-	if len(podSpec.ResourceClaims) != 0 || len(main.Resources.Claims) != 0 {
-		return 0, fmt.Errorf("Engine Group growth does not yet support DRA GPU allocation")
-	}
-	containers := append([]corev1.Container(nil), podSpec.InitContainers...)
-	containers = append(containers, podSpec.Containers...)
-	for _, container := range containers {
-		if container.Name == consts.MainContainerName {
-			continue
-		}
-		gpuLimit := container.Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]
-		if !gpuLimit.IsZero() || len(container.Resources.Claims) != 0 {
-			return 0, fmt.Errorf("Engine Group GPUs must belong exclusively to the main container")
-		}
-	}
-
-	// Fractional or absent limits cannot define a fixed accelerator allocation.
-	gpuLimit := main.Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]
-	gpuCount, exact := gpuLimit.AsInt64()
-	if !exact || gpuCount < 1 {
-		return 0, fmt.Errorf("Engine Group main container requires a positive whole-GPU limit")
-	}
-	return gpuCount, nil
 }
 
 // RenderSGLangEngineGroup declares one world from a validated SGLang launch profile.

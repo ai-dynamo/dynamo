@@ -39,7 +39,7 @@ func TestPackedRetirementRequiresEveryNativeDrainProof(t *testing.T) {
 
 	t.Log("append one packed allocation, preserving the original world and process identities")
 	grow := testGrowPlan(1)
-	grow.Change.Grow.Replicas[0].NativeMembers = nativeMemberIDs(2, 2)
+	grow.Change.Grow.Replicas[0].NativeMembers = []enginegroup.NativeMemberID{"dp-2", "dp-3"}
 	capacity.allocations = append(capacity.allocations, second)
 	target := validatedTarget(t, adapter, base.CommittedTopology, grow, []enginegroup.JoiningReplica{{
 		ReplicaID: "replica-1", Members: second.Incarnation.Members,
@@ -106,7 +106,7 @@ func TestPackedRetirementRequiresEveryNativeDrainProof(t *testing.T) {
 
 	t.Log("a repeated append into the retired range is rejected before creating capacity")
 	regrow := testGrowPlan(1)
-	regrow.Change.Grow.Replicas[0].NativeMembers = nativeMemberIDs(2, 2)
+	regrow.Change.Grow.Replicas[0].NativeMembers = []enginegroup.NativeMemberID{"dp-2", "dp-3"}
 	resolution, err := adapter.ValidatePlan(t.Context(), "group-uid", enginegroup.PlanValidationRequest{
 		BaseTopology: shrunk.CommittedTopology, Plan: regrow, PlanDigest: "regrow-digest",
 	})

@@ -9,11 +9,10 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strconv"
-	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	domain "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
+	sglangruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/sglang"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/workload"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -78,7 +77,7 @@ func (a *SGLangCapacity) Apply(ctx context.Context, groupID domain.GroupID, targ
 			continue
 		}
 		// Every allocation's member range is fixed by its GPU width and physical slot.
-		members, err := sglangMembersForSlot(replica.SlotID, a.MembersPerReplica)
+		members, err := (sglangruntime.ReplicaLayout{NativeMembersPerReplica: a.MembersPerReplica}).MembersForSlot(replica.SlotID)
 		bootstrap := replica.Bootstrap
 		if err != nil || replica.SlotID == "slot-0" || bootstrap.Mode != domain.BootstrapModeJoin ||
 			bootstrap.BaseTopologyGeneration <= 0 || !slices.Equal(bootstrap.NativeMembers, members) {
@@ -107,24 +106,6 @@ func (a *SGLangCapacity) Apply(ctx context.Context, groupID domain.GroupID, targ
 	return a.Physical.Apply(ctx, groupID, target)
 }
 
-func sglangMembersForSlot(slot domain.CapacitySlotID, width int32) ([]domain.NativeMemberID, error) {
-	// Stable physical slots map to non-overlapping native rank ranges.
-	literal := strings.TrimPrefix(string(slot), "slot-")
-	index, err := strconv.ParseInt(literal, 10, 32)
-	if err != nil || index < 0 || string(slot) != "slot-"+strconv.FormatInt(index, 10) {
-		return nil, fmt.Errorf("invalid SGLang allocation slot %q", slot)
-	}
-	if width < 1 {
-		return nil, fmt.Errorf("SGLang allocation width must be positive")
-	}
-	members := make([]domain.NativeMemberID, width)
-	for local := range members {
-		members[local] = domain.NativeMemberID(fmt.Sprintf("dp-%d", index*int64(width)+int64(local)))
-	}
-	slices.Sort(members)
-	return members, nil
-}
-
 func sglangSlotMembers(slot domain.CapacitySlotID, pod *corev1.Pod) ([]domain.NativeMemberIncarnation, error) {
 	// Resolve physical width from the same explicit GPU allocation used by native automatic bootstrap.
 	main, err := engineGroupMainContainer(pod)
@@ -136,7 +117,7 @@ func sglangSlotMembers(slot domain.CapacitySlotID, pod *corev1.Pod) ([]domain.Na
 	if !exact || width < 1 || width > 2147483647 {
 		return nil, fmt.Errorf("SGLang allocation requires a positive whole-GPU width")
 	}
-	ids, err := sglangMembersForSlot(slot, int32(width))
+	ids, err := (sglangruntime.ReplicaLayout{NativeMembersPerReplica: int32(width)}).MembersForSlot(slot)
 	if err != nil {
 		return nil, err
 	}

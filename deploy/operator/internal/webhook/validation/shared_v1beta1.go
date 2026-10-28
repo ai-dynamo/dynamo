@@ -151,6 +151,7 @@ type componentEngineGroupSpecValidationOptions struct {
 	backendFramework string
 	parentEnv        []corev1.EnvVar
 	hasRootOverride  bool
+	grovePathway     bool
 }
 
 // validateComponentEngineGroupSpec validates the child against its component and graph context.
@@ -182,6 +183,17 @@ func (v *sharedValidation) validateComponentEngineGroupSpec(
 	}
 	if err != nil {
 		allErrs = append(allErrs, field.Forbidden(fldPath, err.Error()))
+	}
+	// Workload prerequisites are independent of native geometry and remain provider-owned.
+	if options.grovePathway && options.component.PodTemplate != nil {
+		if err := dynamo.ValidateGroveEngineGroupTemplate(options.component.PodTemplate, options.parentEnv); err != nil {
+			allErrs = append(allErrs, field.Forbidden(fldPath, err.Error()))
+		}
+		if dynamo.BackendFramework(options.backendFramework) == dynamo.BackendFrameworkVLLM {
+			if err := dynamo.RequireGroveEngineGroupRetentionGate(options.component.PodTemplate); err != nil {
+				allErrs = append(allErrs, field.Forbidden(fldPath, err.Error()))
+			}
+		}
 	}
 	return allErrs
 }

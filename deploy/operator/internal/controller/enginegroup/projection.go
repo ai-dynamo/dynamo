@@ -258,15 +258,6 @@ func countAvailableEngineGroupReplicas(replicas []api.EngineGroupReplicaStatus, 
 	return count
 }
 
-func engineGroupHasDegradedAllocation(replicas []api.EngineGroupReplicaStatus) bool {
-	for _, replica := range replicas {
-		if replica.CurrentAllocation != nil && replica.CurrentAllocation.Health == api.EngineGroupAllocationHealthDegraded {
-			return true
-		}
-	}
-	return false
-}
-
 func engineGroupUnexpectedMembershipLoss(group *api.DynamoGraphDeploymentEngineGroup, status domain.GroupStatus) bool {
 	if stable, found := status.Topologies.Snapshot(group.Status.LastStableTopologyGeneration); found {
 		current := engineGroupTopologyNativeMembers(status.Membership.Observed.CommittedTopology)
