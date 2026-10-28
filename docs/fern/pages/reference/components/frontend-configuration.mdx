@@ -884,8 +884,8 @@ These checks validate admission; thinking-budget enforcement by the backend is n
 
 #### API Versions
 
-Version admission requires a build containing the fix tracked in
-[#17374](https://github.com/ai-dynamo/dynamo/issues/17374). Both Messages endpoints apply
+Version admission requires a build containing
+[PR #17378](https://github.com/ai-dynamo/dynamo/pull/17378). Both Messages endpoints apply
 the following policy to the `anthropic-version` request header:
 
 | Header | Admission policy |
@@ -900,6 +900,11 @@ generation. For `2026-10-21`, remove the sampling fields as described in the
 [Anthropic migration guide](https://platform.claude.com/docs/en/api/migration-2026-10-21#sampling-parameters-are-removed).
 Clients that need sampling controls on `/v1/messages` can select `2023-06-01`.
 Token counting does not apply sampling controls.
+
+Under `2026-10-21`, nonempty `citations` arrays on user text blocks also return HTTP
+400, including text nested in tool or search results. Assistant citations and empty
+user citation arrays are accepted. This does not add citation rendering or support
+for otherwise unsupported content blocks.
 
 This policy covers header admission and sampling parameters for Dynamo's experimental
 Messages implementation. It does not establish full compatibility with either API version

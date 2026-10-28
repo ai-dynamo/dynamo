@@ -17,6 +17,7 @@ use serde_json::{Value, value::RawValue};
 /// avoid copying messages, images, or tool schemas before typed deserialization.
 pub(super) struct ValidatedRequest<T> {
     body: Bytes,
+    messages: Option<Bytes>,
     model: String,
     stream: bool,
     fields: Result<Value, String>,
@@ -48,11 +49,15 @@ impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequest<S> for ValidatedReq
 
 impl<T: DeserializeOwned> ValidatedRequest<T> {
     pub(super) fn from_bytes(body: Bytes) -> Self {
+        let mut messages = None;
         let mut model = String::new();
         let mut stream = false;
         let fields = (|| {
             let raw: HashMap<String, &RawValue> =
                 serde_json::from_slice(&body).map_err(|error| error.to_string())?;
+            messages = raw
+                .get("messages")
+                .map(|raw| body.slice_ref(raw.get().as_bytes()));
             model = raw
                 .get("model")
                 .and_then(|raw| serde_json::from_str(raw.get()).ok())
@@ -79,6 +84,7 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
         })();
         Self {
             body,
+            messages,
             model,
             stream,
             fields,
@@ -101,6 +107,9 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
         match version.map(|value| value.to_str()) {
             None | Some(Ok("2023-06-01")) => {}
             Some(Ok("2026-10-21")) => {
+                if let Some(messages) = &self.messages {
+                    reject_user_citations(messages)?;
+                }
                 if let Some(parameter) = ["temperature", "top_p", "top_k"]
                     .into_iter()
                     .find(|parameter| fields.get(*parameter).is_some())
@@ -234,6 +243,113 @@ fn validate(request: &Value, headers: &HeaderMap) -> Result<(), String> {
         .is_some_and(|value| value > i32::MAX as u64)
     {
         return Err("top_k: must be at most 2147483647".into());
+    }
+    Ok(())
+}
+
+// Inspect citations before tool-result conversion can discard them. Skip text,
+// image data, and tool inputs instead of materializing a second message tree.
+fn reject_user_citations(messages: &[u8]) -> Result<(), String> {
+    use serde::{
+        Deserialize,
+        de::{self, MapAccess, SeqAccess, Visitor},
+    };
+
+    #[derive(Default)]
+    struct CitationScan {
+        cited_blocks: bool,
+        cited_users: bool,
+    }
+
+    impl<'de> Deserialize<'de> for CitationScan {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct ScanVisitor;
+            impl<'de> Visitor<'de> for ScanVisitor {
+                type Value = CitationScan;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("message content")
+                }
+                fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                    Ok(CitationScan::default())
+                }
+                fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                    Ok(CitationScan::default())
+                }
+                fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                    Ok(CitationScan::default())
+                }
+                fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                    Ok(CitationScan::default())
+                }
+                fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                    Ok(CitationScan::default())
+                }
+                fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                    Ok(CitationScan::default())
+                }
+                fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                    let mut scan = CitationScan::default();
+                    while let Some(child) = seq.next_element::<CitationScan>()? {
+                        scan.cited_blocks |= child.cited_blocks;
+                        scan.cited_users |= child.cited_users;
+                    }
+                    Ok(scan)
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                    let mut role = None;
+                    let mut kind = None;
+                    let mut text = false;
+                    let mut citations = false;
+                    let mut content = CitationScan::default();
+                    while let Some(key) = map.next_key::<String>()? {
+                        match key.as_str() {
+                            "role" | "type" => {
+                                let raw = map.next_value::<&RawValue>()?;
+                                let value = serde_json::from_str::<String>(raw.get()).ok();
+                                if key == "role" {
+                                    role = value;
+                                } else {
+                                    kind = value;
+                                }
+                            }
+                            "text" => {
+                                text = map.next_value::<&RawValue>()?.get().starts_with('"');
+                            }
+                            "citations" => {
+                                let raw = map.next_value::<&RawValue>()?;
+                                citations = raw
+                                    .get()
+                                    .strip_prefix('[')
+                                    .is_some_and(|tail| tail.trim_start() != "]");
+                            }
+                            "content" => {
+                                content = map.next_value()?;
+                            }
+                            _ => {
+                                map.next_value::<de::IgnoredAny>()?;
+                            }
+                        }
+                    }
+                    // Tool results also accept an implicit text block with no type.
+                    let is_text = kind.as_deref() == Some("text") || (kind.is_none() && text);
+                    let is_container = matches!(
+                        kind.as_deref(),
+                        Some("search_result" | "tool_result" | "web_search_tool_result")
+                    );
+                    Ok(CitationScan {
+                        cited_blocks: (is_text && citations)
+                            || (is_container && content.cited_blocks),
+                        cited_users: role.as_deref() == Some("user") && content.cited_blocks,
+                    })
+                }
+            }
+            deserializer.deserialize_any(ScanVisitor)
+        }
+    }
+
+    // Leave malformed-message diagnostics to the original typed parser below.
+    if serde_json::from_slice::<CitationScan>(messages).is_ok_and(|scan| scan.cited_users) {
+        return Err("messages: non-empty citations on user text blocks are not allowed with anthropic-version 2026-10-21".into());
     }
     Ok(())
 }
