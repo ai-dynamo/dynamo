@@ -288,7 +288,7 @@ jobs:
 
   notify-slack:
     if: always() && github.event_name == 'schedule'
-    needs: [deploy-status-check, vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test]
+    needs: [deploy-status-check, vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-publish-nvstaging]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs
