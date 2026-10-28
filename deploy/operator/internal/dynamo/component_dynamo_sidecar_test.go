@@ -758,6 +758,74 @@ func TestSGLangMultinodeSidecarRequiresBothRoleTemplates(t *testing.T) {
 	}
 }
 
+// runtimeContextDefaults observes the context passed through the production defaults interface.
+type runtimeContextDefaults struct {
+	ComponentDefaults
+	context ComponentContext
+}
+
+func (d *runtimeContextDefaults) GetBasePodSpec(context ComponentContext) (corev1.PodSpec, error) {
+	d.context = context
+	return d.ComponentDefaults.GetBasePodSpec(context)
+}
+
+func TestRenderedRuntimeVersionSource(t *testing.T) {
+	cases := []struct {
+		name          string
+		role          Role
+		nativeSidecar bool
+		runtimeImage  string
+		override      string
+		wantVersion   string
+	}{
+		{name: "combined runtime", role: RoleMain, wantVersion: "2.0.0"},
+		{name: "single-node sidecar", role: RoleMain, nativeSidecar: true, runtimeImage: "runtime:1.6.0", wantVersion: "1.6.0"},
+		{name: "multinode leader sidecar", role: RoleLeader, nativeSidecar: true, runtimeImage: "runtime:1.6.0", wantVersion: "1.6.0"},
+		{name: "multinode worker sidecar", role: RoleWorker, nativeSidecar: true, runtimeImage: "runtime:1.7.0", wantVersion: "1.7.0"},
+		{name: "compute-only worker", role: RoleWorker, nativeSidecar: true},
+		{name: "sidecar override", role: RoleMain, nativeSidecar: true, runtimeImage: "runtime:1.6.0", override: "1.8.0", wantVersion: "1.8.0"},
+		{name: "unknown sidecar version", role: RoleMain, nativeSidecar: true, runtimeImage: "runtime:latest"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Author the selected Pod template with distinct engine and Dynamo images")
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeWorker,
+				RuntimeVersionOverride: tc.override,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "main:2.0.0"}},
+				}},
+			}
+			if tc.runtimeImage != "" {
+				component.PodTemplate.Spec.InitContainers = []corev1.Container{{
+					Name: commonconsts.RuntimeContainerName, Image: tc.runtimeImage,
+					RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+				}}
+			}
+			nodes := int32(1)
+			if tc.role != RoleMain {
+				nodes = 2
+				component.Multinode = &v1beta1.MultinodeSpec{NodeCount: nodes}
+			}
+
+			t.Log("Render through the production defaults interface and inspect its resolved runtime version")
+			defaults := &runtimeContextDefaults{ComponentDefaults: NewWorkerDefaults()}
+			_, err := generateBasePodSpecWithDefaultsAndOwnership(
+				component, BackendFrameworkNoop, nil, "graph", "ns", tc.role, nodes,
+				&configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove,
+				"engine", nil, defaults, roleLaunchOwnedByPodTemplate, tc.nativeSidecar, staticContainerGPUCount(0),
+			)
+			require.NoError(t, err)
+			if tc.wantVersion == "" {
+				require.Nil(t, defaults.context.RuntimeVersion)
+			} else {
+				require.NotNil(t, defaults.context.RuntimeVersion)
+				require.Equal(t, tc.wantVersion, defaults.context.RuntimeVersion.String())
+			}
+		})
+	}
+}
+
 func TestNativeRoleRuntimeVersionsAndKVTransferPolicy(t *testing.T) {
 	t.Log("Author TP roles whose worker runs only a native engine")
 	component := &v1beta1.DynamoComponentDeploymentSharedSpec{

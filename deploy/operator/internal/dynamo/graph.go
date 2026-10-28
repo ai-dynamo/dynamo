@@ -1765,11 +1765,13 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	nativeSidecar bool,
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
-	// Combined-runtime defaults use main's Dynamo version.
-	// Native-sidecar defaults are version-independent; main contains only the engine.
+	// Use the selected runtime sidecar's image, or main in combined-runtime mode.
+	// A compute-only role's engine image does not describe a Dynamo version.
 	annotations := GetPodTemplateAnnotations(component)
 	var runtimeImage string
-	if !nativeSidecar {
+	if runtime := GetDynamoSidecar(component); runtime != nil {
+		runtimeImage = runtime.Image
+	} else if !nativeSidecar {
 		if main := GetMainContainer(component); main != nil {
 			runtimeImage = main.Image
 		}
