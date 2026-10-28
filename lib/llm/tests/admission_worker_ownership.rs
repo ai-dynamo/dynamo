@@ -362,7 +362,6 @@ async fn each_worker_admits_through_its_own_gate_and_its_endpoints_share_it() {
         }
     }
     let rt = Runtime::from_current().unwrap();
-    // Worker A reports one rank, worker B two.
     let mut a = Worker::new(&rt, "worker-a", 1).await;
     let mut b = Worker::new(&rt, "worker-b", 2).await;
     let to_a = a.serve("generate").await;
