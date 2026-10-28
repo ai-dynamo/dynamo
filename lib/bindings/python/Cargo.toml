@@ -139,6 +139,6 @@ inherits = "release"
 debug = true
 strip = false
 
-# Independent workspace: keep this draft prerequisite aligned with the root manifest.
+# Independent workspace: keep this protocol patch aligned with the root manifest.
 [patch.crates-io]
-dynamo-protocols = { git = "https://github.com/maheshrbapatu/frontend-crates", rev = "bc547588eac8890bfeda2e206bc559959b273f72" }
+dynamo-protocols = { git = "https://github.com/maheshrbapatu/frontend-crates", rev = "893b8efd3b6af33216befb2907d89a8b816a9bda" }
