@@ -2351,7 +2351,13 @@ impl ModelManager {
                 cancellation_token,
             )
             .await?;
-        plugins.install(&chooser)?;
+        // A request classifier belongs to the pool that runs prefill: the
+        // aggregated router, or the prefill hop in disaggregated serving.
+        // Decode routing runs after prefill dispatch, too late to admit, and
+        // claims the lifecycle the prefill hop hands off instead.
+        if worker_role != Some(WorkerType::Decode) {
+            plugins.install(&chooser)?;
+        }
         Ok(chooser)
     }
 

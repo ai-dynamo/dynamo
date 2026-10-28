@@ -81,7 +81,9 @@ impl HttpFrontend {
         self
     }
 
-    /// Install one catalog-created request classifier per routed decode or aggregated model.
+    /// Install one catalog-created request classifier per routed model, on the
+    /// pool that runs prefill: the aggregated router, or the prefill hop of a
+    /// disaggregated model.
     pub fn request_classifier_factory(mut self, factory: RequestClassifierFactory) -> Self {
         self.plugins = self.plugins.with_request_classifier(factory);
         self
