@@ -16,21 +16,27 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrrunpublisher"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
 )
 
@@ -68,6 +74,16 @@ type dgdrRunFixture struct {
 
 func newDGDRRunFixture(t *testing.T, hardware dgdrRunHardwareDiscoverer, objects ...client.Object) *dgdrRunFixture {
 	t.Helper()
+	return newDGDRRunFixtureWithInterceptor(t, hardware, interceptor.Funcs{}, objects...)
+}
+
+func newDGDRRunFixtureWithInterceptor(
+	t *testing.T,
+	hardware dgdrRunHardwareDiscoverer,
+	funcs interceptor.Funcs,
+	objects ...client.Object,
+) *dgdrRunFixture {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("add Kubernetes types: %v", err)
@@ -80,6 +96,7 @@ func newDGDRRunFixture(t *testing.T, hardware dgdrRunHardwareDiscoverer, objects
 		WithObjects(objects...).
 		WithIndex(&batchv1.Job{}, dgdrRunJobControllerUIDIndex, dgdrRunJobControllerUIDs).
 		WithStatusSubresource(&nvidiacomv1beta2.DynamoGraphDeploymentRun{}, &batchv1.Job{}, &corev1.Pod{}).
+		WithInterceptorFuncs(funcs).
 		Build()
 	return &dgdrRunFixture{
 		t:      t,
@@ -114,14 +131,20 @@ func (f *dgdrRunFixture) run() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
 
 func (f *dgdrRunFixture) job() *batchv1.Job {
 	f.t.Helper()
+	jobs := f.jobs()
+	if len(jobs) != 1 {
+		f.t.Fatalf("Jobs = %d, want 1", len(jobs))
+	}
+	return &jobs[0]
+}
+
+func (f *dgdrRunFixture) jobs() []batchv1.Job {
+	f.t.Helper()
 	jobs := &batchv1.JobList{}
 	if err := f.client.List(f.t.Context(), jobs, client.InNamespace("default")); err != nil {
 		f.t.Fatalf("list Jobs: %v", err)
 	}
-	if len(jobs.Items) != 1 {
-		f.t.Fatalf("Jobs = %d, want 1", len(jobs.Items))
-	}
-	return &jobs.Items[0]
+	return jobs.Items
 }
 
 func dgdrRunForTest(t *testing.T, inputOverrides map[string]any) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
@@ -133,6 +156,7 @@ func dgdrRunForTest(t *testing.T, inputOverrides map[string]any) *nvidiacomv1bet
 	metric := nvidiacomv1beta2.ObjectiveMetric("ThroughputPerGPU")
 	return &nvidiacomv1beta2.DynamoGraphDeploymentRun{
 		Name: "search-1", Namespace: "default", UID: "run-uid", Generation: 1,
+		Annotations: map[string]string{dgdrV1beta2GenerationAnnotation: "1"},
 		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRunSpec{NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
 			Model:    &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"},
 			Backends: []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM},
@@ -174,6 +198,343 @@ func TestV1beta2RunControllerCreatesOneIsolatedAISimulateJob(t *testing.T) {
 	stored := f.run()
 	assertDGDRRunPendingStatus(t, stored, job.Name)
 	assertDGDRRunStatusInputMatchesConfigMap(t, f.client, stored, job)
+}
+
+func TestV1beta2RunControllerRetainsAndTerminalizesASupersededRun(t *testing.T) {
+	hardware := &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}
+	f := newDGDRRunFixture(t, hardware, dgdrRunForTest(t, map[string]any{}))
+	f.reconcile()
+	f.reconcile()
+
+	run := f.run()
+	run.Status.Progress = &nvidiacomv1beta2.DGDRRunProgress{
+		Candidates: &nvidiacomv1beta2.CandidateProgress{Published: 1},
+	}
+	run.Status.CandidateRefs = []corev1.LocalObjectReference{{Name: "candidate-a"}}
+	if err := f.client.Status().Update(t.Context(), run); err != nil {
+		t.Fatalf("publish candidate history: %v", err)
+	}
+	run = f.run()
+	if run.Annotations == nil {
+		run.Annotations = map[string]string{}
+	}
+	run.Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation] = "3"
+	if err := f.client.Update(t.Context(), run); err != nil {
+		t.Fatalf("request cancellation: %v", err)
+	}
+
+	t.Log("The first cancellation pass stops the Job but retains the Run and its history")
+	f.reconcile()
+	if jobs := f.jobs(); len(jobs) != 0 {
+		t.Fatalf("Jobs = %d, want the execution stopped", len(jobs))
+	}
+	run = f.run()
+	if meta.IsStatusConditionTrue(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted) {
+		t.Fatal("Run completed before Job deletion was observed")
+	}
+	if run.Status.Progress == nil || len(run.Status.CandidateRefs) != 1 {
+		t.Fatalf("candidate history was lost while stopping the Job: %+v", run.Status)
+	}
+
+	t.Log("A coalesced Request generation becomes the terminal cancellation cause")
+	run.Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation] = "4"
+	if err := f.client.Update(t.Context(), run); err != nil {
+		t.Fatalf("coalesce cancellation generation: %v", err)
+	}
+	f.reconcile()
+	run = f.run()
+	condition := meta.FindStatusCondition(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+	if run.Status.Phase != nvidiacomv1beta2.DGDRRunPhaseFailed || condition == nil ||
+		condition.Status != metav1.ConditionTrue || condition.Reason != dgdrRunReasonSuperseded {
+		t.Fatalf("superseded status = %+v", run.Status)
+	}
+	if !strings.Contains(condition.Message, "generation 4") {
+		t.Fatalf("superseded message = %q, want latest generation 4", condition.Message)
+	}
+	if run.Status.CompletionTime == nil || run.Status.Progress == nil || len(run.Status.CandidateRefs) != 1 {
+		t.Fatalf("terminal cancellation lost completion or candidate history: %+v", run.Status)
+	}
+
+	t.Log("Retries are idempotent and never recreate the stopped Job")
+	completionTime := run.Status.CompletionTime.DeepCopy()
+	f.reconcile()
+	if jobs := f.jobs(); len(jobs) != 0 {
+		t.Fatalf("Jobs = %d after retry, want none", len(jobs))
+	}
+	if got := f.run().Status.CompletionTime; got == nil || !got.Equal(completionTime) {
+		t.Fatalf("completionTime = %v, want stable %v", got, completionTime)
+	}
+}
+
+func TestV1beta2RunControllerCancelsBeforeCreatingExecutionResources(t *testing.T) {
+	hardware := &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}
+	run := dgdrRunForTest(t, map[string]any{})
+	run.Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation] = "2"
+	f := newDGDRRunFixture(t, hardware, run)
+
+	f.reconcile()
+	stored := f.run()
+	condition := meta.FindStatusCondition(stored.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != dgdrRunReasonSuperseded {
+		t.Fatalf("Completed condition = %+v, want True/%s", condition, dgdrRunReasonSuperseded)
+	}
+	if jobs := f.jobs(); len(jobs) != 0 {
+		t.Fatalf("Jobs = %d, want none", len(jobs))
+	}
+	if len(hardware.calls) != 0 {
+		t.Fatalf("hardware discovery calls = %v, want none for a canceled Run", hardware.calls)
+	}
+}
+
+func TestV1beta2RunControllerRequiresANewerCancellationGeneration(t *testing.T) {
+	tests := []struct {
+		name             string
+		runGeneration    string
+		cancelGeneration string
+		wantCanceled     bool
+	}{
+		{name: "malformed Run generation", runGeneration: "malformed", cancelGeneration: "2"},
+		{name: "zero Run generation", runGeneration: "0", cancelGeneration: "2"},
+		{name: "malformed cancellation generation", runGeneration: "1", cancelGeneration: "malformed"},
+		{name: "zero cancellation generation", runGeneration: "1", cancelGeneration: "0"},
+		{name: "equal cancellation generation", runGeneration: "1", cancelGeneration: "1"},
+		{name: "older cancellation generation", runGeneration: "2", cancelGeneration: "1"},
+		{name: "newer cancellation generation", runGeneration: "1", cancelGeneration: "2", wantCanceled: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hardware := &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}
+			run := dgdrRunForTest(t, map[string]any{})
+			run.Annotations[dgdrV1beta2GenerationAnnotation] = tt.runGeneration
+			run.Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation] = tt.cancelGeneration
+			f := newDGDRRunFixture(t, hardware, run)
+
+			t.Log("Reconcile the Run with the cancellation marker")
+			f.reconcile()
+
+			completed := meta.IsStatusConditionTrue(f.run().Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+			if completed != tt.wantCanceled {
+				t.Fatalf("Completed = %t, want %t", completed, tt.wantCanceled)
+			}
+			if tt.wantCanceled {
+				if jobs := f.jobs(); len(jobs) != 0 {
+					t.Fatalf("Jobs = %d, want no execution for a superseded Run", len(jobs))
+				}
+				if len(hardware.calls) != 0 {
+					t.Fatalf("hardware discovery calls = %v, want none", hardware.calls)
+				}
+				return
+			}
+			if jobs := f.jobs(); len(jobs) != 1 {
+				t.Fatalf("Jobs = %d, want normal execution", len(jobs))
+			}
+			if len(hardware.calls) != 1 {
+				t.Fatalf("hardware discovery calls = %v, want normal execution", hardware.calls)
+			}
+		})
+	}
+}
+
+func TestV1beta2RunControllerRejectsSupportResourceOwnershipCollisionsWithoutMutation(t *testing.T) {
+	resourceKinds := []struct {
+		name string
+		new  func(string) client.Object
+	}{
+		{name: "ServiceAccount", new: func(name string) client.Object {
+			return &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: "default", Labels: map[string]string{"existing": "service-account"},
+			}}
+		}},
+		{name: "Role", new: func(name string) client.Object {
+			return &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+				Rules: []rbacv1.PolicyRule{{APIGroups: []string{"existing.example"}, Resources: []string{"kept"}, Verbs: []string{"get"}}}}
+		}},
+		{name: "RoleBinding", new: func(name string) client.Object {
+			return &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: "default", Labels: map[string]string{"existing": "role-binding"},
+			}}
+		}},
+		{name: "ConfigMap", new: func(name string) client.Object {
+			return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+				Data: map[string]string{"existing": "config-map"}}
+		}},
+	}
+	owners := []struct {
+		name string
+		ref  *metav1.OwnerReference
+	}{
+		{name: "ownerless"},
+		{name: "foreign", ref: &metav1.OwnerReference{
+			APIVersion: "v1", Kind: "ConfigMap", Name: "foreign", UID: "foreign-uid", Controller: new(true),
+		}},
+		{name: "stale Run UID", ref: &metav1.OwnerReference{
+			APIVersion: nvidiacomv1beta2.GroupVersion.String(), Kind: "DynamoGraphDeploymentRun",
+			Name: "search-1", UID: "stale-run-uid", Controller: new(true),
+		}},
+	}
+
+	for _, resourceKind := range resourceKinds {
+		for _, owner := range owners {
+			t.Run(resourceKind.name+"/"+owner.name, func(t *testing.T) {
+				run := dgdrRunForTest(t, map[string]any{})
+				collision := resourceKind.new(dgdrRunResourceName(run.Name))
+				if owner.ref != nil {
+					collision.SetOwnerReferences([]metav1.OwnerReference{*owner.ref})
+				}
+				f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, run, collision)
+
+				before := collision.DeepCopyObject().(client.Object)
+				if err := f.client.Get(t.Context(), client.ObjectKeyFromObject(collision), before); err != nil {
+					t.Fatalf("get collision before reconcile: %v", err)
+				}
+				_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+				if !errors.Is(err, reconcile.TerminalError(nil)) {
+					t.Fatalf("reconcile error = %v, want terminal ownership conflict", err)
+				}
+				var ownershipConflict *commoncontroller.OwnershipConflictError
+				if !errors.As(err, &ownershipConflict) {
+					t.Fatalf("reconcile error = %T %v, want OwnershipConflictError", err, err)
+				}
+
+				after := collision.DeepCopyObject().(client.Object)
+				if err := f.client.Get(t.Context(), client.ObjectKeyFromObject(collision), after); err != nil {
+					t.Fatalf("get collision after reconcile: %v", err)
+				}
+				if !apiequality.Semantic.DeepEqual(before, after) {
+					t.Fatalf("colliding resource was mutated\nbefore: %#v\nafter:  %#v", before, after)
+				}
+				condition := meta.FindStatusCondition(f.run().Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+				if condition == nil || condition.Status != metav1.ConditionTrue ||
+					condition.Reason != commoncontroller.EventReasonOwnershipConflict {
+					t.Fatalf("Completed condition = %+v, want terminal ownership conflict", condition)
+				}
+			})
+		}
+	}
+}
+
+func TestV1beta2RunControllerClassifiesPermanentAndRetryableFailures(t *testing.T) {
+	tests := []struct {
+		name           string
+		newFixture     func(*testing.T) *dgdrRunFixture
+		wantTerminal   bool
+		wantReason     string
+		wantErrMessage string
+	}{
+		{
+			name: "immutable lowering error is terminal",
+			newFixture: func(t *testing.T) *dgdrRunFixture {
+				run := dgdrRunForTest(t, map[string]any{})
+				f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, run)
+				f.reconciler.PlannerImage = "example.com/dynamo-planner@sha256:0123"
+				f.reconciler.DynamoVersion = "1.7.0"
+				return f
+			},
+			wantTerminal: true, wantReason: dgdrRunReasonInvalidExecution,
+			wantErrMessage: "digest-only planner image",
+		},
+		{
+			name: "invalid Kubernetes resource is terminal",
+			newFixture: func(t *testing.T) *dgdrRunFixture {
+				run := dgdrRunForTest(t, map[string]any{})
+				return newDGDRRunFixtureWithInterceptor(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, interceptor.Funcs{
+					Create: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.CreateOption) error {
+						if _, isConfigMap := object.(*corev1.ConfigMap); isConfigMap {
+							return apierrors.NewInvalid(schema.GroupKind{Kind: "ConfigMap"}, object.GetName(),
+								field.ErrorList{field.Invalid(field.NewPath("data"), nil, "invalid execution")})
+						}
+						return c.Create(ctx, object, opts...)
+					},
+				}, run)
+			},
+			wantTerminal: true, wantReason: dgdrRunReasonInvalidResource,
+			wantErrMessage: "invalid execution",
+		},
+		{
+			name: "hardware discovery error is retryable",
+			newFixture: func(t *testing.T) *dgdrRunFixture {
+				return newDGDRRunFixture(t, &fixedRunHardware{err: errors.New("node inventory unavailable")},
+					dgdrRunForTest(t, map[string]any{}))
+			},
+			wantErrMessage: "node inventory unavailable",
+		},
+		{
+			name: "registry secret error is retryable",
+			newFixture: func(t *testing.T) *dgdrRunFixture {
+				f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}},
+					dgdrRunForTest(t, map[string]any{}))
+				f.reconciler.DockerSecretRetriever = &fixedRunSecrets{err: errors.New("registry index unavailable")}
+				return f
+			},
+			wantErrMessage: "registry index unavailable",
+		},
+		{
+			name: "terminal status write failure remains retryable",
+			newFixture: func(t *testing.T) *dgdrRunFixture {
+				run := dgdrRunForTest(t, map[string]any{})
+				f := newDGDRRunFixtureWithInterceptor(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, interceptor.Funcs{
+					SubResourcePatch: func(
+						_ context.Context, _ client.Client, _ string, _ client.Object,
+						_ client.Patch, _ ...client.SubResourcePatchOption,
+					) error {
+						return errors.New("status writer unavailable")
+					},
+				}, run)
+				f.reconciler.PlannerImage = "example.com/dynamo-planner@sha256:0123"
+				f.reconciler.DynamoVersion = "1.7.0"
+				return f
+			},
+			wantErrMessage: "status writer unavailable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := tt.newFixture(t)
+			_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrMessage) {
+				t.Fatalf("reconcile error = %v, want %q", err, tt.wantErrMessage)
+			}
+			if got := errors.Is(err, reconcile.TerminalError(nil)); got != tt.wantTerminal {
+				t.Fatalf("terminal error = %t, want %t: %v", got, tt.wantTerminal, err)
+			}
+			condition := meta.FindStatusCondition(f.run().Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+			if tt.wantTerminal {
+				if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != tt.wantReason {
+					t.Fatalf("Completed condition = %+v, want True/%s", condition, tt.wantReason)
+				}
+			} else if condition != nil && condition.Status == metav1.ConditionTrue {
+				t.Fatalf("retryable failure terminalized the Run: %+v", condition)
+			}
+		})
+	}
+}
+
+func TestDGDRRunPermanentErrorClassification(t *testing.T) {
+	invalid := apierrors.NewInvalid(schema.GroupKind{Kind: "Job"}, "search-1", field.ErrorList{
+		field.Invalid(field.NewPath("spec"), nil, "invalid"),
+	})
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "explicit immutable execution error", err: &dgdrRunPermanentExecutionError{cause: errors.New("invalid input")}, want: true},
+		{name: "ownership conflict", err: &commoncontroller.OwnershipConflictError{Cause: errors.New("foreign owner")}, want: true},
+		{name: "invalid API object", err: invalid, want: true},
+		{name: "forbidden", err: apierrors.NewForbidden(schema.GroupResource{Group: "batch", Resource: "jobs"}, "search-1", errors.New("denied"))},
+		{name: "conflict", err: apierrors.NewConflict(schema.GroupResource{Group: "batch", Resource: "jobs"}, "search-1", errors.New("changed"))},
+		{name: "timeout", err: apierrors.NewTimeoutError("timed out", 1)},
+		{name: "retryable invalid discovery error", err: &dgdrRunRetryableError{cause: invalid}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := dgdrRunIsPermanentError(tt.err); got != tt.want {
+				t.Fatalf("permanent = %t, want %t for %T %v", got, tt.want, tt.err, tt.err)
+			}
+		})
+	}
 }
 
 func TestV1beta2RunControllerUsesUnfilteredTopologyForAnExternalHardwareSKU(t *testing.T) {
