@@ -34,13 +34,16 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	require.NoError(t, err)
 	projection := projectionBatch[0]
 	projection.stage = testRenderComponentName
+	serving := &dynamov1beta1.DynamoComponentDeploymentSharedSpec{
+		Roles: []dynamov1beta1.ComponentRoleSpec{{Name: dynamov1beta1.ComponentRoleLPXConductor}},
+	}
 	workload := &Workload{
 		modelProjections:     []*ModelProjection{projection},
 		scalingGroupReplicas: 1,
 	}
 
 	t.Log("Render the generated Agent endpoints")
-	plan, err := workload.PlanNodeLocalMaterialization("test-dgd")
+	plan, err := workload.PlanNodeLocalMaterialization("test-dgd", serving)
 	require.NoError(t, err)
 	initial, _, err := workload.renderCyborgConfigMap(plan)
 	require.NoError(t, err)
@@ -49,7 +52,7 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	for _, replicas := range []int32{1, 2, 10, 12} {
 		t.Run(strconv.Itoa(int(replicas)), func(t *testing.T) {
 			workload.scalingGroupReplicas = replicas
-			scaledPlan, err := workload.PlanNodeLocalMaterialization("test-dgd")
+			scaledPlan, err := workload.PlanNodeLocalMaterialization("test-dgd", serving)
 			require.NoError(t, err)
 			configMap, _, err := workload.renderCyborgConfigMap(scaledPlan)
 			require.NoError(t, err)
@@ -102,8 +105,11 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 			projection.stage = testRenderComponentName
 
 			t.Log("Render only projected endpoints without compressing their physical Agent offsets")
+			serving := &dynamov1beta1.DynamoComponentDeploymentSharedSpec{
+				Roles: []dynamov1beta1.ComponentRoleSpec{{Name: dynamov1beta1.ComponentRoleLPXConductor}},
+			}
 			workload := &Workload{modelProjections: []*ModelProjection{projection}, scalingGroupReplicas: 1}
-			plan, err := workload.PlanNodeLocalMaterialization("test-dgd")
+			plan, err := workload.PlanNodeLocalMaterialization("test-dgd", serving)
 			require.NoError(t, err)
 			require.Len(t, projection.RequestSpec(plan, "agents").Partitions, test.partitions)
 			require.Equal(t, 2*test.partitions, projection.agentReplicas)
@@ -172,10 +178,13 @@ func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
 
 			t.Log("Render the hybrid workload with an authored Cyborg configuration mount")
 			projections[0].stage = testRenderComponentName
+			serving := &dynamov1beta1.DynamoComponentDeploymentSharedSpec{
+				Roles: []dynamov1beta1.ComponentRoleSpec{{Name: dynamov1beta1.ComponentRoleLPXConductor}},
+			}
 			workload := &Workload{modelProjections: projections, scalingGroupReplicas: 1}
 			workload.digest, err = workloadSetDigest(projections)
 			require.NoError(t, err)
-			plan, err := workload.PlanNodeLocalMaterialization("test-pcs")
+			plan, err := workload.PlanNodeLocalMaterialization("test-pcs", serving)
 			require.NoError(t, err)
 			pcs := renderTestPCS(true)
 			rendered, err := RenderNodeLocal(workload, plan, RenderInput{
