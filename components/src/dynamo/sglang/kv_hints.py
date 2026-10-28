@@ -32,7 +32,7 @@ def kv_hint_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
 
 def kvcr_hint_endpoints(scheduler_infos, rank_bounds) -> dict[str, str]:
     """Validate SGLang-owned coordinates; never infer backend defaults or offsets."""
-    endpoints = {}
+    endpoints: dict[str, str] = {}
     expected_ranks = set(range(*rank_bounds))
     for info in scheduler_infos:
         sources = info.get("kv_hint_sources", [])
