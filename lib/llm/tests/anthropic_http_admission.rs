@@ -522,7 +522,6 @@ async fn invalid_api_versions_are_rejected_before_generation() {
         ];
         for (path, stream) in [
             ("/v1/messages", false),
-            ("/v1/messages", true),
             ("/v1/messages/count_tokens", false),
         ] {
             for values in invalid_headers {
@@ -563,7 +562,6 @@ async fn current_api_version_rejects_present_sampling_parameters() {
         let svc = HarnessService::start([script]).await;
         for (path, stream) in [
             ("/v1/messages", false),
-            ("/v1/messages", true),
             ("/v1/messages/count_tokens", false),
         ] {
             for (field, values) in [
@@ -698,4 +696,55 @@ async fn supported_api_versions_preserve_legacy_sampling_and_response_formats() 
         svc.shutdown().await;
     })
     .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn current_version_rejects_user_citations_before_conversion() {
+    temp_env::async_with_vars(ENV, async {
+        let fixture = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(std::iter::repeat_n(fixture, 5)).await;
+        let text = json!({"type": "text", "text": "source", "citations": [{"type": "char_location", "cited_text": "source", "document_index": 0, "start_char_index": 0, "end_char_index": 6}]});
+        for path in ["/v1/messages", "/v1/messages/count_tokens"] {
+            for content in [
+                json!([text]),
+                json!([{"type": "tool_result", "tool_use_id": "toolu_one", "content": [{"text": "source", "citations": text["citations"]}]}]),
+                json!([{"type": "search_result", "source": "https://example.com", "title": "source", "content": [text], "citations": {"enabled": true}}]),
+                json!([{"type": "tool_result", "tool_use_id": "toolu_one", "content": [text]}]),
+                json!([{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_one", "content": [{"type": "search_result", "source": "https://example.com", "title": "source", "content": [text]}]}]),
+            ] {
+                let mut body = request();
+                body["messages"][0]["content"] = content;
+                let response = svc.client.post(format!("{}{path}", svc.base_url)).header("anthropic-version", "2026-10-21").json(&body).send().await.unwrap();
+                let error = assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+                let diagnostic = error["error"]["message"].as_str().unwrap();
+                assert!(diagnostic.contains("citations") && diagnostic.contains("2026-10-21"), "{error}");
+            }
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        for path in ["/v1/messages", "/v1/messages/count_tokens"] {
+            for (version, role, citations) in [
+                ("2023-06-01", "user", text["citations"].clone()),
+                ("2026-10-21", "assistant", text["citations"].clone()),
+                ("2026-10-21", "user", json!([])),
+                ("2026-10-21", "user", Value::Null),
+            ] {
+                let mut body = request();
+                body["messages"][0] = json!({"role": role, "content": [{"type": "text", "text": "source", "citations": citations}]});
+                if role == "assistant" { body["messages"].as_array_mut().unwrap().push(json!({"role": "user", "content": "continue"})); }
+                let response = svc.client.post(format!("{}{path}", svc.base_url)).header("anthropic-version", version).json(&body).send().await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{}", response.text().await.unwrap());
+            }
+        }
+        let mut body = request();
+        body["messages"][0]["content"] = json!([
+            {"type": "text", "text": "ok", "content": 42},
+            {"type": "tool_result", "tool_use_id": "toolu_one", "content": [{"text": "ok"}]}
+        ]);
+        let response = svc.client.post(format!("{}/v1/messages", svc.base_url)).header("anthropic-version", "2026-10-21").json(&body).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{}", response.text().await.unwrap());
+        assert_eq!(svc.engine.take_requests().await.len(), 5);
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    }).await;
 }
