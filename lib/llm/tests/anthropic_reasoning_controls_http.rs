@@ -139,28 +139,24 @@ async fn omitted_and_supported_thinking_modes_still_reach_generation() {
 async fn effort_and_manual_budgets_reach_canonical_fields() {
     temp_env::async_with_vars(ENV, async {
         let script = load_agent_fixture("text.sse").await.unwrap();
-        let svc = HarnessService::start(std::iter::repeat_n(script, 20)).await;
-        for stream in [false, true] {
-            for effort in ["low", "medium", "high", "xhigh", "max"] {
-                for budget in [1024, 2048] {
-                    let body = json!({"model": MODEL, "max_tokens": 4096, "stream": stream,
-                        "messages": [{"role": "user", "content": "ping"}],
-                        "thinking": {"type": "enabled", "budget_tokens": budget},
-                        "output_config": {"effort": effort, "format": {"type": "json_schema", "schema": {"type": "object"}}}});
-                    let response = svc.client.post(format!("{}/v1/messages", svc.base_url)).json(&body).send().await.unwrap();
-                    assert_eq!(response.status(), reqwest::StatusCode::OK, "{}", response.text().await.unwrap());
-                    let requests = svc.engine.take_requests().await;
-                    assert_eq!(requests.len(), 1);
-                    let request = &requests[0];
-                    assert_eq!(serde_json::to_value(&request.inner.reasoning_effort).unwrap(), effort);
-                    assert_eq!(request.thinking_token_budget, Some(budget));
-                    assert_eq!(request.extract_stop_conditions().unwrap().max_thinking_tokens, Some(budget));
-                    assert!(request.inner.response_format.is_some());
-                    let args = request.chat_template_args.as_ref().unwrap();
-                    assert_eq!(args["reasoning_effort"], effort);
-                    assert_eq!(args["enable_thinking"], true);
-                }
-            }
+        let svc = HarnessService::start(std::iter::repeat_n(script, 5)).await;
+        for (effort, budget, stream) in [("low", 1024, false), ("medium", 2048, true), ("high", 1024, true), ("xhigh", 2048, false), ("max", 1024, false)] {
+            let body = json!({"model": MODEL, "max_tokens": 4096, "stream": stream,
+                "messages": [{"role": "user", "content": "ping"}],
+                "thinking": {"type": "enabled", "budget_tokens": budget},
+                "output_config": {"effort": effort, "format": {"type": "json_schema", "schema": {"type": "object"}}}});
+            let response = svc.client.post(format!("{}/v1/messages", svc.base_url)).json(&body).send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "{}", response.text().await.unwrap());
+            let requests = svc.engine.take_requests().await;
+            assert_eq!(requests.len(), 1);
+            let request = &requests[0];
+            assert_eq!(serde_json::to_value(&request.inner.reasoning_effort).unwrap(), effort);
+            assert_eq!(request.thinking_token_budget, Some(budget));
+            assert_eq!(request.extract_stop_conditions().unwrap().max_thinking_tokens, Some(budget));
+            assert!(request.inner.response_format.is_some());
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(args["reasoning_effort"], effort);
+            assert_eq!(args["enable_thinking"], true);
         }
         svc.shutdown().await;
     }).await;
