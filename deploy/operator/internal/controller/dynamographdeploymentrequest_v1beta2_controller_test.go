@@ -118,8 +118,9 @@ func (f *dgdrV1beta2Fixture) run(name string) *nvidiacomv1beta2.DynamoGraphDeplo
 	return run
 }
 
-func (f *dgdrV1beta2Fixture) updateRunStatus(name string, mutate func(*nvidiacomv1beta2.DynamoGraphDeploymentRunStatus)) {
+func (f *dgdrV1beta2Fixture) updateRunStatus(mutate func(*nvidiacomv1beta2.DynamoGraphDeploymentRunStatus)) {
 	f.t.Helper()
+	const name = "search-1"
 	run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{}
 	if err := f.client.Get(f.t.Context(), types.NamespacedName{Namespace: "default", Name: name}, run); err != nil {
 		f.t.Fatalf("get run %s: %v", name, err)
@@ -128,15 +129,6 @@ func (f *dgdrV1beta2Fixture) updateRunStatus(name string, mutate func(*nvidiacom
 	if err := f.client.Status().Update(f.t.Context(), run); err != nil {
 		f.t.Fatalf("update status of run %s: %v", name, err)
 	}
-}
-
-// finish ends a Run the way the Run controller does: it publishes Completed and the outcome phase.
-func (f *dgdrV1beta2Fixture) finish(name, phase string) {
-	f.t.Helper()
-	f.updateRunStatus(name, func(status *nvidiacomv1beta2.DynamoGraphDeploymentRunStatus) {
-		status.Phase = nvidiacomv1beta2.DGDRRunPhase(phase)
-		setCompletedForTest(status)
-	})
 }
 
 func setCompletedForTest(status *nvidiacomv1beta2.DynamoGraphDeploymentRunStatus) {
@@ -244,7 +236,7 @@ func TestV1beta2RequestControllerCancelsTheActiveRunBeforeStartingTheNext(t *tes
 	}
 
 	t.Log("The terminal cancellation outcome releases the latest generation")
-	f.updateRunStatus("search-1", setCompletedForTest)
+	f.updateRunStatus(setCompletedForTest)
 	f.reconcile()
 	f.reconcile()
 	request = f.request()
@@ -282,10 +274,9 @@ func TestV1beta2RequestControllerDoesNotStartANewGenerationWhileTheRunCacheLags(
 	t.Log("Observe generation 2 before the Run cache has observed generation 1's reserved create")
 	f.bumpGeneration(2)
 
-	result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: types.NamespacedName{
+	result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{
 		Namespace: "default",
-		Name:      "search",
-	}})
+		Name:      "search"})
 	if err != nil {
 		t.Fatalf("reconcile with lagging Run cache: %v", err)
 	}
@@ -311,7 +302,7 @@ func TestV1beta2RequestControllerDoesNotStartANewGenerationWhileTheRunCacheLags(
 	if got := f.run("search-1").Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation]; got != "2" {
 		t.Fatalf("cancellation generation = %q, want 2", got)
 	}
-	f.updateRunStatus("search-1", setCompletedForTest)
+	f.updateRunStatus(setCompletedForTest)
 	f.reconcile()
 	if names := f.runNames(); len(names) != 2 {
 		t.Fatalf("runs = %v, want retained search-1 and active search-2", names)
@@ -377,7 +368,7 @@ func TestV1beta2RequestControllerCoalescesIntermediateGenerations(t *testing.T) 
 	}
 
 	t.Log("Once cancellation completes, generation 3 starts and generation 2 remains coalesced")
-	f.updateRunStatus("search-1", setCompletedForTest)
+	f.updateRunStatus(setCompletedForTest)
 	f.reconcile()
 	if names := f.runNames(); len(names) != 2 || names[0] != "search-1" || names[1] != "search-3" {
 		t.Fatalf("runs = %v, want retained search-1 and active search-3", names)
@@ -417,7 +408,7 @@ func TestV1beta2RequestControllerAllowsTheCurrentRunToRemainActiveIndefinitely(t
 	f := newDGDRV1beta2Fixture(t, dgdrV1beta2Request(true))
 	f.reconcile()
 
-	f.updateRunStatus("search-1", func(status *nvidiacomv1beta2.DynamoGraphDeploymentRunStatus) {
+	f.updateRunStatus(func(status *nvidiacomv1beta2.DynamoGraphDeploymentRunStatus) {
 		status.Phase = nvidiacomv1beta2.DGDRRunPhaseSucceeded
 	})
 	f.reconcile()
@@ -435,7 +426,7 @@ func TestV1beta2RequestControllerReleasesOnCompletedWithoutATerminalPhase(t *tes
 	f.reconcile()
 	f.bumpGeneration(2)
 
-	f.updateRunStatus("search-1", setCompletedForTest) // the phase is still empty
+	f.updateRunStatus(setCompletedForTest) // the phase is still empty
 	f.reconcile()
 
 	if names := f.runNames(); len(names) != 2 {
