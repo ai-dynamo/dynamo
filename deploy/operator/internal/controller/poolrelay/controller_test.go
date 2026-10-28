@@ -523,6 +523,132 @@ func TestDiscoveryUsesPreservedServiceAnnotationsAndHubEnvironment(t *testing.T)
 	}
 }
 
+func TestDiscoveryEnvFromHonorsExplicitSettings(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		env       []corev1.EnvVar
+		supported bool
+	}{
+		{
+			name: "pod discovery overrides envFrom",
+			env: []corev1.EnvVar{
+				{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+				{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "pod"},
+			},
+			supported: true,
+		},
+		{
+			name: "explicit container mode is rejected",
+			env: []corev1.EnvVar{
+				{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+				{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "container"},
+			},
+		},
+		{
+			name: "unspecified mode could come from envFrom",
+			env:  []corev1.EnvVar{{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dgd := &v1beta1.DynamoGraphDeployment{Spec: v1beta1.DynamoGraphDeploymentSpec{
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+					ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: commonconsts.MainContainerName,
+						Env:  test.env,
+						EnvFrom: []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "worker-credentials"},
+						}}},
+					}}}},
+				}},
+			}}
+			supported, err := supportsPodDiscovery(dgd, configv1alpha1.DiscoveryBackendKubernetes)
+			if err != nil || supported != test.supported {
+				t.Fatalf("supported=%t, want %t, err=%v", supported, test.supported, err)
+			}
+		})
+	}
+}
+
+func TestDeploymentApplyUsesResponseWhenCacheIsStale(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{
+		v1alpha1.AddToScheme, v1beta1.AddToScheme, appsv1.AddToScheme, corev1.AddToScheme, rbacv1.AddToScheme,
+	} {
+		if err := add(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	relay := &v1alpha1.DynamoPoolRelay{ObjectMeta: metav1.ObjectMeta{
+		Name: "green", Namespace: "inference", UID: "relay-uid",
+	}, Spec: relaySpec("east")}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: relay.Name, Namespace: relay.Namespace},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
+		}},
+	}
+	_, old, err := render(relay, []string{"green-runtime"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controllerutil.SetControllerReference(relay, old, scheme); err != nil {
+		t.Fatal(err)
+	}
+	old.UID = "deployment-uid"
+	old.Generation = 1
+	old.Status = appsv1.DeploymentStatus{
+		ObservedGeneration: 1, Replicas: 2, UpdatedReplicas: 2, AvailableReplicas: 2,
+	}
+	stale := old.DeepCopy()
+	relay.Spec.PodTemplate.Spec.Containers[0].Image = "relay:new"
+	_, wanted, err := render(relay, []string{"green-runtime"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	apiClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&appsv1.Deployment{}, relay, dgd).
+		WithObjects(old, relay, dgd).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if deployment, ok := obj.(*appsv1.Deployment); ok {
+				reads++
+				*deployment = *stale.DeepCopy()
+				return nil
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+		Apply: func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			if err := c.Apply(ctx, obj, opts...); err != nil {
+				return err
+			}
+			obj.(metav1.Object).SetGeneration(2)
+			return nil
+		},
+	}).Build()
+	r := &reconciler{Client: apiClient, scheme: scheme, defaultBackend: configv1alpha1.DiscoveryBackendKubernetes}
+	observed, err := r.applyDeployment(ctx, relay, wanted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reads != 1 || observed.Spec.Template.Spec.Containers[0].Image != "relay:new" ||
+		observed.Generation != 2 || observed.Status.ObservedGeneration != 1 {
+		t.Fatalf("used stale cached Deployment after apply: reads=%d, observed=%+v", reads, observed)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{
+		Name: relay.Name, Namespace: relay.Namespace,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := apiClient.Get(ctx, client.ObjectKeyFromObject(relay), relay); err != nil {
+		t.Fatal(err)
+	}
+	condition := meta.FindStatusCondition(relay.Status.Conditions, "Ready")
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "DeploymentProgressing" {
+		t.Fatalf("Relay reported the old listeners ready after apply: %+v", relay.Status)
+	}
+}
+
 func TestDiscoveryConversionErrorDoesNotWithdrawPublishedRelay(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()

@@ -210,21 +210,24 @@ func supportsPodDiscovery(dgd *v1beta1.DynamoGraphDeployment, defaultBackend con
 			if runtime == nil {
 				continue
 			}
-			// envFrom can replace these keys at runtime, so it cannot prove pod mode.
-			if len(runtime.EnvFrom) != 0 {
-				return false, nil
-			}
+			hasBackend, hasMode := false, false
 			for _, item := range runtime.Env {
 				switch item.Name {
 				case commonconsts.DynamoDiscoveryBackendEnvVar:
+					hasBackend = true
 					if item.ValueFrom != nil || item.Value != string(configv1alpha1.DiscoveryBackendKubernetes) {
 						return false, nil
 					}
 				case "DYN_KUBE_DISCOVERY_MODE":
+					hasMode = true
 					if item.ValueFrom != nil || item.Value != string(configv1alpha1.KubeDiscoveryModePod) {
 						return false, nil
 					}
 				}
+			}
+			// Explicit env values override envFrom; missing keys could still come from it.
+			if len(runtime.EnvFrom) != 0 && (!hasBackend || !hasMode) {
+				return false, nil
 			}
 		}
 	}
@@ -363,8 +366,8 @@ func (r *reconciler) applyDeployment(ctx context.Context, relay *v1alpha1.Dynamo
 		return nil, fmt.Errorf("apply Relay Deployment %s: %w", key, err)
 	}
 	observed := &appsv1.Deployment{}
-	if err := r.Get(ctx, key, observed); err != nil {
-		return nil, fmt.Errorf("read Relay Deployment %s after apply: %w", key, err)
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(applyObject.Object, observed); err != nil {
+		return nil, fmt.Errorf("decode applied Relay Deployment %s: %w", key, err)
 	}
 	return observed, nil
 }
