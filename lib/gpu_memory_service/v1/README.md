@@ -241,14 +241,16 @@ DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server
 ```
 
 The supervisor reads the GPUs from `/proc/driver/nvidia/gpus` without starting
-CUDA and serves GMS device N from the N-th GPU in PCI bus order. Each device's
-process is pinned to its GPU with `CUDA_VISIBLE_DEVICES`. libcuda initializes every GPU whose
-device node it can open, so the supervisor also confines each process with
-Landlock to open only its own GPU's node, and the process brings up that GPU
-alone. This shortens start-up and keeps it from slowing other CUDA work on the
-node. It is not isolation between devices. On a kernel without Landlock the
-supervisor exits; pass `--no-isolation` to run the processes unconfined. To
-start one device's server directly:
+CUDA, keeps those whose device node it can open, and serves GMS device N from
+the N-th of them in PCI bus order. Each device's process is pinned to its GPU
+with `CUDA_VISIBLE_DEVICES` and told its GPU's UUID. libcuda initializes every
+GPU whose device node it can open, so the supervisor also confines each process
+with Landlock to open only its own GPU's node, and the process brings up that
+GPU alone. This shortens start-up and keeps it from slowing other CUDA work on
+the node. It is not isolation between devices. On a kernel without Landlock the
+supervisor logs a warning and runs the processes unconfined. Pass
+`--no-isolation` to run them unconfined anyway. To start one device's server
+directly:
 
 ```text
 DYN_GMS_USE_V1=true gpu-memory-service --device 0

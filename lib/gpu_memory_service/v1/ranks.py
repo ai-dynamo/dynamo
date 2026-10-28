@@ -22,17 +22,18 @@ logger = logging.getLogger(__name__)
 
 
 def start_ranks(
-    gpus: list[Gpu], command: Callable[[int], list[str]], *, confine: bool
+    gpus: list[Gpu], command: Callable[[int, Gpu], list[str]], *, confine: bool
 ) -> list[subprocess.Popen]:
-    """Start ``command(n)`` for GMS device n on each GPU.
+    """Start ``command(n, gpu)`` for GMS device n on each GPU.
 
     With ``confine``, each process can open no GPU node but its own (see
-    ``landlock``), so CUDA starts on that GPU alone.
+    ``landlock``), so CUDA starts on that GPU alone. Such a process cannot
+    list the other GPUs, so ``command`` must tell it which GPU is its own.
     """
     processes = []
     for device, gpu in enumerate(gpus):
         process = subprocess.Popen(
-            command(device),
+            command(device, gpu),
             env={**os.environ, "CUDA_VISIBLE_DEVICES": gpu.uuid},
             preexec_fn=(
                 functools.partial(landlock.confine_to_gpu, gpu.minor)

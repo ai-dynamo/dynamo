@@ -37,7 +37,8 @@ def _parse_backend_params(values: list[str]) -> dict[str, str]:
 def _build_parser():
     parser = _build_v0_parser()
     parser.description = "Load exact GMS V1 weights into a fresh rank-local server."
-    parser.set_defaults(device=0)
+    # gpu_uuid: set by a server process confined to its GPU (see v1.cli).
+    parser.set_defaults(device=0, gpu_uuid=None)
     parser.add_argument(
         "--posix-backend-param",
         action="append",
@@ -86,7 +87,7 @@ def load(args: argparse.Namespace) -> None:
     """Fill GMS device ``args.device``'s weights server from its artifact."""
     logger.info("GMS V1 loader starting device=%d", args.device)
     init_vmm(VMMDeviceType.CUDA)
-    gpu_uuid = device_identity.gpu_uuid(args.device)
+    gpu_uuid = args.gpu_uuid or device_identity.gpu_uuid(args.device)
     load_weights(
         os.path.join(args.checkpoint_dir, f"device-{args.device}"),
         device_identity.get_socket_path(gpu_uuid, "weights"),

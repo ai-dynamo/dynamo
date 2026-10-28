@@ -4,7 +4,8 @@
 """GMS server entry point.
 
 Launches one GMS server process per GPU, then supervises them. Each V1 process
-is pinned to its GPU, can open no other GPU (see v1.landlock), and with
+is pinned to its GPU, can open no other GPU when the kernel has Landlock (see
+v1.landlock), and with
 --enable-loader loads its GPU's weights in a thread. V0 can start one loader
 process per GPU. Device discovery uses NVML without initializing the CUDA
 driver.
@@ -85,14 +86,17 @@ def _run_v1_ranks(loader_argv: list[str] | None, confine: bool) -> int:
         try:
             landlock.abi_version()
         except OSError as exc:
-            raise SystemExit(
-                f"GMS V1 cannot confine each device's process to its GPU: {exc}. "
-                "Pass --no-isolation to run them unconfined; each then starts "
-                "CUDA on every visible GPU, which is slower."
-            ) from exc
+            logger.warning(
+                "GMS V1 cannot confine each device's process to its GPU (%s). "
+                "Running them unconfined: each starts CUDA on every visible "
+                "GPU, which is slower.",
+                exc,
+            )
+            confine = False
 
-    def command(device: int) -> list[str]:
+    def command(device: int, gpu: Gpu) -> list[str]:
         argv = [sys.executable, "-m", "gpu_memory_service", "--device", str(device)]
+        argv += ["--gpu-uuid", gpu.uuid]
         if loader_argv is not None:
             argv += ["--enable-loader", *loader_argv]
         return argv
@@ -137,8 +141,9 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help=(
             "V1: do not confine each GPU's server process to its own GPU with "
-            "Landlock, for kernels without it. Each process then starts CUDA on "
-            "every visible GPU, which is slower."
+            "Landlock. Each process then starts CUDA on every visible GPU, which "
+            "is slower. Without Landlock in the kernel, the processes run "
+            "unconfined anyway."
         ),
     )
     parser.add_argument(

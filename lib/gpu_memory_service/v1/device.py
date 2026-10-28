@@ -37,6 +37,15 @@ class Gpu:
     uuid: str
 
 
+def _can_open(node: Path) -> bool:
+    # Opening, not os.access, so the device cgroup and LSMs decide too.
+    try:
+        os.close(os.open(node, os.O_RDWR | os.O_CLOEXEC))
+    except OSError:
+        return False
+    return True
+
+
 def node_gpus(proc_gpus: Path = _PROC_GPUS, dev: Path = _DEV) -> list[Gpu]:
     """GPUs this container can open, in PCI bus order, without starting CUDA."""
     gpus = []
@@ -47,13 +56,17 @@ def node_gpus(proc_gpus: Path = _PROC_GPUS, dev: Path = _DEV) -> list[Gpu]:
             if ":" in line
         )
         minor = int(info["Device Minor"])
-        if os.access(dev / f"nvidia{minor}", os.R_OK | os.W_OK):
+        if _can_open(dev / f"nvidia{minor}"):
             gpus.append(Gpu(entry.name.lower(), minor, info["GPU UUID"].strip()))
     return sorted(gpus, key=lambda gpu: gpu.bus_id)
 
 
 def gpu_uuid(device: int) -> str:
-    """The UUID of GMS device ``device``."""
+    """The UUID of GMS device ``device``.
+
+    Lists the container's GPUs, so a process confined to one GPU (see
+    ``landlock``) must be given its GPU's UUID instead.
+    """
     gpus = node_gpus()
     if not 0 <= device < len(gpus):
         raise ValueError(f"GMS device {device} is not one of {len(gpus)} GPUs")
