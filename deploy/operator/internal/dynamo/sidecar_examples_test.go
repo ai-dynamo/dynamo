@@ -42,6 +42,10 @@ func TestSGLangMultinodeSidecarExamples(t *testing.T) {
 						require.NoError(t, err)
 						require.Equal(t, GetMainContainer(authored).Command, pod.Containers[0].Command)
 						require.Equal(t, GetMainContainer(authored).Args, pod.Containers[0].Args)
+						require.Equal(t, GetMainContainer(authored).StartupProbe, pod.Containers[0].StartupProbe)
+						require.Equal(t, GetMainContainer(authored).ReadinessProbe, pod.Containers[0].ReadinessProbe)
+						require.Equal(t, GetMainContainer(authored).LivenessProbe, pod.Containers[0].LivenessProbe)
+						require.Equal(t, GetMainContainer(authored).Ports, pod.Containers[0].Ports)
 						require.Equal(t, role.Name == "leader" || mode == "dp", findRuntimeInitContainer(pod) != nil)
 					}
 				}

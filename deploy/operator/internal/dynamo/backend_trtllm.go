@@ -21,12 +21,7 @@ type TRTLLMBackend struct {
 // For single-node deployments it is a no-op. For multinode, it mounts the SSH
 // keypair secret and injects the appropriate SSH setup and launch commands for
 // leader (mpirun) and worker (sshd) roles.
-func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount, nativeSidecar bool) error {
-	// Single-node native engines retain their authored container configuration.
-	if nativeSidecar && numberOfNodes <= 1 {
-		return nil
-	}
-
+func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
 	if component.CompilationCache != nil {
 		logger := log.Log.WithName("trtllm-backend")
 		logger.Info("Compilation cache configured for TensorRT-LLM but not yet fully supported",
@@ -90,12 +85,7 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 
 // UpdatePodSpec injects the SSH keypair volume into the pod spec for TRT-LLM
 // multinode deployments so that leader and worker containers can mount it.
-func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, nativeSidecar bool) {
-	// Native sidecar templates own pod-level engine setup and runtime placement.
-	if nativeSidecar {
-		return
-	}
-
+func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// Add SSH keypair volume for TRTLLM multinode deployments
 	if numberOfNodes > 1 {
 		sshVolume := corev1.Volume{

@@ -521,7 +521,16 @@ func TestSGLangMultinodeSidecarRendering(t *testing.T) {
 							PodTemplate: &corev1.PodTemplateSpec{
 								Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0", commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}, Labels: map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "generation"},
 								Spec: corev1.PodSpec{
-									Containers:     []corev1.Container{{Name: "main", Image: "engine:custom", Command: []string{"python3", "-m", "sglang.launch_server"}, Args: []string{"--model-path", "model", "--tp-size", "2", "--kv-events-config", `{"publisher":"zmq"}`}, ReadinessProbe: &corev1.Probe{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(30001)}}}},
+									Containers: []corev1.Container{{
+										Name: "main", Image: "engine:custom",
+										Command:        []string{"python3", "-m", "sglang.launch_server"},
+										Args:           []string{"--model-path", "model", "--tp-size", "2", "--kv-events-config", `{"publisher":"zmq"}`},
+										Ports:          []corev1.ContainerPort{{Name: commonconsts.DynamoNixlPortName, ContainerPort: int32(commonconsts.DynamoNixlPort)}},
+										Env:            []corev1.EnvVar{{Name: "NIXL_TELEMETRY_ENABLE", Value: "y"}, {Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"}},
+										StartupProbe:   &corev1.Probe{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(30001)}, FailureThreshold: 30},
+										ReadinessProbe: &corev1.Probe{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(30001)}},
+										LivenessProbe:  &corev1.Probe{Exec: &corev1.ExecAction{Command: []string{"check-engine"}}},
+									}},
 									InitContainers: []corev1.Container{{Name: "setup", Image: "setup:latest"}, {Name: "runtime", Image: "runtime:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), Command: []string{"dynamo-sglang-sidecar"}, Args: []string{"--grpc-endpoint", "127.0.0.1:30001"}}},
 								},
 							},
@@ -544,11 +553,11 @@ func TestSGLangMultinodeSidecarRendering(t *testing.T) {
 						if !roleTemplates {
 							t.Log("Reject shared native-sidecar templates before rendering either role")
 							for _, role := range []Role{RoleLeader, RoleWorker} {
-								pod, err := GenerateBasePodSpec(component, BackendFrameworkSGLang, nil, "graph", "ns", role, 2, &configv1alpha1.OperatorConfiguration{}, provider, "engine", nil, staticContainerGPUCount(1))
+								pod, err := GenerateBasePodSpec(component, BackendFrameworkSGLang, nil, "graph", "ns", role, 2, &configv1alpha1.OperatorConfiguration{}, provider, "engine", nil, staticContainerGPUCount(2))
 								require.ErrorContains(t, err, "spec.roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates")
 								require.Nil(t, pod)
 								dcd := &v1beta1.DynamoComponentDeployment{Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: *component.DeepCopy(), BackendFramework: "sglang"}}
-								_, err = GenerateBasePodSpecForController(dcd, nil, &configv1alpha1.OperatorConfiguration{}, role, provider, staticContainerGPUCount(1), GenerateBasePodSpecForControllerOptions{})
+								_, err = GenerateBasePodSpecForController(dcd, nil, &configv1alpha1.OperatorConfiguration{}, role, provider, staticContainerGPUCount(2), GenerateBasePodSpecForControllerOptions{})
 								require.ErrorContains(t, err, "require complete leader and worker podTemplates")
 								_, err = buildCliqueForRole(cliqueParams{component: component, backendFramework: BackendFrameworkSGLang, r: ServiceRole{Role: role}})
 								require.ErrorContains(t, err, "require complete leader and worker podTemplates")
@@ -576,10 +585,10 @@ func TestSGLangMultinodeSidecarRendering(t *testing.T) {
 
 						t.Log("Render both roles through the common and DCD provider entry points")
 						for _, role := range []Role{RoleLeader, RoleWorker} {
-							pod, err := GenerateBasePodSpec(component, BackendFrameworkSGLang, nil, "graph", "ns", role, 2, config, provider, "engine", nil, staticContainerGPUCount(1))
+							pod, err := GenerateBasePodSpec(component, BackendFrameworkSGLang, nil, "graph", "ns", role, 2, config, provider, "engine", nil, staticContainerGPUCount(2))
 							require.NoError(t, err)
 							dcd := &v1beta1.DynamoComponentDeployment{Name: "graph", Namespace: "ns", Spec: v1beta1.DynamoComponentDeploymentSpec{DynamoComponentDeploymentSharedSpec: *component.DeepCopy(), BackendFramework: "sglang"}}
-							childPod, err := GenerateBasePodSpecForController(dcd, nil, config, role, provider, staticContainerGPUCount(1), GenerateBasePodSpecForControllerOptions{})
+							childPod, err := GenerateBasePodSpecForController(dcd, nil, config, role, provider, staticContainerGPUCount(2), GenerateBasePodSpecForControllerOptions{})
 							require.NoError(t, err)
 							for _, rendered := range []*corev1.PodSpec{pod, childPod} {
 								engine := rendered.Containers[0]
@@ -590,9 +599,13 @@ func TestSGLangMultinodeSidecarRendering(t *testing.T) {
 								require.Contains(t, envVarsToMap(engine.Env), commonconsts.DynamoLeaderAddressEnvVar)
 								require.Equal(t, []string{"python3", "-m", "sglang.launch_server"}, engine.Command)
 								require.Equal(t, []string{"--nnodes", "2", "--node-rank", "$(DYNAMO_RANK)", "--dist-init-addr", "$(DYNAMO_LEADER_ADDRESS):29500"}, engine.Args)
-								if role == RoleWorker {
-									require.Nil(t, engine.ReadinessProbe)
-								}
+								authored, err := EffectiveComponentForRole(original, role)
+								require.NoError(t, err)
+								main := GetMainContainer(authored)
+								require.Equal(t, main.StartupProbe, engine.StartupProbe)
+								require.Equal(t, main.ReadinessProbe, engine.ReadinessProbe)
+								require.Equal(t, main.LivenessProbe, engine.LivenessProbe)
+								require.Equal(t, main.Ports, engine.Ports)
 								if role == RoleLeader || workerRuntime {
 									require.Len(t, rendered.InitContainers, 2)
 									runtime := rendered.InitContainers[1]
@@ -741,93 +754,6 @@ func TestSGLangMultinodeSidecarRequiresBothRoleTemplates(t *testing.T) {
 				}
 			}
 			require.Equal(t, original, component)
-		})
-	}
-}
-
-func TestNativeSidecarSkipsSingleNodeBackendContainerSetup(t *testing.T) {
-	cases := []struct {
-		name      string
-		backend   Backend
-		container corev1.Container
-	}{
-		{
-			name:    "sglang exporter ports",
-			backend: &SGLangBackend{},
-			container: corev1.Container{
-				Name:  "main",
-				Ports: []corev1.ContainerPort{{Name: commonconsts.DynamoNixlPortName, ContainerPort: int32(commonconsts.DynamoNixlPort)}},
-				Env: []corev1.EnvVar{
-					{Name: "NIXL_TELEMETRY_ENABLE", Value: "y"},
-					{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
-				},
-			},
-		},
-		{
-			name:    "vllm elastic EP launch",
-			backend: &VLLMBackend{},
-			container: corev1.Container{
-				Name:    "main",
-				Command: []string{"python3", "-m", "dynamo.vllm"},
-				Args:    []string{"--enable-elastic-ep", "--data-parallel-backend", "ray"},
-			},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, nativeSidecar := range []bool{false, true} {
-				t.Run(fmt.Sprintf("nativeSidecar=%t", nativeSidecar), func(t *testing.T) {
-					t.Log("Apply backend setup to the same single-node container in each runtime mode")
-					container := tc.container.DeepCopy()
-					component := &v1beta1.DynamoComponentDeploymentSharedSpec{}
-					err := tc.backend.UpdateContainer(container, 1, RoleMain, component, "agg", &GroveMultinodeDeployer{}, staticContainerGPUCount(2), nativeSidecar)
-					require.NoError(t, err)
-
-					t.Log("Only the combined runtime receives backend container defaults")
-					if nativeSidecar {
-						require.Equal(t, &tc.container, container)
-					} else {
-						require.NotEqual(t, &tc.container, container)
-					}
-				})
-			}
-		})
-	}
-}
-
-func TestNativeSidecarSkipsBackendPodSetup(t *testing.T) {
-	cases := []struct {
-		name    string
-		backend Backend
-	}{
-		{name: "vllm wait for leader", backend: &VLLMBackend{ParentGraphDeploymentName: "test"}},
-		{name: "trtllm SSH volume", backend: &TRTLLMBackend{MpiRunSecretName: "ssh-key"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, nativeSidecar := range []bool{false, true} {
-				t.Run(fmt.Sprintf("nativeSidecar=%t", nativeSidecar), func(t *testing.T) {
-					t.Log("Apply backend pod setup to a multinode follower without a runtime container")
-					podSpec := &corev1.PodSpec{
-						Containers: []corev1.Container{{
-							Name:    "main",
-							Image:   "engine:test",
-							Command: []string{"python3", "-m", "dynamo.vllm"},
-							Args:    []string{"--distributed-executor-backend", "mp"},
-						}},
-					}
-					original := podSpec.DeepCopy()
-					component := &v1beta1.DynamoComponentDeploymentSharedSpec{}
-					tc.backend.UpdatePodSpec(podSpec, 2, RoleWorker, component, "agg", &GroveMultinodeDeployer{}, nativeSidecar)
-
-					t.Log("Component-wide sidecar mode preserves the authored pod setup")
-					if nativeSidecar {
-						require.Equal(t, original, podSpec)
-					} else {
-						require.NotEqual(t, original, podSpec)
-					}
-				})
-			}
 		})
 	}
 }

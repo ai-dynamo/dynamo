@@ -1507,22 +1507,20 @@ const (
 
 // Backend interface for modular backend logic
 // Each backend (SGLang, VLLM, etc.) implements this interface.
-// nativeSidecar describes the whole component, including roles without runtime.
-// Each hook decides which backend defaults apply in that mode.
 type Backend interface {
-	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs ContainerGPUCount, nativeSidecar bool) error
-	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, nativeSidecar bool)
+	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs ContainerGPUCount) error
+	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
 }
 
 // NoopBackend does no processing - used for non-worker components like frontend, planner, router
 type NoopBackend struct{}
 
-func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, _ ContainerGPUCount, nativeSidecar bool) error {
+func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, _ ContainerGPUCount) error {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
 	return nil
 }
 
-func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, nativeSidecar bool) {
+func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
 }
 
@@ -1850,9 +1848,11 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
 
-	// Apply backend container setup for the component's runtime mode.
-	if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs, nativeSidecar); err != nil {
-		return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
+	// Native engines retain their authored launch, probes, and ports.
+	if !nativeSidecar {
+		if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
+			return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
+		}
 	}
 
 	// Cache env remains a backend addition in both worker modes, preserving legacy ordering.
@@ -1904,7 +1904,10 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemorySize)
 	podSpec.Containers = append([]corev1.Container{container}, sidecars...)
 
-	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer, nativeSidecar)
+	// Native sidecar templates own backend-specific Pod setup.
+	if !nativeSidecar {
+		backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
+	}
 
 	// A declared sidecar receives Dynamo defaults and the same topology bindings as main.
 	if runtime := findRuntimeInitContainer(&podSpec); runtime != nil {

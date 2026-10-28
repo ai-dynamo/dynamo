@@ -29,7 +29,7 @@ func TestVLLMBackendRoleTemplateLaunchAddsOnlyMPMasterPort(t *testing.T) {
 				Args:    []string{"test", "--distributed-executor-backend=mp"},
 			}
 			require.NoError(t, (&VLLMBackend{roleLaunchOwnership: roleLaunchOwnedByPodTemplate}).UpdateContainer(
-				container, 2, role, component, "engine", &GroveMultinodeDeployer{}, staticContainerGPUCount(0), false,
+				container, 2, role, component, "engine", &GroveMultinodeDeployer{}, staticContainerGPUCount(0),
 			))
 
 			require.True(t, hasArg(getExpandedCommandLine(container), "--master-port", commonconsts.VLLMMpMasterPort))
@@ -54,7 +54,7 @@ func TestVLLMBackendRoleTemplateLaunchAddsMPMasterPortToShellCommand(t *testing.
 	}
 
 	require.NoError(t, (&VLLMBackend{roleLaunchOwnership: roleLaunchOwnedByPodTemplate}).UpdateContainer(
-		container, 2, RoleWorker, component, "engine", &GroveMultinodeDeployer{}, staticContainerGPUCount(0), false,
+		container, 2, RoleWorker, component, "engine", &GroveMultinodeDeployer{}, staticContainerGPUCount(0),
 	))
 	require.Equal(t, []string{"/usr/bin/bash", "-c"}, container.Command)
 	require.Len(t, container.Args, 1)
@@ -70,7 +70,7 @@ func TestVLLMBackendRoleTemplateLaunchAddsMPMasterPortToShellCommandOperand(t *t
 	}
 
 	require.NoError(t, (&VLLMBackend{roleLaunchOwnership: roleLaunchOwnedByPodTemplate}).UpdateContainer(
-		container, 2, RoleWorker, component, "engine", &GroveMultinodeDeployer{}, staticContainerGPUCount(0), false,
+		container, 2, RoleWorker, component, "engine", &GroveMultinodeDeployer{}, staticContainerGPUCount(0),
 	))
 	require.Empty(t, container.Args)
 	require.Contains(t, container.Command[2], "--master-port "+commonconsts.VLLMMpMasterPort)
@@ -612,7 +612,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			initialContainerArgs := append([]string{}, tt.initialContainer.Args...)
 
 			// Call UpdateContainer
-			require.NoError(t, backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer, staticContainerGPUCount(tt.containerGPUs), false))
+			require.NoError(t, backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer, staticContainerGPUCount(tt.containerGPUs)))
 
 			if tt.expectNotModified {
 				// Args should not have changed
@@ -736,7 +736,7 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 				}
 			}
 
-			require.NoError(t, backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, betaComponent(t, component), "test-service", tt.multinodeDeployer, staticContainerGPUCount(tt.gpuCount), false))
+			require.NoError(t, backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, betaComponent(t, component), "test-service", tt.multinodeDeployer, staticContainerGPUCount(tt.gpuCount)))
 
 			if !reflect.DeepEqual(tt.initialContainer.Args, tt.expectedArgs) {
 				t.Errorf("UpdateContainer() args = %v, want %v", tt.initialContainer.Args, tt.expectedArgs)
@@ -1236,7 +1236,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 
 			initialInitCount := len(tt.initialPodSpec.InitContainers)
 			initialVolCount := len(tt.initialPodSpec.Volumes)
-			backend.UpdatePodSpec(tt.initialPodSpec, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer, false)
+			backend.UpdatePodSpec(tt.initialPodSpec, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer)
 
 			if tt.expectInitContainer {
 				g.Expect(tt.initialPodSpec.InitContainers).To(gomega.HaveLen(initialInitCount + 1))
@@ -1419,7 +1419,7 @@ func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
 				Args:    []string{"-m", "dynamo.vllm"},
 			}
 
-			require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{}, staticContainerGPUCount(0), false))
+			require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
 
 			if got := containerHasArg(container, "--load-format", "gms"); got != tt.wantLoadFormat {
 				t.Errorf("containerHasArg(--load-format gms) = %v, want %v; args=%v", got, tt.wantLoadFormat, container.Args)
@@ -1455,7 +1455,7 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 		Args:    []string{"-m", "dynamo.vllm"},
 	}
 
-	require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{}, staticContainerGPUCount(0), false))
+	require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
 
 	if containerHasArg(container, "--load-format", "gms") {
 		t.Errorf("--load-format gms must not be injected when inter-pod GMS is disabled")
