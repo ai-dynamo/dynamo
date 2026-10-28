@@ -1232,6 +1232,11 @@ navigation:
               - page: API Reference (K8s)
                 path: pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
 
+      - page: Image Edits API
+        icon: image
+        path: pages/reference/api/image-edits.mdx
+        slug: api/image-edits
+
       - section: Components
         icon: sliders
         slug: components

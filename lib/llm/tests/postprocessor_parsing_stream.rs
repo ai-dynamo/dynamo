@@ -713,6 +713,7 @@ async fn postprocessor_parsing_stream_normalizes_repeated_tool_metadata_across_m
                 name: Some("get_weather".to_string()),
                 arguments: Some(arguments.to_string()),
             }),
+            custom: None,
         }]);
         chunk
     };
