@@ -247,13 +247,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{name: "native sidecar beta multinode requires role templates", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 		}), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "native sidecar beta rejects unsupported multinode backend", deployment: func() runtime.Object {
-			dgd := nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-				c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-			}).(*nvidiacomv1beta1.DynamoGraphDeployment)
-			dgd.Spec.BackendFramework = dcdAdmissionTRTLLMBackend
-			return dgd
-		}(), wantWebhookErrs: []string{`spec.components[1].multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang or vllm`}},
 		{name: "native sidecar alpha rejects gms create",
 			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
@@ -312,7 +305,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "sglang sidecar multinode requires a leader runtime",
 			deployment: func() runtime.Object {
-				dgd := multinodeSidecarDGDForAdmission(t, sglangBackendFramework, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
 				betaWorkerComponent(dgd).Roles[0].PodTemplate.Spec.InitContainers = nil
 				return dgd
 			}(),
@@ -321,7 +314,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "sglang beta accepts multinode sidecar with runtime on both roles and opaque engine configuration",
 			deployment: func() runtime.Object {
-				dgd := multinodeSidecarDGDForAdmission(t, sglangBackendFramework, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
 				for i := range betaWorkerComponent(dgd).Roles {
 					main := &betaWorkerComponent(dgd).Roles[i].PodTemplate.Spec.Containers[0]
 					main.Command = []string{"/launch.sh"}
@@ -333,7 +326,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "sglang combined runtime still accepts a multinode component template",
 			deployment: func() runtime.Object {
-				dgd := multinodeSidecarDGDForAdmission(t, sglangBackendFramework, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
 				component := betaWorkerComponent(dgd)
 				component.PodTemplate.Spec.InitContainers = nil
 				component.PodTemplate.Spec.Containers[0].Image = "runtime:1.6.0"
@@ -344,37 +337,26 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "sglang sidecar rejects switching combined component template to native sidecar",
 			oldDeployment: func() runtime.Object {
-				dgd := multinodeSidecarDGDForAdmission(t, sglangBackendFramework, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
 				component := betaWorkerComponent(dgd)
 				component.PodTemplate.Spec.InitContainers = nil
 				component.PodTemplate.Spec.Containers[0].Image = "runtime:1.6.0"
 				component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
 				return dgd
 			}(),
-			deployment:      multinodeSidecarDGDForAdmission(t, sglangBackendFramework, false, false, false),
+			deployment:      multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, false, false),
 			wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`},
 		},
 
 		{
 			name: "sglang sidecar multinode worker runtime needs version override",
 			deployment: func() runtime.Object {
-				dgd := multinodeSidecarDGDForAdmission(t, sglangBackendFramework, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
 				betaWorkerComponent(dgd).Roles[1].PodTemplate.Spec.InitContainers[0].Image = "runtime:custom"
 				return dgd
 			}(),
 			wantWebhookErrs: []string{`spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
 		},
-		// Both API versions require explicit sidecar role templates and allow compute-only workers.
-		{name: "sglang beta rejects multinode sidecar without role templates", deployment: multinodeSidecarDGDForAdmission(t, sglangBackendFramework, false, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "sglang beta accepts multinode sidecar with compute-only worker", deployment: multinodeSidecarDGDForAdmission(t, sglangBackendFramework, false, true, false)},
-		{name: "sglang alpha rejects multinode sidecar without role templates", deployment: multinodeSidecarDGDForAdmission(t, sglangBackendFramework, true, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "sglang alpha accepts multinode sidecar with compute-only worker", deployment: multinodeSidecarDGDForAdmission(t, sglangBackendFramework, true, true, false)},
-		{name: "sglang alpha accepts multinode sidecar with runtime on both roles", deployment: multinodeSidecarDGDForAdmission(t, sglangBackendFramework, true, true, true)},
-		// vLLM follows the same explicit-role contract; a hybrid-LB data-parallel worker declares its own runtime.
-		{name: "vllm beta rejects multinode sidecar without role templates", deployment: multinodeSidecarDGDForAdmission(t, dcdAdmissionVLLMBackend, false, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
-		{name: "vllm beta accepts multinode sidecar with compute-only worker", deployment: multinodeSidecarDGDForAdmission(t, dcdAdmissionVLLMBackend, false, true, false)},
-		{name: "vllm beta accepts multinode sidecar with runtime on both roles", deployment: multinodeSidecarDGDForAdmission(t, dcdAdmissionVLLMBackend, false, true, true)},
-		{name: "vllm alpha accepts multinode sidecar with runtime on both roles", deployment: multinodeSidecarDGDForAdmission(t, dcdAdmissionVLLMBackend, true, true, true)},
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
 		{name: "native sidecar beta create", deployment: nativeDGDForAdmission(t, false, nil)},
 		{name: "native sidecar beta update", oldDeployment: nativeDGDForAdmission(t, false, nil), deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
@@ -1753,7 +1735,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "role pod templates reject native sidecars in unsupported multinode layouts",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.BackendFramework = dcdAdmissionTRTLLMBackend
+				dgd.Spec.BackendFramework = admissionTRTLLMBackend
 				worker := betaWorkerComponent(dgd)
 				setBetaExplicitMultinodeRoleTemplates(worker, 4)
 				worker.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
@@ -4148,6 +4130,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	t.Log("Add the LPX scenarios to the same DGD admission table")
 	tests = append(tests, lpxDGDAdmissionCases()...)
 
+	t.Log("Add the explicit-role multinode sidecar cases shared by every supported backend and both API versions")
+	for _, backend := range []string{admissionSGLangBackend, admissionVLLMBackend} {
+		tests = append(tests,
+			dgdAdmissionTestCase{name: backend + " beta rejects multinode sidecar without role templates", deployment: multinodeSidecarDGDForAdmission(t, backend, false, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+			dgdAdmissionTestCase{name: backend + " beta accepts multinode sidecar with compute-only worker", deployment: multinodeSidecarDGDForAdmission(t, backend, false, true, false)},
+			dgdAdmissionTestCase{name: backend + " beta accepts multinode sidecar with runtime on both roles", deployment: multinodeSidecarDGDForAdmission(t, backend, false, true, true)},
+			dgdAdmissionTestCase{name: backend + " alpha accepts multinode sidecar with compute-only worker", deployment: multinodeSidecarDGDForAdmission(t, backend, true, true, false)},
+			dgdAdmissionTestCase{name: backend + " alpha accepts multinode sidecar with runtime on both roles", deployment: multinodeSidecarDGDForAdmission(t, backend, true, true, true)},
+		)
+	}
+
 	t.Log("Own one topology fixture for all DGD admission scenarios")
 	createTestClusterTopology(t, admissionEnv.ForTest(t))
 
@@ -4906,13 +4899,13 @@ func multinodeSidecarDGDForAdmission(t *testing.T, backend string, alpha, roles,
 	component.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 	main := &component.PodTemplate.Spec.Containers[0]
 	switch backend {
-	case sglangBackendFramework:
+	case admissionSGLangBackend:
 		main.Command = []string{"python3", "-m", "sglang.launch_server"}
 		main.Args = []string{"--model-path", "model", "--tp-size", "2", "--kv-events-config", `{"publisher":"zmq"}`}
 		if workerRuntime {
 			main.Args = append(main.Args, "--enable-dp-attention", "--dp-size", "2")
 		}
-	case dcdAdmissionVLLMBackend:
+	case admissionVLLMBackend:
 		main.Command = []string{"vllm", "serve", "model"}
 		main.Args = []string{"--grpc-port", "30001", "--tensor-parallel-size", "2"}
 		if workerRuntime {

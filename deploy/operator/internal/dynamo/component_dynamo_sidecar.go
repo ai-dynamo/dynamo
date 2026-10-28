@@ -79,15 +79,12 @@ func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDep
 
 	// Multinode sidecars require complete role templates; users own engine launches and placement.
 	if component.Multinode != nil {
-		switch BackendFramework(backendFramework) {
-		case BackendFrameworkSGLang, BackendFrameworkVLLM:
-			if !HasCompleteMultinodeRolePodTemplates(component) {
-				allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "multinode sidecars require complete leader and worker podTemplates"))
-			} else if GetComponentDynamoSidecar(component) == nil {
-				allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "the leader template must declare runtime to select sidecar mode"))
-			}
-		default:
+		if !multinodeSidecarBackendSupported(BackendFramework(backendFramework)) {
 			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "Dynamo sidecar multinode support currently requires backendFramework: sglang or vllm"))
+		} else if !HasCompleteMultinodeRolePodTemplates(component) {
+			allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "multinode sidecars require complete leader and worker podTemplates"))
+		} else if GetComponentDynamoSidecar(component) == nil {
+			allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "the leader template must declare runtime to select sidecar mode"))
 		}
 	}
 
@@ -105,6 +102,11 @@ func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDep
 		}
 	}
 	return allErrs
+}
+
+// multinodeSidecarBackendSupported reports the engines whose native multinode roles the operator admits.
+func multinodeSidecarBackendSupported(backend BackendFramework) bool {
+	return backend == BackendFrameworkSGLang || backend == BackendFrameworkVLLM
 }
 
 // dynamoSidecarBaseContainer configures the runtime independently of engine health,
