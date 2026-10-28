@@ -56,7 +56,6 @@ func (p *VLLMWorkerRuntimeProvider) Resolve(ctx context.Context, group *api.Dyna
 		Journal:    kubejournal.NewStore(p.Client, group.Namespace, group.Name, group.UID, "vllm-traffic-"+string(capacity.Grove.CliqueUID)),
 	}
 	return Runtime{
-		ReadinessSteeredRelease: capacity.Grove.ReadinessScaleIn,
 		Profile: api.EngineGroupProfileStatus{
 			Backend: "vllm", Fingerprint: profile.Geometry.Fingerprint,
 			GPUsPerReplica: profile.Geometry.GPUsPerReplica, PodsPerReplica: profile.Geometry.PodsPerReplica,
