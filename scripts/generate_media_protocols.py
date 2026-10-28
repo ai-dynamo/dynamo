@@ -29,14 +29,17 @@ fails where it sets a value the frontend rejects. For a type, a bound, a
 default, a response enum, and a delivery mode, a generated model accepts
 and rejects the same JSON as the Rust type; the shared cases in
 lib/llm/src/protocols/openai/media_fixtures/ hold both sides to that, and
-mark what the frontend alone rejects. A Rust rule the schema
-cannot state, such as a validator with no ``#[schema]`` bound or an integer
-width, is not mirrored: the frontend checks it before a request reaches a
-worker.
+mark what the frontend alone rejects. A field whose wire shape is not
+the type a worker reads, such as the image references, which arrive as a
+string or an array and are read as a list, is mapped to a hand-written type:
+see WORKER_TYPES. A Rust rule the schema cannot state, such as a validator
+with no ``#[schema]`` bound or an integer width, is not mirrored: the
+frontend checks it before a request reaches a worker.
 """
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -53,6 +56,17 @@ MODULES = ("audio", "image", "video")
 # docstring says why. The shared cases hold the generated model to this, so
 # a rename in Rust that misses this set fails them.
 READ_BY_WORKERS = frozenset({"MediaDelivery"})
+
+# The fields a worker reads as one type where the wire has two shapes, by
+# `Model.field`, and the hand-written type that reads and writes both
+# shapes. The schema states the shapes; the type holds the normalization.
+# A key names a field of a committed schema, so a rename in Rust that
+# misses this map fails here.
+WORKER_TYPES = {
+    "NvCreateImageRequest.input_reference": (
+        "dynamo.common.protocols.image_references.ImageReferences"
+    ),
+}
 
 # The copyright check compares the last year in this range with the year the
 # file last changed. Extend the range when a regeneration lands in a new year.
@@ -175,23 +189,48 @@ def loosen_request_enums(document: dict) -> None:
             del schemas[name]
 
 
+def check_worker_types(documents: dict[str, dict]) -> None:
+    """Fail when a WORKER_TYPES key names no field of a committed schema."""
+    fields = {
+        f"{name}.{field}"
+        for document in documents.values()
+        for name, schema in document["components"]["schemas"].items()
+        for field in schema.get("properties", {})
+    }
+    if missing := sorted(set(WORKER_TYPES) - fields):
+        raise ValueError(f"WORKER_TYPES names no schema field: {missing}")
+
+
 def generate(out_dir: Path) -> None:
+    documents = {
+        module: json.loads((SCHEMAS / f"{module}.json").read_text())
+        for module in MODULES
+    }
+    check_worker_types(documents)
     with tempfile.TemporaryDirectory() as tmp:
-        for module in MODULES:
-            document = json.loads((SCHEMAS / f"{module}.json").read_text())
+        # The formatter reads the isort and black settings from the
+        # pyproject.toml above the output file: with the repository's, the
+        # import of a hand-written type sorts as a first-party import. A copy
+        # here gives --check, which generates into a temporary directory,
+        # the same settings as a run that writes the models.
+        shutil.copy(REPO / "pyproject.toml", tmp)
+        for module, document in documents.items():
             loosen_request_enums(document)
             schema = Path(tmp) / f"{module}.json"
             schema.write_text(json.dumps(document, indent=2))
+            model = Path(tmp) / f"{module}_protocol.py"
             subprocess.run(
                 [
                     "datamodel-codegen",
                     f"--input={schema}",
-                    f"--output={out_dir / f'{module}_protocol.py'}",
+                    f"--output={model}",
                     f"--custom-file-header={HEADER.format(module=module)}",
+                    f"--type-overrides={json.dumps(WORKER_TYPES)}",
                     *OPTIONS,
                 ],
                 check=True,
             )
+            shutil.copy(model, out_dir / model.name)
 
 
 def main() -> int:

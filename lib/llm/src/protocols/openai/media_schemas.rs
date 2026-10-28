@@ -27,7 +27,10 @@
 //! values of the delivery mode, which every worker reads. Any other request
 //! enum generates as a plain string, so a worker accepts what a newer
 //! frontend forwards for a field it does not read;
-//! `scripts/generate_media_protocols.py` says why.
+//! `scripts/generate_media_protocols.py` says why. A field whose wire has
+//! two shapes and whose worker type is one, the image references
+//! ([`super::images::ImageReferences`]), generates as a hand-written type
+//! that the script maps onto the field (`WORKER_TYPES` there).
 //! The shared cases in `media_fixtures/` ([`super::media_fixtures`]) hold
 //! both sides to that for accepted and rejected input. A Rust rule the
 //! schema does not state, such as an integer width, is checked by the

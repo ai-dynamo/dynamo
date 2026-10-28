@@ -359,6 +359,28 @@ class TestImageDiffusionWorkerHandler:
         handler.generator.generate.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_generate_two_input_references_raises_invalid_argument(
+        self, handler, mock_context
+    ):
+        """The engine edits one image: a second reference is a 400, not dropped."""
+        request = {
+            "prompt": "Transform this image",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "input_reference": [
+                "https://example.com/a.png",
+                "https://example.com/b.png",
+            ],
+        }
+
+        with pytest.raises(InvalidArgument, match="one input_reference"):
+            async for _ in handler.generate(request, mock_context):
+                pass
+
+        handler.generator.generate.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_generate_invalid_size_raises_invalid_argument(
         self, handler, mock_context
     ):

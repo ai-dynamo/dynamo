@@ -112,6 +112,18 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         req = parse_media_request(SGLangCreateImageRequest, request)
         nvext = req.nvext
 
+        # The model carries the references as a list; this engine edits one
+        # image. The frontend forwards two or more only to a worker that
+        # advertises edit capacity, which this one does not, so the check
+        # guards a body that skipped the frontend.
+        input_reference: Optional[str] = None
+        if req.input_reference is not None:
+            if len(req.input_reference) > 1:
+                raise InvalidArgument(
+                    "SGLang image diffusion takes one input_reference"
+                )
+            (input_reference,) = req.input_reference
+
         if nvext.num_inference_steps > MAX_NUM_INFERENCE_STEPS:
             logger.warning(
                 f"num_inference_steps={nvext.num_inference_steps} exceeds max "
@@ -146,7 +158,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                     num_inference_steps=num_inference_steps,
                     guidance_scale=guidance_scale,
                     seed=nvext.seed + i if nvext.seed is not None else None,
-                    input_reference=req.input_reference,
+                    input_reference=input_reference,
                 )
             )
 

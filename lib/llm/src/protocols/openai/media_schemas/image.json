@@ -153,6 +153,20 @@
           "auto"
         ]
       },
+      "ImageReferences": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        ],
+        "description": "The wire shape of [`NvCreateImageRequest::input_reference`]: one\nreference as a string, two or more as an array. The field itself is a\nlist, which is what a worker reads. One reference goes out as a string\nso a worker whose model has the string field of an earlier release keeps\nreading it. An empty array and a blank reference are rejected, and the\nerror does not repeat the references."
+      },
       "ImageResponseBackground": {
         "type": "string",
         "description": "Actual background of the generated images",
@@ -386,11 +400,15 @@
             ]
           },
           "input_reference": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Optional image reference that guides generation (for I2I/TI2I)."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImageReferences",
+                "description": "Ordered references of the images to edit, for image-to-image and\n`/v1/images/edits`. On the wire one reference is a string and two or\nmore are an array: see [`ImageReferences`]."
+              }
+            ]
           },
           "nvext": {
             "oneOf": [

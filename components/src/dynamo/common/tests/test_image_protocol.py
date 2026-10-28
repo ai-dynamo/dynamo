@@ -4,7 +4,7 @@
 """Unit tests for dynamo.common.protocols.image_protocol module."""
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from dynamo.common.protocols.image_protocol import (
     ImageData,
@@ -137,3 +137,33 @@ def test_image_request_accepts_the_api_maximum(field, value):
     request = NvCreateImageRequest(prompt="a cat", **{field: value})
 
     assert getattr(request, field) == value
+
+
+@pytest.mark.parametrize("reference", ["first", ["first"], ["first", "second"]])
+def test_image_reference_normalization_and_n2_serialization(reference):
+    """Singleton arrays must remain readable by scalar-only worker schemas."""
+
+    class LegacyImageRequest(BaseModel):
+        input_reference: str | None = None
+
+    request = NvCreateImageRequest(prompt="edit", input_reference=reference)
+    expected = [reference] if isinstance(reference, str) else reference
+    assert request.input_reference == expected
+    wire = request.model_dump(exclude_none=True)
+    assert wire["input_reference"] == (expected[0] if len(expected) == 1 else expected)
+    if len(expected) == 1:
+        assert LegacyImageRequest.model_validate(wire).input_reference == expected[0]
+    else:
+        with pytest.raises(ValidationError):
+            LegacyImageRequest.model_validate(wire)
+
+
+@pytest.mark.parametrize(
+    "reference", [[], 1, {"url": "x"}, ["first", 2], ["first", None]]
+)
+def test_invalid_image_reference_shape_fails_at_boundary(reference):
+    # Reject a malformed reference at the model, before worker I/O. A blank
+    # reference is the frontend's rule: the schema cannot state it, and the
+    # worker's loader rejects it.
+    with pytest.raises(ValidationError):
+        NvCreateImageRequest(prompt="edit", input_reference=reference)

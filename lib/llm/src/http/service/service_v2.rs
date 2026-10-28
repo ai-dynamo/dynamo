@@ -1292,6 +1292,7 @@ impl HttpServiceConfigBuilder {
 
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
+        super::image_edits::validate_config()?;
         LazyLock::force(&DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION);
         let metrics_config = config.metrics_config.clone();
         let model_ready_metrics_prefix = metrics_config.prefix();

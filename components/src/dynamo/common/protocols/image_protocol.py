@@ -10,6 +10,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt, StrictStr
 
+from dynamo.common.protocols.image_references import ImageReferences
+
 
 class ImageAccounting(BaseModel):
     """
@@ -171,10 +173,7 @@ class NvCreateImageRequest(BaseModel):
     background: StrictStr | None = None
     style: StrictStr | None = None
     user: StrictStr | None = None
-    input_reference: StrictStr | None = None
-    """
-    Optional image reference that guides generation (for I2I/TI2I).
-    """
+    input_reference: ImageReferences | None = None
     nvext: ImageNvExt | None = None
     extra_args: dict[str, Any] | None = None
     """
