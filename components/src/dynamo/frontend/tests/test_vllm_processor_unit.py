@@ -7,7 +7,6 @@ Tests for the tool-stripping behaviour of _prepare_request when
 tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 """
 
-import importlib.util
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -43,23 +42,6 @@ from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
 # collection, which breaks the pytest-marker-report pre-commit hook (its vllm
 # stub list does not cover those submodules).
 
-HAS_QWEN3_TOOL_PARSER = (
-    importlib.util.find_spec("vllm.tool_parsers.qwen3_engine_tool_parser") is not None
-    or importlib.util.find_spec("vllm.tool_parsers.qwen3coder_tool_parser") is not None
-)
-
-
-def _resolve_qwen3_tool_parser_class():
-    try:
-        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
-
-        return Qwen3EngineToolParser
-    except ImportError:
-        from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
-
-        return Qwen3CoderToolParser
-
-
 # Needs vllm packages, but never touches a GPU.
 pytestmark = [
     pytest.mark.unit,
@@ -74,10 +56,6 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
-    pytest.mark.skipif(
-        not HAS_QWEN3_TOOL_PARSER,
-        reason="requires vllm qwen3 tool parser",
-    ),
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -2859,10 +2837,12 @@ class TestSchemaAwareToolParser:
             "</function></tool_call>"
         )
 
+        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+
         request_for_sampling, parser, _, _, _ = _prepare_request(
             OBJECT_TYPED_TOOL_REQUEST,
             tokenizer=tokenizer,
-            tool_parser_class=_resolve_qwen3_tool_parser_class(),
+            tool_parser_class=Qwen3EngineToolParser,
         )
         assert parser is not None, "Expected _prepare_request to construct the parser"
 
@@ -3757,23 +3737,6 @@ class TestToolCallGuidedDecoding:
             "tool_choice": "auto",
             "reasoning": False,
         }
-
-    def test_missing_registry_uses_parser_method(self, tokenizer, monkeypatch):
-        class CompatibleParser(_FakeStructuralTagParser):
-            structural_tag_model = "qwen_3_coder"
-
-        parser = CompatibleParser()
-        monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
-
-        guided = build_tool_call_guided_decoding(
-            self._request(tokenizer),
-            parser,
-            structural_tag_mode="on",
-            structural_tag_scope="always",
-        )
-
-        assert guided == {"structural_tag": {"format": {"strict": [True]}}}
-        assert len(parser.requests) == 1
 
     # Parser-created grammar must survive preprocessing as guided decoding.
     @pytest.mark.asyncio
@@ -5310,7 +5273,6 @@ class TestToolCallGrammarReasoningStart:
     async def _reasoning_requested(
         self,
         tokenizer,
-        monkeypatch,
         *,
         prompt_text,
         reasoning_parser_class,
@@ -5323,7 +5285,6 @@ class TestToolCallGrammarReasoningStart:
             parsers.append(parser)
             return parser
 
-        monkeypatch.setattr(prepost_module, "get_model_structural_tag", None)
         result = await prepost_module.preprocess_chat_request(
             {**TOOL_REQUEST, "tool_choice": "auto"},
             tokenizer=tokenizer,
@@ -5373,7 +5334,6 @@ class TestToolCallGrammarReasoningStart:
     async def test_reasoning_start(
         self,
         tokenizer,
-        monkeypatch,
         prompt_text,
         parser_start,
         excludes_reasoning,
@@ -5381,7 +5341,6 @@ class TestToolCallGrammarReasoningStart:
     ):
         reasoning = await self._reasoning_requested(
             tokenizer,
-            monkeypatch,
             prompt_text=prompt_text,
             reasoning_parser_class=_prompt_reasoning_parser(parser_start),
             structural_tag_excludes_reasoning=excludes_reasoning,
@@ -5389,12 +5348,9 @@ class TestToolCallGrammarReasoningStart:
         assert reasoning == [expected]
 
     @pytest.mark.asyncio
-    async def test_no_reasoning_parser_keeps_post_reasoning_tag(
-        self, tokenizer, monkeypatch
-    ):
+    async def test_no_reasoning_parser_keeps_post_reasoning_tag(self, tokenizer):
         reasoning = await self._reasoning_requested(
             tokenizer,
-            monkeypatch,
             prompt_text="<|im_start|>assistant\n<think>",
             reasoning_parser_class=None,
         )

@@ -267,6 +267,7 @@ STUB_MODULES = [
     "vllm.tool_parsers.hermes_tool_parser",
     "vllm.tool_parsers.mistral_tool_parser",
     "vllm.tool_parsers.qwen3_engine_tool_parser",
+    "vllm.tool_parsers.structural_tag_registry",
     "vllm.tool_parsers.utils",
     "vllm.usage",
     "vllm.usage.usage_lib",

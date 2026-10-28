@@ -24,6 +24,7 @@ from vllm.renderers import ChatParams, merge_kwargs
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
@@ -43,14 +44,6 @@ from .structural_tag_policy import (
 )
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import legacy_guided_decoding
-
-get_model_structural_tag: Any
-try:
-    from vllm.tool_parsers import structural_tag_registry
-except ImportError:  # Older supported vLLM releases do not expose this registry.
-    get_model_structural_tag = None
-else:
-    get_model_structural_tag = structural_tag_registry.get_model_structural_tag
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -303,7 +296,7 @@ def build_tool_call_guided_decoding(
         try:
             structural_tag_model = getattr(tool_parser, "structural_tag_model", None)
             structural_tag_kwargs = {}
-            if structural_tag_model == "hy_v4" and get_model_structural_tag is not None:
+            if structural_tag_model == "hy_v4":
                 # HYV4's parser detects checkpoint-specific tokens at construction.
                 # Keep its suffix while Dynamo owns activation of the registry path.
                 structural_tag_kwargs["token_suffix"] = getattr(
@@ -318,7 +311,6 @@ def build_tool_call_guided_decoding(
                     **structural_tag_kwargs,
                 )
                 if structural_tag_model is not None
-                and get_model_structural_tag is not None
                 # Older parser hooks may not take ``reasoning``; keep their
                 # call unchanged unless the reasoning prefix is needed.
                 else tool_parser.get_structural_tag(request_for_tag, reasoning=True)

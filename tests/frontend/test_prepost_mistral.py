@@ -65,11 +65,6 @@ class _InnerTokenizer:
     """Mimics the inner ``tokenizer.tokenizer`` accessed by MistralReasoningParser."""
 
     def get_special_token(self, token):
-        # vLLM 0.17.0 renamed get_control_token -> get_special_token
-        return self._token_lookup(token)
-
-    def get_control_token(self, token):
-        # kept for older vLLM compat
         return self._token_lookup(token)
 
     def _token_lookup(self, token):
