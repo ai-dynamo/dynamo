@@ -28,7 +28,7 @@ dynamo-sidecar-common = { workspace = true }
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
-clap = { version = "4", features = ["derive", "env", "string"] }
+clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
