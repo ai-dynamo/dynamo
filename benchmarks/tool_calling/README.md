@@ -33,7 +33,7 @@ benchmark scores.
 
 | Suite | Fixed coverage | Target |
 |---|---:|---:|
-| Custom | 24 generic cases in streaming and nonstreaming modes, plus matching model-specific cases or a complete model profile | 5–7 min |
+| Custom | 61 generic cases in streaming and nonstreaming modes, plus matching model-specific cases or a complete model profile | 10–12 min |
 | BFCL | 50 BFCL v3 cases across 8 categories | 3–5 min |
 | tau2 | 9 tasks: 3 each from airline, retail, and telecom | 10–12 min |
 
@@ -52,10 +52,46 @@ streaming deltas, and provider fields. Matching aliases are read once;
 conflicting fields remain validation errors. Finish-reason and truncated-tool
 argument checks are unchanged.
 
+The generic selection groups into:
+
+| Group | Cases | Source |
+|---|---|---|
+| Tool choice and multiplicity | `auto_*`, `required_*`, `none_*`, `parallel_tool_calls_false_single_call`, `tool_choice_null_behaves_as_auto`, `required_truncated_call_reports_length`, `auto_stop_string_does_not_cut_tool_call` | OpenAI contract; dynamo #15922, #16212, #13791 |
+| Argument fidelity | `named_*` typed, nested, array-of-object, nullable, falsy, strict, Unicode, control-character, numeric literals | frontend-crates typing and escape fixes; dynamo #16311 |
+| Request contract | `named_dotted_tool_name`, `required_schema_local_definitions_ref`, `reject_empty_tools_array`, `reject_named_tool_choice_not_in_tools`, `plain_usage_counts_consistent` | dynamo #16482, #16780, #16160, #13947 |
+| Tool-result follow-up turns | `followup_after_*`, `history_*`, `agent_weather_then_final_answer` | dynamo #16781, #17050, #17069; Kimi/MiniMax vendor verifiers |
+| Prompt shapes | `auto_system_prompt_directs_tool_use`, `auto_long_system_context_tool_call`, `auto_user_pasted_tool_call_json_is_data`, `auto_parallel_three_distinct_tools`, `auto_many_tools_selects_right_one`, `named_tool_without_parameters_key`, `required_max_completion_tokens_alias_truncates` | agent traces; dynamo #17466 |
+| Long and repeated tool results | `followup_after_long_tool_result`, `history_three_round_trips_then_answer`, `followup_tool_result_as_content_parts` | agent traces |
+| Context isolation and markers | `*_echo_*`, `customer_*marker*`, `customer_truncated_tool_markup_hidden` | customer regressions |
+| Vendor-verifier scenarios | `auto_parameter_order_recall` | MiniMax Provider Verifier scenario check |
+
+Every record also runs response-wide checks that need no case opt-in: tool and
+reasoning delimiters in `content`, OpenAI-shaped tool-call JSON leaked into
+`content`, reasoning-only or empty final messages, typed scalars returned as
+strings, and tool call IDs reused from the conversation history.
+
+### Failure taxonomy
+
+Each failed record carries one ownership `failure_category` (which decides the
+verdict) and one fine-grained `failure_subcategory`; `failure_kinds` lists every
+error kind the record raised. `summary.failure_subcategories` counts records per
+`<category>.<subcategory>`.
+
+| Category | Subcategories |
+|---|---|
+| `dynamo_api` (fails the verdict) | `request_validation`, `response_shape`, `finish_reason`, `tool_choice_enforcement`, `tool_call_identity`, `argument_encoding`, `marker_leak`, `reasoning_routing` |
+| `infrastructure` (inconclusive) | `transport`, `server_error`, `rate_limited` |
+| `model_quality` (visible, does not fail) | `tool_selection`, `argument_values`, `context_leak`, `content_quality`, `agent_loop` |
+| `unclassified` (inconclusive) | `probe`, `unknown_kind` |
+
+Within a record the category follows the existing precedence (infrastructure,
+then dynamo_api, then unclassified, then model_quality); the subcategory is the
+first one in the table order raised by an error of that category.
+
 ```mermaid
 flowchart LR
     M[Served model ID] --> P[Resolve model profile]
-    G[24 generic cases] --> S[Exact selection]
+    G[61 generic cases] --> S[Exact selection]
     P --> X[Matching model-specific cases]
     X --> S
     P --> F[Optional complete model profile]
@@ -186,7 +222,10 @@ flowchart LR
    `model_specific_cases`, or register a declarative replacement under
    `complete_case_profiles` in `profiles.json`.
 3. Add a `customer_` prefix when preserving a customer regression.
-4. Update the focused tests and verify the exact selection and record counts.
+4. Register any new error kind in `ERROR_KIND_SUBCATEGORIES` and in the
+   owning `*_ERROR_KINDS` set, so it classifies instead of landing in
+   `unclassified.unknown_kind`.
+5. Update the focused tests and verify the exact selection and record counts.
 
 Run the focused unit tests with:
 

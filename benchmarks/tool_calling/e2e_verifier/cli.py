@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_PROFILES = ROOT / "profiles.json"
 SUITES = ("custom", "bfcl", "tau2")
 CUSTOM_SELECTION_FILE = "custom-case-ids.json"
-CUSTOM_GENERIC_CASE_COUNT = 24
+CUSTOM_GENERIC_CASE_COUNT = 61
 CUSTOM_MODES = ("nonstream", "stream")
 CUSTOM_ITERATIONS = 1
 DECLARATIVE_PROFILE_ROOT = ROOT.parent / "custom" / "configs" / "case_profiles"
@@ -503,6 +503,16 @@ def _run_custom(
             for category in CUSTOM_FAILURE_CATEGORIES
         }
     classified_failed = sum(failure_categories.values())
+    raw_subcategories = raw_summary.get("failure_subcategories")
+    failure_subcategories = (
+        {
+            str(name): max(0, int(count or 0))
+            for name, count in raw_subcategories.items()
+            if isinstance(name, str) and isinstance(count, (int, float))
+        }
+        if isinstance(raw_subcategories, dict)
+        else {}
+    )
     raw_case_ids = raw_config.get("case_ids")
     actual_case_ids = (
         tuple(sorted(raw_case_ids))
@@ -562,6 +572,7 @@ def _run_custom(
         "completed": total,
         "score": passed / total if total else None,
         "failure_categories": failure_categories,
+        "failure_subcategories": failure_subcategories,
         "dynamo_api_failures": failure_categories["dynamo_api"],
         "infrastructure_failures": failure_categories["infrastructure"],
         "model_quality_failures": failure_categories["model_quality"],

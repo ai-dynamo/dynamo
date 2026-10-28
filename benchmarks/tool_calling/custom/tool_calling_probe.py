@@ -98,12 +98,113 @@ DASH_EQUIVALENTS = str.maketrans(
         "\N{FULLWIDTH HYPHEN-MINUS}": "-",
     }
 )
+# Reasoning delimiters that must never reach assistant content. Tool markers
+# live in RAW_TOOL_MARKERS; these are the thinking-block equivalents.
+RAW_REASONING_MARKERS = (
+    "<think>",
+    "</think>",
+    "<|channel>thought",
+    "◁think▷",
+    "◁/think▷",
+)
 FAILURE_CATEGORIES = (
     "dynamo_api",
     "infrastructure",
     "model_quality",
     "unclassified",
 )
+# Fine-grained failure subcategories. Each is owned by exactly one category
+# above; the precedence order decides the primary subcategory of a record.
+FAILURE_SUBCATEGORIES = {
+    "infrastructure": ("transport", "server_error", "rate_limited"),
+    "dynamo_api": (
+        "request_validation",
+        "response_shape",
+        "finish_reason",
+        "tool_choice_enforcement",
+        "tool_call_identity",
+        "argument_encoding",
+        "marker_leak",
+        "reasoning_routing",
+    ),
+    "model_quality": (
+        "tool_selection",
+        "argument_values",
+        "context_leak",
+        "content_quality",
+        "agent_loop",
+    ),
+    "unclassified": ("probe", "unknown_kind"),
+}
+ERROR_KIND_SUBCATEGORIES = {
+    # dynamo_api
+    "unexpected_http_status": "request_validation",
+    "missing_choice": "response_shape",
+    "malformed_choice": "response_shape",
+    "malformed_message": "response_shape",
+    "malformed_tool_calls": "response_shape",
+    "malformed_sse": "response_shape",
+    "malformed_stream_choices": "response_shape",
+    "malformed_stream_choice": "response_shape",
+    "malformed_stream_delta": "response_shape",
+    "malformed_stream_tool_delta": "response_shape",
+    "malformed_reasoning": "response_shape",
+    "stream_json_decode": "response_shape",
+    "usage_missing": "response_shape",
+    "usage_inconsistent": "response_shape",
+    "finish_tool_calls_without_calls": "finish_reason",
+    "missing_tool_id": "tool_call_identity",
+    "duplicate_tool_ids": "tool_call_identity",
+    "tool_id_changed": "tool_call_identity",
+    "tool_id_reused_from_history": "tool_call_identity",
+    "tool_name_changed": "tool_call_identity",
+    "missing_function_name": "tool_call_identity",
+    "wrong_tool_type": "tool_call_identity",
+    "empty_arguments": "argument_encoding",
+    "invalid_arguments_json": "argument_encoding",
+    "arguments_not_object": "argument_encoding",
+    "argument_stringified_scalar": "argument_encoding",
+    "tool_marker_leaked_to_content": "marker_leak",
+    "tool_marker_leaked_to_reasoning": "marker_leak",
+    "reserved_marker_leaked_to_content": "marker_leak",
+    "reserved_marker_leaked_to_reasoning": "marker_leak",
+    "reasoning_marker_leaked_to_content": "marker_leak",
+    "tool_call_json_leaked_to_content": "marker_leak",
+    "unexpected_reasoning_content": "reasoning_routing",
+    "reasoning_mismatch": "reasoning_routing",
+    "reasoning_mangled_function_text": "reasoning_routing",
+    "reasoning_only_response": "reasoning_routing",
+    "empty_response": "reasoning_routing",
+    # model_quality
+    "too_few_tool_calls": "tool_selection",
+    "wrong_tool_call_count": "tool_selection",
+    "missing_expected_tool": "tool_selection",
+    "unknown_tool_name": "tool_selection",
+    "too_few_distinct_tools": "tool_selection",
+    "unexpected_tool_calls": "tool_selection",
+    "schema_validation": "argument_values",
+    "missing_expected_argument_fragment": "argument_values",
+    "missing_expected_argument_value": "argument_values",
+    "context_leak_to_content": "context_leak",
+    "context_leak_to_reasoning": "context_leak",
+    "context_leak_to_tool_arguments": "context_leak",
+    "missing_content": "content_quality",
+    "unexpected_content": "content_quality",
+    "content_pattern_mismatch": "content_quality",
+    "content_json_decode": "content_quality",
+    "unexpected_content_json": "content_quality",
+    "missing_expected_content_fragment": "content_quality",
+    "content_order_mismatch": "content_quality",
+    "missing_reasoning_content": "content_quality",
+    "agent_loop_ended_with_tool_calls": "agent_loop",
+    "agent_loop_missing_final_content": "agent_loop",
+    "agent_loop_no_final_response": "agent_loop",
+    "missing_expected_final_content_fragment": "agent_loop",
+    "missing_expected_executed_tool": "agent_loop",
+    # infrastructure / unclassified
+    "request_error": "transport",
+    "probe_exception": "probe",
+}
 INFRASTRUCTURE_ERROR_KINDS = frozenset({"request_error"})
 DYNAMO_API_ERROR_KINDS = frozenset(
     {
@@ -120,11 +221,20 @@ DYNAMO_API_ERROR_KINDS = frozenset(
         "malformed_stream_delta",
         "malformed_stream_tool_delta",
         "malformed_tool_calls",
+        "malformed_reasoning",
         "missing_choice",
         "missing_function_name",
         "missing_tool_id",
         "reasoning_mangled_function_text",
         "reasoning_mismatch",
+        "reasoning_only_response",
+        "empty_response",
+        "argument_stringified_scalar",
+        "tool_call_json_leaked_to_content",
+        "tool_id_reused_from_history",
+        "unexpected_http_status",
+        "usage_missing",
+        "usage_inconsistent",
         "stream_json_decode",
         "tool_id_changed",
         "tool_name_changed",
@@ -138,6 +248,7 @@ MODEL_QUALITY_ERROR_KINDS = frozenset(
         "agent_loop_missing_final_content",
         "agent_loop_no_final_response",
         "content_json_decode",
+        "content_order_mismatch",
         "content_pattern_mismatch",
         "context_leak_to_content",
         "context_leak_to_reasoning",
@@ -592,6 +703,226 @@ def configure_pipeline_tool() -> dict[str, Any]:
     }
 
 
+def dotted_weather_tool() -> dict[str, Any]:
+    """Namespaced tool name, as MCP bridges and Codex emit (dynamo #16481)."""
+    tool = weather_tool()
+    tool["function"]["name"] = "weather.get_current"
+    return tool
+
+
+def city_weather_ref_tool() -> dict[str, Any]:
+    """Parameter schema with a document-local $ref and no $defs (dynamo #16779)."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "lookup_city_weather",
+            "description": "Look up the current weather for a city.",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"$ref": "#/definitions/City"}},
+                "required": ["city"],
+                "additionalProperties": False,
+                "definitions": {
+                    "City": {"type": "string", "description": "City name."}
+                },
+            },
+        },
+    }
+
+
+def strict_final_result_tool() -> dict[str, Any]:
+    """OpenAI strict tool with a property-level anyOf (dynamo #16311)."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "final_result",
+            "description": "Record the final numeric or textual result.",
+            "strict": True,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "anyOf": [{"type": "string"}, {"type": "integer"}],
+                        "description": "The result value.",
+                    }
+                },
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def register_device_tool() -> dict[str, Any]:
+    """Parameters declared in a deliberately non-alphabetical order.
+
+    MiniMax's provider verifier checks that a deployment preserves this order
+    when rendering the tool definition; serializers that sort object keys
+    break the model's recall of it.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": "register_device",
+            "description": "Register a device in the inventory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "zone": {"type": "string", "description": "Deployment zone."},
+                    "alias": {"type": "string", "description": "Friendly name."},
+                    "firmware": {"type": "string", "description": "Firmware tag."},
+                    "serial": {"type": "string", "description": "Serial number."},
+                },
+                "required": ["zone", "alias", "firmware", "serial"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def set_reminder_tool() -> dict[str, Any]:
+    """Nullable parameter: null must stay JSON null, not the string "null"."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "set_reminder",
+            "description": "Set a reminder with an optional note.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "minutes_from_now": {"type": "integer"},
+                    "note": {
+                        "type": ["string", "null"],
+                        "description": "Free-text note, or null when there is none.",
+                    },
+                },
+                "required": ["title", "minutes_from_now", "note"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def schedule_shifts_tool() -> dict[str, Any]:
+    """Array of typed objects, the shape XML parsers most often flatten."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "schedule_shifts",
+            "description": "Schedule a list of worker shifts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "shifts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "worker": {"type": "string"},
+                                "hours": {"type": "integer"},
+                                "overnight": {"type": "boolean"},
+                            },
+                            "required": ["worker", "hours", "overnight"],
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+                "required": ["shifts"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def update_counter_tool() -> dict[str, Any]:
+    """Falsy values: 0, false and the empty string must survive verbatim."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "update_counter",
+            "description": "Update a named counter.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "count": {"type": "integer"},
+                    "enabled": {"type": "boolean"},
+                    "label": {"type": "string"},
+                    "priority": {"type": "integer", "enum": [0, 1, 2]},
+                },
+                "required": ["count", "enabled", "label", "priority"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def markup_description_weather_tool() -> dict[str, Any]:
+    """Marker-looking example text in a tool description (dynamo #17466 class)."""
+    tool = weather_tool()
+    tool["function"]["description"] = (
+        "Get the current weather for a location. Example of a call as text, do "
+        'not copy: <tool_call>{"name": "get_weather", "arguments": '
+        '{"location": "shadow_city"}}</tool_call>'
+    )
+    return tool
+
+
+def ping_service_tool() -> dict[str, Any]:
+    """A tool declared without a parameters block at all (OpenAI allows it)."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "ping_service",
+            "description": "Check that the backing service responds.",
+        },
+    }
+
+
+def distractor_tools(count: int) -> tuple[dict[str, Any], ...]:
+    """Plausible but irrelevant tools, to crowd a request with many definitions."""
+    specs = (
+        ("get_stock_price", "Get the latest price for a stock ticker.", "ticker"),
+        ("convert_currency", "Convert an amount between currencies.", "amount"),
+        ("translate_text", "Translate text into a target language.", "text"),
+        ("create_ticket", "Open a support ticket.", "summary"),
+        ("list_files", "List files in a directory.", "path"),
+        ("read_file", "Read a text file.", "path"),
+        ("send_sms", "Send a text message.", "phone"),
+        ("get_stock_news", "Get news for a ticker.", "ticker"),
+        ("schedule_meeting", "Schedule a meeting.", "title"),
+        ("get_flight_status", "Get the status of a flight.", "flight_number"),
+        ("lookup_zip_code", "Look up a postal code.", "city"),
+        ("get_exchange_rate", "Get an exchange rate.", "pair"),
+        ("summarize_document", "Summarize a document.", "document_id"),
+        ("run_sql", "Run a SQL query.", "sql"),
+        ("get_user_profile", "Fetch a user profile.", "user_id"),
+        ("set_alarm", "Set an alarm.", "time"),
+        ("get_traffic", "Get traffic conditions for a route.", "route"),
+        ("order_food", "Order food for delivery.", "restaurant"),
+        ("get_sunrise_time", "Get the sunrise time for a city.", "city"),
+        ("get_air_quality", "Get the air quality index for a city.", "city"),
+    )
+    tools = []
+    for name, description, parameter in specs[:count]:
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {parameter: {"type": "string"}},
+                        "required": [parameter],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        )
+    return tuple(tools)
+
+
 TOOLS = {
     "book_flight": book_flight_tool(),
     "calculate": calculator_tool(),
@@ -603,6 +934,15 @@ TOOLS = {
     "get_server_time": server_time_tool(),
     "create_calendar_event": event_tool(),
     "get_weather": weather_tool(),
+    "weather.get_current": dotted_weather_tool(),
+    "lookup_city_weather": city_weather_ref_tool(),
+    "final_result": strict_final_result_tool(),
+    "register_device": register_device_tool(),
+    "set_reminder": set_reminder_tool(),
+    "get_weather_markup_description": markup_description_weather_tool(),
+    "ping_service": ping_service_tool(),
+    "schedule_shifts": schedule_shifts_tool(),
+    "update_counter": update_counter_tool(),
     "record_literal": record_literal_tool(),
     "run_query": run_query_tool(),
     "search_web": search_tool(),
@@ -633,6 +973,8 @@ class Case:
     forbidden_content_fragments: tuple[str, ...] = ()
     forbidden_reasoning_fragments: tuple[str, ...] = ()
     expected_any_content_fragments: tuple[str, ...] = ()
+    # Fragments that must all appear in content, in this relative order.
+    expected_content_order: tuple[str, ...] = ()
     expected_content: str | None = None
     content_pattern: str | None = None
     expected_json: dict[str, Any] | None = None
@@ -651,6 +993,12 @@ class Case:
     expected_final_content_fragments: tuple[str, ...] = ()
     scripted_followup: dict[str, Any] | None = None
     request_overrides: dict[str, Any] | None = None
+    # Request-validation cases: the endpoint must reject the request with
+    # exactly this HTTP status. A 200 response is then a failure.
+    expected_http_status: int | None = None
+    # Require a usage block with consistent token counts (stream mode sends
+    # stream_options.include_usage through request_overrides).
+    expect_usage: bool = False
     profiles: tuple[str, ...] = ("generic",)
 
 
@@ -674,7 +1022,40 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
     event = TOOLS["create_calendar_event"]
     server_time = TOOLS["get_server_time"]
     set_temperature = TOOLS["set_temperature"]
+    dotted_weather = TOOLS["weather.get_current"]
+    city_weather_ref = TOOLS["lookup_city_weather"]
+    strict_final_result = TOOLS["final_result"]
+    register_device = TOOLS["register_device"]
+    set_reminder = TOOLS["set_reminder"]
+    schedule_shifts = TOOLS["schedule_shifts"]
+    update_counter = TOOLS["update_counter"]
+    markup_description_weather = TOOLS["get_weather_markup_description"]
+    ping_service = TOOLS["ping_service"]
     truncation_literal = "customer-eof-" + ("x" * 512)
+    london_weather_history = (
+        {"role": "user", "content": "What is the weather in London?"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_history_london_0",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": json.dumps({"location": "London"}),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_history_london_0",
+            "content": json.dumps(
+                {"temperature": 15, "unit": "celsius", "condition": "cloudy"}
+            ),
+        },
+    )
     thinking_enabled = {"chat_template_kwargs": {"thinking": True}}
     thinking_disabled = {"chat_template_kwargs": {"thinking": False}}
     disabled_reasoning_expectation: bool | None = False
@@ -1320,6 +1701,798 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
                 ("get_weather", "location", "Reykjavik"),
                 ("get_weather", "unit", "celsius"),
             ),
+        ),
+        # --- Tool-result follow-up turns (dynamo #16781, #17050, #17069) ---
+        Case(
+            case_id="followup_after_tool_result_plain_answer",
+            description=(
+                "turn after a tool result answers in content with reasoning kept apart"
+            ),
+            messages=london_weather_history,
+            tools=(weather,),
+            tool_choice="auto",
+            expected_finish_reasons=("stop",),
+            expect_no_tool_calls=True,
+            min_tool_calls=0,
+            expect_content=True,
+            expected_any_content_fragments=("15", "cloud"),
+            validate_schema=False,
+        ),
+        Case(
+            case_id="followup_after_tool_result_thinking_disabled",
+            description=(
+                "turn after a tool result with thinking off leaks no channel markers"
+            ),
+            messages=london_weather_history,
+            tools=(weather,),
+            tool_choice="auto",
+            expected_finish_reasons=("stop",),
+            expect_no_tool_calls=True,
+            min_tool_calls=0,
+            expect_content=True,
+            expected_any_content_fragments=("15", "cloud"),
+            validate_schema=False,
+            request_overrides=thinking_disabled,
+            expect_reasoning=disabled_reasoning_expectation,
+        ),
+        Case(
+            case_id="followup_after_tool_error_result",
+            description="turn after a failed tool result stays well-formed",
+            messages=(
+                *london_weather_history[:2],
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_history_london_0",
+                    "content": json.dumps(
+                        {"error": "weather service unavailable, retry later"}
+                    ),
+                },
+            ),
+            tools=(weather,),
+            tool_choice="auto",
+            expected_finish_reasons=("stop", "tool_calls"),
+            min_tool_calls=0,
+        ),
+        Case(
+            case_id="history_tool_round_trip_without_tools",
+            description=(
+                "tool history with no tools in the request renders and answers cleanly"
+            ),
+            messages=(
+                *london_weather_history,
+                {
+                    "role": "user",
+                    "content": "Summarize that weather result in one sentence.",
+                },
+            ),
+            tools=(),
+            tool_choice=None,
+            expected_finish_reasons=("stop",),
+            expect_no_tool_calls=True,
+            min_tool_calls=0,
+            expect_content=True,
+            expected_any_content_fragments=("15", "cloud"),
+            validate_schema=False,
+        ),
+        Case(
+            case_id="history_second_turn_new_tool_call",
+            description="second tool-calling turn uses a fresh tool call ID",
+            messages=(
+                *london_weather_history,
+                {
+                    "role": "assistant",
+                    "content": "It is 15 degrees celsius and cloudy in London.",
+                },
+                {
+                    "role": "user",
+                    "content": "Now use the weather tool for Berlin.",
+                },
+            ),
+            tools=(weather,),
+            tool_choice="auto",
+            exact_tool_calls=1,
+            expected_tool_names=("get_weather",),
+            expected_arg_fragments=("Berlin",),
+        ),
+        # --- Request contract regressions (dynamo #16482, #16780, #16311, #16373, #16160) ---
+        Case(
+            case_id="named_dotted_tool_name",
+            description="named tool choice with a dotted (namespaced) tool name",
+            messages=({"role": "user", "content": "Get the current weather in Oslo."},),
+            tools=(dotted_weather,),
+            tool_choice={
+                "type": "function",
+                "function": {"name": "weather.get_current"},
+            },
+            exact_tool_calls=1,
+            expected_tool_names=("weather.get_current",),
+            expected_arg_fragments=("Oslo",),
+        ),
+        Case(
+            case_id="required_schema_local_definitions_ref",
+            description=(
+                "required tool choice with a document-local $ref parameter schema"
+            ),
+            messages=({"role": "user", "content": "What is the weather in Boston?"},),
+            tools=(city_weather_ref,),
+            tool_choice="required",
+            parallel_tool_calls=False,
+            exact_tool_calls=1,
+            expected_tool_names=("lookup_city_weather",),
+            expected_arg_values=(("lookup_city_weather", "city", "Boston"),),
+        ),
+        Case(
+            case_id="named_strict_anyof_argument",
+            description="strict tool with a property-level anyOf is accepted and called",
+            messages=(
+                {
+                    "role": "user",
+                    "content": "Record the final result 42 using the final_result tool.",
+                },
+            ),
+            tools=(strict_final_result,),
+            tool_choice={"type": "function", "function": {"name": "final_result"}},
+            exact_tool_calls=1,
+            expected_tool_names=("final_result",),
+            expected_arg_fragments=("42",),
+        ),
+        Case(
+            case_id="tool_choice_null_behaves_as_auto",
+            description="an explicit null tool_choice behaves as auto",
+            messages=(
+                {
+                    "role": "user",
+                    "content": "Use the weather tool to get the weather in Lisbon.",
+                },
+            ),
+            tools=(weather,),
+            tool_choice=None,
+            request_overrides={"tool_choice": None},
+            expected_tool_names=("get_weather",),
+            expected_arg_fragments=("Lisbon",),
+        ),
+        Case(
+            case_id="parallel_tool_calls_false_single_call",
+            description="parallel_tool_calls=false yields exactly one call",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Use get_weather to check the weather in Madrid and in Seoul."
+                    ),
+                },
+            ),
+            tools=(weather,),
+            tool_choice="auto",
+            parallel_tool_calls=False,
+            exact_tool_calls=1,
+            expected_tool_names=("get_weather",),
+        ),
+        Case(
+            case_id="reject_empty_tools_array",
+            description="an explicitly empty tools array is rejected with HTTP 400",
+            messages=({"role": "user", "content": "Say hello."},),
+            tools=(),
+            tool_choice=None,
+            request_overrides={"tools": []},
+            expected_http_status=400,
+            expect_no_tool_calls=True,
+            min_tool_calls=0,
+            validate_schema=False,
+        ),
+        # --- Argument fidelity (fc #187/#284 byte splits, #318 escapes, #248/#251 typing) ---
+        Case(
+            case_id="named_literal_multibyte_text",
+            description="named tool choice preserves multibyte and 4-byte UTF-8 text",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Call record_literal exactly once with label multibyte-literal "
+                        "and literal_text exactly: Zürich ✓ 東京 🌧 café"
+                    ),
+                },
+            ),
+            tools=(record_literal,),
+            tool_choice={"type": "function", "function": {"name": "record_literal"}},
+            exact_tool_calls=1,
+            expected_tool_names=("record_literal",),
+            expected_arg_values=(
+                ("record_literal", "label", "multibyte-literal"),
+                ("record_literal", "literal_text", "Zürich ✓ 東京 🌧 café"),
+            ),
+        ),
+        Case(
+            case_id="named_literal_control_characters",
+            description="named tool choice preserves newline and tab escapes in a string",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Call record_literal exactly once with label control-literal. "
+                        "literal_text must be the three words alpha, beta, gamma where "
+                        "alpha and beta are separated by a single newline character and "
+                        "beta and gamma are separated by a single tab character "
+                        '(JSON-escaped: "alpha\\nbeta\\tgamma").'
+                    ),
+                },
+            ),
+            tools=(record_literal,),
+            tool_choice={"type": "function", "function": {"name": "record_literal"}},
+            exact_tool_calls=1,
+            expected_tool_names=("record_literal",),
+            expected_arg_values=(
+                ("record_literal", "label", "control-literal"),
+                ("record_literal", "literal_text", "alpha\nbeta\tgamma"),
+            ),
+        ),
+        Case(
+            case_id="named_numeric_types_preserved",
+            description="named tool choice keeps negative float and large integer typed",
+            messages=(
+                {
+                    "role": "user",
+                    "content": "Call calculate_sum with a = -2.5 and b = 1000000007.",
+                },
+            ),
+            tools=(calculate_sum,),
+            tool_choice={"type": "function", "function": {"name": "calculate_sum"}},
+            exact_tool_calls=1,
+            expected_tool_names=("calculate_sum",),
+            expected_arg_values=(
+                ("calculate_sum", "a", -2.5),
+                ("calculate_sum", "b", 1000000007),
+            ),
+        ),
+        # --- Vendor-verifier scenarios (MiniMax parameter-order recall) ---
+        Case(
+            case_id="auto_parameter_order_recall",
+            description="tool parameter order survives rendering and is recalled in text",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Do not call any tool. In plain text, list the parameter names "
+                        "of the register_device tool, comma-separated, in exactly the "
+                        "order they are defined."
+                    ),
+                },
+            ),
+            tools=(register_device,),
+            tool_choice="auto",
+            expected_finish_reasons=("stop",),
+            expect_no_tool_calls=True,
+            min_tool_calls=0,
+            expect_content=True,
+            expected_content_order=("zone", "alias", "firmware", "serial"),
+            validate_schema=False,
+        ),
+        # --- Executed loop with a real tool-result round trip ---
+        Case(
+            case_id="agent_weather_then_final_answer",
+            description="actual loop: one weather call, then a final answer using it",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Use get_weather for London, then tell me the temperature and "
+                        "condition in one sentence."
+                    ),
+                },
+            ),
+            tools=(weather,),
+            tool_choice="auto",
+            expected_finish_reasons=("tool_calls", "stop"),
+            min_tool_calls=0,
+            execute_tools=True,
+            max_agent_turns=3,
+            expected_executed_tool_names=("get_weather",),
+            expected_final_content_fragments=("15", "cloud"),
+            validate_schema=True,
+            max_tokens=2048,
+        ),
+        # --- Typing edge values (fc #268/#269/#319 null, #247 empty strings, #251 enum) ---
+        Case(
+            case_id="named_nullable_argument_json_null",
+            description="named tool choice passes an explicit JSON null for a nullable field",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Call set_reminder with title standup, minutes_from_now 15, "
+                        "and note set to null (no note)."
+                    ),
+                },
+            ),
+            tools=(set_reminder,),
+            tool_choice={"type": "function", "function": {"name": "set_reminder"}},
+            exact_tool_calls=1,
+            expected_tool_names=("set_reminder",),
+            expected_arg_values=(
+                ("set_reminder", "title", "standup"),
+                ("set_reminder", "minutes_from_now", 15),
+                ("set_reminder", "note", None),
+            ),
+        ),
+        Case(
+            case_id="named_falsy_values_preserved",
+            description="named tool choice keeps 0, false, empty string, and enum 0 typed",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Call update_counter with count 0, enabled false, label set to "
+                        "an empty string, and priority 0."
+                    ),
+                },
+            ),
+            tools=(update_counter,),
+            tool_choice={"type": "function", "function": {"name": "update_counter"}},
+            exact_tool_calls=1,
+            expected_tool_names=("update_counter",),
+            expected_arg_values=(
+                ("update_counter", "count", 0),
+                ("update_counter", "enabled", False),
+                ("update_counter", "label", ""),
+                ("update_counter", "priority", 0),
+            ),
+        ),
+        Case(
+            case_id="named_array_of_objects_arguments",
+            description="named tool choice with an array of typed objects",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Call schedule_shifts with two shifts: Ana for 8 hours, not "
+                        "overnight; Bo for 10 hours, overnight."
+                    ),
+                },
+            ),
+            tools=(schedule_shifts,),
+            tool_choice={"type": "function", "function": {"name": "schedule_shifts"}},
+            exact_tool_calls=1,
+            expected_tool_names=("schedule_shifts",),
+            expected_tool_calls=(
+                {
+                    "name": "schedule_shifts",
+                    "arguments": {
+                        "shifts": [
+                            {"worker": "Ana", "hours": 8, "overnight": False},
+                            {"worker": "Bo", "hours": 10, "overnight": True},
+                        ]
+                    },
+                },
+            ),
+        ),
+        # --- Multiplicity and common agent shapes ---
+        Case(
+            case_id="auto_parallel_three_distinct_tools",
+            description="three distinct tools in one response keep unique IDs and names",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Do all three now, in parallel: get the weather in Rome, get "
+                        "the server time, and calculate 12 * 12."
+                    ),
+                },
+            ),
+            tools=(weather, server_time, calculate),
+            tool_choice="auto",
+            parallel_tool_calls=True,
+            min_tool_calls=3,
+            min_distinct_tool_names=3,
+            expected_tool_names=("get_weather", "get_server_time", "calculate"),
+        ),
+        Case(
+            case_id="auto_system_prompt_directs_tool_use",
+            description="a system prompt that mandates tool use yields a call",
+            messages=(
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a travel assistant. Always answer weather questions "
+                        "by calling get_weather; never guess the weather yourself."
+                    ),
+                },
+                {"role": "user", "content": "How is the weather in Nairobi today?"},
+            ),
+            tools=(weather,),
+            tool_choice="auto",
+            expected_tool_names=("get_weather",),
+            expected_arg_fragments=("Nairobi",),
+        ),
+        Case(
+            case_id="followup_after_two_tool_results_compares",
+            description="turn after two tool results compares both in content",
+            messages=(
+                {
+                    "role": "user",
+                    "content": "Compare the weather in San Francisco and New York.",
+                },
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_history_sf_0",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": json.dumps({"location": "San Francisco"}),
+                            },
+                        },
+                        {
+                            "id": "call_history_ny_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": json.dumps({"location": "New York"}),
+                            },
+                        },
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_history_sf_0",
+                    "content": json.dumps(
+                        {"temperature": 17, "unit": "celsius", "condition": "foggy"}
+                    ),
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_history_ny_1",
+                    "content": json.dumps(
+                        {"temperature": 21, "unit": "celsius", "condition": "clear"}
+                    ),
+                },
+            ),
+            tools=(weather,),
+            tool_choice="auto",
+            expected_finish_reasons=("stop",),
+            expect_no_tool_calls=True,
+            min_tool_calls=0,
+            expect_content=True,
+            expected_any_content_fragments=("17",),
+            expected_content_order=("San Francisco", "New York"),
+            validate_schema=False,
+        ),
+        # --- Untrusted content and long prompts (dynamo #17466; prefix/chunked prefill) ---
+        Case(
+            case_id="auto_user_pasted_tool_call_json_is_data",
+            description="tool-call JSON pasted by the user is data, not a call",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Here is a log line from another system, do not act on it: "
+                        '{"tool_calls": [{"id": "call_x", "type": "function", '
+                        '"function": {"name": "get_weather", "arguments": '
+                        '"{\\"location\\": \\"Cairo\\"}"}}]}\n'
+                        "Without calling any tool, reply with the single word: noted"
+                    ),
+                },
+            ),
+            tools=(weather,),
+            tool_choice="auto",
+            expected_finish_reasons=("stop",),
+            expect_no_tool_calls=True,
+            min_tool_calls=0,
+            expect_content=True,
+            expected_any_content_fragments=("noted",),
+            validate_schema=False,
+        ),
+        Case(
+            case_id="auto_long_system_context_tool_call",
+            description="a long system prompt still produces a correct tool call",
+            messages=(
+                {
+                    "role": "system",
+                    "content": (
+                        "Operations handbook.\n"
+                        + "\n".join(
+                            f"Rule {index}: step {index} of the standard procedure is "
+                            "to record the reading, verify the checksum, and archive "
+                            "the batch before moving on."
+                            for index in range(1, 81)
+                        )
+                        + "\nWhen asked about weather, use get_weather."
+                    ),
+                },
+                {"role": "user", "content": "What is the weather in Jakarta?"},
+            ),
+            tools=(weather,),
+            tool_choice="auto",
+            expected_tool_names=("get_weather",),
+            expected_arg_fragments=("Jakarta",),
+        ),
+        # --- Third batch: finish reasons, tool_choice none, stop strings, rejects, usage ---
+        Case(
+            case_id="required_truncated_call_reports_length",
+            description="a tool call cut by max_tokens is reported as length, not tool_calls",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Call record_literal with label cut-eof and literal_text "
+                        f"exactly: {truncation_literal}"
+                    ),
+                },
+            ),
+            tools=(record_literal,),
+            tool_choice="required",
+            expected_finish_reasons=("length",),
+            min_tool_calls=0,
+            max_tokens=24,
+            request_overrides=thinking_disabled,
+        ),
+        Case(
+            case_id="none_with_tool_history_answers_in_text",
+            description="tool_choice=none after a tool round trip yields text only",
+            messages=(
+                *london_weather_history,
+                {
+                    "role": "assistant",
+                    "content": "It is 15 degrees celsius and cloudy in London.",
+                },
+                {"role": "user", "content": "And what about Berlin?"},
+            ),
+            tools=(weather,),
+            tool_choice="none",
+            expected_finish_reasons=("stop",),
+            expect_no_tool_calls=True,
+            min_tool_calls=0,
+            expect_content=True,
+            validate_schema=False,
+        ),
+        Case(
+            case_id="auto_stop_string_does_not_cut_tool_call",
+            description="a client stop string does not truncate or hide a tool call",
+            messages=(
+                {
+                    "role": "user",
+                    "content": "Use the weather tool to get the weather in Madrid.",
+                },
+            ),
+            tools=(weather,),
+            tool_choice="auto",
+            request_overrides={"stop": ["###", "END_OF_TURN"]},
+            exact_tool_calls=1,
+            expected_tool_names=("get_weather",),
+            expected_arg_fragments=("Madrid",),
+        ),
+        Case(
+            case_id="reject_named_tool_choice_not_in_tools",
+            description="a named tool_choice absent from tools is rejected with HTTP 400",
+            messages=({"role": "user", "content": "What is the weather in Rome?"},),
+            tools=(weather,),
+            tool_choice={"type": "function", "function": {"name": "get_forecast"}},
+            expected_http_status=400,
+            expect_no_tool_calls=True,
+            min_tool_calls=0,
+            validate_schema=False,
+        ),
+        Case(
+            case_id="named_optional_argument_omitted_not_null",
+            description="an omitted optional argument is absent, never a null placeholder",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Call get_weather for Reykjavik. Do not pass a unit; leave the "
+                        "unit argument out entirely."
+                    ),
+                },
+            ),
+            tools=(weather,),
+            tool_choice={"type": "function", "function": {"name": "get_weather"}},
+            exact_tool_calls=1,
+            expected_tool_names=("get_weather",),
+            expected_arg_values=(("get_weather", "location", "Reykjavik"),),
+        ),
+        Case(
+            case_id="auto_tool_description_with_markup_is_text",
+            description="marker-like text inside a tool description stays inert",
+            messages=({"role": "user", "content": "Use the weather tool for Lima."},),
+            tools=(markup_description_weather,),
+            tool_choice="auto",
+            exact_tool_calls=1,
+            expected_tool_names=("get_weather",),
+            expected_arg_fragments=("Lima",),
+            forbidden_arg_fragments=("shadow_city",),
+            forbidden_content_fragments=("shadow_city",),
+        ),
+        Case(
+            case_id="plain_usage_counts_consistent",
+            description="usage is reported in both modes and totals add up",
+            messages=(
+                {
+                    "role": "user",
+                    "content": "In one short sentence, what is a tokenizer?",
+                },
+            ),
+            tools=(),
+            tool_choice=None,
+            expected_finish_reasons=("stop",),
+            expect_no_tool_calls=True,
+            min_tool_calls=0,
+            expect_content=True,
+            expect_usage=True,
+            request_overrides={"stream_options": {"include_usage": True}},
+            validate_schema=False,
+        ),
+        # --- Fourth batch: request shapes common in agent traffic ---
+        Case(
+            case_id="auto_many_tools_selects_right_one",
+            description="twenty tool definitions in one request still select the right tool",
+            messages=(
+                {"role": "user", "content": "Use a tool to get the weather in Prague."},
+            ),
+            tools=(*distractor_tools(19), weather),
+            tool_choice="auto",
+            exact_tool_calls=1,
+            expected_tool_names=("get_weather",),
+            expected_arg_fragments=("Prague",),
+        ),
+        Case(
+            case_id="named_tool_without_parameters_key",
+            description="a tool declared without parameters is called with empty arguments",
+            messages=({"role": "user", "content": "Call ping_service exactly once."},),
+            tools=(ping_service,),
+            tool_choice={"type": "function", "function": {"name": "ping_service"}},
+            exact_tool_calls=1,
+            expected_tool_names=("ping_service",),
+            expected_tool_calls=({"name": "ping_service", "arguments": {}},),
+        ),
+        Case(
+            case_id="followup_after_long_tool_result",
+            description="a multi-kilobyte tool result is consumed and fields are quoted back",
+            messages=(
+                {
+                    "role": "user",
+                    "content": "Use the weather tool for London, then tell me the "
+                    "station id and the current condition.",
+                },
+                london_weather_history[1],
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_history_london_0",
+                    "content": json.dumps(
+                        {
+                            "station_id": "LHR-7731",
+                            "current": {
+                                "temperature": 15,
+                                "unit": "celsius",
+                                "condition": "cloudy",
+                            },
+                            "hourly": [
+                                {
+                                    "hour": f"{hour:02d}:00",
+                                    "temperature": 12 + (hour % 7),
+                                    "humidity": 60 + (hour % 11),
+                                    "wind_kph": 8 + (hour % 5),
+                                    "condition": (
+                                        "cloudy" if hour % 3 else "light rain"
+                                    ),
+                                }
+                                for hour in range(48)
+                            ],
+                        }
+                    ),
+                },
+            ),
+            tools=(weather,),
+            tool_choice="auto",
+            expected_finish_reasons=("stop",),
+            expect_no_tool_calls=True,
+            min_tool_calls=0,
+            expect_content=True,
+            expected_any_content_fragments=("LHR-7731",),
+            validate_schema=False,
+        ),
+        Case(
+            case_id="history_three_round_trips_then_answer",
+            description="three consecutive tool round trips end in a clean comparison",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Check the weather in London, Paris, and Rome one at a time, "
+                        "then tell me which is warmest."
+                    ),
+                },
+                *(
+                    message
+                    for index, (city, temperature) in enumerate(
+                        (("London", 15), ("Paris", 18), ("Rome", 24))
+                    )
+                    for message in (
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": f"call_round_{index}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_weather",
+                                        "arguments": json.dumps({"location": city}),
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": f"call_round_{index}",
+                            "content": json.dumps(
+                                {"temperature": temperature, "unit": "celsius"}
+                            ),
+                        },
+                    )
+                ),
+            ),
+            tools=(weather,),
+            tool_choice="auto",
+            expected_finish_reasons=("stop",),
+            expect_no_tool_calls=True,
+            min_tool_calls=0,
+            expect_content=True,
+            expected_any_content_fragments=("Rome",),
+            validate_schema=False,
+        ),
+        Case(
+            case_id="required_max_completion_tokens_alias_truncates",
+            description="max_completion_tokens is honored as the max_tokens alias",
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Call record_literal with label alias-eof and literal_text "
+                        f"exactly: {truncation_literal}"
+                    ),
+                },
+            ),
+            tools=(record_literal,),
+            tool_choice="required",
+            expected_finish_reasons=("length",),
+            min_tool_calls=0,
+            request_overrides={
+                **thinking_disabled,
+                "max_tokens": None,
+                "max_completion_tokens": 24,
+            },
+        ),
+        Case(
+            case_id="followup_tool_result_as_content_parts",
+            description="a tool message whose content is a text-part array is accepted",
+            messages=(
+                *london_weather_history[:2],
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_history_london_0",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    "temperature": 15,
+                                    "unit": "celsius",
+                                    "condition": "cloudy",
+                                }
+                            ),
+                        }
+                    ],
+                },
+            ),
+            tools=(weather,),
+            tool_choice="auto",
+            expected_finish_reasons=("stop",),
+            expect_no_tool_calls=True,
+            min_tool_calls=0,
+            expect_content=True,
+            expected_any_content_fragments=("15", "cloud"),
+            validate_schema=False,
         ),
         Case(
             case_id="gemma_no_arg_named_tool",
@@ -2254,6 +3427,110 @@ def validate_json_schema(
     return problems
 
 
+def find_stringified_scalars(
+    value: Any, schema: dict[str, Any], path: str = "$"
+) -> list[tuple[str, str, str]]:
+    """Find string values standing in for a typed scalar the schema requires.
+
+    A parser that emits ``"3"`` for an integer parameter, or ``"true"`` for a
+    boolean, is a Dynamo typing defect rather than a model mistake. Returns
+    ``(path, expected_type, raw_string)`` for every such value.
+    """
+    findings: list[tuple[str, str, str]] = []
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        if "string" in schema_type:
+            return findings
+        scalar_types = [t for t in schema_type if t in ("integer", "number", "boolean")]
+        schema_type = scalar_types[0] if len(scalar_types) == 1 else None
+    if isinstance(value, str) and schema_type in ("integer", "number", "boolean"):
+        text = value.strip()
+        looks_typed = (
+            (schema_type == "boolean" and text.lower() in ("true", "false"))
+            or (schema_type == "integer" and re.fullmatch(r"[+-]?\d+", text))
+            or (
+                schema_type == "number"
+                and re.fullmatch(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?", text)
+            )
+        )
+        if looks_typed:
+            findings.append((path, schema_type, value))
+        return findings
+    if schema_type == "object" and isinstance(value, dict):
+        for key, subschema in (schema.get("properties") or {}).items():
+            if key in value and isinstance(subschema, dict):
+                findings.extend(
+                    find_stringified_scalars(value[key], subschema, f"{path}.{key}")
+                )
+    if schema_type == "array" and isinstance(value, list):
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for idx, item in enumerate(value):
+                findings.extend(
+                    find_stringified_scalars(item, item_schema, f"{path}[{idx}]")
+                )
+    return findings
+
+
+def history_tool_call_ids(messages: tuple[dict[str, Any], ...]) -> set[str]:
+    """Collect tool-call IDs already used by assistant turns in the request."""
+    ids: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        for tc in message.get("tool_calls") or []:
+            if isinstance(tc, dict) and tc.get("id"):
+                ids.add(str(tc["id"]))
+    return ids
+
+
+def find_tool_call_json_leaks(content: str, tool_names: list[str]) -> list[str]:
+    """Find OpenAI-shaped tool-call JSON for a known tool inside assistant content.
+
+    A parallel call that the streaming jail failed to re-capture surfaces as
+    ``{"name": "get_weather", "arguments": ...}`` text in ``content``.
+    """
+    if not content:
+        return []
+    leaked: list[str] = []
+    for name in tool_names:
+        if re.search(r'"name"\s*:\s*"' + re.escape(name) + r'"', content):
+            leaked.append(name)
+    return leaked
+
+
+def validate_usage(usage: Any) -> list[dict[str, Any]]:
+    """Check the OpenAI usage block is present, integral, and self-consistent."""
+    if not isinstance(usage, dict):
+        return [error("usage_missing", "response has no usage object")]
+    counts: dict[str, int] = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = usage.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return [
+                error(
+                    "usage_inconsistent",
+                    f"usage.{key} is not a non-negative integer: {value!r}",
+                    usage=usage,
+                )
+            ]
+        counts[key] = value
+    problems: list[dict[str, Any]] = []
+    if counts["prompt_tokens"] == 0 or counts["completion_tokens"] == 0:
+        problems.append(
+            error("usage_inconsistent", "usage reports zero tokens", usage=usage)
+        )
+    if counts["total_tokens"] != counts["prompt_tokens"] + counts["completion_tokens"]:
+        problems.append(
+            error(
+                "usage_inconsistent",
+                "usage.total_tokens != prompt_tokens + completion_tokens",
+                usage=usage,
+            )
+        )
+    return problems
+
+
 def type_matches(value: Any, schema_type: str) -> bool:
     if schema_type == "object":
         return isinstance(value, dict)
@@ -2317,6 +3594,10 @@ def _error_failure_category(
             return "dynamo_api"
         if _tool_choice_requires_call(case) and not result.tool_calls:
             return "dynamo_api"
+        if result.finish_reason == "tool_calls":
+            # The frontend synthesizes tool_calls; when the case forbids it
+            # (for example a truncated call), the label is a Dynamo defect.
+            return "dynamo_api"
         return "model_quality"
     if kind == "unexpected_tool_calls":
         return "dynamo_api" if case.tool_choice == "none" else "model_quality"
@@ -2327,13 +3608,55 @@ def _error_failure_category(
     return "unclassified"
 
 
-def classify_failure(
+def _error_failure_subcategory(
+    case: Case, result: ChatResult, finding: dict[str, Any], category: str
+) -> str:
+    """Name the fine-grained failure class of one finding within its category."""
+    kind = str(finding.get("kind") or "")
+    details = finding.get("details") or {}
+
+    if kind == "http_error":
+        status = details.get("status") if isinstance(details, dict) else None
+        if isinstance(status, int) and status in {408, 429}:
+            return "rate_limited"
+        if category == "infrastructure":
+            return "server_error"
+        return "request_validation"
+    if kind == "unexpected_finish_reason":
+        if result.finish_reason is None:
+            return "response_shape"
+        if _tool_choice_requires_call(case) and not result.tool_calls:
+            return "tool_choice_enforcement"
+        if case.tool_choice == "none" and result.tool_calls:
+            return "tool_choice_enforcement"
+        return "finish_reason" if category == "dynamo_api" else "tool_selection"
+    if kind == "unexpected_tool_calls" and category == "dynamo_api":
+        return "tool_choice_enforcement"
+    if "marker_leaked" in kind:
+        return "marker_leak"
+    subcategory = ERROR_KIND_SUBCATEGORIES.get(kind)
+    if subcategory is None:
+        if kind.startswith(("missing_expected_", "too_few_")):
+            return "tool_selection"
+        return "unknown_kind"
+    if subcategory not in FAILURE_SUBCATEGORIES.get(category, ()):
+        # The kind is known but its ownership was overridden above; keep the
+        # record classifiable rather than inventing a cross-category label.
+        return FAILURE_SUBCATEGORIES[category][0]
+    return subcategory
+
+
+def classify_failure_detail(
     case: Case, result: ChatResult, errors: list[dict[str, Any]]
-) -> str | None:
-    """Assign one primary ownership category to a failed request."""
+) -> tuple[str | None, str | None]:
+    """Return the primary (category, subcategory) of a failed request."""
     if not errors:
-        return None
-    categories = {_error_failure_category(case, result, finding) for finding in errors}
+        return None, None
+    classified = [
+        (_error_failure_category(case, result, finding), finding) for finding in errors
+    ]
+    categories = {category for category, _ in classified}
+    primary = "unclassified"
     for category in (
         "infrastructure",
         "dynamo_api",
@@ -2341,8 +3664,24 @@ def classify_failure(
         "model_quality",
     ):
         if category in categories:
-            return category
-    return "unclassified"
+            primary = category
+            break
+    subcategories = {
+        _error_failure_subcategory(case, result, finding, category)
+        for category, finding in classified
+        if category == primary
+    }
+    for subcategory in FAILURE_SUBCATEGORIES[primary]:
+        if subcategory in subcategories:
+            return primary, subcategory
+    return primary, FAILURE_SUBCATEGORIES[primary][-1]
+
+
+def classify_failure(
+    case: Case, result: ChatResult, errors: list[dict[str, Any]]
+) -> str | None:
+    """Assign one primary ownership category to a failed request."""
+    return classify_failure_detail(case, result, errors)[0]
 
 
 def normalize_tool_call(tc: Any) -> dict[str, Any]:
@@ -2389,6 +3728,10 @@ def build_payload(
         payload["parallel_tool_calls"] = case.parallel_tool_calls
     if case.request_overrides:
         payload.update(case.request_overrides)
+    # An override of max_tokens=None removes the default so an alias such as
+    # max_completion_tokens is the only budget the request carries.
+    if "max_tokens" in payload and payload["max_tokens"] is None:
+        del payload["max_tokens"]
     return payload
 
 
@@ -2550,6 +3893,8 @@ def request_stream(
                 continue
 
             raw_chunks.append(chunk)
+            if isinstance(chunk.get("usage"), dict):
+                result.usage = chunk["usage"]
             result.response_id = result.response_id or str(chunk.get("id") or "")
             result.model = result.model or str(chunk.get("model") or "")
             result.created = result.created or chunk.get("created")
@@ -3038,14 +4383,47 @@ def validate_result(
         decoded_calls.append((name, args))
 
         if case.validate_schema and name in schemas:
+            stringified = find_stringified_scalars(args, schemas[name])
+            stringified_paths = {path for path, _, _ in stringified}
+            for path, expected_type, raw in stringified:
+                errors.append(
+                    error(
+                        "argument_stringified_scalar",
+                        f"{path}: expected {expected_type}, got string {raw!r}",
+                        tool_name=name,
+                        expected_type=expected_type,
+                    )
+                )
             schema_errors = validate_json_schema(args, schemas[name])
             for schema_error in schema_errors:
+                problem_path = schema_error.split(":", 1)[0]
+                if problem_path in stringified_paths:
+                    continue
                 errors.append(error("schema_validation", schema_error, tool_name=name))
 
     nonempty_ids = [tc_id for tc_id in ids if tc_id]
     if len(nonempty_ids) != len(set(nonempty_ids)):
         errors.append(
             error("duplicate_tool_ids", "tool call IDs are not unique", ids=ids)
+        )
+    reused_ids = sorted(set(nonempty_ids) & history_tool_call_ids(case.messages))
+    if reused_ids:
+        errors.append(
+            error(
+                "tool_id_reused_from_history",
+                "tool call IDs repeat IDs already used earlier in the conversation",
+                ids=reused_ids,
+            )
+        )
+
+    leaked_names = find_tool_call_json_leaks(result.content or "", sorted(schemas))
+    if leaked_names:
+        errors.append(
+            error(
+                "tool_call_json_leaked_to_content",
+                "assistant content contains tool-call JSON for a known tool",
+                tool_names=leaked_names,
+            )
         )
 
     expected_counter = Counter(case.expected_tool_names)
@@ -3243,6 +4621,26 @@ def validate_result(
             )
         )
 
+    if case.expected_content_order:
+        normalized_content = normalize_content_for_match(result.content or "")
+        positions = [
+            normalized_content.find(normalize_content_for_match(fragment))
+            for fragment in case.expected_content_order
+        ]
+        if any(position < 0 for position in positions) or positions != sorted(
+            positions
+        ):
+            errors.append(
+                error(
+                    "content_order_mismatch",
+                    (
+                        "expected content to mention "
+                        f"{list(case.expected_content_order)!r} in this order"
+                    ),
+                    positions=positions,
+                )
+            )
+
     if case.expected_any_content_fragments:
         normalized_content = normalize_content_for_match(result.content or "")
         if not any(
@@ -3276,6 +4674,42 @@ def validate_result(
                     "context_leak_to_reasoning",
                     f"forbidden context fragment {fragment!r} appeared in reasoning_content",
                     forbidden_fragment=fragment,
+                )
+            )
+
+    # A response with neither content nor tool calls is never a valid final
+    # turn. Reasoning-only output means the answer was routed into the thinking
+    # channel (MiniMax verifier: Error-Only-Reasoning); an entirely empty
+    # message with no truncation means the frontend dropped the model output.
+    if not result.tool_calls and not (result.content or "").strip():
+        if (result.reasoning_content or "").strip():
+            if result.finish_reason != "length":
+                errors.append(
+                    error(
+                        "reasoning_only_response",
+                        "response carries reasoning but no content and no tool calls",
+                    )
+                )
+        elif result.finish_reason != "length" and not result.parse_errors:
+            errors.append(
+                error(
+                    "empty_response",
+                    (
+                        "response has no content, reasoning, or tool calls "
+                        f"(finish_reason={result.finish_reason!r})"
+                    ),
+                )
+            )
+
+    if case.expect_usage:
+        errors.extend(validate_usage(result.usage))
+
+    for marker in RAW_REASONING_MARKERS:
+        if marker in (result.content or ""):
+            errors.append(
+                error(
+                    "reasoning_marker_leaked_to_content",
+                    f"content contains reasoning marker {marker!r}",
                 )
             )
 
@@ -3517,6 +4951,8 @@ def run_scripted_followup_case(
         "mode": mode,
         "pass": passed,
         "failure_category": classify_failure(case, final_result, errors),
+        "failure_subcategory": classify_failure_detail(case, final_result, errors)[1],
+        "failure_kinds": sorted({str(item.get("kind")) for item in errors}),
         "errors": errors,
         "warnings": warnings,
         "scripted_followup": True,
@@ -3744,6 +5180,8 @@ def run_agent_case(
         "mode": mode,
         "pass": passed,
         "failure_category": classify_failure(case, final_result, errors),
+        "failure_subcategory": classify_failure_detail(case, final_result, errors)[1],
+        "failure_kinds": sorted({str(item.get("kind")) for item in errors}),
         "errors": errors,
         "warnings": warnings,
         "agent_loop": True,
@@ -3877,20 +5315,49 @@ def run_case(
                 timeout=timeout,
                 extra_headers=extra_headers,
             )
-        errors, warnings = validate_result(case, result)
+        if case.expected_http_status is not None:
+            # The request was supposed to be rejected. Response-level checks
+            # are meaningless, so report only the contract violation.
+            errors = [
+                error(
+                    "unexpected_http_status",
+                    f"expected HTTP {case.expected_http_status}, got a 200 response",
+                    expected_status=case.expected_http_status,
+                    status=200,
+                )
+            ]
+            warnings = []
+        else:
+            errors, warnings = validate_result(case, result)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         result = ChatResult(
             latency_ms=0.0, raw_response={"status": exc.code, "body": body}
         )
-        errors = [
-            error(
-                "http_error",
-                f"HTTP {exc.code}: {exc.reason}",
-                status=exc.code,
-                body=body[:raw_chars],
-            )
-        ]
+        if case.expected_http_status == exc.code:
+            errors = []
+        elif case.expected_http_status is not None and exc.code < 500:
+            errors = [
+                error(
+                    "unexpected_http_status",
+                    (
+                        f"expected HTTP {case.expected_http_status}, "
+                        f"got HTTP {exc.code}: {exc.reason}"
+                    ),
+                    expected_status=case.expected_http_status,
+                    status=exc.code,
+                    body=body[:raw_chars],
+                )
+            ]
+        else:
+            errors = [
+                error(
+                    "http_error",
+                    f"HTTP {exc.code}: {exc.reason}",
+                    status=exc.code,
+                    body=body[:raw_chars],
+                )
+            ]
         warnings = []
     except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
         result = ChatResult(latency_ms=0.0, raw_response={"error": repr(exc)})
@@ -3908,6 +5375,9 @@ def run_case(
         warnings = []
 
     passed = not errors
+    failure_category, failure_subcategory = classify_failure_detail(
+        case, result, errors
+    )
     record: dict[str, Any] = {
         "timestamp": started,
         "iteration": iteration,
@@ -3915,7 +5385,9 @@ def run_case(
         "description": case.description,
         "mode": mode,
         "pass": passed,
-        "failure_category": classify_failure(case, result, errors),
+        "failure_category": failure_category,
+        "failure_subcategory": failure_subcategory,
+        "failure_kinds": sorted({str(item.get("kind")) for item in errors}),
         "errors": errors,
         "warnings": warnings,
         "response": {
