@@ -191,18 +191,21 @@ func (w *workerControlFixture) RoundTrip(request *http.Request) (*http.Response,
 	if uid, found := w.podUIDs[rank]; found {
 		podUID = uid
 	}
-	status := workerStatus{
-		PodUID:   podUID,
-		MemberID: domain.NativeMemberID(fmt.Sprintf("dp-%d", rank)), Binding: &binding,
-		ListenerReady: true, Verified: !w.failProbe,
-		Admitted:           w.registered[rank] && !w.failProbe,
-		InstanceID:         native.InstanceID,
-		Retired:            native.Phase == PhaseCompleted && native.TopologyKnown && rank >= native.EffectiveDataParallelSize,
-		Withdrawn:          !w.registered[rank] && !w.withdrawalPending && !w.pendingWithdrawals[rank],
-		NativeDrainEnabled: !w.drainDisabled,
+	retired := native.Phase == PhaseCompleted && native.TopologyKnown && rank >= native.EffectiveDataParallelSize
+	status := map[string]any{
+		"pod_uid":              podUID,
+		"member_ids":           []string{fmt.Sprintf("dp-%d", rank)},
+		"binding":              &binding,
+		"listener_ready":       true,
+		"verified":             !w.failProbe,
+		"admitted":             w.registered[rank] && !w.failProbe,
+		"instance_id":          native.InstanceID,
+		"retired":              retired,
+		"withdrawn":            !w.registered[rank] && !w.withdrawalPending && !w.pendingWithdrawals[rank],
+		"native_drain_enabled": !w.drainDisabled,
 	}
-	if status.Retired {
-		status.Binding, status.Verified = nil, false
+	if retired {
+		status["binding"], status["verified"] = nil, false
 	}
 	payload, err := json.Marshal(status)
 	if err != nil {
