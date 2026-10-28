@@ -40,6 +40,7 @@ from dynamo.sglang.engine_generate import (
     native_generate_stream,
     new_sglang_request_id,
 )
+from dynamo.sglang.kv_hints import kv_hint_kwargs
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
@@ -656,6 +657,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prefill_dp_rank=routing.get("prefill_dp_rank"),
             lora_path=self._resolve_lora(request),
             cache_salt=request_cache_salt(request),
+            kv_hint=request.get("kv_hint"),
         )
         return native_generate_stream(self.engine, native_request)
 
@@ -821,6 +823,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **logprob_kwargs,
                 **priority_kwargs,
                 **agent_session_kwargs(self.engine, request),
+                **kv_hint_kwargs(self.engine, request),
             )
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
@@ -923,6 +926,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **logprob_kwargs,
                 **priority_kwargs,
                 **agent_session_kwargs(self.engine, request),
+                **kv_hint_kwargs(self.engine, request),
             )
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(

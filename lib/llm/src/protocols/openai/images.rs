@@ -20,8 +20,8 @@ pub use nvext::{ImageAccounting, ImagesResponseNvExt, NvExt};
 pub struct NvCreateImageRequest {
     pub inner: dynamo_protocols::types::CreateImageRequest,
 
-    /// Optional image reference that guides generation (for I2I/TI2I).
-    pub input_reference: Option<String>,
+    /// Ordered edit references. A singleton retains the legacy string wire form.
+    pub input_reference: Option<Vec<String>>,
 
     pub nvext: Option<NvExt>,
 
@@ -48,14 +48,40 @@ impl NvCreateImageRequest {
 }
 
 impl<'de> Deserialize<'de> for NvCreateImageRequest {
+    /// Normalize scalar or array references while separating typed and passthrough fields.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let mut body = serde_json::Map::deserialize(deserializer)?;
         let input_reference = match body.remove("input_reference") {
-            Some(value) => serde_json::from_value(value).map_err(serde::de::Error::custom)?,
-            None => None,
+            Some(serde_json::Value::Null) | None => None,
+            Some(value) => {
+                #[derive(Deserialize)]
+                #[serde(untagged)]
+                enum References {
+                    One(String),
+                    Many(Vec<String>),
+                }
+                let references = match serde_json::from_value(value).map_err(|_| {
+                    serde::de::Error::custom(
+                        "input_reference must be a string or an array of strings",
+                    )
+                })? {
+                    References::One(reference) => vec![reference],
+                    References::Many(references) => references,
+                };
+                if references.is_empty()
+                    || references
+                        .iter()
+                        .any(|reference| reference.trim().is_empty())
+                {
+                    return Err(serde::de::Error::custom(
+                        "input_reference must contain non-empty references",
+                    ));
+                }
+                Some(references)
+            }
         };
         let nvext = match body.remove("nvext") {
             Some(value) => serde_json::from_value(value).map_err(serde::de::Error::custom)?,
@@ -83,6 +109,7 @@ impl<'de> Deserialize<'de> for NvCreateImageRequest {
 }
 
 impl Serialize for NvCreateImageRequest {
+    /// Borrow ordered references and emit singletons in the N-2-compatible string form.
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -99,12 +126,6 @@ impl Serialize for NvCreateImageRequest {
         for (key, value) in &self.passthrough {
             body.entry(key.clone()).or_insert_with(|| value.clone());
         }
-        if let Some(input_reference) = &self.input_reference {
-            body.insert(
-                "input_reference".to_string(),
-                serde_json::Value::String(input_reference.clone()),
-            );
-        }
         if let Some(nvext) = &self.nvext {
             body.insert(
                 "nvext".to_string(),
@@ -117,7 +138,30 @@ impl Serialize for NvCreateImageRequest {
                 serde_json::Value::Object(extra_args.clone()),
             );
         }
-        body.serialize(serializer)
+        use serde::ser::SerializeMap;
+        if self.input_reference.is_some() {
+            body.remove("input_reference");
+        }
+        let mut map = serializer.serialize_map(Some(
+            body.len() + usize::from(self.input_reference.is_some()),
+        ))?;
+        for (key, value) in &body {
+            map.serialize_entry(key, value)?;
+        }
+        // Borrow the inline payloads: a budget check must not clone every image.
+        // Singletons keep the legacy wire form; old readers reject arrays.
+        if let Some(references) = &self.input_reference {
+            match references.as_slice() {
+                [] => {
+                    return Err(serde::ser::Error::custom(
+                        "input_reference must not be empty",
+                    ));
+                }
+                [reference] => map.serialize_entry("input_reference", reference)?,
+                references => map.serialize_entry("input_reference", references)?,
+            }
+        }
+        map.end()
     }
 }
 
@@ -186,6 +230,57 @@ mod tests {
     use super::*;
 
     // --- NvCreateImageRequest ---
+    /// Legacy readers must accept singletons and reject arrays instead of losing inputs.
+    #[test]
+    fn image_references_preserve_order_and_legacy_singleton_wire_shape() {
+        #[derive(Deserialize)]
+        struct LegacyImageRequest {
+            input_reference: Option<String>,
+        }
+        for value in [serde_json::json!("first"), serde_json::json!(["first"])] {
+            let request: NvCreateImageRequest = serde_json::from_value(
+                serde_json::json!({"prompt":"edit", "input_reference":value}),
+            )
+            .unwrap();
+            assert_eq!(request.input_reference, Some(vec!["first".to_string()]));
+            let wire = serde_json::to_value(&request).unwrap();
+            assert_eq!(wire["input_reference"], "first");
+            assert_eq!(
+                serde_json::from_value::<LegacyImageRequest>(wire)
+                    .unwrap()
+                    .input_reference
+                    .as_deref(),
+                Some("first")
+            );
+        }
+        let request: NvCreateImageRequest = serde_json::from_value(
+            serde_json::json!({"prompt":"edit", "input_reference":["first", "second"]}),
+        )
+        .unwrap();
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            wire["input_reference"],
+            serde_json::json!(["first", "second"])
+        );
+        assert!(serde_json::from_value::<LegacyImageRequest>(wire).is_err());
+    }
+
+    /// Wire-validation errors must not disclose the submitted reference contents.
+    #[test]
+    fn image_references_reject_empty_or_invalid_values_without_echoing_input() {
+        for value in [
+            serde_json::json!([]),
+            serde_json::json!(" "),
+            serde_json::json!(["first", null]),
+            serde_json::json!({"private":"signed-url"}),
+        ] {
+            let error = serde_json::from_value::<NvCreateImageRequest>(
+                serde_json::json!({"prompt":"edit", "input_reference":value}),
+            )
+            .unwrap_err();
+            assert!(!error.to_string().contains("signed-url"));
+        }
+    }
 
     #[test]
     fn image_request_captures_unknown_top_level_fields() {
@@ -212,12 +307,16 @@ mod tests {
         assert!(serde_json::from_str::<NvCreateImageRequest>(json).is_err());
     }
 
+    /// Known request fields must not be forwarded a second time as backend extras.
     #[test]
     fn image_request_typed_fields_stay_out_of_passthrough() {
         let json = r#"{"prompt":"a cat","n":2,"input_reference":"ref.png","nvext":{"seed":7},"custom_knob":1}"#;
         let req: NvCreateImageRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.inner.prompt, "a cat");
-        assert_eq!(req.input_reference.as_deref(), Some("ref.png"));
+        assert_eq!(
+            req.input_reference.as_deref(),
+            Some(["ref.png".to_string()].as_slice())
+        );
         assert_eq!(req.nvext.as_ref().and_then(|n| n.seed), Some(7));
         assert_eq!(req.passthrough["custom_knob"], serde_json::json!(1));
         for consumed in ["prompt", "n", "input_reference", "nvext"] {
