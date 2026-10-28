@@ -32,7 +32,7 @@ pub(crate) async fn relay(
         "Telemetry-only sidecars cannot register encoder or RL routes"
     );
     let transport = args.sidecar.grpc.config();
-    let supervision = RoutingSupervision::default();
+    let supervision = RoutingSupervision::PRODUCTION;
     let initialization = async {
         let client = TrtllmClient::connect(&args.sidecar.grpc_endpoint, transport).await?;
         let info = client

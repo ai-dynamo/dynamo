@@ -33,7 +33,7 @@ const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_INITIAL_LOAD_AGE: Duration = Duration::from_secs(5);
 const METRICS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Routing health limits; `Default` holds the production values.
+/// Routing health limits.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RoutingSupervision {
     pub(crate) metadata_poll_interval: Duration,
@@ -43,13 +43,24 @@ pub(crate) struct RoutingSupervision {
     pub(crate) load_staleness_limit: Duration,
 }
 
+impl RoutingSupervision {
+    pub(crate) const PRODUCTION: Self = Self {
+        metadata_poll_interval: Duration::from_secs(5),
+        metadata_poll_timeout: Duration::from_secs(5),
+        metadata_recovery_limit: Duration::from_secs(30),
+        load_staleness_limit: Duration::from_secs(30),
+    };
+}
+
+/// Short limits so failure-path tests do not wait out [`RoutingSupervision::PRODUCTION`].
+#[cfg(test)]
 impl Default for RoutingSupervision {
     fn default() -> Self {
         Self {
-            metadata_poll_interval: Duration::from_secs(5),
+            metadata_poll_interval: Duration::from_millis(25),
             metadata_poll_timeout: Duration::from_secs(5),
-            metadata_recovery_limit: Duration::from_secs(30),
-            load_staleness_limit: Duration::from_secs(30),
+            metadata_recovery_limit: Duration::from_secs(1),
+            load_staleness_limit: Duration::from_millis(500),
         }
     }
 }
@@ -103,7 +114,7 @@ impl TrtllmSidecarEngine {
             connection: OnceCell::new(),
             started: OnceCell::new(),
             routing: OnceCell::new(),
-            supervision: RoutingSupervision::default(),
+            supervision: RoutingSupervision::PRODUCTION,
             metrics_task: Arc::new(Mutex::new(None)),
             cancel: CancellationToken::new(),
             load_failed: CancellationToken::new(),

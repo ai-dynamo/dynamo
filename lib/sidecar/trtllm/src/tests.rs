@@ -22,7 +22,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
 use crate::client::TrtllmClient;
-use crate::engine::TrtllmSidecarEngine;
+use crate::engine::{RoutingSupervision, TrtllmSidecarEngine};
 use crate::model::ConfiguredModel;
 use crate::proto as pb;
 
@@ -528,6 +528,7 @@ fn engine_with_kv_routing(endpoint: &str) -> TrtllmSidecarEngine {
         },
         AGG,
     )
+    .with_supervision(RoutingSupervision::default())
 }
 
 async fn collect(

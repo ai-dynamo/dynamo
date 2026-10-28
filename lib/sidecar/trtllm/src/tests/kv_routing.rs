@@ -5,7 +5,6 @@
 
 use super::*;
 use crate::convert::build_generate_request;
-use crate::engine::RoutingSupervision;
 
 #[tokio::test]
 async fn sidecar_signs_parent_context_affinity_without_replacing_child() {
@@ -235,10 +234,7 @@ async fn stale_load_withdraws_worker_without_node_metadata() {
     let service = FakeTrtllm::default();
     service.kv_routing.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service.clone()).await;
-    let engine = engine_with_kv_routing(&server.endpoint).with_supervision(RoutingSupervision {
-        load_staleness_limit: Duration::from_millis(500),
-        ..Default::default()
-    });
+    let engine = engine_with_kv_routing(&server.endpoint);
     engine.start(0).await.expect("start with KV routing");
 
     let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
@@ -364,15 +360,11 @@ async fn leader_monitor_rejects_restarted_native_engine() {
         source_owners: [(0, "leader".into())].into(),
     });
     let server = FakeServer::start(service.clone()).await;
-    // A poll may run until the recovery deadline, so a metadata RPC that times
+    // The poll timeout outlasts the recovery limit, so a metadata RPC that times
     // out withdraws the worker instead of passing as a handled status.
-    let supervision = RoutingSupervision {
-        metadata_poll_interval: Duration::from_millis(25),
-        metadata_poll_timeout: Duration::from_secs(5),
-        metadata_recovery_limit: Duration::from_secs(1),
-        ..Default::default()
-    };
-    let engine = engine_with_kv_routing(&server.endpoint).with_supervision(supervision);
+    let supervision = RoutingSupervision::default();
+    assert!(supervision.metadata_poll_timeout > supervision.metadata_recovery_limit);
+    let engine = engine_with_kv_routing(&server.endpoint);
     engine.start(0).await.expect("start original engine");
     let errors = || service.metadata_errors_served.load(Ordering::SeqCst);
     let healthy_polls = || service.kv_sources_served.load(Ordering::SeqCst);
@@ -492,11 +484,7 @@ async fn sustained_metadata_outage_withdraws_worker() {
         source_owners: [(0, "leader".into())].into(),
     });
     let server = FakeServer::start(service.clone()).await;
-    let engine = engine_with_kv_routing(&server.endpoint).with_supervision(RoutingSupervision {
-        metadata_poll_interval: Duration::from_millis(50),
-        metadata_recovery_limit: Duration::from_millis(300),
-        ..Default::default()
-    });
+    let engine = engine_with_kv_routing(&server.endpoint);
     engine.start(0).await.expect("start original engine");
     *service.kv_sources_error.lock().await = Some(tonic::Code::ResourceExhausted);
     let error = tokio::time::timeout(Duration::from_secs(5), engine.monitor_routing())
