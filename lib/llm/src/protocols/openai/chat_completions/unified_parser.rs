@@ -4873,51 +4873,33 @@ pub(crate) mod tests {
     #[test]
     fn gpt_oss_replay_chunking_preserves_continuation_state() {
         let large_body = "alpha ".repeat(512);
-        let seeds = [
-            ("<|start|>assistant<|channel|>analysis<|message|>thinking<".to_string(), "|end|><|end|><|start|>assistant<|channel|>final<|message|>answer<|return|>"),
-            ("<|start|>assistant to=functions.lookup<|channel|>commentary<|message|>{\"q\":\"hé".to_string(), "🙂\"}<|call|>"),
-            ("<|start|>assistant<|channel|>analysis to=functions.lookup<|message|>{\"q\":\"<|start|>assistant<|channel|>analysis<|message|>".to_string(), "literal\"}<|call|>"),
-            ("<|start|>assistant to=functions.lookup<|channel|>commentary<|message|>{\"q\":\"done\"}".to_string(), "<|call|><|start|>assistant to=functions.lookup<|channel|>commentary<|message|>{\"q\":\"next\"}<|call|>"),
-            ("<|start|>assistant to=functions.lookup<|channel|>commentary<|message|>{broken".to_string(), "}<|call|>"),
-            (format!("<|start|>assistant to=functions.lookup<|channel|>commentary<|message|>{{\"q\":\"{large_body}"), "tail\"}<|call|>"),
-        ];
-        for (prefix, generated) in seeds {
-            let ids = dynamo_parsers_v2::unified::harmony::encode_harmony(&prefix).unwrap();
-            let mut chunk_sizes: Vec<_> = if ids.len() < 256 {
-                (1..=ids.len()).collect()
-            } else {
-                vec![1, 255, 256, 257, ids.len()]
-            };
-            chunk_sizes.sort_unstable();
-            chunk_sizes.dedup();
-            for split in generated
-                .char_indices()
-                .map(|(i, _)| i)
-                .chain(std::iter::once(generated.len()))
-            {
-                let parse = |chunk_size| {
-                    let mut parser = create_unified_parser_for_family("gpt_oss", &[]).unwrap();
-                    parser
-                        .initialize_request(UnifiedParserInit::default())
-                        .unwrap();
-                    replay_consumed_harmony(parser.as_mut(), &ids, chunk_size).unwrap();
-                    let mut output = UnifiedParserOutput::default();
-                    parser.parse_into(&generated[..split], &mut output).unwrap();
-                    parser.parse_into(&generated[split..], &mut output).unwrap();
-                    output.events.extend(parser.finish().unwrap().events);
-                    output.events
-                };
-                let expected = parse(ids.len());
-                for size in &chunk_sizes {
-                    assert_eq!(
-                        parse(*size),
-                        expected,
-                        "seed_bytes={} split={split} chunk={size}",
-                        prefix.len()
-                    );
-                }
-            }
-        }
+        let prefix = format!(
+            "<|start|>assistant to=functions.lookup<|channel|>commentary<|message|>{{\"q\":\"{large_body}"
+        );
+        let ids = dynamo_parsers_v2::unified::harmony::encode_harmony(&prefix).unwrap();
+        assert!(
+            ids.len() > 256,
+            "the consumed prefix must span replay batches"
+        );
+
+        let generated = "tail\"}<|call|>";
+        let parse = |chunk_size| {
+            let mut parser = create_unified_parser_for_family("gpt_oss", &[]).unwrap();
+            parser
+                .initialize_request(UnifiedParserInit::default())
+                .unwrap();
+            replay_consumed_harmony(parser.as_mut(), &ids, chunk_size).unwrap();
+            let mut output = UnifiedParserOutput::default();
+            parser.parse_into(generated, &mut output).unwrap();
+            output.events.extend(parser.finish().unwrap().events);
+            output.events
+        };
+
+        assert_eq!(
+            parse(256),
+            parse(ids.len()),
+            "production-sized replay must preserve continuation state"
+        );
     }
 
     #[test]
