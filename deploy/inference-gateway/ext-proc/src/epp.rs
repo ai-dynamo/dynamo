@@ -23,6 +23,7 @@ use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
+use dynamo_llm::protocols::openai::responses::NvCreateResponse;
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_protocols::types::Prompt;
@@ -269,14 +270,33 @@ impl Router {
     ///
     /// Returns the routing inputs, including the cache namespace resolved from
     /// the headers and body. Priorities default to zero and constraints default
-    /// to empty when absent. Supports both `/v1/chat/completions` and
-    /// `/v1/completions` bodies, discriminated by a non-empty `messages` array
-    /// (chat) versus a `prompt` (completions).
+    /// to empty when absent. Supports `/v1/chat/completions`, `/v1/completions`
+    /// and `/v1/responses` bodies. The API is chosen by the `:path`
+    /// pseudo-header; when that names no known route, the body is
+    /// discriminated by a non-empty `messages` array (chat) versus a `prompt`
+    /// (completions).
     async fn tokenize(
         &self,
         request_json: &str,
         headers: &[(String, String)],
     ) -> Result<TokenizeResult> {
+        match request_api_from_path(headers) {
+            Some(RequestApi::ChatCompletions) => {
+                let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+                    serde_json::from_str(request_json)?;
+                return self.tokenize_chat(&request, headers);
+            }
+            Some(RequestApi::Completions) => {
+                let request: NvCreateCompletionRequest = serde_json::from_str(request_json)?;
+                return self.tokenize_completion(request, headers).await;
+            }
+            Some(RequestApi::Responses) => {
+                let request = responses_to_chat_request(request_json)?;
+                return self.tokenize_chat(&request, headers);
+            }
+            None => {}
+        }
+
         // Discriminating on a borrowed `Value` costs one scan plus the tree it
         // allocates; `from_value` then consumes that tree rather than re-reading
         // the body.
@@ -293,12 +313,8 @@ impl Router {
         //     160 KB   Value 19.7us  IgnoredAny 28.4us  (probe ~44% worse)
         //
         // Inference bodies skew large, so the crossover lands on the wrong side.
-        // The real fix is not to read the body at all: this is
-        // `/v1/chat/completions` vs `/v1/completions`, and the `:path`
-        // pseudo-header would settle it in O(1) -- `req.headers` is already in
-        // scope at the call site. That needs confirmation that Envoy's ext_proc
-        // delivers pseudo-headers through to `ctx.request_headers` before being
-        // relied on, which is why it is not done here.
+        // The `:path` dispatch above avoids this scan entirely; it remains only
+        // for requests whose path names no known route.
         let value: serde_json::Value = serde_json::from_str(request_json)?;
         let has_messages = value
             .get("messages")
@@ -742,6 +758,42 @@ fn completion_prompt_routing_text(prompt: Prompt) -> String {
 /// 1's tokens to every split of the batch (see [`TokenizeResult`]).
 fn completion_text_tokens_safe_to_inject(prompt: &Prompt) -> bool {
     !matches!(prompt, Prompt::StringArray(texts) if texts.len() > 1)
+}
+
+/// The OpenAI API a request body is shaped for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestApi {
+    ChatCompletions,
+    Completions,
+    Responses,
+}
+
+/// The API named by the request's `:path` pseudo-header, ignoring any query
+/// string. `None` when the header is absent or names no known route.
+fn request_api_from_path(headers: &[(String, String)]) -> Option<RequestApi> {
+    let path = crate::envoy_helpers::find_header(headers, ":path")?;
+    let path = path.split_once('?').map_or(path, |(path, _query)| path);
+    match path {
+        "/v1/chat/completions" => Some(RequestApi::ChatCompletions),
+        "/v1/completions" => Some(RequestApi::Completions),
+        "/v1/responses" => Some(RequestApi::Responses),
+        _ => None,
+    }
+}
+
+/// Convert a `/v1/responses` body to the chat request the Frontend renders
+/// for it: the same `NvCreateResponse` -> chat conversion, then the same
+/// reasoning-control normalization, so the chat template sees identical input.
+fn responses_to_chat_request(
+    request_json: &str,
+) -> Result<dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest> {
+    let request: NvCreateResponse = serde_json::from_str(request_json)?;
+    let mut chat_request =
+        dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest::try_from(
+            request,
+        )?;
+    chat_request.normalize_reasoning_template_args()?;
+    Ok(chat_request)
 }
 
 struct DiscoveredModelBootstrap {
@@ -1979,6 +2031,93 @@ mod tests {
             ext_proc_tokens, chat_tokens,
             "raw completion tokenization must differ from chat-template tokenization"
         );
+    }
+
+    #[test]
+    fn request_api_chosen_by_path() {
+        let path = |p: &str| vec![(":path".to_string(), p.to_string())];
+        assert_eq!(
+            request_api_from_path(&path("/v1/chat/completions")),
+            Some(RequestApi::ChatCompletions)
+        );
+        assert_eq!(
+            request_api_from_path(&path("/v1/completions")),
+            Some(RequestApi::Completions)
+        );
+        assert_eq!(
+            request_api_from_path(&path("/v1/responses")),
+            Some(RequestApi::Responses)
+        );
+        assert_eq!(
+            request_api_from_path(&path("/v1/responses?stream=true")),
+            Some(RequestApi::Responses)
+        );
+        assert_eq!(request_api_from_path(&path("/v1/embeddings")), None);
+        assert_eq!(request_api_from_path(&[]), None);
+    }
+
+    /// A `/v1/responses` body has `input`, not `messages` or `prompt`, so it
+    /// does not parse as chat. Routed by path, it is converted the way the
+    /// Frontend converts it, and its chat-template tokens match those of the
+    /// equivalent chat request.
+    #[test]
+    fn responses_tokens_match_equivalent_chat_request() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../lib/llm/tests/data/sample-models/TinyLlama_v1.1"
+            ),
+            None,
+        )
+        .expect("load fixture model card");
+        let preprocessor =
+            OpenAIPreprocessor::new(mdc).expect("build preprocessor from fixture card");
+        let template_tokens = |request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest| {
+            let rendered = preprocessor
+                .apply_template(request)
+                .expect("apply_template")
+                .expect("fixture model has a chat template");
+            preprocessor
+                .tokenize_rendered_prompt(&rendered)
+                .expect("tokenize rendered prompt")
+                .token_ids()
+                .to_vec()
+        };
+
+        for stream in [false, true] {
+            let responses_body = serde_json::json!({
+                "model": "default",
+                "instructions": "You are terse.",
+                "input": "The capital of France is",
+                "stream": stream,
+            })
+            .to_string();
+            assert!(
+                serde_json::from_str::<
+                    dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+                >(&responses_body)
+                .is_err(),
+                "a Responses body must not parse as chat"
+            );
+
+            let responses_tokens =
+                template_tokens(&responses_to_chat_request(&responses_body).unwrap());
+
+            let chat_request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "default",
+                    "messages": [
+                        {"role": "system", "content": "You are terse."},
+                        {"role": "user", "content": "The capital of France is"},
+                    ],
+                    "stream": stream,
+                }))
+                .unwrap();
+            let chat_tokens = template_tokens(&chat_request);
+
+            assert!(!responses_tokens.is_empty());
+            assert_eq!(responses_tokens, chat_tokens);
+        }
     }
 
     /// A multi-prompt text batch routes on prompt 1's tokens, but those
