@@ -422,6 +422,10 @@ markers = [
 line-length = 88
 indent-width = 4
 
+[tool.ruff.lint]
+# The rules that ruff 0.5.2 enabled by default. Newer ruff enables many more by default.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.ruff.lint.extend-per-file-ignores]
 "icp/tests/**/test_*.py" = ["F811", "F401"]
 "*_inc.py" = ["F821"]
