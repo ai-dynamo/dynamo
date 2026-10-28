@@ -14,7 +14,6 @@ Hardware-specific deployment templates for Intel GPUs, with Kubernetes Dynamic R
 | `agg_xpu_dra.yaml` | Aggregated | Single worker with XPU target |
 | `agg_router_xpu_dra.yaml` | Aggregated + KV Router | Two workers behind the KV router |
 | `disagg_xpu_dra.yaml` | Disaggregated | Separate prefill and decode workers with NIXL |
-| `disagg_planner_xpu_dra.yaml` | Disaggregated + Planner | Dynamo Planner for throughput scaling |
 | `disagg_xpu.yaml` | Disaggregated (Device Plugin) | Device plugin resource `gpu.intel.com/xe` |
 
 ## Prerequisites
@@ -26,16 +25,6 @@ python3 container/render.py --framework=sglang --device=xpu --target=runtime
 docker build -t my-registry/sglang-runtime-xpu:my-tag \
   -f container/sglang-runtime-xpu-amd64-rendered.Dockerfile .
 ```
-
-For `disagg_planner_xpu_dra.yaml`, also build the Planner image:
-
-```bash
-python3 container/render.py --framework=dynamo --target=planner
-docker build -t my-registry/dynamo-planner:my-tag \
-  -f container/dynamo-planner-cuda13.0-amd64-rendered.Dockerfile .
-```
-
-The Planner template uses `optimization_target: sla` and requires Prometheus. Install `kube-prometheus-stack` as described in the [Dynamo Platform installation guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/install-dynamo.md). Planner uses `http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090` by default. If your Prometheus service uses a different address, set `PROMETHEUS_ENDPOINT` in the Planner container.
 
 The manifests use placeholder images (`my-registry/...:my-tag`) and `imagePullPolicy: IfNotPresent`. Replace `my-registry` and `my-tag` in each manifest with your image, then load it on every eligible Kubernetes node or push it to a registry. The operator reads the Dynamo version from the image tag, so the manifests set no `runtimeVersionOverride`. Use a tag that holds the Dynamo version you built, such as `1.7.0`. If the tag has no version, such as `my-tag` or `latest`, the admission webhook rejects the manifest and asks for `runtimeVersionOverride`.
 
@@ -74,9 +63,7 @@ The files ending in `_dra.yaml` require:
 > [!NOTE]
 > Do not hardcode `ZE_AFFINITY_MASK` in these examples. DRA or the Intel device plugin selects the allocated device.
 
-`agg_router_xpu_dra.yaml` starts two workers and requires two GPUs. `disagg_planner_xpu_dra.yaml` starts two decode workers and one prefill worker and requires three GPUs.
-
-The Planner template sets `pre_deployment_sweeping_mode` to `none`, so it ships no profile data, and `max_gpu_budget` to 3 to match the three GPUs above. The XPU SGLang build does not publish live forward pass metrics, so the Planner has no live latency data from these workers.
+`agg_router_xpu_dra.yaml` starts two workers and requires two GPUs.
 
 ## Deploy
 

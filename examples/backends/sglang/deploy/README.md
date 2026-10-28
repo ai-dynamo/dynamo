@@ -41,7 +41,6 @@ Hardware-specific deployment templates for Intel GPUs using Kubernetes Dynamic R
 - `agg_xpu_dra.yaml`: Aggregated deployment with DRA
 - `agg_router_xpu_dra.yaml`: Aggregated deployment with the KV router and DRA
 - `disagg_xpu_dra.yaml`: Disaggregated deployment with DRA
-- `disagg_planner_xpu_dra.yaml`: Disaggregated + Planner with DRA
 - `disagg_xpu.yaml`: Disaggregated deployment using traditional device plugin (non-DRA)
 
 See the [XPU deployment README](./xpu/README.md) for detailed prerequisites and usage instructions.
