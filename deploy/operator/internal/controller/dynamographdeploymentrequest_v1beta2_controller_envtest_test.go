@@ -26,6 +26,7 @@ import (
 
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -47,6 +48,7 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 	env.StartManager(func(mgr ctrl.Manager) error {
 		return (&DynamoGraphDeploymentRequestV1beta2Reconciler{
 			Client:        mgr.GetClient(),
+			APIReader:     mgr.GetAPIReader(),
 			Config:        env.OperatorConfig(),
 			RuntimeConfig: env.RuntimeConfig(),
 		}).SetupWithManager(mgr)
@@ -99,33 +101,36 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(input).To(HaveKey("search_space"))
 
-	t.Log("Editing the Request while its Run is active is reported and starts nothing")
+	t.Log("Editing the Request foreground-cancels the active Run")
 	g.Eventually(func(g Gomega) {
 		live := getRequest(g)
 		live.Spec.Model.Name = "Qwen/Qwen3-30B-A3B"
 		g.Expect(c.Update(ctx, live)).To(Succeed())
 	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
 	g.Eventually(func(g Gomega) {
+		terminating := getRun(g, firstName)
+		g.Expect(terminating.DeletionTimestamp).NotTo(BeNil())
 		live := getRequest(g)
 		condition := accepted(live)
 		g.Expect(condition).NotTo(BeNil())
 		g.Expect(condition.Status).To(Equal(metav1.ConditionFalse))
-		g.Expect(condition.Reason).To(Equal(dgdrReasonWaitingForActiveRun))
-		g.Expect(condition.ObservedGeneration).To(Equal(live.Generation))
+		g.Expect(condition.Reason).To(Equal(dgdrReasonCancelingStaleRun))
+		g.Expect(live.Status.ActiveRunRef).NotTo(BeNil())
+		g.Expect(live.Status.ActiveRunRef.Name).To(Equal(firstName))
 	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
 
-	t.Log("Only the Run status update wakes the Request: Completed releases the next generation")
+	t.Log("Complete foreground deletion; envtest has no garbage-collector controller")
 	g.Eventually(func(g Gomega) {
-		run := getRun(g, firstName)
-		run.Status.Phase = nvidiacomv1beta2.DGDRRunPhase("Succeeded")
-		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:   nvidiacomv1beta2.DGDRRunConditionCompleted,
-			Status: metav1.ConditionTrue,
-			Reason: "Finished",
-		})
-		g.Expect(c.Status().Update(ctx, run)).To(Succeed())
+		terminating := getRun(g, firstName)
+		terminating.Finalizers = nil
+		g.Expect(c.Update(ctx, terminating)).To(Succeed())
+	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
+	g.Eventually(func(g Gomega) {
+		err := c.Get(ctx, types.NamespacedName{Namespace: env.Namespace(), Name: firstName}, &nvidiacomv1beta2.DynamoGraphDeploymentRun{})
+		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "superseded Run lookup returned %v", err)
 	}).WithTimeout(timeout).WithPolling(poll).Should(Succeed())
 
+	t.Log("The completed deletion event wakes the Request and starts only the newest generation")
 	var secondName string
 	var secondUID types.UID
 	g.Eventually(func(g Gomega) {
@@ -134,8 +139,7 @@ func TestDGDRV1beta2ControllerReactsToRequestAndRunEvents(t *testing.T) {
 		g.Expect(live.Status.ActiveRunRef.Name).NotTo(Equal(firstName))
 		g.Expect(live.Status.ObservedGeneration).To(Equal(live.Generation))
 		g.Expect(accepted(live).Status).To(Equal(metav1.ConditionTrue))
-		g.Expect(live.Status.RecentRunRefs).To(HaveLen(1))
-		g.Expect(live.Status.RecentRunRefs[0].Name).To(Equal(firstName))
+		g.Expect(live.Status.RecentRunRefs).To(BeEmpty())
 		second := getRun(g, live.Status.ActiveRunRef.Name)
 		g.Expect(second.Spec.Model.Name).To(Equal("Qwen/Qwen3-30B-A3B"))
 		secondName, secondUID = second.Name, second.UID

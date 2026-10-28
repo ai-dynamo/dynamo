@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -55,10 +56,11 @@ const (
 	// dgdrV1beta2RetainedRuns is how many terminal Runs a Request keeps. Older ones are deleted.
 	dgdrV1beta2RetainedRuns = 5
 
-	dgdrReasonRunCreated          = "RunCreated"
-	dgdrReasonInvalidSpec         = "InvalidSpec"
-	dgdrReasonWaitingForActiveRun = "WaitingForActiveRun"
-	dgdrReasonRunNameConflict     = "RunNameConflict"
+	dgdrReasonRunCreated        = "RunCreated"
+	dgdrReasonRunCreating       = "RunCreating"
+	dgdrReasonCancelingStaleRun = "CancelingSupersededRun"
+	dgdrReasonInvalidSpec       = "InvalidSpec"
+	dgdrReasonRunNameConflict   = "RunNameConflict"
 
 	// dgdrV1beta2MaxRunNameLength is the longest object name Kubernetes accepts.
 	dgdrV1beta2MaxRunNameLength = 253
@@ -72,6 +74,7 @@ const (
 // Request that still lacks it is reported instead of searched for. The Run controller executes the Run.
 type DynamoGraphDeploymentRequestV1beta2Reconciler struct {
 	client.Client
+	APIReader     client.Reader
 	Config        *configv1alpha1.OperatorConfiguration
 	RuntimeConfig *commonController.RuntimeConfig
 }
@@ -128,35 +131,52 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 		fmt.Sprintf("Run %q exists for generation %d", runName, request.Generation))
 	if current == nil {
 		if active != nil {
-			condition = dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonWaitingForActiveRun,
-				fmt.Sprintf("Run %q is still active; the Run for generation %d starts when it finishes",
-					active.Name, request.Generation))
+			if active.DeletionTimestamp.IsZero() {
+				if err := r.Delete(ctx, active, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
+					return ctrl.Result{}, fmt.Errorf("cancel superseded Run %q: %w", active.Name, err)
+				}
+			}
+			condition = dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonCancelingStaleRun,
+				fmt.Sprintf("Canceling superseded Run %q before generation %d starts", active.Name, request.Generation))
+			request.Status.ActiveRunRef = &corev1.LocalObjectReference{Name: active.Name}
+			meta.SetStatusCondition(&request.Status.Conditions, condition)
+			if err := r.patchStatus(ctx, request, original); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
 		} else if run, buildErr := r.buildRun(request); buildErr != nil {
 			logger.Info("Request cannot be turned into a Run", "reason", buildErr.Error())
 			condition = dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonInvalidSpec, buildErr.Error())
 		} else {
-			err := r.Create(ctx, run)
+			marker := meta.FindStatusCondition(request.Status.Conditions, nvidiacomv1beta2.DGDRRequestConditionAccepted)
+			markerMatches := request.Status.ActiveRunRef != nil && request.Status.ActiveRunRef.Name == wantName &&
+				marker != nil && marker.ObservedGeneration == request.Generation
+
 			switch {
-			case err == nil:
-				runs = append(runs, *run)
-				accepted = true
-			case apierrors.IsAlreadyExists(err):
-				// A stale cache, or a Run left by an earlier Request of the same name that is still being
-				// garbage collected. Only a Run this Request controls counts as ours.
-				existing := &nvidiacomv1beta2.DynamoGraphDeploymentRun{}
-				if getErr := r.Get(ctx, client.ObjectKeyFromObject(run), existing); getErr != nil {
-					return ctrl.Result{}, fmt.Errorf("get existing Run %q: %w", wantName, getErr)
+			case markerMatches && (marker.Reason == dgdrReasonRunCreating || marker.Reason == dgdrReasonRunCreated):
+				return r.createReservedRun(ctx, request, run, original)
+			case request.Status.ActiveRunRef != nil && marker != nil && marker.Reason == dgdrReasonRunCreating:
+				// The Request informer has observed a newer spec before the Run informer observed
+				// the reserved create. Resolve its unknown outcome directly: an owned Run waits for
+				// the cache before cancellation, while authoritative absence releases the stale
+				// reservation. This is the only uncached read in the Request transaction.
+				pending, err := r.reservedRunPending(ctx, request, marker.ObservedGeneration)
+				if err != nil {
+					return ctrl.Result{}, err
 				}
-				if metav1.IsControlledBy(existing, request) && dgdrV1beta2RunIsGeneration(existing, request.Generation) {
-					runs = append(runs, *existing)
-					accepted = true
-				} else {
-					condition = dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonRunNameConflict,
-						fmt.Sprintf("Run %q exists and is not the Run of generation %d of this Request; trying again once it is gone", wantName, request.Generation))
-					result.RequeueAfter = dgdrV1beta2ConflictRetry
+				if pending {
+					return ctrl.Result{RequeueAfter: dgdrV1beta2ConflictRetry}, nil
 				}
+				fallthrough
 			default:
-				return ctrl.Result{}, fmt.Errorf("create Run %q: %w", wantName, err)
+				condition = dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonRunCreating,
+					fmt.Sprintf("Creating Run %q for generation %d", wantName, request.Generation))
+				request.Status.ActiveRunRef = &corev1.LocalObjectReference{Name: wantName}
+				meta.SetStatusCondition(&request.Status.Conditions, condition)
+				if err := r.patchStatus(ctx, request, original); err != nil {
+					return ctrl.Result{}, err
+				}
+				return r.createReservedRun(ctx, request, run, request.DeepCopy())
 			}
 		}
 	}
@@ -183,8 +203,8 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 	meta.SetStatusCondition(&request.Status.Conditions, condition)
 
 	if !apiequality.Semantic.DeepEqual(original.Status, request.Status) {
-		if err := r.Status().Patch(ctx, request, client.MergeFrom(original)); err != nil {
-			return ctrl.Result{}, fmt.Errorf("update Request status: %w", err)
+		if err := r.patchStatus(ctx, request, original); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -196,6 +216,86 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) Reconcile(
 		}
 	}
 	return result, nil
+}
+
+func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) patchStatus(
+	ctx context.Context,
+	request, original *nvidiacomv1beta2.DynamoGraphDeploymentRequest,
+) error {
+	patch := client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})
+	if err := r.Status().Patch(ctx, request, patch); err != nil {
+		return fmt.Errorf("update Request status: %w", err)
+	}
+	return nil
+}
+
+func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) reservedRunPending(
+	ctx context.Context,
+	request *nvidiacomv1beta2.DynamoGraphDeploymentRequest,
+	generation int64,
+) (bool, error) {
+	if r.APIReader == nil {
+		return false, errors.New("resolve reserved Run create: APIReader is not configured")
+	}
+	run := &nvidiacomv1beta2.DynamoGraphDeploymentRun{}
+	key := client.ObjectKey{Namespace: request.Namespace, Name: request.Status.ActiveRunRef.Name}
+	if err := r.APIReader.Get(ctx, key, run); apierrors.IsNotFound(err) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("resolve reserved Run %q: %w", key.Name, err)
+	}
+	return metav1.IsControlledBy(run, request) && dgdrV1beta2RunIsGeneration(run, generation), nil
+}
+
+func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) createReservedRun(
+	ctx context.Context,
+	request *nvidiacomv1beta2.DynamoGraphDeploymentRequest,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	original *nvidiacomv1beta2.DynamoGraphDeploymentRequest,
+) (ctrl.Result, error) {
+	err := r.Create(ctx, run)
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return ctrl.Result{}, fmt.Errorf("create Run %q: %w", run.Name, err)
+	}
+
+	// A successful create reaches the API server before its watch event necessarily reaches this
+	// controller. The fixed Run name makes retry safe; only publish RunCreated once the cached Get
+	// proves that this informer has observed the owned Run.
+	existing := &nvidiacomv1beta2.DynamoGraphDeploymentRun{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(run), existing); apierrors.IsNotFound(err) {
+		return ctrl.Result{RequeueAfter: dgdrV1beta2ConflictRetry}, nil
+	} else if err != nil {
+		return ctrl.Result{}, fmt.Errorf("get existing Run %q: %w", run.Name, err)
+	}
+	if metav1.IsControlledBy(existing, request) && dgdrV1beta2RunIsGeneration(existing, request.Generation) {
+		return r.markRunCreated(ctx, request, existing.Name, original)
+	}
+
+	condition := dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonRunNameConflict,
+		fmt.Sprintf("Run %q exists and is not the Run of generation %d of this Request; trying again once it is gone", run.Name, request.Generation))
+	request.Status.ActiveRunRef = nil
+	meta.SetStatusCondition(&request.Status.Conditions, condition)
+	if err := r.patchStatus(ctx, request, original); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: dgdrV1beta2ConflictRetry}, nil
+}
+
+func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) markRunCreated(
+	ctx context.Context,
+	request *nvidiacomv1beta2.DynamoGraphDeploymentRequest,
+	runName string,
+	original *nvidiacomv1beta2.DynamoGraphDeploymentRequest,
+) (ctrl.Result, error) {
+	request.Status.ObservedGeneration = request.Generation
+	request.Status.ActiveRunRef = &corev1.LocalObjectReference{Name: runName}
+	condition := dgdrV1beta2Condition(request, metav1.ConditionTrue, dgdrReasonRunCreated,
+		fmt.Sprintf("Run %q exists for generation %d", runName, request.Generation))
+	meta.SetStatusCondition(&request.Status.Conditions, condition)
+	if err := r.patchStatus(ctx, request, original); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
 }
 
 // buildRun freezes the accepted Request input into an immutable Run spec. The Run reconciler lowers
@@ -240,6 +340,9 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) ownedRuns(
 // SetupWithManager registers the controller. It watches the Runs it owns, so a finished Run wakes
 // the Request that was waiting for it.
 func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
 		&nvidiacomv1beta2.DynamoGraphDeploymentRun{},

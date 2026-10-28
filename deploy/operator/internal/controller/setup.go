@@ -137,6 +137,7 @@ func SetupDynamoGraphDeploymentRequestV1beta2(mgr ctrl.Manager, opts SetupOption
 	}
 	if err := (&DynamoGraphDeploymentRequestV1beta2Reconciler{
 		Client:        mgr.GetClient(),
+		APIReader:     mgr.GetAPIReader(),
 		Config:        opts.Config,
 		RuntimeConfig: opts.RuntimeConfig,
 	}).SetupWithManager(mgr); err != nil {
