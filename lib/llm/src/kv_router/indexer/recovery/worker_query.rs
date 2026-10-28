@@ -3,8 +3,11 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -111,6 +114,8 @@ pub(crate) struct WorkerQueryClient<T = IndexerRecoveryTarget> {
     recovery_lane: RecoveryLane<RecoveryKey>,
     recovery_attempt_timeout: Duration,
     cancellation_token: CancellationToken,
+    /// Batches dropped because their publisher had no active binding; throttles the warning.
+    unbound_batches_dropped: AtomicU64,
 }
 
 impl<T: RecoveryTarget> WorkerQueryClient<T> {
@@ -152,6 +157,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token,
+            unbound_batches_dropped: AtomicU64::new(0),
         });
 
         Ok(client)
@@ -191,6 +197,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token: CancellationToken::new(),
+            unbound_batches_dropped: AtomicU64::new(0),
         })
     }
 
@@ -307,6 +314,13 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 slot: slot_handle.clone(),
             },
         );
+        tracing::info!(
+            worker_id = key.0,
+            dp_rank = key.1,
+            publisher_id = binding.source_id.publisher_id,
+            recoverable = binding.recovery_target().is_some(),
+            "Activated KV event source"
+        );
         if binding.recovery_target().is_some() {
             self.spawn_recovery(key, binding, None, None).await;
         } else {
@@ -330,6 +344,14 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             .remove_if(&binding.source_id.publisher_id, |_, current| {
                 Arc::ptr_eq(&current.binding, &binding)
             });
+        if !self.cancellation_token.is_cancelled() {
+            tracing::info!(
+                worker_id = key.0,
+                dp_rank = key.1,
+                publisher_id = binding.source_id.publisher_id,
+                "Deactivated KV event source"
+            );
+        }
         binding.lifetime.cancel();
         self.cancel_recovery(key).await;
         Some(binding.source_id.clone())
@@ -578,10 +600,21 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             .get(&publisher_id)
             .map(|entry| entry.clone())
         else {
-            tracing::debug!(
-                publisher_id,
-                "Dropping KV event batch from an inactive or ambiguous source"
-            );
+            // Logs the 1st, 2nd, 4th, ... drop so a source that never activates stays visible.
+            let dropped = self.unbound_batches_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped.is_power_of_two() {
+                tracing::warn!(
+                    publisher_id,
+                    dropped,
+                    "Dropping KV event batch from an inactive or ambiguous source"
+                );
+            } else {
+                tracing::debug!(
+                    publisher_id,
+                    dropped,
+                    "Dropping KV event batch from an inactive or ambiguous source"
+                );
+            }
             return;
         };
         let binding = active.binding;
@@ -984,6 +1017,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
     ) -> Result<WorkerKvQueryResponse> {
+        let started = Instant::now();
         let mut last_error = None;
         let mut saw_non_authoritative_failure = false;
         for attempt in 0..RECOVERY_MAX_RETRIES {
@@ -1033,10 +1067,29 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     ));
                     saw_non_authoritative_failure = true;
                 }
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    tracing::info!(
+                        worker_id = key.0,
+                        dp_rank = key.1,
+                        attempts = attempt + 1,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "KV recovery query answered"
+                    );
+                    return Ok(response);
+                }
                 Err(error) => {
                     last_error = Some(error);
                 }
+            }
+            if let Some(error) = &last_error {
+                tracing::warn!(
+                    %error,
+                    worker_id = key.0,
+                    dp_rank = key.1,
+                    attempt = attempt + 1,
+                    max_attempts = RECOVERY_MAX_RETRIES,
+                    "KV recovery attempt failed"
+                );
             }
             if attempt + 1 < RECOVERY_MAX_RETRIES {
                 let backoff_ms = RECOVERY_INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
