@@ -187,6 +187,7 @@ pub fn generate_openapi_spec_with_options(
     // represent the 3.2 version. HTTP and file export share this final representation.
     let mut document = serde_json::to_value(openapi).map_err(|error| error.to_string())?;
     document["openapi"] = serde_json::json!("3.2.0");
+    annotate_decision_errors(&mut document, route_docs)?;
     for route in route_docs {
         let Some((_, chunk, chat)) = completion_response_types(route) else {
             continue;
@@ -201,6 +202,67 @@ pub fn generate_openapi_spec_with_options(
         media["itemSchema"] = streaming_event_schema(&chunk, chat, options);
     }
     Ok(document)
+}
+
+/// Error bodies follow the released decision adapter, not the generic completion envelope.
+fn annotate_decision_errors(
+    document: &mut serde_json::Value,
+    routes: &[RouteDoc],
+) -> Result<(), String> {
+    use serde_json::json;
+
+    for route in routes {
+        if route.method() != axum::http::Method::POST {
+            continue;
+        }
+        let (name, schema) = match route.openapi_kind() {
+            Some(OpenApiRouteKind::Decisions) => (
+                "DecisionOpenAiError",
+                json!({
+                    "type": "object", "required": ["error"],
+                    "properties": {"error": {
+                        "type": "object", "required": ["message", "type", "param", "code"],
+                        "properties": {
+                            "message": {"type": "string"}, "type": {"type": "string"},
+                            "param": {"type": "null"}, "code": {"type": "string"}
+                        }
+                    }}
+                }),
+            ),
+            Some(OpenApiRouteKind::SystemOne) => (
+                "DecisionSystemOneError",
+                json!({
+                    "oneOf": [
+                        {"type": "object", "required": ["detail"], "properties": {"detail": {
+                            "type": "array", "minItems": 1, "items": {
+                                "type": "object", "required": ["loc", "msg", "type"],
+                                "properties": {
+                                    "loc": {"type": "array", "items": {"type": "string"}},
+                                    "msg": {"type": "string"}, "type": {"type": "string"}
+                                }
+                            }
+                        }}},
+                        {"type": "object", "required": ["detail", "code"], "properties": {
+                            "detail": {"type": "string"}, "code": {"type": "string"}
+                        }}
+                    ]
+                }),
+            ),
+            _ => continue,
+        };
+        document["components"]["schemas"][name] = schema;
+        let responses = document["paths"][route.path()]["post"]["responses"]
+            .as_object_mut()
+            .ok_or_else(|| format!("missing decision responses for {route}"))?;
+        for (status, response) in responses {
+            if status.parse::<u16>().is_ok_and(|status| status >= 400) {
+                response["content"] = json!({"application/json": {"schema": {
+                    "$ref": format!("#/components/schemas/{name}")
+                }}});
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Describe parsed data-bearing SSE events for a registered completion response.
@@ -467,7 +529,10 @@ fn create_operation_for_route(route: &RouteDoc) -> utoipa::openapi::path::Operat
         for (status, description) in [
             ("413", "Request body exceeds 4 MiB"),
             ("415", "Content-Type must be application/json"),
-            ("429", "Decision scoring admission capacity is exhausted"),
+            (
+                "429",
+                "Capacity rejection when configured as 429; code is rate_limit_exceeded",
+            ),
             ("499", "Request cancelled"),
             ("500", "Malformed or incomplete native scoring response"),
             ("502", "Executor result failed decision contract validation"),
@@ -1295,6 +1360,11 @@ mod tests {
                 operation["responses"].get(status).is_some(),
                 "missing {status}"
             );
+            assert_eq!(
+                operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/DecisionSystemOneError",
+                "missing System One error schema for {status}"
+            );
         }
         let schemas = &value["components"]["schemas"];
         assert!(schemas["DecisionSystemOneQuestion"]["oneOf"].is_array());
@@ -1330,6 +1400,15 @@ mod tests {
         assert!(operation["responses"].get("415").is_some());
         assert!(operation["responses"].get("502").is_some());
         assert!(operation["responses"].get("422").is_none());
+        for (status, response) in operation["responses"].as_object().unwrap() {
+            if status != "200" {
+                assert_eq!(
+                    response["content"]["application/json"]["schema"]["$ref"],
+                    "#/components/schemas/DecisionOpenAiError",
+                    "missing OpenAI error schema for {status}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1352,6 +1431,20 @@ mod tests {
         assert!(operation["requestBody"]["content"]["application/json"]["schema"].is_object());
         assert!(operation["responses"]["200"]["content"]["application/json"]["schema"].is_object());
         assert!(operation["responses"].get("429").is_some());
+        assert_eq!(
+            operation["responses"]["422"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/DecisionSystemOneError"
+        );
+        assert!(
+            value["paths"]["/v1/systemone"]["post"]["responses"]["400"]
+                .get("content")
+                .is_none()
+        );
+        assert!(
+            value["paths"]["/v1/decisions"]["get"]["responses"]["400"]
+                .get("content")
+                .is_none()
+        );
         assert!(value["paths"]["/v1/decisions"]["post"]["requestBody"]["content"].is_object());
         assert_eq!(
             value["paths"]["/v1/systemone"]["post"]["requestBody"]["content"],
