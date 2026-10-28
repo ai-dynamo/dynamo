@@ -222,6 +222,104 @@ def test_decode_scheduling_limit_applies_per_attention_dp_rank():
     assert capacity.rps == pytest.approx(400.0)
 
 
+@pytest.mark.parametrize(
+    "ranks,expected_rps,expected_seconds",
+    [(1, 200.0, 0.06), (2, 400.0, 0.03), (4, 800.0, 0.02)],
+)
+def test_synthetic_prefill_scheduling_limit_applies_per_rank(
+    ranks, expected_rps, expected_seconds
+):
+    def price(metrics):
+        assert all(
+            item["scheduled_requests"]["sum_prefill_tokens"] <= 64 for item in metrics
+        )
+        return 10.0
+
+    model = AISCoreEnginePerfModel(
+        model=_FakeForwardPassModel(price),
+        worker_type="prefill",
+        limits=EnginePerfLimits(256, 128, 100_000, 64),
+        attention_dp_size=ranks,
+        max_observations=16,
+    )
+
+    capacity = model.find_engine_capacity_rps(EngineCapacityRequest(isl=32, osl=32))
+
+    assert capacity is not None
+    assert capacity.rps == pytest.approx(expected_rps)
+    assert model._prefill_time_for_tokens(384) == pytest.approx(expected_seconds)
+
+
+def test_synthetic_prefill_preserves_existing_total_chunk_ceiling():
+    forward = _FakeForwardPassModel(lambda _metrics: 10.0)
+    model = AISCoreEnginePerfModel(
+        model=forward,
+        worker_type="prefill",
+        limits=EnginePerfLimits(256, 128, 100_000, 128),
+        attention_dp_size=4,
+        max_observations=16,
+    )
+
+    assert model._prefill_time_for_tokens(512) == pytest.approx(0.02)
+    assert len(forward.estimate_calls) == 1
+    assert (
+        sum(
+            item["scheduled_requests"]["sum_prefill_tokens"]
+            for item in forward.estimate_calls[0]
+        )
+        == 256
+    )
+
+
+def test_observed_prefill_queue_retains_per_rank_scheduling_limit():
+    def price(metrics):
+        assert all(
+            item["scheduled_requests"]["sum_prefill_tokens"] <= 64 for item in metrics
+        )
+        return 10.0
+
+    model = AISCoreEnginePerfModel(
+        model=_FakeForwardPassModel(price),
+        worker_type="prefill",
+        limits=EnginePerfLimits(256, 128, 100_000, 64),
+        attention_dp_size=2,
+        max_observations=16,
+    )
+    queued = [
+        ForwardPassMetrics(
+            dp_rank=rank,
+            queued_requests=QueuedRequestMetrics(
+                num_prefill_requests=6,
+                sum_prefill_tokens=192,
+            ),
+        )
+        for rank in range(2)
+    ]
+
+    assert model.get_queued_prefill_time(queued) == pytest.approx(0.03)
+
+
+def test_synthetic_prefill_budget_does_not_widen_mixed_ttft_chunks():
+    def price(metrics):
+        assert all(
+            item["scheduled_requests"]["sum_prefill_tokens"]
+            + item["scheduled_requests"]["num_decode_requests"]
+            <= 64
+            for item in metrics
+        )
+        return 10.0
+
+    model = AISCoreEnginePerfModel(
+        model=_FakeForwardPassModel(price),
+        worker_type="aggregated",
+        limits=EnginePerfLimits(256, 128, 100_000, 64),
+        attention_dp_size=2,
+        max_observations=16,
+    )
+
+    assert model._aggregated_ttft(192, 2, 20) == pytest.approx(0.03)
+
+
 @pytest.mark.parametrize("scheduled_limit", [0, -1, 1 << 32, True, 1.5])
 def test_invalid_scheduling_limit_is_rejected(scheduled_limit):
     with pytest.raises(ValueError, match="max_num_scheduled_tokens"):

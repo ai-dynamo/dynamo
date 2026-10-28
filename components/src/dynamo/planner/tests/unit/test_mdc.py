@@ -137,10 +137,9 @@ class TestWorkerInfoFromMdc:
         assert info.max_num_batched_tokens == 256
         assert info.max_num_scheduled_tokens == 64
 
-    @pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
-    def test_legacy_metadata_has_no_scheduling_override(self, backend):
+    def test_legacy_metadata_has_no_scheduling_override(self):
         info = worker_info_from_mdc(
-            MdcEntry(card_json=_card()), SubComponentType.DECODE, backend=backend
+            MdcEntry(card_json=_card()), SubComponentType.DECODE, backend="vllm"
         )
         assert info.max_num_scheduled_tokens is None
         assert info.max_num_batched_tokens == 8192

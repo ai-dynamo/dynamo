@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Scheduling metadata retains model capacity across the native JSON boundary."""
-
 import json
 from types import SimpleNamespace
 

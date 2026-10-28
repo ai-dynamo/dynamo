@@ -514,12 +514,22 @@ class AISCoreEnginePerfModel:
             best = _select_capacity(best, capacity, request.optimization_target)
         return best
 
+    def _synthetic_prefill_budget(self) -> int:
+        # Preserve the existing total ceiling when splitting work across ranks.
+        return min(
+            self._limits.max_num_batched_tokens,
+            _saturating_mul_u32(
+                self._limits.scheduling_token_budget, self._attention_dp_size
+            ),
+        )
+
     def _prefill_time_for_tokens(self, tokens: int) -> Optional[float]:
         return self._prefill_chunk_time(
             tokens,
             lambda chunk: self._estimate_forward_pass_seconds(
                 _synthetic_prefill_by_rank(chunk, self._attention_dp_size)
             ),
+            max_chunk=self._synthetic_prefill_budget(),
         )
 
     def _decode_time_for_batch(
@@ -562,11 +572,15 @@ class AISCoreEnginePerfModel:
         self,
         tokens: int,
         estimate_chunk: Callable[[int], Optional[float]],
+        *,
+        max_chunk: Optional[int] = None,
     ) -> Optional[float]:
-        plan = _PrefillChunkPlan.build(tokens, self._limits.scheduling_token_budget)
+        if max_chunk is None:
+            max_chunk = self._limits.scheduling_token_budget
+        plan = _PrefillChunkPlan.build(tokens, max_chunk)
         total_s = 0.0
         if plan.full_chunks > 0:
-            duration_s = estimate_chunk(self._limits.scheduling_token_budget)
+            duration_s = estimate_chunk(max_chunk)
             if duration_s is None:
                 return None
             total_s = _checked_duration_add(
@@ -584,11 +598,12 @@ class AISCoreEnginePerfModel:
         return total_s
 
     def _prefill_max_batch(self, isl: int) -> int:
-        if isl > self._limits.scheduling_token_budget:
+        budget = self._synthetic_prefill_budget()
+        if isl > budget:
             return 1
         return min(
             self._limits.max_num_seqs,
-            self._limits.scheduling_token_budget // max(1, isl),
+            budget // max(1, isl),
         )
 
     def _decode_max_batch(self, context_length: int) -> int:

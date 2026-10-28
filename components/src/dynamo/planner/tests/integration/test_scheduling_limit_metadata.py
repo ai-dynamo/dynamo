@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""An independent scheduling ceiling survives native registration into Planner."""
-
 import asyncio
 import json
 from types import SimpleNamespace
