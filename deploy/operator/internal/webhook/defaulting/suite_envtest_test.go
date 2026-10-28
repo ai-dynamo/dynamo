@@ -359,14 +359,13 @@ func TestDynamoGraphDeploymentRequestV1beta2DefaultingAdmission(t *testing.T) {
 			check:      expectV1beta2ExplicitValues,
 		},
 		{
-			name: "v1beta2 unresolved explicit hardware reports its public field path",
+			name: "v1beta2 unknown SKU without budget reports the manual override",
 			request: v1beta2DefaultingRequest(func(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) {
 				spec.Hardware = &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{
-					SKU: new("h100_sxm"), Budget: new(int32(4)),
+					SKU: new("future_accelerator"),
 				}}
 			}),
-			discoveryErr:  errors.New("no matching GPUs found"),
-			wantCreateErr: `spec.hardware.gpu.sku: Invalid value: "h100_sxm": could not be verified against the cluster's GPUs (no matching GPUs found)`,
+			wantCreateErr: `spec.hardware.gpu.budget: Required value: cannot discover a GPU budget for SKU "future_accelerator" because it is not known to the bundled AISimulate catalog; set spec.hardware.gpu.budget explicitly`,
 		},
 		{
 			name:       "v1beta2 metadata-only update is idempotent and does not rediscover hardware",

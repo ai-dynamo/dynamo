@@ -29,6 +29,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/aisimulate"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	admissionv1 "k8s.io/api/admission/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -79,8 +80,10 @@ func (o DGDRV1beta2Options) resolveDefaults(
 	return dynamoGraphDeploymentRequestV1beta2DefaultOptions{hardware: hardware}, nil
 }
 
-// resolveHardware returns the SKU and budget the typed spec omits and verifies an explicit SKU
-// against the cluster. Discovery is restricted to the typed SKU when there is one.
+// resolveHardware returns the SKU and budget the typed spec omits. A complete explicit pair is
+// authoritative and bypasses discovery. When only a known SKU is present, discovery is restricted
+// to it. An SKU outside the bundled AISimulate catalog remains an authoritative override only
+// when its budget is explicit, because discovery cannot associate cluster capacity with it.
 //
 // Discovery runs on CREATE and on an UPDATE that changes spec.hardware. A Request stays
 // mutable and every Run snapshots it, so a caller may change or remove typed hardware before
@@ -91,10 +94,9 @@ func (o DGDRV1beta2Options) resolveDefaults(
 // the typed hardware alone, never spec.aisimulate.inputOverrides.
 //
 // After a successful return the typed hardware is complete. An omitted SKU becomes the
-// cluster's AISimulate SKU, and an omitted budget becomes min(matching GPUs, cap). An explicit
-// budget is authoritative: it is never capped, whatever the cluster holds. What the cluster
-// cannot supply is rejected on the field that fixes it: a failed discovery, a GPU model the
-// AISimulate catalog does not know, and an explicit SKU without any matching GPU.
+// cluster's AISimulate SKU, and an omitted budget becomes min(matching GPUs, cap). Explicit
+// values are authoritative: they are neither rewritten nor capped. What the cluster cannot
+// supply is rejected on the omitted field that fixes it.
 func (o DGDRV1beta2Options) resolveHardware(
 	ctx context.Context,
 	operation admissionv1.Operation,
@@ -113,6 +115,16 @@ func (o DGDRV1beta2Options) resolveHardware(
 		}
 		hasBudget = spec.Hardware.GPU.Budget != nil
 	}
+	if sku != "" && hasBudget {
+		return hardwareDefaultsV1beta2{}, nil
+	}
+
+	if sku != "" && !aisimulate.IsKnownHardwareSKU(sku) {
+		return hardwareDefaultsV1beta2{}, rejectHardwareV1beta2(field.Required(
+			field.NewPath("spec", "hardware", "gpu", "budget"),
+			fmt.Sprintf("cannot discover a GPU budget for SKU %q because it is not known to the bundled AISimulate catalog; set spec.hardware.gpu.budget explicitly", sku),
+		))
+	}
 	timeout := o.HardwareDiscoveryTimeout
 	if timeout <= 0 {
 		timeout = defaultHardwareDiscoveryTimeout
@@ -124,10 +136,9 @@ func (o DGDRV1beta2Options) resolveHardware(
 	found, err := o.Hardware.Discover(ctx, nvidiacomv1beta1.GPUSKUType(sku))
 	if err != nil {
 		if sku != "" {
-			return hardwareDefaultsV1beta2{}, rejectHardwareV1beta2(field.Invalid(
-				gpuPath.Child("sku"),
-				sku,
-				fmt.Sprintf("could not be verified against the cluster's GPUs (%v)", err),
+			return hardwareDefaultsV1beta2{}, rejectHardwareV1beta2(field.Required(
+				gpuPath.Child("budget"),
+				fmt.Sprintf("could not be discovered for SKU %q (%v); set spec.hardware.gpu.budget", sku, err),
 			))
 		}
 		return hardwareDefaultsV1beta2{}, rejectHardwareV1beta2(field.Required(gpuPath, fmt.Sprintf(
@@ -144,7 +155,7 @@ func (o DGDRV1beta2Options) resolveHardware(
 				strings.Join(append([]string{found.Model}, found.OtherModels...), ", "))))
 		}
 		sku = string(gpu.KnownSKU(found))
-		if sku == "" {
+		if sku == "" || !aisimulate.IsKnownHardwareSKU(sku) {
 			detail := "the cluster's GPUs map to no AISimulate SKU; set spec.hardware.gpu.sku"
 			if found != nil && found.Model != "" {
 				detail = fmt.Sprintf("the cluster's GPU model %q maps to no AISimulate SKU; set spec.hardware.gpu.sku", found.Model)
@@ -154,17 +165,10 @@ func (o DGDRV1beta2Options) resolveHardware(
 		defaults.sku = sku
 	}
 
-	// A filtered discovery with no GPUs means the caller pinned a SKU the cluster cannot run.
+	// Discovery is needed only for an omitted budget at this point.
 	var gpus int
 	if found != nil {
 		gpus = found.TotalGPUs
-	}
-	if spec.Hardware != nil && spec.Hardware.GPU != nil && spec.Hardware.GPU.SKU != nil && gpus <= 0 {
-		return hardwareDefaultsV1beta2{}, rejectHardwareV1beta2(field.Invalid(
-			gpuPath.Child("sku"),
-			sku,
-			"no GPUs of this SKU were found in the cluster",
-		))
 	}
 	if !hasBudget {
 		if gpus <= 0 {

@@ -44,13 +44,20 @@ const (
 // GPUHardwareSpec describes accelerator identity and the maximum allocation per candidate.
 type GPUHardwareSpec struct {
 	// SKU identifies the accelerator using the AISimulate hardware catalog name.
-	// When omitted, admission discovers the accelerator from the cluster.
+	// Known values in the bundled AISimulate release are `a100_pcie`, `a100_sxm`,
+	// `a30`, `b200_sxm`, `b300_sxm`, `b60`, `gb200`, `gb300`, `h100_pcie`,
+	// `h100_sxm`, `h200_sxm`, `l4`, `l40s`, and `rtx_pro_6000_server`.
+	// The field remains open so an external AISimulate systems catalog can add identifiers.
+	// Admission passes an unknown identifier through unchanged and warns when `budget` is also
+	// explicit. Without an explicit `budget`, it rejects the identifier because cluster discovery
+	// cannot associate capacity with it. When omitted, admission discovers the accelerator.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	SKU *string `json:"sku,omitempty"`
 
 	// Budget is the maximum total number of GPUs one candidate may use.
-	// When omitted, admission derives the available GPU budget from the cluster.
+	// When omitted for a known SKU, admission derives the available GPU budget from the cluster.
+	// An SKU unknown to the bundled AISimulate catalog requires an explicit `budget`.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	Budget *int32 `json:"budget,omitempty"`
@@ -59,7 +66,7 @@ type GPUHardwareSpec struct {
 // HardwareSpec bounds the accelerator configurations evaluated by the search.
 type HardwareSpec struct {
 	// GPU describes accelerator identity and the maximum allocation per candidate.
-	// Omitted fields are resolved independently by admission.
+	// Admission resolves omitted fields from the cluster when the SKU is known.
 	// +optional
 	GPU *GPUHardwareSpec `json:"gpu,omitempty"`
 }
@@ -312,7 +319,8 @@ type DynamoGraphDeploymentRequestNativeStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// ActiveRunRef identifies the one non-terminal run.
+	// ActiveRunRef identifies the reserved or active Run. During a spec change it continues to
+	// identify the superseded Run until foreground deletion completes, before a replacement is reserved.
 	// +optional
 	ActiveRunRef *corev1.LocalObjectReference `json:"activeRunRef,omitempty"`
 

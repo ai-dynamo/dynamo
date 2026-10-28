@@ -3473,7 +3473,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the most recent DGDR generation accepted by the controller. |  | Optional: \{\} <br /> |
-| `activeRunRef` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core)_ | ActiveRunRef identifies the one non-terminal run. |  | Optional: \{\} <br /> |
+| `activeRunRef` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core)_ | ActiveRunRef identifies the reserved or active Run. During a spec change it continues to<br />identify the superseded Run until foreground deletion completes, before a replacement is reserved. |  | Optional: \{\} <br /> |
 | `recentRunRefs` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core) array_ | RecentRunRefs identifies retained terminal runs in newest-first order. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions reports reconciliation of the persistent request, not run execution outcomes. |  | Optional: \{\} <br /> |
 
@@ -3516,7 +3516,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `observedGeneration` _integer_ | ObservedGeneration is the most recent DGDR generation accepted by the controller. |  | Optional: \{\} <br /> |
-| `activeRunRef` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core)_ | ActiveRunRef identifies the one non-terminal run. |  | Optional: \{\} <br /> |
+| `activeRunRef` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core)_ | ActiveRunRef identifies the reserved or active Run. During a spec change it continues to<br />identify the superseded Run until foreground deletion completes, before a replacement is reserved. |  | Optional: \{\} <br /> |
 | `recentRunRefs` _[LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core) array_ | RecentRunRefs identifies retained terminal runs in newest-first order. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions reports reconciliation of the persistent request, not run execution outcomes. |  | Optional: \{\} <br /> |
 | `v1beta1` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | V1Beta1 losslessly preserves a native v1beta1 status while this object is<br />represented through v1beta2. |  | Type: object <br />Optional: \{\} <br /> |
@@ -3624,8 +3624,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `sku` _string_ | SKU identifies the accelerator using the AISimulate hardware catalog name.<br />When omitted, admission discovers the accelerator from the cluster. |  | MinLength: 1 <br />Optional: \{\} <br /> |
-| `budget` _integer_ | Budget is the maximum total number of GPUs one candidate may use.<br />When omitted, admission derives the available GPU budget from the cluster. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `sku` _string_ | SKU identifies the accelerator using the AISimulate hardware catalog name.<br />Known values in the bundled AISimulate release are `a100_pcie`, `a100_sxm`,<br />`a30`, `b200_sxm`, `b300_sxm`, `b60`, `gb200`, `gb300`, `h100_pcie`,<br />`h100_sxm`, `h200_sxm`, `l4`, `l40s`, and `rtx_pro_6000_server`.<br />The field remains open so an external AISimulate systems catalog can add identifiers.<br />Admission passes an unknown identifier through unchanged and warns when `budget` is also<br />explicit. Without an explicit `budget`, it rejects the identifier because cluster discovery<br />cannot associate capacity with it. When omitted, admission discovers the accelerator. |  | MinLength: 1 <br />Optional: \{\} <br /> |
+| `budget` _integer_ | Budget is the maximum total number of GPUs one candidate may use.<br />When omitted for a known SKU, admission derives the available GPU budget from the cluster.<br />An SKU unknown to the bundled AISimulate catalog requires an explicit `budget`. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### v1beta2 HardwareSpec
@@ -3644,7 +3644,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpu` _[GPUHardwareSpec](#gpuhardwarespec)_ | GPU describes accelerator identity and the maximum allocation per candidate.<br />Omitted fields are resolved independently by admission. |  | Optional: \{\} <br /> |
+| `gpu` _[GPUHardwareSpec](#gpuhardwarespec)_ | GPU describes accelerator identity and the maximum allocation per candidate.<br />Admission resolves omitted fields from the cluster when the SKU is known. |  | Optional: \{\} <br /> |
 
 
 #### KVCapacityFractionRange

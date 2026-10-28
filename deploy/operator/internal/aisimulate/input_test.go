@@ -125,6 +125,14 @@ func TestLowerModelOnlyRequest(t *testing.T) {
 	}
 }
 
+func TestUnderlayPreservesOpenHardwareSKU(t *testing.T) {
+	spec := defaultedSpec()
+	*spec.Hardware.GPU.SKU = "future_accelerator"
+	if got := nested(t, underlay(t, spec), "engine", "hardware"); got != "future_accelerator" {
+		t.Fatalf("engine.hardware = %q, want the API value unchanged", got)
+	}
+}
+
 func TestLowerIsDeterministicAndDoesNotMutateTheSpec(t *testing.T) {
 	const overrides = `{"optimizer":{"max_trials":100},"traffic":{"stop":{"requests":5}}}`
 	spec := withInputOverrides(defaultedSpec(), overrides)
