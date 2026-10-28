@@ -5,10 +5,10 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-This step applies when a branch claims a speedup or a memory saving, or changes a hot-path dependency
-or a block-scale data structure. The goal is a PR in which a reviewer can see three things: what got
-cheaper and by how much, which base it was measured against, and that behavior did not change. List
-what is missing. Don't run a benchmark campaign to fill the gaps.
+This step applies when a branch claims a speedup, a memory saving, or a fix for loss, lag or overload,
+or changes a hot-path dependency or a block-scale data structure. The goal is a PR in which a reviewer
+can see three things: what got cheaper and by how much, which base it was measured against, and that
+behavior did not change. List what is missing. Don't run a benchmark campaign to fill the gaps.
 
 ## Lead with the metric that matches the mechanism
 
@@ -17,7 +17,7 @@ what is missing. Don't run a benchmark campaign to fill the gaps.
 | Removes lock contention or a convoy | Threads blocked on that lock, from an off-CPU profile attributed by stack, or blocked time per request | CPU ms per request, requests/s |
 | Removes writes to a shared atomic or metric | Shared writes per second, before and after (e.g. per token → per 64 tokens) | Whole-process CPU |
 | Removes per-item CPU work | CPU ms per request or µs per token, overall and for the affected symbols | Closed-loop requests/s |
-| Shrinks memory | Bytes per element (`size_of`), plus live heap or RSS at a stated scale | Throughput |
+| Shrinks memory | Bytes per element (`size_of` in Rust), plus live heap or RSS at a stated scale | Throughput |
 | Unblocks one thread (actor, GIL, ingest loop) | That thread's utilization, lag, or applied events/s | — |
 | Speeds up startup or reconfiguration | Median wall time over several fresh starts | — |
 | Speeds up a data structure or codec | ns/op or ops/s from the existing bench binary, as a ratio of medians | — |
@@ -31,8 +31,10 @@ is what limits them.
   PRs, name them.
 - **Same conditions.** Run both arms on the same machine or allocation, in alternating order, as fresh
   processes, with the same warmup and measurement window.
-- **Same work.** Both arms complete the same requests with zero errors. Where outputs are deterministic
-  (query checksums, replay reports, dumps), they are identical.
+- **Same work.** Both arms get the same offered load and complete the same requests with zero errors.
+  For a fix to loss, lag or overload, the base's errors or drops are what is measured, so report them
+  for both arms. Where outputs are deterministic (query checksums, replay reports, dumps), the
+  completed requests' outputs are identical.
 - **Enough repetitions to see the noise.** Report medians, with ranges or a bootstrap interval for
   microbenchmarks. A single run per arm is acceptable when it is labeled a point comparison.
 - **Quiet machine.** Don't compile or run other heavy work during runs, and check that the load
@@ -71,12 +73,14 @@ Follow the repository template (Overview, Details, Where should the reviewer sta
 
 ## Tests
 
-- At least one test that fails without the change. Check it against the parent commit.
+- A test that fails without the change, checked against the parent commit, whenever the change alters
+  behavior or has a mechanism a test can observe (a skip, a removed copy, fewer shared writes). A pure
+  rewrite with nothing observable needs the parity test below instead.
 - A data structure or algorithm rewrite gets a parity or differential test against the old path or a
   simple reference model (for example a `HashMap`). Seed it if it is randomized.
-- Maintained aggregates and fast paths get a `debug_assert!` that recomputes the answer from scratch in
-  debug builds.
-- Size-sensitive types get `const _: () = assert!(std::mem::size_of::<T>() == N);`.
+- Maintained aggregates and fast paths get a check that recomputes the answer from scratch: a
+  `debug_assert!` in Rust debug builds, or an assertion in the tests in Python.
+- Size-sensitive Rust types get `const _: () = assert!(std::mem::size_of::<T>() == N);`.
 - Removed copies get a pointer or allocation identity check.
 - Keep tests in proportion to the change, and put no timing thresholds in CI tests.
 

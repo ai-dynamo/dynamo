@@ -45,10 +45,13 @@ Out of scope: deployment and engine knob tuning (`consult-perf-knowledge`), benc
 
 ## Inputs
 
-- The branch diff, including uncommitted changes:
-  `git diff $(git merge-base HEAD refs/remotes/origin/main)` after `git fetch origin main`. The full
-  ref avoids a local branch that happens to be named `origin/main`. If the user names a PR, commit
-  range or patch, use that instead.
+- The branch diff, including uncommitted and untracked changes. Use the remote that points to
+  `ai-dynamo/dynamo` (`upstream` in a fork checkout, `origin` in a direct clone):
+  `git diff $(git merge-base HEAD refs/remotes/<remote>/main)`, plus the new files listed by
+  `git ls-files --others --exclude-standard`. The full ref avoids a local branch that happens to be
+  named `<remote>/main`. Don't fetch: the existing ref already holds the commit the branch started
+  from. If the diff pulls in main commits that aren't the branch's, the ref is stale; say so and ask
+  before fetching. If the user names a PR, commit range or patch, use that instead.
 - The checkout to read callers from. If the change is not applied there, read the patched lines from
   the diff and the callers from the checkout.
 - The PR description draft and commit messages, if any. Step 4 needs them.
@@ -59,10 +62,12 @@ Stay read-only. Report findings, and edit code only when the user asks you to ap
 
 ## Step 1: Find the multiplier
 
-For every changed function, trace its callers and work out how often it runs in production. The cost
-that matters is per-call cost × rate × concurrency.
+For every changed function, trace its callers and work out how often it runs in production across the
+whole process. The cost that matters is per-call cost × that process-wide rate. The rates below are
+already process-wide, so don't multiply by concurrency again. Concurrency matters separately when the
+code touches shared state (principle 1).
 
-| Rate | Typical scale | Where it usually lives (starting points, not a boundary) |
+| Rate | Typical process-wide scale | Where it usually lives (starting points, not a boundary) |
 |---|---|---|
 | Per output token or stream chunk | millions per second per frontend | `lib/llm/src/http/service`, stream converters in `lib/llm/src/protocols/openai`, detokenization in `lib/llm/src/backend.rs`, engine handlers in `components/src/dynamo/{vllm,sglang,trtllm}`, the response transport |
 | Per KV block | blocks per request × workers; indexer state holds millions of entries | `lib/kv-router/src/indexer`, `lib/kv-router/src/sequences`, `lib/mocker` |
@@ -71,8 +76,10 @@ that matters is per-call cost × rate × concurrency.
 | Per connection | thousands open at once | HTTP accept and serve, transport clients |
 | Per worker or publisher | N in the thousands, at startup and on every discovery change | discovery, subscriptions, sockets, threads |
 
-Code that runs once (configuration, startup at small N), error paths and tests are cold. Note them in
-one line and move on. A hot call inside a cold-looking file still counts, so follow the calls.
+Code that runs once (configuration, startup at small N) and tests are cold. Error paths are cold only
+when failures are rare: an error path that every request can hit during an outage or a burst of bad
+input (logging, retries, per-failure allocation) is hot. Note cold code in one line and move on. A hot
+call inside a cold-looking file still counts, so follow the calls.
 
 ## Step 2: Check the principles
 
@@ -216,10 +223,11 @@ connections? Is it maintained?
 
 A fast path for a common case is fine when its guard is checked on every use, it falls back to the
 unchanged general path, and a test shows both paths give the same result. Skipping work is safe only
-behind an exact (or fingerprinted) equality check, never a heuristic one. Illustrations: a scalar walk
-guarded at every step ([#17149](https://github.com/ai-dynamo/dynamo/pull/17149)); an equal-size skip
-that overcounted until it also compared a fingerprint
-([#16265](https://github.com/ai-dynamo/dynamo/pull/16265)).
+when an exact predicate proves it unnecessary: the feature is off, the input is empty, or the input
+equals (or fingerprints the same as) what was already processed. Never skip on a heuristic.
+Illustrations: a scalar walk guarded at every step
+([#17149](https://github.com/ai-dynamo/dynamo/pull/17149)); an equal-size skip that overcounted until
+it also compared a fingerprint ([#16265](https://github.com/ai-dynamo/dynamo/pull/16265)).
 
 ## Step 3: Semantics guard
 
@@ -241,9 +249,9 @@ Run this step when the branch claims a speedup, a memory saving, or a fix for lo
 (in commits or the description), or when it changes a hot-path dependency or a block-scale data
 structure. Also check that the diagnosis in the claim matches the code path the diff changes. Read
 [references/perf-claims.md](references/perf-claims.md) and list what the PR still needs: evidence that
-matches the mechanism, the base it was measured on, what was not re-measured, and tests that fail
-without the change. Don't run benchmark campaigns from this skill. Name where the numbers can be
-reproduced.
+matches the mechanism, the base it was measured on, what was not re-measured, and tests that show
+behavior is unchanged and, where the mechanism is observable, fail without the change. Don't run
+benchmark campaigns from this skill. Name where the numbers can be reproduced.
 
 ## Prefer simple fixes
 
