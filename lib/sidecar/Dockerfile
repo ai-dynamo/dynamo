@@ -115,7 +115,7 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/us
         cargo install cargo-cyclonedx --locked --version "${CARGO_CYCLONEDX_VERSION}"; \
     mkdir -p /out/bin /out/sidecar-sboms /out/rust-licenses; \
     if [ "${FAST_RELEASE_PROFILE}" = "true" ]; then \
-        export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_LTO=false; \
+        export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_LTO=off; \
     fi; \
     cargo build --release --locked \
         -p dynamo-vllm-sidecar \
