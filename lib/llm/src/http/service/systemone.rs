@@ -30,7 +30,6 @@ use super::{
 };
 use crate::{
     discovery::{SystemOneExecutionSelection, SystemOneSelectionError},
-    local_model::runtime_config::SGLANG_GENERATE_CAPABILITY,
     protocols::{
         Annotated,
         common::{
@@ -236,7 +235,7 @@ async fn handle_request(
 
     let selection = match state
         .manager()
-        .get_systemone_execution_selection(&request.model, SGLANG_GENERATE_CAPABILITY)
+        .get_systemone_execution_selection(&request.model)
     {
         Ok(selection) => selection,
         Err(SystemOneSelectionError::NotFound) => {
