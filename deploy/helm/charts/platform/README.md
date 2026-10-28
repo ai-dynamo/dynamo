@@ -309,7 +309,9 @@ persist until the next attempt and require manual removal when retiring the rele
 into DGDs originally created by operator 1.6.0 or later. Upgrading the operator does
 not enable these variables for older DGDs. They remain absent after subsequent
 workload edits, including a switch to sidecar mode. See the
-[SGLang sidecar migration instructions](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#migrate-an-existing-dgd-to-multinode-sidecars).
+[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#migrate-an-existing-dgd-to-multinode-sidecars)
+and [vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md#migrate-an-existing-dgd-to-multinode-sidecars)
+sidecar migration instructions.
 
 ### v1.5.0
 

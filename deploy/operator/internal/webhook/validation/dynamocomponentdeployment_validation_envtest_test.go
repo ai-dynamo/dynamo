@@ -186,9 +186,16 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
 			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
-		{name: "native sidecar beta rejects multinode", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+		{name: "native sidecar beta multinode requires role templates", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-		}), wantWebhookErrs: []string{`spec.multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang`}},
+		}), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "native sidecar beta rejects unsupported multinode backend", deployment: func() runtime.Object {
+			dcd := nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}).(*nvidiacomv1beta1.DynamoComponentDeployment)
+			dcd.Spec.BackendFramework = dcdAdmissionTRTLLMBackend
+			return dcd
+		}(), wantWebhookErrs: []string{`spec.multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang or vllm`}},
 		{name: "native sidecar alpha rejects gms create",
 			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
@@ -209,9 +216,9 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
 			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
-		{name: "native sidecar alpha rejects multinode", deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+		{name: "native sidecar alpha multinode requires role templates", deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-		}), wantWebhookErrs: []string{`spec.multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang`}},
+		}), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
 		{name: "native sidecar requires engine main", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Name = "engine"
 		}), wantWebhookErrs: []string{`spec.podTemplate.spec.containers: Required value: main engine container is required for component "worker" with a runtime init container`}},
@@ -220,9 +227,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
 			}), wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].name: Forbidden: is supported only for worker, prefill, decode, and LPX components`}},
 
-		// DCD admission forwards the backend and enforces complete SGLang role templates.
-		{name: "sglang sidecar multinode DCD accepts complete roles", deployment: sglangMultinodeDCDForAdmission(t, false, true, false)},
-		{name: "sglang sidecar multinode DCD rejects a component template", deployment: sglangMultinodeDCDForAdmission(t, false, false, false), wantWebhookErrs: []string{`spec.roles: Required value: SGLang multinode sidecars require complete leader and worker podTemplates`}},
+		// DCD admission forwards the backend and enforces complete role templates for each supported backend.
+		{name: "sglang sidecar multinode DCD accepts complete roles", deployment: multinodeSidecarDCDForAdmission(t, dcdAdmissionSGLangBackend, false, true, false)},
+		{name: "sglang sidecar multinode DCD rejects a component template", deployment: multinodeSidecarDCDForAdmission(t, dcdAdmissionSGLangBackend, false, false, false), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "vllm sidecar multinode DCD accepts complete roles", deployment: multinodeSidecarDCDForAdmission(t, dcdAdmissionVLLMBackend, false, true, false)},
+		{name: "vllm sidecar multinode DCD accepts runtime on both roles", deployment: multinodeSidecarDCDForAdmission(t, dcdAdmissionVLLMBackend, false, true, true)},
+		{name: "vllm sidecar multinode DCD alpha accepts complete roles", deployment: multinodeSidecarDCDForAdmission(t, dcdAdmissionVLLMBackend, true, true, false)},
 
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
 		{name: "native sidecar beta create", deployment: nativeDCDForAdmission(t, false, nil)},
@@ -375,13 +385,14 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1alpha1 role PodTemplates cannot bypass native sidecar restrictions",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.BackendFramework = dcdAdmissionTRTLLMBackend
 				setAlphaExplicitMultinodeRoleTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec, 2)
 				dcd.Spec.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
 					Name: consts.RuntimeContainerName, Image: "runtime:1.5.0",
 					RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
 				}}
 			}),
-			wantWebhookErrs: []string{`spec.multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang`},
+			wantWebhookErrs: []string{`spec.multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang or vllm`},
 		},
 		{
 			name: "standalone v1alpha1 canonical lpx component is rejected",

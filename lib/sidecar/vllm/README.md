@@ -27,6 +27,7 @@ you to.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Kubernetes multinode TP and hybrid-LB DP | Experimental; explicit leader and worker PodTemplates |
 
 ## Run locally
 
@@ -57,6 +58,26 @@ See [`deploy/`](deploy/) for all manifests. For example, aggregated serving:
 kubectl apply -f lib/sidecar/vllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000
 ```
+
+Multinode deployments require `backendFramework: vllm` and complete `leader` and
+`worker` role PodTemplates. The templates own the native engine commands and
+sidecar placement; the operator does not inject executor or coordination flags.
+See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_tp.yaml),
+which uses the multiprocessing executor with a sidecar on the leader only, and the
+[hybrid-LB DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_dp.yaml),
+where every Pod runs a sidecar for its local data-parallel ranks. Both examples
+launch `vllm serve --grpc-port` with `VLLM_USE_RUST_FRONTEND=1`, which requires
+vLLM v0.32.0 or later; `vllm-rs serve` does not support `--data-parallel-hybrid-lb`.
+Engine-failure KV recovery remains incomplete and is tracked in
+[DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
+
+The multinode examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which require
+a DGD originally created by operator 1.6.0 or later. Upgrading the operator or
+switching to sidecar mode does not enable these variables for older DGDs.
+For an older DGD, delete and recreate it after upgrading, or replace the topology
+variables in both role templates with Grove or LeaderWorkerSet variables. See the
+[vLLM sidecar migration instructions](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md#migrate-an-existing-dgd-to-multinode-sidecars)
+for the provider-specific values.
 
 ## Topologies
 

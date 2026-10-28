@@ -1,0 +1,163 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EXPERIMENTAL: multinode vLLM hybrid-LB DP with explicit leader and worker templates
+# One engine group spans two Pods with four DP ranks. Every Pod runs the Dynamo
+# sidecar and serves only its two local ranks; the KV-aware router selects the
+# rank and the Pod that owns it. Requires vLLM v0.32.0 or later for
+# `vllm serve --grpc-port`; `vllm-rs serve` does not support hybrid LB.
+# This example uses DYNAMO_RANK and DYNAMO_LEADER_ADDRESS, which require a
+# DGD originally created by operator 1.6.0 or later. Upgrading the operator
+# does not enable these variables for an existing older DGD.
+# For older DGDs, delete and recreate after upgrading, or replace the
+# topology arguments in both role templates with Grove/LWS variables.
+# See ../README.md#deploy-on-kubernetes for migration guidance.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-sidecar-multinode-dp
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: <your-registry>/dynamo-frontend:1.6.0
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+  - name: VllmWorker
+    type: worker
+    replicas: 1
+    multinode:
+      nodeCount: 2
+    roles:
+    - name: leader
+      podTemplate:
+        spec:
+          initContainers:
+          - name: runtime
+            image: <your-registry>/dynamo-sidecar:1.6.0
+            command:
+            - dynamo-vllm-sidecar
+            args:
+            - --grpc-endpoint
+            - 127.0.0.1:30001
+            restartPolicy: Always
+          containers:
+          - name: main
+            # Requires vLLM v0.32.0 or later for `vllm serve --grpc-port`.
+            image: vllm/vllm-openai:v0.32.0
+            env:
+            - name: VLLM_USE_RUST_FRONTEND
+              value: '1'
+            startupProbe:
+              grpc:
+                port: 30001
+                service: ""
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 180
+            readinessProbe:
+              grpc:
+                port: 30001
+                service: ""
+              periodSeconds: 5
+              timeoutSeconds: 5
+              failureThreshold: 3
+            livenessProbe:
+              grpc:
+                port: 30001
+                service: ""
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 6
+            resources:
+              limits:
+                nvidia.com/gpu: '2'
+              requests:
+                ephemeral-storage: 2Gi
+            command:
+            - vllm
+            - serve
+            - Qwen/Qwen3-0.6B
+            args:
+            - --host
+            - 0.0.0.0
+            - --grpc-port
+            - '30001'
+            - --data-parallel-hybrid-lb
+            - --data-parallel-size
+            - '4'
+            - --data-parallel-size-local
+            - '2'
+            - --data-parallel-start-rank
+            - '0'
+            - --data-parallel-address
+            - $(DYNAMO_LEADER_ADDRESS)
+            - --data-parallel-rpc-port
+            - '13445'
+            - --kv-events-config
+            - '{"publisher":"zmq","endpoint":"tcp://*:20080","replay_endpoint":"tcp://*:20180","topic":"kv-events","enable_kv_cache_events":true}'
+    - name: worker
+      podTemplate:
+        spec:
+          initContainers:
+          - name: runtime
+            image: <your-registry>/dynamo-sidecar:1.6.0
+            command:
+            - dynamo-vllm-sidecar
+            args:
+            - --grpc-endpoint
+            - 127.0.0.1:30001
+            restartPolicy: Always
+          containers:
+          - name: main
+            image: vllm/vllm-openai:v0.32.0
+            env:
+            - name: VLLM_USE_RUST_FRONTEND
+              value: '1'
+            startupProbe:
+              grpc:
+                port: 30001
+                service: ""
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 180
+            readinessProbe:
+              grpc:
+                port: 30001
+                service: ""
+              periodSeconds: 5
+              timeoutSeconds: 5
+              failureThreshold: 3
+            livenessProbe:
+              grpc:
+                port: 30001
+                service: ""
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 6
+            resources:
+              limits:
+                nvidia.com/gpu: '2'
+              requests:
+                ephemeral-storage: 2Gi
+            # The worker's first global DP rank is its node rank times the local
+            # rank count, so the launch runs under a shell for the arithmetic.
+            command:
+            - /bin/sh
+            - -c
+            args:
+            - |
+              exec vllm serve Qwen/Qwen3-0.6B \
+                --host 0.0.0.0 --grpc-port 30001 \
+                --data-parallel-hybrid-lb --data-parallel-size 4 --data-parallel-size-local 2 \
+                --data-parallel-start-rank "$((2 * DYNAMO_RANK))" \
+                --data-parallel-address "${DYNAMO_LEADER_ADDRESS}" --data-parallel-rpc-port 13445 \
+                --kv-events-config '{"publisher":"zmq","endpoint":"tcp://*:20080","replay_endpoint":"tcp://*:20180","topic":"kv-events","enable_kv_cache_events":true}'
+  backendFramework: vllm
