@@ -193,24 +193,28 @@ func (w *workerControlFixture) RoundTrip(request *http.Request) (*http.Response,
 	if uid, found := w.podUIDs[rank]; found {
 		podUID = uid
 	}
-	status := workerStatus{
-		PodUID:    podUID,
-		MemberIDs: []domain.NativeMemberID{domain.NativeMemberID(fmt.Sprintf("dp-%d", rank))}, Binding: &binding,
-		ListenerReady: true, Verified: !w.failProbe,
-		Admitted:           w.registered[rank] && !w.failProbe,
-		InstanceID:         native.InstanceID,
-		Retired:            native.Phase == PhaseCompleted && native.TopologyKnown && rank >= native.EffectiveDataParallelSize,
-		Withdrawn:          !w.registered[rank] && !w.withdrawalPending && !w.pendingWithdrawals[rank],
-		NativeDrainEnabled: !w.drainDisabled,
-	}
+	retired := native.Phase == PhaseCompleted && native.TopologyKnown && rank >= native.EffectiveDataParallelSize
+	memberIDs := []string{fmt.Sprintf("dp-%d", rank)}
 	for offset := int32(1); offset < w.localWidth; offset++ {
-		status.MemberIDs = append(status.MemberIDs, domain.NativeMemberID(fmt.Sprintf("dp-%d", rank+offset)))
+		memberIDs = append(memberIDs, fmt.Sprintf("dp-%d", rank+offset))
 	}
-	if status.Retired && w.omitLastMember {
-		status.MemberIDs = status.MemberIDs[:len(status.MemberIDs)-1]
+	if retired && w.omitLastMember {
+		memberIDs = memberIDs[:len(memberIDs)-1]
 	}
-	if status.Retired {
-		status.Binding, status.Verified = nil, false
+	status := map[string]any{
+		"pod_uid":              podUID,
+		"member_ids":           memberIDs,
+		"binding":              &binding,
+		"listener_ready":       true,
+		"verified":             !w.failProbe,
+		"admitted":             w.registered[rank] && !w.failProbe,
+		"instance_id":          native.InstanceID,
+		"retired":              retired,
+		"withdrawn":            !w.registered[rank] && !w.withdrawalPending && !w.pendingWithdrawals[rank],
+		"native_drain_enabled": !w.drainDisabled,
+	}
+	if retired {
+		status["binding"], status["verified"] = nil, false
 	}
 	payload, err := json.Marshal(status)
 	if err != nil {
