@@ -6885,9 +6885,13 @@ impl OpenAIPreprocessor {
                 reasoning_parser,
             )
             .is_some();
+        // Same exception as the request path: the paired Gemma 4 parsers keep reasoning on.
+        let reasoning_disabled_by_request =
+            !Self::keeps_gemma4_reasoning_with_tool_parser(tool_call_parser, reasoning_parser)
+                && Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args);
         has_reasoning_decoder
             && Self::wants_reasoning_as_content_when_empty(chat_template_args)
-            && !Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args)
+            && !reasoning_disabled_by_request
     }
 
     /// Parsers that begin streaming in reasoning mode (force_reasoning=true).
@@ -7186,8 +7190,8 @@ impl OpenAIPreprocessor {
         matches!(tool_parser, Some("gemma4" | "gemma-4"))
     }
 
-    /// Legacy split route: the Gemma 4 reasoning parser stays on with the Gemma 4
-    /// tool-call parser (see `is_gemma4_tool_parser`).
+    /// Legacy split route and the stream heartbeat predicate: the Gemma 4 reasoning
+    /// parser stays on with the Gemma 4 tool-call parser (see `is_gemma4_tool_parser`).
     fn keeps_gemma4_reasoning_with_tool_parser(
         tool_parser: Option<&str>,
         reasoning_parser: Option<&str>,
@@ -17972,6 +17976,28 @@ mod tests {
         assert!(OpenAIPreprocessor::stream_can_defer_all_output(
             None,
             Some("muse_glimmer"),
+            Some(&args),
+        ));
+    }
+
+    #[test]
+    fn gemma4_paired_parsers_force_nonempty_stream_can_defer_with_thinking_off() {
+        let mut args = std::collections::HashMap::new();
+        args.insert(
+            "force_nonempty_content".to_string(),
+            serde_json::Value::Bool(true),
+        );
+
+        // Thinking off (unset) keeps reasoning parsing on with the Gemma 4 tool parser.
+        assert!(OpenAIPreprocessor::stream_can_defer_all_output(
+            Some("gemma4"),
+            Some("gemma4"),
+            Some(&args),
+        ));
+        // Without it, thinking off disables reasoning, so nothing is deferred.
+        assert!(!OpenAIPreprocessor::stream_can_defer_all_output(
+            None,
+            Some("gemma4"),
             Some(&args),
         ));
     }
