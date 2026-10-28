@@ -4,4 +4,4 @@
 #![allow(clippy::all)]
 #![allow(missing_docs)]
 
-tonic::include_proto!("sglang.runtime.v1");
+tonic::include_proto!("sglang.api.v1");
