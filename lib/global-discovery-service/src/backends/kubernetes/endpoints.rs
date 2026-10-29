@@ -42,8 +42,17 @@ pub struct McsReplicaDirectory(SliceDirectory<ReplicaIndex>);
 impl McsReplicaDirectory {
     /// The Service's slices as MCS imports them into the cluster `client`
     /// reaches. The client's connect and read timeouts should add up to under
-    /// 90 s, so a server that stops answering shows up as failures.
+    /// 90 s, so a server that stops answering shows up as failures. Logs an
+    /// error for a Service that `mcs` cannot import, since none of its
+    /// replicas would be listed.
     pub fn new(client: Client, service: &ExportedService, mcs: McsImplementation) -> Self {
+        if !mcs::can_import(mcs, &service.name) {
+            tracing::error!(
+                service = %service.name,
+                karmada_max_service_name = mcs::KARMADA_MAX_SERVICE_NAME,
+                "the Service's name is too long for Karmada to import it, so none of its replicas will be listed"
+            );
+        }
         Self(SliceDirectory::new(
             Api::namespaced(client, &service.namespace),
             mcs::service_selector(mcs, &service.name),
@@ -202,6 +211,8 @@ impl SliceIndex for ReplicaIndex {
             .collect()
     }
 
+    /// A relist: every slice at once. Rebuilds every replica; the cache
+    /// publishes one `Resync` instead of per-replica events.
     fn replace(&mut self, _naming: &ReplicaNaming, entries: HashMap<SliceKey, Vec<RouterReplica>>) {
         self.replicas.clear();
         for (key, endpoints) in &entries {
@@ -417,7 +428,6 @@ mod tests {
         assert!(
             matches!(events.try_recv().unwrap(), WatchEvent::Upserted(e) if e.replica == id("ohio/global-router-0"))
         );
-        // The same slice again changes nothing.
         cache.apply(watcher::Event::Apply(one.clone()));
         assert!(events.try_recv().is_err());
         // The pod moves to a new address: the replica changes.

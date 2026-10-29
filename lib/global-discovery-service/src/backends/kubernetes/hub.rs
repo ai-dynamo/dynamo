@@ -775,7 +775,6 @@ mod tests {
             events.try_recv().unwrap(),
             WatchEvent::Upserted(_)
         ));
-        // The same slice again changes nothing.
         cache.apply(watcher::Event::Apply(live.clone()));
         assert!(events.try_recv().is_err());
         // The Relay stops being Ready.

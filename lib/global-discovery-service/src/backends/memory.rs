@@ -325,6 +325,8 @@ impl Directory<PoolListing, PoolKey> for MemoryPoolStore {
         Ok(pools.snapshot(now, completeness))
     }
 
+    /// Starts from the view `list` returns, then follows registrations and
+    /// expired leases, and sends a `Resync` when the lists become `Exact`.
     async fn list_and_watch(
         &self,
         cancel_token: Option<CancellationToken>,
@@ -386,6 +388,8 @@ impl Directory<RouterReplica, RouterReplicaId> for StaticReplicaDirectory {
         Ok(self.snapshot())
     }
 
+    /// The configured replicas. The stream then stays open, with no events,
+    /// until the caller cancels it or the directory is dropped.
     async fn list_and_watch(
         &self,
         cancel_token: Option<CancellationToken>,

@@ -4,17 +4,20 @@
 # Optional-dependency preflight must run before the sweep module imports it.
 
 """Retune sweeps on real spawned workers: isolation, deadline, cancellation,
-the trace read, the pre-sweep and the workers' temporary files.
+the trace read, the pre-sweep and the workers' temporary files, plus every
+objective scored from a real replay.
 
-Each test runs ``run_sweep`` end to end, so it spawns worker processes that
-import the evaluators from ``dynamo.planner.tests.retune_sweep_helpers``.
+Each sweep test runs ``run_sweep`` end to end, so it spawns worker processes
+that import the evaluators from ``dynamo.planner.tests.retune_sweep_helpers``.
 """
 
 import errno
+import math
 import multiprocessing
 import os
 import threading
 import time
+from typing import get_args
 
 import pytest
 
@@ -23,8 +26,9 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
+from dynamo.planner.config.planner_config import RetuneObjective
 from dynamo.planner.core.types import RetuneParams
-from dynamo.planner.retune.sweep import run_sweep
+from dynamo.planner.retune.sweep import evaluate_candidate, run_sweep
 from dynamo.planner.tests.retune_sweep_helpers import (
     ABORT,
     HANG,
@@ -209,6 +213,42 @@ def test_run_sweep_presweep_fixes_the_winner_into_non_baseline_candidates(tmp_pa
     assert all(obs.duration_s == interval_s for obs in observations)
     assert sum(obs.num_req for obs in observations) == len(arrivals)
     assert result.predictor_warmup_error is None
+
+
+@pytest.mark.timeout(240)
+def test_a_real_replay_scores_every_objective(tmp_path):
+    # In process: the summary keys each objective reads exist in a replay.
+    trace = write_trace(
+        tmp_path / "trace.jsonl", trace_rows([ORIGIN_MS + 250 * i for i in range(30)])
+    )
+    request = sweep_request(
+        [trace],
+        [retune_params()],
+        retune_params(),
+        engine=disagg_engine(),
+        replicas={"prefill": 1, "decode": 1},
+    )
+
+    scores = {}
+    for objective in get_args(RetuneObjective):
+        scores[objective], metrics = evaluate_candidate(
+            trace,
+            request.engine,
+            request.arrival_speedup_ratio,
+            request.baseline,
+            request.replicas,
+            None,
+            None,
+            request.sla_ttft_ms,
+            request.sla_itl_ms,
+            request.window_s,
+            objective,
+        )
+        assert metrics["completed_requests"] == 30
+
+    assert all(math.isfinite(score) and score > 0 for score in scores.values())
+    assert scores["ThroughputPerGPU"] < scores["Throughput"]
+    assert scores["TTFT"] < scores["E2ELatency"]
 
 
 @pytest.mark.timeout(240)

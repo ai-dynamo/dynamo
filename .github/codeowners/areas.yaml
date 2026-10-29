@@ -72,6 +72,7 @@ areas:
 - label: global-router
   github_team: '@ai-dynamo/dynamo-global-router-codeowners'
   path_globs:
+  - lib/global-view-broadcaster/
   - components/src/dynamo/pool_relay/
   - container/global-discovery-service.yaml
   - lib/global-view-receiver/
