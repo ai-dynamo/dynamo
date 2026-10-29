@@ -89,6 +89,15 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "vllm_xargs",
 ];
 
+/// OpenAI Chat Completions fields that are accepted and dropped. They configure
+/// OpenAI's moderation, prompt cache retention, and response verbosity, which
+/// Dynamo does not implement.
+pub const CHAT_IGNORED_FIELDS: &[&str] =
+    &["prompt_cache_retention", "safety_identifier", "verbosity"];
+
+/// Maximum `safety_identifier` length in the OpenAI request contract.
+const MAX_SAFETY_IDENTIFIER_LENGTH: usize = 128;
+
 /// `vllm_xargs` keys vLLM itself fills from dedicated request fields. Dynamo only
 /// forwards router-generated `kv_transfer_params`, so clients may not set them.
 const RESERVED_VLLM_XARGS_KEYS: &[&str] = &["kv_transfer_params", "ec_transfer_params"];
@@ -122,17 +131,35 @@ pub fn validate_no_unsupported_fields(
 ) -> Result<(), anyhow::Error> {
     validate_no_unsupported_fields_with_ignore(
         unsupported_fields,
+        &[],
         *IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
     )
 }
 
+/// Chat Completions version of [`validate_no_unsupported_fields`] that also
+/// accepts [`CHAT_IGNORED_FIELDS`] after checking their values.
+pub fn validate_no_unsupported_chat_fields(
+    unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), anyhow::Error> {
+    validate_no_unsupported_fields_with_ignore(
+        unsupported_fields,
+        CHAT_IGNORED_FIELDS,
+        *IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+    )?;
+    validate_chat_ignored_fields(unsupported_fields)
+}
+
 fn validate_no_unsupported_fields_with_ignore(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+    accepted_fields: &[&str],
     ignore_unsupported_fields: bool,
 ) -> Result<(), anyhow::Error> {
     let unknown: Vec<_> = unsupported_fields
         .keys()
-        .filter(|k| !PASSTHROUGH_EXTRA_FIELDS.contains(&k.as_str()))
+        .filter(|k| {
+            !PASSTHROUGH_EXTRA_FIELDS.contains(&k.as_str())
+                && !accepted_fields.contains(&k.as_str())
+        })
         .map(|s| format!("`{}`", s))
         .collect();
     if !unknown.is_empty() && !ignore_unsupported_fields {
@@ -174,6 +201,34 @@ fn validate_no_unsupported_fields_with_ignore(
     }
     if let Some(value) = unsupported_fields.get("vllm_xargs") {
         validate_vllm_xargs(value)?;
+    }
+    Ok(())
+}
+
+/// Checks [`CHAT_IGNORED_FIELDS`] values against the OpenAI request contract.
+fn validate_chat_ignored_fields(
+    fields: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), anyhow::Error> {
+    if let Some(value) = fields.get("safety_identifier")
+        && !value.is_null()
+        && value
+            .as_str()
+            .is_none_or(|id| id.chars().count() > MAX_SAFETY_IDENTIFIER_LENGTH)
+    {
+        anyhow::bail!(
+            "`safety_identifier` must be a string of at most {MAX_SAFETY_IDENTIFIER_LENGTH} characters"
+        );
+    }
+    for (field, allowed) in [
+        ("prompt_cache_retention", &["in_memory", "24h"][..]),
+        ("verbosity", &["low", "medium", "high"][..]),
+    ] {
+        if let Some(value) = fields.get(field)
+            && !value.is_null()
+            && !value.as_str().is_some_and(|v| allowed.contains(&v))
+        {
+            anyhow::bail!("`{field}` must be one of: {}", allowed.join(", "));
+        }
     }
     Ok(())
 }
@@ -1231,7 +1286,7 @@ mod tests {
             "vllm_xargs": {"flag": true},
         }))
         .unwrap();
-        validate_no_unsupported_fields_with_ignore(&fields.fields, false).unwrap();
+        validate_no_unsupported_fields_with_ignore(&fields.fields, &[], false).unwrap();
         assert_eq!(fields.fields.len(), PASSTHROUGH_EXTRA_FIELDS.len());
         assert_eq!(fields.fields["detokenize"], json!(false));
         assert_eq!(fields.fields["stop_token_ids"], json!([]));
@@ -1249,7 +1304,7 @@ mod tests {
             let fields: ExtraFields = serde_json::from_value(json!({field: bad})).unwrap();
             assert_eq!(fields.fields[field], bad);
             let err =
-                validate_no_unsupported_fields_with_ignore(&fields.fields, false).unwrap_err();
+                validate_no_unsupported_fields_with_ignore(&fields.fields, &[], false).unwrap_err();
             assert!(err.to_string().contains(field), "{err}");
         }
     }
@@ -1257,14 +1312,14 @@ mod tests {
     #[test]
     fn validate_no_unsupported_fields_accepts_logprob_token_ids() {
         let fields = HashMap::from([("logprob_token_ids".to_string(), json!([14, 15]))]);
-        validate_no_unsupported_fields_with_ignore(&fields, false).unwrap();
+        validate_no_unsupported_fields_with_ignore(&fields, &[], false).unwrap();
     }
 
     #[test]
     fn validate_no_unsupported_fields_rejects_malformed_logprob_token_ids() {
         for bad in [json!(["notanint"]), json!(7), json!([[1, 2]]), json!([-1])] {
             let fields = HashMap::from([("logprob_token_ids".to_string(), bad)]);
-            let err = validate_no_unsupported_fields_with_ignore(&fields, false).unwrap_err();
+            let err = validate_no_unsupported_fields_with_ignore(&fields, &[], false).unwrap_err();
             assert!(err.to_string().contains("must be an array of token IDs"));
         }
     }
@@ -1288,7 +1343,7 @@ mod tests {
                 "tag": "read",
             }),
         )]);
-        validate_no_unsupported_fields_with_ignore(&fields, false).unwrap();
+        validate_no_unsupported_fields_with_ignore(&fields, &[], false).unwrap();
     }
 
     #[test]
@@ -1309,20 +1364,21 @@ mod tests {
             ),
         ] {
             let fields = HashMap::from([("vllm_xargs".to_string(), bad)]);
-            let err = validate_no_unsupported_fields_with_ignore(&fields, false).unwrap_err();
+            let err = validate_no_unsupported_fields_with_ignore(&fields, &[], false).unwrap_err();
             assert!(err.to_string().contains(message), "{err}");
         }
     }
 
     #[test]
     fn validate_no_unsupported_fields_rejects_unknown_fields_by_default() {
-        let err = validate_no_unsupported_fields_with_ignore(&unknown_fields(), false).unwrap_err();
+        let err =
+            validate_no_unsupported_fields_with_ignore(&unknown_fields(), &[], false).unwrap_err();
         assert!(err.to_string().contains("Unsupported parameter(s)"));
     }
 
     #[test]
     fn validate_no_unsupported_fields_ignores_unknown_fields_when_configured() {
-        validate_no_unsupported_fields_with_ignore(&unknown_fields(), true).unwrap();
+        validate_no_unsupported_fields_with_ignore(&unknown_fields(), &[], true).unwrap();
     }
 
     #[test]
@@ -1333,8 +1389,51 @@ mod tests {
         ]);
 
         let err =
-            validate_no_unsupported_fields_with_ignore(&unsupported_fields, true).unwrap_err();
+            validate_no_unsupported_fields_with_ignore(&unsupported_fields, &[], true).unwrap_err();
         assert!(err.to_string().contains("stop_token_ids"));
+    }
+
+    #[test]
+    fn chat_ignored_fields_are_accepted_only_by_chat() {
+        let fields = HashMap::from([
+            (
+                "safety_identifier".to_string(),
+                json!("é".repeat(MAX_SAFETY_IDENTIFIER_LENGTH)),
+            ),
+            ("prompt_cache_retention".to_string(), json!("24h")),
+            ("verbosity".to_string(), json!("low")),
+        ]);
+        validate_no_unsupported_fields_with_ignore(&fields, CHAT_IGNORED_FIELDS, false).unwrap();
+        validate_chat_ignored_fields(&fields).unwrap();
+        let err = validate_no_unsupported_fields_with_ignore(&fields, &[], false).unwrap_err();
+        assert!(
+            err.to_string().contains("Unsupported parameter(s)"),
+            "{err}"
+        );
+
+        let nulls = CHAT_IGNORED_FIELDS
+            .iter()
+            .map(|field| (field.to_string(), serde_json::Value::Null))
+            .collect::<HashMap<_, _>>();
+        validate_chat_ignored_fields(&nulls).unwrap();
+    }
+
+    #[test]
+    fn chat_ignored_fields_reject_malformed_values() {
+        for (field, bad) in [
+            ("safety_identifier", json!(7)),
+            (
+                "safety_identifier",
+                json!("x".repeat(MAX_SAFETY_IDENTIFIER_LENGTH + 1)),
+            ),
+            ("prompt_cache_retention", json!("1h")),
+            ("verbosity", json!("loud")),
+            ("verbosity", json!(["low"])),
+        ] {
+            let fields = HashMap::from([(field.to_string(), bad)]);
+            let err = validate_chat_ignored_fields(&fields).unwrap_err();
+            assert!(err.to_string().contains(field), "{err}");
+        }
     }
 
     #[test]

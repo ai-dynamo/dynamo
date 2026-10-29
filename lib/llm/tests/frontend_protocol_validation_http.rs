@@ -1220,6 +1220,61 @@ async fn responses_auto_tool_choice_without_tools_reaches_backend() {
     .await;
 }
 
+/// OpenAI's `safety_identifier`, `prompt_cache_retention`, and `verbosity` reach the
+/// backend on chat completions without being forwarded. Legacy completions, whose
+/// contract has no such fields, still rejects them.
+#[tokio::test]
+#[serial]
+async fn chat_completions_accept_and_drop_openai_ignored_fields() {
+    const FIELDS: [(&str, &str); 3] = [
+        ("safety_identifier", "user-1234"),
+        ("prompt_cache_retention", "24h"),
+        ("verbosity", "low"),
+    ];
+    fn with_fields(mut body: Value) -> Value {
+        for (field, value) in FIELDS {
+            body[field] = json!(value);
+        }
+        body
+    }
+
+    temp_env::async_with_vars(BASE_ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script; 2]).await;
+
+        for stream in [false, true] {
+            let body = with_fields(json!({
+                "model": MODEL,
+                "stream": stream,
+                "messages": [{"role": "user", "content": "ping"}],
+            }));
+            let response = post_json(&svc, "/v1/chat/completions", body).await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            bounded(response.bytes()).await.unwrap();
+
+            let requests = svc.engine.take_requests().await;
+            assert_eq!(requests.len(), 1);
+            let forwarded = serde_json::to_value(&requests[0]).unwrap();
+            for (field, _) in FIELDS {
+                assert!(forwarded.get(field).is_none(), "{field} was forwarded");
+            }
+        }
+
+        let body = with_fields(json!({"model": MODEL, "prompt": "ping"}));
+        let response = post_json(&svc, "/v1/completions", body).await;
+        assert_openai_error(
+            response,
+            ExpectedError::Validation,
+            "Unsupported parameter(s)",
+        )
+        .await;
+
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 #[tokio::test]
 #[serial]
 async fn responses_reject_empty_input_and_required_tool_choice_without_tools() {

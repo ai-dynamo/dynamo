@@ -709,7 +709,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_custom_tools(&self.inner)?;
-        validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        validate::validate_no_unsupported_chat_fields(&self.unsupported_fields)?;
         validate::validate_guided_decoding(self)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;

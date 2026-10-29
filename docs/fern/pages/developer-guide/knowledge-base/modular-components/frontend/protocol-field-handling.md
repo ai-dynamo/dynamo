@@ -174,8 +174,10 @@ commitment.
 
 Chat completion and completion requests currently capture extra top-level fields in an internal
 map named `unsupported_fields`. The name describes the capture mechanism, not the final admission
-decision. A small named set is accepted and validated for downstream handling. Other fields are
-rejected by default. When `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` is truthy, those other fields
+decision. A small named set is accepted and validated for downstream handling. Chat completions
+also accepts OpenAI's `safety_identifier`, `prompt_cache_retention`, and `verbosity`, validates
+their values, and drops them, because Dynamo does not implement OpenAI's moderation, prompt cache
+retention, or verbosity behavior. Other fields are rejected by default. When `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` is truthy, those other fields
 are ignored and dropped; the switch does not enable general forwarding. See the
 [frontend configuration reference](../../../../reference/components/frontend-configuration.mdx)
 for the exact switch behavior.
