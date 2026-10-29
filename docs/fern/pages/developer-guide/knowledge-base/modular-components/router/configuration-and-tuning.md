@@ -109,7 +109,7 @@ link no catalog and reject a configured policy type at startup.
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
-| `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+| `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then KV prefix overlap (device-resident by default; host, disk, shared-cache, and fetchable blocks can also be credited). Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
@@ -217,15 +217,24 @@ experimental router exactly. Add any subset to tune it:
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `cache_threshold` | `0.5` | Fraction of the request's blocks that must be device-resident on the best worker before the cache tier applies. Compared strictly. Must be in `[0.0, 1.0]`. |
+| `cache_threshold` | `0.5` | Fraction of the request's blocks that the best worker's credited overlap must exceed before the cache tier applies. Credited overlap is the worker's device-resident blocks plus the weighted blocks below. Compared strictly. Must be in `[0.0, 1.0]`. |
 | `balance_abs_threshold` | `32` | Minimum active-request spread before the load tier applies. |
 | `balance_rel_threshold` | `1.1` | Minimum ratio of largest to smallest active-request count before the load tier applies. Must be at least `1.0`. |
+| `host_cache_hit_weight` | `0.0` | Credit per host-pinned prefix block. |
+| `disk_cache_hit_weight` | `0.0` | Credit per disk prefix block. |
+| `shared_cache_multiplier` | `0.0` | Credit per block a worker could read remotely: shared-cache hits beyond its device prefix, plus the blocks a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints) would add beyond its own prefix. |
 
 Both load gates must hold before the load tier displaces the cache tier. Parameters are validated at
 startup, so an out-of-range value or an unknown key fails the process immediately, naming the key,
 rather than being silently ignored. It selects the least-loaded worker once the active-request spread is greater than 32 and the
 largest count is more than 1.1 times the smallest; otherwise it prefers the worker holding the
 largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
+
+The three cache weights mean the same as the [default policy's](#configure-the-default-policy) and
+must be finite and non-negative. They are read only from this `parameters` mapping: router flags
+such as `--shared-cache-multiplier` do not apply. Keep `shared_cache_multiplier` at or below
+`host_cache_hit_weight`; otherwise a worker that can fetch a prefix from a peer outranks one that
+holds it in its own host tier.
 
 #### Override the Selection
 

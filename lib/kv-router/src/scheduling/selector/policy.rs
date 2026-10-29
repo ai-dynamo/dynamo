@@ -50,7 +50,7 @@ pub(super) struct ComposedPolicyState {
     pub(super) filter_inputs: WorkerInputs,
     pub(super) scorer_picker_inputs: WorkerInputs,
     pub(super) picker_inputs: WorkerInputs,
-    unscored_candidates: Vec<CandidateData>,
+    pub(super) unscored_candidates: Vec<CandidateData>,
     score_contributions: Vec<f64>,
     pub(super) candidates: Vec<ScoredWorkerCandidate>,
     pub(super) cache_inputs: Vec<WorkerCacheData>,
@@ -97,10 +97,9 @@ impl WorkerSelectionPolicy {
         scorers: Vec<Box<dyn WorkerScorer>>,
         picker: Box<dyn WorkerPicker>,
     ) -> Self {
-        // Fetch inputs are filled once every row is built, so only scorers receive them.
-        let picker_inputs = picker
-            .required_worker_inputs()
-            .without(WorkerInputs::KV_TRANSFER);
+        // Fetch inputs are filled once every row is built, so filters, which run per row before
+        // that, do not receive them.
+        let picker_inputs = picker.required_worker_inputs();
         // Freeze each declaration once; callbacks must not inherit another component's access.
         let filters: Vec<_> = filters
             .into_iter()
@@ -271,8 +270,9 @@ impl ComposedPolicyState {
             &mut self.cache_inputs,
             &mut self.load_inputs,
         );
-        if !self.scorers.is_empty() {
-            // Picker-only policies do not need a second copy of the worker inputs.
+        if !self.scorers.is_empty() || self.picker_inputs.contains(WorkerInputs::KV_TRANSFER) {
+            // Picker-only policies do not need a second copy of the worker inputs unless the
+            // picker reads fetch inputs, which are filled into these rows.
             self.unscored_candidates.push(candidate);
         }
     }
@@ -289,7 +289,7 @@ impl ComposedPolicyState {
             candidates,
             ..
         } = self;
-        if unscored_candidates.is_empty() {
+        if scorers.is_empty() || unscored_candidates.is_empty() {
             return Ok(());
         }
         debug_assert_eq!(unscored_candidates.len(), candidates.len());
@@ -343,7 +343,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
     state.cache_inputs.clear();
     state.load_inputs.clear();
     state.transfer_targets.clear();
-    // Only scorers declare KV_TRANSFER; their inputs are filled once every row is built.
+    // Only scorers and pickers read KV_TRANSFER; their inputs are filled once every row is built.
     let defer_transfer = request.kv_transfer_candidates.is_some()
         && state
             .scorer_picker_inputs
@@ -853,23 +853,53 @@ mod tests {
                 _context: &WorkerSelectionContext<'_>,
                 candidate: WorkerCandidate<'_>,
             ) -> Result<bool, WorkerSelectionPolicyError> {
-                // Only scorers receive fetch inputs.
+                // Filters never receive fetch inputs.
                 assert_eq!(candidate.kv_transfer(), None);
                 Ok(true)
             }
         }
 
+        struct TransferPicker {
+            inputs: WorkerInputs,
+            seen: Seen,
+        }
+
+        impl WorkerPicker for TransferPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                self.inputs
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                let transfer = input.kv_transfer();
+                assert!(transfer.is_none_or(|transfer| transfer.len() == input.candidates().len()));
+                for (row, candidate) in input.candidates().iter().enumerate() {
+                    let transfer =
+                        transfer.map(|transfer| transfer.get(row).unwrap().source_prefix_blocks());
+                    self.seen
+                        .lock()
+                        .unwrap()
+                        .push((candidate.worker().worker_id, transfer));
+                }
+                Ok(0)
+            }
+        }
+
         let warm = WorkerWithDpRank::from_worker_id(0);
         let workers = HashMap::from([(0, HintWorker), (1, HintWorker)]);
-        let select = |candidates: Option<KvTransferCandidates>| {
-            let (declared, undeclared) = (Seen::default(), Seen::default());
+        // `scored` adds one scorer that declares fetch inputs and one that does not.
+        let select = |candidates: Option<KvTransferCandidates>,
+                      scored: bool,
+                      picker_inputs: WorkerInputs| {
+            let (declared, undeclared, picked) =
+                (Seen::default(), Seen::default(), Seen::default());
             let mut request = base_request(64);
             request.overlap.tier_overlap_blocks.device = FxHashMap::from_iter([(warm, 3)]);
             request.kv_transfer_candidates = candidates;
-            let policy = WorkerSelectionPolicy::new_with_filters(
-                KvRouterConfig::default(),
-                "test",
-                vec![Box::new(TransferFilter)],
+            let scorers: Vec<Box<dyn WorkerScorer>> = if scored {
                 vec![
                     Box::new(TransferScorer {
                         inputs: WorkerInputs::KV_TRANSFER,
@@ -879,8 +909,19 @@ mod tests {
                         inputs: WorkerInputs::CACHE,
                         seen: undeclared.clone(),
                     }),
-                ],
-                Box::new(FirstPicker),
+                ]
+            } else {
+                Vec::new()
+            };
+            let policy = WorkerSelectionPolicy::new_with_filters(
+                KvRouterConfig::default(),
+                "test",
+                vec![Box::new(TransferFilter)],
+                scorers,
+                Box::new(TransferPicker {
+                    inputs: picker_inputs,
+                    seen: picked.clone(),
+                }),
             );
             policy
                 .select_worker(WorkerSelectionInput::configured(
@@ -895,20 +936,41 @@ mod tests {
                 seen.sort_unstable();
                 seen
             };
-            (sorted(declared), sorted(undeclared))
+            (sorted(declared), sorted(undeclared), sorted(picked))
+        };
+        let candidates = || {
+            Some(KvTransferCandidates {
+                block_hashes: (101..=104).map(ExternalSequenceBlockHash).collect(),
+                owner_prefix_blocks: vec![(warm.into(), 3)],
+                routing_snapshot: None,
+            })
         };
 
-        let (declared, undeclared) = select(Some(KvTransferCandidates {
-            block_hashes: (101..=104).map(ExternalSequenceBlockHash).collect(),
-            owner_prefix_blocks: vec![(warm.into(), 3)],
-            routing_snapshot: None,
-        }));
         // The warm worker holds the whole fetchable prefix; the cold one can fetch it.
-        assert_eq!(declared, vec![(0, Some(None)), (1, Some(Some(3)))]);
-        assert_eq!(undeclared, vec![(0, None), (1, None)]);
+        let fetchable = vec![(0, Some(None)), (1, Some(Some(3)))];
+        let unavailable = vec![(0, None), (1, None)];
+        let (declared, undeclared, picked) = select(candidates(), true, WorkerInputs::KV_TRANSFER);
+        assert_eq!(declared, fetchable);
+        assert_eq!(undeclared, unavailable);
+        assert_eq!(picked, fetchable);
+        // A picker-only policy gets the same fetch inputs; a picker that does not declare them
+        // gets none, even when a scorer does.
+        assert_eq!(
+            select(candidates(), false, WorkerInputs::KV_TRANSFER).2,
+            fetchable
+        );
+        assert_eq!(
+            select(candidates(), true, WorkerInputs::CACHE).2,
+            unavailable
+        );
         // Without transfer candidates the host has nothing to report.
-        let (declared, _) = select(None);
-        assert_eq!(declared, vec![(0, None), (1, None)]);
+        let (declared, _, picked) = select(None, true, WorkerInputs::KV_TRANSFER);
+        assert_eq!(declared, unavailable);
+        assert_eq!(picked, unavailable);
+        assert_eq!(
+            select(None, false, WorkerInputs::KV_TRANSFER).2,
+            unavailable
+        );
     }
 
     #[test]

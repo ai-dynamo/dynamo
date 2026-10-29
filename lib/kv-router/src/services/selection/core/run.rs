@@ -317,8 +317,8 @@ impl SelectionCore {
         // Transfer candidates need a worker in this partition that consumes
         // router hints and an indexer that can retain the matched chain (local,
         // event-driven, no approximate writes). Bookings use them for the fetch
-        // hint; when the policy scores fetchable prefixes, every selection
-        // retains them so previews score like bookings.
+        // hint; when the policy ranks on fetchable prefixes, every selection
+        // retains them so previews rank like bookings.
         let hint_capable_workers = (book || entry.scores_kv_transfer)
             && entry.hint_capable_workers.load(Ordering::Relaxed);
         let retain_kv_transfer_chain =

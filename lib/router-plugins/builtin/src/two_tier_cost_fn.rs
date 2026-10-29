@@ -5,17 +5,25 @@
 //!
 //! Dynamo's built-in selector folds cache overlap and load into one additive cost. This policy
 //! instead ranks on two tiers, taking the first that applies. For each eligible worker it reads
-//! device-KV overlap and active-request count, then:
+//! credited prefix overlap and active-request count, then:
 //!
 //! 1. Load tier: if active-request spread exceeds `balance_abs_threshold` and the largest count
 //!    exceeds `balance_rel_threshold` times the smallest, select the least-loaded worker.
-//! 2. Cache tier: otherwise, if the largest device-KV overlap is strictly greater than
+//! 2. Cache tier: otherwise, if the largest credited overlap is strictly greater than
 //!    `cache_threshold` of the request's block count, select the least-loaded worker holding that
 //!    maximum overlap.
 //! 3. Otherwise, select the least-loaded worker.
 //!
 //! Both load gates must hold to take step 1, so load displaces cache affinity only when the
 //! imbalance is both large in absolute terms and disproportionate.
+//!
+//! Credited overlap is the worker's device-KV overlap plus the lower-tier and remote credits of
+//! Dynamo's default policy, under the same parameter names: `host_cache_hit_weight` and
+//! `disk_cache_hit_weight` per host-pinned and disk prefix block, and `shared_cache_multiplier`
+//! per shared-cache hit beyond the device prefix and per block a KV fetch hint would add beyond
+//! the worker's own prefix. The host chooses each worker's fetch source, and booking a worker
+//! attaches a fetch hint for that same source. These weights have no `sgl-router` counterpart and
+//! default to zero, so credited overlap is device-KV overlap unless an instance sets them.
 //!
 //! The thresholds and selection order are the exact implementation ported from
 //! `experimental/sgl-router`'s `cache_aware_zmq` policy, using Dynamo's authoritative device-KV
@@ -31,9 +39,9 @@ use std::sync::Arc;
 
 use dynamo_kv_router::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCacheInputs, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-    WorkerSelectionPolicyFactory,
+    WorkerCacheInput, WorkerCacheInputs, WorkerInputView, WorkerInputs, WorkerLoadInput,
+    WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    WorkerSelectionPolicyFactory, WorkerTransferInput, WorkerTransferInputs,
 };
 use dynamo_kv_router::plugins::{
     RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
@@ -49,10 +57,12 @@ const DEFAULT_CACHE_THRESHOLD: f64 = 0.5;
 const DEFAULT_BALANCE_ABS_THRESHOLD: usize = 32;
 const DEFAULT_BALANCE_REL_THRESHOLD: f64 = 1.1;
 
-/// Tunables for [`POLICY_TYPE`], named after their `sgl-router` counterparts.
+/// Tunables for [`POLICY_TYPE`]. Thresholds are named after their `sgl-router` counterparts, and
+/// cache weights after the default policy's.
 ///
-/// Every field is optional and keeps the upstream default when omitted. Unknown keys are rejected
-/// at startup rather than ignored, so a misremembered name fails loudly.
+/// Every field is optional and keeps its default when omitted. Router-level cache weights do not
+/// apply. Unknown keys are rejected at startup rather than ignored, so a misremembered name fails
+/// loudly.
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct Parameters {
@@ -63,6 +73,13 @@ struct Parameters {
     balance_abs_threshold: usize,
     /// Minimum ratio of largest to smallest active-request count before the load tier applies.
     balance_rel_threshold: f64,
+    /// Credit per host-pinned prefix block.
+    host_cache_hit_weight: f64,
+    /// Credit per disk prefix block.
+    disk_cache_hit_weight: f64,
+    /// Credit per block a worker could read remotely: shared-cache hits beyond its device prefix,
+    /// plus the blocks a KV fetch would add beyond its device, host, and disk prefix.
+    shared_cache_multiplier: f64,
 }
 
 impl Default for Parameters {
@@ -71,6 +88,9 @@ impl Default for Parameters {
             cache_threshold: DEFAULT_CACHE_THRESHOLD,
             balance_abs_threshold: DEFAULT_BALANCE_ABS_THRESHOLD,
             balance_rel_threshold: DEFAULT_BALANCE_REL_THRESHOLD,
+            host_cache_hit_weight: 0.0,
+            disk_cache_hit_weight: 0.0,
+            shared_cache_multiplier: 0.0,
         }
     }
 }
@@ -87,7 +107,43 @@ impl Parameters {
                 "balance_rel_threshold must be a finite number greater than or equal to 1.0",
             ));
         }
+        for (name, value) in [
+            ("host_cache_hit_weight", self.host_cache_hit_weight),
+            ("disk_cache_hit_weight", self.disk_cache_hit_weight),
+            ("shared_cache_multiplier", self.shared_cache_multiplier),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(WorkerSelectionPolicyProviderError::new(format!(
+                    "{name} must be finite and non-negative"
+                )));
+            }
+        }
         Ok(())
+    }
+
+    /// Device overlap plus the weighted lower-tier and remote blocks, defined as the default
+    /// policy's credits are. With every weight zero this is exactly the device overlap.
+    fn credited_overlap(
+        &self,
+        cache: WorkerCacheInput<'_>,
+        transfer: Option<WorkerTransferInput>,
+    ) -> f64 {
+        let device = cache.device_overlap_blocks();
+        let host = cache.host_overlap_blocks();
+        let disk = cache.disk_overlap_blocks();
+        let shared = cache
+            .shared_hits()
+            .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
+        // Blocks a KV fetch would add beyond everything this worker holds.
+        let fetchable = transfer
+            .and_then(|transfer| transfer.source_prefix_blocks())
+            .map_or(0.0, |source| {
+                (f64::from(source) - (device + host + disk)).max(0.0)
+            });
+        device
+            + self.host_cache_hit_weight * host
+            + self.disk_cache_hit_weight * disk
+            + self.shared_cache_multiplier * (shared as f64 + fetchable)
     }
 }
 
@@ -99,9 +155,14 @@ fn select_row(
     parameters: &Parameters,
     cache: WorkerCacheInputs<'_>,
     load: &[WorkerLoadInput],
+    transfer: Option<WorkerTransferInputs<'_>>,
     request_blocks: u64,
+    overlaps: &mut Vec<f64>,
 ) -> Option<usize> {
-    if cache.is_empty() || cache.len() != load.len() {
+    if cache.is_empty()
+        || cache.len() != load.len()
+        || transfer.is_some_and(|transfer| transfer.len() != load.len())
+    {
         return None;
     }
 
@@ -113,10 +174,12 @@ fn select_row(
         return least_loaded(load, 0..load.len());
     }
 
-    let max_overlap = cache
-        .iter()
-        .map(|item| item.device_overlap_blocks())
-        .max_by(f64::total_cmp)?;
+    // Computed once, so the maximum and the tie set compare identical values.
+    overlaps.clear();
+    overlaps.extend(cache.iter().enumerate().map(|(row, item)| {
+        parameters.credited_overlap(item, transfer.and_then(|transfer| transfer.get(row)))
+    }));
+    let max_overlap = overlaps.iter().copied().max_by(f64::total_cmp)?;
     let cache_ratio = if request_blocks == 0 {
         0.0
     } else {
@@ -125,9 +188,10 @@ fn select_row(
     if cache_ratio > parameters.cache_threshold {
         return least_loaded(
             load,
-            cache.iter().enumerate().filter_map(|(row, item)| {
-                (item.device_overlap_blocks() == max_overlap).then_some(row)
-            }),
+            overlaps
+                .iter()
+                .enumerate()
+                .filter_map(|(row, &overlap)| (overlap == max_overlap).then_some(row)),
         );
     }
 
@@ -136,11 +200,28 @@ fn select_row(
 
 struct TwoTierCostFnPicker {
     parameters: Parameters,
+    /// Credited overlap per candidate row, reused across selections.
+    overlaps: Vec<f64>,
+}
+
+impl TwoTierCostFnPicker {
+    fn new(parameters: Parameters) -> Self {
+        Self {
+            parameters,
+            overlaps: Vec::new(),
+        }
+    }
 }
 
 impl WorkerPicker for TwoTierCostFnPicker {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::LOAD
+        let inputs = WorkerInputs::CACHE | WorkerInputs::LOAD;
+        if self.parameters.shared_cache_multiplier != 0.0 {
+            // The host builds fetch sources per selection only for policies that ask.
+            inputs | WorkerInputs::KV_TRANSFER
+        } else {
+            inputs
+        }
     }
 
     fn pick(
@@ -154,8 +235,15 @@ impl WorkerPicker for TwoTierCostFnPicker {
         let load = input
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        select_row(&self.parameters, cache, load, context.request_blocks())
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+        select_row(
+            &self.parameters,
+            cache,
+            load,
+            input.kv_transfer(),
+            context.request_blocks(),
+            &mut self.overlaps,
+        )
+        .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
     }
 }
 
@@ -171,7 +259,7 @@ fn provider(
                 config.clone(),
                 worker_type.as_str(),
                 Vec::new(),
-                Box::new(TwoTierCostFnPicker { parameters }),
+                Box::new(TwoTierCostFnPicker::new(parameters)),
             )
         },
     ))
@@ -185,9 +273,13 @@ pub fn register(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
-    use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
+    use dynamo_kv_router::kv_hints::KvTransferCandidates;
+    use dynamo_kv_router::protocols::{
+        ExternalSequenceBlockHash, KvHintTransferWorkerMetadata, RoutingConstraints,
+        WorkerConfigLike, WorkerWithDpRank,
+    };
     use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
     use dynamo_kv_router::{
         SchedulingRequest, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
@@ -216,6 +308,15 @@ mod tests {
         fn total_kv_blocks(&self) -> Option<u64> {
             Some(1024)
         }
+        fn kv_hint_transfer_metadata_for_dp_rank(
+            &self,
+            _dp_rank: u32,
+        ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+            Some(KvHintTransferWorkerMetadata {
+                worker_type: "aggregated",
+                source_control_endpoint: Some("tcp://worker:23280"),
+            })
+        }
     }
 
     fn worker(id: u64) -> WorkerWithDpRank {
@@ -228,6 +329,16 @@ mod tests {
     }
 
     fn select_with(parameters: Parameters, workers: [(u64, usize, usize); 2]) -> WorkerWithDpRank {
+        pick(
+            parameters,
+            &request(&workers),
+            &workers.map(|(id, _, _)| id),
+        )
+    }
+
+    /// A ten-block request over workers given as `(worker_id, device_overlap_blocks,
+    /// active_requests)`.
+    fn request(workers: &[(u64, usize, usize)]) -> SchedulingRequest {
         let mut request = SchedulingRequest {
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
@@ -251,7 +362,7 @@ mod tests {
             worker_loads: Default::default(),
             resp_tx: None,
         };
-        for (id, overlap_blocks, active_requests) in workers {
+        for &(id, overlap_blocks, active_requests) in workers {
             request
                 .overlap
                 .tier_overlap_blocks
@@ -265,16 +376,33 @@ mod tests {
                 },
             );
         }
-        let configs = HashMap::from(workers.map(|(id, _, _)| (id, TestWorker)));
+        request
+    }
+
+    /// Fetch candidates for the ten-block prompt, held on device by `owners` as
+    /// `(worker_id, prefix_blocks)`.
+    fn fetch_candidates(owners: &[(u64, usize)]) -> KvTransferCandidates {
+        KvTransferCandidates {
+            block_hashes: (0..10).map(ExternalSequenceBlockHash).collect(),
+            owner_prefix_blocks: owners
+                .iter()
+                .map(|&(id, prefix_blocks)| (worker(id).into(), prefix_blocks))
+                .collect(),
+            routing_snapshot: None,
+        }
+    }
+
+    fn pick(parameters: Parameters, request: &SchedulingRequest, ids: &[u64]) -> WorkerWithDpRank {
+        let configs: HashMap<_, _> = ids.iter().map(|&id| (id, TestWorker)).collect();
         WorkerSelectionPolicy::new(
             KvRouterConfig::default(),
             "test",
             Vec::new(),
-            Box::new(TwoTierCostFnPicker { parameters }),
+            Box::new(TwoTierCostFnPicker::new(parameters)),
         )
         .select_worker(WorkerSelectionInput::configured(
             &configs,
-            &request,
+            request,
             request.eligibility(),
             BLOCK_SIZE,
         ))
@@ -326,7 +454,73 @@ mod tests {
 
         assert!(cache(-0.1).is_err() && cache(1.1).is_err() && cache(f64::NAN).is_err());
         assert!(ratio(0.9).is_err() && ratio(f64::NAN).is_err());
+        for weights in [
+            Parameters {
+                host_cache_hit_weight: -0.1,
+                ..Default::default()
+            },
+            Parameters {
+                disk_cache_hit_weight: f64::INFINITY,
+                ..Default::default()
+            },
+            Parameters {
+                shared_cache_multiplier: f64::NAN,
+                ..Default::default()
+            },
+        ] {
+            assert!(weights.validate().is_err());
+        }
         assert!(Parameters::default().validate().is_ok());
+    }
+
+    #[test]
+    fn fetch_credit_lets_a_fetching_worker_tie_the_holder() {
+        // A holds six of ten blocks on device; idle B can fetch them from A.
+        let mut request = request(&[(A, 6, 4), (B, 0, 0)]);
+        request.kv_transfer_candidates = Some(fetch_candidates(&[(A, 6)]));
+        let upstream = TwoTierCostFnPicker::new(Parameters::default());
+        assert!(
+            !upstream
+                .required_worker_inputs()
+                .contains(WorkerInputs::KV_TRANSFER)
+        );
+        assert_eq!(pick(Parameters::default(), &request, &[A, B]), worker(A));
+
+        // At full credit B's six fetchable blocks tie A's six resident ones; load breaks the tie.
+        let credited = Parameters {
+            shared_cache_multiplier: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(pick(credited, &request, &[A, B]), worker(B));
+    }
+
+    #[test]
+    fn host_credit_keeps_an_own_copy_ahead_of_a_peer_fetch() {
+        const C: u64 = 53;
+        // A holds six blocks host-pinned. Less-loaded B can fetch six from C, which is ineligible.
+        let mut request = request(&[(A, 0, 2), (B, 0, 0), (C, 6, 0)]);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .host_pinned
+            .insert(worker(A), 6);
+        request.kv_transfer_candidates = Some(fetch_candidates(&[(C, 6)]));
+        request.allowed_worker_ids = Some(HashSet::from([A, B]));
+        let parameters = Parameters {
+            cache_threshold: 0.2,
+            host_cache_hit_weight: 0.75,
+            shared_cache_multiplier: 0.5,
+            ..Default::default()
+        };
+        // A's credited 4.5 blocks beat B's 3.0.
+        assert_eq!(pick(parameters, &request, &[A, B, C]), worker(A));
+
+        // Without host credit, the peer fetch outranks A's own copy.
+        let fetch_only = Parameters {
+            host_cache_hit_weight: 0.0,
+            ..parameters
+        };
+        assert_eq!(pick(fetch_only, &request, &[A, B, C]), worker(B));
     }
 
     #[test]
