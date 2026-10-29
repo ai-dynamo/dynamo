@@ -6,8 +6,8 @@
 //! Two flags choose the backend behind the API:
 //! - `--pool-discovery`: where the pool and router lists come from. Either
 //!   the registrations PoolRelays send (`registrations`), or the
-//!   EndpointSlices that MCS imports, named the Karmada way (`karmada`) or
-//!   the standard way (`mcs`).
+//!   EndpointSlices that MCS imports, with the standard MCS labels (`mcs`)
+//!   or named the Karmada way (`karmada`).
 //! - `--registration-storage`: where registrations are kept. Only `memory`
 //!   for now.
 //!
@@ -62,7 +62,7 @@ const _: () = assert!(KUBE_CONNECT_TIMEOUT.as_secs() + KUBE_READ_TIMEOUT.as_secs
 /// values. A flag under the heading of another value fails at startup, rather
 /// than being ignored.
 const WITH_REGISTRATIONS: &str = "With --pool-discovery registrations";
-const WITH_MCS: &str = "With --pool-discovery karmada or mcs";
+const WITH_MCS: &str = "With --pool-discovery mcs or karmada";
 
 #[derive(Debug, Parser)]
 #[command(about = "Serve Global Router pool discovery over HTTP")]
@@ -136,13 +136,17 @@ enum PoolDiscovery {
     /// The pools PoolRelays register (`POST /pools`), while their leases
     /// last. Router replicas come from `--router`.
     Registrations,
-    /// The pools whose PoolRelay Services Karmada imports, and the replicas
-    /// of the router Service, from EndpointSlices named the Karmada way.
-    /// Takes no registrations.
-    Karmada,
-    /// As `karmada`, from EndpointSlices with the standard
-    /// `multicluster.kubernetes.io` labels.
+    /// The pools whose PoolRelay Services MCS imports, and the replicas of
+    /// the router Service, from EndpointSlices with the standard
+    /// `multicluster.kubernetes.io/source-cluster` and `service-name` labels.
+    /// A pool's region is its slices' optional `topology.kubernetes.io/region`
+    /// label, which `deploy/global-discovery-mcs` sets, or else its cluster's
+    /// name. Takes no registrations.
     Mcs,
+    /// As `mcs`, from EndpointSlices named the Karmada way instead:
+    /// `imported-<cluster>-<slice>`, of a Service named `derived-<service>`.
+    /// Karmada sets no region, so a pool's region is its cluster's name.
+    Karmada,
 }
 
 /// Where registrations are kept.
@@ -263,7 +267,7 @@ async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscover
         &args.router_port_name,
     ) else {
         bail!(
-            "--pool-discovery karmada and mcs need --router-namespace, --router-service and \
+            "--pool-discovery mcs and karmada need --router-namespace, --router-service and \
              --router-port-name"
         );
     };
@@ -415,12 +419,12 @@ mod tests {
         assert_refused(
             &["gds", "--router-service", "global-router"],
             "router-service",
-            "karmada or mcs",
+            "mcs or karmada",
         );
         assert_refused(
             &["gds", "--pool-service-suffix=-relay"],
             "pool-service-suffix",
-            "karmada or mcs",
+            "mcs or karmada",
         );
         // Flags left at their defaults are not refused, whatever their heading.
         assert!(parse_args(karmada(&[])).is_ok());
