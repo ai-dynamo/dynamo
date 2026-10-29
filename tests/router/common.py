@@ -4392,9 +4392,9 @@ def run_frontend_epp_tools_token_parity(
             case_name = f"{declaration.name}-{arm_name}-{other_name}"
             baseline_tokens = arm_tokens["baseline"]
             variant_tokens = arm_tokens[other_name]
-            assert baseline_tokens != variant_tokens, (
-                f"{case_name}: {label} baseline matched {other_name}"
-            )
+            assert (
+                baseline_tokens != variant_tokens
+            ), f"{case_name}: {label} baseline matched {other_name}"
             logger.info(
                 "Tools token sensitivity confirmed for %s (%s vs %s)",
                 case_name,
