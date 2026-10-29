@@ -1,8 +1,10 @@
 {
   "captureSources": {
-    "hack/capture_missing_origin.py": "4ab316abd63eb732dabf92b3a06aca8ce344a9c8c798c21a39d4bf9b60a007b3",
+    "hack/capture_missing_origin.py": "6b4ffb46cbed9520f1556201dca3105adb5fced2dc86f3955e314d7f157c6a8a",
+    "hack/normalize_upgrade_snapshot/main.go": "5e8f3247947b384c93c79b4681d6389ca3d00c63aa0b85054a254f4d1ea1192b",
     "hack/upgrade_capture_test.go.tmpl": "6d2e0b9bcb266ad0b72d719434f06b3686d230423486491493fb52c78e242206",
-    "internal/testing/golden/capture.go": "73425c5e21c3f3da45cb79549f0e1d23ef43eee21a85981c0b4f3703b5d845cd"
+    "internal/testing/golden/capture.go": "73425c5e21c3f3da45cb79549f0e1d23ef43eee21a85981c0b4f3703b5d845cd",
+    "internal/testing/golden/snapshot.go": "f63c723b093b2bf6b8fe760e043e09e471cc7e1da80077da3b75b9e636b1db35"
   },
   "creation": "1.4.0 CREATE before mutating admission is enabled",
   "harness": {
@@ -10,18 +12,18 @@
     "1.5.0": "ae270b7978a5eadfe7d6aa623de4b53af3ac6c7e7e087222aedd78dfcc1ecd6e",
     "1.6.0": "c545971a751d5803a5129454831836887d67ad862669308322272d54fecca0b9"
   },
-  "inputSHA256": "1a7d6b2f2d2e2e27d09704fb6488c774d1f99fdef828bc3ad580b2696baf9a2d",
+  "inputSHA256": "cb1ffc0f6529e1d3535a62917ec560f1868fbd8f1563c19d95902a1e5397c193",
   "observations": {
     "1.4.0": {
-      "sha256": "7ecfaf07b0428a86eaa0e4efcf540e99c56f6d9f3fd92bec5f5eeaa781962779",
+      "sha256": "e4fbd6df5ed9f5b488e7e5ab15a9251bb8c4818da90d818c5e052f3bc8aeed33",
       "workerHash": "7df86e24"
     },
     "1.5.0": {
-      "sha256": "415da06122636a4a2f3ade57fae534782971686c224b9b70781f710057e0c555",
+      "sha256": "2e98093182b6a95878fb8f116fd2b3e85174565ac398ae231c11f5a80a44ddfe",
       "workerHash": "7df86e24"
     },
     "1.6.0": {
-      "sha256": "6d3ef09a74bf8f56f1b6c55f6fa8bcbc436266fe5cde4e70d95d3cdb717cf638",
+      "sha256": "902d2cbbcfef1c881ba6987d9f545d8411735b9b47a15de8362480ef3d66fb71",
       "workerHash": "7df86e24"
     }
   },

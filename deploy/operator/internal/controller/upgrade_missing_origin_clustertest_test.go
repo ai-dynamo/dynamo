@@ -6,6 +6,8 @@
 package controller
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -21,7 +23,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
-const upgradeMissingOriginInput = "testdata/upgrade-compatibility/missing-origin/input.yaml"
+const upgradeMissingOriginInput = "testdata/upgrade/compatibility/missing-origin/input.yaml"
 
 func testUpgradeMissingOrigin(t *testing.T) {
 	t.Log("Read the released snapshot seeded before current schema and admission")
@@ -48,6 +50,13 @@ func testUpgradeMissingOrigin(t *testing.T) {
 	require.Eventually(t, func() bool { return completedUpgradeReconciles(t) > baseline }, 90*time.Second, 200*time.Millisecond)
 	after := captureUpgrade(t, env)
 	require.NoError(t, upgradeSafetyError(transition.hashChanged, before, after))
+
+	t.Log("Capture the released takeover state before the intentional worker edit")
+	if root := os.Getenv("DYNAMO_UPGRADE_CAPTURE_DIR"); root != "" && !t.Failed() {
+		path := filepath.Join(root, "compatibility", "missing-origin", "input.yaml")
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		require.NoError(t, golden.WriteManifests(path, after))
+	}
 
 	t.Log("The independent safety check rejects inventing a historical origin")
 	changed := make([]unstructured.Unstructured, len(after))
