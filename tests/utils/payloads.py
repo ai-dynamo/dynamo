@@ -1087,7 +1087,6 @@ class StreamingChatPayload(BasePayload):
 def _validate_single_tool_call(
     call: Dict[str, Any], name: Optional[str], arguments: Dict[str, Any]
 ) -> None:
-    """Check one OpenAI tool call: its type, id, function name, and JSON arguments."""
     assert call.get("type") == "function", f"Tool call type is not function: {call}"
     assert (
         isinstance(call.get("id"), str) and call["id"]
@@ -1203,10 +1202,15 @@ class StreamingToolCallingChatPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
+        text = response.content.decode("utf-8")
+        events = [
+            line[5:].strip() for line in text.splitlines() if line.startswith("data:")
+        ]
+        assert events and events[-1] == "[DONE]", "Stream did not end with [DONE]"
         content_parts: List[str] = []
         calls: Dict[int, Dict[str, Any]] = {}
         finish_reason = None
-        for chunk in parse_sse_json_chunks(response.content.decode("utf-8")):
+        for chunk in parse_sse_json_chunks(text):
             assert "error" not in chunk, f"Stream error: {chunk!r}"
             for choice in chunk["choices"]:
                 assert choice["index"] == 0, f"Unexpected choice: {chunk!r}"
@@ -1215,7 +1219,7 @@ class StreamingToolCallingChatPayload(BasePayload):
                 content_parts.append(delta.get("content") or "")
                 for part in delta.get("tool_calls") or []:
                     # The first delta of a call carries its id, type, and name.
-                    # Later deltas only add argument text.
+                    # A later delta may repeat them, but must not change them.
                     function = part.get("function") or {}
                     call = calls.setdefault(
                         part["index"],
@@ -1225,6 +1229,14 @@ class StreamingToolCallingChatPayload(BasePayload):
                             "function": {"name": function.get("name"), "arguments": []},
                         },
                     )
+                    for key, value, first in (
+                        ("id", part.get("id"), call["id"]),
+                        ("type", part.get("type"), call["type"]),
+                        ("name", function.get("name"), call["function"]["name"]),
+                    ):
+                        assert (
+                            value is None or value == first
+                        ), f"Tool call {key} changed mid-stream: {chunk!r}"
                     call["function"]["arguments"].append(
                         function.get("arguments") or ""
                     )
