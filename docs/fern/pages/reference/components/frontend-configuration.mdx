@@ -467,6 +467,8 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
 </ParamField>
 
 <ParamField path="--active-prefill-tokens-threshold" type="integer" default="null">
+  Deprecated; will be removed in v1.7. Use `--active-prefill-tokens-threshold-frac`.
+
   Absolute active-prefill-token threshold. A numeric value greater than or equal to `0` independently
   enables this check. Uses OR logic with the fractional prefill threshold.
 
@@ -867,8 +869,9 @@ accepted fields, limits, errors, and rolling upgrades.
 `POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,
 `active_prefill_tokens_threshold`, and `active_prefill_tokens_threshold_frac`. A numeric field enables
 only that check. The router reevaluates workers on the next worker-load or runtime-configuration
-update; the call does not synchronously recompute the busy set and does not change startup-only router
-options such as `--router-mode kv` or `--router-track-output-blocks`.
+update, or with `--router-mode kv` at the next worker selection; the call does not synchronously
+recompute the busy set and does not change startup-only router options such as `--router-mode kv` or
+`--router-track-output-blocks`.
 
 ### Frontend feature switches
 
