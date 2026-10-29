@@ -9,12 +9,12 @@
 //! - `GET /routers`: the Global Router replicas a PoolRelay connects to.
 //! - `GET /pools`: the pools a Global Router routes to.
 //! - `GET /healthz`: OK while the service can answer from its backend. Use it
-//!   for readiness; liveness needs only the TCP port. With mTLS, a probe
-//!   needs a client certificate too, so probe with TCP or a command.
+//!   for readiness; liveness needs only the TCP port.
 //!
 //! The service reads and writes only through the [`crate::pool_discovery`]
-//! traits. It runs on `dynamo-http-server`, so it gets TLS and mTLS the way
-//! the Dynamo frontend does.
+//! traits. It runs on `dynamo-http-server`, so it gets TLS the way the Dynamo
+//! frontend does. mTLS waits until `dynamo-global-discovery-client` can
+//! present a client certificate.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -24,6 +24,7 @@ use crate::pool_discovery::{
     Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration, ReplicaDirectory,
 };
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -52,13 +53,11 @@ impl fmt::Debug for PoolDiscoveryBackend {
     }
 }
 
-/// TLS for the listener. With `client_ca`, callers must also present a
-/// certificate that it signed (mTLS).
+/// TLS for the listener.
 #[derive(Clone, Debug)]
 pub struct Tls {
     pub cert: PathBuf,
     pub key: PathBuf,
-    pub client_ca: Option<PathBuf>,
 }
 
 /// The service's HTTP routes.
@@ -85,8 +84,8 @@ pub async fn serve(
         port: address.port(),
         enable_tls: tls.is_some(),
         tls_cert_path: tls.as_ref().map(|tls| tls.cert.clone()),
-        tls_key_path: tls.as_ref().map(|tls| tls.key.clone()),
-        tls_client_ca_cert_path: tls.and_then(|tls| tls.client_ca),
+        tls_key_path: tls.map(|tls| tls.key),
+        tls_client_ca_cert_path: None,
     };
     // The observer counts inference requests, and this service has none, so
     // shutdown goes straight to letting open requests finish.
@@ -97,9 +96,11 @@ pub async fn serve(
         .await
 }
 
+/// The body is checked after the registrar, so that a backend without one
+/// answers `501` whatever the body is.
 async fn register_pool(
     State(backend): State<Arc<PoolDiscoveryBackend>>,
-    Json(registration): Json<PoolRegistration>,
+    registration: Result<Json<PoolRegistration>, JsonRejection>,
 ) -> Response {
     let Some(registrar) = &backend.registrar else {
         return (
@@ -107,6 +108,10 @@ async fn register_pool(
             "this service takes no registrations",
         )
             .into_response();
+    };
+    let Json(registration) = match registration {
+        Ok(registration) => registration,
+        Err(rejection) => return rejection.into_response(),
     };
     match registrar.register(registration).await {
         Ok(lease) => Json(lease).into_response(),
@@ -296,6 +301,31 @@ mod tests {
         let (base, shutdown) = start(backend).await;
         let (status, _) = post_pool(&base, &registration()).await;
         assert_eq!(status, reqwest::StatusCode::NOT_IMPLEMENTED);
+        // Whatever the body is.
+        let (status, _) = post_pool(&base, &json!({})).await;
+        assert_eq!(status, reqwest::StatusCode::NOT_IMPLEMENTED);
+        let response = reqwest::Client::new()
+            .post(format!("{base}/pools"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_registration_must_be_json() {
+        let (base, shutdown) = start(registrations_backend()).await;
+        let response = reqwest::Client::new()
+            .post(format!("{base}/pools"))
+            .body(registration().to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
         shutdown.cancel();
     }
 

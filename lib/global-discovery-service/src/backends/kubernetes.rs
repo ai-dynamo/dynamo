@@ -20,7 +20,8 @@
 //! `derived-<name>`, and that name may have at most 63 characters, so
 //! Karmada imports nothing for a longer name, and the backend never sees that
 //! Service's endpoints. [`McsReplicaDirectory::new`] logs an error for a
-//! Service whose name is too long.
+//! Service whose name is too long; [`McsImplementation::can_import`] lets a
+//! caller refuse that name first.
 //!
 //! Create the PoolRelay Service and its `ServiceExport` in the workload
 //! cluster, not through Karmada propagation. Kubernetes copies a Service's
@@ -46,4 +47,4 @@ mod mcs;
 
 pub use endpoints::{ExportedService, McsReplicaDirectory};
 pub use hub::McsPoolDirectory;
-pub use mcs::McsImplementation;
+pub use mcs::{KARMADA_MAX_SERVICE_NAME, McsImplementation};

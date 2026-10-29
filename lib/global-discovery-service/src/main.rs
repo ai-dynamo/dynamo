@@ -24,12 +24,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use clap::builder::NonEmptyStringValueParser;
 use clap::error::ErrorKind;
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dynamo_global_common::Lease;
 use dynamo_global_discovery_service::backends::kubernetes::{
-    ExportedService, McsImplementation, McsPoolDirectory, McsReplicaDirectory,
+    ExportedService, KARMADA_MAX_SERVICE_NAME, McsImplementation, McsPoolDirectory,
+    McsReplicaDirectory,
 };
 use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
 use dynamo_global_discovery_service::pool_discovery::{
@@ -76,10 +78,6 @@ struct Args {
     /// The private key for `--tls-cert-path`.
     #[arg(long, requires = "tls_cert_path")]
     tls_key_path: Option<PathBuf>,
-    /// Also require callers to present a certificate that this CA signed
-    /// (mTLS). Probes need one too, so probe readiness with TCP or a command.
-    #[arg(long, requires = "tls_cert_path")]
-    tls_client_ca_cert_path: Option<PathBuf>,
     /// Where the pool and router lists come from.
     #[arg(long, value_enum, default_value_t = PoolDiscovery::Registrations)]
     pool_discovery: PoolDiscovery,
@@ -106,23 +104,38 @@ struct Args {
     /// A Global Router replica as `<id>=<url>`. Repeat it for each replica.
     #[arg(long = "router", value_parser = parse_router, help_heading = WITH_REGISTRATIONS)]
     routers: Vec<RouterReplica>,
-    /// Each PoolRelay Service is named `<DGD name><suffix>`.
+    /// Each PoolRelay Service is named `<DGD name><suffix>`. Give a suffix
+    /// that starts with `-` after an `=`: `--pool-service-suffix=-relay`.
     #[arg(
         long,
         default_value = "-pool-relay",
-        allow_hyphen_values = true,
-        value_parser = clap::builder::NonEmptyStringValueParser::new(),
+        value_parser = NonEmptyStringValueParser::new(),
         help_heading = WITH_MCS
     )]
     pool_service_suffix: String,
     /// Namespace of the Global Router Service.
-    #[arg(long, help_heading = WITH_MCS, required_if_eq_any = MCS_VALUES)]
+    #[arg(
+        long,
+        value_parser = NonEmptyStringValueParser::new(),
+        help_heading = WITH_MCS,
+        required_if_eq_any = MCS_VALUES
+    )]
     router_namespace: Option<String>,
     /// The Global Router Service, exported through MCS.
-    #[arg(long, help_heading = WITH_MCS, required_if_eq_any = MCS_VALUES)]
+    #[arg(
+        long,
+        value_parser = NonEmptyStringValueParser::new(),
+        help_heading = WITH_MCS,
+        required_if_eq_any = MCS_VALUES
+    )]
     router_service: Option<String>,
     /// The router Service's named port for state streams.
-    #[arg(long, help_heading = WITH_MCS, required_if_eq_any = MCS_VALUES)]
+    #[arg(
+        long,
+        value_parser = NonEmptyStringValueParser::new(),
+        help_heading = WITH_MCS,
+        required_if_eq_any = MCS_VALUES
+    )]
     router_port_name: Option<String>,
 }
 
@@ -145,6 +158,17 @@ enum PoolDiscovery {
     Mcs,
 }
 
+impl PoolDiscovery {
+    /// How imported EndpointSlices are named, for the values that read MCS.
+    fn mcs(self) -> Option<McsImplementation> {
+        match self {
+            Self::Registrations => None,
+            Self::Karmada => Some(McsImplementation::Karmada),
+            Self::Mcs => Some(McsImplementation::Standard),
+        }
+    }
+}
+
 /// Where registrations are kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum RegistrationStorage {
@@ -161,6 +185,13 @@ fn parse_router(value: &str) -> Result<RouterReplica, String> {
         return Err("the replica id is empty".to_owned());
     }
     let url = Url::parse(url).map_err(|error| error.to_string())?;
+    // Without `http://`, `Url` reads a host such as `localhost:50051` as the
+    // scheme.
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "expected an http or https URL, such as http://10.42.0.5:50051, not {url}"
+        ));
+    }
     Ok(RouterReplica {
         replica: RouterReplicaId(id.to_owned()),
         url,
@@ -191,23 +222,36 @@ where
                     .is_some_and(|source| source != ValueSource::DefaultValue)
         })
         .map(|arg| arg.get_long().unwrap_or(arg.get_id().as_str()).to_owned());
-    match given {
-        Some(flag) => Err(command.error(
+    if let Some(flag) = given {
+        return Err(command.error(
             ErrorKind::ArgumentConflict,
             format!("--{flag} works only {}", refused.to_lowercase()),
-        )),
-        None => Ok(parsed),
+        ));
     }
+    // Karmada imports no Service with a longer name, and the API server
+    // refuses to list one, so the service would never be ready.
+    if let (Some(mcs), Some(service)) = (parsed.pool_discovery.mcs(), &parsed.router_service)
+        && !mcs.can_import(service)
+    {
+        return Err(command.error(
+            ErrorKind::ValueValidation,
+            format!(
+                "--router-service has {} characters, and Karmada imports a Service name of at \
+                 most {KARMADA_MAX_SERVICE_NAME}",
+                service.len()
+            ),
+        ));
+    }
+    Ok(parsed)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dynamo_runtime::logging::init();
     let args = parse_args(std::env::args_os()).unwrap_or_else(|error| error.exit());
-    let backend = match args.pool_discovery {
-        PoolDiscovery::Registrations => registrations_backend(&args)?,
-        PoolDiscovery::Karmada => mcs_backend(&args, McsImplementation::Karmada).await?,
-        PoolDiscovery::Mcs => mcs_backend(&args, McsImplementation::Standard).await?,
+    let backend = match args.pool_discovery.mcs() {
+        None => registrations_backend(&args)?,
+        Some(mcs) => mcs_backend(&args, mcs).await?,
     };
     let listener = TcpListener::bind(args.listen)
         .await
@@ -220,11 +264,7 @@ async fn main() -> Result<()> {
         .tls_cert_path
         .clone()
         .zip(args.tls_key_path.clone())
-        .map(|(cert, key)| Tls {
-            cert,
-            key,
-            client_ca: args.tls_client_ca_cert_path.clone(),
-        });
+        .map(|(cert, key)| Tls { cert, key });
     service::serve(listener, backend, tls, shutdown)
         .await
         .context("serve the Global Discovery Service")
@@ -293,6 +333,16 @@ async fn kubernetes_client() -> Result<Client> {
     let mut config = kube::Config::infer().await?;
     config.connect_timeout = Some(KUBE_CONNECT_TIMEOUT);
     config.read_timeout = Some(KUBE_READ_TIMEOUT);
+    // With a kubeconfig, kube also takes a proxy from `HTTPS_PROXY`, ignoring
+    // `NO_PROXY`. This build has no proxy support, so the client would fail
+    // here; connect to the API server directly instead. Only the host is
+    // logged: a proxy URL can hold a password.
+    if let Some(proxy) = config.proxy_url.take() {
+        tracing::warn!(
+            proxy_host = proxy.host(),
+            "this build cannot use a proxy, so it connects to the Kubernetes API server directly"
+        );
+    }
     Ok(Client::try_from(config)?)
 }
 
@@ -363,7 +413,6 @@ mod tests {
             "listen",
             "tls_cert_path",
             "tls_key_path",
-            "tls_client_ca_cert_path",
             "pool_discovery",
             "help",
         ];
@@ -428,10 +477,67 @@ mod tests {
 
     #[test]
     fn pool_service_suffix_can_start_with_a_hyphen_but_not_be_empty() {
-        let args = parse_args(karmada(&["--pool-service-suffix", "-pool-gateway"])).unwrap();
+        let args = parse_args(karmada(&["--pool-service-suffix=-pool-gateway"])).unwrap();
         assert_eq!(args.pool_service_suffix, "-pool-gateway");
         // An empty suffix would make every imported Service a pool.
         assert!(parse_args(karmada(&["--pool-service-suffix="])).is_err());
+        // A suffix left out fails, rather than taking the next flag.
+        let error = parse_args(karmada(&[
+            "--pool-service-suffix",
+            "--listen=127.0.0.1:18496",
+        ]))
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidValue, "{error}");
+    }
+
+    #[test]
+    fn router_flags_cannot_be_empty() {
+        for flag in [
+            "--router-namespace",
+            "--router-service",
+            "--router-port-name",
+        ] {
+            let mut args = karmada(&[]);
+            let at = args.iter().position(|arg| *arg == flag).unwrap();
+            args[at + 1] = "";
+            let error = parse_args(args).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidValue, "{flag}: {error}");
+        }
+    }
+
+    #[test]
+    fn karmada_refuses_a_router_service_it_cannot_import() {
+        let name = "r".repeat(KARMADA_MAX_SERVICE_NAME + 1);
+        let mut args = karmada(&[]);
+        let at = args
+            .iter()
+            .position(|arg| *arg == "--router-service")
+            .unwrap();
+        args[at + 1] = &name;
+        let error = parse_args(args.clone()).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
+        // Standard MCS imports it.
+        let at = args.iter().position(|arg| *arg == "karmada").unwrap();
+        args[at] = "mcs";
+        assert!(parse_args(args).is_ok());
+    }
+
+    #[test]
+    fn a_router_needs_an_http_url() {
+        for url in ["http://10.42.0.5:50051", "https://global-router-0.svc:8443"] {
+            let router = parse_router(&format!("r0={url}")).unwrap();
+            assert_eq!(router.url.as_str(), format!("{url}/"));
+        }
+        // Without `http://`, a host name would be read as the scheme. An IP
+        // address fails to parse at all.
+        for url in [
+            "localhost:50051",
+            "global-router-0.svc:50051",
+            "10.42.0.5:50051",
+            "mailto:x@y",
+        ] {
+            assert!(parse_router(&format!("r0={url}")).is_err(), "{url}");
+        }
     }
 
     #[test]
