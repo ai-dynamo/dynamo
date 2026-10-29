@@ -59,11 +59,22 @@ const (
 	// Beta since: N/A
 	// GA since: N/A
 	// Configuration: orchestrators.lws.enabled
-	// Auto-detection: leaderworkerset.x-k8s.io and scheduling.volcano.sh API groups
-	// Requires: LWS serving leaderworkerset.x-k8s.io/v1 and Volcano serving
-	// scheduling.volcano.sh/v1beta1
-	// Default: true when both API groups are detected; false otherwise
+	// Auto-detection: leaderworkerset.x-k8s.io API group
+	// Requires: LWS serving leaderworkerset.x-k8s.io/v1
+	// Default: true when the LWS API group is detected; false otherwise
 	LWS Name = "lws"
+
+	// DisaggregatedSet enables the opt-in DisaggregatedSet workload pathway.
+	//
+	// Owner: @yankay
+	// Experimental since: v1.4.0
+	// Beta since: N/A
+	// GA since: N/A
+	// Configuration: nvidia.com/enable-disaggregatedset annotation
+	// Auto-detection: disaggregatedset.x-k8s.io/v1 API
+	// Requires: LWS serving disaggregatedset.x-k8s.io/v1
+	// Default: true when the API is detected; false otherwise
+	DisaggregatedSet Name = "disaggregatedSet"
 
 	// KaiScheduler enables Kai Scheduler integration.
 	//
@@ -130,7 +141,9 @@ const (
 var allNames = [...]Name{
 	Checkpoint,
 	Grove,
+	LPX,
 	LWS,
+	DisaggregatedSet,
 	KaiScheduler,
 	VolcanoScheduler,
 	DRA,
@@ -147,7 +160,9 @@ type Gate interface {
 type Gates struct {
 	Checkpoint       bool `json:"checkpoint"`
 	Grove            bool `json:"grove"`
+	LPX              bool `json:"lpx"`
 	LWS              bool `json:"lws"`
+	DisaggregatedSet bool `json:"disaggregatedSet"`
 	KaiScheduler     bool `json:"kaiScheduler"`
 	VolcanoScheduler bool `json:"volcanoScheduler"`
 	DRA              bool `json:"dra"`
@@ -163,7 +178,11 @@ func Defaults() Gates {
 }
 
 // New detects cluster capabilities and resolves them with operator configuration.
-func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration) (Gates, error) {
+func New(
+	ctx context.Context,
+	mgr ctrl.Manager,
+	config *configv1alpha1.OperatorConfiguration,
+) (Gates, error) {
 	gates := Defaults()
 	gates.GPUDiscovery = config.Namespace.Restricted == "" || ptr.Deref(config.GPU.DiscoveryEnabled, true)
 
@@ -182,7 +201,7 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 		if detectErr != nil {
 			return Gates{}, detectErr
 		}
-		if gates.Checkpoint, err = resolve(ptr.To(true), snapshotAPIsAvailable,
+		if gates.Checkpoint, err = resolve(new(true), snapshotAPIsAvailable,
 			"checkpoint is explicitly enabled in config but the nvidia.com/v1alpha1 PodSnapshot and SnapshotJob APIs were not both detected in the cluster"); err != nil {
 			return Gates{}, err
 		}
@@ -196,29 +215,40 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 		return Gates{}, err
 	}
 
+	// Enable LPX only when explicitly configured and its external API dependency is available.
+	if config.LPX.Enabled {
+		if gates.LPX, err = resolveLPX(ctx, mgr.GetConfig()); err != nil {
+			return Gates{}, err
+		}
+	}
+
 	lwsAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "leaderworkerset.x-k8s.io", "", "")
 	if err != nil {
 		return Gates{}, err
 	}
-	volcanoAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "scheduling.volcano.sh", "", "")
+	disaggregatedSetAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "disaggregatedset.x-k8s.io", "v1", "")
 	if err != nil {
 		return Gates{}, err
 	}
-	if ptr.Deref(config.Orchestrators.LWS.Enabled, lwsAvailable && volcanoAvailable) {
-		if !lwsAvailable {
-			return Gates{}, fmt.Errorf("LWS is explicitly enabled in config but the LWS API group was not detected in the cluster")
-		}
-		if !volcanoAvailable {
-			return Gates{}, fmt.Errorf("LWS is explicitly enabled in config but the Volcano API group was not detected in the cluster")
-		}
-		gates.LWS = true
+	// The DS pathway lists and watches the LWS children created by the DS
+	// controller. Do not register those watches when the LWS API is absent.
+	lwsOptedOut := config.Orchestrators.LWS.Enabled != nil && !*config.Orchestrators.LWS.Enabled
+	gates.DisaggregatedSet = !lwsOptedOut && lwsAvailable && disaggregatedSetAvailable
+	if gates.LWS, err = resolve(config.Orchestrators.LWS.Enabled, lwsAvailable,
+		"LWS is explicitly enabled in config but the LWS API group was not detected in the cluster"); err != nil {
+		return Gates{}, err
 	}
 
+	// Volcano is a prerequisite only for the opt-in Grove scheduler integration.
 	if ptr.Deref(config.Orchestrators.VolcanoScheduler.Enabled, false) {
-		if !volcanoAvailable {
-			return Gates{}, fmt.Errorf("Volcano scheduler integration is explicitly enabled in config but the Volcano API group was not detected in the cluster")
+		volcanoAvailable, detectErr := detectAPIAvailability(ctx, mgr.GetConfig(), "scheduling.volcano.sh", "", "")
+		if detectErr != nil {
+			return Gates{}, detectErr
 		}
-		gates.VolcanoScheduler = true
+		if gates.VolcanoScheduler, err = resolve(new(true), volcanoAvailable,
+			"Volcano scheduler integration is explicitly enabled in config but the Volcano API group was not detected in the cluster"); err != nil {
+			return Gates{}, err
+		}
 	}
 
 	kaiSchedulerAvailable, err := detectAPIAvailability(ctx, mgr.GetConfig(), "scheduling.run.ai", "", "")

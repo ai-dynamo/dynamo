@@ -60,6 +60,21 @@ impl WorkerFilter for KeepAllFilter {
     }
 }
 
+/// Reads every worker's static info and keeps the workers that report KV blocks.
+struct CapacityFilter;
+
+impl WorkerFilter for CapacityFilter {
+    fn keep(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        candidate: WorkerCandidate<'_>,
+    ) -> Result<bool, WorkerSelectionPolicyError> {
+        let info = candidate.info();
+        Ok(info.total_kv_blocks().is_some_and(|blocks| blocks > 0)
+            && info.max_num_batched_tokens() != Some(0))
+    }
+}
+
 struct BenchScorer;
 
 impl WorkerScorer for BenchScorer {
@@ -154,8 +169,10 @@ fn fixture_with_preferred_taints(
     const PREFERRED_TAINTS: [&str; 4] = ["rack-a", "zone-a", "gpu-a", "node-a"];
     assert!(preferred_taint_count <= PREFERRED_TAINTS.len());
     let mut workers = HashMap::with_capacity(worker_count);
-    let mut effective_overlap_blocks = FxHashMap::default();
-    let mut effective_cached_tokens = FxHashMap::default();
+    let mut effective_overlap_blocks =
+        FxHashMap::with_capacity_and_hasher(worker_count, Default::default());
+    let mut effective_cached_tokens =
+        FxHashMap::with_capacity_and_hasher(worker_count, Default::default());
     let mut worker_loads = FxHashMap::with_capacity_and_hasher(worker_count, Default::default());
 
     for worker_id in 0..worker_count as WorkerId {
@@ -234,7 +251,7 @@ fn worker_selection(c: &mut Criterion) {
             group.measurement_time(Duration::from_secs(5));
             group.sample_size(50);
 
-            for worker_count in [2, 32, 1_024, 10_000] {
+            for worker_count in [2, 32, 1_024, 2_048, 10_000] {
                 let (workers, request) = fixture(worker_count);
                 let selector = DefaultWorkerSelector::new(
                     Some(KvRouterConfig {
@@ -284,9 +301,16 @@ fn custom_worker_selection(c: &mut Criterion) {
         Box::new(LowestCostPicker),
     );
     let custom_keep_all_filter = WorkerSelectionPolicy::new_with_filters(
-        config,
+        config.clone(),
         "prefill",
         vec![Box::new(KeepAllFilter)],
+        vec![Box::new(BenchScorer)],
+        Box::new(LowestCostPicker),
+    );
+    let custom_capacity_filter = WorkerSelectionPolicy::new_with_filters(
+        config,
+        "prefill",
+        vec![Box::new(CapacityFilter)],
         vec![Box::new(BenchScorer)],
         Box::new(LowestCostPicker),
     );
@@ -314,6 +338,20 @@ fn custom_worker_selection(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 custom_keep_all_filter
+                    .select_worker(WorkerSelectionInput::configured(
+                        black_box(&workers),
+                        black_box(&request),
+                        request.eligibility(),
+                        black_box(16),
+                    ))
+                    .unwrap(),
+            )
+        })
+    });
+    group.bench_function("custom_capacity_filter", |b| {
+        b.iter(|| {
+            black_box(
+                custom_capacity_filter
                     .select_worker(WorkerSelectionInput::configured(
                         black_box(&workers),
                         black_box(&request),
@@ -425,11 +463,49 @@ fn default_policy_wrapper(c: &mut Criterion) {
     group.finish();
 }
 
+fn worker_projection(c: &mut Criterion) {
+    let mut group = c.benchmark_group("worker_projection");
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+    for count in [32, 2_048] {
+        let (workers, request) = fixture(count);
+        let slots = dynamo_kv_router::ActiveSequencesMultiWorker::new(
+            dynamo_kv_router::NoopSequencePublisher,
+            16,
+            workers.keys().map(|&id| (id, (0, 1))).collect(),
+            false,
+            0,
+            "bench",
+        );
+        let now = tokio::time::Instant::now();
+        group.bench_function(BenchmarkId::new("allocate", count), |b| {
+            b.iter(|| black_box(slots.project_worker_loads(request.token_seq.as_deref(), now)))
+        });
+        #[cfg(feature = "bench")]
+        {
+            let mut projections = FxHashMap::default();
+            group.bench_function(BenchmarkId::new("reuse", count), |b| {
+                b.iter(|| {
+                    slots.bench_project_worker_loads_into(
+                        request.token_seq.as_deref(),
+                        now,
+                        &mut projections,
+                    );
+                    black_box(&projections);
+                })
+            });
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     worker_selection,
     custom_worker_selection,
     unused_preferred_taint_metadata,
-    default_policy_wrapper
+    default_policy_wrapper,
+    worker_projection
 );
 criterion_main!(benches);

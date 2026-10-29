@@ -34,10 +34,10 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	kruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/utils/ptr"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -72,16 +72,14 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 		"Deployment": func() upgradeCase {
 			dynamoNamespace := "default"
 			parent := &v1alpha1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "qwen-decode-db6b6891",
-					Namespace: "default",
-					Labels: map[string]string{
-						commonconsts.KubeLabelDynamoComponent:           "decode",
-						commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
-						commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
-						commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
-						commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
-					},
+				Name:      "qwen-decode-db6b6891",
+				Namespace: "default",
+				Labels: map[string]string{
+					commonconsts.KubeLabelDynamoComponent:           "decode",
+					commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
+					commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
+					commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+					commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
 				},
 				Spec: v1alpha1.DynamoComponentDeploymentSpec{
 					BackendFramework: string(dynamo.BackendFrameworkVLLM),
@@ -267,16 +265,14 @@ spec:
 		"LeaderWorkerSet": func() upgradeCase {
 			dynamoNamespace := "default"
 			parent := &v1alpha1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "qwen-decode-db6b6891",
-					Namespace: "default",
-					Labels: map[string]string{
-						commonconsts.KubeLabelDynamoComponent:           "decode",
-						commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
-						commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
-						commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
-						commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
-					},
+				Name:      "qwen-decode-db6b6891",
+				Namespace: "default",
+				Labels: map[string]string{
+					commonconsts.KubeLabelDynamoComponent:           "decode",
+					commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen",
+					commonconsts.KubeLabelDynamoWorkerHash:          "db6b6891",
+					commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
+					commonconsts.KubeLabelDynamoSubComponentType:    commonconsts.ComponentTypeDecode,
 				},
 				Spec: v1alpha1.DynamoComponentDeploymentSpec{
 					BackendFramework: string(dynamo.BackendFrameworkVLLM),
@@ -552,12 +548,10 @@ spec:
 		}(),
 		"Grove PodCliqueSet": func() upgradeCase {
 			parent := &v1alpha1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "vllm-disagg-planner",
-					Namespace: "jsm",
-					Annotations: map[string]string{
-						commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0",
-					},
+				Name:      "vllm-disagg-planner",
+				Namespace: "jsm",
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0",
 				},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
@@ -565,12 +559,12 @@ spec:
 						"VllmDecodeWorker": {
 							ComponentType:    commonconsts.ComponentTypeWorker,
 							SubComponentType: commonconsts.ComponentTypeDecode,
-							Replicas:         ptr.To(int32(1)),
+							Replicas:         new(int32(1)),
 						},
 						"VllmPrefillWorker": {
 							ComponentType:    commonconsts.ComponentTypeWorker,
 							SubComponentType: commonconsts.ComponentTypePrefill,
-							Replicas:         ptr.To(int32(1)),
+							Replicas:         new(int32(1)),
 						},
 					},
 				},
@@ -806,25 +800,25 @@ spec:
 						&controller_common.RuntimeConfig{},
 						nil,
 					)
-					renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
+					renderedPCS, err := renderer.Render(ctx, groveReconcileRequest{DGD: dgd}, nil, nil, false)
 					require.NoError(t, err)
 					pcs := renderedPCS.desired
-					renderDGD := renderedPCS.renderDeployment
 
-					t.Log("generate the decode service selector from the same prepared Grove component")
-					decodeComponent := renderDGD.GetComponentByName("VllmDecodeWorker")
-					require.NotNil(t, decodeComponent)
-					service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-						ServiceName:     dynamo.GetDCDResourceName(renderDGD, "VllmDecodeWorker", ""),
-						Namespace:       renderDGD.Namespace,
-						ComponentType:   string(decodeComponent.ComponentType),
-						DynamoNamespace: renderDGD.GetDynamoNamespaceForComponent(decodeComponent),
-						ComponentName:   "VllmDecodeWorker",
-						Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "VllmDecodeWorker", decodeComponent),
-						Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDGD, "VllmDecodeWorker", decodeComponent),
-						IsK8sDiscovery:  true,
-					})
+					t.Log("generate the decode service selector from the rendered Grove workload")
+					stableResources := newGroveStableResourcesReconciler(
+						reconciler.Client,
+						events.NewFakeRecorder(10),
+						&configv1alpha1.OperatorConfiguration{
+							Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+						},
+					)
+					_, err = stableResources.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, pcs)
 					require.NoError(t, err)
+					service := &corev1.Service{}
+					require.NoError(t, reconciler.Client.Get(ctx, types.NamespacedName{
+						Name:      dynamo.GetDCDResourceName(dgd, "VllmDecodeWorker", ""),
+						Namespace: dgd.Namespace,
+					}, service))
 					return pcs, service.Spec.Selector
 				},
 				childPodLabels: func(t *testing.T, obj client.Object) map[string]map[string]string {
@@ -898,15 +892,15 @@ spec:
 func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
 	ctx := context.Background()
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "native-dgd", Namespace: "jsm"},
+		Name: "native-dgd", Namespace: "jsm",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-				{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
+				{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: new(int32(1))},
 			},
 		},
 	}
 	existingPCS := &grovev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "native-dgd", Namespace: "jsm"},
+		Name: "native-dgd", Namespace: "jsm",
 		Spec: grovev1alpha1.PodCliqueSetSpec{
 			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
@@ -932,15 +926,11 @@ func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, groveReconcileRequest{DGD: dgd}, nil, nil, false)
 	require.NoError(t, err)
 	desired := renderedPCS.desired
-	renderDGD := renderedPCS.renderDeployment
 
 	t.Log("assert the native prefill component stays prefill instead of legacy worker")
-	prefillComponent := renderDGD.GetComponentByName("prefill")
-	require.NotNil(t, prefillComponent)
-	require.Equal(t, v1beta1.ComponentTypePrefill, prefillComponent.ComponentType)
 	prefillClique := requireGroveClique(t, desired, "prefill")
 	require.Equal(t, commonconsts.ComponentTypePrefill, prefillClique.Labels[commonconsts.KubeLabelDynamoComponentType])
 }
@@ -1007,24 +997,22 @@ func TestLegacyGoEPPUpgradeDoesNotChangePodContract(t *testing.T) {
 
 	t.Log("build a Go-EPP DCD that still carries deprecated eppConfig after operator upgrade")
 	dcd := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "gaie-epp",
-			Namespace: "default",
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoComponent:           "epp",
-				commonconsts.KubeLabelDynamoGraphDeploymentName: "gaie",
-				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeEPP,
-			},
+		Name:      "gaie-epp",
+		Namespace: "default",
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoComponent:           "epp",
+			commonconsts.KubeLabelDynamoGraphDeploymentName: "gaie",
+			commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeEPP,
 		},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "epp",
 				ComponentType: v1beta1.ComponentTypeEPP,
-				Replicas:      ptr.To(int32(1)),
+				Replicas:      new(int32(1)),
 				EPPConfig: &v1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "gaie-epp-config"},
-						Key:                  "epp-config-dynamo.yaml",
+						Name: "gaie-epp-config",
+						Key:  "epp-config-dynamo.yaml",
 					},
 				},
 				PodTemplate: &corev1.PodTemplateSpec{

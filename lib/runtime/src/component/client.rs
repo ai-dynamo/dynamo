@@ -586,6 +586,14 @@ impl Client {
         self.instance_source.borrow().clone()
     }
 
+    pub(crate) fn instance_by_id(&self, instance_id: u64) -> Option<Instance> {
+        self.instance_source
+            .borrow()
+            .iter()
+            .find(|instance| instance.id() == instance_id)
+            .cloned()
+    }
+
     pub fn instance_ids(&self) -> Vec<u64> {
         self.instances().into_iter().map(|ep| ep.id()).collect()
     }
@@ -801,7 +809,11 @@ impl Client {
         }
 
         self.routing_instances.report_instance_down(instance_id);
-        tracing::debug!("inhibiting instance {instance_id}");
+        tracing::debug!(
+            instance_id,
+            routing_event = "worker_inhibited",
+            "inhibiting instance"
+        );
     }
 
     /// Replace the set of overloaded instances reported by the worker monitor.
@@ -817,8 +829,8 @@ impl Client {
         self.routing_instances.overload_reconciliation_needed()
     }
 
-    /// Mark an instance overloaded immediately after a worker-scoped
-    /// `WorkerOverloaded` response. This is backpressure, not a fault, so it
+    /// Mark an instance overloaded immediately after a `WorkerOverloaded`
+    /// response for the whole worker. This is backpressure, not a fault, so it
     /// does not call `report_instance_down`. A fresh worker-monitor publication
     /// clears this hint early. Its bounded lease otherwise permits a recovery probe.
     pub fn mark_overloaded_immediate(&self, instance_id: u64) {
@@ -826,6 +838,7 @@ impl Client {
             .mark_overloaded_immediate(instance_id);
         tracing::debug!(
             instance_id,
+            routing_event = "worker_overloaded",
             "marking instance overloaded with a bounded backpressure lease"
         );
     }
@@ -1112,6 +1125,53 @@ mod tests {
                 }
             }))
         }
+    }
+
+    #[tokio::test]
+    async fn test_instance_by_id_returns_owned_current_instance() {
+        use crate::component::TransportType;
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_instance_lookup".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let mut client = endpoint.client().await.unwrap();
+        let instances: Vec<_> = (1..=2)
+            .map(|instance_id| Instance {
+                namespace: "test_instance_lookup".to_string(),
+                component: "test_component".to_string(),
+                endpoint: "test_endpoint".to_string(),
+                instance_id,
+                transport: TransportType::Tcp(format!("127.0.0.1:{}", 9000 + instance_id)),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .collect();
+        let (tx, rx) = tokio::sync::watch::channel(instances.clone());
+        client.instance_source = Arc::new(rx);
+
+        assert_eq!(client.instance_by_id(1), Some(instances[0].clone()));
+        let selected = client.instance_by_id(2).unwrap();
+        assert_eq!(selected, instances[1]);
+        assert!(client.instance_by_id(3).is_none());
+
+        let mut updated = selected.clone();
+        updated.transport = TransportType::Nats("updated.subject".to_string());
+        tx.send(vec![instances[0].clone(), updated.clone()])
+            .unwrap();
+        assert_eq!(client.instance_by_id(2), Some(updated));
+
+        tx.send(vec![instances[0].clone()]).unwrap();
+        assert!(client.instance_by_id(2).is_none());
+        assert_eq!(client.instance_by_id(1), Some(instances[0].clone()));
+
+        rt.shutdown();
     }
 
     async fn wait_for_discovery_event(

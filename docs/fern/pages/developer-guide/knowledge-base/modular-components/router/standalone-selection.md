@@ -76,6 +76,7 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 | `--router-tracking-key-file` | environment/none | Override the path to the 32-byte provider key file. |
 | `--router-tracking-key-id` | environment/none | Override the provider-managed key epoch. |
 | `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` | `300` | Override the absolute request age at which the standalone slot tracker may reclaim stale active state. |
+| `DYN_ZMQ_IO_THREADS` | `4` | I/O threads per shared ZMQ context. KV-event, replay, and replica-sync sockets share contexts of up to 1023 sockets each, the libzmq limit. |
 
 Router scheduling behavior continues to use the standard Dynamo router
 environment configuration.
@@ -365,12 +366,17 @@ present, the flat `session_id` field is ignored.
     "session_id": "child-session",
     "parent_session_id": "root-session",
     "session_final": false,
-    "input_trigger": "tool_result"
+    "input_trigger": "tool_result",
+    "agent_headers": {
+      "x-claude-code-request-class": ["subagent"]
+    }
   }
 }
 ```
 
 Only `session_id` is required inside the object. `input_trigger` is one of `user_message`, `tool_result`, or `other`. The affinity table uses this session ID when a TTL is configured. Custom policies can read the remaining values through `WorkerSelectionContext::session_context()`.
+
+The optional `agent_headers` map carries upstream-captured header names and ordered lists of string values to the policy's `SessionContext.agent_headers()` accessor. Both selection endpoints preserve these values without interpreting them. Supply the map in the request body; the selection API does not extract coding-agent metadata from its own HTTP headers.
 
 ## Ray Select-Then-Reserve Flow
 

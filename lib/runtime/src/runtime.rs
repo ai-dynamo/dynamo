@@ -43,9 +43,26 @@ pub(crate) fn graceful_shutdown_timeout() -> Duration {
     Duration::from_secs(timeout_secs)
 }
 
+/// How long the Velo response service stays open after the main token is
+/// cancelled: the HTTP service's drain, `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`
+/// (default 5, read by dynamo-llm). Requests it admits may still be queued or
+/// tokenizing, and register their responses later.
+fn velo_response_drain_window() -> Duration {
+    let timeout_secs =
+        std::env::var(config::environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(5);
+
+    Duration::from_secs(timeout_secs)
+}
+
+/// How long Velo responses still open after that window get to finish.
+const VELO_RESPONSE_DRAIN_HEADROOM: Duration = Duration::from_secs(10);
+
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
 #[derive(Clone, Debug)]
-enum RuntimeType {
+pub(crate) enum RuntimeType {
     Shared(Arc<ManuallyDrop<tokio::runtime::Runtime>>),
     External(tokio::runtime::Handle),
 }
@@ -58,7 +75,9 @@ pub struct Runtime {
     secondary: RuntimeType,
     cancellation_token: CancellationToken,
     endpoint_shutdown_token: CancellationToken,
+    shutdown_started: CancellationToken,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
+    velo_response_service: Arc<crate::pipeline::network::velo_response::RuntimeService>,
     compute_pool: Option<Arc<compute::ComputePool>>,
     block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
 }
@@ -76,6 +95,7 @@ impl Runtime {
 
         // create endpoint shutdown token as a child of the main token
         let endpoint_shutdown_token = cancellation_token.child_token();
+        let shutdown_started = endpoint_shutdown_token.child_token();
 
         // secondary runtime for background ectd/nats tasks
         let secondary = match secondary {
@@ -93,13 +113,17 @@ impl Runtime {
         let compute_pool = None;
         let block_in_place_permits = None;
 
+        let velo_response_service =
+            Arc::new(crate::pipeline::network::velo_response::RuntimeService::new(runtime.clone()));
         Ok(Runtime {
             id,
             primary: runtime,
             secondary,
             cancellation_token,
             endpoint_shutdown_token,
+            shutdown_started,
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
+            velo_response_service,
             compute_pool,
             block_in_place_permits,
         })
@@ -328,6 +352,12 @@ impl Runtime {
         self.graceful_shutdown_tracker.clone()
     }
 
+    pub(crate) fn velo_response_service(
+        &self,
+    ) -> Arc<crate::pipeline::network::velo_response::RuntimeService> {
+        self.velo_response_service.clone()
+    }
+
     /// Get access to the compute pool for CPU-intensive operations
     ///
     /// Returns None if the compute pool was not initialized (e.g., due to configuration error)
@@ -335,14 +365,34 @@ impl Runtime {
         self.compute_pool.as_ref()
     }
 
+    /// Withdraw readiness before application draining without stopping the
+    /// endpoints or transports still needed to complete that drain.
+    pub fn mark_shutting_down(&self) {
+        if !self.shutdown_started.is_cancelled() {
+            tracing::info!("Runtime readiness withdrawn for shutdown");
+            self.shutdown_started.cancel();
+        }
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown_started.is_cancelled()
+    }
+
+    /// Observe shutdown from its start, rather than waiting for transport teardown.
+    pub fn shutdown_started_token(&self) -> CancellationToken {
+        self.shutdown_started.child_token()
+    }
+
     /// Shuts down the [`Runtime`] instance
     pub fn shutdown(&self) {
+        self.mark_shutting_down();
         tracing::info!("Runtime shutdown initiated");
 
         // Spawn the shutdown coordination task BEFORE cancelling tokens
         let tracker = self.graceful_shutdown_tracker.clone();
         let main_token = self.cancellation_token.clone();
         let endpoint_token = self.endpoint_shutdown_token.clone();
+        let velo_response_service = self.velo_response_service.clone();
 
         // Use the runtime handle to spawn the task
         let handle = self.primary();
@@ -374,14 +424,25 @@ impl Runtime {
 
             // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
             tracing::info!("Phase 3: Connections to backend services will now be disconnected");
+            velo_response_service.close();
             main_token.cancel();
+
+            // The main token also starts the HTTP drain, so close the response
+            // service only after that drain and its streams finish. Other
+            // Runtime owners in this process keep their shared service alive.
+            // The main token is already cancelled and nothing awaits this task,
+            // so a slow close cannot hold up shutdown.
+            velo_response_service
+                .drain(velo_response_drain_window(), VELO_RESPONSE_DRAIN_HEADROOM)
+                .await;
+            velo_response_service.shutdown().await;
         });
     }
 }
 
 impl RuntimeType {
     /// Get [`tokio::runtime::Handle`] to runtime
-    pub fn handle(&self) -> tokio::runtime::Handle {
+    pub(crate) fn handle(&self) -> tokio::runtime::Handle {
         match self {
             RuntimeType::External(rt) => rt.clone(),
             RuntimeType::Shared(rt) => rt.handle().clone(),

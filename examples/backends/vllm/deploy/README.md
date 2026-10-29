@@ -125,7 +125,7 @@ podTemplate:
 - `--enable-prompt-embeds`: Enable prompt embeddings feature
 - `--enable-multimodal`: Enable multimodal (vision) support
 - `--disaggregation-mode prefill`: Prefill-only mode for disaggregated serving
-- `--kv-transfer-config '<json>'`: KV transfer backend configuration (e.g., `'{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`)
+- `--kv-transfer-config '<json>'`: KV transfer backend configuration (e.g., `'{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'` on prefill and `'{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'` on decode)
 
 ## Prerequisites
 

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import gc
 import logging
 import os
 from typing import Any
@@ -11,20 +10,6 @@ from typing import Any
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 
 _EXTERNAL_MODEL_LOAD_FORMATS = {"gms"}
-
-
-def _configure_trtllm_snapshot_capture_env() -> None:
-    """Disable TRT-LLM's NCCL registered window before engine creation."""
-    env_name = "TLLM_NCCL_SYMMETRIC_ZERO_COPY"
-    configured = os.environ.get(env_name)
-    if configured and configured != "0":
-        logging.getLogger(__name__).warning(
-            "Overriding %s=%r with '0' for snapshot mode because "
-            "cuda-checkpoint cannot capture NCCL registered windows",
-            env_name,
-            configured,
-        )
-    os.environ[env_name] = "0"
 
 
 def _should_prefetch_model_for_snapshot(config: Any) -> bool:
@@ -60,7 +45,16 @@ def _create_engine_snapshot_controller(
         engine=engine,
         pause_controller=pause_controller,
         snapshot_config=snapshot_config,
+        # Discard the KV cache and keep weights resident for capture. Resume
+        # wakes only the tags that were put to sleep.
+        pause_args=(["kv_cache"],),
     )
+
+
+def _create_pause_controller(engine: Any) -> Any:
+    from dynamo.trtllm.request_handlers.handler_base import TRTLLMEnginePauseController
+
+    return TRTLLMEnginePauseController(engine)
 
 
 async def _refresh_snapshot_restore_runtime_config(
@@ -76,26 +70,6 @@ async def _refresh_snapshot_restore_runtime_config(
         config,
         lambda: parse_snapshot_restore_runtime_config(argv),
     )
-
-
-class _NoOpSnapshotPauseController:
-    """Pause controller for pre-runtime TRT-LLM engine snapshots.
-
-    The snapshot hook runs after the TRT-LLM engine has loaded and before the
-    Dynamo runtime endpoint is created. There is no endpoint to drain or
-    unregister at this point, so keep the TRT-LLM/CUDA allocations resident and
-    only run Python GC before CRIU/cuda-checkpoint capture.
-    """
-
-    async def pause(self, *_args: object) -> bool:
-        gc.collect()
-        return True
-
-    async def resume(self) -> bool:
-        return True
-
-    def mark_resumed(self) -> None:
-        return None
 
 
 class _SnapshotRuntimeProxy:
@@ -126,7 +100,7 @@ class _SnapshotRuntimeProxy:
             "Checkpoint mode enabled: TRT-LLM engine is initialized before "
             "Dynamo runtime creation"
         )
-        pause_controller = _NoOpSnapshotPauseController()
+        pause_controller = _create_pause_controller(engine)
         snapshot_controller = _create_engine_snapshot_controller(
             engine=engine,
             pause_controller=pause_controller,
@@ -197,18 +171,6 @@ def _validate_supported_snapshot_config(config: Any) -> None:
             ),
             (not config.encode_endpoint, "--encode-endpoint"),
             (not config.frontend_decoding, "--frontend-decoding"),
-            (
-                config.tensor_parallel_size == 1,
-                f"tensor_parallel_size={config.tensor_parallel_size}",
-            ),
-            (
-                config.pipeline_parallel_size == 1,
-                f"pipeline_parallel_size={config.pipeline_parallel_size}",
-            ),
-            (
-                config.gpus_per_node in (None, 1),
-                f"gpus_per_node={config.gpus_per_node}",
-            ),
             (not config.has_connector("kvbm"), "--connector kvbm"),
         )
         if not supported
@@ -216,7 +178,7 @@ def _validate_supported_snapshot_config(config: Any) -> None:
 
     if unsupported:
         raise ValueError(
-            "TRT-LLM Dynamo Snapshot currently supports only the single-GPU "
-            "aggregated text worker path. Unsupported snapshot setting(s): "
+            "TRT-LLM Dynamo Snapshot currently supports only the aggregated "
+            "text worker path. Unsupported snapshot setting(s): "
             + ", ".join(unsupported)
         )

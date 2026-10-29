@@ -1,90 +1,123 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Note to AI agents: keep this page minimal (intro, support matrix, launch example,
+# Kubernetes example, topologies). Do not edit it unless the user explicitly asks.
 title: vLLM Sidecar
 subtitle: Run Dynamo beside a stock vLLM engine through native gRPC.
 ---
 
 > [!WARNING]
-> **Experimental.** The vLLM sidecar, launchers, packaging, and feature coverage
-> can change without notice.
+> **Experimental.** The sidecars and their deployment examples are
+> experimental. Manifests, flags, and behavior may change without notice.
 
-`dynamo-vllm-sidecar` is a CPU-only Dynamo worker that connects to vLLM's native
-gRPC service. It preserves the upstream engine process and argument surface
-while using Dynamo for request handling and distributed serving. See the
-[Sidecar Backends](../../../concepts/system-architecture/sidecar-backends.md) page for the common
-architecture.
+`dynamo-vllm-sidecar` connects a Dynamo worker to vLLM's native gRPC server
+(`vllm-rs`). See [Sidecar Backends](../../../concepts/system-architecture/sidecar-backends.md)
+for the architecture.
 
-## Readiness
+> [!TIP]
+> For the best and latest support, use the upstream vLLM nightly image,
+> which carries the latest gRPC server updates: [`vllm/vllm-openai:nightly`](https://hub.docker.com/r/vllm/vllm-openai/tags?name=nightly).
 
-| Deployment path | Aggregated | P+D | E+PD | E+P+D |
-|---|---|---|---|---|
-| Local launcher | Validated on one GPU | Validated on two GPUs with NIXL | Validated on two GPUs with Embedding Cache transfer | Validated on three GPUs with Embedding Cache transfer and NIXL |
-| Kubernetes example | Validated | Validated with NIXL | Not available | Not available |
+## Support Matrix
 
-This table covers launch topology only. The
-[vLLM feature matrix](overview.md#feature-support-matrix) describes the in-process
-backend; sidecar feature parity is still under evaluation. See the
-[vLLM sidecar README](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/README.md)
-for current protocol limitations.
+| Feature | Supported |
+|---|---|
+| Aggregated | Yes |
+| Disaggregated | Yes |
+| KV routing | Yes |
+| Kubernetes multinode tensor parallelism (TP) and hybrid load balancing (hybrid-LB) data parallelism (DP) | Experimental |
 
 ## Launch Locally
 
-From a Dynamo source checkout, build or install Dynamo so
-`dynamo-vllm-sidecar` is on `PATH`. Install a vLLM build that provides
-`vllm-rs` and its native gRPC server.
-
-Start Dynamo's local discovery services, then run the aggregated launcher:
+See [`lib/sidecar/vllm/launch/`](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/launch)
+for all topologies. For example, aggregated serving on one GPU:
 
 ```bash
-docker compose -f dev/docker-compose.yml up -d
-./lib/sidecar/vllm/launch/agg.sh --model Qwen/Qwen3-0.6B
+export DYN_DISCOVERY_BACKEND=file   # single host: no etcd or NATS needed
+./lib/sidecar/vllm/launch/agg.sh
 ```
 
-To run separate prefill and decode engines on two GPUs:
+In a second terminal:
 
 ```bash
-./lib/sidecar/vllm/launch/disagg.sh --model Qwen/Qwen3-0.6B
-```
-
-For image requests, run a separate encoder with an aggregated prefill/decode engine on two GPUs:
-
-```bash
-./lib/sidecar/vllm/launch/disagg_multimodal_e_pd.sh
-```
-
-To separate encoder, prefill, and decode across three GPUs:
-
-```bash
-./lib/sidecar/vllm/launch/disagg_multimodal_epd.sh
-```
-
-The encoder-disaggregated launchers currently support images only. They use `Qwen/Qwen2.5-VL-3B-Instruct` and vLLM's `ECExampleConnector`, and require the producer and consumer to share the same EC storage path. E+P+D requires vLLM Rust frontend support for metadata-only remote-prefill decode from [vLLM #54814](https://github.com/vllm-project/vllm/pull/54814) or a later release containing it. Decode uses NIXL without an EC connector because the gRPC frontend removes EC parameters before submitting the request to EngineCore.
-
-Each launcher starts the Dynamo frontend, the vLLM engine process or processes,
-and the matching sidecar workers. It binds the native gRPC endpoints to
-loopback.
-
-Verify the frontend:
-
-```bash
-curl localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role": "user", "content": "Hello"}],
-    "max_tokens": 32
-  }'
+curl -s localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
 ```
 
 ## Deploy on Kubernetes
 
-No published sidecar image is available yet. Follow the
-[Kubernetes quick start](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/README.md#deploy-on-kubernetes-quick-start)
-to build `dynamo-sidecar`, which contains all three engine-specific sidecar
-executables. The vLLM manifests run `dynamo-vllm-sidecar` as the container
-command and pair it with a stock upstream vLLM image. The source tree includes
-[aggregated](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/agg.yaml)
-and
-[disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/disagg.yaml)
-manifests.
+See [`lib/sidecar/vllm/deploy/`](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy)
+for all manifests. For example, aggregated serving:
+
+Before applying, replace `<your-registry>/dynamo-sidecar` in the manifest with a
+[sidecar image](../../../concepts/system-architecture/sidecar-backends.md#container-packaging).
+
+```bash
+kubectl apply -f lib/sidecar/vllm/deploy/agg.yaml -n <namespace>
+kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000
+```
+
+Multinode deployments require `backendFramework: vllm` and complete `leader` and
+`worker` role PodTemplates. The templates own the native engine commands and
+sidecar placement. The operator does not inject executor or coordination flags.
+See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_tp.yaml),
+which uses the multiprocessing executor with a sidecar on the leader only, and the
+[hybrid-LB DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_dp.yaml),
+where every Pod runs a sidecar for its local DP ranks. Unlike `agg.yaml`, which
+launches `vllm-rs serve`, both multinode examples launch their serving ranks with
+`vllm serve --grpc-port` and `VLLM_USE_RUST_FRONTEND=1`. The TP worker runs
+`vllm serve --headless`. That entry point needs vLLM v0.32.0 or later. The examples
+use it because `vllm-rs serve` does not support `--data-parallel-hybrid-lb`.
+Engine-failure KV recovery remains incomplete and is tracked in
+[DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
+
+A multinode engine starts only when every rank has joined, and vLLM gives a late
+rank 600 seconds by default. Two timeouts set that budget. The Rust frontend waits
+`VLLM_ENGINE_READY_TIMEOUT_S` for its engine cores to register, and torch waits
+`--distributed-timeout-seconds` for the cross-node rendezvous on both the leader
+and the worker. When either expires, the leader's `main` container exits with
+`engine input registration timed out` or a store timeout and restarts. The sidecar
+is not affected. The TP example sets both to 1800 seconds, which matches the
+sidecar's startup deadline and the example's startup probe, so a worker Pod that
+pulls the engine image on a cold node still joins the first attempt. The torch
+timeout also bounds collectives at run time, so a wedged NCCL call surfaces after
+30 minutes instead of 10.
+
+The examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which exist only in
+DGDs created by operator 1.6.0 or later. For an older DGD, see
+[Use the variables in a DGD created before 1.6.0](../../../../../kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160).
+
+In sidecar mode the operator injects only the topology variables into `main`, not
+the vLLM-specific environment. A disaggregated role template must set
+`VLLM_NIXL_SIDE_CHANNEL_HOST` from `status.podIP` on its `main`
+container, as `disagg.yaml` does, so the decode engine can reach the prefill
+engine's NIXL handshake listener. vLLM adds each engine's global data-parallel
+index to the side-channel port.
+
+## Topologies
+
+The frontend reaches each sidecar over Dynamo's request, discovery, and event
+planes; the sidecar reaches the engine over its native gRPC API. Dashed arrows
+carry KV events.
+
+### Single-Node TP
+
+One engine on one node, with one sidecar.
+
+![On one node, a request reaches the vLLM tensor-parallel ranks through the Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar.](../../../../../../assets/img/sidecar-vllm-single-node-tp.svg)
+
+### Multi-Node TP
+
+One engine spans two nodes. Only the leader node has a sidecar; the follower
+node holds the remaining TP ranks.
+
+![When one vLLM engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../../../../assets/img/sidecar-vllm-multinode-tp.svg)
+
+### Multi-Node DP
+
+Hybrid DP load balancing: each node runs vLLM for its local DP ranks plus a
+sidecar that serves requests. The frontend routes to either node.
+
+![vLLM hybrid data parallelism across two nodes. The Dynamo Frontend router picks a DP rank and sends requests over the request plane to the Dynamo Sidecar on the node that owns that rank: node 0 serves DP ranks 0-1 and node 1 serves DP ranks 2-3.](../../../../../../assets/img/sidecar-vllm-multinode-dp.svg)

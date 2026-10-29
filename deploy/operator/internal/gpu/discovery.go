@@ -55,6 +55,8 @@ const (
 	requestTimeout                  = 5 * time.Second
 	dialTimeout                     = 3 * time.Second
 	tlsHandshakeTimeout             = 3 * time.Second
+	metricsIdleConnTimeout          = 90 * time.Second
+	metricsMaxIdleConns             = 100
 	CloudProviderGCP                = "gcp"
 	CloudProviderAWS                = "aws"
 	CloudProviderAKS                = "aks"
@@ -86,22 +88,24 @@ const (
 
 // --- GPU model tokens ---
 const (
-	tokenGB200  = "GB200"
-	tokenGB10   = "GB10"
-	tokenB200   = "B200"
-	tokenH200   = "H200"
-	tokenH100   = "H100"
-	tokenA100   = "A100"
-	tokenA30    = "A30"
-	tokenL40S   = "L40S"
-	tokenL40    = "L40"
-	tokenL4     = "L4"
-	tokenV100   = "V100"
-	tokenT4     = "T4"
-	tokenMI300  = "MI300"
-	tokenMI250  = "MI250"
-	tokenMI200  = "MI200"
-	LabelNVLink = "nvlink"
+	tokenVRNVL72 = "VRNVL72"
+	tokenGB200   = "GB200"
+	tokenGB10    = "GB10"
+	tokenB300    = "B300"
+	tokenB200    = "B200"
+	tokenH200    = "H200"
+	tokenH100    = "H100"
+	tokenA100    = "A100"
+	tokenA30     = "A30"
+	tokenL40S    = "L40S"
+	tokenL40     = "L40"
+	tokenL4      = "L4"
+	tokenV100    = "V100"
+	tokenT4      = "T4"
+	tokenMI300   = "MI300"
+	tokenMI250   = "MI250"
+	tokenMI200   = "MI200"
+	LabelNVLink  = "nvlink"
 )
 
 // awsInstanceTypePrefixes matches known GPU/accelerator instance families on EKS. See: https://aws.amazon.com/ec2/instance-types/
@@ -120,16 +124,21 @@ var gcpMachineSeries = []string{
 }
 
 type gpuRule struct {
-	token     string
-	sxmSKU    nvidiacomv1beta1.GPUSKUType
-	pcieSKU   nvidiacomv1beta1.GPUSKUType
-	singleSKU nvidiacomv1beta1.GPUSKUType // for GPUs without form factor variants
+	token        string
+	boundedToken bool // require a complete model token instead of a substring match
+	sxmSKU       nvidiacomv1beta1.GPUSKUType
+	pcieSKU      nvidiacomv1beta1.GPUSKUType
+	singleSKU    nvidiacomv1beta1.GPUSKUType // for GPUs without form factor variants
 }
 
 var gpuRules = []gpuRule{
+	// Vera Rubin
+	{token: tokenVRNVL72, boundedToken: true, singleSKU: nvidiacomv1beta1.GPUSKUTypeVRNVL72},
+
 	// Blackwell
-	{token: tokenGB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeGB200SXM},
+	{token: tokenGB200, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB200},
 	{token: tokenGB10, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB10},
+	{token: tokenB300, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB300SXM},
 	{token: tokenB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB200SXM},
 
 	// Hopper
@@ -138,7 +147,7 @@ var gpuRules = []gpuRule{
 
 	// Ampere
 	{token: tokenA100, sxmSKU: nvidiacomv1beta1.GPUSKUTypeA100SXM, pcieSKU: nvidiacomv1beta1.GPUSKUTypeA100PCIe},
-	{token: tokenA30, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
+	{token: tokenA30, boundedToken: true, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
 
 	// Ada
 	{token: tokenL40S, singleSKU: nvidiacomv1beta1.GPUSKUTypeL40S},
@@ -371,7 +380,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	var bestNode *GPUInfo
 	var bestSKU nvidiacomv1beta1.GPUSKUType
 	for _, n := range allNodes {
-		if filterSKU != "" && n.sku != filterSKU {
+		if !matchesDiscoveredSKU(filterSKU, n.sku) {
 			continue
 		}
 		if bestNode == nil ||
@@ -537,19 +546,31 @@ func listGPUOperatorRunningPods(ctx context.Context, k8sClient client.Reader) ([
 // This function does not implement retries or fallback logic.
 // Error handling and multi-pod aggregation are managed by the caller.
 func ScrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, error) {
+	return scrapeMetricsEndpoint(ctx, metricsHTTPClient, endpoint)
+}
+
+// metricsHTTPClient is shared by all scrapes so their connections go back to
+// one bounded, idle-timed pool instead of a new transport per call.
+var metricsHTTPClient = newMetricsHTTPClient(metricsIdleConnTimeout)
+
+func newMetricsHTTPClient(idleConnTimeout time.Duration) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   dialTimeout,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout: tlsHandshakeTimeout,
+			IdleConnTimeout:     idleConnTimeout,
+			MaxIdleConns:        metricsMaxIdleConns,
+		},
+	}
+}
+
+func scrapeMetricsEndpoint(ctx context.Context, client *http.Client, endpoint string) (*GPUInfo, error) {
 	// Set a timeout for the request
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	// Create a custom HTTP client with transport-level timeouts
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   dialTimeout,      // Dial timeout
-				KeepAlive: 30 * time.Second, // Keep-alive for connections
-			}).DialContext,
-			TLSHandshakeTimeout: tlsHandshakeTimeout, // TLS handshake timeout
-		},
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request for %s: %w", endpoint, err)
@@ -827,7 +848,7 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 	var bestNode *GPUInfo
 	var bestSKU nvidiacomv1beta1.GPUSKUType
 	for _, n := range allNodes {
-		if filterSKU != "" && n.sku != filterSKU {
+		if !matchesDiscoveredSKU(filterSKU, n.sku) {
 			continue
 		}
 		if bestNode == nil ||
@@ -954,7 +975,12 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	formFactor := detectFormFactor(normalized)
 
 	for _, rule := range gpuRules {
-		if rule.token == tokenA30 && !containsModelToken(gpuProduct, tokenA30) {
+		if rule.boundedToken && !containsModelToken(gpuProduct, rule.token) {
+			continue
+		}
+
+		// B300 must not match GB300, but compact product names can attach its SXM suffix.
+		if rule.token == tokenB300 && !containsB300ModelToken(gpuProduct) {
 			continue
 		}
 		if strings.Contains(normalized, rule.token) {
@@ -969,7 +995,7 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 			}
 			// Token matched but no form factor indicator was present in the string
 			// (e.g. "NVIDIA H200" from DCGM has no SXM/HGX/DGX suffix). If the GPU
-			// has no PCIe variant it must be SXM-only (H200, B200, GB200).
+			// has no PCIe variant it must be SXM-only (H200, B200).
 			if rule.sxmSKU != "" {
 				return rule.sxmSKU
 			}
@@ -977,6 +1003,16 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	}
 
 	return ""
+}
+
+// matchesDiscoveredSKU keeps the deprecated GB200 selector compatible without rewriting it.
+func matchesDiscoveredSKU(filterSKU, discoveredSKU nvidiacomv1beta1.GPUSKUType) bool {
+	if filterSKU == "" || filterSKU == discoveredSKU {
+		return true
+	}
+
+	//nolint:staticcheck // SA1019: Existing selectors must continue to match GB200 nodes.
+	return filterSKU == nvidiacomv1beta1.GPUSKUTypeGB200SXM && discoveredSKU == nvidiacomv1beta1.GPUSKUTypeGB200
 }
 
 // normalize standardizes a GPU product string to simplify matching.
@@ -992,15 +1028,44 @@ func normalize(input string) string {
 
 func containsModelToken(input, token string) bool {
 	upper := strings.ToUpper(input)
+	token = normalize(token)
+	for start := 0; start < len(upper); start++ {
+		if start > 0 && isASCIIAlphaNum(upper[start-1]) {
+			continue
+		}
+
+		inputIndex := start
+		tokenIndex := 0
+		for inputIndex < len(upper) && tokenIndex < len(token) {
+			if upper[inputIndex] == ' ' || upper[inputIndex] == '-' {
+				inputIndex++
+				continue
+			}
+			if upper[inputIndex] != token[tokenIndex] {
+				break
+			}
+			inputIndex++
+			tokenIndex++
+		}
+		if tokenIndex == len(token) &&
+			(inputIndex == len(upper) || !isASCIIAlphaNum(upper[inputIndex])) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsB300ModelToken(input string) bool {
+	upper := strings.ToUpper(input)
 	for start := 0; start < len(upper); {
-		idx := strings.Index(upper[start:], token)
+		idx := strings.Index(upper[start:], tokenB300)
 		if idx < 0 {
 			return false
 		}
 		idx += start
-		end := idx + len(token)
+		end := idx + len(tokenB300)
 		if (idx == 0 || !isASCIIAlphaNum(upper[idx-1])) &&
-			(end == len(upper) || !isASCIIAlphaNum(upper[end])) {
+			(end == len(upper) || !isASCIIAlphaNum(upper[end]) || strings.HasPrefix(upper[end:], tokenSXM)) {
 			return true
 		}
 		start = idx + 1

@@ -155,6 +155,38 @@ def test_clamp_pair_asymmetric_floor_grows():
     assert 3 <= total <= 5
 
 
+@pytest.mark.parametrize(
+    "current,min_gpus,max_gpus,expected",
+    [
+        ((1, 10), 27, -1, (2, 10)),
+        ((10, 10), 188, 202, (12, 10)),
+        # 186 GPUs fits the tolerance-relaxed [172, 200] band.
+        ((10, 10), 188, 200, (11, 10)),
+        ((1, 1), 35, 35, (1, 1)),
+    ],
+    ids=[
+        "floor-only",
+        "within-ceiling",
+        "fit-prefill-to-ceiling",
+        "unchanged-fallback-without-decode-shrink",
+    ],
+)
+def test_clamp_pair_floor_rounding_preserves_decode(
+    current, min_gpus, max_gpus, expected
+):
+    assert (
+        proportional_clamp_pair(
+            *current,
+            p_gpu=16,
+            d_gpu=1,
+            min_gpus=min_gpus,
+            max_gpus=max_gpus,
+            prefill_min_endpoint=1,
+        )
+        == expected
+    )
+
+
 def test_clamp_pair_asymmetric_unreachable_target_converges():
     # Both pools = 2 GPU/worker. min=max=5 unreachable (totals are even).
     # tol=2 only on lower → band [3, 5]. Should land at 4 (largest feasible

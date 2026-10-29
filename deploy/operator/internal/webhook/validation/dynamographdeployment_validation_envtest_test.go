@@ -34,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
@@ -46,38 +47,388 @@ const (
 
 const sglangBackendFramework = "sglang"
 
+// dgdAdmissionTestCase keeps the native admission and post-admission expectations together.
+type dgdAdmissionTestCase struct {
+	name               string
+	deployment         runtime.Object
+	oldDeployment      runtime.Object
+	oldBeforeUpdate    runtime.Object
+	mutateRequest      func(*testing.T, map[string]any) // mutates the source-version request map
+	groveDisabled      bool                             // disables the configured Grove pathway
+	lpxDisabled        bool                             // disables the LPX integration
+	checkpointOff      bool                             // disables checkpoint creation and restore
+	seedWithoutWebhook bool                             // seeds oldDeployment without validating it
+	terminating        bool                             // deletes the seeded object so the update runs while it terminates
+	username           string                           // supplies the admission request identity
+
+	wantSchemaErr          string
+	wantCELErr             string
+	wantAdmissionErrs      []string
+	wantWebhookErrs        []string
+	wantWarnings           []string
+	notWantErr             string
+	wantPodAnnotations     map[string]string
+	wantOriginVersion      string
+	wantProvider           string
+	wantRoleReplicas       map[string]int32
+	wantReplicas           map[string]*int32
+	wantRootProviderTarget string
+}
+
 func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
+	const updatedSidecarImage = "runtime:1.6.0"
+	const initialSidecarImage = "runtime:1.5.0"
+	const unrelatedInitContainerName = "setup"
+	const customSidecarImage = "runtime:custom"
+	const trtllmBackendFramework = "trtllm"
+
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
 
-	tests := []struct {
-		name               string
-		deployment         runtime.Object
-		oldDeployment      runtime.Object
-		oldBeforeUpdate    runtime.Object
-		mutateRequest      func(*testing.T, map[string]any) // mutates the source-version request map
-		withoutTopology    bool                             // omits the default cluster topology fixture
-		groveDisabled      bool                             // disables the configured Grove pathway
-		checkpointOff      bool                             // disables checkpoint creation and restore
-		seedWithoutWebhook bool                             // seeds oldDeployment without validating it
-		terminating        bool                             // deletes the seeded object so the update runs while it terminates
-		username           string                           // supplies the admission request identity
+	tests := []dgdAdmissionTestCase{
+		{name: "vLLM multi-GPU snapshot failover is admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), "vllm")
+		})},
+		{name: "SGLang multi-GPU snapshot failover is admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = sglangBackendFramework
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), sglangBackendFramework)
+		})},
+		{name: "TRT-LLM snapshot failover is rejected at admission", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = trtllmBackendFramework
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), trtllmBackendFramework)
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: trtllm)"}},
+		{name: "inferred TRT-LLM snapshot failover is rejected at admission", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = ""
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), trtllmBackendFramework)
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: trtllm)"}},
+		{name: "TRT-LLM snapshot without failover remains admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			dgd.Spec.BackendFramework = trtllmBackendFramework
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, trtllmBackendFramework)
+			worker.Experimental.Failover = nil
+		})},
+		{name: "TRT-LLM snapshot failover cannot be enabled on update", oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = trtllmBackendFramework
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, trtllmBackendFramework)
+			worker.Experimental.Failover = nil
+		}), deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			dgd.Spec.BackendFramework = trtllmBackendFramework
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), trtllmBackendFramework)
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: trtllm)"}},
+		{name: "snapshot failover rejects conflicting backend selection", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), sglangBackendFramework)
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Snapshot-backed intra-pod failover requires a consistent vLLM or SGLang backend"}},
+		{name: "automatic snapshot failover cannot use Immediate startup", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, "vllm")
+			worker.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicyImmediate
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"}},
+		{name: "blank checkpointRef cannot bypass automatic snapshot failover startup policy", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, "vllm")
+			worker.Experimental.Checkpoint.CheckpointRef = new(" \t ")
+			worker.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicyImmediate
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"}},
+		{name: "snapshot failover rejects a helper capture target", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, "vllm")
+			worker.Experimental.Checkpoint.TargetContainerName = "helper"
+		}), wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint.targetContainerName: Invalid value: "helper": must be main for intra-pod failover`}},
+		{name: "snapshot failover rejects multiple nodes", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, "vllm")
+			worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+		}), wantWebhookErrs: []string{"spec.components[1].multinode: Forbidden: Snapshot-backed intra-pod failover requires a single node setup"}},
+		{name: "snapshot failover update cannot enable Immediate startup", oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), sglangBackendFramework)
+			dgd.Spec.BackendFramework = sglangBackendFramework
+		}), deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			enableBetaContainerDiscovery(dgd)
+			worker := dgd.GetComponentByName("worker")
+			enableBetaSnapshotFailover(worker, sglangBackendFramework)
+			dgd.Spec.BackendFramework = sglangBackendFramework
+			worker.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicyImmediate
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.checkpoint.startupPolicy: Forbidden: Snapshot-backed intra-pod failover requires WaitForCheckpoint for automatic capture"}},
+		// Sidecar mode is derived from live init-container names in both API versions.
+		{name: "beta unrelated init container retains standard mode", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
+			c.PodTemplate.Spec.InitContainers[0].Name = unrelatedInitContainerName
+			c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
+			c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+		})},
+		{name: "beta regular runtime container retains standard mode", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
+			c.PodTemplate.Spec.InitContainers = nil
+			c.PodTemplate.Spec.Containers = append(c.PodTemplate.Spec.Containers, corev1.Container{Name: "runtime", Image: "helper:latest"})
+			c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+		})},
+		{name: "beta adding runtime activates sidecar validation", oldDeployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.InitContainers = nil
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
+		}), deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
+			c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
+		}), wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for component "worker" with a runtime init container`}},
+		{name: "beta removing runtime returns to main", oldDeployment: nativeDGDForAdmission(t, false, nil), deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.InitContainers = nil
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
+		})},
+		{name: "beta renaming runtime returns to main", oldDeployment: nativeDGDForAdmission(t, false, nil), deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.InitContainers[0].Name = unrelatedInitContainerName
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
+		})},
+		{name: "beta removing runtime revalidates engine version", oldDeployment: nativeDGDForAdmission(t, false, nil), deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.InitContainers = nil
+		}), wantWebhookErrs: []string{`spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`}},
+		{name: "alpha unrelated init container retains standard mode", deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
+			c.PodTemplate.Spec.InitContainers[0].Name = unrelatedInitContainerName
+			c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
+			c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+		})},
+		{name: "alpha regular runtime container retains standard mode", deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
+			c.PodTemplate.Spec.InitContainers = nil
+			c.PodTemplate.Spec.Containers = append(c.PodTemplate.Spec.Containers, corev1.Container{Name: "runtime", Image: "helper:latest"})
+			c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+		})},
+		{name: "alpha adding runtime activates sidecar validation", oldDeployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.InitContainers = nil
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
+		}), deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
+			c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
+		}), wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for component "worker" with a runtime init container`}},
+		{name: "alpha removing runtime returns to main", oldDeployment: nativeDGDForAdmission(t, true, nil), deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.InitContainers = nil
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
+		})},
+		{name: "alpha renaming runtime returns to main", oldDeployment: nativeDGDForAdmission(t, true, nil), deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.InitContainers[0].Name = unrelatedInitContainerName
+			c.PodTemplate.Spec.Containers[0].Image = initialSidecarImage
+		})},
+		{name: "alpha removing runtime revalidates engine version", oldDeployment: nativeDGDForAdmission(t, true, nil), deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.InitContainers = nil
+		}), wantWebhookErrs: []string{`spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`}},
+		{name: "native sidecar beta rejects gms create",
+			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}}
+			}), wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
+		{name: "native sidecar beta rejects failover create",
+			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
+			}), wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.components[1].experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
+		{name: "native sidecar beta rejects gms update", oldDeployment: nativeDGDForAdmission(t, false, nil),
+			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}}
+			}), wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
+		{name: "native sidecar beta rejects failover update", oldDeployment: nativeDGDForAdmission(t, false, nil),
+			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
+			}), wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.components[1].experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
+		{name: "native sidecar beta multinode requires role templates", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+		}), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "native sidecar alpha rejects gms create",
+			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}}
+			}), wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
+		{name: "native sidecar alpha rejects failover create",
+			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
+			}), wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.components[1].experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
+		{name: "native sidecar alpha rejects gms update", oldDeployment: nativeDGDForAdmission(t, true, nil),
+			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}}
+			}), wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
+		{name: "native sidecar alpha rejects failover update", oldDeployment: nativeDGDForAdmission(t, true, nil),
+			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
+			}), wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.components[1].experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
+		{name: "native sidecar alpha multinode requires role templates", deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+		}), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+		{name: "native sidecar requires engine main", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.Containers[0].Name = "engine"
+		}), wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Required value: main engine container is required for component "worker" with a runtime init container`}},
+		{name: "native sidecar rejects non-worker component type",
+			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+			}), wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.initContainers[0].name: Forbidden: is supported only for worker, prefill, decode, and LPX components`}},
 
-		wantSchemaErr      string
-		wantCELErr         string
-		wantAdmissionErrs  []string
-		wantWebhookErrs    []string
-		wantWarnings       []string
-		notWantErr         string
-		wantPodAnnotations map[string]string
-		wantProvider       string
-		wantRoleReplicas   map[string]int32
-	}{
+		{name: "native sidecar beta custom runtime image create needs override",
+			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.InitContainers[0].Image = customSidecarImage
+			}),
+			wantWebhookErrs: []string{`spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
+		},
+		{name: "native sidecar beta custom runtime image update needs override", oldDeployment: nativeDGDForAdmission(t, false, nil),
+			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.InitContainers[0].Image = customSidecarImage
+			}),
+			wantWebhookErrs: []string{`spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
+		},
+		{name: "native sidecar alpha custom runtime image create needs override",
+			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.InitContainers[0].Image = customSidecarImage
+			}),
+			wantWebhookErrs: []string{`spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
+		},
+		{name: "native sidecar alpha custom runtime image update needs override", oldDeployment: nativeDGDForAdmission(t, true, nil),
+			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.InitContainers[0].Image = customSidecarImage
+			}),
+			wantWebhookErrs: []string{`spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
+		},
+		{
+			name: "sglang sidecar multinode requires a leader runtime",
+			deployment: func() runtime.Object {
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				betaWorkerComponent(dgd).Roles[0].PodTemplate.Spec.InitContainers = nil
+				return dgd
+			}(),
+			wantWebhookErrs: []string{`spec.components[1].roles: Required value: the leader template must declare runtime to select sidecar mode`, `spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
+		},
+		{
+			name: "sglang beta accepts multinode sidecar with runtime on both roles and opaque engine configuration",
+			deployment: func() runtime.Object {
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				for i := range betaWorkerComponent(dgd).Roles {
+					main := &betaWorkerComponent(dgd).Roles[i].PodTemplate.Spec.Containers[0]
+					main.Command = []string{"/launch.sh"}
+					main.Args = []string{"--config", "/engine.yaml", "--attn-dp-size", "$(DP)"}
+				}
+				return dgd
+			}(),
+		},
+		{
+			name: "sglang combined runtime still accepts a multinode component template",
+			deployment: func() runtime.Object {
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				component := betaWorkerComponent(dgd)
+				component.PodTemplate.Spec.InitContainers = nil
+				component.PodTemplate.Spec.Containers[0].Image = "runtime:1.6.0"
+				component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
+				return dgd
+			}(),
+		},
+		{
+			name: "sglang sidecar rejects switching combined component template to native sidecar",
+			oldDeployment: func() runtime.Object {
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				component := betaWorkerComponent(dgd)
+				component.PodTemplate.Spec.InitContainers = nil
+				component.PodTemplate.Spec.Containers[0].Image = "runtime:1.6.0"
+				component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
+				return dgd
+			}(),
+			deployment:      multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, false, false),
+			wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`},
+		},
+
+		{
+			name: "sglang sidecar multinode worker runtime needs version override",
+			deployment: func() runtime.Object {
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				betaWorkerComponent(dgd).Roles[1].PodTemplate.Spec.InitContainers[0].Image = "runtime:custom"
+				return dgd
+			}(),
+			wantWebhookErrs: []string{`spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
+		},
+		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
+		{name: "native sidecar beta create", deployment: nativeDGDForAdmission(t, false, nil)},
+		{name: "native sidecar beta update", oldDeployment: nativeDGDForAdmission(t, false, nil), deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.InitContainers[0].Image = updatedSidecarImage
+		})},
+		{name: "native sidecar beta disabled checkpoint", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: false}}
+		})},
+		{name: "native sidecar beta rejects nonrestartable init create",
+			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
+			}),
+			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for component "worker" with a runtime init container`},
+		},
+		{name: "native sidecar beta rejects checkpoint create",
+			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint.enabled: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`},
+		},
+		{name: "native sidecar beta rejects nonrestartable init update", oldDeployment: nativeDGDForAdmission(t, false, nil),
+			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
+			}),
+			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for component "worker" with a runtime init container`},
+		},
+		{name: "native sidecar beta rejects checkpoint update", oldDeployment: nativeDGDForAdmission(t, false, nil),
+			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint.enabled: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`},
+		},
+		{name: "native sidecar alpha create", deployment: nativeDGDForAdmission(t, true, nil)},
+		{name: "native sidecar alpha update", oldDeployment: nativeDGDForAdmission(t, true, nil), deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.InitContainers[0].Image = updatedSidecarImage
+		})},
+		{name: "native sidecar alpha disabled checkpoint", deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: false}}
+		})},
+		{name: "native sidecar alpha rejects nonrestartable init create",
+			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
+			}),
+			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for component "worker" with a runtime init container`},
+		},
+		{name: "native sidecar alpha rejects checkpoint create",
+			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint.enabled: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`},
+		},
+		{name: "native sidecar alpha rejects nonrestartable init update", oldDeployment: nativeDGDForAdmission(t, true, nil),
+			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
+			}),
+			wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for component "worker" with a runtime init container`},
+		},
+		{name: "native sidecar alpha rejects checkpoint update", oldDeployment: nativeDGDForAdmission(t, true, nil),
+			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint.enabled: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`},
+		},
+		{name: "native sidecar with regular frontend", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.FrontendSidecar = new("http-frontend")
+			c.PodTemplate.Spec.Containers = append(c.PodTemplate.Spec.Containers, corev1.Container{Name: "http-frontend", Image: "frontend:1.5.0"})
+		})},
 		// Baseline create-path rules.
 		{
-			name:       "valid deployment with components",
-			deployment: betaDGDForAdmission(nil),
+			name:        "valid deployment with components",
+			lpxDisabled: true,
+			deployment:  betaDGDForAdmission(nil),
 		},
 		{
 			name: "beta component main image is required when pod template is absent on create",
@@ -102,7 +453,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: customRuntimeImage}},
 				}}
 			}),
-			wantWebhookErrs: []string{"spec.components[1].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+			wantWebhookErrs: []string{"spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
 		},
 		{
 			name: "alpha component custom image uses source-version path",
@@ -111,7 +462,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.RuntimeVersionOverride = ""
 				worker.ExtraPodSpec.MainContainer.Image = customRuntimeImage
 			}),
-			wantWebhookErrs: []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+			wantWebhookErrs: []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
 		},
 		{
 			name:               "unchanged legacy beta component runtime version is ratcheted on update",
@@ -148,22 +499,22 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(1))
 				worker.RuntimeVersionOverride = ""
 				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "legacy-epp-config"},
 				}
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Labels = map[string]string{"updated": "true"}
 				worker := betaWorkerComponent(dgd)
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(1))
 				worker.RuntimeVersionOverride = ""
 				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "legacy-epp-config"},
 				}
 			}),
 		},
@@ -172,22 +523,22 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
 				worker.ComponentType = consts.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(1))
 				worker.RuntimeVersionOverride = ""
 				worker.ExtraPodSpec.MainContainer.Image = legacyEPPImage140
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "legacy-epp-config"},
 				}
 			}),
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Labels = map[string]string{"updated": "true"}
 				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
 				worker.ComponentType = consts.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(1))
 				worker.RuntimeVersionOverride = ""
 				worker.ExtraPodSpec.MainContainer.Image = legacyEPPImage140
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "legacy-epp-config"},
 				}
 			}),
 		},
@@ -197,22 +548,22 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(1))
 				worker.RuntimeVersionOverride = ""
 				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "legacy-epp-config"},
 				}
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Labels = map[string]string{"updated": "true"}
 				worker := betaWorkerComponent(dgd)
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(1))
 				worker.RuntimeVersionOverride = ""
 				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "legacy-epp-config"},
 				}
 			}),
 		},
@@ -222,22 +573,22 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
 				worker.ComponentType = consts.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(1))
 				worker.RuntimeVersionOverride = ""
 				worker.ExtraPodSpec.MainContainer.Image = frontendImage150
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "legacy-epp-config"},
 				}
 			}),
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Labels = map[string]string{"updated": "true"}
 				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
 				worker.ComponentType = consts.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(1))
 				worker.RuntimeVersionOverride = ""
 				worker.ExtraPodSpec.MainContainer.Image = frontendImage150
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "legacy-epp-config"},
 				}
 			}),
 		},
@@ -254,7 +605,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(1))
 				worker.RuntimeVersionOverride = ""
 				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 			}),
@@ -265,17 +616,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(1))
 				worker.RuntimeVersionOverride = ""
 				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "legacy-epp-config"},
 				}
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(1))
 				worker.RuntimeVersionOverride = ""
 				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
 			}),
@@ -285,18 +636,18 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(1))
 				worker.RuntimeVersionOverride = ""
 				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(1))
 				worker.RuntimeVersionOverride = ""
 				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "legacy-epp-config"},
 				}
 			}),
 		},
@@ -311,7 +662,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.RuntimeVersionOverride = ""
 				worker.PodTemplate.Spec.Containers[0].Image = customRuntimeImage
 			}),
-			wantWebhookErrs: []string{"spec.components[1].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+			wantWebhookErrs: []string{"spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
 		},
 		{
 			name:               "changing a legacy alpha custom image requires runtime version override",
@@ -326,7 +677,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.RuntimeVersionOverride = ""
 				worker.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:other-custom"
 			}),
-			wantWebhookErrs: []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+			wantWebhookErrs: []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
 		},
 		{
 			name: "no components",
@@ -338,18 +689,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "component replicas must be non-negative",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				betaWorkerComponent(dgd).Replicas = k8sptr.To(int32(-1))
+				betaWorkerComponent(dgd).Replicas = new(int32(-1))
 			}),
 			wantAdmissionErrs: []string{
 				"spec.components[1].replicas: Invalid value: -1: spec.components[1].replicas in body should be greater than or equal to 0",
-				"spec.components[1]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
 			},
 		},
 		{
 			name:          "component minAvailable requires Grove",
 			groveDisabled: true,
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
+				betaWorkerComponent(dgd).MinAvailable = new(int32(1))
 			}),
 			wantWebhookErrs: []string{"spec.components[1].minAvailable: Forbidden: is currently supported only for Grove-backed DynamoGraphDeployment components"},
 		},
@@ -384,7 +734,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "inter-pod GMS requires vLLM backend",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.BackendFramework = "sglang"
+				dgd.Spec.BackendFramework = sglangBackendFramework
 				enableBetaInterPodGMS(betaWorkerComponent(dgd))
 			}),
 			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService.mode: Invalid value: \"InterPod\": the inter-pod GMS layout is currently supported only for vLLM (detected backend: sglang)"},
@@ -418,7 +768,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
 						Enabled:       true,
-						CheckpointRef: k8sptr.To("existing-checkpoint"),
+						CheckpointRef: new("existing-checkpoint"),
 						Job:           &nvidiacomv1beta1.ComponentCheckpointJobConfig{},
 					},
 				}
@@ -545,9 +895,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "v1beta1 pod template backend annotation is validated by CEL",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).PodTemplate = &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					Annotations: map[string]string{
 						consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
-					}},
+					},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}}},
 				}
 			}),
@@ -558,10 +908,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "v1beta1 discovery annotation survives the component pod template API server round trip",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).PodTemplate = &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					Annotations: map[string]string{
 						consts.KubeAnnotationVLLMDistributedExecutorBackend: "RaY",
 						consts.KubeAnnotationDynamoKubeDiscoveryMode:        "container",
-					}},
+					},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}}},
 				}
 			}),
@@ -591,7 +941,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "v1beta1 frontend sidecar must reference an existing container",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
-				worker.FrontendSidecar = k8sptr.To("missing")
+				worker.FrontendSidecar = new("missing")
 				worker.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
 				}}
@@ -627,13 +977,316 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 
+		// Deprecated minima warn even when RollingRecreate or OnDelete is selected.
+		{
+			name: "deprecated standalone minimum warns with implicit RollingRecreate",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).MinAvailable = new(int32(1))
+			}),
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+		},
+		{
+			name: "deprecated scaling group minimum warns with OnDelete",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				worker.MinAvailable = new(int32(1))
+			}),
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.minAvailable and migrate all component minima together without changing their effective values`},
+		},
+
+		{
+			name:          "legacy minima do not repeat warnings on an unrelated label edit",
+			oldDeployment: legacyMinimumDGDForAdmission(1),
+			deployment:    dgdAdmissionWithLabel(t, legacyMinimumDGDForAdmission(1)),
+		},
+		{
+			name:          "legacy minima do not repeat warnings on a replica-only update",
+			oldDeployment: legacyMinimumDGDForAdmission(1),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.MinAvailable = new(int32(1))
+				worker.Replicas = new(int32(3))
+			}),
+		},
+		{
+			name: "legacy alpha minima do not repeat warnings on a replica-only update",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services[dgdAdmissionWorkerName].MinAvailable = new(int32(1))
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.MinAvailable = new(int32(1))
+				worker.Replicas = new(int32(3))
+			}),
+		},
+		{
+			name:          "migrating back to legacy minima warns about their introduction",
+			oldDeployment: nativeMinimumDGDForAdmission(2),
+			deployment:    legacyMinimumDGDForAdmission(2),
+			wantWarnings:  []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+		},
+
+		// Native availability and migration use the same production schema/conversion/webhook chain.
+		{
+			name: "native standalone minimum is accepted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":1}}`)
+			}),
+		},
+		{
+			name: "native multinode minimum is accepted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				worker.ProviderOverride = groveProviderOverride("", `{"minAvailable":1}`)
+			}),
+		},
+		{
+			name: "native alpha minimum is accepted through conversion",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services[dgdAdmissionWorkerName].ProviderOverride = alphaGroveProviderOverride(provideroverride.TargetPodCliqueTemplateSpec, `{"spec":{"minAvailable":1}}`)
+			}),
+		},
+		{
+			name: "native minimum must fit positive replicas",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(1))
+				worker.ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":2}}`)
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.spec.minAvailable: Invalid value: 2: minAvailable must be less than or equal to replicas unless replicas is 0`},
+		},
+		{
+			name: "native minimum allows scale to zero",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(0))
+				worker.ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":2}}`)
+			}),
+		},
+		{
+			name: "native zero minimum is not hidden by defaulting",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":0}}`)
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.spec.minAvailable: Invalid value: null: must be a positive 32-bit integer`},
+		},
+		{
+			name: "native null minimum is not hidden by defaulting",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":null}}`)
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.spec.minAvailable: Invalid value: null: is required`},
+		},
+		{
+			name: "P and D cannot mix legacy and native minima",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].MinAvailable = new(int32(1))
+				betaWorkerComponent(dgd).ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":1}}`)
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value: Forbidden: cannot mix provider-native minAvailable with deprecated component minAvailable; migrate all components together`},
+			wantWarnings:    []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+		},
+		{
+			name:          "all legacy minima migrate without changing their immutable values",
+			oldDeployment: legacyMinimumDGDForAdmission(2),
+			deployment:    nativeMinimumDGDForAdmission(2),
+		},
+		{
+			name:            "migration cannot change effective minimum",
+			oldDeployment:   legacyMinimumDGDForAdmission(2),
+			deployment:      nativeMinimumDGDForAdmission(3),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.spec.minAvailable: Invalid value: 3: minAvailable is immutable after creation`},
+		},
+		{
+			name:            "native minimum cannot change after creation",
+			oldDeployment:   nativeMinimumDGDForAdmission(2),
+			deployment:      nativeMinimumDGDForAdmission(3),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.spec.minAvailable: Invalid value: 3: minAvailable is immutable after creation`},
+		},
+		{
+			name:          "removing native minimum cannot bypass immutability",
+			oldDeployment: nativeMinimumDGDForAdmission(2),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				for i := range dgd.Spec.Components {
+					dgd.Spec.Components[i].ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":1}}`)
+				}
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = nil
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.spec.minAvailable: Invalid value: 1: minAvailable is immutable after creation`},
+		},
+		{
+			name: "member role cannot set an independent minimum",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{{Name: nvidiacomv1beta1.ComponentRoleLeader, ProviderOverride: groveProviderOverride("", `{"spec":{"minAvailable":1}}`)}, {Name: nvidiacomv1beta1.ComponentRoleWorker}}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].roles[0].providerOverride.value.spec.minAvailable: Forbidden: minAvailable (1) belongs to the owning component`},
+		},
+
+		{
+			name:         "Coherent default budget can take the entire worker component down",
+			deployment:   groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "Coherent"),
+			wantWarnings: []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=2, minAvailable=2, maxUnavailable=2); provision spare serving capacity before updating`},
+		},
+		{
+			name:         "Coherent explicit full budget warns even with minimum one",
+			deployment:   groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "Coherent"),
+			wantWarnings: []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=4, minAvailable=1, maxUnavailable=4); provision spare serving capacity before updating`},
+		},
+		{
+			name:       "Coherent partial disruption budget does not warn",
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 1, replicas: 4}, "Coherent"),
+		},
+		{
+			name:       "OnDelete minimum alone does not warn",
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "OnDelete"),
+		},
+		{
+			name:       "RollingRecreate minimum alone does not warn",
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "RollingRecreate"),
+		},
+		{
+			name:          "Coherent warning is not repeated for an unrelated metadata edit",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "Coherent"),
+			deployment:    betaDGDWithAvailabilityNoteForAdmission(),
+		},
+		{
+			name:          "replica reduction to the disruption budget warns",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 2, replicas: 3}, "Coherent"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 2, replicas: 2}, "Coherent"),
+			wantWarnings:  []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=2, minAvailable=1, maxUnavailable=2); provision spare serving capacity before updating`},
+		},
+		{
+			name:          "increasing budget to full capacity warns",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 2, replicas: 4}, "Coherent"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "Coherent"),
+			wantWarnings:  []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=4, minAvailable=1, maxUnavailable=4); provision spare serving capacity before updating`},
+		},
+		{
+			name:          "explicit Coherent strategy change warns about existing full unit",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "RollingRecreate"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "Coherent"),
+			wantWarnings:  []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=2, minAvailable=2, maxUnavailable=2); provision spare serving capacity before updating`},
+		},
+		{
+			name:            "explicit Coherent annotation enforces the budget floor",
+			deployment:      groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 3, budget: 2, replicas: 4}, "Coherent"),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.rollingUpdate.maxUnavailable: Invalid value: 2: must not be less than minAvailable (3) under the Coherent update strategy`},
+		},
+
+		{
+			name:       "native minimum without an annotation uses RollingRecreate and does not warn",
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, ""),
+		},
+		{
+			name:       "unannotated native budget uses RollingRecreate without a Coherent minimum floor",
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 3, budget: 2, replicas: 4}, ""),
+		},
+		{
+			name:         "unannotated full budget warns for RollingRecreate",
+			deployment:   groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, ""),
+			wantWarnings: []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=4, maxUnavailable=4); provision spare serving capacity before updating`},
+		},
+		{
+			name:         "RollingRecreate full budget warns when explicitly selected",
+			deployment:   groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "RollingRecreate"),
+			wantWarnings: []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=4, maxUnavailable=4); provision spare serving capacity before updating`},
+		},
+		{
+			name:       "RollingRecreate partial budget does not warn",
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 2, replicas: 4}, "RollingRecreate"),
+		},
+		{
+			name:       "RollingRecreate default singleton preserves established warning behavior",
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "RollingRecreate"),
+		},
+		{
+			name:          "RollingRecreate budget increase introduces full component disruption risk",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 2, replicas: 4}, "RollingRecreate"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "RollingRecreate"),
+			wantWarnings:  []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=4, maxUnavailable=4); provision spare serving capacity before updating`},
+		},
+		{
+			name:          "RollingRecreate unrelated metadata edit does not repeat an outage warning",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "RollingRecreate"),
+			deployment:    betaDGDWithRolloutBudgetNoteForAdmission(),
+		},
+		{
+			name:          "RollingRecreate replica reduction leaves existing outage risk unchanged",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "RollingRecreate"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 3}, "RollingRecreate"),
+		},
+		{
+			name:          "RollingRecreate pod template edit warns about an existing full budget",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "RollingRecreate"),
+			deployment:    betaDGDWithRolloutBudgetImageForAdmission(),
+			wantWarnings:  []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=4, maxUnavailable=4); provision spare serving capacity before updating`},
+		},
+
+		{
+			name:          "Coherent replica reduction introduces full component disruption risk",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 2}, "Coherent"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent"),
+			wantWarnings:  []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
+		},
+		{
+			name:          "Coherent scale from zero introduces full component disruption risk",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 0}, "Coherent"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent"),
+			wantWarnings:  []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
+		},
+		{
+			name:          "Coherent scale up leaves serving capacity without warning",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 2}, "Coherent"),
+		},
+		{
+			name: "Coherent explicit default replica count does not repeat the warning",
+			oldDeployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent")
+				betaWorkerComponent(dgd).Replicas = nil
+				return dgd
+			}(),
+			deployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent"),
+		},
+		{
+			name:          "Coherent omitted default replica count does not repeat the warning",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent"),
+			deployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent")
+				betaWorkerComponent(dgd).Replicas = nil
+				return dgd
+			}(),
+		},
+		{
+			name:          "Coherent pod template edit still warns about existing full component disruption risk",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent"),
+			deployment: func() *nvidiacomv1beta1.DynamoGraphDeployment {
+				dgd := groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 0, replicas: 1}, "Coherent")
+				betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Image += "-coherent-update"
+				return dgd
+			}(),
+			wantWarnings: []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
+		},
+		{
+			name:          "removing the Coherent annotation restores RollingRecreate without warning",
+			oldDeployment: groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "Coherent"),
+			deployment:    groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, ""),
+		},
+
 		// Replica availability rules.
 		{
 			name: "v1beta1 replicas below minAvailable are rejected by CEL",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
-				worker.Replicas = k8sptr.To(int32(1))
-				worker.MinAvailable = k8sptr.To(int32(2))
+				worker.Replicas = new(int32(1))
+				worker.MinAvailable = new(int32(2))
 			}),
 			wantCELErr: "spec.components[1]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
 		},
@@ -641,28 +1294,29 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "v1beta1 valid replicas and minAvailable reach the webhook",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
-				worker.Replicas = k8sptr.To(int32(2))
-				worker.MinAvailable = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(2))
+				worker.MinAvailable = new(int32(1))
 			}),
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "v1beta1 unchanged minAvailable update reaches the webhook",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
+				betaWorkerComponent(dgd).MinAvailable = new(int32(1))
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
+				betaWorkerComponent(dgd).MinAvailable = new(int32(1))
 			}),
 		},
 		{
-			name: "v1beta1 changed minAvailable update is rejected by CEL",
+			name: "v1beta1 changed effective minAvailable is rejected by admission",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
+				betaWorkerComponent(dgd).MinAvailable = new(int32(1))
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(2))
+				betaWorkerComponent(dgd).MinAvailable = new(int32(2))
 			}),
-			wantCELErr: "spec.components[1]: Invalid value: minAvailable is immutable after creation",
+			wantWebhookErrs: []string{"spec.components[1].minAvailable: Invalid value: 2: minAvailable is immutable after creation"},
 		},
 		{
 			name:          "v1alpha1 componentType change is rejected by CEL",
@@ -683,7 +1337,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1beta1 removed minAvailable update is restored by defaulting",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
+				betaWorkerComponent(dgd).MinAvailable = new(int32(1))
 			}),
 			deployment: betaDGDForAdmission(nil),
 		},
@@ -719,7 +1373,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 				setBetaWorkerResourceClaim(dgd, corev1.PodResourceClaim{
 					Name:                      "gpu",
-					ResourceClaimTemplateName: k8sptr.To("gpu-template"),
+					ResourceClaimTemplateName: new("gpu-template"),
 				})
 			}),
 			wantWebhookErrs: []string{
@@ -732,7 +1386,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 				setBetaWorkerResourceClaim(dgd, corev1.PodResourceClaim{
 					Name:              "gpu",
-					ResourceClaimName: k8sptr.To("gpu-claim"),
+					ResourceClaimName: new("gpu-claim"),
 				})
 			}),
 			wantWebhookErrs: []string{
@@ -744,7 +1398,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerResourceClaim(dgd, corev1.PodResourceClaim{
 					Name:                      "device",
-					ResourceClaimTemplateName: k8sptr.To("device-template"),
+					ResourceClaimTemplateName: new("device-template"),
 				})
 			}),
 		},
@@ -790,7 +1444,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				}
 				worker.PodTemplate.Spec.ResourceClaims = []corev1.PodResourceClaim{
-					{Name: "gpu", ResourceClaimTemplateName: k8sptr.To("gpu-template")},
+					{Name: "gpu", ResourceClaimTemplateName: new("gpu-template")},
 				}
 			}),
 			wantWebhookErrs: []string{
@@ -802,14 +1456,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerResourceClaim(dgd, corev1.PodResourceClaim{
 					Name:                      "device",
-					ResourceClaimTemplateName: k8sptr.To("device-template"),
+					ResourceClaimTemplateName: new("device-template"),
 				})
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 				setBetaWorkerResourceClaim(dgd, corev1.PodResourceClaim{
 					Name:                      "device",
-					ResourceClaimTemplateName: k8sptr.To("device-template"),
+					ResourceClaimTemplateName: new("device-template"),
 				})
 			}),
 			wantWebhookErrs: []string{
@@ -879,6 +1533,32 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "v1beta1 GPU sidecar addition is rejected for a power component",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+				addBetaWorkerGPUSidecar(dgd)
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].podTemplate.spec: Invalid value: "2": ` + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+		{
+			name: "v1beta1 GPU sidecar removal is rejected for a power component",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+				addBetaWorkerGPUSidecar(dgd)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].podTemplate.spec: Invalid value: "1": ` + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+		{
 			name: "v1beta1 power node count change is rejected by the webhook",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
@@ -898,7 +1578,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 				worker := betaWorkerComponent(dgd)
-				worker.Replicas = k8sptr.To(int32(2))
+				worker.Replicas = new(int32(2))
 				worker.PodTemplate.Spec.Containers[0].Image = "registry.example/runtime:1.2.0"
 			}),
 		},
@@ -968,7 +1648,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
 				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
-				worker.Replicas = k8sptr.To(int32(2))
+				worker.Replicas = new(int32(2))
 				worker.ExtraPodSpec.MainContainer.Image = "registry.example/runtime:1.2.0"
 			}),
 		},
@@ -979,7 +1659,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			groveDisabled: true,
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)},
 				}
 			}),
 			wantWebhookErrs: []string{"spec.components[1].experimental.grove.forceScalingGroup: Forbidden: is currently supported only for Grove-backed DynamoGraphDeployment components"},
@@ -988,7 +1668,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "v1beta1 grove.forceScalingGroup on a single-node component reaches the webhook",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)},
 				}
 			}),
 		},
@@ -998,7 +1678,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := betaWorkerComponent(dgd)
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)},
 				}
 			}),
 		},
@@ -1047,6 +1727,102 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "complete role pod templates are admitted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaExplicitMultinodeRoleTemplates(betaWorkerComponent(dgd), 4)
+			}),
+		},
+		{
+			name: "role pod templates reject native sidecars in unsupported multinode layouts",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = admissionTRTLLMBackend
+				worker := betaWorkerComponent(dgd)
+				setBetaExplicitMultinodeRoleTemplates(worker, 4)
+				worker.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
+					Name: consts.RuntimeContainerName, Image: initialSidecarImage,
+					RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
+				}}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang or vllm`},
+		},
+		{
+			name: "role pod templates require a 1.6 or later Planner",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaExplicitMultinodeRoleTemplates(betaWorkerComponent(dgd), 4)
+				addBetaPlanner(dgd, "registry.example/planner:1.5.0", "")
+			}),
+			wantWebhookErrs: []string{`spec.components[1].roles: Forbidden: role-specific PodTemplates require every planner component to use Dynamo runtime 1.6.0 or later; planner component "planner" resolves to 1.5.0`},
+		},
+		{
+			name: "role pod templates gate the Planner override and not engine runtimes",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaExplicitMultinodeRoleTemplates(betaWorkerComponent(dgd), 4)
+				addBetaPlanner(dgd, "registry.example/planner:1.5.0", "1.6.0")
+			}),
+		},
+		{
+			name: "role pod templates reject a Planner override below 1.6 despite its image tag",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaExplicitMultinodeRoleTemplates(betaWorkerComponent(dgd), 4)
+				addBetaPlanner(dgd, "registry.example/planner:1.6.0", "1.5.0")
+			}),
+			wantWebhookErrs: []string{`spec.components[1].roles: Forbidden: role-specific PodTemplates require every planner component to use Dynamo runtime 1.6.0 or later; planner component "planner" resolves to 1.5.0`},
+		},
+		{
+			name: "switching to role pod templates rejects an existing pre-1.6 Planner",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				addBetaPlanner(dgd, "registry.example/planner:1.5.0", "")
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaExplicitMultinodeRoleTemplates(betaWorkerComponent(dgd), 4)
+				addBetaPlanner(dgd, "registry.example/planner:1.5.0", "")
+			}),
+			wantWebhookErrs: []string{`spec.components[1].roles: Forbidden: role-specific PodTemplates require every planner component to use Dynamo runtime 1.6.0 or later; planner component "planner" resolves to 1.5.0`},
+		},
+		{
+			name: "switching to role pod templates can atomically upgrade the Planner",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				addBetaPlanner(dgd, "registry.example/planner:1.5.0", "")
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaExplicitMultinodeRoleTemplates(betaWorkerComponent(dgd), 4)
+				addBetaPlanner(dgd, "registry.example/planner:1.6.0", "")
+			}),
+		},
+		{
+			name: "alpha role pod templates reject a pre-1.6 Planner at the source path",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaExplicitMultinodeRoleTemplates(dgd.Spec.Services[dgdAdmissionWorkerName], 4)
+				addAlphaPlanner(dgd, "registry.example/planner:1.5.0", "")
+			}),
+			wantWebhookErrs: []string{`spec.services[worker].roles: Forbidden: role-specific PodTemplates require every planner component to use Dynamo runtime 1.6.0 or later; planner component "planner" resolves to 1.5.0`},
+		},
+		{
+			name: "role pod template sidecars require images in CEL",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				setBetaExplicitMultinodeRoleTemplates(worker, 4)
+				worker.Roles[0].PodTemplate.Spec.Containers = append(
+					worker.Roles[0].PodTemplate.Spec.Containers,
+					corev1.Container{Name: "metrics"},
+				)
+			}),
+			wantCELErr: "spec.components[1].roles[0].podTemplate.spec.containers[1]: Invalid value: sidecar containers must specify a non-empty image",
+		},
+		{
+			name: "role pod template backend annotations are validated by CEL",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				setBetaExplicitMultinodeRoleTemplates(worker, 4)
+				worker.Roles[0].PodTemplate.Annotations = map[string]string{
+					consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
+				}
+			}),
+			wantCELErr: "spec.components[1].roles[0].podTemplate.metadata.annotations: Invalid value: podTemplate backend annotation must be mp or ray, case-insensitively",
+		},
+		{
 			name: "v1alpha1 explicit multinode roles convert and are admitted",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
@@ -1058,40 +1834,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1beta1 role PodTemplates require component-specific support",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				worker := betaWorkerComponent(dgd)
-				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
-					{
-						Name: nvidiacomv1beta1.ComponentRoleLeader,
-						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-							Name: consts.MainContainerName, Image: "registry.example/leader:1.1.0",
-						}}}},
-					},
-					{Name: nvidiacomv1beta1.ComponentRoleWorker},
-				}
-			}),
-			wantWebhookErrs: []string{"spec.components[1].roles[0].podTemplate: Forbidden: is not supported for this component role"},
-		},
-		{
-			name: "v1alpha1 role PodTemplates require component-specific support",
-			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
-				worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
-				worker.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
-					{
-						Name: nvidiacomv1alpha1.ComponentRoleLeader,
-						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-							Name: consts.MainContainerName, Image: "registry.example/leader:1.1.0",
-						}}}},
-					},
-					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
-				}
-			}),
-			wantWebhookErrs: []string{"spec.components[0].roles[0].podTemplate: Forbidden: is not supported for this component role"},
-		},
-		{
 			name: "roles require a component role schema",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
@@ -1099,7 +1841,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					{Name: nvidiacomv1beta1.ComponentRoleLeader},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.components[1].roles: Forbidden: roles are supported only for component shapes that define a role schema; this release supports multinode components"},
+			wantWebhookErrs: []string{"spec.components[1].roles: Forbidden: roles are supported only for component shapes that define a role schema; this release supports multinode and LPX components"},
 		},
 		{
 			name: "explicit multinode roles require the complete role set",
@@ -1161,7 +1903,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "explicit multinode role replicas must match node count",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaExplicitMultinodeRoles(betaWorkerComponent(dgd), 4)
-				betaWorkerComponent(dgd).Roles[1].Replicas = k8sptr.To(int32(2))
+				betaWorkerComponent(dgd).Roles[1].Replicas = new(int32(2))
 			}),
 			wantWebhookErrs: []string{
 				`spec.components[1].roles[1].replicas: Invalid value: 2: must equal 3 for multinode role "worker"`,
@@ -1254,7 +1996,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						LabelKey:        "topology.kubernetes.io/zone",
 						Domain:          "zone",
 						Enforcement:     nvidiacomv1beta1.KvTransferEnforcementRequired,
-						PreferredWeight: k8sptr.To(float32(1)),
+						PreferredWeight: new(float32(1)),
 					},
 				}
 			}),
@@ -1268,7 +2010,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						LabelKey:        "topology.kubernetes.io/zone",
 						Domain:          "zone",
 						Enforcement:     nvidiacomv1beta1.KvTransferEnforcementPreferred,
-						PreferredWeight: k8sptr.To(float32(1)),
+						PreferredWeight: new(float32(1)),
 					},
 				}
 			}),
@@ -1347,7 +2089,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						LabelKey:        "topology.kubernetes.io/zone",
 						Domain:          "zone",
 						Enforcement:     nvidiacomv1beta1.KvTransferEnforcementPreferred,
-						PreferredWeight: k8sptr.To(float32(1.2)),
+						PreferredWeight: new(float32(1.2)),
 					},
 				}
 			}),
@@ -1362,8 +2104,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name:            "KV-transfer cluster topology policy rejects missing topology",
-			withoutTopology: true,
+			name: "KV-transfer cluster topology policy rejects missing topology",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
 					KvTransferPolicy: &nvidiacomv1beta1.KvTransferPolicy{ClusterTopologyName: "missing-topology", Domain: "rack"},
@@ -1555,8 +2296,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "alpha PVC empty name requirement is preserved structurally",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.PVCs = []nvidiacomv1alpha1.PVC{{
-					Name:   k8sptr.To(""),
-					Create: k8sptr.To(false),
+					Name:   new(""),
+					Create: new(false),
 				}}
 			}),
 			wantWebhookErrs: []string{"spec.pvcs[0].name: Required value: is required"},
@@ -1596,7 +2337,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := dgd.Spec.Services["worker"]
 				worker.ComponentType = consts.ComponentTypeEPP
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "epp"},
 					Config: &apixv1alpha1.EndpointPickerConfig{
 						Plugins:            []apixv1alpha1.PluginSpec{},
 						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
@@ -1634,7 +2375,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.RuntimeVersionOverride = ""
 				worker.ExtraPodSpec.MainContainer.Image = frontendImage150
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "legacy-epp-config"},
 				}
 			}),
 			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
@@ -1693,7 +2434,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "valid preserved alpha-only fields are accepted",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				host := "worker.example.com"
-				dgd.Spec.PVCs = []nvidiacomv1alpha1.PVC{{Name: k8sptr.To("cache"), Create: k8sptr.To(false)}}
+				dgd.Spec.PVCs = []nvidiacomv1alpha1.PVC{{Name: new("cache"), Create: new(false)}}
 				service := dgd.Spec.Services["worker"]
 				service.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: host}
 				service.Annotations = map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "ray"}
@@ -1716,7 +2457,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "alpha PVC create value constraints are preserved structurally",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.PVCs = []nvidiacomv1alpha1.PVC{{Name: k8sptr.To("cache"), Create: k8sptr.To(true)}}
+				dgd.Spec.PVCs = []nvidiacomv1alpha1.PVC{{Name: new("cache"), Create: new(true)}}
 			}),
 			wantCELErr: "spec.pvcs[0]: Invalid value: When create is true, size, storageClass, and volumeAccessMode are required",
 		},
@@ -1804,7 +2545,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := betaWorkerComponent(dgd)
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "epp"},
 					Config: &apixv1alpha1.EndpointPickerConfig{
 						Plugins:            []apixv1alpha1.PluginSpec{},
 						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
@@ -1821,9 +2562,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
+				worker.Replicas = new(int32(1))
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{Name: "epp"},
 				}
 			}),
 		},
@@ -1846,7 +2587,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "minAvailable must be positive",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(0))
+				betaWorkerComponent(dgd).MinAvailable = new(int32(0))
 			}),
 			wantSchemaErr: "spec.components[1].minAvailable: Invalid value: 0: spec.components[1].minAvailable in body should be greater than or equal to 1",
 		},
@@ -1854,9 +2595,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "replicas zero can keep minAvailable for scale-up intent",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
-				worker.Replicas = k8sptr.To(int32(0))
-				worker.MinAvailable = k8sptr.To(int32(2))
+				worker.Replicas = new(int32(0))
+				worker.MinAvailable = new(int32(2))
 			}),
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "rendered Grove resource name length accepts boundary",
@@ -1872,9 +2614,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).ComponentName = tooLongComponentName
 			}),
 			wantWebhookErrs: []string{fmt.Sprintf(
-				"spec.components[1].name: Invalid value: %q: combined resource name length 46 exceeds the 45-character pod-name limit (PCS name + component name); shorten DynamoGraphDeployment name %q or component name %q",
-				tooLongComponentName,
-				longDGDName,
+				"spec.components[1].name: Invalid value: %q: combined Grove resource name length 46 exceeds the 45-character limit; shorten the deployment or component name",
 				tooLongComponentName,
 			)},
 		},
@@ -1953,8 +2693,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name:            "missing cluster topology is rejected",
-			withoutTopology: true,
+			name: "missing cluster topology is rejected",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{
 					ClusterTopologyName: "missing-topology",
@@ -1964,8 +2703,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.topologyConstraint.clusterTopologyName: Invalid value: "missing-topology": references a ClusterTopologyBinding resource that was not found`},
 		},
 		{
-			name:            "independent topology errors aggregate",
-			withoutTopology: true,
+			name: "independent topology errors aggregate",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "missing-topology"}
 			}),
@@ -1998,6 +2736,303 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 		// Provider-native override rules.
 		{
+			name: "v1alpha1 component budget converts and defaults",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services["worker"]
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = alphaGroveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+		},
+		{
+			name: "Grove standalone budget override is defaulted and admitted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+		},
+		{
+			name: "Grove multinode budget override is applied at component scope",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+		},
+		{
+			name: "Grove forced scaling group budget override is admitted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)}}
+			}),
+		},
+		{
+			name: "budget override coexists with typed topology",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "grove-topology", PackDomain: "rack"}
+				worker.TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "rack"}
+			}),
+		},
+		{
+			name:         "RollingRecreate allows budget below minAvailable",
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.MinAvailable = new(int32(3))
+			}),
+		},
+		{
+			name:         "Coherent rejects budget below minAvailable",
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[0] ("frontend"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.MinAvailable = new(int32(3))
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.rollingUpdate.maxUnavailable: Invalid value: 2: must not be less than minAvailable (3) under the Coherent update strategy`},
+		},
+		{
+			name: "OnDelete rejects budget override",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.rollingUpdate: Forbidden: must not be set when the update strategy is OnDelete`},
+		},
+		{
+			name:         "budget may exceed desired replicas",
+			wantWarnings: []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=1, maxUnavailable=2); provision spare serving capacity before updating`},
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Replicas = new(int32(1))
+			}),
+		},
+		{
+			name: "scale-to-zero retains explicit budget",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Replicas = new(int32(0))
+			}),
+		},
+		{
+			name:         "replica reduction below an unchanged budget is admitted",
+			wantWarnings: []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=1, maxUnavailable=2); provision spare serving capacity before updating`},
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Replicas = new(int32(1))
+			}),
+		},
+		{
+			name: "replica update to zero retains the rollout budget",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Replicas = new(int32(0))
+			}),
+		},
+		{
+			name:         "forced scaling group retains budget while scaling to 1",
+			wantWarnings: []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=1, maxUnavailable=2); provision spare serving capacity before updating`},
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)}}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(1))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)}}
+			}),
+		},
+		{
+			name: "forced scaling group retains budget while scaling to 0",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)}}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(0))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)}}
+			}),
+		},
+		{
+			name:         "multinode scaling group retains budget while scaling to 1",
+			wantWarnings: []string{`spec.components[1] ("worker"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=1, maxUnavailable=2); provision spare serving capacity before updating`},
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(1))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+		},
+		{
+			name: "multinode scaling group retains budget while scaling to 0",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(0))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+		},
+		{
+			name: "Coherent retains a budget above live replicas while scaling to 1",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Replicas = new(int32(4))
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Replicas = new(int32(4))
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(1))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+			wantWarnings: []string{`spec.components[1] ("worker"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=2); provision spare serving capacity before updating`},
+		},
+		{
+			name: "Coherent retains a budget above live replicas while scaling to 0",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Replicas = new(int32(4))
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Replicas = new(int32(4))
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(0))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+		},
+		{
+			name:         "strategy change revalidates unchanged budget",
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove, consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].providerOverride.value.rollingUpdate: Forbidden: must not be set when the update strategy is OnDelete`},
+		},
+		{
+			name: "member clique role rejects budget override",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0].ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":1}}`)
+			}),
+			wantWebhookErrs: []string{`spec.components[1].roles[0].providerOverride.value.rollingUpdate: Forbidden: member cliques use the owning component's rollingUpdate budget`},
+		},
+		{
+			name: "root override rejects rolling update configuration",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride("", `{"spec":{"template":{"topologyConstraint":{},"rollingUpdate":{"maxUnavailable":1}}}}`)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.value.spec.template.rollingUpdate: Forbidden: is Dynamo-owned or not enabled for provider override`},
+		},
+		{
+			name:               "legacy minima retain RollingRecreate despite new origin and a smaller budget",
+			seedWithoutWebhook: true,
+			// Seed through the older test operator, then materialize the newer origin
+			// with the existing legacy seeder before exercising real update admission.
+			oldBeforeUpdate: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0"}
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.MinAvailable = new(int32(3))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":3}}`)
+			}),
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.MinAvailable = new(int32(3))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":3}}`)
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.MinAvailable = new(int32(3))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+		},
+		{
+			name:         "authored origin does not opt a disaggregated budget into Coherent",
+			wantWarnings: []string{`spec.components[0].minAvailable ("frontend") is deprecated; use spec.components[0].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[1].minAvailable ("worker") is deprecated; use spec.components[1].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`, `spec.components[2].minAvailable ("prefill") is deprecated; use spec.components[2].providerOverride.value.spec.minAvailable and migrate all component minima together without changing their effective values`},
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = new(int32(4))
+				worker.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":2}}`)
+				worker.ComponentType = "decode"
+				worker.MinAvailable = new(int32(3))
+				prefill := worker.DeepCopy()
+				prefill.ComponentName = "prefill"
+				prefill.ComponentType = "prefill"
+				prefill.ProviderOverride = nil
+				dgd.Spec.Components = append(dgd.Spec.Components, *prefill)
+			}),
+			wantOriginVersion: "1.6.0",
+		},
+		{
 			name: "valid Grove root provider override is admitted and defaulted",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.ProviderOverride = groveProviderOverride(
@@ -2007,10 +3042,18 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1alpha1 Grove root provider override converts and defaults",
+			name:                   "v1alpha1 Grove root provider override converts and defaults an omitted target",
+			wantRootProviderTarget: "PodCliqueSet",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = alphaGroveProviderOverride("", `{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`)
+			}),
+		},
+		{
+			name:                   "v1alpha1 Grove root provider override preserves an explicit target",
+			wantRootProviderTarget: "PodCliqueSet",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.ProviderOverride = alphaGroveProviderOverride(
-					"",
+					"PodCliqueSet",
 					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
 				)
 			}),
@@ -2104,7 +3147,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					`{"spec":{"template":{"topologyConstraint":{"pack":"rack"}}}}`,
 				)
 			}),
-			wantWebhookErrs: []string{`spec.providerOverride.value: Invalid value: null: does not match the registered PodCliqueSet schema: json: cannot unmarshal string into Go struct field TopologyConstraint.spec.template.topologyConstraint.pack of type v1alpha1.TopologyPackConstraint`},
+			// Go 1.27's encoding/json names the root struct (PodCliqueSet) in
+			// UnmarshalTypeError; Go 1.26 named the immediate parent
+			// (TopologyConstraint).
+			wantWebhookErrs: []string{`spec.providerOverride.value: Invalid value: null: does not match the registered PodCliqueSet schema: json: cannot unmarshal string into Go struct field PodCliqueSet.spec.template.topologyConstraint.pack of type v1alpha1.TopologyPackConstraint`},
 		},
 		{
 			name: "typed and provider-native Grove topology cannot be combined",
@@ -2202,7 +3248,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 				dgd.Labels = map[string]string{"updated": "true"}
 			}),
-			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/workload-provider]: Unsupported value: "unknown": supported values: "component", "grove"`},
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/workload-provider]: Unsupported value: "unknown": supported values: "component", "grove", "disaggregatedset"`},
 		},
 		{
 			name:               "user cannot materialize a legacy workload provider",
@@ -2273,17 +3319,61 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.priorityClassName: Forbidden: requires the Grove pathway, but workload provider "component" is selected`},
 		},
 		{
-			name: "origin version accepts semver",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.2.3"}
-			}),
-		},
-		{
-			name: "origin version rejects non-semver",
+			name: "create overwrites a user-supplied origin version",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver"}
 			}),
-			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "not-semver": must be valid semver`},
+			wantOriginVersion: "1.6.0",
+		},
+		{
+			name:               "origin version cannot be materialized on update",
+			seedWithoutWebhook: true,
+			oldBeforeUpdate:    betaDGDForAdmission(nil),
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationDynamoOperatorOriginVersion: "1.2.3",
+					consts.KubeAnnotationWorkloadProvider:            consts.WorkloadProviderGrove,
+				}
+			}),
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "1.2.3": field is immutable`},
+		},
+		{
+			name: "origin version cannot change on update",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0",
+					consts.KubeAnnotationWorkloadProvider:            consts.WorkloadProviderGrove,
+				}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationDynamoOperatorOriginVersion: "1.2.3",
+					consts.KubeAnnotationWorkloadProvider:            consts.WorkloadProviderGrove,
+				}
+			}),
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "1.2.3": field is immutable`},
+		},
+		{
+			name: "origin version cannot be removed on update",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationDynamoOperatorOriginVersion: "1.1.0",
+					consts.KubeAnnotationWorkloadProvider:            consts.WorkloadProviderGrove,
+				}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				}
+			}),
+			wantWebhookErrs: []string{
+				"metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: null: field is immutable",
+			},
 		},
 		{
 			name: "vLLM backend annotation accepts mp",
@@ -2305,6 +3395,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/vllm-distributed-executor-backend]: Invalid value: "typo": must be "mp" or "ray"`},
 		},
 		{
+			name:         "Grove update strategy annotation accepts Coherent",
+			wantWarnings: []string{`spec.components[0] ("frontend"): Coherent updates may temporarily make this entire component unavailable (replicas=1, minAvailable=1, maxUnavailable=1); provision spare serving capacity before updating`},
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+		},
+		{
 			name: "Grove update strategy annotation accepts RollingRecreate",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "RollingRecreate"}
@@ -2321,21 +3418,21 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "ondelete"}
 			}),
-			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: "ondelete": supported values: "RollingRecreate", "OnDelete"`},
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: "ondelete": supported values: "Coherent", "RollingRecreate", "OnDelete"`},
 		},
 		{
 			name: "Grove update strategy annotation rejects whitespace",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: " OnDelete "}
 			}),
-			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: " OnDelete ": supported values: "RollingRecreate", "OnDelete"`},
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: " OnDelete ": supported values: "Coherent", "RollingRecreate", "OnDelete"`},
 		},
 		{
 			name: "Grove update strategy annotation rejects unknown value",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "BlueGreen"}
 			}),
-			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: "BlueGreen": supported values: "RollingRecreate", "OnDelete"`},
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: "BlueGreen": supported values: "Coherent", "RollingRecreate", "OnDelete"`},
 		},
 		{
 			name: "discovery mode accepts pod",
@@ -2361,13 +3458,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components = nil
 				dgd.Annotations = map[string]string{
-					consts.KubeAnnotationDynamoOperatorOriginVersion:    "not-semver",
 					consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
 					consts.KubeAnnotationDynamoKubeDiscoveryMode:        "invalid",
 				}
 			}),
 			wantWebhookErrs: []string{
-				`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "not-semver": must be valid semver`,
 				`metadata.annotations[nvidia.com/vllm-distributed-executor-backend]: Invalid value: "invalid": must be "mp" or "ray"`,
 				`metadata.annotations[nvidia.com/dynamo-kube-discovery-mode]: Unsupported value: "invalid": supported values: "pod", "container"`,
 				"spec.components: Required value: must have at least one component",
@@ -2381,7 +3476,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
 				spec.Components = append(spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 					ComponentName:          "extra",
-					Replicas:               k8sptr.To(int32(1)),
+					Replicas:               new(int32(1)),
 					RuntimeVersionOverride: "1.1.0",
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
 						Name:  consts.MainContainerName,
@@ -2409,7 +3504,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					spec.Components[1],
 					{
 						ComponentName:          "extra",
-						Replicas:               k8sptr.To(int32(1)),
+						Replicas:               new(int32(1)),
 						RuntimeVersionOverride: "1.1.0",
 						PodTemplate:            &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}}}},
 					},
@@ -2708,7 +3803,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: newBetaDGDForValidation(),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)},
 				}
 			}),
 			wantWebhookErrs: []string{"spec.components[1].experimental.grove.forceScalingGroup: Invalid value: true: cannot be toggled after creation; delete and recreate the DynamoGraphDeployment to change it"},
@@ -2717,7 +3812,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "grove.forceScalingGroup removal is immutable",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)},
 				}
 			}),
 			deployment:      newBetaDGDForValidation(),
@@ -2727,12 +3822,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "unchanged grove.forceScalingGroup update reaches the webhook",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)},
 				}
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)},
 				}
 			}),
 		},
@@ -2743,7 +3838,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(false)},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(false)},
 				}
 			}),
 		},
@@ -2751,7 +3846,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "grove block removal with retained experimental is immutable",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)},
 				}
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
@@ -2775,11 +3870,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "scaling adapter blocks direct replica changes",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
-				worker.Replicas = k8sptr.To(int32(2))
+				worker.Replicas = new(int32(2))
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
-				worker.Replicas = k8sptr.To(int32(3))
+				worker.Replicas = new(int32(3))
 			}),
 			username:        "system:serviceaccount:default:regular-user",
 			wantWebhookErrs: []string{"spec.components[1].replicas: Forbidden: cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead"},
@@ -2788,11 +3883,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "scaling adapter fails closed without user info",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
-				worker.Replicas = k8sptr.To(int32(2))
+				worker.Replicas = new(int32(2))
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
-				worker.Replicas = k8sptr.To(int32(3))
+				worker.Replicas = new(int32(3))
 			}),
 			wantWebhookErrs: []string{"spec.components[1].replicas: Forbidden: cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead"},
 		},
@@ -2800,11 +3895,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "scaling adapter removal cannot bypass replica ownership",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
-				worker.Replicas = k8sptr.To(int32(2))
+				worker.Replicas = new(int32(2))
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.ScalingAdapter = nil
-				worker.Replicas = k8sptr.To(int32(3))
+				worker.Replicas = new(int32(3))
 			}),
 			username:        "system:serviceaccount:default:regular-user",
 			wantWebhookErrs: []string{"spec.components[1].replicas: Forbidden: cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead"},
@@ -2813,11 +3908,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "operator can change scaling-adapter-owned replicas",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
-				worker.Replicas = k8sptr.To(int32(2))
+				worker.Replicas = new(int32(2))
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
-				worker.Replicas = k8sptr.To(int32(3))
+				worker.Replicas = new(int32(3))
 			}),
 			username: admissionOperatorPrincipal,
 		},
@@ -2966,6 +4061,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment:      betaTerminatingDGDForAdmission(nil),
 			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				delete(dgd.Annotations, consts.KubeAnnotationWorkloadProvider)
+				dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = "1.6.0"
 			}),
 			// Removal reports a null bad value, since there is no new value to name.
 			wantWebhookErrs: []string{
@@ -2989,7 +4085,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Annotations[consts.KubeAnnotationWorkloadProvider] = "bogus"
 			}),
 			wantWebhookErrs: []string{
-				`metadata.annotations[nvidia.com/workload-provider]: Unsupported value: "bogus": supported values: "component", "grove"`,
+				`metadata.annotations[nvidia.com/workload-provider]: Unsupported value: "bogus": supported values: "component", "grove", "disaggregatedset"`,
 			},
 		},
 		{
@@ -3028,17 +4124,37 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		},
 	}
 
+	t.Log("Add complete-probe cases to the admission table for both API versions")
+	tests = append(tests, probeDGDAdmissionCases()...)
+
+	t.Log("Add the LPX scenarios to the same DGD admission table")
+	tests = append(tests, lpxDGDAdmissionCases()...)
+
+	t.Log("Add the explicit-role multinode sidecar cases shared by every supported backend and both API versions")
+	for _, backend := range []string{admissionSGLangBackend, admissionVLLMBackend} {
+		tests = append(tests,
+			dgdAdmissionTestCase{name: backend + " beta rejects multinode sidecar without role templates", deployment: multinodeSidecarDGDForAdmission(t, backend, false, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+			dgdAdmissionTestCase{name: backend + " beta accepts multinode sidecar with compute-only worker", deployment: multinodeSidecarDGDForAdmission(t, backend, false, true, false)},
+			dgdAdmissionTestCase{name: backend + " beta accepts multinode sidecar with runtime on both roles", deployment: multinodeSidecarDGDForAdmission(t, backend, false, true, true)},
+			dgdAdmissionTestCase{name: backend + " alpha rejects multinode sidecar without role templates", deployment: multinodeSidecarDGDForAdmission(t, backend, true, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+			dgdAdmissionTestCase{name: backend + " alpha accepts multinode sidecar with compute-only worker", deployment: multinodeSidecarDGDForAdmission(t, backend, true, true, false)},
+			dgdAdmissionTestCase{name: backend + " alpha accepts multinode sidecar with runtime on both roles", deployment: multinodeSidecarDGDForAdmission(t, backend, true, true, true)},
+		)
+	}
+
+	t.Log("Own one topology fixture for all DGD admission scenarios")
+	createTestClusterTopology(t, admissionEnv.ForTest(t))
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Assemble the admission scenario from the table entry")
-			gates := features.Gates{Checkpoint: !tt.checkpointOff, Grove: !tt.groveDisabled}
+			gates := features.Gates{Checkpoint: !tt.checkpointOff, Grove: !tt.groveDisabled, LPX: !tt.lpxDisabled}
 			test := admissionTestCase{
 				object:             tt.deployment,
 				oldObject:          tt.oldDeployment,
 				oldBeforeUpdate:    tt.oldBeforeUpdate,
 				mutateObject:       tt.mutateRequest,
 				gates:              gates,
-				withoutTopology:    tt.withoutTopology,
 				seedWithoutWebhook: tt.seedWithoutWebhook,
 				terminating:        tt.terminating,
 				username:           tt.username,
@@ -3053,58 +4169,66 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				if test.oldBeforeUpdate == nil {
 					test.oldBeforeUpdate = dgdBeforeRestart(t, tt.oldDeployment)
 				}
-				if tt.checkpointOff || tt.groveDisabled {
+				if tt.checkpointOff || tt.groveDisabled || tt.lpxDisabled {
 					seedGates := gates
 					seedGates.Checkpoint = true
 					seedGates.Grove = true
+					seedGates.LPX = true
 					test.seedGates = &seedGates
 				}
 			}
 			actual := runAdmissionTest(t, test)
-			if tt.wantPodAnnotations != nil || tt.wantProvider != "" || tt.wantRoleReplicas != nil {
-				t.Log("Convert the admitted DGD for result assertions")
-				actualDGD := admittedBetaDGD(t, actual)
-				if tt.wantProvider != "" {
-					t.Log("Verify creation-time routing intent determined the admitted workload provider")
-					if got := actualDGD.Annotations[consts.KubeAnnotationWorkloadProvider]; got != tt.wantProvider {
-						t.Fatalf("workload provider = %q, want %q", got, tt.wantProvider)
-					}
-				}
-				if tt.wantRoleReplicas != nil {
-					t.Log("Verify admission persisted the defaulted multinode role replicas")
-					component := actualDGD.GetComponentByName(dgdAdmissionWorkerName)
-					if component == nil {
-						t.Fatalf("admitted DGD has no component %q", dgdAdmissionWorkerName)
-					}
-					actualRoleReplicas := make(map[string]int32, len(component.Roles))
-					for i := range component.Roles {
-						role := &component.Roles[i]
-						actualRoleReplicas[role.Name] = k8sptr.Deref(role.Replicas, 0)
-					}
-					if !maps.Equal(actualRoleReplicas, tt.wantRoleReplicas) {
-						t.Fatalf("role replicas = %v, want %v", actualRoleReplicas, tt.wantRoleReplicas)
-					}
-				}
-				if tt.wantPodAnnotations == nil {
-					return
-				}
-
-				t.Log("Verify the API server preserved embedded component pod-template annotations")
-				component := actualDGD.GetComponentByName(dgdAdmissionWorkerName)
-				if component == nil || component.PodTemplate == nil {
-					t.Fatalf("admitted DGD has no pod template for component %q", dgdAdmissionWorkerName)
-				}
-				if got := component.PodTemplate.Annotations; !maps.Equal(got, tt.wantPodAnnotations) {
-					t.Fatalf(
-						"spec.components[%q].podTemplate.metadata.annotations = %v, want %v",
-						dgdAdmissionWorkerName,
-						got,
-						tt.wantPodAnnotations,
-					)
-				}
-			}
+			assertDGDAdmissionDefaults(t, actual, tt)
 		})
 	}
+}
+
+// probeDGDAdmissionCases builds probe rows for the shared DGD admission table.
+func probeDGDAdmissionCases() []dgdAdmissionTestCase {
+	var tests []dgdAdmissionTestCase
+	for _, placement := range []string{"main", "frontend sidecar", "role"} {
+		beta := betaDGDForAdmission(nil)
+		alpha := alphaDGDForAdmission(nil)
+		betaSpec := betaWorkerComponent(beta)
+		alphaSpec := alpha.Spec.Services["worker"]
+		betaPath := field.NewPath("spec", "components").Index(1)
+		alphaPath := field.NewPath("spec", "services").Key("worker")
+		betaContainer := &betaSpec.PodTemplate.Spec.Containers[0]
+		alphaContainer := alphaSpec.ExtraPodSpec.MainContainer
+
+		// Select a representative container in each source-version template.
+		switch placement {
+		case "main":
+			betaPath = betaPath.Child("podTemplate", "spec", "containers").Index(0)
+			alphaPath = alphaPath.Child("extraPodSpec", "mainContainer")
+		case "frontend sidecar":
+			betaSpec.FrontendSidecar = new("frontend")
+			betaSpec.PodTemplate.Spec.Containers = append(betaSpec.PodTemplate.Spec.Containers, corev1.Container{Name: "frontend", Image: frontendImage150})
+			betaContainer = &betaSpec.PodTemplate.Spec.Containers[1]
+			betaPath = betaPath.Child("podTemplate", "spec", "containers").Index(1)
+			alphaSpec.ExtraPodSpec.PodSpec = &corev1.PodSpec{Containers: []corev1.Container{{Name: "frontend", Image: frontendImage150}}}
+			alphaContainer = &alphaSpec.ExtraPodSpec.Containers[0]
+			alphaPath = alphaPath.Child("extraPodSpec", "containers").Index(0)
+		case "role":
+			setBetaExplicitMultinodeRoleTemplates(betaSpec, 2)
+			betaContainer = &betaSpec.Roles[1].PodTemplate.Spec.Containers[0]
+			betaPath = betaPath.Child("roles").Index(1).Child("podTemplate", "spec", "containers").Index(0)
+			setAlphaExplicitMultinodeRoleTemplates(alphaSpec, 2)
+			alphaContainer = &alphaSpec.Roles[0].PodTemplate.Spec.Containers[0]
+			alphaPath = alphaPath.Child("roles").Index(0).Child("podTemplate", "spec", "containers").Index(0)
+		}
+
+		// Keep the shared probe cases on the resource's production admission path.
+		probeCases := containerProbeAdmissionCases(beta, betaContainer, betaPath)
+		probeCases = append(probeCases, containerProbeAdmissionCases(alpha, alphaContainer, alphaPath)...)
+		for _, probeCase := range probeCases {
+			tests = append(tests, dgdAdmissionTestCase{
+				name: probeCase.name, deployment: probeCase.deployment,
+				oldDeployment: probeCase.oldDeployment, wantCELErr: probeCase.wantCELErr,
+			})
+		}
+	}
+	return tests
 }
 
 func admittedBetaDGD(t *testing.T, actual *unstructured.Unstructured) *nvidiacomv1beta1.DynamoGraphDeployment {
@@ -3280,10 +4404,8 @@ func dgdBeforeRestart(t *testing.T, deployment runtime.Object) runtime.Object {
 
 func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 	return &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-graph",
-			Namespace: "default",
-		},
+		Name:      "test-graph",
+		Namespace: "default",
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
@@ -3291,7 +4413,7 @@ func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 					ComponentName:          "frontend",
 					ComponentType:          nvidiacomv1beta1.ComponentTypeFrontend,
 					RuntimeVersionOverride: "1.1.0",
-					Replicas:               k8sptr.To(int32(1)),
+					Replicas:               new(int32(1)),
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
 					}},
@@ -3300,7 +4422,7 @@ func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 					ComponentName:          "worker",
 					ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
 					RuntimeVersionOverride: "1.1.0",
-					Replicas:               k8sptr.To(int32(2)),
+					Replicas:               new(int32(2)),
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
 					}},
@@ -3312,17 +4434,15 @@ func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 
 func newAlphaDGDForCompatibilityValidation() *nvidiacomv1alpha1.DynamoGraphDeployment {
 	return &nvidiacomv1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-graph",
-			Namespace: "default",
-		},
+		Name:      "test-graph",
+		Namespace: "default",
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType:          consts.ComponentTypeWorker,
 					RuntimeVersionOverride: "1.1.0",
-					Replicas:               k8sptr.To(int32(1)),
+					Replicas:               new(int32(1)),
 					ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
 						MainContainer: &corev1.Container{Image: "registry.example/runtime:1.1.0"},
 					},
@@ -3402,6 +4522,66 @@ func setBetaExplicitMultinodeRoles(
 	}
 }
 
+func setBetaExplicitMultinodeRoleTemplates(
+	worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	nodeCount int32,
+) {
+	setBetaExplicitMultinodeRoles(worker, nodeCount)
+	for i := range worker.Roles {
+		worker.Roles[i].PodTemplate = worker.PodTemplate.DeepCopy()
+	}
+	worker.PodTemplate = nil
+}
+
+func addBetaPlanner(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	image string,
+	runtimeVersionOverride string,
+) {
+	dgd.Spec.Components = append(dgd.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName:          "planner",
+		ComponentType:          nvidiacomv1beta1.ComponentTypePlanner,
+		RuntimeVersionOverride: runtimeVersionOverride,
+		Replicas:               new(int32(1)),
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: consts.MainContainerName, Image: image}},
+		}},
+	})
+}
+
+func setAlphaExplicitMultinodeRoleTemplates(
+	worker *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	nodeCount int32,
+) {
+	template := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  consts.MainContainerName,
+			Image: worker.ExtraPodSpec.MainContainer.Image,
+		}},
+	}}
+	worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: nodeCount}
+	worker.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
+		{Name: nvidiacomv1alpha1.ComponentRoleLeader, PodTemplate: template.DeepCopy()},
+		{Name: nvidiacomv1alpha1.ComponentRoleWorker, PodTemplate: template.DeepCopy()},
+	}
+	worker.ExtraPodSpec = nil
+}
+
+func addAlphaPlanner(
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	image string,
+	runtimeVersionOverride string,
+) {
+	dgd.Spec.Services["planner"] = &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType:          consts.ComponentTypePlanner,
+		RuntimeVersionOverride: runtimeVersionOverride,
+		Replicas:               new(int32(1)),
+		ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{Image: image},
+		},
+	}
+}
+
 func setBetaWorkerPowerInputs(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	watts string,
@@ -3416,6 +4596,17 @@ func setBetaWorkerPowerInputs(
 		corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse(gpus),
 	}
 	worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: nodeCount}
+}
+
+func addBetaWorkerGPUSidecar(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+	worker := betaWorkerComponent(dgd)
+	worker.PodTemplate.Spec.Containers = append(worker.PodTemplate.Spec.Containers, corev1.Container{
+		Name:  "gpu-sidecar",
+		Image: "registry.example/gpu-sidecar:1.0.0",
+		Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+			corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+		}},
+	})
 }
 
 func setBetaWorkerResourceClaim(
@@ -3486,6 +4677,23 @@ func enableBetaInterPodGMS(component *nvidiacomv1beta1.DynamoComponentDeployment
 	}
 }
 
+// enableBetaSnapshotFailover constructs a fresh multi-GPU capture/election
+// contract in each admission fixture; no fixture objects are shared.
+func enableBetaSnapshotFailover(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, backend string) {
+	component.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+		GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{Mode: nvidiacomv1beta1.GMSModeIntraPod},
+		Failover:         &nvidiacomv1beta1.FailoverSpec{Mode: nvidiacomv1beta1.GMSModeIntraPod},
+		Checkpoint:       &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true, StartupPolicy: nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint},
+	}
+	tpFlag := "--tensor-parallel-size"
+	if backend == sglangBackendFramework {
+		tpFlag = "--tp"
+	}
+	component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo." + backend}
+	component.PodTemplate.Spec.Containers[0].Args = []string{"--model", "Qwen/Qwen3-0.6B", tpFlag, "2"}
+	component.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("2")}
+}
+
 func enableBetaIntraPodGMS(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 	component.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
 		GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
@@ -3518,4 +4726,228 @@ func enableBetaInterPodFailover(
 		Mode:       nvidiacomv1beta1.GMSModeInterPod,
 		NumShadows: numShadows,
 	}
+}
+
+// nativeDGDForAdmission builds a user-authored native-sidecar topology in either API version.
+func nativeDGDForAdmission(t *testing.T, alpha bool, mutate func(*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec)) runtime.Object {
+	t.Helper()
+	object := betaDGDForAdmission(nil)
+	if object.Annotations == nil {
+		object.Annotations = map[string]string{}
+	}
+	object.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode] = "container"
+	component := betaWorkerComponent(object)
+	component.RuntimeVersionOverride = ""
+	component.PodTemplate.Spec.Containers[0].Image = "engine:latest"
+	component.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "runtime", Image: "runtime:1.5.0", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways)}}
+	if mutate != nil {
+		mutate(component)
+	}
+	if !alpha {
+		return object
+	}
+	spoke := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+	if err := spoke.ConvertFrom(object); err != nil {
+		t.Fatal(err)
+	}
+	return spoke
+}
+
+// These complete fixtures make every persisted legacy default explicit for removal on migration.
+func legacyMinimumDGDForAdmission(minimum int32) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		for i := range dgd.Spec.Components {
+			dgd.Spec.Components[i].MinAvailable = new(int32(1))
+		}
+		worker := betaWorkerComponent(dgd)
+		worker.Replicas = new(int32(4))
+		worker.MinAvailable = new(minimum)
+	})
+}
+
+func nativeMinimumDGDForAdmission(minimum int32) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		for i := range dgd.Spec.Components {
+			dgd.Spec.Components[i].ProviderOverride = groveProviderOverride("", `{"spec":{"minAvailable":1}}`)
+		}
+		worker := betaWorkerComponent(dgd)
+		worker.Replicas = new(int32(4))
+		worker.ProviderOverride = groveProviderOverride("", fmt.Sprintf(`{"spec":{"minAvailable":%d}}`, minimum))
+	})
+}
+
+type groveAvailabilityForAdmission struct {
+	minimum  int32
+	budget   int32
+	replicas int32
+}
+
+func groveAvailabilityDGDForAdmission(availability groveAvailabilityForAdmission, strategy string) *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := nativeMinimumDGDForAdmission(availability.minimum)
+	dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove}
+	dgd.Spec.Components[0].Replicas = new(int32(2))
+	worker := betaWorkerComponent(dgd)
+	worker.Replicas = new(availability.replicas)
+	if availability.budget > 0 {
+		worker.ProviderOverride.Value.Raw = []byte(fmt.Sprintf(`{"spec":{"minAvailable":%d},"rollingUpdate":{"maxUnavailable":%d}}`, availability.minimum, availability.budget))
+	}
+	if strategy != "" {
+		dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = strategy
+	}
+	return dgd
+}
+
+func betaDGDWithAvailabilityNoteForAdmission() *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 2, budget: 0, replicas: 2}, "Coherent")
+	dgd.Annotations["example.com/note"] = "reviewed"
+	return dgd
+}
+
+func betaDGDWithRolloutBudgetNoteForAdmission() *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "RollingRecreate")
+	dgd.Annotations["example.com/note"] = "reviewed"
+	return dgd
+}
+
+func betaDGDWithRolloutBudgetImageForAdmission() *nvidiacomv1beta1.DynamoGraphDeployment {
+	dgd := groveAvailabilityDGDForAdmission(groveAvailabilityForAdmission{minimum: 1, budget: 4, replicas: 4}, "RollingRecreate")
+	betaWorkerComponent(dgd).PodTemplate.Spec.Containers[0].Image = "runtime:1.6.0"
+	return dgd
+}
+
+func assertDGDAdmissionDefaults(t *testing.T, actual *unstructured.Unstructured, tt dgdAdmissionTestCase) {
+	t.Helper()
+	if !(tt.wantRootProviderTarget != "" || tt.wantPodAnnotations != nil || tt.wantOriginVersion != "" || tt.wantProvider != "" || tt.wantRoleReplicas != nil || tt.wantReplicas != nil) {
+		return
+	}
+
+	t.Log("Convert the admitted DGD for result assertions")
+	actualDGD := admittedBetaDGD(t, actual)
+
+	if tt.wantRootProviderTarget != "" {
+		t.Log("Verify the alpha root override keeps its resolved provider target")
+		if actualDGD.Spec.ProviderOverride == nil || actualDGD.Spec.ProviderOverride.Target != tt.wantRootProviderTarget {
+			t.Fatalf("root provider override = %v, want target %q", actualDGD.Spec.ProviderOverride, tt.wantRootProviderTarget)
+		}
+	}
+
+	t.Log("Verify admission preserved component replica intent")
+	for name, want := range tt.wantReplicas {
+		component := actualDGD.GetComponentByName(name)
+		if component == nil {
+			t.Fatalf("admitted DGD has no component %q", name)
+		}
+		if !k8sptr.Equal(component.Replicas, want) {
+			t.Fatalf("component %q: replicas = %v, want %v", name, component.Replicas, want)
+		}
+	}
+
+	if tt.wantOriginVersion != "" {
+		t.Log("Verify creation stamped the authoritative operator origin version")
+		if got := actualDGD.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; got != tt.wantOriginVersion {
+			t.Fatalf("operator origin version = %q, want %q", got, tt.wantOriginVersion)
+		}
+	}
+	if tt.wantProvider != "" {
+		t.Log("Verify creation-time routing intent determined the admitted workload provider")
+		if got := actualDGD.Annotations[consts.KubeAnnotationWorkloadProvider]; got != tt.wantProvider {
+			t.Fatalf("workload provider = %q, want %q", got, tt.wantProvider)
+		}
+	}
+	if tt.wantRoleReplicas != nil {
+		t.Log("Verify admission persisted the defaulted multinode role replicas")
+		component := actualDGD.GetComponentByName(dgdAdmissionWorkerName)
+		if component == nil {
+			t.Fatalf("admitted DGD has no component %q", dgdAdmissionWorkerName)
+		}
+		actualRoleReplicas := make(map[string]int32, len(component.Roles))
+		for i := range component.Roles {
+			role := &component.Roles[i]
+			actualRoleReplicas[role.Name] = k8sptr.Deref(role.Replicas, 0)
+		}
+		if !maps.Equal(actualRoleReplicas, tt.wantRoleReplicas) {
+			t.Fatalf("role replicas = %v, want %v", actualRoleReplicas, tt.wantRoleReplicas)
+		}
+	}
+	if tt.wantPodAnnotations == nil {
+		return
+	}
+
+	t.Log("Verify the API server preserved embedded component pod-template annotations")
+	component := actualDGD.GetComponentByName(dgdAdmissionWorkerName)
+	if component == nil || component.PodTemplate == nil {
+		t.Fatalf("admitted DGD has no pod template for component %q", dgdAdmissionWorkerName)
+	}
+	if got := component.PodTemplate.Annotations; !maps.Equal(got, tt.wantPodAnnotations) {
+		t.Fatalf(
+			"spec.components[%q].podTemplate.metadata.annotations = %v, want %v",
+			dgdAdmissionWorkerName,
+			got,
+			tt.wantPodAnnotations,
+		)
+	}
+
+}
+
+// multinodeSidecarDGDForAdmission authors either complete role sources or one shared
+// template for a native multinode engine of the given backend. workerRuntime selects
+// a layout where every node publishes KV events or serves requests.
+func multinodeSidecarDGDForAdmission(t *testing.T, backend string, alpha, roles, workerRuntime bool) runtime.Object {
+	t.Helper()
+	dgd := nativeDGDForAdmission(t, false, nil).(*nvidiacomv1beta1.DynamoGraphDeployment)
+	dgd.Spec.BackendFramework = backend
+	component := betaWorkerComponent(dgd)
+	component.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+	main := &component.PodTemplate.Spec.Containers[0]
+	switch backend {
+	case admissionSGLangBackend:
+		main.Command = []string{"python3", "-m", "sglang.launch_server"}
+		main.Args = []string{"--model-path", "model", "--tp-size", "2", "--kv-events-config", `{"publisher":"zmq"}`}
+		if workerRuntime {
+			main.Args = append(main.Args, "--enable-dp-attention", "--dp-size", "2")
+		}
+	case admissionVLLMBackend:
+		main.Command = []string{"vllm", "serve", "model"}
+		main.Args = []string{"--grpc-port", "30001", "--tensor-parallel-size", "2"}
+		if workerRuntime {
+			main.Args = append(main.Args, "--data-parallel-hybrid-lb", "--data-parallel-size", "4", "--data-parallel-size-local", "2")
+		}
+	default:
+		t.Fatalf("unsupported multinode sidecar backend %q", backend)
+	}
+	if roles {
+		for _, name := range []string{"leader", "worker"} {
+			template := component.PodTemplate.DeepCopy()
+			template.Spec.Containers[0].Command = []string{"/custom-launcher"}
+			if name == "worker" && !workerRuntime {
+				template.Spec.InitContainers = nil
+			}
+			component.Roles = append(component.Roles, nvidiacomv1beta1.ComponentRoleSpec{Name: name, PodTemplate: template})
+		}
+		component.PodTemplate = nil
+	}
+	if alpha {
+		spoke := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+		if err := spoke.ConvertFrom(dgd); err != nil {
+			t.Fatal(err)
+		}
+		return spoke
+	}
+	return dgd
+}
+
+func multinodeSidecarDCDForAdmission(t *testing.T, backend string, alpha, roles, workerRuntime bool) runtime.Object {
+	t.Helper()
+	dgd := multinodeSidecarDGDForAdmission(t, backend, false, roles, workerRuntime).(*nvidiacomv1beta1.DynamoGraphDeployment)
+	dcd := betaDCDForAdmission(nil)
+	dcd.Spec.BackendFramework = backend
+	dcd.Spec.DynamoComponentDeploymentSharedSpec = *betaWorkerComponent(dgd).DeepCopy()
+	if alpha {
+		spoke := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+		if err := spoke.ConvertFrom(dcd); err != nil {
+			t.Fatal(err)
+		}
+		return spoke
+	}
+	return dcd
 }

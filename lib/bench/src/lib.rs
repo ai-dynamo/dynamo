@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(feature = "claude-trace-export")]
+#[cfg(feature = "coding-trace-export")]
 pub mod coding;
 #[cfg(feature = "kv-router-stress-support")]
 pub mod common;

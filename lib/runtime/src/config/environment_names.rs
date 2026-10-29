@@ -196,6 +196,9 @@ pub mod nats {
     /// NATS request/reply timeout in seconds. Unset = async-nats default (10 s).
     pub const DYN_NATS_REQUEST_TIMEOUT_SECS: &str = "DYN_NATS_REQUEST_TIMEOUT_SECS";
 
+    /// Maximum time in seconds to establish the initial NATS connection.
+    pub const NATS_STARTUP_CONNECT_TIMEOUT_SECONDS: &str = "NATS_STARTUP_CONNECT_TIMEOUT_SECONDS";
+
     /// NATS authentication environment variables (checked in priority order)
     pub mod auth {
         /// Username for NATS authentication (use with NATS_AUTH_PASSWORD)
@@ -245,11 +248,17 @@ pub mod etcd {
     /// ETCD endpoints (comma-separated list of URLs)
     pub const ETCD_ENDPOINTS: &str = "ETCD_ENDPOINTS";
 
-    /// ETCD lease TTL in seconds (default: 10)
+    /// ETCD lease TTL in seconds (default: 30)
     pub const ETCD_LEASE_TTL: &str = "ETCD_LEASE_TTL";
 
     /// Maximum time in seconds to retry the initial ETCD connection (default: 120)
     pub const ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS: &str = "ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS";
+
+    /// HTTP/2 keepalive ping interval in seconds for the ETCD channel (default: 15, 0 disables)
+    pub const ETCD_KEEPALIVE_INTERVAL_SECONDS: &str = "ETCD_KEEPALIVE_INTERVAL_SECONDS";
+
+    /// Seconds to wait for a keepalive ping ack before the ETCD channel is closed (default: 10)
+    pub const ETCD_KEEPALIVE_TIMEOUT_SECONDS: &str = "ETCD_KEEPALIVE_TIMEOUT_SECONDS";
 
     /// ETCD authentication environment variables
     pub mod auth {
@@ -368,11 +377,23 @@ pub mod llm {
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
 
+    /// Batch file upload limit in MiB, including multipart framing (default 202).
+    pub const DYN_BATCH_UPLOAD_BODY_LIMIT_MB: &str = "DYN_BATCH_UPLOAD_BODY_LIMIT_MB";
+
+    /// Concurrent batch uploads/downloads per frontend replica (default 4).
+    pub const DYN_BATCH_MAX_FILE_TRANSFERS: &str = "DYN_BATCH_MAX_FILE_TRANSFERS";
+
+    /// Maximum batch file transfer lifetime, including response consumption (default 600 seconds).
+    pub const DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS: &str = "DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS";
+
     /// Listen backlog of the frontend HTTP/HTTPS socket (default 4096).
     pub const DYN_HTTP_LISTEN_BACKLOG: &str = "DYN_HTTP_LISTEN_BACKLOG";
 
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
+
+    /// Maximum stalled downstream write time per connection (default 120 seconds).
+    pub const DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS: &str = "DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS";
 
     /// HTTP status code returned when the frontend rejects a request because
     /// all workers are overloaded. Defaults to 529 ("Site is overloaded"); set
@@ -410,6 +431,12 @@ pub mod llm {
     pub const DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: &str =
         "DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS";
 
+    /// Skip OpenAI strict function-tool schema preflight for legacy clients.
+    /// Request schemas and strictness are preserved; basic tool validation and
+    /// downstream processor/backend constraints remain active.
+    pub const DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: &str =
+        "DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION";
+
     /// Master switch for the frontend's HTTP admin API surface.
     /// The admin API is **enabled by default**; this variable disables it.
     /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) prevent
@@ -438,19 +465,22 @@ pub mod llm {
     /// Accepted values: "reasoning_content" (default) or "reasoning".
     pub const DYN_REASONING_FIELD_NAME: &str = "DYN_REASONING_FIELD_NAME";
 
-    /// \[EXPERIMENTAL\] Use `dynamo-parsers-v2` instead of the v1 tool-call jail, for
-    /// BOTH the batch and the streaming path. Off by default.
+    /// Select the parser generation. Unset or `auto` prefers a compatible unified V2
+    /// parser and falls back to V1 when no compatible family is configured.
     ///
-    /// Which v2 shape a request gets is decided by the configured parsers, not by a
-    /// second flag:
-    /// * tool-call parser only (Qwen3-Coder, DeepSeek-V4) -> the v2 TOOL parser owns
-    ///   incremental tool-call emission and drops values truncated at EOF.
-    /// * tool-call AND reasoning parser naming the same family (`qwen3_coder` +
-    ///   `qwen3`) -> the v2 UNIFIED parser owns reasoning, visible text and tool calls
-    ///   in one ordered stream, so reasoning that followed a tool call stays after it
-    ///   instead of being hoisted to the front and fused with the first thought.
+    /// Explicit `1` keeps the V1 parsers; explicit `2` selects a compatible unified
+    /// parser for the configured family. When both parser slots are set, their names
+    /// must resolve to the same family. Unsupported explicit selections fail during
+    /// preprocessor construction.
     ///
-    /// One switch, because both are the same decision: stop using v1.
+    /// Accepted values are `auto`, `1`, and `2`. Explicit
+    /// generations fail during preprocessor construction when the configured family has
+    /// no compatible parser.
+    pub const DYN_PARSER_VERSION: &str = "DYN_PARSER_VERSION";
+
+    /// Compatibility alias for `DYN_PARSER_VERSION=2` when enabled. Uses the shared
+    /// boolean parser: `1`/`true`/`on`/`yes` select V2; `0`/`false`/`off`/`no`/empty
+    /// retain auto selection. True conflicts with `DYN_PARSER_VERSION=1`; false conflicts with `2`.
     pub const DYN_ENABLE_EXPERIMENTAL_PARSERS_V2: &str = "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2";
 
     /// Rollback lever for incremental guided-tool-call streaming.
@@ -532,6 +562,17 @@ pub mod llm {
     pub const DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS: &str =
         "DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS";
 
+    /// Progress-thread delay, in microseconds, of the frontend media loader's NIXL
+    /// agent (default 1000, range 0 to 1000000). NIXL rounds it up to whole
+    /// milliseconds; `0` makes the thread busy-poll one core. Over TCP, a read can
+    /// wait up to the full delay, so larger values add longer stalls. Values that do
+    /// not parse or are above 1000000 use the default.
+    pub const DYN_MM_NIXL_PROGRESS_DELAY_US: &str = "DYN_MM_NIXL_PROGRESS_DELAY_US";
+
+    /// Publish the serving-load streams the Pool Relay aggregates: frontend
+    /// request load and router scheduler load. Off unless truthy.
+    pub const DYN_SERVING_LOAD_PUBLISH: &str = "DYN_SERVING_LOAD_PUBLISH";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -550,6 +591,8 @@ pub mod llm {
         pub const DYN_METRICS_TTFT: &str = "DYN_METRICS_TTFT";
         /// See [`DYN_METRICS_REQUEST_DURATION`].
         pub const DYN_METRICS_ITL: &str = "DYN_METRICS_ITL";
+        /// Comma-separated inter-token latency histogram bucket boundaries.
+        pub const DYN_METRICS_ITL_BUCKETS: &str = "DYN_METRICS_ITL_BUCKETS";
         /// See [`DYN_METRICS_REQUEST_DURATION`].
         pub const DYN_METRICS_EMBEDDING_LATENCY: &str = "DYN_METRICS_EMBEDDING_LATENCY";
 
@@ -710,6 +753,12 @@ pub mod llm {
         pub const DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST: &str =
             "DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST";
 
+        /// Lowest-cost candidates retained per `router_selection` record. `0`
+        /// retains every scored candidate. The selected worker is always
+        /// retained. Default `16`.
+        pub const DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K: &str =
+            "DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K";
+
         /// S3 bucket for the S3 request-trace sink. Required when
         /// `DYN_REQUEST_TRACE_SINKS` includes `s3`.
         pub const DYN_REQUEST_TRACE_S3_BUCKET: &str = "DYN_REQUEST_TRACE_S3_BUCKET";
@@ -808,6 +857,11 @@ pub mod request_plane {
     /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 
+    /// Serialize `PreprocessedRequest.token_ids` as one packed little-endian int32 blob on
+    /// binary codecs instead of a sequence. Opt-in; every msgpack worker must run a release
+    /// whose readers accept the packed form.
+    pub const DYN_TOKEN_IDS_AS_BYTES: &str = "DYN_TOKEN_IDS_AS_BYTES";
+
     /// Maximum TCP request-plane message size, in bytes.
     pub const DYN_TCP_MAX_MESSAGE_SIZE: &str = "DYN_TCP_MAX_MESSAGE_SIZE";
 
@@ -826,16 +880,64 @@ pub mod request_plane {
 
 /// Response plane transport configuration.
 pub mod response_plane {
-    /// Response transport used by every runtime in this process: "tcp" or "quic".
-    /// Defaults to "tcp".
+    /// Response transport used by every runtime in this process: "tcp", "quic"
+    /// or "velo". Defaults to "tcp".
+    ///
+    /// Velo has no TLS, so a velo runtime refuses to start while any
+    /// `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is truthy.
+    ///
+    /// On a graceful Stop, velo still delivers what the worker's engine
+    /// yields, final chunk included; tcp and quic end the stream at the worker.
     pub const DYN_RESPONSE_PLANE: &str = "DYN_RESPONSE_PLANE";
+
+    /// Seconds a frontend waits, after a worker ACKs a unary request, for that
+    /// worker to establish its response stream.
+    ///
+    /// The deadline starts at the request-plane ACK, so time spent waiting for
+    /// local admission, connecting, and sending does not count. It covers the
+    /// worker's queueing and setup before it sends the response prologue, and a
+    /// worker that accepts requests but cannot connect back. Set it above the
+    /// worst-case time a healthy worker takes to start a response.
+    ///
+    /// On expiry the request fails with a response timeout (or migrates when
+    /// migration is enabled) and the worker is inhibited for
+    /// `DYN_RUNTIME_INHIBITED_DURATION_SECS`. Routers without fault detection
+    /// and bidirectional (streaming-input) requests do not apply this bound.
+    ///
+    /// Set to `0` or leave unset to disable the timeout (default: disabled).
+    pub const DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS: &str =
+        "DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS";
+    /// Messenger transport for Velo responses: tcp (default) or ucx. A ucx
+    /// service also listens on TCP, so a frontend and worker set differently
+    /// still reach each other, and the worker reports the mismatch.
+    pub const DYN_VELO_RESPONSE_TRANSPORT: &str = "DYN_VELO_RESPONSE_TRANSPORT";
+    /// Maximum Velo response batching delay in milliseconds (default: 5).
+    /// Set to 0 for greedy flushing after transport admission. Full batches and
+    /// lifecycle records can flush sooner. Read once when the service starts.
+    pub const DYN_VELO_RESPONSE_BATCH_MS: &str = "DYN_VELO_RESPONSE_BATCH_MS";
+    /// Heartbeat interval of each Velo response stream in milliseconds
+    /// (default: 1000). A frontend ends a stream, as Disconnected, once its
+    /// worker misses three to four heartbeats. Must be positive. Set on the
+    /// frontend; workers follow it. Read once when the service starts.
+    pub const DYN_VELO_RESPONSE_HEARTBEAT_MS: &str = "DYN_VELO_RESPONSE_HEARTBEAT_MS";
+    /// TCP port of the Velo response listener. Every Velo process, workers
+    /// included, opens one, and frontends connect to the workers' listeners as
+    /// well as workers to the frontends'. Only one process per IP address can
+    /// use a given port. If unset or 0, the OS assigns a free ephemeral port.
+    pub const DYN_VELO_RESPONSE_PORT: &str = "DYN_VELO_RESPONSE_PORT";
 }
 
 /// TCP request callback listener environment variables. Names are retained for compatibility.
 pub mod tcp_response_stream {
     /// Port shared by the TCP request callback and QUIC response listeners.
-    /// If unset or 0, the OS assigns a free ephemeral port.
+    /// If unset or 0, the OS assigns a free ephemeral port. Velo responses
+    /// use `DYN_VELO_RESPONSE_PORT` instead.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
+
+    /// Listen backlog of the TCP response stream (CallHome) listener. Defaults to
+    /// 4096, capped by the kernel at `net.core.somaxconn`. Unset, zero, negative, or
+    /// unparseable values fall back to the default.
+    pub const DYN_TCP_LISTEN_BACKLOG: &str = "DYN_TCP_LISTEN_BACKLOG";
 
     /// Host or interface for the TCP response stream server and QUIC response listener.
     ///
@@ -1051,6 +1153,7 @@ mod tests {
             // NATS
             nats::NATS_SERVER,
             nats::DYN_NATS_REQUEST_TIMEOUT_SECS,
+            nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
             nats::auth::NATS_AUTH_USERNAME,
             nats::auth::NATS_AUTH_PASSWORD,
             nats::auth::NATS_AUTH_TOKEN,
@@ -1065,6 +1168,8 @@ mod tests {
             etcd::ETCD_ENDPOINTS,
             etcd::ETCD_LEASE_TTL,
             etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
+            etcd::ETCD_KEEPALIVE_INTERVAL_SECONDS,
+            etcd::ETCD_KEEPALIVE_TIMEOUT_SECONDS,
             etcd::auth::ETCD_AUTH_USERNAME,
             etcd::auth::ETCD_AUTH_PASSWORD,
             etcd::auth::ETCD_AUTH_CA,
@@ -1085,25 +1190,33 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_BATCH_UPLOAD_BODY_LIMIT_MB,
+            llm::DYN_BATCH_MAX_FILE_TRANSFERS,
+            llm::DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS,
             llm::DYN_HTTP_LISTEN_BACKLOG,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            llm::DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
+            llm::DYN_SERVING_LOAD_PUBLISH,
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+            llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
             llm::DYN_DISABLE_FRONTEND_ADMIN_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::DYN_REASONING_FIELD_NAME,
+            llm::DYN_PARSER_VERSION,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_ENABLE_GUIDED_TOOL_STREAMING,
             llm::DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS,
+            llm::DYN_MM_NIXL_PROGRESS_DELAY_US,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
@@ -1121,6 +1234,7 @@ mod tests {
             llm::metrics::DYN_METRICS_OUTPUT_SEQUENCE,
             llm::metrics::DYN_METRICS_TTFT,
             llm::metrics::DYN_METRICS_ITL,
+            llm::metrics::DYN_METRICS_ITL_BUCKETS,
             llm::metrics::DYN_METRICS_EMBEDDING_LATENCY,
             llm::audit::DYN_AUDIT_SINKS,
             llm::audit::DYN_AUDIT_FORCE_LOGGING,
@@ -1172,12 +1286,18 @@ mod tests {
             request_plane::DYN_REQUEST_PLANE,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             response_plane::DYN_RESPONSE_PLANE,
+            response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS,
+            response_plane::DYN_VELO_RESPONSE_TRANSPORT,
+            response_plane::DYN_VELO_RESPONSE_BATCH_MS,
+            response_plane::DYN_VELO_RESPONSE_HEARTBEAT_MS,
+            response_plane::DYN_VELO_RESPONSE_PORT,
             request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
             request_plane::DYN_TCP_SHRINK_MESSAGE_SIZE,
             request_plane::DYN_TCP_RPC_HOST,
             request_plane::DYN_TCP_RPC_PORT,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+            tcp_response_stream::DYN_TCP_LISTEN_BACKLOG,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
             tcp_response_stream::tls::DYN_TCP_TLS_CERT_PATH,
             tcp_response_stream::tls::DYN_TCP_TLS_KEY_PATH,

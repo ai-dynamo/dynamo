@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -54,13 +55,11 @@ func TestDiscoverGPUs_SingleNode(t *testing.T) {
 	ctx := context.Background()
 
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "gpu-node-1",
-			Labels: map[string]string{
-				LabelGPUCount:   "8",
-				LabelGPUProduct: "H100-SXM5-80GB",
-				LabelGPUMemory:  "81920",
-			},
+		Name: "gpu-node-1",
+		Labels: map[string]string{
+			LabelGPUCount:   "8",
+			LabelGPUProduct: "H100-SXM5-80GB",
+			LabelGPUMemory:  "81920",
 		},
 	}
 
@@ -81,23 +80,19 @@ func TestDiscoverGPUs_MultipleNodesHomogeneous(t *testing.T) {
 
 	// Multiple nodes with same GPU configuration
 	node1 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "gpu-node-1",
-			Labels: map[string]string{
-				LabelGPUCount:   "8",
-				LabelGPUProduct: "H100-SXM5-80GB",
-				LabelGPUMemory:  "81920",
-			},
+		Name: "gpu-node-1",
+		Labels: map[string]string{
+			LabelGPUCount:   "8",
+			LabelGPUProduct: "H100-SXM5-80GB",
+			LabelGPUMemory:  "81920",
 		},
 	}
 	node2 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "gpu-node-2",
-			Labels: map[string]string{
-				LabelGPUCount:   "8",
-				LabelGPUProduct: "H100-SXM5-80GB",
-				LabelGPUMemory:  "81920",
-			},
+		Name: "gpu-node-2",
+		Labels: map[string]string{
+			LabelGPUCount:   "8",
+			LabelGPUProduct: "H100-SXM5-80GB",
+			LabelGPUMemory:  "81920",
 		},
 	}
 
@@ -117,25 +112,21 @@ func TestDiscoverGPUs_MultipleNodesHeterogeneous_HigherGPUCountWins(t *testing.T
 
 	// Node with fewer GPUs
 	node1 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "gpu-node-1",
-			Labels: map[string]string{
-				LabelGPUCount:   "4",
-				LabelGPUProduct: "A100-SXM4-40GB",
-				LabelGPUMemory:  "40960",
-			},
+		Name: "gpu-node-1",
+		Labels: map[string]string{
+			LabelGPUCount:   "4",
+			LabelGPUProduct: "A100-SXM4-40GB",
+			LabelGPUMemory:  "40960",
 		},
 	}
 
 	// Node with more GPUs (should win)
 	node2 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "gpu-node-2",
-			Labels: map[string]string{
-				LabelGPUCount:   "8",
-				LabelGPUProduct: "H100-SXM5-80GB",
-				LabelGPUMemory:  "81920",
-			},
+		Name: "gpu-node-2",
+		Labels: map[string]string{
+			LabelGPUCount:   "8",
+			LabelGPUProduct: "H100-SXM5-80GB",
+			LabelGPUMemory:  "81920",
 		},
 	}
 
@@ -156,25 +147,21 @@ func TestDiscoverGPUs_MultipleNodesHeterogeneous_HigherVRAMWins(t *testing.T) {
 
 	// Node with same GPU count but less VRAM
 	node1 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "gpu-node-1",
-			Labels: map[string]string{
-				LabelGPUCount:   "8",
-				LabelGPUProduct: "A100-SXM4-40GB",
-				LabelGPUMemory:  "40960",
-			},
+		Name: "gpu-node-1",
+		Labels: map[string]string{
+			LabelGPUCount:   "8",
+			LabelGPUProduct: "A100-SXM4-40GB",
+			LabelGPUMemory:  "40960",
 		},
 	}
 
 	// Node with same GPU count but more VRAM (should win)
 	node2 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "gpu-node-2",
-			Labels: map[string]string{
-				LabelGPUCount:   "8",
-				LabelGPUProduct: "H100-SXM5-80GB",
-				LabelGPUMemory:  "81920",
-			},
+		Name: "gpu-node-2",
+		Labels: map[string]string{
+			LabelGPUCount:   "8",
+			LabelGPUProduct: "H100-SXM5-80GB",
+			LabelGPUMemory:  "81920",
 		},
 	}
 
@@ -195,21 +182,17 @@ func TestDiscoverGPUs_MixedNodesWithAndWithoutGPUs(t *testing.T) {
 
 	// CPU-only node (no GPU labels)
 	cpuNode := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "cpu-node-1",
-			Labels: map[string]string{},
-		},
+		Name:   "cpu-node-1",
+		Labels: map[string]string{},
 	}
 
 	// GPU node
 	gpuNode := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "gpu-node-1",
-			Labels: map[string]string{
-				LabelGPUCount:   "8",
-				LabelGPUProduct: "H100-SXM5-80GB",
-				LabelGPUMemory:  "81920",
-			},
+		Name: "gpu-node-1",
+		Labels: map[string]string{
+			LabelGPUCount:   "8",
+			LabelGPUProduct: "H100-SXM5-80GB",
+			LabelGPUMemory:  "81920",
 		},
 	}
 
@@ -238,23 +221,19 @@ func TestDiscoverGPUsFiltered_MixedSKU(t *testing.T) {
 	ctx := context.Background()
 
 	h100Node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "h100-node",
-			Labels: map[string]string{
-				LabelGPUCount:   "8",
-				LabelGPUProduct: "H100-SXM5-80GB",
-				LabelGPUMemory:  "81920",
-			},
+		Name: "h100-node",
+		Labels: map[string]string{
+			LabelGPUCount:   "8",
+			LabelGPUProduct: "H100-SXM5-80GB",
+			LabelGPUMemory:  "81920",
 		},
 	}
 	a100Node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "a100-node",
-			Labels: map[string]string{
-				LabelGPUCount:   "4",
-				LabelGPUProduct: "A100-SXM4-40GB",
-				LabelGPUMemory:  "40960",
-			},
+		Name: "a100-node",
+		Labels: map[string]string{
+			LabelGPUCount:   "4",
+			LabelGPUProduct: "A100-SXM4-40GB",
+			LabelGPUMemory:  "40960",
 		},
 	}
 	k8sClient := newFakeClient(h100Node, a100Node)
@@ -286,28 +265,40 @@ func TestDiscoverGPUsFiltered_MixedSKU(t *testing.T) {
 	})
 }
 
+func TestDiscoverGPUsFiltered_LegacyGB200Selector(t *testing.T) {
+	node := &corev1.Node{
+		Name: "gb200-node",
+		Labels: map[string]string{
+			LabelGPUCount:   "4",
+			LabelGPUProduct: "NVIDIA GB200",
+			LabelGPUMemory:  "189471",
+		},
+	}
+
+	//nolint:staticcheck // SA1019: Exercise compatibility with the deprecated selector.
+	info, err := DiscoverGPUsFiltered(context.Background(), newFakeClient(node), nvidiacomv1beta1.GPUSKUTypeGB200SXM)
+	require.NoError(t, err)
+	assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeGB200, info.System)
+}
+
 func TestDiscoverGPUsFiltered_HomogeneousCountsAllNodes(t *testing.T) {
 	ctx := context.Background()
 
 	// Two H100 nodes
 	node1 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "h100-node-1",
-			Labels: map[string]string{
-				LabelGPUCount:   "8",
-				LabelGPUProduct: "H100-SXM5-80GB",
-				LabelGPUMemory:  "81920",
-			},
+		Name: "h100-node-1",
+		Labels: map[string]string{
+			LabelGPUCount:   "8",
+			LabelGPUProduct: "H100-SXM5-80GB",
+			LabelGPUMemory:  "81920",
 		},
 	}
 	node2 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "h100-node-2",
-			Labels: map[string]string{
-				LabelGPUCount:   "8",
-				LabelGPUProduct: "H100-SXM5-80GB",
-				LabelGPUMemory:  "81920",
-			},
+		Name: "h100-node-2",
+		Labels: map[string]string{
+			LabelGPUCount:   "8",
+			LabelGPUProduct: "H100-SXM5-80GB",
+			LabelGPUMemory:  "81920",
 		},
 	}
 	k8sClient := newFakeClient(node1, node2)
@@ -322,14 +313,12 @@ func TestDiscoverGPUsFiltered_DetectsRDMAAvailableLabel(t *testing.T) {
 	ctx := context.Background()
 
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "h100-node-rdma",
-			Labels: map[string]string{
-				LabelGPUCount:         "8",
-				LabelGPUProduct:       "H100-SXM5-80GB",
-				LabelGPUMemory:        "81920",
-				LabelNFDRDMAAvailable: "true",
-			},
+		Name: "h100-node-rdma",
+		Labels: map[string]string{
+			LabelGPUCount:         "8",
+			LabelGPUProduct:       "H100-SXM5-80GB",
+			LabelGPUMemory:        "81920",
+			LabelNFDRDMAAvailable: "true",
 		},
 	}
 	k8sClient := newFakeClient(node)
@@ -344,21 +333,17 @@ func TestDiscoverGPUsFiltered_IBPodsOverrideGenericRDMAType(t *testing.T) {
 	ctx := context.Background()
 
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "h100-node-rdma",
-			Labels: map[string]string{
-				LabelGPUCount:          "8",
-				LabelGPUProduct:        "H100-SXM5-80GB",
-				LabelGPUMemory:         "81920",
-				LabelNVIDIARDMAPresent: "true",
-			},
+		Name: "h100-node-rdma",
+		Labels: map[string]string{
+			LabelGPUCount:          "8",
+			LabelGPUProduct:        "H100-SXM5-80GB",
+			LabelGPUMemory:         "81920",
+			LabelNVIDIARDMAPresent: "true",
 		},
 	}
 	ibPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "rdma-shared-device-plugin",
-			Namespace: LabelValueNvidiaNetworkOperator,
-		},
+		Name:      "rdma-shared-device-plugin",
+		Namespace: LabelValueNvidiaNetworkOperator,
 	}
 	k8sClient := newFakeClient(node, ibPod)
 
@@ -373,17 +358,13 @@ func TestDiscoverGPUs_NoGPUNodes(t *testing.T) {
 
 	// Only CPU nodes
 	cpuNode1 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "cpu-node-1",
-			Labels: map[string]string{},
-		},
+		Name:   "cpu-node-1",
+		Labels: map[string]string{},
 	}
 	cpuNode2 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "cpu-node-2",
-			Labels: map[string]string{
-				"node-type": "cpu-only",
-			},
+		Name: "cpu-node-2",
+		Labels: map[string]string{
+			"node-type": "cpu-only",
 		},
 	}
 
@@ -437,10 +418,8 @@ func TestExtractGPUInfoFromNode_MissingLabels(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			node := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "test-node",
-					Labels: tt.labels,
-				},
+				Name:   "test-node",
+				Labels: tt.labels,
 			}
 
 			gpuInfo, err := extractGPUInfoFromNode(node)
@@ -476,16 +455,43 @@ func TestInferHardwareSystem(t *testing.T) {
 			expected: "",
 		},
 
-		// --- Blackwell ---
+		// --- Vera Rubin ---
 		{
-			name:     "GB200 SXM",
-			input:    "GB200-SXM",
-			expected: nvidiacomv1beta1.GPUSKUTypeGB200SXM,
+			name:     "observed VR NVL72 ES product name",
+			input:    "NVIDIA VR NVL72 ES",
+			expected: nvidiacomv1beta1.GPUSKUTypeVRNVL72,
 		},
 		{
-			name:     "GB200 HGX (implies SXM)",
+			name:     "GPU Feature Discovery sanitised product name",
+			input:    "NVIDIA-VR-NVL72-ES",
+			expected: nvidiacomv1beta1.GPUSKUTypeVRNVL72,
+		},
+		{
+			name:     "VR200-only name is not accepted",
+			input:    "NVIDIA VR200",
+			expected: "",
+		},
+		{
+			name:     "generic driver fallback",
+			input:    "NVIDIA Graphics Device",
+			expected: "",
+		},
+		{
+			name:     "longer NVL model should not match",
+			input:    "NVIDIA VR NVL720 ES",
+			expected: "",
+		},
+
+		// --- Blackwell ---
+		{
+			name:     "GB200 legacy SXM label",
+			input:    "GB200-SXM",
+			expected: nvidiacomv1beta1.GPUSKUTypeGB200,
+		},
+		{
+			name:     "GB200 HGX label",
 			input:    "HGX GB200",
-			expected: nvidiacomv1beta1.GPUSKUTypeGB200SXM,
+			expected: nvidiacomv1beta1.GPUSKUTypeGB200,
 		},
 		{
 			name:     "GB10 bare",
@@ -496,6 +502,31 @@ func TestInferHardwareSystem(t *testing.T) {
 			name:     "NVIDIA GB10 (DCGM format)",
 			input:    "NVIDIA GB10",
 			expected: nvidiacomv1beta1.GPUSKUTypeGB10,
+		},
+		{
+			name:     "B300 SXM6 AC (DCGM format)",
+			input:    "NVIDIA B300 SXM6 AC",
+			expected: nvidiacomv1beta1.GPUSKUTypeB300SXM,
+		},
+		{
+			name:     "B300 bare",
+			input:    "NVIDIA B300",
+			expected: nvidiacomv1beta1.GPUSKUTypeB300SXM,
+		},
+		{
+			name:     "B300 compact SXM6 suffix",
+			input:    "NVIDIA B300SXM6 AC",
+			expected: nvidiacomv1beta1.GPUSKUTypeB300SXM,
+		},
+		{
+			name:     "GB300 should not match B300",
+			input:    "NVIDIA GB300",
+			expected: "",
+		},
+		{
+			name:     "B3000 should not match B300",
+			input:    "NVIDIA B3000",
+			expected: "",
 		},
 		{
 			name:     "B200 SXM",
@@ -635,7 +666,7 @@ func TestInferHardwareSystem(t *testing.T) {
 		{
 			name:     "NVIDIA GB200 bare (DCGM format, no SXM suffix)",
 			input:    "NVIDIA GB200",
-			expected: nvidiacomv1beta1.GPUSKUTypeGB200SXM,
+			expected: nvidiacomv1beta1.GPUSKUTypeGB200,
 		},
 		{
 			name:     "H200 bare without vendor prefix",
@@ -836,36 +867,36 @@ func TestParseMetrics(t *testing.T) {
 			Metric: []*dto.Metric{
 				{
 					Label: []*dto.LabelPair{
-						{Name: strPtr("gpu"), Value: strPtr("0")},
-						{Name: strPtr("modelName"), Value: strPtr("H100-SXM5-80GB")},
-						{Name: strPtr("Hostname"), Value: strPtr("node1")},
+						{Name: new("gpu"), Value: new("0")},
+						{Name: new("modelName"), Value: new("H100-SXM5-80GB")},
+						{Name: new("Hostname"), Value: new("node1")},
 					},
 				},
 				{
 					Label: []*dto.LabelPair{
-						{Name: strPtr("gpu"), Value: strPtr("1")},
-						{Name: strPtr("modelName"), Value: strPtr("H100-SXM5-80GB")},
-						{Name: strPtr("Hostname"), Value: strPtr("node1")},
+						{Name: new("gpu"), Value: new("1")},
+						{Name: new("modelName"), Value: new("H100-SXM5-80GB")},
+						{Name: new("Hostname"), Value: new("node1")},
 					},
 				},
 			},
 		},
 		"DCGM_FI_DEV_FB_FREE": {
 			Metric: []*dto.Metric{
-				{Label: []*dto.LabelPair{{Name: strPtr("gpu"), Value: strPtr("0")}}, Gauge: &dto.Gauge{Value: float64Ptr(10000)}},
-				{Label: []*dto.LabelPair{{Name: strPtr("gpu"), Value: strPtr("1")}}, Gauge: &dto.Gauge{Value: float64Ptr(12000)}},
+				{Label: []*dto.LabelPair{{Name: new("gpu"), Value: new("0")}}, Gauge: &dto.Gauge{Value: new(float64(10000))}},
+				{Label: []*dto.LabelPair{{Name: new("gpu"), Value: new("1")}}, Gauge: &dto.Gauge{Value: new(float64(12000))}},
 			},
 		},
 		"DCGM_FI_DEV_FB_USED": {
 			Metric: []*dto.Metric{
-				{Label: []*dto.LabelPair{{Name: strPtr("gpu"), Value: strPtr("0")}}, Gauge: &dto.Gauge{Value: float64Ptr(5000)}},
-				{Label: []*dto.LabelPair{{Name: strPtr("gpu"), Value: strPtr("1")}}, Gauge: &dto.Gauge{Value: float64Ptr(6000)}},
+				{Label: []*dto.LabelPair{{Name: new("gpu"), Value: new("0")}}, Gauge: &dto.Gauge{Value: new(float64(5000))}},
+				{Label: []*dto.LabelPair{{Name: new("gpu"), Value: new("1")}}, Gauge: &dto.Gauge{Value: new(float64(6000))}},
 			},
 		},
 		"DCGM_FI_DEV_FB_RESERVED": {
 			Metric: []*dto.Metric{
-				{Label: []*dto.LabelPair{{Name: strPtr("gpu"), Value: strPtr("0")}}, Gauge: &dto.Gauge{Value: float64Ptr(0)}},
-				{Label: []*dto.LabelPair{{Name: strPtr("gpu"), Value: strPtr("1")}}, Gauge: &dto.Gauge{Value: float64Ptr(0)}},
+				{Label: []*dto.LabelPair{{Name: new("gpu"), Value: new("0")}}, Gauge: &dto.Gauge{Value: new(float64(0))}},
+				{Label: []*dto.LabelPair{{Name: new("gpu"), Value: new("1")}}, Gauge: &dto.Gauge{Value: new(float64(0))}},
 			},
 		},
 	}
@@ -952,16 +983,92 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 	})
 }
 
+const scrapeTestMetrics = "# TYPE DCGM_FI_DEV_GPU_TEMP gauge\n" +
+	`DCGM_FI_DEV_GPU_TEMP{gpu="0",modelName="NVIDIA A100",Hostname="test-node"} 50` + "\n"
+
+// connCountingServer starts a keep-alive server that counts the connections it
+// has accepted and the ones still open.
+func connCountingServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *atomic.Int32, *atomic.Int32) {
+	t.Helper()
+	var opened, open atomic.Int32
+	server := httptest.NewUnstartedServer(handler)
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateNew:
+			opened.Add(1)
+			open.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			open.Add(-1)
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+	return server, &opened, &open
+}
+
+func TestScrapeMetricsEndpoint_ConnectionReuse(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("repeated scrapes reuse one connection", func(t *testing.T) {
+		client := newMetricsHTTPClient(time.Minute)
+		t.Cleanup(client.CloseIdleConnections)
+		server, opened, _ := connCountingServer(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = fmt.Fprint(w, scrapeTestMetrics)
+		})
+
+		for range 3 {
+			_, err := scrapeMetricsEndpoint(ctx, client, server.URL)
+			require.NoError(t, err)
+		}
+		assert.EqualValues(t, 1, opened.Load())
+	})
+
+	t.Run("idle connections are released after the idle timeout", func(t *testing.T) {
+		client := newMetricsHTTPClient(50 * time.Millisecond)
+		t.Cleanup(client.CloseIdleConnections)
+		server, _, open := connCountingServer(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = fmt.Fprint(w, scrapeTestMetrics)
+		})
+
+		_, err := scrapeMetricsEndpoint(ctx, client, server.URL)
+		require.NoError(t, err)
+		assert.Eventually(t, func() bool { return open.Load() == 0 }, 2*time.Second, 10*time.Millisecond,
+			"idle connection still open after the idle timeout")
+	})
+
+	t.Run("a failed scrape does not break the next one", func(t *testing.T) {
+		client := newMetricsHTTPClient(time.Minute)
+		t.Cleanup(client.CloseIdleConnections)
+		var calls atomic.Int32
+		server, _, _ := connCountingServer(t, func(w http.ResponseWriter, r *http.Request) {
+			switch calls.Add(1) {
+			case 1:
+				w.WriteHeader(http.StatusServiceUnavailable)
+			case 2:
+				_, _ = fmt.Fprint(w, "not a prometheus format\n")
+			default:
+				_, _ = fmt.Fprint(w, scrapeTestMetrics)
+			}
+		})
+
+		_, err := scrapeMetricsEndpoint(ctx, client, server.URL)
+		require.ErrorContains(t, err, "returned status 503")
+		_, err = scrapeMetricsEndpoint(ctx, client, server.URL)
+		require.ErrorContains(t, err, "parse prometheus metrics")
+		info, err := scrapeMetricsEndpoint(ctx, client, server.URL)
+		require.NoError(t, err)
+		assert.Equal(t, 1, info.GPUsPerNode)
+	})
+}
+
 func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 	ctx := context.Background()
 
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "dcgm-pod",
-			Namespace: "default",
-			Labels: map[string]string{
-				LabelApp: LabelValueNvidiaDCGMExporter,
-			},
+		Name:      "dcgm-pod",
+		Namespace: "default",
+		Labels: map[string]string{
+			LabelApp: LabelValueNvidiaDCGMExporter,
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
@@ -1017,12 +1124,10 @@ func TestDiscoverGPUsFromDCGM_SharesConcurrentScrape(t *testing.T) {
 	ctx := context.Background()
 
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "dcgm-exporter-1",
-			Namespace: "gpu-operator",
-			Labels: map[string]string{
-				LabelApp: LabelValueNvidiaDCGMExporter,
-			},
+		Name:      "dcgm-exporter-1",
+		Namespace: "gpu-operator",
+		Labels: map[string]string{
+			LabelApp: LabelValueNvidiaDCGMExporter,
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
@@ -1067,10 +1172,8 @@ func TestDiscoverGPUsFromDCGM_SharesConcurrentScrape(t *testing.T) {
 	errs := make(chan error, callers)
 	infos := make(chan *GPUInfo, callers)
 
-	for i := 0; i < callers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range callers {
+		wg.Go(func() {
 			<-start
 			attempted.Add(1)
 			info, err := discovery.DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
@@ -1079,7 +1182,7 @@ func TestDiscoverGPUsFromDCGM_SharesConcurrentScrape(t *testing.T) {
 				return
 			}
 			infos <- info
-		}()
+		})
 	}
 
 	close(start)
@@ -1111,13 +1214,13 @@ func TestDiscoverGPUsFromDCGMFiltered_MixedSKU(t *testing.T) {
 	// Two DCGM pods, one per node
 	pods := []client.Object{
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "dcgm-h100", Namespace: "gpu-operator",
-				Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter}},
+			Name: "dcgm-h100", Namespace: "gpu-operator",
+			Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1"},
 		},
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "dcgm-a100", Namespace: "gpu-operator",
-				Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter}},
+			Name: "dcgm-a100", Namespace: "gpu-operator",
+			Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2"},
 		},
 	}
@@ -1167,24 +1270,46 @@ func TestDiscoverGPUsFromDCGMFiltered_MixedSKU(t *testing.T) {
 	})
 }
 
+func TestDiscoverGPUsFromDCGMFiltered_LegacyGB200Selector(t *testing.T) {
+	pod := &corev1.Pod{
+		Name:      "dcgm-gb200",
+		Namespace: "gpu-operator",
+		Labels:    map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
+		Spec:      corev1.PodSpec{NodeName: "gb200-node"},
+		Status:    corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1"},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	discovery := NewGPUDiscovery(func(context.Context, string) (*GPUInfo, error) {
+		return &GPUInfo{NodeName: "gb200-node", GPUsPerNode: 4, Model: "NVIDIA GB200", VRAMPerGPU: 189471}, nil
+	})
+
+	//nolint:staticcheck // SA1019: Exercise compatibility with the deprecated selector.
+	info, err := discovery.DiscoverGPUsFromDCGMFiltered(
+		context.Background(),
+		k8sClient,
+		nil,
+		nvidiacomv1beta1.GPUSKUTypeGB200SXM,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeGB200, info.System)
+}
+
 func TestDiscoverGPUsFromDCGMFiltered_DetectsRDMAAvailableLabel(t *testing.T) {
 	ctx := context.Background()
 
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "node-h100",
-			Labels: map[string]string{
-				LabelNFDRDMAAvailable: "true",
-			},
+		Name: "node-h100",
+		Labels: map[string]string{
+			LabelNFDRDMAAvailable: "true",
 		},
 	}
 	dcgmPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "dcgm-h100",
-			Namespace: "gpu-operator",
-			Labels:    map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
-		},
-		Spec: corev1.PodSpec{NodeName: "node-h100"},
+		Name:      "dcgm-h100",
+		Namespace: "gpu-operator",
+		Labels:    map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
+		Spec:      corev1.PodSpec{NodeName: "node-h100"},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			PodIP: "10.0.0.1",
@@ -1211,12 +1336,10 @@ func TestDiscoverGPUsFromDCGM_GPUOperatorInstalled_DCgmNotEnabled(t *testing.T) 
 	ctx := context.Background()
 
 	gpuOperatorPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "gpu-operator-abc",
-			Namespace: "gpu-operator",
-			Labels: map[string]string{
-				LabelApp: LabelValueGPUOperator,
-			},
+		Name:      "gpu-operator-abc",
+		Namespace: "gpu-operator",
+		Labels: map[string]string{
+			LabelApp: LabelValueGPUOperator,
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
@@ -1292,21 +1415,17 @@ func TestListDCGMExporterPods(t *testing.T) {
 			name: "pods found via different selectors",
 			objects: []client.Object{
 				&corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "pod1",
-						Namespace: "ns1",
-						Labels: map[string]string{
-							LabelApp: LabelValueNvidiaDCGMExporter,
-						},
+					Name:      "pod1",
+					Namespace: "ns1",
+					Labels: map[string]string{
+						LabelApp: LabelValueNvidiaDCGMExporter,
 					},
 				},
 				&corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "pod2",
-						Namespace: "ns1",
-						Labels: map[string]string{
-							LabelAppKubernetesName: LabelValueDCGMExporter,
-						},
+					Name:      "pod2",
+					Namespace: "ns1",
+					Labels: map[string]string{
+						LabelAppKubernetesName: LabelValueDCGMExporter,
 					},
 				},
 			},
@@ -1317,13 +1436,11 @@ func TestListDCGMExporterPods(t *testing.T) {
 			name: "duplicate pods across selectors should dedupe",
 			objects: []client.Object{
 				&corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "pod1",
-						Namespace: "ns1",
-						Labels: map[string]string{
-							LabelApp:               LabelValueDCGMExporter,
-							LabelAppKubernetesName: LabelValueDCGMExporter,
-						},
+					Name:      "pod1",
+					Namespace: "ns1",
+					Labels: map[string]string{
+						LabelApp:               LabelValueDCGMExporter,
+						LabelAppKubernetesName: LabelValueDCGMExporter,
 					},
 				},
 			},
@@ -1385,10 +1502,6 @@ type errorListClient struct {
 func (e *errorListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	return errors.New("forced list error")
 }
-
-// --- Helper functions ---
-func strPtr(s string) *string       { return &s }
-func float64Ptr(f float64) *float64 { return &f }
 
 func TestGetCloudProviderInfo(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -1534,11 +1647,9 @@ func TestDetectRDMAFromNode(t *testing.T) {
 		{
 			name: "rdma detected",
 			node: &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "node-rdma",
-					Labels: map[string]string{
-						LabelNVIDIARDMAPresent: "true",
-					},
+				Name: "node-rdma",
+				Labels: map[string]string{
+					LabelNVIDIARDMAPresent: "true",
 				},
 			},
 			nodeName:    "node-rdma",
@@ -1548,11 +1659,9 @@ func TestDetectRDMAFromNode(t *testing.T) {
 		{
 			name: "nfd rdma available detected",
 			node: &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "node-nfd-rdma",
-					Labels: map[string]string{
-						LabelNFDRDMAAvailable: "true",
-					},
+				Name: "node-nfd-rdma",
+				Labels: map[string]string{
+					LabelNFDRDMAAvailable: "true",
 				},
 			},
 			nodeName:    "node-nfd-rdma",
@@ -1562,11 +1671,9 @@ func TestDetectRDMAFromNode(t *testing.T) {
 		{
 			name: "sriov detected",
 			node: &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "node-sriov",
-					Labels: map[string]string{
-						LabelNFDNetworkSRIOVCapable: "true",
-					},
+				Name: "node-sriov",
+				Labels: map[string]string{
+					LabelNFDNetworkSRIOVCapable: "true",
 				},
 			},
 			nodeName:    "node-sriov",
@@ -1576,12 +1683,10 @@ func TestDetectRDMAFromNode(t *testing.T) {
 		{
 			name: "both rdma and sriov - rdma takes precedence",
 			node: &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "node-both",
-					Labels: map[string]string{
-						LabelNVIDIARDMAPresent:      "true",
-						LabelNFDNetworkSRIOVCapable: "true",
-					},
+				Name: "node-both",
+				Labels: map[string]string{
+					LabelNVIDIARDMAPresent:      "true",
+					LabelNFDNetworkSRIOVCapable: "true",
 				},
 			},
 			nodeName:    "node-both",
@@ -1591,10 +1696,8 @@ func TestDetectRDMAFromNode(t *testing.T) {
 		{
 			name: "no relevant labels",
 			node: &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "node-none",
-					Labels: map[string]string{},
-				},
+				Name:   "node-none",
+				Labels: map[string]string{},
 			},
 			nodeName:    "node-none",
 			expectedOK:  false,
@@ -1603,13 +1706,11 @@ func TestDetectRDMAFromNode(t *testing.T) {
 		{
 			name: "labels present but false",
 			node: &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "node-false",
-					Labels: map[string]string{
-						LabelNVIDIARDMAPresent:      "false",
-						LabelNFDRDMAAvailable:       "false",
-						LabelNFDNetworkSRIOVCapable: "false",
-					},
+				Name: "node-false",
+				Labels: map[string]string{
+					LabelNVIDIARDMAPresent:      "false",
+					LabelNFDRDMAAvailable:       "false",
+					LabelNFDNetworkSRIOVCapable: "false",
 				},
 			},
 			nodeName:    "node-false",

@@ -22,6 +22,19 @@ kubectl apply -f agg.yaml
 <Accordion title="agg.yaml · Baseline aggregated serving">
 <Code src="../../../../../../examples/backends/sglang/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
 </Accordion>
+<Accordion title="agg_embed.yaml · Aggregated embedding serving">
+This Kubernetes template uses `Qwen/Qwen3-Embedding-0.6B` for the single-GPU CI profile; the
+[local CLI example](../../cli-templates/sglang.mdx) defaults to `Qwen/Qwen3-Embedding-4B`.
+
+<Code src="../../../../../../examples/backends/sglang/deploy/agg_embed.yaml" title="agg_embed.yaml" language="yaml" maxLines={0} />
+
+After forwarding the Frontend service to `localhost:8000`, check the `/v1/embeddings` endpoint:
+
+```bash
+curl http://localhost:8000/v1/embeddings -H 'Content-Type: application/json' \
+  -d '{"model": "Qwen/Qwen3-Embedding-0.6B", "input": "Hello world"}'
+```
+</Accordion>
 <Accordion title="agg_router.yaml · Aggregated with KV-aware routing">
 <Code src="../../../../../../examples/backends/sglang/deploy/agg_router.yaml" title="agg_router.yaml" language="yaml" maxLines={0} />
 </Accordion>

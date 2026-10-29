@@ -21,7 +21,8 @@ use dynamo_protocols::types::{
     ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionTool,
     ChatCompletionToolChoiceOption, ChatCompletionToolType, CompletionUsage, FunctionName,
-    FunctionObject, FunctionType, ImageUrl, ReasoningContent,
+    FunctionObject, FunctionType, ImageUrl, ReasoningContent, ResponseFormat,
+    ResponseFormatJsonSchema,
 };
 use uuid::Uuid;
 
@@ -59,7 +60,7 @@ fn system_message_content(content: &AnthropicMessageContent) -> String {
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
-    fn try_from(req: AnthropicCreateMessageRequest) -> Result<Self, Self::Error> {
+    fn try_from(mut req: AnthropicCreateMessageRequest) -> Result<Self, Self::Error> {
         let mut messages = Vec::new();
 
         // Prepend system message if present
@@ -112,15 +113,21 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             }
         }
 
-        // Convert tools
+        // Convert tools. Chat validation rejects an empty `tools` array, so map it
+        // to `None` to keep `/v1/messages` accepting `tools: []`.
         let tools = req
             .tools
             .as_deref()
+            .filter(|tools| !tools.is_empty())
             .map(convert_anthropic_tools)
             .transpose()?;
 
         // Convert tool_choice
-        let tool_choice = req.tool_choice.as_ref().map(convert_anthropic_tool_choice);
+        let tool_choice = req
+            .tool_choice
+            .as_ref()
+            .map(convert_anthropic_tool_choice)
+            .transpose()?;
         let parallel_tool_calls = req
             .tool_choice
             .as_ref()
@@ -136,6 +143,33 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .filter(|sequences| !sequences.is_empty())
             .map(dynamo_protocols::types::Stop::StringArray);
 
+        let response_format = req
+            .output_config
+            .as_mut()
+            .and_then(|config| config.get_mut("format"))
+            .filter(|format| !format.is_null())
+            .map(|format| {
+                anyhow::ensure!(
+                    format.get("type").and_then(|value| value.as_str()) == Some("json_schema"),
+                    "output_config.format.type must be json_schema"
+                );
+                let schema = format
+                    .get_mut("schema")
+                    .filter(|schema| schema.is_object())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("output_config.format.schema must be an object")
+                    })?;
+                Ok::<_, anyhow::Error>(ResponseFormat::JsonSchema {
+                    json_schema: ResponseFormatJsonSchema {
+                        name: "response".into(),
+                        description: None,
+                        schema: schema.take(),
+                        strict: Some(true),
+                    },
+                })
+            })
+            .transpose()?;
+
         Ok(NvCreateChatCompletionRequest {
             inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 messages,
@@ -147,6 +181,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 tools,
                 tool_choice,
                 parallel_tool_calls,
+                response_format,
                 stream: Some(true), // Always stream internally
                 // Request cumulative usage on every chunk (not just the final
                 // one) so the Anthropic stream converter can stamp an
@@ -170,17 +205,19 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             // when a reasoning parser is configured. The conversion layer only
             // forwards the client's explicit thinking preference here; the handler
             // has access to parsing_options and makes the final decision.
-            chat_template_args: if req
-                .thinking
-                .as_ref()
-                .is_some_and(|t| t.thinking_type == "enabled")
-            {
+            chat_template_args: req.thinking.as_ref().and_then(|thinking| {
+                let enabled = match thinking.thinking_type.as_str() {
+                    "enabled" => true,
+                    "disabled" => false,
+                    _ => return None,
+                };
                 let mut args = std::collections::HashMap::new();
-                args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+                args.insert(
+                    "enable_thinking".to_string(),
+                    serde_json::Value::Bool(enabled),
+                );
                 Some(args)
-            } else {
-                None
-            },
+            }),
             thinking: None,
             thinking_token_budget: None,
             media_io_kwargs: None,
@@ -206,7 +243,10 @@ fn convert_user_blocks(
         match block {
             AnthropicContentBlock::Text { text, .. } => {
                 content_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
-                    ChatCompletionRequestMessageContentPartText { text: text.clone() },
+                    ChatCompletionRequestMessageContentPartText {
+                        text: text.clone(),
+                        ..Default::default()
+                    },
                 ));
             }
             AnthropicContentBlock::Image { source } => {
@@ -306,7 +346,10 @@ fn convert_tool_result_content(
         match block {
             ToolResultContentBlock::Text { text } => {
                 parts.push(ChatCompletionRequestToolMessageContentPart::Text(
-                    ChatCompletionRequestMessageContentPartText { text: text.clone() },
+                    ChatCompletionRequestMessageContentPartText {
+                        text: text.clone(),
+                        ..Default::default()
+                    },
                 ));
             }
             ToolResultContentBlock::Image { source } => {
@@ -421,6 +464,7 @@ fn convert_assistant_blocks(
                         name: name.clone(),
                         arguments: serde_json::to_string(input).unwrap_or_default(),
                     },
+                    custom: None,
                 });
             }
             _ => {}
@@ -499,29 +543,27 @@ fn convert_anthropic_tools(
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     parameters: Some(schema),
-                    strict: None,
+                    strict: tool.strict,
+                    defer_loading: None,
                 },
+                custom: None,
+                defer_loading: None,
             })
         })
         .collect()
 }
 
 /// Convert Anthropic tool_choice to ChatCompletionToolChoiceOption.
-fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionToolChoiceOption {
-    match tc {
+fn convert_anthropic_tool_choice(
+    tc: &AnthropicToolChoice,
+) -> anyhow::Result<ChatCompletionToolChoiceOption> {
+    Ok(match tc {
         AnthropicToolChoice::Simple(simple) => match simple.choice_type {
             AnthropicToolChoiceMode::Auto => ChatCompletionToolChoiceOption::Auto,
             AnthropicToolChoiceMode::Any => ChatCompletionToolChoiceOption::Required,
             AnthropicToolChoiceMode::None => ChatCompletionToolChoiceOption::None,
             AnthropicToolChoiceMode::Tool => {
-                // {"type": "tool"} without a "name" field is invalid per the Anthropic spec.
-                // It deserialized as Simple because Named requires the name field.
-                // Treat as "any" (required) since the caller wants a specific tool but
-                // didn't specify which — this is the closest semantic match.
-                tracing::warn!(
-                    "tool_choice has type 'tool' without a 'name' field; treating as 'any' (required)"
-                );
-                ChatCompletionToolChoiceOption::Required
+                anyhow::bail!("tool_choice.name: field required when tool_choice.type is \"tool\"");
             }
         },
         AnthropicToolChoice::Named(named) => {
@@ -532,7 +574,7 @@ fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionTool
                 },
             })
         }
-    }
+    })
 }
 
 /// Convert Dynamo's OpenAI-compatible usage into Anthropic's non-overlapping
@@ -596,7 +638,15 @@ pub(super) fn tool_use_input(
     }
 
     let error = match serde_json::from_str::<serde_json::Value>(arguments) {
-        Ok(value) => return Some(value),
+        Ok(value) if value.is_object() => return Some(value),
+        Ok(_) => {
+            tracing::warn!(
+                tool_name = %tool_name,
+                argument_bytes = arguments.len(),
+                "suppressing tool_use block with non-object arguments"
+            );
+            return None;
+        }
         Err(error) => error,
     };
 
@@ -708,18 +758,42 @@ fn ends_on_a_finished_value(trimmed: &str) -> bool {
         || tail.ends_with("null")
 }
 
+/// Preserve a matched string stop without confusing token stops with delimiters.
+pub(super) fn anthropic_stop_fields(
+    finish_reason: &dynamo_protocols::types::FinishReason,
+    stop_reason: Option<&serde_json::Value>,
+) -> (AnthropicStopReason, Option<String>) {
+    use dynamo_protocols::types::FinishReason;
+
+    match finish_reason {
+        FinishReason::Stop => match stop_reason.and_then(serde_json::Value::as_str) {
+            Some(sequence) => (
+                AnthropicStopReason::StopSequence,
+                Some(sequence.to_string()),
+            ),
+            None => (AnthropicStopReason::EndTurn, None),
+        },
+        FinishReason::Length => (AnthropicStopReason::MaxTokens, None),
+        FinishReason::ToolCalls | FinishReason::FunctionCall => {
+            (AnthropicStopReason::ToolUse, None)
+        }
+        FinishReason::ContentFilter => (AnthropicStopReason::Refusal, None),
+    }
+}
+
 /// Convert a completed chat completion response into an Anthropic Messages response.
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
     model: &str,
     api_context: Option<&crate::protocols::unified::AnthropicContext>,
 ) -> AnthropicMessageResponse {
-    let _ = api_context; // Available for future enrichment (service_tier, etc.)
+    let single_tool = api_context.is_some_and(|ctx| ctx.disable_parallel_tool_use);
     let msg_id = format!("msg_{}", Uuid::new_v4().simple());
 
     let choice = chat_resp.inner.choices.into_iter().next();
     let mut content = Vec::new();
     let mut stop_reason = None;
+    let mut stop_sequence = None;
 
     if let Some(choice) = choice {
         // Only the token limit means that a call may have been cut off. The loop
@@ -730,14 +804,17 @@ pub fn chat_completion_to_anthropic_response(
             Some(dynamo_protocols::types::FinishReason::Length)
         );
 
-        // Map finish_reason
-        stop_reason = choice.finish_reason.map(|fr| match fr {
-            dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
-            dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
-            dynamo_protocols::types::FinishReason::ToolCalls => AnthropicStopReason::ToolUse,
-            dynamo_protocols::types::FinishReason::ContentFilter => AnthropicStopReason::Refusal,
-            dynamo_protocols::types::FinishReason::FunctionCall => AnthropicStopReason::ToolUse,
-        });
+        if let Some(finish_reason) = &choice.finish_reason {
+            let fields = anthropic_stop_fields(
+                finish_reason,
+                chat_resp
+                    .nvext
+                    .as_ref()
+                    .and_then(|ext| ext.get("stop_reason")),
+            );
+            stop_reason = Some(fields.0);
+            stop_sequence = fields.1;
+        }
 
         // Extract tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
@@ -761,6 +838,9 @@ pub fn chat_completion_to_anthropic_response(
                     name: tc.function.name,
                     input,
                 });
+                if single_tool {
+                    break;
+                }
             }
         }
 
@@ -840,7 +920,7 @@ pub fn chat_completion_to_anthropic_response(
         content,
         model: model.to_string(),
         stop_reason,
-        stop_sequence: None,
+        stop_sequence,
         usage,
     }
 }
@@ -848,6 +928,142 @@ pub fn chat_completion_to_anthropic_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unary_stop_sequence_metadata() {
+        for (finish, matched, expected_reason, expected_sequence) in [
+            (
+                "stop",
+                serde_json::json!("</answer>"),
+                "stop_sequence",
+                Some("</answer>"),
+            ),
+            (
+                "stop",
+                serde_json::json!("\n\nHuman:"),
+                "stop_sequence",
+                Some("\n\nHuman:"),
+            ),
+            ("stop", serde_json::json!(42), "end_turn", None),
+            ("length", serde_json::json!("</answer>"), "max_tokens", None),
+            (
+                "content_filter",
+                serde_json::json!("</answer>"),
+                "refusal",
+                None,
+            ),
+            (
+                "tool_calls",
+                serde_json::json!("</answer>"),
+                "tool_use",
+                None,
+            ),
+            (
+                "function_call",
+                serde_json::json!("</answer>"),
+                "tool_use",
+                None,
+            ),
+        ] {
+            let mut chat = serde_json::json!({
+                "id": "chatcmpl-test", "object": "chat.completion", "created": 0,
+                "model": "test-model", "choices": [{
+                    "index": 0, "finish_reason": finish,
+                    "message": {"role": "assistant", "content": "<answer>2 plus 3 is 5"}
+                }], "nvext": {"stop_reason": matched}
+            });
+            if expected_reason == "tool_use" {
+                chat["choices"][0]["message"]["tool_calls"] = serde_json::json!([{
+                    "id": "call-1", "type": "function",
+                    "function": {"name": "calculate", "arguments": "{}"}
+                }]);
+            }
+            let response = chat_completion_to_anthropic_response(
+                serde_json::from_value(chat).unwrap(),
+                "test-model",
+                None,
+            );
+            let response = serde_json::to_value(response).unwrap();
+            assert_eq!(
+                response["stop_reason"], expected_reason,
+                "{finish}: {matched}"
+            );
+            assert_eq!(
+                response["stop_sequence"],
+                serde_json::json!(expected_sequence),
+                "{finish}: {matched}"
+            );
+            assert!(response.get("nvext").is_none());
+        }
+    }
+
+    #[test]
+    fn test_output_config_format_conversion() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "$defs": {"value": {"type": "string", "enum": ["OK"]}},
+            "properties": {"value": {"$ref": "#/$defs/value"}},
+            "required": ["value"],
+            "additionalProperties": false
+        });
+        let req: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model", "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Return a value."}],
+            "output_config": {"format": {"type": "json_schema", "schema": schema}}
+        }))
+        .unwrap();
+        let chat = NvCreateChatCompletionRequest::try_from(req).unwrap();
+        assert_eq!(
+            serde_json::to_value(chat.inner.response_format).unwrap(),
+            serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {"name": "response", "schema": schema, "strict": true}
+            })
+        );
+    }
+
+    #[test]
+    fn test_output_config_format_absent_or_invalid() {
+        for (config, valid) in [
+            (serde_json::json!(null), true),
+            (serde_json::json!({}), true),
+            (serde_json::json!({"effort": "high"}), true),
+            (serde_json::json!({"format": null}), true),
+            (serde_json::json!({"format": "json_schema"}), false),
+            (serde_json::json!({"format": {"type": "text"}}), false),
+            (serde_json::json!({"format": {"schema": {}}}), false),
+            (
+                serde_json::json!({"format": {"type": "json_schema"}}),
+                false,
+            ),
+            (
+                serde_json::json!({"format": {"type": "json_schema", "schema": null}}),
+                false,
+            ),
+            (
+                serde_json::json!({"format": {"type": "json_schema", "schema": []}}),
+                false,
+            ),
+        ] {
+            let req: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+                "model": "test-model", "max_tokens": 100,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "output_config": config
+            }))
+            .unwrap();
+            let result = NvCreateChatCompletionRequest::try_from(req);
+            if valid {
+                assert!(result.unwrap().inner.response_format.is_none());
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .starts_with("output_config.format")
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_simple_user_message_conversion() {
@@ -1145,6 +1361,37 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_strict_conversion() {
+        for strict in [Some(true), Some(false), None] {
+            let mut input = serde_json::json!({
+                "model": "test-model",
+                "max_tokens": 256,
+                "messages": [{"role": "user", "content": "Set the status to gamma."}],
+                "tools": [{
+                    "name": "set_status",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"status": {"type": "string", "enum": ["ALPHA", "BETA"]}},
+                        "required": ["status"],
+                        "additionalProperties": false
+                    }
+                }]
+            });
+            if let Some(strict) = strict {
+                input["tools"][0]["strict"] = strict.into();
+            }
+            let req: AnthropicCreateMessageRequest = serde_json::from_value(input.clone()).unwrap();
+            let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+            let tools = chat_req.inner.tools.unwrap();
+            assert_eq!(tools[0].function.strict, strict);
+            assert_eq!(
+                tools[0].function.parameters.as_ref().unwrap(),
+                &input["tools"][0]["input_schema"]
+            );
+        }
+    }
+
+    #[test]
     fn test_tools_conversion() {
         let req = AnthropicCreateMessageRequest {
             model: "test-model".into(),
@@ -1172,6 +1419,7 @@ mod tests {
                     "properties": {"location": {"type": "string"}},
                     "required": ["location"]
                 })),
+                strict: None,
                 cache_control: None,
             }]),
             tool_choice: Some(AnthropicToolChoice::Simple(AnthropicToolChoiceSimple {
@@ -1184,6 +1432,12 @@ mod tests {
             container: None,
             output_config: None,
         };
+
+        let mut empty_req = req.clone();
+        empty_req.tools = Some(vec![]);
+        empty_req.tool_choice = None;
+        let empty_chat_req: NvCreateChatCompletionRequest = empty_req.try_into().unwrap();
+        assert!(empty_chat_req.inner.tools.is_none());
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         assert!(chat_req.inner.tools.is_some());
@@ -1280,6 +1534,7 @@ mod tests {
                     completion_tokens_details: None,
                 }),
             },
+            prompt_logprobs: None,
             nvext: None,
         };
 
@@ -1337,10 +1592,12 @@ mod tests {
                     prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
                         audio_tokens: None,
                         cached_tokens: Some(11),
+                        ..Default::default()
                     }),
                     completion_tokens_details: None,
                 }),
             },
+            prompt_logprobs: None,
             nvext: None,
         };
 
@@ -1366,6 +1623,7 @@ mod tests {
             prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
                 audio_tokens: None,
                 cached_tokens: Some(20),
+                ..Default::default()
             }),
             completion_tokens_details: None,
         };
@@ -1405,6 +1663,7 @@ mod tests {
                 object: "chat.completion".to_string(),
                 usage: None,
             },
+            prompt_logprobs: None,
             nvext: None,
         };
 
@@ -1444,6 +1703,7 @@ mod tests {
                 object: "chat.completion".to_string(),
                 usage: None,
             },
+            prompt_logprobs: None,
             nvext: Some(serde_json::json!({
                 "worker_id": {"decode_worker_id": 1}
             })),
@@ -2525,6 +2785,7 @@ mod anthropic_types_tests {
                         name: "record_literal".into(),
                         arguments: (*arguments).into(),
                     },
+                    custom: None,
                 },
             )
             .collect();
@@ -2552,6 +2813,7 @@ mod anthropic_types_tests {
                 object: "chat.completion".into(),
                 usage: None,
             },
+            prompt_logprobs: None,
             nvext: None,
         };
         chat_completion_to_anthropic_response(chat_resp, "test-model", None)
@@ -2619,6 +2881,33 @@ mod anthropic_types_tests {
             "the malformed call must not be emitted"
         );
         assert_eq!(response.stop_reason, Some(AnthropicStopReason::EndTurn));
+    }
+
+    #[test]
+    fn conversion_suppresses_non_object_inputs() {
+        for arguments in ["[]", "null", "42", "true", r#""hello""#] {
+            for reason in [
+                dynamo_protocols::types::FinishReason::ToolCalls,
+                dynamo_protocols::types::FinishReason::Length,
+            ] {
+                let response = converted_tool_use_response_for(reason, &[arguments]);
+                assert!(
+                    response.content.iter().all(|block| !matches!(
+                        block,
+                        AnthropicResponseContentBlock::ToolUse { .. }
+                    )),
+                    "{arguments} with {reason:?}"
+                );
+                assert_eq!(
+                    response.stop_reason,
+                    Some(if reason == dynamo_protocols::types::FinishReason::Length {
+                        AnthropicStopReason::MaxTokens
+                    } else {
+                        AnthropicStopReason::EndTurn
+                    })
+                );
+            }
+        }
     }
 
     #[test]
@@ -2754,5 +3043,109 @@ mod anthropic_types_tests {
             Some(r#"he said "hi", ok"#)
         );
         assert_eq!(recovered.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod thinking_control_tests {
+    use super::*;
+
+    fn request_with_thinking(thinking: Option<serde_json::Value>) -> AnthropicCreateMessageRequest {
+        let mut request = serde_json::json!({
+            "model": "test-model",
+            "max_tokens": 2048,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        if let Some(thinking) = thinking {
+            request["thinking"] = thinking;
+        }
+        serde_json::from_value(request).unwrap()
+    }
+
+    #[test]
+    fn enabled_thinking_survives_conversion() {
+        let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+            serde_json::json!({"type": "enabled", "budget_tokens": 1024}),
+        )))
+        .unwrap();
+        assert_eq!(
+            converted.chat_template_args.unwrap()["enable_thinking"],
+            true
+        );
+    }
+
+    #[test]
+    fn disabled_thinking_survives_conversion() {
+        let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+            serde_json::json!({"type": "disabled"}),
+        )))
+        .unwrap();
+        assert_eq!(
+            converted.chat_template_args.unwrap()["enable_thinking"],
+            false
+        );
+    }
+
+    #[test]
+    fn omitted_thinking_keeps_template_default() {
+        let converted =
+            NvCreateChatCompletionRequest::try_from(request_with_thinking(None)).unwrap();
+        assert!(converted.chat_template_args.is_none());
+    }
+
+    #[test]
+    fn null_thinking_keeps_template_default() {
+        let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+            serde_json::Value::Null,
+        )))
+        .unwrap();
+        assert!(converted.chat_template_args.is_none());
+    }
+
+    #[test]
+    fn other_thinking_modes_keep_existing_behavior() {
+        for mode in ["adaptive", "unknown"] {
+            let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+                serde_json::json!({"type": mode}),
+            )))
+            .unwrap();
+            assert!(converted.chat_template_args.is_none(), "{mode}");
+        }
+    }
+
+    #[test]
+    fn disabling_thinking_preserves_history_and_tools() {
+        let mut value = serde_json::json!({
+            "model": "test-model", "max_tokens": 2048,
+            "messages": [
+                {"role": "user", "content": "Read x"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "Inspect the file", "signature": "sig"},
+                    {"type": "tool_use", "id": "call_1", "name": "read", "input": {"path": "x"}}
+                ]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "hello"}]}
+            ],
+            "tools": [{"name": "read", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}],
+            "tool_choice": {"type": "tool", "name": "read"},
+            "nvext": {"cache_salt": "test-salt"}
+        });
+        let unspecified = NvCreateChatCompletionRequest::try_from(
+            serde_json::from_value::<AnthropicCreateMessageRequest>(value.clone()).unwrap(),
+        )
+        .unwrap();
+        value["thinking"] = serde_json::json!({"type": "disabled"});
+        let mut disabled = NvCreateChatCompletionRequest::try_from(
+            serde_json::from_value::<AnthropicCreateMessageRequest>(value).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            disabled.chat_template_args.as_ref().unwrap()["enable_thinking"],
+            false
+        );
+        disabled.chat_template_args = None;
+        assert_eq!(
+            serde_json::to_value(unspecified).unwrap(),
+            serde_json::to_value(disabled).unwrap()
+        );
     }
 }

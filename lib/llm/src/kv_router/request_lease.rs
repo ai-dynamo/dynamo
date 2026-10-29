@@ -255,6 +255,14 @@ impl RequestLeaseManager {
         debug_assert!(installed, "request lease manager scheduler set twice");
     }
 
+    pub(crate) fn replica_observer(&self) -> Arc<dyn ReplicaRequestLeaseObserver> {
+        // The scheduler actor owns slots and their observer. A strong manager reference
+        // here would keep the actor's own command sender alive through booking cleanup.
+        Arc::new(WeakRequestLeaseObserver {
+            manager: Arc::downgrade(&self.inner),
+        })
+    }
+
     pub(crate) fn register_local(
         &self,
         booking: SchedulerBookingDescriptor,
@@ -324,14 +332,15 @@ impl RequestLeaseManager {
         self.inner.enqueue_completion(record);
     }
 
-    async fn finish(&self, record: &Arc<RequestLeaseRecord>) {
+    /// Returns `false` when another lifecycle path already claimed the record.
+    async fn finish(&self, record: &Arc<RequestLeaseRecord>) -> bool {
         if !record.clock.claim_now() {
-            return;
+            return false;
         }
         self.inner.remove(record);
 
-        // Enqueue both subsystem commands before the first await. Cancellation of
-        // the finishing future therefore cannot strand either cleanup.
+        // Release the scheduler booking and start LRU cleanup before the first
+        // await. Cancellation of this future cannot strand either cleanup.
         let scheduler_ack = self
             .inner
             .scheduler("finished", &record.booking)
@@ -374,20 +383,49 @@ impl RequestLeaseManager {
                 "Failed to enqueue approximate LRU request release"
             ),
         }
+        true
+    }
+
+    /// Release the scheduler booking now, even if another path owns the
+    /// record's cleanup and has not applied it yet. Attempt-scoped, so it is a
+    /// no-op once that cleanup lands and cannot free a later attempt.
+    async fn release_booking(&self, booking: &SchedulerBookingDescriptor) {
+        let Some(scheduler) = self.inner.scheduler("released", booking) else {
+            return;
+        };
+        if let Err(error) = scheduler.enqueue_and_wait(booking.clone()).await {
+            tracing::warn!(
+                request_id = %booking.request_id,
+                worker = ?booking.worker,
+                attempt_id = %booking.attempt_id,
+                %error,
+                "Failed to release scheduler booking"
+            );
+        }
     }
 }
 
-impl ReplicaRequestLeaseObserver for RequestLeaseManager {
+struct WeakRequestLeaseObserver {
+    manager: Weak<RequestLeaseManagerInner>,
+}
+
+impl ReplicaRequestLeaseObserver for WeakRequestLeaseObserver {
     fn admitted(&self, booking: SchedulerBookingDescriptor) {
-        self.register_remote(booking);
+        if let Some(inner) = self.manager.upgrade() {
+            RequestLeaseManager { inner }.register_remote(booking);
+        }
     }
 
     fn progressed(&self, booking: &SchedulerBookingDescriptor) {
-        self.touch_booking(booking);
+        if let Some(inner) = self.manager.upgrade() {
+            RequestLeaseManager { inner }.touch_booking(booking);
+        }
     }
 
     fn completed(&self, booking: &SchedulerBookingDescriptor) {
-        self.complete_remote(booking);
+        if let Some(inner) = self.manager.upgrade() {
+            RequestLeaseManager { inner }.complete_remote(booking);
+        }
     }
 }
 
@@ -411,6 +449,39 @@ impl RequestAttemptLease {
 
     pub(crate) async fn finish(&self) {
         self.manager.finish(&self.record).await;
+    }
+
+    pub(crate) fn release_handle(&self) -> RequestAttemptRelease {
+        RequestAttemptRelease {
+            manager: self.manager.clone(),
+            record: Arc::clone(&self.record),
+        }
+    }
+}
+
+/// Releases one attempt's booking before the lease that owns it completes.
+/// Release is idempotent and scoped to this attempt, so the owner's eventual
+/// completion is a no-op and cannot free a later attempt of the same request.
+/// The booking is gone when `release` returns, so a migration retry can
+/// re-book the same request ID.
+pub(crate) struct RequestAttemptRelease {
+    manager: RequestLeaseManager,
+    record: Arc<RequestLeaseRecord>,
+}
+
+impl RequestAttemptRelease {
+    pub(crate) async fn release(&self) {
+        if !self.manager.finish(&self.record).await {
+            self.manager.release_booking(&self.record.booking).await;
+        }
+    }
+}
+
+impl std::fmt::Debug for RequestAttemptRelease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestAttemptRelease")
+            .field("booking", &self.record.booking)
+            .finish()
     }
 }
 
@@ -477,6 +548,132 @@ fn start_reaper(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn replica_observer_forwards_live_callbacks_without_retaining_manager() {
+        use dynamo_kv_router::protocols::WorkerWithDpRank;
+
+        use crate::kv_router::{sequence::SequenceRequest, tests::tracked_router};
+
+        let router = tracked_router("replica-lease-observer").await;
+        let request_id = "replica-lease-callbacks".to_string();
+        let worker = WorkerWithDpRank::new(0, 0);
+        let attempt_id = router
+            .selection
+            .scheduler()
+            .add_request_admitted(SequenceRequest {
+                request_id: request_id.clone(),
+                token_sequence: None,
+                track_prefill_tokens: false,
+                expected_output_tokens: None,
+                prefill_load_hint: None,
+                worker,
+                lora_name: None,
+            })
+            .await
+            .unwrap();
+        let booking = SchedulerBookingDescriptor {
+            request_id: request_id.clone(),
+            worker,
+            attempt_id,
+        };
+        let manager = Arc::downgrade(&router.request_leases.inner);
+        let observer = router.request_leases.replica_observer();
+        assert!(
+            router
+                .request_leases
+                .inner
+                .matching_record(&booking)
+                .is_none()
+        );
+        observer.admitted(booking.clone());
+        let record = router
+            .request_leases
+            .inner
+            .matching_record(&booking)
+            .unwrap();
+        assert!(!record.clock.reap());
+        observer.progressed(&booking);
+        assert!(!record.clock.reap());
+        assert!(record.clock.is_active());
+        observer.completed(&booking);
+        assert!(!record.clock.is_active());
+        assert!(
+            router
+                .request_leases
+                .inner
+                .matching_record(&booking)
+                .is_none()
+        );
+        router
+            .selection
+            .scheduler()
+            .free(&request_id)
+            .await
+            .unwrap();
+        router.cancellation_token.cancel();
+        drop(router);
+        assert!(manager.upgrade().is_none());
+        observer.admitted(booking.clone());
+        observer.progressed(&booking);
+        observer.completed(&booking);
+        assert!(manager.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn attempt_release_frees_booking_when_another_path_owns_cleanup() {
+        use dynamo_kv_router::protocols::WorkerWithDpRank;
+
+        use crate::kv_router::{sequence::SequenceRequest, tests::tracked_router};
+
+        let router = tracked_router("attempt-release-lost-claim").await;
+        let request_id = "attempt-release-lost-claim".to_string();
+        let worker = WorkerWithDpRank::new(0, 0);
+        let sequence_request = || SequenceRequest {
+            request_id: request_id.clone(),
+            token_sequence: None,
+            track_prefill_tokens: false,
+            expected_output_tokens: None,
+            prefill_load_hint: None,
+            worker,
+            lora_name: None,
+        };
+        let scheduler = router.selection.scheduler();
+        let attempt_id = scheduler
+            .add_request_admitted(sequence_request())
+            .await
+            .unwrap();
+        let booking = SchedulerBookingDescriptor {
+            request_id: request_id.clone(),
+            worker,
+            attempt_id,
+        };
+        let lease = router.request_leases.register_local(booking.clone(), None);
+        let release = lease.release_handle();
+
+        // Another lifecycle path has claimed the attempt but not yet released it.
+        assert!(lease.record.clock.claim_now());
+        assert!(scheduler.has_booking(&booking));
+
+        release.release().await;
+        assert!(!scheduler.has_booking(&booking));
+
+        let retry_attempt_id = scheduler
+            .add_request_admitted(sequence_request())
+            .await
+            .unwrap();
+        let retry_booking = SchedulerBookingDescriptor {
+            request_id: request_id.clone(),
+            worker,
+            attempt_id: retry_attempt_id,
+        };
+        release.release().await;
+        drop(lease);
+        assert!(scheduler.has_booking(&retry_booking));
+
+        scheduler.free(&request_id).await.unwrap();
+        router.cancellation_token.cancel();
+    }
 
     #[test]
     fn clock_coalesces_progress_and_cannot_resurrect_a_claimed_lease() {
