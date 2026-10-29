@@ -54,6 +54,7 @@ The files ending in `_dra.yaml` require:
 | GPU Allocation | `nvidia.com/gpu` resource limit | DRA `ResourceClaimTemplate` or `gpu.intel.com/xe` resource limit |
 | Device Target | Default (CUDA) | `--device xpu` flag |
 | Attention Backend | Default | `--attention-backend intel_xpu` (the default Triton backend returned garbage tokens such as `!!!!` in testing) |
+| Page Size | `--page-size 16` | `--page-size 64` (with `intel_xpu`, SGLang accepts only 64 or 128 for this model and changes any other value to 128) |
 | DeviceClass | `nvidia.com` | `gpu.intel.com` |
 | Disagg KV Transfer | Default | `hostIPC: true`, `UCX_TLS=ze_ipc,...` |
 
