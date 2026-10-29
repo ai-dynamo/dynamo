@@ -873,6 +873,33 @@ accepted fields, limits, errors, and rolling upgrades.
 | `POST` | `/v1/messages` | Anthropic Messages API (requires `--enable-anthropic-api`) |
 | `POST` | `/v1/messages/count_tokens` | Token counting for the Anthropic API |
 
+#### Image Sources
+
+URL image sources require a build containing the fix for
+[#17377](https://github.com/ai-dynamo/dynamo/issues/17377). Supply an ordinary image
+block or an image inside a client `tool_result` with either of these source shapes:
+
+```json
+{"type": "image", "source": {"type": "url", "url": "https://images.example.com/photo.png"}}
+```
+
+```json
+{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "<base64-image>"}}
+```
+
+URL sources must be absolute HTTP(S) URLs without embedded credentials. Malformed
+sources and other schemes are rejected. Existing base64 conversion is unchanged;
+file IDs and document blocks are outside this image-source subset.
+
+Both forms convert to OpenAI `image_url` content. Fetching and decoding depend on
+the deployment: frontend preprocessing can use the media loader, while passthrough
+requests are loaded by the worker. Frontend multimodal-routing probes are best effort
+and do not replace worker-side URL policy. The component that fetches the image owns
+its destination and redirect rules, timeouts, decoding, and media limits. Keep the existing
+[media URL security policy for your backend](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md) enabled; configure internal
+media access only for deployments that need it. This endpoint does not provide
+Claude's hosted-model image limits or model-aware image token counts.
+
 ### Infrastructure
 
 | Method | Path | Description |

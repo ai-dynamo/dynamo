@@ -509,7 +509,7 @@ async fn anthropic_messages(
     let metric_model = state.manager().metric_model_for(&model).to_string();
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
-    tracing::trace!("Received Anthropic messages request: {:?}", &*request);
+    tracing::trace!(%request_id, %model, streaming, "Received Anthropic messages request");
 
     // Look up engine and parsing options early so we know whether a reasoning
     // parser is configured before converting the request.

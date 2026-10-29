@@ -139,3 +139,7 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
+
+# Independent workspace: keep this protocol patch aligned with the root manifest.
+[patch.crates-io]
+dynamo-protocols = { git = "https://github.com/maheshrbapatu/frontend-crates", rev = "893b8efd3b6af33216befb2907d89a8b816a9bda" }
