@@ -96,7 +96,7 @@ def main() -> None:
             print(
                 f"  n {lo}-{min(hi - 1, 9999)}: steps={len(rs)} error={mape(c, rs):.1%}"
             )
-    print(f"DYN_DECODE_REGULATION_COEFFS={c[0]:.4f},{c[1]:.6f},{c[2]:.9f}")
+    print(f"export DYN_DECODE_REGULATION_COEFFS={c[0]:.4f},{c[1]:.6f},{c[2]:.9f}")
 
 
 if __name__ == "__main__":

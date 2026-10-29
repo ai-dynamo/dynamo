@@ -22,6 +22,7 @@ from dynamo.vllm.decode_regulation import (
     identity_from_request,
     vllm_skip_unsupported,
 )
+from dynamo.vllm.decode_regulation_fit import fit, load
 
 pytestmark = [
     pytest.mark.unit,
@@ -355,6 +356,14 @@ def test_failsafe_disables_when_bias_stays_pinned():
     assert step(s) == {r.request_id for r in s.running}  # stock scheduling
 
 
+def test_failsafe_leaves_observe_mode_tracing():
+    s = Sched(overloaded(), cfg("observe", failsafe_steps=3))
+    s._reg_policy.bias = 2.0
+    for _ in range(5):
+        s._reg_failsafe()
+    assert s._reg_cfg.mode == "observe"
+
+
 def test_failsafe_resets_when_bias_recovers():
     s = Sched(overloaded(), cfg(failsafe_steps=3))
     for b in (2.0, 2.0, 1.2, 2.0, 2.0):
@@ -457,8 +466,6 @@ def test_observe_mode_decides_but_never_skips():
 
 
 def test_fit_recovers_step_model_from_trace(tmp_path):
-    from dynamo.vllm.decode_regulation_fit import fit, load
-
     path = tmp_path / "trace.jsonl"
     with open(path, "w") as f:
         for i in range(200):

@@ -656,7 +656,9 @@ class DecodeRegulationMixin:
         coefficients fitted for another GPU or model. Skips stop and the
         scheduler behaves as stock vLLM until restart."""
         limit = self._reg_cfg.failsafe_steps
-        if limit <= 0:
+        # Observe mode never skips, and calibrating needs its trace even while the
+        # coefficients are wrong.
+        if limit <= 0 or self._reg_cfg.mode == "observe":
             return
         b = self._reg_policy.bias
         self._reg_pinned = self._reg_pinned + 1 if b <= 0.5 or b >= 2.0 else 0

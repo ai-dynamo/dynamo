@@ -95,7 +95,10 @@ The coefficients above were fitted for MiniMax-M2.7 with tensor parallelism 4 an
    export DYN_DECODE_REGULATION_MODE=observe
    export DYN_DECODE_REGULATION_PRIORITY_MIN=1
    export DYN_DECODE_REGULATION_TRACE=/tmp/decode-regulation-trace.jsonl
+   rm -f "$DYN_DECODE_REGULATION_TRACE"  # the trace appends; start each calibration fresh
    ```
+
+   The fail-open guard doesn't act in observe mode, so the trace keeps recording even when the current coefficients are far off.
 
 2. Fit the coefficients from the trace:
 
@@ -103,7 +106,7 @@ The coefficients above were fitted for MiniMax-M2.7 with tensor parallelism 4 an
    python3 -m dynamo.vllm.decode_regulation_fit /tmp/decode-regulation-trace.jsonl
    ```
 
-   The tool reports the fit error by batch size, then prints a `DYN_DECODE_REGULATION_COEFFS=a,b,c` line to use.
+   The tool reports the fit error by batch size, then prints an `export DYN_DECODE_REGULATION_COEFFS=a,b,c` line to use.
 
 Observe mode is also a way to see what regulation would do before enabling it: its log lines and metrics report the steps it would engage and the decodes it would skip.
 
@@ -126,7 +129,7 @@ Set these on the vLLM worker.
 | `DYN_DECODE_REGULATION_COEFFS` | MiniMax-M2.7, TP4, H200 | `a,b,c` of the step-time model, in ms, with `L` in tokens. The worker logs a warning at startup while this is unset. |
 | `DYN_DECODE_REGULATION_PREFILL_COEFFS` | `0,0` | `q,p`: a step that also carries `P` prefill tokens takes `q + p × P` ms longer. |
 | `DYN_DECODE_REGULATION_MAX_OPP_CTX` | `0` | Cap, in tokens, on the total context of regulated requests added to a step. `0`: no cap. |
-| `DYN_DECODE_REGULATION_FAILSAFE_STEPS` | `200` | Decode-only steps with the bias at its limit before regulation turns off. `0` disables the guard. |
+| `DYN_DECODE_REGULATION_FAILSAFE_STEPS` | `200` | Decode-only steps with the bias at its limit before regulation turns off. `0` disables the guard. Not applied in observe mode. |
 | `DYN_DECODE_REGULATION_TRACE` | unset | Path for a per-step JSONL trace. |
 | `DYN_DECODE_REGULATION_LOG_S` | `10` | Seconds between summary log lines. |
 
@@ -190,7 +193,7 @@ Two choices matter for the agents' cost. A fixed per-token target (`DYN_DECODE_R
 
 ## Limitations
 
-- vLLM only. SGLang and TensorRT-LLM need their own adapters.
+- The in-process vLLM worker only. The vLLM sidecar (`vllm-rs`), SGLang and TensorRT-LLM need their own adapters.
 - One deadline per worker. Requests cannot set their own deadline.
 - An interactive request that is already past its deadline keeps the target at its tightest until it finishes.
 - Not supported with pipeline parallelism or speculative decoding.
