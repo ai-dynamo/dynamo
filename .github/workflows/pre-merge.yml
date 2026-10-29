@@ -153,7 +153,7 @@ jobs:
     - name: Check generated recipe manifests
       run: python3 scripts/kustomize-matrix.py check
     - name: Test recipe generators and docs artifacts
-      run: python3 -m pytest --noconftest -o asyncio_default_fixture_loop_scope=function tests/test_kustomize_matrix.py tests/test_generate_kustomize_openapi.py docs/tests/ tests/deploy/test_batch_profile_values.py
+      run: python3 -m pytest --noconftest tests/test_kustomize_matrix.py tests/test_generate_kustomize_openapi.py docs/tests/ tests/deploy/test_batch_profile_values.py
 
   api-docs:
     name: Generated API References
