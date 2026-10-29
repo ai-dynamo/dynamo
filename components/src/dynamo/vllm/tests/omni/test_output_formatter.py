@@ -488,6 +488,35 @@ class TestDiffusionFormatterImage:
         assert "Error" in chunk["choices"][0]["delta"]["content"]
 
 
+class TestImageOutputFormat:
+    def test_normalizer_returns_a_value_the_response_model_accepts(self):
+        """The normalizer casts its result to `ImageOutputFormat`; the cast is
+        honest only while the encoder table, the alias, and the generated
+        `NvImagesResponse.output_format` Literal name the same values."""
+        from typing import Literal, get_args, get_origin
+
+        from dynamo.common.protocols.image_protocol import NvImagesResponse
+        from dynamo.vllm.omni.output_formatter import (
+            _IMAGE_OUTPUT_FORMATS,
+            ImageOutputFormat,
+            _normalize_image_output_options,
+        )
+
+        allowed = set(get_args(ImageOutputFormat))
+        assert set(_IMAGE_OUTPUT_FORMATS) == allowed
+
+        response_annotation = NvImagesResponse.model_fields["output_format"].annotation
+        response_literal = next(
+            arg for arg in get_args(response_annotation) if get_origin(arg) is Literal
+        )
+        assert set(get_args(response_literal)) == allowed
+
+        for value in sorted(allowed):
+            assert _normalize_image_output_options(value, None) == value
+            assert _normalize_image_output_options(value.upper(), None) == value
+        assert _normalize_image_output_options(None, None) == "png"
+
+
 class TestDiffusionFormatterVideo:
     @pytest.mark.asyncio
     async def test_empty_frames_returns_video_error(self):

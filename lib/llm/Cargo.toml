@@ -128,6 +128,7 @@ validator = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
+zmq = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
 
@@ -166,12 +167,13 @@ clap = { version = "4.5.49", features = ["derive"], optional = true }
 indicatif = { version = "0.18.0", optional = true }
 
 # http-service
-axum = { workspace = true }
+axum = { workspace = true, features = ["multipart"] }
+mime = "0.3"
 hyper-util = { version = "0.1.17", features = ["server-auto", "service", "tokio"] }
 tokio-rustls = { workspace = true }
 tower-http = { workspace = true }
 tower = { workspace = true }
-utoipa = { version = "5.3", features = ["axum_extras", "rc_schema"] }
+utoipa = { version = "5.3", features = ["axum_extras", "rc_schema", "preserve_order"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
 

@@ -652,7 +652,7 @@ impl RoutingHost {
         &self,
         mut request: SingleIn<PreprocessedRequest>,
         prepare: F,
-    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
+    ) -> Result<PrefillDispatch<M>, Error>
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
@@ -680,6 +680,7 @@ impl RoutingHost {
             }
         };
         drop(route_guard);
+        let booking = guard.attempt_release();
         let stream = match self
             .dispatch_selection(request, selection, guard, &budget)
             .await
@@ -695,9 +696,10 @@ impl RoutingHost {
                 return Err(error);
             }
         };
-        Ok((
+        Ok(PrefillDispatch {
             metadata,
-            self.bind_affinity(operation, selected_target, stream)?,
-        ))
+            stream: self.bind_affinity(operation, selected_target, stream)?,
+            booking,
+        })
     }
 }

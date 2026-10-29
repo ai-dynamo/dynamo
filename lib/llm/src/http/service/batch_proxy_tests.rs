@@ -227,6 +227,7 @@ async fn failed_requests_log_bounded_classification_without_client_values() {
         };
         let logs = CapturedLogs::default();
         let writer = logs.clone();
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::fmt()
             .without_time()
             .with_ansi(false)
