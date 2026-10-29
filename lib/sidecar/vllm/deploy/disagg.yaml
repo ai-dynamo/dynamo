@@ -37,6 +37,10 @@ spec:
         containers:
         - name: main
           image: vllm/vllm-openai:v0.28.0
+          # Scraped by the platform chart's dynamo-worker PodMonitor when podMonitors.engineMetrics=true.
+          ports:
+          - name: engine-metrics
+            containerPort: 8000
           securityContext:
             runAsUser: 0
             capabilities:
@@ -118,6 +122,10 @@ spec:
         containers:
         - name: main
           image: vllm/vllm-openai:v0.28.0
+          # Scraped by the platform chart's dynamo-worker PodMonitor when podMonitors.engineMetrics=true.
+          ports:
+          - name: engine-metrics
+            containerPort: 8000
           securityContext:
             runAsUser: 0
             capabilities:

@@ -41,6 +41,10 @@ spec:
         containers:
         - name: main
           image: lmsysorg/sglang:v0.5.22
+          # Scraped by the platform chart's dynamo-worker PodMonitor when podMonitors.engineMetrics=true.
+          ports:
+          - name: engine-metrics
+            containerPort: 30000
           # All probes pass only for HealthCheckResponse.healthy=true;
           # its raw protobuf encoding is 0x08 0x01.
           startupProbe:
@@ -95,6 +99,8 @@ spec:
           - --grpc-port
           - "30001"
           - --incremental-streaming-output
+          # /metrics needs --enable-metrics; --host 0.0.0.0 exposes it on the pod IP for the PodMonitor.
+          - --enable-metrics
           - --page-size
           - "16"
           - --kv-events-config
