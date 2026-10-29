@@ -68,6 +68,7 @@ _SAMPLING_OPTION_FIELDS = (
     "top_p",
     "top_k",
     "min_p",
+    "logit_bias",
 )
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 _MAX_ABORT_MESSAGE_LENGTH = 8192

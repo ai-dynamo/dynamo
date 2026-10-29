@@ -60,7 +60,7 @@ Exclude tests, documentation, comments, and whitespace from this count, as they 
 
 ## 2. Performance
 
-Analyze any change to the hot path (per-request or per-token code) statically for locks, copies, and allocations (the `dynamo-clone-hotpath-audit` skill covers Rust clones), and measure it empirically, ideally with mockers (the `dynamo-frontend-benchmark` skill).
+Check any change to the hot path (code that runs per token, KV block, KV event, request, connection or worker) with the `dynamo-perf-best-practices` skill (the `dynamo-clone-hotpath-audit` skill covers Rust clones), and measure it empirically, ideally with mockers (the `dynamo-frontend-benchmark` skill).
 
 ## 3. Testing and Validation
 
