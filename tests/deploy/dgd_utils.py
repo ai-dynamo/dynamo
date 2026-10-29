@@ -1810,7 +1810,9 @@ class ManagedDeployment:
                 def run_forever(port_forward=port_forward):
                     try:
                         port_forward.run_forever()
-                    except BaseException as e:
+                    except Exception as e:
+                        # Not re-raised: an exception that leaves this thread is
+                        # reported by pytest as an unhandled thread exception.
                         self._logger.warning(
                             "Port forward to pod %s on local port %s stopped: %r",
                             pod.name,
@@ -1838,7 +1840,10 @@ class ManagedDeployment:
                     # Check if port is assigned
                     if port_forward.local_port == 0:
                         self._logger.debug(
-                            f"Port not yet assigned for pod {pod.name} (attempt {attempt + 1}/{max_connection_attempts})"
+                            "Port not yet assigned for pod %s (attempt %d/%d)",
+                            pod.name,
+                            attempt + 1,
+                            max_connection_attempts,
                         )
                         continue
 
@@ -1849,18 +1854,30 @@ class ManagedDeployment:
                         response = requests.head(test_url, timeout=5)
                     except (requests.ConnectionError, requests.Timeout) as e:
                         self._logger.warning(
-                            f"Connection test failed for pod {pod.name} (attempt {attempt + 1}/{max_connection_attempts}): {e}"
+                            "Connection test failed for pod %s (attempt %d/%d): %s",
+                            pod.name,
+                            attempt + 1,
+                            max_connection_attempts,
+                            e,
                         )
                         continue
                     if response.status_code in (200, 404):  # 404 is acceptable
                         self._active_port_forwards.append(port_forward)
                         return port_forward
                     self._logger.warning(
-                        f"Connection test for pod {pod.name} returned HTTP {response.status_code} (attempt {attempt + 1}/{max_connection_attempts})"
+                        "Connection test for pod %s returned HTTP %s (attempt %d/%d)",
+                        pod.name,
+                        response.status_code,
+                        attempt + 1,
+                        max_connection_attempts,
                     )
 
                 self._logger.warning(
-                    f"Port forward {forward_attempt}/{max_port_forwards} on local port {port_forward.local_port} failed for pod {pod.name}"
+                    "Port forward %d/%d on local port %s failed for pod %s",
+                    forward_attempt,
+                    max_port_forwards,
+                    port_forward.local_port,
+                    pod.name,
                 )
                 # A forward whose bind failed has no servers, so stop() is a no-op.
                 try:
@@ -1869,13 +1886,15 @@ class ManagedDeployment:
                     self._logger.debug("Error stopping port forward: %s", e)
 
             self._logger.warning(
-                f"Port forward failed after {max_port_forwards} forwards for pod {pod.name}"
+                "Port forward failed after %d forwards for pod %s",
+                max_port_forwards,
+                pod.name,
             )
             return None
 
         except Exception as e:
             self._logger.warning(
-                f"Failed to create port forward for pod {pod.name}: {e}"
+                "Failed to create port forward for pod %s: %s", pod.name, e
             )
             return None
 

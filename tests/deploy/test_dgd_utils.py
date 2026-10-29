@@ -5,6 +5,7 @@
 
 import asyncio
 import socket
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
@@ -274,9 +275,18 @@ def head_probe(ready_port: int) -> MagicMock:
     return MagicMock(side_effect=head)
 
 
+def short_backoff(monkeypatch) -> None:
+    """Cap backoff sleeps but keep real time for forward threads to bind."""
+    real_sleep = time.sleep
+    monkeypatch.setattr(
+        "tests.deploy.dgd_utils.time.sleep", lambda s: real_sleep(min(s, 0.1))
+    )
+
+
 def test_port_forward_replaces_forward_whose_bind_failed(monkeypatch, tmp_path) -> None:
     """A kr8s bind failure is handled and a new forward is returned."""
     deployment = managed_deployment(tmp_path)
+    short_backoff(monkeypatch)
     # A bound, non-listening socket passes kr8s's connect probe but makes its
     # later bind fail with EADDRINUSE, as in the CI teardown failure.
     with socket.socket() as holder:
@@ -308,6 +318,7 @@ def test_port_forward_replaces_unreachable_forward_with_new_object(
 ) -> None:
     """An unreachable forward is stopped, not restarted on the same port."""
     deployment = managed_deployment(tmp_path)
+    short_backoff(monkeypatch)
     unreachable_port = unused_local_port()
     ready_port = unused_local_port()
     unreachable = kr8s_port_forward(unreachable_port)
