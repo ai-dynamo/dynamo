@@ -304,9 +304,15 @@ def stub_nvtx(monkeypatch):
         return domains.setdefault(name, _StubDomain(name))
 
     stub = types.ModuleType("nvtx")
+    stub.__path__ = []  # type: ignore[attr-defined]
     stub.get_domain = get_domain  # type: ignore[attr-defined]
     stub.annotate = _StubAnnotate  # type: ignore[attr-defined]
+    # Identity resolver, so the attribute cache is still observable by color name.
+    colors = types.ModuleType("nvtx.colors")
+    colors.color_to_hex = lambda color: color  # type: ignore[attr-defined]
+    stub.colors = colors  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "nvtx", stub)
+    monkeypatch.setitem(sys.modules, "nvtx.colors", colors)
     _StubAnnotate.instances = []
     return stub, domains
 
@@ -348,9 +354,6 @@ class TestEnabledWithPackage:
 
     def test_annotate_is_bound_to_the_dynamo_domain(self, enabled):
         module, _domain = enabled
-        assert isinstance(module.annotate, functools.partial)
-        assert module.annotate.keywords == {"domain": "dynamo"}
-
         with module.annotate("my:block", color="cyan") as ctx:
             pass
         assert ctx.domain == "dynamo"
