@@ -79,6 +79,21 @@ load is known. The round trip to each region is the median TCP connect time to
 its pools, measured every 30 seconds; the request's own region counts as
 zero.
 
+## Metrics
+
+`/metrics`, on the same port, serves the Global Frontend's Prometheus metrics,
+named `dynamo_global_frontend_*`: requests per pool by response status (or
+`cancelled` when the client leaves before the pool answers),
+requests answered without a pool, time to first byte and duration per pool,
+and requests in flight per pool. The `pool` label is the pool's
+`<cluster>/<namespace>/<DGD name>` and `region` its region. On requests, `local`
+says whether the pool is in `--region` (`unknown` without it), which gives the
+share of requests kept in the region. Nothing is labelled from the request
+body. Inter-token latency and token counts need the stream parsed, so they come
+from the pool frontends' own metrics. See the
+[Metrics Catalog](../../docs/fern/pages/reference/observability/metrics-catalog.mdx#global-frontend-metrics)
+for each family.
+
 ## Deployment notes
 
 - The Global Frontend holds a request's body, as received, only until it is
@@ -95,8 +110,7 @@ zero.
 
 Pools are given on the command line; there is no discovery client, polling, or
 registration. There is no automatic failover or retry: unreachable
-pools return 503. The Global Frontend serves no `/metrics` of its own, and its
-listener has no TLS.
+pools return 503. The listener has no TLS.
 
 ## Tests
 
