@@ -85,6 +85,7 @@ fn choice(
 
 fn chunk(choice: ChatChoiceStream) -> NvCreateChatCompletionStreamResponse {
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "tool-dispatch-stream".to_string(),
             choices: vec![choice],
