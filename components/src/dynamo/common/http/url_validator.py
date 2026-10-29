@@ -213,6 +213,21 @@ class UrlValidationPolicy:
         )
 
 
+def check_remote_url_allowed(url: str, policy: UrlValidationPolicy) -> None:
+    """Raise ``UrlValidationError`` if ``url`` is ``http(s)://`` and ``policy``
+    disables remote URLs.
+
+    For call sites that hand URLs to an engine's own downloader, where the full
+    :func:`validate_url` check does not run.
+    """
+    scheme = urlparse(url).scheme.lower()
+    if scheme in ("http", "https") and not policy.allow_remote_urls:
+        raise UrlValidationError(
+            f"{scheme}:// media URLs are disabled (DYN_MM_ALLOW_REMOTE_URLS=0); "
+            "send the media inline as a data: URL instead"
+        )
+
+
 async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     """Check ``url`` against ``policy`` and return it unchanged if it passes.
 
@@ -263,11 +278,7 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
             f"URL scheme '{describe_media_source(scheme)}' not allowed"
         )
 
-    if not policy.allow_remote_urls:
-        raise UrlValidationError(
-            f"{scheme}:// media URLs are disabled (DYN_MM_ALLOW_REMOTE_URLS=0); "
-            "send the media inline as a data: URL instead"
-        )
+    check_remote_url_allowed(url, policy)
 
     if scheme == "http" and not policy.allow_http:
         raise UrlValidationError(

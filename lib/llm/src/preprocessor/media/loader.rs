@@ -193,7 +193,8 @@ impl MediaFetcher {
     /// `allow_direct_port`, and `allow_private_ips` all to `true` at
     /// once.
     ///
-    /// `DYN_MM_ALLOW_REMOTE_URLS=0` sets `allow_remote_urls` to `false`.
+    /// `DYN_MM_ALLOW_REMOTE_URLS=0` (or any other false value) sets
+    /// `allow_remote_urls` to `false`.
     pub fn from_env() -> Self {
         let allow_internal = std::env::var("DYN_MM_ALLOW_INTERNAL").ok().as_deref() == Some("1");
         let allow_remote = std::env::var("DYN_MM_ALLOW_REMOTE_URLS").ok();
@@ -203,10 +204,16 @@ impl MediaFetcher {
         }
     }
 
+    /// Unset or empty keeps remote URLs on. A value that is not a boolean
+    /// turns them off, so a typo fails closed.
     fn allow_remote_urls_from(value: Option<&str>) -> bool {
-        value
-            .and_then(dynamo_runtime::config::parse_bool_opt)
-            .unwrap_or(true)
+        let Some(value) = value.filter(|v| !v.trim().is_empty()) else {
+            return true;
+        };
+        dynamo_runtime::config::parse_bool(value).unwrap_or_else(|error| {
+            tracing::error!(%error, "Invalid DYN_MM_ALLOW_REMOTE_URLS; disabling remote media URLs");
+            false
+        })
     }
 }
 
@@ -1118,7 +1125,9 @@ mod tests_non_nixl {
 
     #[test]
     fn test_allow_remote_urls_from_env_value() {
-        assert!(!MediaFetcher::allow_remote_urls_from(Some("0")));
+        for off in [Some("0"), Some("disabled")] {
+            assert!(!MediaFetcher::allow_remote_urls_from(off));
+        }
         for on in [None, Some("1"), Some("")] {
             assert!(MediaFetcher::allow_remote_urls_from(on));
         }
