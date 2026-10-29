@@ -23,7 +23,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, ModelLimits, TrtllmClient};
+use crate::client::{self, ModelInfo, TrtllmClient};
 use crate::convert::{ResponseState, build_generate_request_with_routing};
 use crate::model::ConfiguredModel;
 use crate::proto as pb;
@@ -88,8 +88,8 @@ pub struct TrtllmSidecarEngine {
     /// `kv.session` divergence in `convert`.
     mode: DisaggregationMode,
     subagent_affinity_auth_key: Option<String>,
-    /// Connection and limits may be discovered in the cancellable sidecar bootstrap.
-    connection: OnceCell<(TrtllmClient, ModelLimits)>,
+    /// Connection and model information may be discovered in the cancellable sidecar bootstrap.
+    connection: OnceCell<(TrtllmClient, ModelInfo)>,
     started: OnceCell<()>,
     routing: OnceCell<RoutingState>,
     supervision: RoutingSupervision,
@@ -285,7 +285,7 @@ impl TrtllmSidecarEngine {
         Ok((engine, config))
     }
 
-    async fn connect(&self) -> Result<(TrtllmClient, ModelLimits), DynamoError> {
+    async fn connect(&self) -> Result<(TrtllmClient, ModelInfo), DynamoError> {
         tracing::info!(
             endpoint = %self.endpoint,
             connections = self.transport.connections.get(),
@@ -320,7 +320,7 @@ impl TrtllmSidecarEngine {
             // (`grpc.health.v1` Check/Watch, with registration driven by
             // `Watch`). Do not grow a second readiness protocol here.
             Some(configured) => {
-                let reported = match client.model_limits(&model.source).await {
+                let reported = match client.model_info(&model.source).await {
                     Ok(reported) => reported,
                     Err(error) => {
                         // Tolerated because some OpenEngine servicer builds ship
@@ -336,10 +336,10 @@ impl TrtllmSidecarEngine {
                              ships no Control service or was started without \
                              --grpc-protocol openengine"
                         );
-                        ModelLimits::default()
+                        ModelInfo::default()
                     }
                 };
-                if let Some(engine_context_length) = reported.context_length
+                if let Some(engine_context_length) = reported.limits.context_length
                     && engine_context_length != configured
                 {
                     tracing::warn!(
@@ -349,8 +349,11 @@ impl TrtllmSidecarEngine {
                          reported; using the configured --context-length"
                     );
                 }
-                ModelLimits {
-                    context_length: Some(configured),
+                ModelInfo {
+                    limits: client::ModelLimits {
+                        context_length: Some(configured),
+                        ..reported.limits
+                    },
                     ..reported
                 }
             }
@@ -364,7 +367,7 @@ impl TrtllmSidecarEngine {
                 // traffic. The operator gets one startup error naming the fix
                 // instead of a worker that looks healthy and serves half.
                 client
-                    .wait_for_model_limits(&model.source, deadline, self.transport.retry_interval)
+                    .wait_for_model_info(&model.source, deadline, self.transport.retry_interval)
                     .await
                     .map_err(|error| {
                         client::invalid_argument(format!(
@@ -387,7 +390,8 @@ impl LLMEngine for TrtllmSidecarEngine {
         }
         // Synchronous constructors retain deferred discovery; the CLI and Python
         // sidecar launcher reuse the connection prepared by their async bootstrap.
-        let (client, limits) = self.connection.get_or_try_init(|| self.connect()).await?;
+        let (client, info) = self.connection.get_or_try_init(|| self.connect()).await?;
+        let limits = &info.limits;
         self.started
             .set(())
             .map_err(|_| client::engine_shutdown(ALREADY_STARTED))?;
@@ -490,6 +494,7 @@ impl LLMEngine for TrtllmSidecarEngine {
             "TensorRT-LLM gRPC is ready"
         );
         let mut config = model.engine_config();
+        config.served_model_name = info.served_model_name.clone();
         if let Some(node) = self.routing.get().and_then(|routing| routing.node.as_ref()) {
             config.runtime_data.insert(
                 crate::node::NODE_METADATA_KEY.to_string(),
@@ -505,7 +510,7 @@ impl LLMEngine for TrtllmSidecarEngine {
         request: PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let (client, limits) = self
+        let (client, info) = self
             .connection
             .get()
             .filter(|_| self.started.initialized())
@@ -522,7 +527,7 @@ impl LLMEngine for TrtllmSidecarEngine {
             &request,
             &request_id,
             &self.model.source,
-            Some(*limits),
+            Some(info.limits),
             self.mode,
             use_dp_targeting,
         )?;

@@ -46,6 +46,13 @@ pub(crate) struct ModelLimits {
     pub(crate) max_output_tokens: Option<u32>,
 }
 
+/// Registration name and inference limits reported by OpenEngine.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ModelInfo {
+    pub(crate) limits: ModelLimits,
+    pub(crate) served_model_name: Option<String>,
+}
+
 const TARGET_DP_RANK_METADATA_KEY: &str = "openengine-target-dp-rank";
 
 #[derive(Clone)]
@@ -171,7 +178,7 @@ impl TrtllmClient {
     /// unset rather than substituting its `max_input_len` default (measured
     /// against TensorRT-LLM main at 8bbaf66bd5), so `None` here means "the
     /// server did not say", and `--context-length` supplies it instead.
-    async fn get_model_info(&self, model: &str) -> Result<ModelLimits, tonic::Status> {
+    async fn get_model_info(&self, model: &str) -> Result<ModelInfo, tonic::Status> {
         let info = self
             .control()
             .get_model_info(pb::GetModelInfoRequest {
@@ -179,16 +186,20 @@ impl TrtllmClient {
             })
             .await?
             .into_inner();
-        Ok(ModelLimits {
-            context_length: info.max_context_length.filter(|len| *len > 0),
-            max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
+        Ok(ModelInfo {
+            limits: ModelLimits {
+                context_length: info.max_context_length.filter(|len| *len > 0),
+                max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
+            },
+            served_model_name: (!info.served_model_name.trim().is_empty())
+                .then_some(info.served_model_name),
         })
     }
 
     /// One `GetModelInfo` call, for when `--context-length` already supplies the
     /// window and the engine is consulted only to cross-check it and to learn
     /// its output cap.
-    pub(crate) async fn model_limits(&self, model: &str) -> Result<ModelLimits, DynamoError> {
+    pub(crate) async fn model_info(&self, model: &str) -> Result<ModelInfo, DynamoError> {
         tokio::time::timeout(RPC_TIMEOUT, self.get_model_info(model))
             .await
             .map_err(|_| {
@@ -276,16 +287,16 @@ impl TrtllmClient {
     /// rather than polling for half an hour and then blaming a slow load. An
     /// answer that says the request itself is wrong ends the wait for the same
     /// reason.
-    pub(crate) async fn wait_for_model_limits(
+    pub(crate) async fn wait_for_model_info(
         &self,
         model: &str,
         deadline: Instant,
         retry_interval: Duration,
-    ) -> Result<ModelLimits, DynamoError> {
+    ) -> Result<ModelInfo, DynamoError> {
         let mut last = "it never answered".to_string();
         loop {
             match timeout_at(deadline, self.get_model_info(model)).await {
-                Ok(Ok(limits)) if limits.context_length.is_some() => return Ok(limits),
+                Ok(Ok(info)) if info.limits.context_length.is_some() => return Ok(info),
                 Ok(Ok(_)) => {
                     return Err(protocol_error(format!(
                         "TensorRT-LLM answered GetModelInfo for {model} with no \

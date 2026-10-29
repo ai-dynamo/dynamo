@@ -53,6 +53,7 @@ struct FakeTrtllm {
     /// Answers `UNAVAILABLE`, the shape of an engine that is not serving yet.
     unavailable_model_info: Arc<AtomicBool>,
     model_info_calls: Arc<AtomicUsize>,
+    served_model_name: Arc<Mutex<String>>,
     kv_routing: Arc<AtomicBool>,
     server_info_error: Arc<Mutex<Option<tonic::Code>>>,
     kv_sources_error: Arc<Mutex<Option<tonic::Code>>>,
@@ -228,6 +229,7 @@ impl pb::control_server::Control for FakeTrtllm {
         }
         Ok(Response::new(pb::ModelInfo {
             model_id: "fake-model".to_string(),
+            served_model_name: self.served_model_name.lock().await.clone(),
             max_context_length: if self.empty_model_info.load(Ordering::SeqCst) {
                 None
             } else {
@@ -1010,6 +1012,23 @@ async fn start_waits_for_a_server_that_is_not_serving_yet() {
     );
 }
 
+/// The public model name must not replace the path used to load artifacts.
+#[tokio::test]
+async fn engine_registers_reported_name_separately_from_model_path() {
+    for configured_length in [None, Some(8192)] {
+        let service = FakeTrtllm::default();
+        *service.served_model_name.lock().await = "org/served-model".into();
+        let server = FakeServer::start(service).await;
+        let engine = engine_with(&server.endpoint, transport(1), configured_length, AGG);
+        let config = engine.start(0).await.expect("start");
+        assert_eq!(config.model, "model-source");
+        assert_eq!(
+            config.served_model_name.as_deref(),
+            Some("org/served-model")
+        );
+    }
+}
+
 /// `--context-length` wins over what the engine reports. The engine is still
 /// asked, so the disagreement can be logged and its output cap picked up, but
 /// its answer does not decide the window.
@@ -1022,6 +1041,10 @@ async fn a_configured_context_length_outranks_the_servers() {
         .start(0)
         .await
         .expect("start with a configured window");
+    assert_eq!(
+        config.served_model_name, None,
+        "an empty reported name uses the existing fallback"
+    );
     assert_eq!(
         config.llm.expect("llm registration").context_length,
         Some(8192),
@@ -1047,6 +1070,7 @@ async fn a_configured_context_length_survives_a_server_without_control() {
         .start(0)
         .await
         .expect("start with a configured window");
+    assert_eq!(config.served_model_name, None);
     assert_eq!(
         config.llm.expect("llm registration").context_length,
         Some(8192)

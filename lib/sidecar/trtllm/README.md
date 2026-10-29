@@ -16,6 +16,10 @@ you to.
 `dynamo-trtllm-sidecar` connects a Dynamo worker to TensorRT-LLM's OpenEngine
 gRPC server. See the [sidecar overview](../README.md) for installation.
 
+The sidecar reads model metadata from `--model-path`, which must be accessible
+to the sidecar. It registers the served model name reported by the engine; if
+the name is empty or unavailable, it registers the model path as before.
+
 > [!TIP]
 > For the best and latest support, use the upstream TensorRT-LLM nightly image,
 > which carries the latest gRPC server updates. Nightly builds are the
