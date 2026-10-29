@@ -627,7 +627,19 @@ def _run_v1_profiler(case: ComparisonCase) -> None:
             f"[{case.hardware.name}/{case.name}] v1beta1: {shlex.join(command)}",
             flush=True,
         )
-        subprocess.run(command, check=True, env=environment)
+        result = subprocess.run(
+            command,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        print(result.stdout, end="", flush=True)
+        if result.returncode:
+            raise RuntimeError(
+                result.stdout.strip()
+                or f"v1beta1 profiler exited with status {result.returncode} without diagnostics"
+            )
         final_config = Path(temporary_dir) / "final_config.yaml"
         if not final_config.is_file():
             raise RuntimeError(

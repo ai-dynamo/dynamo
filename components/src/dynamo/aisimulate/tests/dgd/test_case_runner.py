@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -272,6 +274,63 @@ def test_load_suite_parses_expected_renderer_failure(tmp_path) -> None:
         match="TEP.*not implemented",
     )
     assert entry.exception_for("render", "sweeper-aic") is None
+
+
+@pytest.mark.parametrize(
+    ("stream", "diagnostic", "match", "expected_failure"),
+    [
+        ("stderr", "Known profiler failure", "Known profiler failure", False),
+        ("stdout", "Known profiler failure", "Known profiler failure", False),
+        ("stderr", "Unrelated profiler bug", "Known profiler failure", True),
+        ("stderr", "Unrelated profiler bug", "returned non-zero exit status", True),
+    ],
+    ids=["known-stderr", "known-stdout", "unrelated-error", "generic-exit-message"],
+)
+@pytest.mark.timeout(10)
+def test_profiler_failure_matches_child_diagnostic(
+    monkeypatch, tmp_path, capfd, stream, diagnostic, match, expected_failure
+) -> None:
+    _write_case_and_hardware(tmp_path, monkeypatch)
+    case = run_cases.load_case(
+        "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
+    )
+    run_subprocess = subprocess.run
+
+    def failing_profiler(command, **kwargs):
+        assert command[1:3] == ["-m", "dynamo.profiler"]
+        script = (
+            "import os, sys; print('Profiler progress', flush=True); "
+            f"print(os.environ['PROFILER_DIAGNOSTIC'], file=sys.{stream}, flush=True); "
+            "sys.exit(7)"
+        )
+        kwargs["env"] = {**kwargs["env"], "PROFILER_DIAGNOSTIC": diagnostic}
+        return run_subprocess([sys.executable, "-c", script], **kwargs)
+
+    monkeypatch.setattr(run_cases.subprocess, "run", failing_profiler)
+    entry = run_cases.SuiteEntry(
+        case=case.name,
+        hardware=case.hardware.name,
+        exceptions={
+            "render": {
+                "profiler-v1beta1": run_cases.SuiteException(
+                    status="broken", reason="Known profiler failure.", match=match
+                ),
+                "sweeper": run_cases.SuiteException(
+                    status="skipped", reason="This case exercises the profiler process."
+                ),
+            }
+        },
+    )
+
+    observed = f"Profiler progress\n{diagnostic}"
+    expected = [f"profiler-v1beta1: {observed}"] if expected_failure else []
+    assert run_cases.run_case(case, entry) == expected
+    assert (case.generated_dir / "error-profiler-v1beta1.txt").read_text() == (
+        observed + "\n"
+    )
+    output = capfd.readouterr()
+    assert "Profiler progress" in output.out + output.err
+    assert diagnostic in output.out + output.err
 
 
 @pytest.mark.parametrize(
