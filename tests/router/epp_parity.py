@@ -831,7 +831,7 @@ def _not_found(resource: str, name: str) -> dict[str, Any]:
 
 
 def _write_chunk(handler: BaseHTTPRequestHandler, payload: dict[str, Any]) -> None:
-    data = json.dumps(payload).encode("utf-8")
+    data = json.dumps(payload).encode("utf-8") + b"\n"
     handler.wfile.write(f"{len(data):X}\r\n".encode("ascii") + data + b"\r\n")
     handler.wfile.flush()
 
