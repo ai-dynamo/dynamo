@@ -74,9 +74,10 @@ func newWriterFixture(t *testing.T) *writerFixture {
 			NativeSearchInput: v1beta2.NativeSearchInput{
 				Model:    &v1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"},
 				Backends: []v1beta2.Backend{v1beta2.BackendVLLM},
-				Hardware: &v1beta2.HardwareSpec{GPU: &v1beta2.GPUHardwareSpec{
-					SKU: new("h200_sxm"), Budget: new(int32(8)),
-				}},
+				Hardware: &v1beta2.HardwareSpec{
+					GPU:            &v1beta2.GPUHardwareSpec{SKU: new("h200_sxm"), Budget: new(int32(8))},
+					NumGPUsPerNode: new(int32(8)),
+				},
 				Workload: &v1beta2.WorkloadSpec{Static: &v1beta2.StaticWorkloadSpec{}},
 				Objective: &v1beta2.ObjectiveSpec{
 					Mode: v1beta2.ObjectiveModeOptimize, Metric: &metric, SLA: &v1beta2.ObjectiveSLASpec{},
