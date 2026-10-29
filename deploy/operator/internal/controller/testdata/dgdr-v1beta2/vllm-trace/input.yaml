@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The test writes trace.jsonl, gzip-compressed, to retune/w-1.jsonl.gz on the request-traces claim
+# before it applies this Request. The direct generator renders the Candidate without the AIC
+# generator bridge.
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: aisimulate-vllm-trace
+spec:
+  model:
+    name: Qwen/Qwen3-32B
+  backends:
+    - vllm
+  workload:
+    trace:
+      format: dynamo
+      source:
+        pvc:
+          claimName: request-traces
+          path: retune/w-1.jsonl.gz
+      replay:
+        arrivalSpeedupRatio: 2.0
+  objective:
+    mode: Optimize
+    metric: ThroughputPerGPU
+    sla: {}
+  aisimulate:
+    inputOverrides:
+      engine:
+        mode: aggregated
+        context_length: 32768
+        workers:
+          prefill: null
+          decode: null
+      optimizer:
+        algorithm: random
+        max_trials: 3
+        parallelism: 1
+        candidate_timeout_seconds: 120
+      dgdr_run:
+        generator: direct
+        snapshot_interval_seconds: 0
+  recommendation:
+    maxCandidates: 1

@@ -1114,6 +1114,100 @@ kubectl get dgdr my-model -n $NAMESPACE \
 - The relationship is tracked via labels: `dgdr.nvidia.com/name` and `dgdr.nvidia.com/namespace`.
 - Additional resources (planner ConfigMaps) are created in the same namespace and labeled with `dgdr.nvidia.com/name`.
 
+## Replay a recorded trace (v1beta2)
+
+<Warning>
+The `nvidia.com/v1beta2` API is experimental and disabled by default. See the
+[installation guide](../../kubernetes/installation/install-dynamo.md) before you enable it.
+</Warning>
+
+A native `v1beta2` request can evaluate every candidate against a recorded request trace instead
+of synthetic traffic. Set `spec.workload.trace` instead of `spec.workload.static`; the two are
+mutually exclusive, and admission adds no static default when `trace` is set. To switch an existing
+request from static traffic to a trace, set `spec.workload.static` to `null` in the same update.
+
+```yaml
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-trace-replay
+spec:
+  model:
+    name: Qwen/Qwen3-0.6B
+  workload:
+    trace:
+      format: dynamo                          # required; no default
+      source:
+        pvc:
+          claimName: request-traces           # PersistentVolumeClaim in this namespace
+          path: windows/2026-10-27T10-00.jsonl.gz
+      replay:
+        arrivalSpeedupRatio: 1.0              # optional; 2.0 replays arrivals twice as fast
+```
+
+Before you create the request:
+
+- Create the PersistentVolumeClaim in the request's namespace. Use a filesystem volume, not
+  `volumeMode: Block`. When the process that writes the trace keeps running, use `ReadWriteMany`.
+  With `ReadWriteOnce`, a Job scheduled to another node than the writer waits in
+  `ContainerCreating`, and with `ReadWriteOncePod`, a Job waits in `Pending` until the writer's pod
+  is gone. The Run reports `Running` while its Job waits.
+- Finish writing the file. `path` names one file relative to the claim root; directories and globs
+  are not expanded. Every Run of the request reads the file when its Job starts, so do not rewrite
+  it afterwards. To replay several rolled `jsonl_gz` segments, concatenate them into one `.jsonl.gz`
+  file. A relative symlink to another file in the claim works. An absolute symlink does not,
+  because the kubelet resolves it on the node rather than inside the claim, and neither does a
+  symlink that leaves the claim.
+- Make the file readable by others (for example, mode `0644` in `0755` directories) or by group
+  `65532`, which the Job's pod has as a supplemental group. The pod sets no `fsGroup`, so neither
+  the kubelet nor a CSI driver changes the ownership or permissions of anything on the claim.
+
+The operator mounts only this file, read-only and only into the AISimulate container, through a
+`subPath` of the claim at `/var/run/aisimulate/trace/trace.jsonl.gz`, or at
+`/var/run/aisimulate/trace/trace.jsonl` when `path` does not end in `.gz`. The kubelet resolves
+`path` inside the claim and refuses to mount a file outside it. If the file does not exist when
+the Job starts, the kubelet cannot mount it either. On a volume type whose node directory the
+kubelet can write, such as `hostPath`, the kubelet instead creates an empty directory at `path` on
+the claim, and the Run fails when AISimulate cannot read it.
+
+`format: dynamo` is the only admitted format. It reads the Dynamo request trace
+(`dynamo.request.trace.v1`) written by the frontend, as JSON Lines or as gzip-compressed JSON Lines
+when the file name ends in `.gz`. See the [Request Trace Reference](../observability/request-traces.mdx).
+
+The operator lowers the trace to the AISimulate input `traffic.source` (`type: trace`, `format`, and
+`paths` with the mounted file) and `traffic.load.type: trace_timestamps`, with
+`traffic.load.speedup` when `arrivalSpeedupRatio` is set. It adds no `traffic.stop.requests`. When
+`trace` is set, `spec.aisimulate.inputOverrides` cannot set `traffic.source.type`,
+`traffic.source.format`, or `traffic.source.paths`, or replace `traffic` or `traffic.source` with a
+non-object value. Admission rejects these overrides, and the Run controller restores the typed
+values. Other `traffic` overrides, such as `traffic.load` and `traffic.stop`, go to AISimulate,
+which validates the complete input when the Run's Job starts; an input it rejects fails the Run.
+
+The Run fails, and its `Completed` condition has reason `TraceSourceUnavailable`, when its Job could
+never read the trace:
+
+- The claim does not exist, is being deleted, is a block volume, or has lost its volume. The
+  operator checks this before it creates the Job, and again whenever the claim or the Job's pod
+  changes until the AISimulate container starts. Once a pod is scheduled, Kubernetes keeps a claim
+  being deleted until the pod ends, and the pod can still mount it.
+- The kubelet cannot mount the trace file, for example because it does not exist, is an absolute
+  symlink, or is a symlink that leaves the claim.
+
+The operator records the failure on the Run and then deletes such a Job. A claim that is still
+`Pending`, such as one that waits for its first consumer, is accepted. The request starts one Run
+per `metadata.generation`, so after you fix the claim or the file, change the request's `spec` to
+start a new Run.
+
+```bash
+# Active and recent Runs of the request
+kubectl get dynamographdeploymentrequests.v1beta2.nvidia.com qwen3-trace-replay -n "$NAMESPACE" \
+  -o jsonpath='{.status.activeRunRef}{"\n"}{.status.recentRunRefs}{"\n"}'
+
+# Why a Run failed
+kubectl get dynamographdeploymentrun qwen3-trace-replay-1 -n "$NAMESPACE" \
+  -o jsonpath='{.status.conditions}'
+```
+
 ## Known issues
 
 - **PCIe profiler data not yet available.** See the PCIe callout under [SKU format](#sku-format).

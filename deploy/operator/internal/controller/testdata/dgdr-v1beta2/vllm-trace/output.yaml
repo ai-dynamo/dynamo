@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentCandidate
+metadata:
+  $strict: false
+  name: $glob:aisimulate-vllm-trace-1-*-evaluated-point-*
+  labels:
+    $strict: false
+    nvidia.com/dgdr-candidate-id: $pattern:^evaluated-point-[0-9a-f]{12}$
+    nvidia.com/dgdr-run-uid: $ignore
+spec:
+  $strict: false
+  parameters:
+    $strict: false
+    backend: vllm
+status:
+  metrics:
+    $strict: false
+    score: $ignore
+    usedGpus: $ignore

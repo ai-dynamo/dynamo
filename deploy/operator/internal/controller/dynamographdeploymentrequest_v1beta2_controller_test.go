@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -32,7 +33,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -738,5 +741,68 @@ func TestV1beta2RequestControllerPreservesInputOverridesForRunLowering(t *testin
 	request.Spec.AISimulate.InputOverrides.Raw[0] = '['
 	if got := string(run.Spec.AISimulate.InputOverrides.Raw); got != overrides {
 		t.Fatalf("Run inputOverrides changed with the Request: %s", got)
+	}
+}
+
+func TestV1beta2RequestControllerReportsARunTheCRDRejectsInsteadOfRetryingIt(t *testing.T) {
+	invalid := apierrors.NewInvalid(
+		schema.GroupKind{Group: nvidiacomv1beta2.GroupVersion.Group, Kind: "DynamoGraphDeploymentRun"}, "search-1",
+		field.ErrorList{field.Invalid(field.NewPath("spec", "workload", "trace", "source", "pvc", "path"), "../escape.jsonl",
+			"path must be relative to the claim root without empty, '.' or '..' segments")},
+	)
+	tests := []struct {
+		name        string
+		createErr   error
+		wantRuns    []string
+		wantReason  string
+		wantMessage string
+	}{
+		{
+			name:       "a Run the API server accepts is created",
+			wantRuns:   []string{"search-1"},
+			wantReason: dgdrReasonRunCreated,
+		},
+		{
+			name:        "a Run the CRD rejects is reported once as an invalid spec",
+			createErr:   invalid,
+			wantReason:  dgdrReasonInvalidSpec,
+			wantMessage: invalid.Error(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			creates := 0
+			f := newDGDRV1beta2FixtureWithInterceptor(t, interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if _, ok := obj.(*nvidiacomv1beta2.DynamoGraphDeploymentRun); ok {
+						creates++
+						if tt.createErr != nil {
+							return tt.createErr
+						}
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+			}, dgdrV1beta2Request(true))
+
+			t.Log("Reconcile twice: an invalid spec is a condition for this generation, not a create to retry")
+			f.reconcile()
+			f.reconcile()
+			if names := f.runNames(); !slices.Equal(names, tt.wantRuns) {
+				t.Fatalf("runs = %v, want %v", names, tt.wantRuns)
+			}
+			if creates != 1 {
+				t.Fatalf("Run creates = %d, want 1", creates)
+			}
+			if request := f.request(); tt.createErr != nil && request.Status.ActiveRunRef != nil {
+				t.Fatalf("activeRunRef = %+v, want the reservation released", request.Status.ActiveRunRef)
+			}
+			condition := dgdrV1beta2AcceptedCondition(t, f.request())
+			if condition.Reason != tt.wantReason {
+				t.Fatalf("Accepted = %+v, want reason %s", condition, tt.wantReason)
+			}
+			if tt.wantMessage != "" && condition.Message != tt.wantMessage {
+				t.Fatalf("Accepted message = %q, want %q", condition.Message, tt.wantMessage)
+			}
+		})
 	}
 }

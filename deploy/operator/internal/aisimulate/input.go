@@ -161,6 +161,8 @@ func Underlay(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 		}
 	}
 
+	b.setTraceWorkload(spec.Workload)
+
 	if objective := spec.Objective; objective != nil {
 		if objective.Mode == v1beta2.ObjectiveModePareto {
 			if len(objective.Metrics) > 0 && !isDefaultParetoMetrics(objective.Metrics) {
@@ -189,6 +191,20 @@ func Underlay(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 		}
 	}
 	return b.root, b.err
+}
+
+// setTraceWorkload lowers workload.trace: it replays the recorded arrival times, scaled by the
+// speedup only when one is set. workload may be nil; a workload without a trace lowers nothing.
+func (b *builder) setTraceWorkload(workload *v1beta2.WorkloadSpec) {
+	if workload == nil || workload.Trace == nil {
+		return
+	}
+	trace := workload.Trace
+	b.set(TraceSource(trace), trafficSource)
+	b.set("trace_timestamps", trafficLoadType)
+	if replay := trace.Replay; replay != nil && replay.ArrivalSpeedupRatio != nil {
+		b.set(*replay.ArrivalSpeedupRatio, trafficLoadSpeedup)
+	}
 }
 
 func hasStaticWorkloadFields(static *v1beta2.StaticWorkloadSpec) bool {
