@@ -50,7 +50,7 @@ impl McsReplicaDirectory {
             tracing::error!(
                 service = %service.name,
                 karmada_max_service_name = mcs::KARMADA_MAX_SERVICE_NAME,
-                "the router Service's name is too long for Karmada to import it, so no router replicas will be listed"
+                "the Service's name is too long for Karmada to import it, so none of its replicas will be listed"
             );
         }
         Self(SliceDirectory::new(
