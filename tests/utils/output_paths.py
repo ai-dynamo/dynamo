@@ -86,9 +86,19 @@ def prepare_test_output_dir(log_dir: str, session_start: float) -> None:
             continue
         if stale:
             shutil.rmtree(path, ignore_errors=True)
-    if os.path.exists(log_dir):
-        attempt = 1
-        while os.path.exists(f"{log_dir}.attempt{attempt}"):
-            attempt += 1
-        os.rename(log_dir, f"{log_dir}.attempt{attempt}")
+    attempt = 1
+    while os.path.exists(log_dir):
+        archive = f"{log_dir}.attempt{attempt}"
+        attempt += 1
+        try:
+            # mkdir claims the slot atomically, so two workers cannot pick the
+            # same one; rename then replaces the claimed empty directory.
+            os.mkdir(archive)
+        except FileExistsError:
+            continue
+        try:
+            os.rename(log_dir, archive)
+        except FileNotFoundError:
+            os.rmdir(archive)
+        break
     os.makedirs(log_dir, exist_ok=True)

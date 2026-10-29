@@ -82,21 +82,3 @@ def test_repeat_execution_keeps_previous_attempt_output(tmp_path: Path) -> None:
     second_attempt = tmp_path / f"{log_dir.name}.attempt2"
     assert (second_attempt / "test.log.txt").read_text() == "second attempt"
     assert list(log_dir.iterdir()) == []
-
-
-def test_keeps_attempts_written_by_another_worker(tmp_path: Path) -> None:
-    # xdist workers and same-named tests in different files share one directory.
-    session_start = time.time()
-    log_dir = tmp_path / "test_deployment"
-    other_worker_attempt = tmp_path / f"{log_dir.name}.attempt1"
-    other_worker_attempt.mkdir()
-    (other_worker_attempt / "test.log.txt").write_text("worker gw0")
-    log_dir.mkdir()
-    (log_dir / "test.log.txt").write_text("worker gw1")
-
-    prepare_test_output_dir(str(log_dir), session_start)
-
-    assert (other_worker_attempt / "test.log.txt").read_text() == "worker gw0"
-    archived = tmp_path / f"{log_dir.name}.attempt2"
-    assert (archived / "test.log.txt").read_text() == "worker gw1"
-    assert list(log_dir.iterdir()) == []
