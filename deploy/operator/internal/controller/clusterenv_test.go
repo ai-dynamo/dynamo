@@ -381,6 +381,8 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			require.Equal(t, "h200_sxm", ptr.Deref(request.Spec.Hardware.GPU.SKU, ""))
 			require.Equal(t, int32(8), ptr.Deref(request.Spec.Hardware.GPU.Budget, 0),
 				"admission must use the selected 8-GPU node shape, not the 12-GPU inventory")
+			require.Equal(t, int32(8), ptr.Deref(request.Spec.Hardware.NumGPUsPerNode, 0),
+				"admission must persist the selected node width")
 
 			t.Log("Watch every Run transition before starting the production controllers")
 			watchClient, err := client.NewWithWatch(env.RESTConfig(), client.Options{Scheme: newClusterTestScheme()})
@@ -388,16 +390,6 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			runWatch, err := watchClient.Watch(ctx, &nvidiacomv1beta2.DynamoGraphDeploymentRunList{}, client.InNamespace(env.Namespace()))
 			require.NoError(t, err)
 			defer runWatch.Stop()
-
-			t.Log("Provide the Run controller the same heterogeneous inventory resolved by Request admission")
-			hardwareCache := gpu.NewGPUDiscoveryCache()
-			hardwareCache.Set(nvidiacomv1beta1.GPUSKUTypeH200SXM, &gpu.GPUInfo{
-				System:            nvidiacomv1beta1.GPUSKUTypeH200SXM,
-				GPUsPerNode:       8,
-				NodesWithGPUs:     2,
-				TotalGPUs:         12,
-				SelectedShapeGPUs: 8,
-			}, time.Hour)
 
 			t.Log("Start the production Request, Run, AISimulate Job, and publisher chain")
 			operatorConfig := clusterTestRestrictedConfig(env.Namespace())
@@ -409,7 +401,6 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 				}
 				return SetupDynamoGraphDeploymentRunV1beta2(mgr, DynamoGraphDeploymentRunSetupOptions{
 					SetupOptions:            setupOptions,
-					GPUDiscoveryCache:       hardwareCache,
 					PlannerImage:            plannerImage,
 					DynamoVersion:           dynamoVersion,
 					OperatorImage:           operatorImage,
@@ -448,6 +439,8 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			require.NotNil(t, completedRun.Spec.Hardware.GPU)
 			require.Equal(t, int32(8), ptr.Deref(completedRun.Spec.Hardware.GPU.Budget, 0),
 				"immutable Run snapshot lost the admitted selected-shape budget")
+			require.Equal(t, int32(8), ptr.Deref(completedRun.Spec.Hardware.NumGPUsPerNode, 0),
+				"immutable Run snapshot lost the admitted node width")
 
 			t.Log("Verify the Job consumed the immutable input recorded in Run status")
 			require.NotNil(t, completedRun.Status.JobRef, "completed Run has no Job reference")
