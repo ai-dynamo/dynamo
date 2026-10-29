@@ -72,6 +72,7 @@ areas:
   github_team: '@ai-dynamo/dynamo-global-router-codeowners'
   path_globs:
   - components/src/dynamo/pool_relay/
+  - lib/global-view-receiver/
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
   - lib/global-*/**
   - docs/fern/pages/kubernetes/kv-aware-routing/pool-relay.md

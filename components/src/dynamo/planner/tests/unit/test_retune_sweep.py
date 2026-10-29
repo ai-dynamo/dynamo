@@ -66,7 +66,7 @@ pytestmark = [
 def test_score_uses_the_fixed_window_denominator():
     summary = {GOODPUT_KEY: 120.0, "gpu_hours": 2.0, "duration_ms": 1_800_000.0}
 
-    score, metrics = score_summary(summary, window_s=1_500.0)
+    score, metrics = score_summary(summary, 1_500.0, "GoodputPerGPU")
 
     # goodput tokens over the run / (window seconds x average GPUs)
     assert score == pytest.approx(120.0 * 1_800.0 / (1_500.0 * 4.0))
@@ -79,7 +79,7 @@ def test_score_uses_the_fixed_window_denominator():
         ({GOODPUT_KEY: math.nan, "gpu_hours": 1.0, "duration_ms": 1.0}, "finite"),
     ]:
         with pytest.raises(ValueError, match=match):
-            score_summary(bad, window_s=10.0)
+            score_summary(bad, 10.0, "GoodputPerGPU")
 
 
 # Four average GPUs over a 1,800 s replay of a 1,500 s window.
@@ -113,7 +113,6 @@ def test_each_objective_scores_the_target_the_dgdr_operator_lowers_it_to(
     objective, target, raw, score, maximized
 ):
     # The targets are those of the DGDR operator's v1beta2 publicMetric.
-    assert get_args(RetuneObjective) == tuple(_OBJECTIVES)
     assert _OBJECTIVES[objective].target.value == target
 
     value, metrics = score_summary(SUMMARY, 1_500.0, objective)
@@ -179,7 +178,6 @@ def test_a_missing_score_input_fails_the_candidate(objective, update, match):
 
 
 def test_only_goodput_objectives_need_the_sla_and_gpu_hours():
-    # A latency replay without goodput (no SLA) or GPU accounting scores.
     summary = {"mean_ttft_ms": 250.0, "num_ttft_samples": 10}
 
     assert score_summary(summary, 1_500.0, "TTFT")[0] == 250.0

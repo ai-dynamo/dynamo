@@ -302,7 +302,7 @@ def with_predictor_fields(
 def score_summary(
     summary: Mapping[str, Any],
     window_s: float,
-    objective: RetuneObjective = "GoodputPerGPU",
+    objective: RetuneObjective,
 ) -> tuple[float, dict[str, Any]]:
     """Score a replay summary on ``objective``, in the objective's own units.
 
@@ -377,7 +377,7 @@ def evaluate_candidate(
     sla_ttft_ms: float,
     sla_itl_ms: float,
     window_s: float,
-    objective: RetuneObjective = "GoodputPerGPU",
+    objective: RetuneObjective,
 ) -> tuple[float, dict[str, Any]]:
     """Replay the window once with ``params`` and score its summary on ``objective``.
 
@@ -387,12 +387,9 @@ def evaluate_candidate(
     predictor is warmed with the observations in ``warmup_path``, when set.
     The replay uses the canonical router seed and ordinal request ids, so the
     baseline and every candidate see common random numbers, and it does not
-    depend on host speed: a candidate that changes no routing or scaling
-    decision scores exactly the baseline. With the pinned AISimulate, an inner
-    planner in SLA mode is not guaranteed to be bitwise reproducible across
-    processes: AISimulate's forward-pass performance model iterates its
-    samples in a per-process hash order, so its refits can differ in the last
-    bits and flip a scaling decision.
+    depend on host speed or on the worker process, inner planner included: a
+    candidate that changes no routing or scaling decision scores exactly the
+    baseline.
     Raises when the replay fails or its summary lacks the score inputs.
     """
 

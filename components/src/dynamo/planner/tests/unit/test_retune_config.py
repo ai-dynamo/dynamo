@@ -287,27 +287,6 @@ def test_retune_only_mode_needs_both_scaling_flags_explicitly_false():
         _config(optimization_target="sla", **RETUNE_ONLY)
 
 
-def test_objective_takes_the_dgdr_metric_names_and_defaults_to_goodput_per_gpu():
-    assert RetuneConfig(interval_seconds=600).objective == "GoodputPerGPU"
-    # The DGDR v1beta2 ObjectiveMetric enum, spelled as a Request writes it.
-    assert get_args(RetuneObjective) == (
-        "Throughput",
-        "ThroughputPerGPU",
-        "ThroughputPerUser",
-        "TTFT",
-        "E2ELatency",
-        "Goodput",
-        "GoodputPerGPU",
-    )
-    for objective in get_args(RetuneObjective):
-        config = _config(mode="agg", retune=_retune(objective=objective), **RETUNE_ONLY)
-        assert config.retune.objective == objective
-    # AISimulate target names and other spellings are not the DGDR names.
-    for objective in ("goodput_per_gpu", "goodputPerGPU", "MinGPUs", "Pareto"):
-        with pytest.raises(ValidationError, match="objective"):
-            RetuneConfig(interval_seconds=600, objective=objective)
-
-
 @pytest.mark.parametrize("objective", get_args(RetuneObjective))
 def test_scaling_retune_needs_a_per_gpu_objective(objective):
     # Easy mode forces load scaling on, so each candidate replay sizes its

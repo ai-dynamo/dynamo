@@ -407,12 +407,9 @@ Every candidate replay, the current point's included, runs with the canonical ro
 ordinal request ids, so all candidates of a window see common random numbers. Its result does not
 depend on host speed: a replayed Planner tick runs to completion, without the live tick deadline. A
 candidate that changes no routing or scaling decision scores exactly the current point; a candidate
-that changes decisions is still compared on one sample path of the window. With the pinned
-AISimulate release, a candidate replay whose inner Planner uses `optimization_target: sla` is not
-guaranteed to be bitwise reproducible across processes: AISimulate's forward-pass performance model
-iterates its samples in a per-process hash order, so its refits can differ in the last bits and flip
-a scaling decision. Such a candidate can score differently from the current point even when its
-parameters change nothing. The outer replay keeps its default, non-deterministic routing.
+that changes decisions is still compared on one sample path of the window. Nor does the result
+depend on which sweep worker process replays the candidate, including with an inner Planner that
+uses `optimization_target: sla`. The outer replay keeps its default, non-deterministic routing.
 
 Without scaling, a candidate replay keeps the replica counts fixed. With scaling, it runs an inner
 Planner: the current configuration with the candidate's Planner fields, retune disabled, no
@@ -473,7 +470,7 @@ is paired on the same window file and the same random numbers.
 Candidates rank best first, highest score for a maximized objective and lowest for `TTFT` and
 `E2ELatency`, with ties going to the current point and then to the canonical order. The best
 candidate is applied only when it beats the current score by more than `min_improvement_percentage`
-/ 100 × |current score| (above it for a maximized objective, below it for a minimized one) and it
+/ 100 × the current score (above it for a maximized objective, below it for a minimized one) and it
 changes a router parameter or a Planner field. A zero current score therefore needs any strict
 gain, and a zero latency is never beaten. Each decision has one outcome:
 

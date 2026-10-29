@@ -369,10 +369,8 @@ apply, with outcome `advisory`; the router and Planner parameters keep their sta
 A sweep takes time, so the decision lands at least one Planner tick after the sweep launches, and
 later when `decision_latency_seconds` models the sweep's duration. The old parameters serve traffic
 until then. Each candidate is replayed once, and all candidates of a window share one random seed,
-so a candidate that changes no routing or scaling decision ties the current point and is kept (with
-the pinned AISimulate release, an inner Planner with `optimization_target: sla` is not guaranteed to
-be bitwise reproducible; see
-[Candidates and the Sweep](planner-design.md#candidates-and-the-sweep)).
+so a candidate that changes no routing or scaling decision ties the current point and is kept; see
+[Candidates and the Sweep](planner-design.md#candidates-and-the-sweep).
 A candidate that changes decisions is judged on one replay of one window, so
 `min_improvement_percentage` sets the margin it must clear; see
 [Measure the Gain](aisimulate-planner-replay.mdx#measure-the-gain).

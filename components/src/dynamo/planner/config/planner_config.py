@@ -2344,9 +2344,6 @@ class PlannerConfig(BaseModel):
             # Before the domain expansion, whose errors assume replay.
             self._validate_live_retune(retune)
         if self.scaling_enabled() and retune.objective not in RETUNE_PER_GPU_OBJECTIVES:
-            # Every candidate replay runs an inner planner that sizes its own
-            # replicas, and min_workers or the GPU budgets may be searched; a
-            # metric that ignores GPU count picks the largest deployment.
             raise ValueError(
                 f"retune.objective {retune.objective!r} does not divide by "
                 "GPUs, so with load or throughput scaling it favors the "
