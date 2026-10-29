@@ -2120,15 +2120,14 @@ fn wrap_engine_control_callback(
 ) -> EngineRouteCallback {
     let policy = engine_control_policy(&control_name);
     let recovery = routes.recovery.clone();
-    let recovery_resume =
-        matches!(control_name.as_str(), "resume_generation" | "wake_up").then(|| {
-            recovery_resume_callback(
-                control_name.clone(),
-                callback.clone(),
-                engine.clone(),
-                routes.clone(),
-            )
-        });
+    let recovery_resume = (policy == EngineControlPolicy::RegisterAfter).then(|| {
+        recovery_resume_callback(
+            control_name.clone(),
+            callback.clone(),
+            engine.clone(),
+            routes.clone(),
+        )
+    });
     let callback: EngineRouteCallback = Arc::new(move |body| {
         let callback = callback.clone();
         let engine = engine.clone();
