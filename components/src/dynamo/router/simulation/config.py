@@ -98,7 +98,9 @@ class ConversationAffinityConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["session", "sibling_group"] = "session"
-    ttl_seconds: float = Field(default=300.0, ge=1.0, allow_inf_nan=False)
+    ttl_seconds: float = Field(
+        default=300.0, ge=1.0, le=31_536_000, allow_inf_nan=False
+    )
 
 
 class RouterPredictionConfig(BaseModel):
