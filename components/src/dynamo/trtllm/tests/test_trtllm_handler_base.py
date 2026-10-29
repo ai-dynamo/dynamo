@@ -160,6 +160,18 @@ class TestOverrideSamplingParams:
         assert result.n == 2
         assert result.best_of == 2
 
+    def test_logit_bias_is_rejected(self):
+        sampling_params = MockSamplingParams()
+        request = {
+            "sampling_options": {
+                "logit_bias": {"18": -100},
+                "temperature": 0.5,
+            }
+        }
+
+        with pytest.raises(InvalidArgument, match="logit_bias"):
+            HandlerBase._override_sampling_params(sampling_params, request)
+
     def test_unknown_attributes_raise_error(self):
         """Test that unknown attributes raise a TypeError.
 

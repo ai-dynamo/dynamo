@@ -31,6 +31,7 @@ for the architecture.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (DP) | Experimental |
 
 ## Launch Locally
 
@@ -66,6 +67,41 @@ kubectl apply -f lib/sidecar/trtllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 ```
 
+Multinode deployments require complete `leader` and `worker` role PodTemplates. Set
+`backendFramework: trtllm` as the examples do: the operator does not infer a backend from a
+native engine launch, and on Grove it starts the leader clique after the worker clique only
+when the backend is known. The templates own the MPI launch, the SSH setup, the
+engine probes, and the sidecar placement. In sidecar mode the operator does not apply
+its TensorRT-LLM SSH key mount, `mpirun` wrapper, or worker probe rewrite. See the
+[TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/deploy/multinode_tp.yaml),
+where the leader launches every rank with `mpirun` over SSH and runs the only sidecar,
+and the [attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/deploy/multinode_dp.yaml),
+where every rank publishes KV events on its own node, so the worker also runs a
+sidecar that relays its local events under the leader's worker identity through
+OpenEngine's follower metadata endpoint. Engine-failure KV recovery remains incomplete
+and is tracked in [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
+
+The leader runs `trtllm-llmapi-launch trtllm-serve --grpc --grpc-protocol openengine
+--host 0.0.0.0` and uses Kubernetes gRPC probes against the standard health service:
+`liveness` for the startup and liveness probes, `inference` for readiness. That service
+is in TensorRT-LLM nightlies from 2026-10-27; node-local discovery and native KV events
+need 1.4.0rc1 or later. Worker `main` containers run `sshd` for the MPI launch and carry
+no probes: the leader waits for `sshd`, and losing `sshd` or a rank aborts `mpirun` and
+restarts the leader. The release images ship no `sshd`, so the examples install
+`openssh-server` at start, and they export the container environment to `sshd` sessions
+so Triton JIT on the worker finds CUDA. TensorRT-LLM attention DP requires untied input
+and output embeddings; the DP example serves `TinyLlama/TinyLlama-1.1B-Chat-v1.0`.
+
+> [!WARNING]
+> The multinode examples bind the OpenEngine listener to every Pod interface so the
+> kubelet can probe it. The listener is unauthenticated: any client that reaches the
+> Pod IP can run inference and abort requests. Restrict it with a NetworkPolicy, or
+> bind `127.0.0.1` and use exec probes as `agg_kv_router.yaml` does.
+
+The examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which exist only in
+DGDs created by operator 1.6.0 or later. For an older DGD, see
+[Use the variables in a DGD created before 1.6.0](../../../../../kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160).
+
 ## Topologies
 
 The frontend sends inference requests to each engine's leader sidecar, which forwards them to OpenEngine over gRPC and polls routing load for all attention-DP ranks. Each sidecar discovers its node's KV event sources through OpenEngine and relays local KV events through Dynamo's event plane. Follower sidecars do not serve inference requests.
@@ -85,7 +121,7 @@ node holds the remaining TP ranks.
 
 ### Multi-Node DP
 
-The sidecar forwards the selected attention-DP rank to OpenEngine for KV-aware routing when the engine has more than one attention-DP rank. For single-rank engines, it omits the redundant rank hint and does not synthesize a conversation ID for anonymous requests. Explicit session IDs are preserved.
+Every rank publishes KV events on its own node. The leader sidecar registers all ranks and serves requests; a worker sidecar relays its node-local events without serving. The sidecar forwards the selected attention-DP rank to OpenEngine for KV-aware routing when the engine has more than one attention-DP rank. For single-rank engines, it omits the redundant rank hint and does not synthesize a conversation ID for anonymous requests. Explicit session IDs are preserved.
 
 > [!WARNING]
 > For multi-rank engines with conversation affinity enabled, OpenEngine currently requires a conversation ID with a rank hint. The sidecar supplies a request-scoped ID when the client provides no session. With KVCM2 `block_reuse_config.policy: per_conversation`, those one-shot IDs can retain conversation state until cache reset or engine restart, causing host memory to grow with anonymous request count. Avoid this combination for sustained anonymous traffic until TensorRT-LLM accepts rank hints without conversation IDs or bounds retained conversation state.

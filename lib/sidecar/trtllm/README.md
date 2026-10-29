@@ -16,6 +16,13 @@ you to.
 `dynamo-trtllm-sidecar` connects a Dynamo worker to TensorRT-LLM's OpenEngine
 gRPC server. See the [sidecar overview](../README.md) for installation.
 
+The sidecar reads model metadata from `--model-path`, which must be accessible
+to the sidecar. It requires the engine to report a non-empty served model name
+through `GetModelInfo` and registers that name. Configure the engine with
+`--served_model_name` to choose the name clients use. Without it, TensorRT-LLM
+may report its model path as the name. Engines without `GetModelInfo` are not
+supported, even when `--context-length` is supplied.
+
 > [!TIP]
 > For the best and latest support, use the upstream TensorRT-LLM nightly image,
 > which carries the latest gRPC server updates. Nightly builds are the
@@ -32,6 +39,7 @@ gRPC server. See the [sidecar overview](../README.md) for installation.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (DP) | Experimental |
 
 For child-agent context affinity, enable frontend session affinity and TensorRT-LLM conversation affinity. Set `TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY` on the prefill sidecar and set `internal_request_auth_key` to the same private value in the OpenEngine server YAML configuration. The sidecar requires the server to advertise signed affinity support. It sends the child's own conversation ID and a signed parent hint for context requests; decode requests retain the child's identity. The gateway must authorize client parent-session headers before they reach the router.
 
@@ -44,6 +52,8 @@ one GPU:
 export DYN_DISCOVERY_BACKEND=file   # single host: no etcd or NATS needed
 lib/sidecar/trtllm/launch/agg.sh
 ```
+
+For KV-aware routing, use `launch/agg_kv_router.sh` (two GPUs) or `launch/disagg_kv_router.sh` (four GPUs). Both enable OpenEngine load metrics and publish one ZMQ event source per worker.
 
 In a second terminal:
 
@@ -70,6 +80,12 @@ kubectl apply -f lib/sidecar/trtllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 ```
 
+For KV routing, use `deploy/agg_kv_router.yaml` or `deploy/disagg_kv_router.yaml`. These examples pin matching Dynamo frontend and sidecar nightlies (`20261023-75d0686`) and `nvcr.io/nvidia/tensorrt-llm/release:1.4.0a0.dev202610180820` for the engine.
+
+Multinode deployments use complete `leader` and `worker` role PodTemplates. See
+[`multinode_tp.yaml`](deploy/multinode_tp.yaml), [`multinode_dp.yaml`](deploy/multinode_dp.yaml),
+and the [TensorRT-LLM sidecar guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/sidecar.md#deploy-on-kubernetes).
+
 ## Topologies
 
 The frontend sends inference requests to each engine's leader sidecar, which forwards them to OpenEngine over gRPC and polls routing load for all attention-DP ranks. Each sidecar discovers its node's KV event sources through OpenEngine and relays local KV events through Dynamo's event plane. Follower sidecars do not serve inference requests.
@@ -89,6 +105,6 @@ node holds the remaining TP ranks.
 
 ### Multi-Node DP
 
-The sidecar forwards the selected attention-DP rank to OpenEngine for KV-aware routing.
+Every rank publishes KV events on its own node. The leader sidecar registers all ranks and serves requests; a worker sidecar relays its node-local events without serving. The sidecar forwards the selected attention-DP rank to OpenEngine for KV-aware routing.
 
 ![Experimental TensorRT-LLM data parallelism across two nodes. The Dynamo Frontend selects an attention-DP rank and sends requests to the leader sidecar on node 0, which forwards the selected rank to OpenEngine when the engine advertises rank targeting. Sidecars on both nodes relay local KV events; the follower sidecar does not serve inference requests.](../../../docs/fern/assets/img/sidecar-trtllm-multinode-dp.svg)

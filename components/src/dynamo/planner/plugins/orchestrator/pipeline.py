@@ -747,7 +747,7 @@ async def run_pipeline(
     baseline: Mapping[ComponentKey, int],
     clock: Clock,
     tick_now: float,
-    tick_max_duration_seconds: float,
+    tick_max_duration_seconds: Optional[float],
     metrics: Optional[PluginFrameworkMetrics] = None,
 ) -> PipelineOutcome:
     """Run one tick through the 4 stages and return a PipelineOutcome.
@@ -761,13 +761,16 @@ async def run_pipeline(
         baseline: Current replicas per ComponentKey — fed to every
             ``type_aware_merge`` call for recommendation fallback and
             AT_LEAST/AT_MOST clamping.
-        clock: Used only for the whole-tick deadline guard.
+        clock: Times the tick and the plugin calls for ``metrics``. The
+            deadline runs on the event loop's wall clock, not on ``clock``.
         tick_now: Monotonic timestamp the active set + record_result use
             for "due" detection and HOLD_LAST cache age.
         tick_max_duration_seconds: Outermost deadline — wraps the entire
             4-stage pipeline in a single ``asyncio.wait_for``. Per-stage
             plugins each enforce their own deadline inside
-            ``PluginTransport.call``.
+            ``PluginTransport.call``. ``None`` runs the pipeline to
+            completion: replay passes it, because a wall-clock deadline
+            would make the simulated decisions depend on host speed.
     """
 
     async def _body() -> PipelineOutcome:
@@ -924,6 +927,7 @@ async def run_pipeline(
 
     # Outermost safety deadline — this is the ONLY asyncio.wait_for in
     # this module, and it wraps the entire pipeline, not a single stage.
+    # A ``None`` deadline (replay) awaits the body unbounded.
     try:
         # tick_duration_seconds histogram — measured around the outer
         # wait_for so it includes every stage + the timeout machinery
@@ -938,6 +942,9 @@ async def run_pipeline(
                 )
         return outcome
     except asyncio.TimeoutError:
+        if tick_max_duration_seconds is None:
+            # No deadline expired: the body raised it.
+            raise
         if metrics is not None:
             metrics.tick_timeout_total.inc()
         log.warning(
