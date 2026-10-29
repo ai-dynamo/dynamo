@@ -14,6 +14,7 @@ from dynamo._core import (
     supports_structural_tag_parser,
     validate_structural_tag_parser,
 )
+from dynamo._core.backend import EngineConfig
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -112,6 +113,15 @@ def test_capability_query_respects_parser_generation(version):
 
 def test_incompatible_v2_parser_pair_is_rejected():
     _run_probe("routing_error", "deepseek_v41", "qwen3", version="2")
+
+
+@pytest.mark.parametrize("value", [512, 0.5, True, {"limits": [-3, 0, 2**63]}])
+def test_parser_dependency_preserves_runtime_metadata_numbers(value):
+    # Parser dependency features also affect serializers used by runtime metadata.
+    config = EngineConfig(model="test", runtime_data={"value": value})
+    actual = config.runtime_data["value"]
+    assert type(actual) is type(value)
+    assert actual == value
 
 
 if __name__ == "__main__":
