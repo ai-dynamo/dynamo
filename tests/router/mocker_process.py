@@ -42,6 +42,19 @@ BASE_PORT_BOOTSTRAP = 10100
 BASE_PORT_ZMQ = 11100
 
 
+def _apply_extra_env(
+    env: dict[str, str], extra_env: Mapping[str, str | None] | None
+) -> None:
+    """Merge optional process env overlays without changing caller defaults."""
+    if extra_env is None:
+        return
+    for name, value in extra_env.items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
+
+
 def _build_mocker_command(
     endpoint: str,
     store_backend: str,
@@ -87,6 +100,7 @@ class MockerProcess:
         standalone_selector: bool = False,
         model_name: str = "mocker",
         zmq_replay: bool = False,
+        extra_env: Mapping[str, str | None] | None = None,
     ):
         if standalone_selector and not standalone_indexer:
             raise ValueError("standalone_selector requires standalone_indexer=True")
@@ -114,6 +128,7 @@ class MockerProcess:
         self._store_backend = store_backend
         self._request_plane = request_plane
         self._mocker_config = MockerConfig.from_value(mocker_args)
+        self._extra_env = extra_env
         self.worker_id_to_zmq_ports: dict[int, dict[int, str]] = {}
         request.addfinalizer(self._release_ports)
 
@@ -177,6 +192,7 @@ class MockerProcess:
             )
             env = os.environ.copy()
             env["DYN_REQUEST_PLANE"] = request_plane
+            _apply_extra_env(env, extra_env)
             self._process = ManagedProcess(
                 command=command,
                 env=env,
@@ -309,6 +325,7 @@ class MockerProcess:
             )
             env = os.environ.copy()
             env["DYN_REQUEST_PLANE"] = self._request_plane
+            _apply_extra_env(env, self._extra_env)
             proc = ManagedProcess(
                 command=command,
                 env=env,

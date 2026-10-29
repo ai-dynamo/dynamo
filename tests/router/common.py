@@ -10,6 +10,7 @@ import random
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import aiohttp
@@ -4026,3 +4027,223 @@ def _test_disagg_per_role_session_affinity(
             f"{set(prefill_ids)} (TTL advertised) while decode spread across "
             f"{set(decode_ids)} (no TTL)"
         )
+
+
+########################################################
+# Frontend / Runtime EPP token parity
+########################################################
+
+
+@dataclass(frozen=True)
+class TokenParityCase:
+    """One actual Frontend-vs-EPP request pair plus a meaning-changing sibling."""
+
+    name: str
+    path: str
+    payload: dict[str, Any]
+    divergent_payload: dict[str, Any]
+
+
+def frontend_epp_token_parity_cases(model_name: str) -> list[TokenParityCase]:
+    """Reusable actual-token scenarios for native Frontend HTTP vs Runtime EPP.
+
+    Each case carries a real request body and a sibling whose system or content
+    meaning changes so the same comparator can reject a live mismatch.
+    """
+    chat_path = "/v1/chat/completions"
+    completion_path = "/v1/completions"
+    return [
+        TokenParityCase(
+            name="plain_chat",
+            path=chat_path,
+            payload={
+                "model": model_name,
+                "messages": [
+                    {"role": "user", "content": "Name the first three prime numbers."}
+                ],
+                "stream": True,
+                "max_tokens": 1,
+            },
+            divergent_payload={
+                "model": model_name,
+                "messages": [
+                    {"role": "user", "content": "Translate good morning into French."}
+                ],
+                "stream": True,
+                "max_tokens": 1,
+            },
+        ),
+        TokenParityCase(
+            name="text_completion",
+            path=completion_path,
+            payload={
+                "model": model_name,
+                "prompt": "The first three prime numbers are",
+                "stream": True,
+                "max_tokens": 1,
+            },
+            divergent_payload={
+                "model": model_name,
+                "prompt": "The capital of France is",
+                "stream": True,
+                "max_tokens": 1,
+            },
+        ),
+        TokenParityCase(
+            name="system_chat",
+            path=chat_path,
+            payload={
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": "Answer with only the numbers."},
+                    {"role": "user", "content": "Name the first three prime numbers."},
+                ],
+                "stream": True,
+                "max_tokens": 1,
+            },
+            divergent_payload={
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": "Answer only in Spanish words."},
+                    {"role": "user", "content": "Name the first three prime numbers."},
+                ],
+                "stream": True,
+                "max_tokens": 1,
+            },
+        ),
+        TokenParityCase(
+            name="multiturn_chat",
+            path=chat_path,
+            payload={
+                "model": model_name,
+                "messages": [
+                    {"role": "user", "content": "What is two plus two?"},
+                    {"role": "assistant", "content": "4"},
+                    {"role": "user", "content": "Add three more."},
+                ],
+                "stream": True,
+                "max_tokens": 1,
+            },
+            divergent_payload={
+                "model": model_name,
+                "messages": [
+                    {"role": "user", "content": "What is two plus two?"},
+                    {"role": "assistant", "content": "4"},
+                    {"role": "user", "content": "Now subtract nine."},
+                ],
+                "stream": True,
+                "max_tokens": 1,
+            },
+        ),
+    ]
+
+
+def assert_ordered_token_ids_match(
+    left: list[int],
+    right: list[int],
+    *,
+    left_label: str,
+    right_label: str,
+    case_name: str,
+) -> None:
+    """Compare exact ordered token IDs and report the first differing position."""
+    if left == right:
+        if not left:
+            raise AssertionError(f"{case_name}: both token sequences are empty")
+        return
+    limit = min(len(left), len(right))
+    index = next((i for i in range(limit) if left[i] != right[i]), limit)
+    left_token = left[index] if index < len(left) else "<missing>"
+    right_token = right[index] if index < len(right) else "<missing>"
+    raise AssertionError(
+        f"{case_name}: token sequence mismatch at index {index}: "
+        f"{left_label}={left_token} {right_label}={right_token} "
+        f"lengths {len(left)} vs {len(right)}"
+    )
+
+
+def run_frontend_epp_token_parity(
+    stack,
+    cases: list[TokenParityCase],
+    *,
+    include_negative_control: bool = True,
+) -> None:
+    """Compare live Frontend query_instance_id tokens to live EPP mutations.
+
+    Frontend uses query-only annotation and does not generate. EPP still picks
+    and books; the driver completes the ext_proc stream before the next case.
+    The optional negative control changes one arm's system or content meaning
+    after unchanged-request parity succeeds and requires the same comparator
+    to reject the live mismatch.
+    """
+    from tests.router.epp_parity import unique_request_id
+
+    if not cases:
+        raise AssertionError("token parity requires at least one actual request case")
+
+    for case in cases:
+        frontend_tokens = stack.collect_frontend_tokens(
+            case.payload,
+            path=case.path,
+            request_id=unique_request_id(f"fe-{case.name}"),
+        )
+        epp_tokens = stack.collect_epp_tokens(
+            case.payload,
+            path=case.path,
+            request_id=unique_request_id(f"epp-{case.name}"),
+        )
+        assert_ordered_token_ids_match(
+            frontend_tokens,
+            epp_tokens,
+            left_label="frontend.nvext.token_ids",
+            right_label="epp.nvext.token_data",
+            case_name=case.name,
+        )
+        logger.info(
+            "Token parity matched for %s (%s tokens)",
+            case.name,
+            len(frontend_tokens),
+        )
+
+    kube_api = getattr(stack, "kube_api", None)
+    if kube_api is not None and kube_api.failures:
+        raise AssertionError(
+            "Loopback Kubernetes API recorded unexpected requests: "
+            + "; ".join(kube_api.failures)
+        )
+
+    if not include_negative_control:
+        return
+
+    control = cases[0]
+    frontend_tokens = stack.collect_frontend_tokens(
+        control.payload,
+        path=control.path,
+        request_id=unique_request_id(f"fe-neg-{control.name}"),
+    )
+    epp_tokens = stack.collect_epp_tokens(
+        control.divergent_payload,
+        path=control.path,
+        request_id=unique_request_id(f"epp-neg-{control.name}"),
+    )
+    try:
+        assert_ordered_token_ids_match(
+            frontend_tokens,
+            epp_tokens,
+            left_label="frontend.nvext.token_ids",
+            right_label="epp.nvext.token_data",
+            case_name=f"{control.name}-negative",
+        )
+    except AssertionError as exc:
+        if "mismatch at index" in str(exc):
+            logger.info("Negative control rejected live mismatched token sequences")
+            if kube_api is not None and kube_api.failures:
+                raise AssertionError(
+                    "Loopback Kubernetes API recorded unexpected requests: "
+                    + "; ".join(kube_api.failures)
+                )
+            return
+        raise
+    raise AssertionError(
+        f"{control.name}-negative: same comparator accepted diverged live requests"
+    )
