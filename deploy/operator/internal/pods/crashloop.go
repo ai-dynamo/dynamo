@@ -8,7 +8,6 @@ package pods
 
 import (
 	"fmt"
-	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -38,23 +37,19 @@ func (c CrashLoop) String() string {
 	return message
 }
 
-// FindCrashLoop returns the first crash-looping container among pods, ordered
-// by Pod name.
+// FindCrashLoop returns the crash loop of the crash-looping Pod with the
+// smallest name among pods, which it does not reorder.
 func FindCrashLoop(pods []corev1.Pod) (CrashLoop, bool) {
-	sorted := make([]*corev1.Pod, len(pods))
+	var first CrashLoop
+	found := false
 	for i := range pods {
-		sorted[i] = &pods[i]
-	}
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Name < sorted[j].Name
-	})
-
-	for _, pod := range sorted {
-		if crashLoop, found := CrashLoopOf(pod); found {
-			return crashLoop, true
+		crashLoop, crashing := CrashLoopOf(&pods[i])
+		if crashing && (!found || crashLoop.Pod < first.Pod) {
+			first = crashLoop
+			found = true
 		}
 	}
-	return CrashLoop{}, false
+	return first, found
 }
 
 // CrashLoopOf returns pod's first crash-looping container, init containers

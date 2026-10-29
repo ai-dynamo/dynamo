@@ -12,7 +12,6 @@ import (
 	poddiagnostics "github.com/ai-dynamo/dynamo/deploy/operator/internal/pods"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -40,30 +39,16 @@ func DGDName(obj client.Object) (string, bool) {
 	return name, name != "" && labels[commonconsts.KubeLabelDynamoComponent] != ""
 }
 
-// EnqueueOwners enqueues the owner of the Pod in an event. An update also
-// enqueues the Pod's previous owner, whose Pods it may have left.
+// EnqueueOwners enqueues the owner of the Pod in an event. The mapped handler
+// maps both sides of an update, so a Pod's previous owner is enqueued too.
 func EnqueueOwners(ownerName OwnerName) handler.EventHandler {
-	// Enqueue the object's owner, if any, in the object's namespace.
-	enqueue := func(q workqueue.TypedRateLimitingInterface[reconcile.Request], obj client.Object) {
-		if name, ok := ownerName(obj); ok {
-			q.Add(reconcile.Request{Namespace: obj.GetNamespace(), Name: name})
+	return handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
+		name, ok := ownerName(obj)
+		if !ok {
+			return nil
 		}
-	}
-	return handler.Funcs{
-		CreateFunc: func(_ context.Context, e event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-			enqueue(q, e.Object)
-		},
-		UpdateFunc: func(_ context.Context, e event.UpdateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-			enqueue(q, e.ObjectOld)
-			enqueue(q, e.ObjectNew)
-		},
-		DeleteFunc: func(_ context.Context, e event.DeleteEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-			enqueue(q, e.Object)
-		},
-		GenericFunc: func(_ context.Context, e event.GenericEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-			enqueue(q, e.Object)
-		},
-	}
+		return []reconcile.Request{{Namespace: obj.GetNamespace(), Name: name}}
+	})
 }
 
 // CrashLoopPredicate admits the Pod events that can change an owner's

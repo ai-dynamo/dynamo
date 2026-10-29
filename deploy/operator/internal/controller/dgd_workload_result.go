@@ -179,14 +179,14 @@ func applyComponentCrashLoops(
 }
 
 // failCrashLoopingComponents fails the graph while crashLoops, a diagnosis by
-// component name formatted with %v, is non-empty.
-func failCrashLoopingComponents[D any](result ReconcileResult, crashLoops map[string]D) ReconcileResult {
+// component name, is non-empty.
+func failCrashLoopingComponents(result ReconcileResult, crashLoops map[string]string) ReconcileResult {
 	if len(crashLoops) == 0 {
 		return result
 	}
 	messages := make([]string, 0, len(crashLoops))
 	for component, diagnosis := range crashLoops {
-		messages = append(messages, fmt.Sprintf("Component %s is crash-looping: %v", component, diagnosis))
+		messages = append(messages, fmt.Sprintf("Component %s is crash-looping: %s", component, diagnosis))
 	}
 	sort.Strings(messages)
 	result.State = nvidiacomv1beta1.DGDStateFailed

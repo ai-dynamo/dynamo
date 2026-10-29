@@ -87,6 +87,12 @@ func TestEnqueueOwners(t *testing.T) {
 			want:   []string{"new-graph", "old-graph"},
 		},
 		{
+			name:   "update keeping a Pod's graph",
+			oldPod: testPod("inference", "worker-a", componentLabels("graph", "worker"), 2),
+			newPod: testPod("inference", "worker-a", componentLabels("graph", "worker"), 3),
+			want:   []string{"graph"},
+		},
+		{
 			name:   "create of an owned Pod",
 			newPod: testPod("inference", "worker-a", componentLabels("graph", "worker"), 3),
 			want:   []string{"graph"},
