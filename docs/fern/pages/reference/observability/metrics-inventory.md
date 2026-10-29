@@ -12,6 +12,7 @@ This page does not list:
 - Inference engine metrics (`vllm:*`, `sglang:*`, `trtllm_*`) that the engine itself defines. See [Engine metrics](metrics-catalog.mdx#engine-metrics).
 - Kubernetes operator metrics. See [Operator Metrics](operator-metrics.mdx).
 - NIXL transfer metrics, which NIXL serves on its own port. See the [NIXL telemetry documentation](https://github.com/ai-dynamo/nixl/blob/main/docs/telemetry.md).
+- KVBM metrics, including the block-pool metrics in the `kvbm-logical` crate. KVBM was removed in v1.7.0; see the documentation for v1.6 and earlier.
 
 ## How to Read This Page
 
@@ -208,7 +209,7 @@ These counters carry `router_id`, `model`, and `phase`. See [KV-cache reuse tele
 
 ### Routing Overhead
 
-Frontend only, in milliseconds, with a `router_id` label. Registered on every frontend and recorded only for KV routing decisions.
+Frontend only, in milliseconds. These carry only a `router_id` label, without the `dynamo_namespace`, `dynamo_component`, and `worker_id` labels the router adds to its other metrics. Registered on every frontend and recorded only for KV routing decisions.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
@@ -227,7 +228,7 @@ Recorded only with `--shared-cache-type hicache`.
 |---|---|---|---|---|
 | `dynamo_component_router_shared_cache_hit_rate` | histogram | `router_id` | Fraction of request blocks found in the shared KV cache. | Current |
 | `dynamo_component_router_shared_cache_beyond_blocks` | histogram | `router_id` | Shared-cache blocks beyond the selected worker's device overlap. | Current |
-| `dynamo_router_shared_cache_errors_total` | counter | `router_id` | Failed shared-cache queries and subscriber errors. Frontend only. | Current |
+| `dynamo_router_shared_cache_errors_total` | counter | `router_id` | Failed shared-cache queries and subscriber errors. Frontend only; carries only `router_id`, like the [routing overhead](#routing-overhead) metrics. | Current |
 
 ### KV Index and Event Ingestion
 
@@ -290,7 +291,7 @@ Exposed by each worker at `/metrics` on `DYN_SYSTEM_PORT`, which is off by defau
 
 ### Request Handling
 
-Recorded for every endpoint a process serves. Backends also add a `model` label.
+Recorded for every endpoint a process serves. vLLM, SGLang, and TensorRT-LLM workers also add a `model` label on their inference endpoints. Internal endpoints, such as the `worker_kv_query_source_*` endpoint the router uses to recover a worker's KV index, have no `model` label.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
@@ -362,7 +363,13 @@ Label sets depend on the worker type:
 
 ### Multimodal and Embedding Caches
 
-These carry `model` and `dynamo_component`. The embedding cache metrics require `--multimodal-embedding-cache-capacity-gb` greater than 0. The image cache metrics are registered on vLLM multimodal workers, and the shared image cache records samples only with `DYN_MM_SHARED_IMAGE_CACHE_ENABLED=1`.
+These metrics come from several publishers, so their labels differ:
+
+- The image cache metrics, and the embedding cache metrics a worker records in its own process, carry `model` and `dynamo_component`.
+- With the `DynamoMultimodalEmbeddingCacheConnector`, the vLLM scheduler records the embedding cache metrics once per data-parallel rank. They carry `model`, `model_name`, `dp_rank`, `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and `worker_id`.
+- The SGLang `dynamo_embedding_*` histograms carry `model`, `model_name`, `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and `worker_id`.
+
+The embedding cache metrics require `--multimodal-embedding-cache-capacity-gb` greater than 0. The image cache metrics are registered on vLLM multimodal workers, and the shared image cache records samples only with `DYN_MM_SHARED_IMAGE_CACHE_ENABLED=1`.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
@@ -421,7 +428,7 @@ Emitted by every Dynamo process: on the HTTP port for the frontend, and on `DYN_
 
 ## Planner
 
-Exposed by `python -m dynamo.planner` at `/metrics` on its own port, set by `metric_reporting_prometheus_port` (default `PLANNER_PROMETHEUS_PORT`, else `0`, which disables the server). The Kubernetes operator sets the port to `9085`. Planner metrics carry no automatic labels. See [Planner Configuration](../components/planner-configuration.mdx).
+Exposed by `python -m dynamo.planner` at `/metrics` on its own port, set by `metric_reporting_prometheus_port`. It defaults to the `PLANNER_PROMETHEUS_PORT` environment variable, or to `0`, which disables the server, when that variable is unset. The Kubernetes operator sets the port to `9085`. Planner metrics carry no automatic labels. See [Planner Configuration](../components/planner-configuration.mdx).
 
 ### Replicas, Traffic, and SLA
 
@@ -455,8 +462,8 @@ Exposed by `python -m dynamo.planner` at `/metrics` on its own port, set by `met
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_planner_load_scaling_decision` | gauge | `dynamo_planner_load_scaling_decision` | Reason for the latest load-based scaling decision. One series per reason; the current one is 1. | Current |
-| `dynamo_planner_throughput_scaling_decision` | gauge | `dynamo_planner_throughput_scaling_decision` | Reason for the latest throughput-based scaling decision. One series per reason; the current one is 1. | Current |
+| `dynamo_planner_load_scaling_decision` | gauge | `dynamo_planner_load_scaling_decision` | Reason for the latest load-based scaling decision. A Prometheus Enum: the label, named after the metric, holds the reason. One series per reason; the current one is 1. | Current |
+| `dynamo_planner_throughput_scaling_decision` | gauge | `dynamo_planner_throughput_scaling_decision` | Reason for the latest throughput-based scaling decision. A Prometheus Enum: the label, named after the metric, holds the reason. One series per reason; the current one is 1. | Current |
 | `dynamo_planner_signal_unavailable` | gauge | `component`, `signal` | 1 if a required planner input was unavailable at its latest observation. | Current |
 | `dynamo_planner_degraded_signals_total` | counter | `component`, `signal` | Times a required input was unavailable for 3 observations in a row. | Current |
 | `dynamo_planner_power_budget_total_watts` | gauge | — | Configured total GPU power budget, in watts. Only with power awareness enabled. | Current |
@@ -519,7 +526,7 @@ The endpoint picker (EPP) for Gateway API Inference Extension routing serves `/m
 
 ## Mocker
 
-The mocker (`python -m dynamo.mocker`) simulates an inference engine. It emits imitation engine metrics with simulated values on `DYN_SYSTEM_PORT`, choosing the set by `--engine-type`. They carry the engine's usual labels plus `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, `worker_id`, and `model`.
+The mocker (`python -m dynamo.mocker`) simulates an inference engine. It emits imitation engine metrics with simulated values on `DYN_SYSTEM_PORT`, choosing the set by `--engine-type`. They carry the engine's usual labels plus `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, `worker_id`, `model`, and `model_name`. These imitate engine metrics, so this table has no Labels, Description, or Status column; each metric means what it means in the engine it imitates.
 
 | Metric | Type | Engine type |
 |---|---|---|
@@ -545,29 +552,6 @@ The mocker (`python -m dynamo.mocker`) simulates an inference engine. It emits i
 | `trtllm_time_to_first_token_seconds` | histogram | `trtllm` |
 | `trtllm_time_per_output_token_seconds` | histogram | `trtllm` |
 | `trtllm_e2e_request_latency_seconds` | histogram | `trtllm` |
-
-## KVBM
-
-> [!WARNING]
-> KVBM is deprecated since v1.5.0, and `main` no longer builds it. These metrics apply only to releases that ship KVBM. See [Deprecations](../general/releases/deprecations.mdx).
-
-KVBM serves these from its own server at `/metrics` on `DYN_KVBM_METRICS_PORT` (default `6880`) when `DYN_KVBM_METRICS=1`, with no labels. In the block names, `d2d` means GPU to disk for offload and disk to GPU for onboard.
-
-| Metric | Type | Labels | Description | Status |
-|---|---|---|---|---|
-| `kvbm_offload_blocks_d2h` | counter | — | Blocks offloaded from GPU to host memory. | Deprecated |
-| `kvbm_offload_blocks_h2d` | counter | — | Blocks offloaded from host memory to disk. | Deprecated |
-| `kvbm_offload_blocks_d2d` | counter | — | Blocks offloaded from GPU directly to disk. | Deprecated |
-| `kvbm_offload_blocks_d2o` | counter | — | Blocks offloaded from GPU to object storage. Always 0. | Deprecated |
-| `kvbm_onboard_blocks_h2d` | counter | — | Blocks onboarded from host memory to GPU. | Deprecated |
-| `kvbm_onboard_blocks_d2d` | counter | — | Blocks onboarded from disk to GPU. | Deprecated |
-| `kvbm_onboard_blocks_o2d` | counter | — | Blocks onboarded from object storage to GPU. Always 0. | Deprecated |
-| `kvbm_matched_tokens` | counter | — | Host and disk tokens matched for onboarding. | Deprecated |
-| `kvbm_host_cache_hit_rate` | gauge | — | Host cache hit rate over recent requests, from 0.0 to 1.0. | Deprecated |
-| `kvbm_disk_cache_hit_rate` | gauge | — | Disk cache hit rate over recent requests, from 0.0 to 1.0. | Deprecated |
-| `kvbm_object_cache_hit_rate` | gauge | — | Object storage cache hit rate. Always 0. | Deprecated |
-| `kvbm_object_read_failures` | counter | — | Failed object storage reads. Always 0. | Deprecated |
-| `kvbm_object_write_failures` | counter | — | Failed object storage writes. Always 0. | Deprecated |
 
 ## Related
 

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Metrics Catalog
-subtitle: Every dynamo_* metric emitted by the frontend, backend workers, and router — name, type, and meaning.
+subtitle: Semantics, availability, and PromQL for the core frontend, worker, and router metrics.
 ---
 
 Dynamo exposes metrics in Prometheus exposition format at the `/metrics` HTTP endpoint. Most Dynamo-generated metrics use the `dynamo_*` prefix; [Metric Labels](metric-labels.mdx) documents the labels they carry. This page is the field catalog; for setup and dashboards see the [Metrics guide](../../cli/operations/observability.mdx#view-metrics-and-dashboards). For a one-line entry for every metric Dynamo defines, including the planner, KV indexer, and runtime metrics, see the [Metrics Inventory](metrics-inventory.md).
@@ -163,7 +163,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 
 `dynamo_frontend_worker_*` gauges appear once workers register and begin serving. They live on the frontend's local registry (not component-scoped) and do **not** carry `dynamo_namespace` or `dynamo_component` labels. Frontend-only — not available on the standalone router. Labeled by `worker_id`, `dp_rank`, and `worker_type`.
 
-Only the KV router writes the three `dynamo_frontend_worker_active_*` gauges, so they have no series in other router modes; the three `dynamo_frontend_worker_last_*` gauges are populated in every mode. At each HTTP scrape, these six gauges include only workers in the current committed router membership that pass hard availability checks, and only their current data-parallel (DP) ranks. The timing gauges also allow `dp_rank="none"` when the rank is unknown, provided the worker remains available. The `worker_type` label describes serving attribution: an Encode worker serving Chat/Completions reports its load and timing samples as `decode`, while the inventory metrics below retain its `encode` topology role. Removed or excluded workers disappear from the output; late request completions or load updates cannot restore their exposed series.
+Only the KV router writes the three `dynamo_frontend_worker_active_*` gauges, so they have no series in other router modes; the three `dynamo_frontend_worker_last_*` gauges are populated in every mode. At each HTTP scrape, these six gauges include only workers in the current committed router membership that pass hard availability checks, and only their current data-parallel (DP) ranks. The timing gauges also allow `dp_rank="none"` when the rank is unknown, provided the worker remains available. The `worker_type` label describes serving attribution: an Encode worker serving Chat/Completions reports its load and timing samples as `decode`, while the [router worker inventory](#router-worker-inventory) gauges below retain its `encode` topology role. Removed or excluded workers disappear from the output; late request completions or load updates cannot restore their exposed series.
 
 <ParamField path="dynamo_frontend_worker_active_decode_blocks" type="gauge">
   Active KV cache decode blocks per worker.
@@ -549,11 +549,11 @@ Requires the client to request usage accounting on streaming calls (`"stream_opt
 
 ## Engine metrics
 
-Backend workers also expose their inference engine's own metrics at `/metrics` on `DYN_SYSTEM_PORT`. The engine defines these metrics, so their names, types, and meanings follow the engine version you run. Dynamo passes them through unchanged and adds the `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, `worker_id`, `model`, and `model_name` labels.
+Backend workers also expose their inference engine's own metrics at `/metrics` on `DYN_SYSTEM_PORT`. The engine defines these metrics, so their names, types, and meanings follow the engine version you run. Dynamo passes them through with the engine's names, types, and values, and adds the `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, `worker_id`, `model`, and `model_name` labels.
 
 | Engine | Prefix | Enabled by | Engine reference | Dynamo guide |
 |--------|--------|------------|------------------|--------------|
-| vLLM | `vllm:`, plus `lmcache:` with LMCache | On by default; `--disable-log-stats` turns it off | [vLLM Production Metrics](https://docs.vllm.ai/en/stable/usage/metrics.html) | [vLLM Observability](../../developer-guide/knowledge-base/modular-components/backends/vllm/observability.md) |
+| vLLM | `vllm:`, plus `lmcache:` with LMCache | On by default; `--disable-log-stats` turns it off | [vLLM Production Metrics](https://docs.vllm.ai/en/stable/usage/metrics/) | [vLLM Observability](../../developer-guide/knowledge-base/modular-components/backends/vllm/observability.md) |
 | SGLang | `sglang:` | `--enable-metrics` | [SGLang Production Metrics](https://docs.sglang.io/docs/references/production_metrics) | [SGLang Observability](../../developer-guide/knowledge-base/modular-components/backends/sglang/observability.md) |
 | TensorRT-LLM | `trtllm_` | `--publish-metrics` | [TensorRT-LLM metrics collector](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py) | [TensorRT-LLM Observability](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/observability.md) |
 
