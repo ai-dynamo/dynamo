@@ -80,10 +80,12 @@ filename, for example:
 synthetic-2fps-30s:<video-filename>
 ```
 
-For `round-robin`, AIPerf does not send that ID as a routing header. For
-`session-affinity`, it adds `--session-header X-Dynamo-Session-ID`, so every
-replay of a given video carries the same header and remains pinned to one
-worker while the 300-second affinity TTL is active. The two profiles otherwise
+AIPerf groups rows with the same session ID into one conversation and gives
+that conversation its own generated identifier. For `round-robin`, no routing
+header is sent. For `session-affinity`, `--session-header X-Dynamo-Session-ID`
+sends the conversation identifier in that header, so all questions about a
+video carry the same value and stay on one worker while the 300-second
+affinity TTL is active. The two profiles otherwise
 use the same eight-worker deployment shape and benchmark settings.
 
 ## Run the smoke test
