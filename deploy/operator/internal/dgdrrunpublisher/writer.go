@@ -238,8 +238,10 @@ func buildRunStatusApply(namespace, runName, resourceVersion string, status RunS
 		refs = append(refs, map[string]any{"name": name})
 	}
 	candidates := map[string]any{
-		"published":   int64(status.Published),
-		"paretoFront": int64(status.ParetoFront),
+		"published": int64(status.Published),
+	}
+	if status.ParetoFront > 0 {
+		candidates["paretoFront"] = int64(status.ParetoFront)
 	}
 	fields := map[string]any{
 		"candidateRefs": refs,

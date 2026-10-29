@@ -355,9 +355,10 @@ func TestUnderlayParetoObjective(t *testing.T) {
 		t.Fatalf("not a Pareto optimization: %v", input["optimization"])
 	}
 
+	// Any Metrics slice is silently carried to AISimulate; Underlay does not validate them.
 	spec.Objective.Metrics = []v1beta2.ObjectiveMetric{"Throughput", "TTFT"}
-	if _, err := Underlay(&spec.NativeSearchInput); err == nil {
-		t.Fatal("custom Pareto objectives must fail until the public AISimulate input exposes them")
+	if _, err := Underlay(&spec.NativeSearchInput); err != nil {
+		t.Fatalf("Underlay must accept any Metrics slice: %v", err)
 	}
 }
 

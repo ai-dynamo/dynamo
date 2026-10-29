@@ -608,9 +608,9 @@ def test_a_persistent_write_failure_waits_for_backoff_instead_of_spinning(
 # -- configuration and plugin -------------------------------------------------
 
 
-def test_pareto_objectives_are_rejected_explicitly(tmp_path: Path) -> None:
-    with pytest.raises(NotImplementedError, match="scalar"):
-        DGDRRunOutputAdapter(make_config(tmp_path), workload=None, is_pareto=True)
+def test_pareto_adapter_is_accepted(tmp_path: Path) -> None:
+    adapter = DGDRRunOutputAdapter(make_config(tmp_path), workload=None, is_pareto=True)
+    assert adapter._is_pareto is True
 
 
 @pytest.mark.parametrize(
@@ -928,16 +928,13 @@ def test_plugin_write_keeps_sweepers_selection_order(
     assert tags(snapshot) == ["low", "high"]
 
 
-def test_plugin_write_refuses_pareto_and_empty_results(tmp_path: Path) -> None:
+def test_plugin_write_refuses_empty_results(tmp_path: Path) -> None:
     config = {
         "name": "sweep",
         "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
         "num_gpus_per_node": 8,
         "max_candidates": 5,
     }
-    pareto = SimpleNamespace(views=SimpleNamespace(pareto_front=[object()]))
-    with pytest.raises(NotImplementedError):
-        create_adapter().write(config, result=pareto, output_dir=tmp_path)  # type: ignore[arg-type]
     empty = SimpleNamespace(
         views=SimpleNamespace(pareto_front=[]), selected_candidates=[]
     )

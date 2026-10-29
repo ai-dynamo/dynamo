@@ -760,7 +760,8 @@ class DGDRRunOutputPlugin:
         workload = getattr(context, "workload", None)
         if workload is None or resolved.snapshot_dir is None:
             return None
-        adapter = DGDRRunOutputAdapter(resolved, workload)
+        is_pareto = (config.get("optimization") or {}).get("target") == "pareto"
+        adapter = DGDRRunOutputAdapter(resolved, workload, is_pareto=is_pareto)
         adapter.start()
         return RecommendationOutputCallbacks(
             on_candidate=adapter.on_candidate,
