@@ -50,6 +50,12 @@ pub(crate) struct ModelLimits {
     pub(crate) supports_image: Option<bool>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ModelInfo {
+    pub(crate) limits: ModelLimits,
+    pub(crate) served_model_name: String,
+}
+
 const TARGET_DP_RANK_METADATA_KEY: &str = "openengine-target-dp-rank";
 
 #[derive(Clone)]
@@ -175,7 +181,7 @@ impl TrtllmClient {
     /// unset rather than substituting its `max_input_len` default (measured
     /// against TensorRT-LLM main at 8bbaf66bd5), so `None` here means "the
     /// server did not say", and `--context-length` supplies it instead.
-    async fn get_model_info(&self, model: &str) -> Result<ModelLimits, tonic::Status> {
+    async fn get_model_info(&self, model: &str) -> Result<ModelInfo, tonic::Status> {
         let info = self
             .control()
             .get_model_info(pb::GetModelInfoRequest {
@@ -202,11 +208,14 @@ impl TrtllmClient {
                         _ => false,
                     })
             });
-        Ok(ModelLimits {
-            context_length: info.max_context_length.filter(|len| *len > 0),
-            engine_context_length: info.max_context_length.filter(|len| *len > 0),
-            max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
-            supports_image: Some(supports_image),
+        Ok(ModelInfo {
+            limits: ModelLimits {
+                context_length: info.max_context_length.filter(|len| *len > 0),
+                engine_context_length: info.max_context_length.filter(|len| *len > 0),
+                max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
+                supports_image: Some(supports_image),
+            },
+            served_model_name: info.served_model_name,
         })
     }
 
@@ -275,60 +284,42 @@ impl TrtllmClient {
         }
     }
 
-    /// Resolve capabilities before registration, retrying temporary failures within
-    /// the shared startup deadline. Only an older engine's UNIMPLEMENTED response
-    /// permits text-only operation with an operator-supplied context window.
-    pub(crate) async fn wait_for_model_limits(
+    /// Transient RPC failures are retried; unsupported Control, invalid model
+    /// identity and other terminal errors fail without registering a worker.
+    pub(crate) async fn wait_for_model_info(
         &self,
         model: &str,
         configured_context_length: Option<u32>,
         deadline: Instant,
         retry_interval: Duration,
-    ) -> Result<ModelLimits, DynamoError> {
+    ) -> Result<ModelInfo, DynamoError> {
         let mut last = "it never answered".to_string();
         loop {
             match timeout_at(deadline, self.get_model_info(model)).await {
-                Ok(Ok(mut limits)) => {
+                Ok(Ok(mut info)) => {
+                    if info.served_model_name.trim().is_empty() {
+                        return Err(protocol_error(
+                            "GetModelInfo returned an empty served_model_name; configure the engine's served model name",
+                        ));
+                    }
                     if let Some(configured) = configured_context_length {
-                        if let Some(reported) = limits.context_length
+                        if let Some(reported) = info.limits.context_length
                             && reported != configured
                         {
                             tracing::warn!(
                                 configured_context_length = configured,
                                 engine_context_length = reported,
-                                "--context-length disagrees with the context length TensorRT-LLM \
-                                 reported; using the configured --context-length"
+                                "--context-length disagrees with the engine; using the configured value"
                             );
                         }
-                        limits.context_length = Some(configured);
+                        info.limits.context_length = Some(configured);
                     }
-                    if limits.context_length.is_some() {
-                        return Ok(limits);
+                    if info.limits.context_length.is_none() {
+                        return Err(protocol_error(format!(
+                            "TensorRT-LLM answered GetModelInfo for {model} with no max_context_length. Start the engine with --max_seq_len, or give the sidecar --context-length."
+                        )));
                     }
-                    return Err(protocol_error(format!(
-                        "TensorRT-LLM answered GetModelInfo for {model} with no \
-                         max_context_length. Start the engine with --max_seq_len, or give the \
-                         sidecar --context-length."
-                    )));
-                }
-                Ok(Err(status)) if status.code() == tonic::Code::Unimplemented => {
-                    if let Some(configured) = configured_context_length {
-                        tracing::warn!(
-                            message = status.message(),
-                            "Control.GetModelInfo is not implemented; using --context-length \
-                             with text-only support"
-                        );
-                        return Ok(ModelLimits {
-                            context_length: Some(configured),
-                            supports_image: Some(false),
-                            ..Default::default()
-                        });
-                    }
-                    return Err(protocol_error(format!(
-                        "Control.GetModelInfo is not implemented: {}. Supply --context-length \
-                         for text-only operation with this engine.",
-                        status.message()
-                    )));
+                    return Ok(info);
                 }
                 Ok(Err(status)) if is_terminal_discovery_error(&status) => {
                     return Err(status_to_dynamo("GetModelInfo", status));
@@ -344,8 +335,7 @@ impl TrtllmClient {
             sleep_until(next_attempt).await;
         }
         Err(connection_timeout(format!(
-            "TensorRT-LLM did not resolve GetModelInfo before the gRPC startup deadline \
-             ({last}). Raise --grpc-startup-deadline-secs if the engine is still starting."
+            "TensorRT-LLM did not resolve GetModelInfo before the gRPC startup deadline ({last}). Raise --grpc-startup-deadline-secs if the engine is still starting."
         )))
     }
 
@@ -391,6 +381,7 @@ fn is_terminal_discovery_error(status: &tonic::Status) -> bool {
         status.code(),
         tonic::Code::InvalidArgument
             | tonic::Code::NotFound
+            | tonic::Code::Unimplemented
             | tonic::Code::Unauthenticated
             | tonic::Code::PermissionDenied
     )
