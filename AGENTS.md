@@ -95,14 +95,6 @@ which sequences these skills:
 - `perform-adversarial-review` — challenge a DGD draft before it consumes GPU time
 - `report-skillpack-issue` — file a sanitized, operator-approved issue for a defect in these skills or guides
 
-**Adding a skill:** the folder name must equal the frontmatter `name` (kebab-case); the
-`description` is third person, states what the skill does and when to use it, and is at
-most 1024 characters; include `license: Apache-2.0` and a `metadata:` block with `author`
-and `tags`. List the skill in this section — the index must match `.agents/skills/`
-exactly. All of this is enforced by `scripts/validate_skills.py` (pre-commit hook
-`validate-skills`). Changes under `.agents/skills/` are also validated by NVSkills CI —
-a maintainer comments `/nvskills-ci` on the PR.
-
 ## Build and Test
 
 ### Published builds
