@@ -522,17 +522,13 @@ impl RoutingHost {
             };
             tracker.record_worker(target.worker_id, target.dp_rank, worker_type);
         }
-        guard.on_dispatched();
-        if let Some(hold) = operation.take() {
-            match self.commit_affinity(hold, target) {
-                Ok(Some(lease)) => guard.hold_affinity_lease(lease),
-                Ok(None) => {}
-                Err(error) => {
-                    guard.abort(None).await;
-                    return Err(error);
-                }
-            }
-        }
+        self.accept_dispatch(
+            &mut guard,
+            operation.take(),
+            target,
+            &response_stream.context(),
+        )
+        .await?;
         Ok((metadata, into_monitored_response(response_stream, guard)))
     }
 }

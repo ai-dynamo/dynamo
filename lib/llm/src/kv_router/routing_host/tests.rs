@@ -1111,7 +1111,7 @@ async fn kv_cache_hit_counts_immediately_once_in_selection_phase(#[case] reused:
             None,
         ),
         &req,
-        RequestPhase::Aggregated,
+        RequestPhase::Prefill,
         Some(RouteObservation {
             prompt_tokens: 1,
             best_router_tokens: 1,
@@ -2045,9 +2045,10 @@ async fn kv_cancellation_after_admission_still_stops_the_aggregated_dispatch() {
         .dispatch_selection(
             request,
             selection,
+            RequestPhase::Aggregated,
             guard,
             &CleanupBudget::default(),
-            &mut None,
+            None,
         )
         .await
         .expect_err("aggregated dispatch must still be cancelled before it is issued");
@@ -2953,9 +2954,10 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
             .dispatch_selection(
                 failed_request,
                 failed_selection,
+                RequestPhase::Aggregated,
                 failed_dispatch_guard,
                 &CleanupBudget::default(),
-                &mut None,
+                None,
             )
             .await
             .is_err()
@@ -4755,7 +4757,10 @@ async fn parent_group_binding_offers_siblings_the_committed_worker() {
     // response stream would.
     drop(
         router
-            .commit_affinity(
+            .affinity
+            .as_ref()
+            .unwrap()
+            .commit(
                 hold.expect("a new session holds"),
                 AffinityTarget::new(7, Some(0)),
             )
@@ -4799,7 +4804,10 @@ async fn child_prefill_uses_parent_worker_while_decode_keeps_group_binding() {
         .unwrap();
     drop(
         router
-            .commit_affinity(
+            .affinity
+            .as_ref()
+            .unwrap()
+            .commit(
                 hold.expect("a new session holds"),
                 AffinityTarget::new(7, Some(0)),
             )

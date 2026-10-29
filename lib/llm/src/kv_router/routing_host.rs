@@ -12,7 +12,6 @@ use dynamo_kv_router::{
     protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
     scheduling::{AbortCause, KvSchedulerError},
     selector::{WorkerInputs, WorkerSelector},
-    services::selection::affinity::AffinityLease,
 };
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
@@ -487,17 +486,34 @@ impl RoutingHost {
         Some(Arc::new(SessionAffinityId::new(binding_id)))
     }
 
-    /// Commit a held session to the worker the request was sent to. The lease
-    /// goes into the request guard, so the binding is held exactly as long as
-    /// the request it belongs to. `None` when this host has no affinity.
-    fn commit_affinity(
+    /// The worker accepted the send: tell the guard, then bind the held session
+    /// to `dispatched_target` and park its lease in the guard, so the binding
+    /// is held exactly as long as the request it belongs to. A commit that
+    /// fails after a successful send stops the worker's generation, aborts the
+    /// attempt with the cause, and fails the request.
+    async fn accept_dispatch(
         &self,
-        hold: Hold,
+        guard: &mut RequestGuard,
+        hold: Option<Hold>,
         dispatched_target: AffinityTarget,
-    ) -> Result<Option<AffinityLease>, Error> {
-        match self.affinity.as_ref() {
-            Some(affinity) => affinity.commit(hold, dispatched_target).map(Some),
-            None => Ok(None),
+        stream_context: &Arc<dyn AsyncEngineContext>,
+    ) -> Result<(), Error> {
+        guard.on_dispatched();
+        let (Some(hold), Some(affinity)) = (hold, self.affinity.as_ref()) else {
+            return Ok(());
+        };
+        match affinity.commit(hold, dispatched_target) {
+            Ok(lease) => {
+                guard.hold_affinity_lease(lease);
+                Ok(())
+            }
+            Err(error) => {
+                // The worker is already generating for a request the client
+                // will see fail; stop it instead of letting it run to the end.
+                stream_context.stop_generating();
+                guard.abort(Some(error.as_ref())).await;
+                Err(error)
+            }
         }
     }
 

@@ -626,6 +626,7 @@ impl RequestGuard {
         request_metrics: Arc<RouterRequestMetrics>,
         mut cleanup: KvRequestCleanup,
         request: &PreprocessedRequest,
+        phase: RequestPhase,
         kv_route: Option<RouteObservation>,
         mut request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
@@ -651,7 +652,7 @@ impl RequestGuard {
         let kv_hit = kv_route.map(|route| KvHitTracking {
             prompt_tokens: route.prompt_tokens,
             reused_tokens: Some(request_metrics.observe_kv_route_estimate(
-                request.phase(),
+                phase,
                 &request.model,
                 route.best_router_tokens,
                 route.selected_router_tokens,

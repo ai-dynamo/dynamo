@@ -328,33 +328,15 @@ impl RoutingHost {
             phase,
             mut selection,
             cleanup,
-            mut affinity,
+            affinity,
             budget,
             ..
         } = plan;
-        let selected_target = route_target(selection.worker);
-        let guard = match self
+        let guard = self
             .track_planned_selection(&request, &mut selection, phase, cleanup, &budget)
+            .await?;
+        self.dispatch_selection(request, selection, phase, guard, &budget, affinity)
             .await
-        {
-            Ok(guard) => guard,
-            Err(error) => return Err(error),
-        };
-        match self
-            .dispatch_selection(request, selection, guard, &budget, &mut affinity)
-            .await
-        {
-            Ok(stream) => Ok(stream),
-            Err(error) => {
-                if self.session_affinity_mode == SessionAffinityMode::Hard
-                    && !self.affinity_target_is_valid(selected_target)
-                    && let Some(operation) = affinity.take()
-                {
-                    operation.invalidate();
-                }
-                Err(error)
-            }
-        }
     }
 
     pub(crate) async fn prefill_worker_busy(
@@ -423,6 +405,7 @@ impl RoutingHost {
             self.request_metrics.clone(),
             cleanup,
             request,
+            phase,
             kv_route,
             selection.request_lifecycle.take(),
         );
@@ -518,22 +501,22 @@ impl RoutingHost {
         Ok(guard)
     }
 
-    /// Send a tracked selection and hand the response stream to its guard. On
-    /// success the session-affinity hold, if any, is committed to the worker
-    /// and its lease moves into the guard; on failure the hold is left with the
-    /// caller, which decides whether to invalidate it.
+    /// Send a tracked selection in `phase` and hand the response stream to its
+    /// guard. On success the session-affinity hold, if any, is committed to the
+    /// worker and its lease moves into the guard; a failed send under hard
+    /// affinity invalidates a hold whose target is no longer valid.
     pub(super) async fn dispatch_selection(
         &self,
         request: SingleIn<PreprocessedRequest>,
         selection: WorkerSelection,
+        phase: RequestPhase,
         mut guard: RequestGuard,
         budget: &CleanupBudget,
-        affinity: &mut Option<Hold>,
+        affinity: Option<Hold>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
         let route_trace_context = get_route_trace_context(&request);
-        let phase = request.phase();
         let staged_kv = StagedKv::for_request(request.content());
         let phase_label = phase.to_string();
         let worker = selection.worker;
@@ -587,6 +570,12 @@ impl RoutingHost {
             Ok(stream) => stream,
             Err(error) => {
                 record_route_error(&route_span, error.as_ref());
+                if self.session_affinity_mode == SessionAffinityMode::Hard
+                    && !self.affinity_target_is_valid(route_target(worker))
+                    && let Some(hold) = affinity
+                {
+                    hold.invalidate();
+                }
                 let typed_error = error
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
@@ -600,16 +589,17 @@ impl RoutingHost {
             }
         };
 
-        guard.on_dispatched();
-        if let Some(hold) = affinity.take() {
-            match self.commit_affinity(hold, route_target(worker)) {
-                Ok(Some(lease)) => guard.hold_affinity_lease(lease),
-                Ok(None) => {}
-                Err(error) => {
-                    guard.abort(None).await;
-                    return Err(error);
-                }
-            }
+        if let Err(error) = self
+            .accept_dispatch(
+                &mut guard,
+                affinity,
+                route_target(worker),
+                &response_stream.context(),
+            )
+            .await
+        {
+            record_route_error(&route_span, error.as_ref());
+            return Err(error);
         }
         Ok(wrap_route_span(
             into_monitored_response(response_stream, guard),
