@@ -8,6 +8,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from itertools import pairwise
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -293,10 +294,12 @@ def test_dropping_transfer_buffer_size_keeps_other_arguments() -> None:
     assert aic_renderer._drop_transfer_buffer_size(unrelated) == unrelated
 
 
-def test_direct_renderer_preserves_evaluation_context(monkeypatch) -> None:
-    monkeypatch.setattr(vllm, "get_model_context_length", lambda _model: None)
-    monkeypatch.setattr(vllm, "get_mamba_cache_align_block_size", lambda _model: None)
+def test_direct_renderer_preserves_evaluation_context() -> None:
     candidate = _disagg_candidate("vllm", "0.20.1")
+    candidate.config["model_name"] = str(
+        Path(__file__).resolve().parents[3]
+        / "replay/tests/e2e/configs/unified_cli/fixtures/tiny-model"
+    )
     candidate.config["concurrency"] = 64
     rendered = render_dgd(
         candidate,
