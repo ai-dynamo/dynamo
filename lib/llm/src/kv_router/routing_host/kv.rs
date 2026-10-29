@@ -281,10 +281,8 @@ impl RoutingHost {
         let (mut selection, affinity) = self
             .select_with_request_lifecycle(request, phase, select)
             .await?;
-        let signals = self.route_signals(&selection);
         drop(route_guard);
         Ok(RoutePlan {
-            signals,
             phase,
             cleanup: KvRequestCleanup::new(
                 Arc::clone(self.kv_router()),

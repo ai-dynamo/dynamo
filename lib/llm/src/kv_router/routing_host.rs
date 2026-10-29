@@ -325,10 +325,10 @@ pub struct RoutingHost {
     routing_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
 }
 
-/// An admitted KV route awaiting dispatch: the one form "booked but not sent"
-/// takes. Every KV route, direct or previewed, passes through here.
+/// An admitted KV route awaiting dispatch: the selected worker, its booking,
+/// and the affinity hold, until [`RoutingHost::dispatch_kv_plan`] sends it or
+/// [`RoutePlan::abort_with_error`] gives it up.
 pub(crate) struct RoutePlan {
-    pub(crate) signals: RoutePlanSignals,
     /// The phase the worker was selected for; dispatch tracks under it rather
     /// than re-reading the request.
     phase: RequestPhase,
@@ -380,9 +380,8 @@ impl RoutePlan {
         self.budget.remaining()
     }
 
-    /// The worker this plan booked.
     pub(crate) fn worker(&self) -> WorkerWithDpRank {
-        self.signals.worker
+        self.selection.worker
     }
 
     /// Early release for the booking, taken before dispatch so a migration

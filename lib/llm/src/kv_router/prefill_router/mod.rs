@@ -441,11 +441,11 @@ impl
                 .await
             {
                 Ok(Some(decision)) => {
-                    let signals = decision.plan.signals;
+                    let worker = decision.plan.worker();
                     tracing::info!(
                         request_id = %request_id,
-                        worker_id = signals.worker.worker_id,
-                        dp_rank = signals.worker.dp_rank,
+                        worker_id = worker.worker_id,
+                        dp_rank = worker.dp_rank,
                         net_new_tokens = decision.net_new_tokens,
                         overlap_tokens = decision.overlap_tokens,
                         "Conditional disagg routing to decode worker"

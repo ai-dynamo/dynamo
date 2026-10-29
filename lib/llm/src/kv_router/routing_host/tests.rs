@@ -2605,7 +2605,7 @@ async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
     let request = Context::new(request());
 
     let plan = plan_decode_route(&router, &request).await;
-    assert_eq!(plan.signals.worker.worker_id, 7);
+    assert_eq!(plan.worker().worker_id, 7);
     assert_eq!(
         router.request_metrics.requests_started_total.get(),
         0,
@@ -2664,7 +2664,7 @@ async fn route_plan_from_preview_admits_the_previewed_worker() {
         .plan_kv_route_from_preview(&request, preview)
         .await
         .unwrap();
-    assert_eq!(plan.signals.worker, previewed_worker);
+    assert_eq!(plan.worker(), previewed_worker);
     let loads = potential_loads(&router).await;
     assert_eq!(
         active_requests_for(&loads, previewed_worker.worker_id, previewed_worker.dp_rank),
