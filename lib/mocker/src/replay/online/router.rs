@@ -381,6 +381,7 @@ impl KvReplayRouter {
                 pinned_worker: None,
                 allowed_worker_ids: None,
                 shared_cache_hits: None,
+                admitted_upstream: false,
             })
             .await?;
         Ok(ReplayPlacement {

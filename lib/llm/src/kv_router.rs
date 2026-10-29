@@ -1382,6 +1382,7 @@ impl KvRouter {
                 track_active_blocks: self.kv_router_config.router_track_active_blocks,
                 return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
                 replay_id: None,
+                admitted_upstream: false,
             })
             .await;
         if lookup.is_some_and(|lookup| lookup.shared_cache_error)
