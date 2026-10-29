@@ -14,20 +14,9 @@ placement can also have host pages allocated in HBM. Binding is also useful on m
 H100, H200, B200, and B300 servers. The right NUMA node depends on the server's CPU, memory,
 GPU, and NIC topology.
 
+At high concurrency, expect roughly 10% higher throughput when NUMA locality is a bottleneck.
+
 Add these settings to a working deployment, keeping its model, discovery, and KV-transfer options.
-
-## Where NUMA Binding Can Help
-
-Local CPU work and faster KV movement can reduce Time To First Token (TTFT) and Inter-Token
-Latency (ITL) when those paths delay requests. Host-memory placement matters for KV offloading
-from GPU to host and onboarding back to GPU; GPU/NIC locality matters for KV transfer.
-
-As a measured example, NVIDIA reports **10% higher end-to-end throughput** after GPU-local CPU
-binding of Megatron policy and vLLM generation workers in its GB200 NeMo-RL infrastructure.
-This is a post-training result, rather than a Dynamo serving-latency measurement. See the
-[Nemotron 3 Ultra report, section 3.6.2](https://research.nvidia.com/labs/nemotron/files/NVIDIA-Nemotron-3-Ultra-Technical-Report.pdf#page=34),
-[Grace NUMA guidance](https://docs.nvidia.com/dccpu/grace-perf-tuning-guide/os-settings.html#unified-memory-considerations-on-grace-hopper-blackwell-systems),
-and [KV-cache offloading](../kv-cache-offloading/overview.mdx).
 
 ## Check the Tools in Your Image
 
@@ -370,9 +359,18 @@ For NIXL with UCX, a backend `device_list` can override `UCX_NET_DEVICES`; inspe
 config. `NCCL_IB_HCA` and `NCCL_SOCKET_IFNAME` configure NCCL only. See the
 [NIXL device override](https://github.com/ai-dynamo/nixl/blob/v1.5.0/src/plugins/ucx/ucx_utils.cpp#L480).
 
-For optional TCP support and rail tuning, see
-[Configure UCX Transports](../disaggregated-serving/overview.mdx#configure-ucx-transports).
-Transport selection is separate from CPU, memory, and NIC placement.
+If a UCX deployment needs TCP as well as RDMA, keep a reachable TCP interface eligible.
+For a single rank whose verified local HCA is `mlx5_0`, port `1`, and TCP interface is `eth0`:
+
+```bash
+export UCX_NET_DEVICES=mlx5_0:1,eth0
+export UCX_TLS=rc,cuda_ipc,cuda_copy,sm,self,tcp
+```
+
+Replace both device names for the worker. With vLLM's per-rank mapping, inherit only the TCP
+interface (`UCX_NET_DEVICES=eth0`) so vLLM can add each rank's HCA. `UCX_TLS` selects transports,
+not placement; this example also permits TCP payload fallback. Check UCX logs for the intended
+RDMA path. See [UCX transport controls](https://github.com/openucx/ucx/blob/v1.21.0/docs/source/faq.md#which-transports-does-ucx-use).
 
 ## Verify Effective Placement
 
@@ -410,6 +408,7 @@ high-address host buffers, and use `numastat -p` for totals by node. Check under
 initialization. For UCX, temporarily set `UCX_LOG_LEVEL=info` and check the HCA, TCP interface,
 and KV-payload transport.
 
-Compare TTFT, ITL, throughput, memory placement, and KV-transfer performance with the same
-workload before and after binding. If the workload offloads KV cache, also measure offload and
-onboard latency and bandwidth so you can tell whether host-memory placement improved that path.
+Compare Time To First Token (TTFT), Inter-Token Latency (ITL), throughput, memory placement, and
+KV-transfer performance with the same workload before and after binding. If the workload
+offloads KV cache, also measure offload and onboard latency and bandwidth so you can tell
+whether host-memory placement improved that path.
