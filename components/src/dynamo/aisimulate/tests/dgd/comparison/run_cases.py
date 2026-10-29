@@ -13,6 +13,7 @@ import argparse
 import copy
 import hashlib
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -52,12 +53,6 @@ _PHASE_VARIANTS = {
         "sweeper-aic",
         "sweeper-direct",
     },
-    "deploy": {
-        "profiler-v1beta1",
-        "sweeper-aic",
-        "sweeper-direct",
-        "recipe",
-    },
 }
 
 
@@ -77,7 +72,6 @@ class Recipe:
 
     source: str
     path: Path
-    metadata_path: Path
     requirements: dict[str, dict[str, Any]]
 
 
@@ -88,6 +82,14 @@ class SuiteException:
     status: str
     reason: str
     links: tuple[str, ...] = ()
+    match: str | None = None
+
+    def matches(self, message: str) -> bool:
+        return (
+            self.status == "broken"
+            and self.match is not None
+            and re.search(self.match, message) is not None
+        )
 
     def describe(self) -> str:
         """Return a concise diagnostic including optional evidence links."""
@@ -269,73 +271,8 @@ def _load_recipe(case_path: Path) -> Recipe | None:
     return Recipe(
         source=source,
         path=source_path,
-        metadata_path=recipe_path,
         requirements=requirements,
     )
-
-
-def load_recipe(case_name: str) -> Recipe | None:
-    """Load the optional recipe provenance for one matrix row."""
-    return _load_recipe(_case_path(case_name))
-
-
-def write_discovered_recipe_requirement(
-    recipe: Recipe, hardware: str, gpus: int
-) -> Path | None:
-    """Write a proposed requirement without changing the checked-in recipe file."""
-    proposed = {"gpus": gpus}
-    original = _read_mapping(recipe.metadata_path)
-    if original.get("requirements", {}).get(hardware) == proposed:
-        return None
-    output_path = recipe.metadata_path.with_name("recipe.new.yaml")
-    value = _read_mapping(output_path) if output_path.is_file() else original
-    value.setdefault("requirements", {})[hardware] = proposed
-    replace_text(output_path, yaml.safe_dump(value, sort_keys=False))
-    return output_path
-
-
-def recipe_gpu_count(recipe: Recipe) -> int:
-    """Return the GPU footprint declared by one maintained DGD recipe."""
-    documents = [
-        document for document in yaml.safe_load_all(recipe.path.read_text()) if document
-    ]
-    dgds = [
-        document
-        for document in documents
-        if document.get("kind") == "DynamoGraphDeployment"
-    ]
-    if len(dgds) != 1:
-        raise ValueError(
-            f"{recipe.path} must contain exactly one DynamoGraphDeployment"
-        )
-    spec = dgds[0].get("spec", {})
-    total = 0
-    services = spec.get("services")
-    if isinstance(services, dict):
-        for service in services.values():
-            replicas = service.get("replicas", 1)
-            gpus = service.get("resources", {}).get("limits", {}).get("gpu", 0)
-            total += int(replicas) * int(gpus)
-    components = spec.get("components")
-    if isinstance(components, list):
-        for component in components:
-            replicas = component.get("replicas", 1)
-            containers = (
-                component.get("podTemplate", {}).get("spec", {}).get("containers", [])
-            )
-            main = next(
-                (
-                    container
-                    for container in containers
-                    if container.get("name") == "main"
-                ),
-                containers[0] if containers else {},
-            )
-            gpus = main.get("resources", {}).get("limits", {}).get("nvidia.com/gpu", 0)
-            total += int(replicas) * int(gpus)
-    if total <= 0:
-        raise ValueError(f"cannot determine GPU requirement from {recipe.path}")
-    return total
 
 
 def _single_sweeper_backend(sweeper_input: dict[str, Any]) -> str:
@@ -484,10 +421,24 @@ def _load_suite_exception(value: Any, *, field: str, path: Path) -> SuiteExcepti
         for link in links
     ):
         raise TypeError(f"{path}: {field}.links must be a list of HTTP URLs")
-    unknown = sorted(set(value) - {"status", "reason", "links"})
+    match = value.get("match")
+    if match is not None:
+        if status != "broken" or not isinstance(match, str) or not match:
+            raise ValueError(
+                f"{path}: {field}.match requires broken status and a non-empty regex"
+            )
+        try:
+            re.compile(match)
+        except re.error as exc:
+            raise ValueError(
+                f"{path}: {field}.match is not a valid regex: {exc}"
+            ) from exc
+    unknown = sorted(set(value) - {"status", "reason", "links", "match"})
     if unknown:
         raise ValueError(f"{path}: {field} has unknown fields: {', '.join(unknown)}")
-    return SuiteException(status=status, reason=reason.strip(), links=tuple(links))
+    return SuiteException(
+        status=status, reason=reason.strip(), links=tuple(links), match=match
+    )
 
 
 def _load_entry_status(
@@ -495,14 +446,17 @@ def _load_entry_status(
 ) -> SuiteException | None:
     status = item.get("status")
     if status is None:
-        if "reason" in item or "links" in item:
-            raise ValueError(f"{path}: {field}.reason/links require {field}.status")
+        if any(name in item for name in ("reason", "links", "match")):
+            raise ValueError(
+                f"{path}: {field}.reason/links/match require {field}.status"
+            )
         return None
     return _load_suite_exception(
         {
             "status": status,
             "reason": item.get("reason"),
             "links": item.get("links", []),
+            "match": item.get("match"),
         },
         field=field,
         path=path,
@@ -555,7 +509,8 @@ def load_suite(path: Path) -> list[SuiteEntry]:
             raise TypeError(f"{path}: tests[{index}] must be a mapping")
         field = f"tests[{index}]"
         unknown = sorted(
-            set(item) - {"case", "hardware", "status", "reason", "links", "exceptions"}
+            set(item)
+            - {"case", "hardware", "status", "reason", "links", "match", "exceptions"}
         )
         if unknown:
             raise ValueError(
@@ -693,7 +648,7 @@ def _record_failure(
     message: str,
 ) -> None:
     exception = entry.exception_for(phase, variant)
-    if exception is not None and exception.status == "broken":
+    if exception is not None and exception.matches(message):
         print(
             f"[{entry.hardware}/{entry.case}] expected failure: {phase}/{variant}: "
             f"{message} — {exception.describe()}",
@@ -721,21 +676,6 @@ def _active_sweeper_renderers(entry: SuiteEntry) -> list[str]:
         for renderer in _RENDERERS
         if not _is_skipped(entry, "render", f"sweeper-{renderer}")
     ]
-
-
-def _sweeper_search_exception(entry: SuiteEntry) -> SuiteException | None:
-    exception = entry.exception_for("render", "sweeper")
-    if exception is not None:
-        return exception
-    renderers = _active_sweeper_renderers(entry)
-    exceptions = [
-        entry.exception_for("render", f"sweeper-{renderer}") for renderer in renderers
-    ]
-    if exceptions and all(
-        item is not None and item.status == "broken" for item in exceptions
-    ):
-        return exceptions[0]
-    return None
 
 
 def _run_sweeper_renderers(
@@ -851,8 +791,8 @@ def run_case(case: ComparisonCase, entry: SuiteEntry | None = None) -> list[str]
             failures.extend(_run_sweeper_renderers(case, entry))
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             replace_text(case.generated_dir / "error-sweeper.txt", f"{exc}\n")
-            exception = _sweeper_search_exception(entry)
-            if exception is not None and exception.status == "broken":
+            exception = entry.exception_for("render", "sweeper")
+            if exception is not None and exception.matches(str(exc)):
                 print(
                     f"[{entry.hardware}/{entry.case}] expected failure: "
                     f"render/sweeper: {exc} — {exception.describe()}",

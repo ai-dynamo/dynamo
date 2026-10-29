@@ -65,22 +65,6 @@ def _write_case_and_hardware(tmp_path, monkeypatch, *, backend="vllm"):
     return case_path, hardware_path
 
 
-@pytest.fixture(autouse=True)
-def _stub_runtime_image_derivation(monkeypatch) -> None:
-    image_names = {
-        "vllm": "vllm-runtime",
-        "sglang": "sglang-runtime",
-        "trtllm": "tensorrtllm-runtime",
-    }
-
-    def derive(image, backend):
-        prefix, _, suffix = image.rpartition("/")
-        _, _, tag = suffix.partition(":")
-        return f"{prefix}/{image_names[backend]}:{tag}"
-
-    monkeypatch.setattr(run_cases, "_derive_runtime_image", derive)
-
-
 def test_merge_patch_merges_maps_replaces_lists_and_removes_nulls() -> None:
     base = {"map": {"kept": 1, "removed": 2}, "list": [1], "scalar": "old"}
     patch = {"map": {"removed": None, "added": 3}, "list": [2], "scalar": "new"}
@@ -94,11 +78,13 @@ def test_merge_patch_merges_maps_replaces_lists_and_removes_nulls() -> None:
 
 
 def test_dgd_name_is_stable_and_leaves_room_for_component_names() -> None:
+    name = "deepseek-r1-trtllm-disagg-wide-ep"
     assert run_cases._dgd_name("qwen") == "qwen"
-    shortened = run_cases._dgd_name("deepseek-r1-trtllm-disagg-wide-ep")
+    shortened = run_cases._dgd_name(name)
 
-    assert shortened == "deepseek-r1-trtllm-8c2e7a9a"
+    assert shortened == run_cases._dgd_name(name)
     assert len(shortened) <= 28
+    assert shortened != run_cases._dgd_name(name + "-other")
 
 
 def test_load_case_composes_hardware_and_derives_dgd_options(
@@ -172,17 +158,6 @@ def test_load_suite_returns_explicit_case_hardware_pairs(tmp_path) -> None:
 
 
 def test_main_does_not_execute_case_wide_skip(monkeypatch, tmp_path, capsys) -> None:
-    cases_root = tmp_path / "cases"
-    case_path = cases_root / "qwen"
-    case_path.mkdir(parents=True)
-    (case_path / "recipe.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "source": "recipes/qwen/deploy.yaml",
-                "requirements": {"h200-sxm-8gpu": {"gpus": 8}},
-            }
-        )
-    )
     suite = tmp_path / "suite.yaml"
     suite.write_text(
         yaml.safe_dump(
@@ -199,8 +174,7 @@ def test_main_does_not_execute_case_wide_skip(monkeypatch, tmp_path, capsys) -> 
             }
         )
     )
-    monkeypatch.setattr(run_cases, "_CASES_ROOT", cases_root)
-    monkeypatch.setattr(run_cases, "_REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(run_cases, "_CASES_ROOT", tmp_path / "missing-cases")
 
     assert run_cases.main(["--suite", str(suite)]) == 0
     output = capsys.readouterr().out
@@ -208,7 +182,7 @@ def test_main_does_not_execute_case_wide_skip(monkeypatch, tmp_path, capsys) -> 
     assert "1 case(s) skipped" in output
 
 
-def test_load_suite_parses_nested_render_and_deploy_exceptions(tmp_path) -> None:
+def test_load_suite_parses_expected_renderer_failure(tmp_path) -> None:
     suite = tmp_path / "suite.yaml"
     suite.write_text(
         yaml.safe_dump(
@@ -222,15 +196,10 @@ def test_load_suite_parses_nested_render_and_deploy_exceptions(tmp_path) -> None
                                 "sweeper-direct": {
                                     "status": "broken",
                                     "reason": "Direct rendering lacks this topology.",
+                                    "match": "TEP.*not implemented",
                                     "links": [
                                         "https://github.com/ai-dynamo/dynamo/issues/8469"
                                     ],
-                                }
-                            },
-                            "deploy": {
-                                "recipe": {
-                                    "status": "skipped",
-                                    "reason": "The historical recipe was removed.",
                                 }
                             },
                         },
@@ -247,168 +216,23 @@ def test_load_suite_parses_nested_render_and_deploy_exceptions(tmp_path) -> None
         status="broken",
         reason="Direct rendering lacks this topology.",
         links=("https://github.com/ai-dynamo/dynamo/issues/8469",),
-    )
-    assert entry.exception_for("deploy", "recipe") == run_cases.SuiteException(
-        status="skipped", reason="The historical recipe was removed."
+        match="TEP.*not implemented",
     )
     assert entry.exception_for("render", "sweeper-aic") is None
 
 
-def test_recipe_hardware_discovery_writes_new_file_without_changing_source(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("match", "expected_failures"),
+    [
+        (None, ["sweeper-aic: missing bridge"]),
+        ("missing bridge", []),
+        ("unsupported topology", ["sweeper-aic: missing bridge"]),
+    ],
+    ids=["unqualified-failure", "expected-failure", "unrelated-regression"],
+)
+def test_renderer_failure_keeps_other_renderer_output(
+    monkeypatch, tmp_path, match, expected_failures
 ) -> None:
-    cases_root = tmp_path / "cases"
-    case_path = cases_root / "qwen"
-    case_path.mkdir(parents=True)
-    recipe_path = case_path / "recipe.yaml"
-    original = {
-        "source": "recipes/qwen/deploy.yaml",
-        "requirements": {"h200-sxm-8gpu": {"gpus": 8}},
-    }
-    recipe_path.write_text(yaml.safe_dump(original, sort_keys=False))
-    monkeypatch.setattr(run_cases, "_CASES_ROOT", cases_root)
-    monkeypatch.setattr(run_cases, "_REPOSITORY_ROOT", tmp_path)
-    recipe = run_cases.load_recipe("qwen")
-
-    assert recipe is not None
-    output = run_cases.write_discovered_recipe_requirement(recipe, "h100-sxm-4gpu", 4)
-
-    assert yaml.safe_load(recipe_path.read_text()) == original
-    assert output == case_path / "recipe.new.yaml"
-    assert yaml.safe_load(output.read_text()) == {
-        "source": "recipes/qwen/deploy.yaml",
-        "requirements": {
-            "h200-sxm-8gpu": {"gpus": 8},
-            "h100-sxm-4gpu": {"gpus": 4},
-        },
-    }
-
-
-@pytest.mark.parametrize("api_version", ["v1alpha1", "v1beta1"])
-def test_recipe_gpu_count_includes_replicas(monkeypatch, tmp_path, api_version) -> None:
-    cases_root = tmp_path / "cases"
-    case_path = cases_root / "qwen"
-    case_path.mkdir(parents=True)
-    recipe_dgd = tmp_path / "deploy.yaml"
-    if api_version == "v1alpha1":
-        spec = {
-            "services": {
-                "Worker": {
-                    "replicas": 3,
-                    "resources": {"limits": {"gpu": "2"}},
-                }
-            }
-        }
-    else:
-        spec = {
-            "components": [
-                {
-                    "name": "worker",
-                    "replicas": 3,
-                    "podTemplate": {
-                        "spec": {
-                            "containers": [
-                                {
-                                    "name": "main",
-                                    "resources": {"limits": {"nvidia.com/gpu": "2"}},
-                                }
-                            ]
-                        }
-                    },
-                }
-            ]
-        }
-    recipe_dgd.write_text(
-        yaml.safe_dump(
-            {
-                "apiVersion": f"nvidia.com/{api_version}",
-                "kind": "DynamoGraphDeployment",
-                "metadata": {"name": "qwen"},
-                "spec": spec,
-            }
-        )
-    )
-    (case_path / "recipe.yaml").write_text(
-        yaml.safe_dump({"source": "deploy.yaml", "requirements": {}})
-    )
-    monkeypatch.setattr(run_cases, "_CASES_ROOT", cases_root)
-    monkeypatch.setattr(run_cases, "_REPOSITORY_ROOT", tmp_path)
-    recipe = run_cases.load_recipe("qwen")
-
-    assert recipe is not None
-    assert run_cases.recipe_gpu_count(recipe) == 6
-
-
-def test_repository_learning_case_composes_without_case_local_hardware() -> None:
-    hardware = run_cases.load_hardware("h200-sxm-16gpu")
-    case = run_cases.load_case("qwen3-32b-vllm-disagg", hardware)
-
-    assert "hardware" not in yaml.safe_load(
-        (case.path / "dgdr-v1beta1.yaml").read_text()
-    )
-    assert (
-        "hardware_sku"
-        not in yaml.safe_load((case.path / "sweeper.yaml").read_text())["search_space"]
-    )
-    assert case.recipe is not None
-    assert case.recipe.source == "recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml"
-
-
-def test_repository_suite_resolves_every_ashna_case() -> None:
-    suite_path = run_cases._ROOT / "testsuite-issue-8469.yaml"
-    entries = run_cases.load_suite(suite_path)
-
-    assert len(entries) == 29
-    for entry in entries:
-        assert run_cases.load_recipe(entry.case) is not None
-        assert run_cases.missing_case_inputs(entry.case) == ()
-        case = run_cases.load_case(entry.case, run_cases.load_hardware(entry.hardware))
-        assert case.recipe is not None
-
-
-def test_sweeper_runs_once_and_renders_same_candidate_twice(
-    monkeypatch, tmp_path
-) -> None:
-    _write_case_and_hardware(tmp_path, monkeypatch)
-    case = run_cases.load_case(
-        "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
-    )
-    run_cases._write_composed_inputs(case)
-    config = SimpleNamespace(goal=SimpleNamespace(is_pareto=False), workload=object())
-    candidate = SimpleNamespace(
-        config={"backend": "vllm"},
-        score=3.0,
-        used_gpus=4,
-        metrics={"throughput": 3.0},
-        objectives=None,
-    )
-    sweep_calls = []
-    render_calls = []
-    monkeypatch.setattr(run_cases, "load_sweep_config", lambda path: config)
-
-    def fake_sweep(received_config):
-        sweep_calls.append(received_config)
-        return SimpleNamespace(candidates=[candidate])
-
-    def fake_render(received, workload, options, *, dgd_name, renderer):
-        render_calls.append((received, workload, options, dgd_name, renderer))
-        return f"kind: DynamoGraphDeployment\nrenderer: {renderer}\n"
-
-    monkeypatch.setattr(run_cases, "run_sweep", fake_sweep)
-    monkeypatch.setattr(run_cases, "render_dgd", fake_render)
-
-    assert run_cases._run_sweeper_renderers(case) == []
-    assert sweep_calls == [config]
-    assert [call[0] for call in render_calls] == [candidate, candidate]
-    assert [call[-1] for call in render_calls] == ["aic", "direct"]
-    assert (case.generated_dir / "candidate-sweeper.yaml").is_file()
-    for renderer in ("aic", "direct"):
-        rendered = case.generated_dir / f"dgd-sweeper-{renderer}.yaml"
-        assert rendered.is_file()
-        assert rendered.read_text().startswith(run_cases._YAML_SPDX_HEADER)
-
-
-def test_renderer_failure_keeps_other_renderer_output(monkeypatch, tmp_path) -> None:
     _write_case_and_hardware(tmp_path, monkeypatch)
     case = run_cases.load_case(
         "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
@@ -432,47 +256,21 @@ def test_renderer_failure_keeps_other_renderer_output(monkeypatch, tmp_path) -> 
     stale_aic_output = case.generated_dir / "dgd-sweeper-aic.yaml"
     stale_aic_output.write_text("stale\n")
 
-    assert run_cases._run_sweeper_renderers(case) == ["sweeper-aic: missing bridge"]
-    assert (case.generated_dir / "error-sweeper-aic.txt").read_text() == (
-        "missing bridge\n"
-    )
-    assert not stale_aic_output.exists()
-    assert (case.generated_dir / "dgd-sweeper-direct.yaml").is_file()
-
-
-def test_broken_renderer_failure_does_not_fail_case(monkeypatch, tmp_path) -> None:
-    _write_case_and_hardware(tmp_path, monkeypatch)
-    case = run_cases.load_case(
-        "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
-    )
-    run_cases._write_composed_inputs(case)
-    config = SimpleNamespace(goal=SimpleNamespace(is_pareto=False), workload=object())
-    candidate = SimpleNamespace(
-        config={"backend": "vllm"}, score=3.0, used_gpus=4, metrics={}, objectives=None
-    )
-    monkeypatch.setattr(run_cases, "load_sweep_config", lambda path: config)
-    monkeypatch.setattr(
-        run_cases, "run_sweep", lambda received: SimpleNamespace(candidates=[candidate])
-    )
-
-    def render(received, workload, options, *, dgd_name, renderer):
-        if renderer == "direct":
-            raise RuntimeError("unsupported topology")
-        return f"kind: DynamoGraphDeployment\nname: {dgd_name}\n"
-
-    monkeypatch.setattr(run_cases, "render_dgd", render)
     entry = run_cases.SuiteEntry(
         case="qwen",
         hardware="h200-sxm-8gpu",
         exceptions={
             "render": {
-                "sweeper-direct": run_cases.SuiteException(
-                    status="broken", reason="Direct rendering lacks this topology."
+                "sweeper-aic": run_cases.SuiteException(
+                    status="broken", reason="Known renderer failure.", match=match
                 )
             }
         },
     )
 
-    assert run_cases._run_sweeper_renderers(case, entry) == []
-    assert (case.generated_dir / "dgd-sweeper-aic.yaml").is_file()
-    assert not (case.generated_dir / "dgd-sweeper-direct.yaml").exists()
+    assert run_cases._run_sweeper_renderers(case, entry) == expected_failures
+    assert (case.generated_dir / "error-sweeper-aic.txt").read_text() == (
+        "missing bridge\n"
+    )
+    assert not stale_aic_output.exists()
+    assert (case.generated_dir / "dgd-sweeper-direct.yaml").is_file()

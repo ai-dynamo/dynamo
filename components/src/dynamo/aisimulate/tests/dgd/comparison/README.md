@@ -9,9 +9,15 @@ This directory compares DGDs generated for the same deployment intent by the exi
 v1beta1 profiler and AI Simulate Sweeper. See [DESIGN.md](DESIGN.md) for the file contracts and
 the distinction between cases, hardware configurations, suites, goldens, and local diagnostics.
 
-`testsuite-issue-8469.yaml` retains all 29 rows from issue #8469. Every row has paired v1beta1 and
-Sweeper inputs. Known render and deployment exceptions are recorded on the affected suite row with
-a reason and optional evidence links. A missing generated variant has no placeholder golden.
+`testsuite-issue-8469.yaml` retains the rows from issue #8469. Every row has paired v1beta1 and
+Sweeper inputs. Known rendering problems are recorded on the affected suite row with a reason and
+optional evidence links. Only an explicit `match` regex accepts a known failure; reason-only
+historical entries remain diagnostic and fail closed. A missing generated variant has no placeholder
+golden.
+
+This is a manual corpus-generation tool. Automatic Recommend-to-DGD coverage runs in the existing
+[CLI E2E table](../../../../replay/tests/e2e/test_unified_cli_dynamo.py) with small deterministic
+searches. The runner does not deploy generated manifests or recipes.
 
 The portable runner and comparison-corpus direction build on Ashna Mehrotra's work in
 [PR #14031](https://github.com/ai-dynamo/dynamo/pull/14031).
