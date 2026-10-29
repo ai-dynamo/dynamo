@@ -91,12 +91,23 @@ pub(crate) fn merge_tool_call_chunk(
     }
     match (&existing.r#type, incoming.r#type) {
         (None, Some(ty)) => existing.r#type = Some(ty),
-        // Forward-compat only: `FunctionType` has one variant today, so this
-        // arm cannot fire. Kept so a second variant is not silently unreported.
         (Some(current), Some(ty)) if *current != ty => note(ToolCallIdentityField::Type),
         _ => {}
     }
 
+    // Custom deltas carry freeform input instead of function JSON fragments.
+    if let Some(incoming_custom) = incoming.custom {
+        let custom = existing.custom.get_or_insert_with(Default::default);
+        if custom.name.is_none() {
+            custom.name = incoming_custom.name;
+        }
+        if let Some(input) = incoming_custom.input {
+            custom
+                .input
+                .get_or_insert_with(String::new)
+                .push_str(&input);
+        }
+    }
     let Some(mut incoming_fn) = incoming.function else {
         return outcome(conflict);
     };

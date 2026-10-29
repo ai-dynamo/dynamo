@@ -60,18 +60,19 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 [workspace.dependencies]
 dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.7.0" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { version = "=0.13.0-dev.202610240000000082" }
+aisimulate-core = { version = "=0.13.0-dev.202610280000000086" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.7.0" }
 dynamo-llm = { path = "lib/llm", version = "1.7.0", default-features = false }
 dynamo-rl = { path = "lib/rl", version = "1.7.0" }
 dynamo-tokenizers = { version = "=3.1.3" }
-dynamo-renderer = { version = "=8.0.3" }
+dynamo-renderer = { version = "=8.2.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.7.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.7.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.7.0" }
 dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.7.0" }
+dynamo-global-common = { path = "lib/global-common", version = "1.7.0" }
 dynamo-memory = { path = "lib/memory", version = "1.7.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.7.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.7.0" }
@@ -82,14 +83,14 @@ dynamo-parsers = { version = "=10.2.2" }
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
 # Native count-before-string early streaming still needs a frontend-crates fix.
-dynamo-parsers-v2 = { version = "=0.7.35" }
+dynamo-parsers-v2 = { version = "=0.8.0" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.7.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.7.0" }
 
 
 
 # velo
-velo = { version = "0.12.0" }
+velo = { version = "=0.20.0", default-features = false }
 
 # External dependencies
 anyhow = { version = "1" }

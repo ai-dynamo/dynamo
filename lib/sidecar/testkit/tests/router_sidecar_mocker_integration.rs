@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, FinishReason, LLMEngine};
 use dynamo_llm::discovery::{LoadThresholdHandle, ModelManager};
@@ -149,6 +149,8 @@ async fn registration_and_errors_recover_through_worker_ingress<F: ProcessFixtur
         ),
         "{error}"
     );
+    // Checked as soon as the refusal returns, well inside `process::INHIBITED_DURATION`,
+    // so a wrongly inhibited worker is still out of rotation here.
     assert!(
         router
             .selectable_worker_ids()
@@ -632,7 +634,7 @@ async fn sigterm_withdraws_worker_and_releases_active_native_request<F: ProcessF
         },
     )
     .await;
-    let mut child = env.spawn_with_grace::<F>(&peer.endpoint(), DisaggregationMode::Aggregated);
+    let mut child = env.spawn_with_grace::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 1);
     let router = env.ready("backend").await;
     let handle = control.request("shutdown-active", hold_after_token());
     let mut stream = router
@@ -670,6 +672,60 @@ async fn sigterm_withdraws_worker_and_releases_active_native_request<F: ProcessF
     let independent = peer.engine().await;
     independent.start(0).await.unwrap();
     independent.cleanup().await.unwrap();
+    peer.shutdown().await;
+}
+
+/// Load that stays unavailable past the LPX sidecar's 30 s staleness limit
+/// withdraws the worker, and the sidecar then exits with an error.
+async fn load_loss_withdraws_worker_and_fails_the_process() {
+    let env = Environment::new().await;
+    let mut peer = lpx::Fixture::start(
+        Controller::default(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    // The grace keeps the withdrawn process up while the test observes it.
+    let mut child =
+        env.spawn_with_grace::<lpx::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let router = env.ready("backend").await;
+    // Valid load first, so the limit must count from the last valid answer
+    // rather than from the sidecar's start.
+    let warmed_up = Instant::now() + Duration::from_secs(5);
+    bounded("GetLoad answered after warm-up", async {
+        while peer.load_served_at().is_none_or(|at| at < warmed_up) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    peer.lose_load();
+    tokio::time::timeout(Duration::from_secs(40), async {
+        while !env.registrations("backend").await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("load loss did not withdraw the worker\n{}", child.logs()));
+    let withdrawn_after = peer
+        .load_served_at()
+        .expect("GetLoad served load before the loss")
+        .elapsed();
+    assert!(
+        withdrawn_after >= Duration::from_secs(29),
+        "withdrawn {withdrawn_after:?} after the last load, before the 30 s limit"
+    );
+    env.withdrawn("backend", &router).await;
+    assert!(child.is_running(), "withdrawal must precede process exit");
+    assert!(!child.exit().await.success(), "{}", child.logs());
+    assert!(
+        child
+            .logs()
+            .contains("Routing load remained unavailable for 30 seconds"),
+        "{}",
+        child.logs()
+    );
     peer.shutdown().await;
 }
 
@@ -1396,6 +1452,16 @@ async fn lpx_sigterm_withdraws_worker_and_releases_active_native_request() {
     tokio::time::timeout(
         Duration::from_secs(60),
         sigterm_withdraws_worker_and_releases_active_native_request::<lpx::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_load_loss_withdraws_worker_and_fails_the_process() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        load_loss_withdraws_worker_and_fails_the_process(),
     )
     .await
     .expect("process scenario exceeded its overall deadline");

@@ -176,7 +176,7 @@ fn validate_descriptors(descriptors: &[KvStateAttachmentDescriptor]) -> Result<(
         if descriptor.cache_owner_id.pool().indexer_domain() != descriptor.indexer_domain_id {
             anyhow::bail!("CacheOwnerId and indexer domain disagree");
         }
-        if descriptor.ingress_protocol != KvStateIngressProtocol::VllmResidencyV1 {
+        if !descriptor.ingress_protocol.supports_owned_residency() {
             anyhow::bail!("unsupported state-agent raw ingress protocol");
         }
         if descriptor.raw_zmq_endpoint.is_empty() {
@@ -505,7 +505,7 @@ mod tests {
 
     use async_trait::async_trait;
     use dynamo_kv_router::identity::{
-        CacheSemanticsId, DcId, IdentitySource, PoolId, RoutingScopeId, StableDpSlotId,
+        CacheSemanticsId, ClusterId, IdentitySource, PoolId, RoutingScopeId, StableDpSlotId,
     };
     use dynamo_runtime::{
         component::TransportType,
@@ -605,7 +605,7 @@ mod tests {
                     CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                     RoutingScopeId::new([2; 16], IdentitySource::Explicit),
                 ),
-                DcId::new(3),
+                ClusterId::new(3),
             ),
             StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
         )

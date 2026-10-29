@@ -172,7 +172,7 @@ hyper-util = { version = "0.1.17", features = ["server-auto", "service", "tokio"
 tokio-rustls = { workspace = true }
 tower-http = { workspace = true }
 tower = { workspace = true }
-utoipa = { version = "5.3", features = ["axum_extras", "rc_schema"] }
+utoipa = { version = "5.3", features = ["axum_extras", "rc_schema", "preserve_order"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
 
