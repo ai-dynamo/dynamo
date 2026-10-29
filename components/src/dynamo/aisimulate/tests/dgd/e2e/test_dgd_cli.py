@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Real Dynamo Recommend-to-DGD CLI coverage with offline model metadata."""
-
 from __future__ import annotations
 
 import json
