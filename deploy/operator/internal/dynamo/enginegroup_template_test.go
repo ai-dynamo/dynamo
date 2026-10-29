@@ -14,24 +14,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-func TestGroveEngineGroupTopologyAliases(t *testing.T) {
-	t.Log("declare a provider-independent launch with environment references that need topology first")
-	main := corev1.Container{
-		Name: consts.MainContainerName, Command: []string{"engine"},
-		Args: []string{"--rank=$(DYNAMO_RANK)", "--address=$(DYNAMO_LEADER_ADDRESS)"},
-		Env:  []corev1.EnvVar{{Name: "RENDEZVOUS", Value: "$(DYNAMO_LEADER_ADDRESS):29500"}},
-	}
-	expected := main.DeepCopy()
-	expected.Env = append([]corev1.EnvVar{
-		{Name: consts.DynamoRankEnvVar, Value: "$(GROVE_PCLQ_POD_INDEX)"},
-		{Name: consts.DynamoLeaderAddressEnvVar, Value: "$(GROVE_PCLQ_NAME)-0.$(GROVE_HEADLESS_SERVICE)"},
-	}, main.Env...)
-
-	t.Log("supply only the two aliases before caller environment, without rewriting the launch")
-	addGroveEngineGroupTopologyEnvVars(&main)
-	assert.Equal(t, *expected, main)
-}
-
 func TestEngineGroupTopologyAliasesAreOperatorOwned(t *testing.T) {
 	for _, name := range []string{consts.DynamoRankEnvVar, consts.DynamoLeaderAddressEnvVar} {
 		t.Run(name, func(t *testing.T) {
@@ -80,39 +62,6 @@ func TestEngineGroupIncarnationRequiresDownwardIdentity(t *testing.T) {
 				require.NoError(t, err)
 			}
 			assert.Equal(t, before, main)
-		})
-	}
-}
-
-func TestGroveEngineGroupContainerProbeOwnership(t *testing.T) {
-	for _, declared := range []bool{false, true} {
-		name := "waiting joiner has no inferred HTTP probe"
-		if declared {
-			name = "explicit allocation probes are retained"
-		}
-		t.Run(name, func(t *testing.T) {
-			t.Log("start with the standard worker probes and an explicit native launch")
-			main, err := NewWorkerDefaults().GetBaseContainer(ComponentContext{})
-			require.NoError(t, err)
-			require.NotNil(t, main.ReadinessProbe)
-			main.Command, main.Args = []string{"engine"}, []string{"--rank=$(DYNAMO_RANK)"}
-			template := &corev1.Container{Name: consts.MainContainerName}
-			if declared {
-				probe := &corev1.Probe{Exec: &corev1.ExecAction{Command: []string{"check-process"}}}
-				template.LivenessProbe, template.ReadinessProbe, template.StartupProbe = probe.DeepCopy(), probe.DeepCopy(), probe.DeepCopy()
-			}
-			beforeTemplate := template.DeepCopy()
-			beforeMain := main.DeepCopy()
-
-			t.Log("apply the allocation probe contract without changing the engine command or shared defaults")
-			configureGroveEngineGroupContainer(&main, template)
-			assert.Equal(t, template.LivenessProbe, main.LivenessProbe)
-			assert.Equal(t, template.ReadinessProbe, main.ReadinessProbe)
-			assert.Equal(t, template.StartupProbe, main.StartupProbe)
-			assert.Equal(t, beforeMain.Command, main.Command)
-			assert.Equal(t, beforeMain.Args, main.Args)
-			assert.Equal(t, beforeMain.Env, main.Env[2:])
-			assert.Equal(t, beforeTemplate, template)
 		})
 	}
 }

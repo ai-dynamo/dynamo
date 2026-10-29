@@ -458,13 +458,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		allErrs = append(allErrs, lpxComponentGateErrors(
 			v.ctx, component, opts.oldComponents[component.ComponentName], componentPath, v.runtimeVersionSource,
 		)...)
-		// Engine Group admission proves the supported layout before any Grove resources exist.
+		// Validate the creation contract independently of workload-provider support.
 		if component.EngineGroup != nil {
-			allErrs = append(allErrs, v.validateComponentEngineGroupSpec(component.EngineGroup, componentPath.Child("engineGroup"), componentEngineGroupSpecValidationOptions{
-				component: component, backendFramework: spec.BackendFramework, parentEnv: spec.Env,
-				hasRootOverride: spec.ProviderOverride != nil,
-				grovePathway:    opts.grovePathway,
-			})...)
+			allErrs = append(allErrs, v.validateComponentEngineGroupSpec(
+				component.EngineGroup, componentPath.Child("engineGroup"), spec.ProviderOverride != nil,
+			)...)
 		}
 
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
@@ -478,7 +476,6 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				oldComponent:                      opts.oldComponents[component.ComponentName],
 				groveUpdateStrategy:               opts.groveUpdateStrategy,
 				groveStrategyChanged:              opts.oldGroveUpdateStrategy != opts.groveUpdateStrategy,
-				engineGroupsSupported:             opts.grovePathway,
 			},
 		)...)
 	}
@@ -944,6 +941,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 		if !exists {
 			continue
 		}
+
 		// Until coordinated world rollout exists, preserve the declarative creation template.
 		if oldComponent.EngineGroup != nil || newComponent.EngineGroup != nil {
 			if !apiequality.Semantic.DeepEqual(newComponent, oldComponent) {

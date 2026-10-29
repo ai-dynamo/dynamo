@@ -229,27 +229,6 @@ func TestProjectConsumerContract(t *testing.T) {
 	assert.Equal(t, first, Project(got), "projection must be idempotent")
 }
 
-func TestProjectRetainsAllocationReadinessAndRetentionGate(t *testing.T) {
-	t.Log("keep launch-consumption readiness distinct from the gate closing a retired allocation")
-	gate := corev1.PodConditionType(consts.EngineGroupRetainedReadinessGate)
-	pod := &corev1.Pod{
-		Spec: corev1.PodSpec{ReadinessGates: []corev1.PodReadinessGate{{ConditionType: gate}}},
-		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{
-			{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
-			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
-			{Type: gate, Status: corev1.ConditionFalse},
-			{Type: corev1.PodReady, Status: corev1.ConditionFalse},
-		}},
-	}
-	projected := Project(pod)
-	require.Equal(t, []corev1.PodReadinessGate{{ConditionType: gate}}, projected.Spec.ReadinessGates)
-	require.Equal(t, []corev1.PodCondition{
-		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
-		{Type: gate, Status: corev1.ConditionFalse},
-		{Type: corev1.PodReady, Status: corev1.ConditionFalse},
-	}, projected.Status.Conditions)
-}
-
 func TestTransformLeavesOtherObjectsUnchanged(t *testing.T) {
 	configMap := &corev1.ConfigMap{Name: "config"}
 	got, err := Transform(configMap)

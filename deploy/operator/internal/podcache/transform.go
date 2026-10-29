@@ -85,8 +85,7 @@ func projectSpec(in corev1.PodSpec) corev1.PodSpec {
 		// Topology and snapshot controllers require the assigned node.
 		NodeName: in.NodeName,
 		// Engine Group bootstrap rejects automatic, unfenced process restarts.
-		RestartPolicy:  in.RestartPolicy,
-		ReadinessGates: in.ReadinessGates,
+		RestartPolicy: in.RestartPolicy,
 		// Model endpoint classification requires the main container's command
 		// and arguments.
 		Containers: projectContainers(in.Containers),
@@ -189,7 +188,6 @@ func projectConditions(in []corev1.PodCondition) []corev1.PodCondition {
 	for i := range in {
 		if in[i].Type != corev1.PodReady &&
 			in[i].Type != corev1.ContainersReady &&
-			in[i].Type != corev1.PodConditionType(consts.EngineGroupRetainedReadinessGate) &&
 			in[i].Type != corev1.PodConditionType(podcontract.RestoredCondition) {
 			continue
 		}

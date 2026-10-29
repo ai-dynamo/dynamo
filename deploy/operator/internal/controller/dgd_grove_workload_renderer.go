@@ -30,7 +30,6 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -112,23 +111,6 @@ func (r *groveWorkloadRenderer) Render(
 		checkpointInfos,
 	)
 
-	// Until world rollout is implemented, never change a live world's immutable pod template.
-	if existingPodCliqueSet != nil {
-		for i := range req.DGD.Spec.Components {
-			component := &req.DGD.Spec.Components[i]
-			if component.EngineGroup == nil || (req.IsDelegated != nil && req.IsDelegated(component)) {
-				continue
-			}
-			oldClique := podCliqueSetCliqueForComponent(existingPodCliqueSet, component.ComponentName)
-			newClique := podCliqueSetCliqueForComponent(desired, component.ComponentName)
-			if oldClique == nil || newClique == nil || !apiequality.Semantic.DeepEqual(oldClique.Spec, newClique.Spec) ||
-				!apiequality.Semantic.DeepEqual(oldClique.Annotations, newClique.Annotations) {
-				return nil, fmt.Errorf("component %q: live Engine Group workload changes require coordinated world rollout", component.ComponentName)
-			}
-		}
-	}
-
-	// Resolve status from the same complete graph and ownership boundary used for rendering.
 	gpuShapes, err := dynamo.ResolveGroveGPUShapes(ctx, r.reader, req.DGD, req.IsDelegated, desired)
 	if err != nil {
 		return nil, err
