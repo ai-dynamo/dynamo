@@ -1,20 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the direct Sweeper-to-DGD renderer.
-
-The candidate fixtures below are copied verbatim from a real
-aisimulate.sweeper.Sweeper.run() invocation (scalar and Pareto goals), not
-hand-written -- see the "representative search" investigation for DGDR v2
-tracking issue #13545, phase-1 items 2 and 3. In particular
-REAL_CANDIDATE_TEP_TRTLLM is the top-ranked scalar candidate from that run
-exactly as produced, including its strategy="tep" value, which is what
-surfaces the real materialization gap tested below.
-"""
+"""Regression coverage for the direct Sweeper-to-DGD materializer."""
 
 from __future__ import annotations
 
+import sys
+
 import pytest
+
+if not (3, 11) <= sys.version_info < (3, 14):
+    pytest.skip("AISimulate requires Python 3.11–3.13", allow_module_level=True)
+
+from dynamo.aisimulate.output.dgd.renderers.direct import (
+    materializer as materializer_module,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -23,13 +23,6 @@ pytestmark = [
     pytest.mark.planner,
     pytest.mark.parallel,
 ]
-
-try:
-    from dynamo.aisimulate.output.dgd.renderers.direct import (
-        materializer as materializer_module,
-    )
-except ImportError as exc:
-    pytest.skip(f"Skip (missing dependency): {exc}", allow_module_level=True)
 
 MaterializationError = materializer_module.MaterializationError
 materialize_dgd_from_candidate = materializer_module.materialize_dgd_from_candidate
@@ -126,22 +119,9 @@ def test_real_candidate_strategy_tep_on_trtllm_raises_materialization_error() ->
         materialize_dgd_from_candidate(REAL_CANDIDATE_TEP_TRTLLM, image=_IMAGE)
 
 
-def test_tp_strategy_materializes_successfully_on_all_three_backends() -> None:
-    for backend in ("vllm", "sglang", "trtllm"):
-        candidate = dict(REAL_CANDIDATE_TEP_TRTLLM, backend=backend, strategy="tp")
-        result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
-
-        worker_components = [
-            c for c in result.dgd["spec"]["components"] if c.get("type") == "worker"
-        ]
-        assert worker_components, f"no worker component materialized for {backend}"
-        args = worker_components[0]["podTemplate"]["spec"]["containers"][0]["args"]
-        assert args, f"no args materialized for {backend}"
-
-
 @pytest.mark.parametrize(
     ("backend", "tp_flag"),
-    [("vllm", "--tensor-parallel-size 4"), ("sglang", "--tp 4")],
+    [("vllm", "--tensor-parallel-size"), ("sglang", "--tp")],
 )
 def test_tep_uses_candidate_parallel_width(backend, tp_flag) -> None:
     candidate = dict(
@@ -158,7 +138,8 @@ def test_tep_uses_candidate_parallel_width(backend, tp_flag) -> None:
         if component.get("type") == "worker"
     )
     container = worker["podTemplate"]["spec"]["containers"][0]
-    assert tp_flag in " ".join(container["args"])
+    args = container["args"]
+    assert args[args.index(tp_flag) + 1] == "4"
     assert container["resources"]["limits"]["nvidia.com/gpu"] == "4"
 
 
@@ -209,20 +190,54 @@ def test_vllm_fixed_kv_capacity_uses_num_gpu_blocks_override() -> None:
 
 
 @pytest.mark.parametrize(
-    ("backend", "memory_flag", "expected_fraction"),
+    (
+        "backend",
+        "model_flag",
+        "sequence_flag",
+        "tokens_flag",
+        "memory_flag",
+        "expected_fraction",
+    ),
     [
-        ("vllm", "--gpu-memory-utilization", "0.9"),
-        ("sglang", "--mem-fraction-static", "0.88"),
-        ("trtllm", "free_gpu_memory_fraction", "0.9"),
+        (
+            "vllm",
+            "--model",
+            "--max-num-seqs",
+            "--max-num-batched-tokens",
+            "--gpu-memory-utilization",
+            "0.9",
+        ),
+        (
+            "sglang",
+            "--model-path",
+            "--max-running-requests",
+            "--chunked-prefill-size",
+            "--mem-fraction-static",
+            "0.88",
+        ),
+        (
+            "trtllm",
+            "--model-path",
+            "--trtllm.max_batch_size",
+            "--trtllm.max_num_tokens",
+            "--trtllm.kv_cache_config.free_gpu_memory_fraction",
+            "0.9",
+        ),
     ],
 )
-def test_default_kv_capacity_uses_aisimulate_backend_default(
-    backend, memory_flag, expected_fraction
+def test_aggregated_candidate_preserves_engine_configuration(
+    backend, model_flag, sequence_flag, tokens_flag, memory_flag, expected_fraction
 ) -> None:
     candidate = dict(
         REAL_CANDIDATE_TEP_TRTLLM,
         backend=backend,
         strategy="tp",
+        model_name="Qwen/Qwen3-8B",
+        tp=2,
+        replicas=2,
+        used_gpus=4,
+        agg_max_num_seqs=999,
+        agg_max_num_batched_tokens=12345,
         agg_gpu_memory_utilization=None,
     )
 
@@ -233,9 +248,24 @@ def test_default_kv_capacity_uses_aisimulate_backend_default(
         for component in result.dgd["spec"]["components"]
         if component.get("type") == "worker"
     )
-    args = " ".join(worker["podTemplate"]["spec"]["containers"][0]["args"])
-    assert memory_flag in args
-    assert expected_fraction in args
+    container = worker["podTemplate"]["spec"]["containers"][0]
+    args = container["args"]
+    for flag, value in (
+        (model_flag, candidate["model_name"]),
+        ("--served-model-name", candidate["model_name"]),
+        (sequence_flag, "999"),
+        (tokens_flag, "12345"),
+        (memory_flag, expected_fraction),
+    ):
+        assert args.count(flag) == 1
+        assert args[args.index(flag) + 1] == value
+    if backend == "trtllm":
+        assert (
+            args[args.index("--trtllm.cuda_graph_config.max_batch_size") + 1] == "999"
+        )
+    assert worker["replicas"] == 2
+    assert int(container["resources"]["limits"]["nvidia.com/gpu"]) == 2
+    assert "Qwen3-0.6B" not in " ".join(args)
 
 
 def test_kv_capacity_rejects_memory_fraction_and_fixed_blocks_together() -> None:
@@ -262,40 +292,6 @@ def test_fixed_kv_capacity_fails_when_backend_cannot_materialize_it(backend) -> 
 
     with pytest.raises(MaterializationError, match="fixed KV-cache blocks"):
         materialize_dgd_from_candidate(candidate, image=_IMAGE)
-
-
-def test_evaluated_model_is_written_into_the_dgd_not_the_template_placeholder() -> None:
-    """Regression test for a real bug found running a live end-to-end sweep:
-    the sweep evaluated and scored Qwen/Qwen3-8B, but the materialized DGD
-    contained Qwen/Qwen3-0.6B -- the base template's example placeholder --
-    because materialize_dgd_from_candidate never read candidate_config
-    ["model_name"] at all. Checks all three backends, since each uses a
-    different flag name (vLLM: --model; SGLang/TRT-LLM: --model-path) via
-    cls.WORKER_MODEL_PATH_ARG, and the bug could plausibly be fixed for one
-    backend while remaining broken for the others.
-    """
-    for backend in ("vllm", "sglang", "trtllm"):
-        candidate = dict(
-            REAL_CANDIDATE_TEP_TRTLLM,
-            backend=backend,
-            strategy="tp",
-            model_name="Qwen/Qwen3-8B",
-        )
-        result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
-
-        worker = next(
-            c for c in result.dgd["spec"]["components"] if c.get("type") == "worker"
-        )
-        args = worker["podTemplate"]["spec"]["containers"][0]["args"]
-        args_text = " ".join(args)
-
-        assert (
-            "Qwen/Qwen3-8B" in args_text
-        ), f"{backend}: evaluated model_name missing from materialized args: {args}"
-        assert "Qwen3-0.6B" not in args_text, (
-            f"{backend}: template placeholder model leaked into materialized "
-            f"args (the real bug this test guards against): {args}"
-        )
 
 
 def test_evaluation_context_fields_never_appear_in_the_dgd_spec() -> None:
@@ -373,139 +369,25 @@ def test_modifier_value_error_is_reported_as_materialization_error(monkeypatch) 
         materialize_dgd_from_candidate(candidate, image=_IMAGE)
 
 
-def test_total_gpu_footprint_matches_the_evaluated_candidate_not_just_tp() -> None:
-    """Regression test for a review-reported gap: a real 4-GPU candidate
-    (Llama-3.3-70B FP8 / vLLM / 4xH200, tp=2 x replicas=2) materialized as a
-    2-GPU DGD, because replicas was never propagated from candidate_config
-    into component.replicas -- it silently stayed at the base template's
-    hardcoded `replicas: 1` regardless of the candidate's real replica
-    count. gpus-per-worker (via tp/tep/dep) was already correct; only the
-    replica multiplier was missing, so total footprint (replicas x
-    gpus-per-worker) could be silently wrong even when the per-worker
-    GPU count looked right on its own.
-    """
-    candidate = dict(
-        REAL_CANDIDATE_TEP_TRTLLM,
-        backend="vllm",
-        strategy="tp",
-        tp=2,
-        replicas=2,
-        used_gpus=4,
-        model_name="meta-llama/Llama-3.3-70B-Instruct-FP8",
-    )
-    result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
-
-    worker = next(
-        c for c in result.dgd["spec"]["components"] if c.get("type") == "worker"
-    )
-    replicas = worker["replicas"]
-    gpus_per_worker = int(
-        worker["podTemplate"]["spec"]["containers"][0]["resources"]["limits"][
-            "nvidia.com/gpu"
-        ]
-    )
-
-    assert replicas == 2, f"replicas not propagated from candidate: got {replicas}"
-    assert gpus_per_worker == 2
-    assert replicas * gpus_per_worker == candidate["used_gpus"], (
-        f"materialized total GPU footprint ({replicas} x {gpus_per_worker}) "
-        f"does not match the evaluated candidate's used_gpus "
-        f"({candidate['used_gpus']})"
-    )
-
-
-def test_scheduler_limits_materialize_the_evaluated_candidates_values() -> None:
-    """Regression test for the most significant gap found in this pass:
-    materialize_dgd_from_candidate never called set_prefill_config on any
-    backend, so agg_max_num_seqs/agg_max_num_batched_tokens -- real search
-    dimensions Sweeper evaluates and scores candidates by -- were never
-    materialized at all. Every DGD silently kept the base template's fixed
-    scheduler defaults regardless of what was actually searched, on every
-    backend, since this materializer's very first version.
-    """
-    for backend in ("vllm", "sglang", "trtllm"):
-        candidate = dict(
-            REAL_CANDIDATE_TEP_TRTLLM,
-            backend=backend,
-            strategy="tp",
-            agg_max_num_seqs=999,
-            agg_max_num_batched_tokens=12345,
-        )
-        result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
-        worker = next(
-            c for c in result.dgd["spec"]["components"] if c.get("type") == "worker"
-        )
-        args_text = " ".join(worker["podTemplate"]["spec"]["containers"][0]["args"])
-        assert "999" in args_text, f"{backend}: agg_max_num_seqs missing: {args_text}"
-        assert (
-            "12345" in args_text
-        ), f"{backend}: agg_max_num_batched_tokens missing: {args_text}"
-
-
-def test_attention_dp_enabled_when_candidate_selected_it_trtllm_only() -> None:
-    """Regression test: examples/backends/trtllm/engine_configs/qwen3/agg.yaml
-    (the extra-engine-args file every TRT-LLM agg deployment references)
-    hardcodes enable_attention_dp: false. Nothing overrode it before this
-    fix -- a candidate genuinely evaluated with attention_dp > 1 would
-    silently materialize with attention-DP off. TRT-LLM-only: vLLM/SGLang
-    don't reference this file, so their modifiers correctly have no
-    set_config_attention_dp at all (checked via hasattr, matching how
-    materializer.py gates the call).
-    """
-    candidate = dict(
-        REAL_CANDIDATE_TEP_TRTLLM, backend="trtllm", strategy="tp", attention_dp=4
-    )
-    result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
-    worker = next(
-        c for c in result.dgd["spec"]["components"] if c.get("type") == "worker"
-    )
-    args = " ".join(worker["podTemplate"]["spec"]["containers"][0]["args"])
-    assert "enable_attention_dp" in args and "true" in args.lower(), args
-
-    from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-
-    assert not hasattr(CONFIG_MODIFIERS["vllm"], "set_config_attention_dp")
-    assert not hasattr(CONFIG_MODIFIERS["sglang"], "set_config_attention_dp")
-
-
-def test_attention_dp_left_disabled_when_candidate_did_not_select_it() -> None:
-    candidate = dict(
-        REAL_CANDIDATE_TEP_TRTLLM, backend="trtllm", strategy="tp", attention_dp=1
-    )
-    result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
-    worker = next(
-        c for c in result.dgd["spec"]["components"] if c.get("type") == "worker"
-    )
-    args = " ".join(worker["podTemplate"]["spec"]["containers"][0]["args"])
-    assert "enable_attention_dp" in args and "false" in args.lower(), args
-
-
-def test_cuda_graph_batch_size_mirrors_engine_max_batch_size_trtllm() -> None:
-    """cuda_graph_config.max_batch_size is a separate key from top-level
-    max_batch_size in the base template; confirmed it was never otherwise
-    overridden and stayed fixed at the template's default (16) regardless
-    of the real candidate."""
+@pytest.mark.parametrize("attention_dp,expected", [(1, "false"), (4, "true")])
+def test_trtllm_attention_dp_matches_evaluated_candidate(
+    attention_dp, expected
+) -> None:
     candidate = dict(
         REAL_CANDIDATE_TEP_TRTLLM,
         backend="trtllm",
         strategy="tp",
-        agg_max_num_seqs=777,
+        attention_dp=attention_dp,
     )
     result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
     worker = next(
         c for c in result.dgd["spec"]["components"] if c.get("type") == "worker"
     )
     args = worker["podTemplate"]["spec"]["containers"][0]["args"]
-    args_text = " ".join(args)
-    assert "cuda_graph_config.max_batch_size" in args_text
-    assert "777" in args_text
+    assert args[args.index("--trtllm.enable_attention_dp") + 1] == expected
 
 
-def test_disagg_materializes_both_prefill_and_decode_with_their_own_shapes() -> None:
-    """The core disagg test: prefill and decode must each get their own
-    tp/kv-cache/scheduler/replicas from their own {role}_-prefixed fields --
-    not share one shape, and not silently fall back to agg's bare/agg_*
-    keys (which don't exist on a real disagg Candidate.config at all)."""
+def test_disagg_preserves_role_specific_configuration() -> None:
     result = materialize_dgd_from_candidate(REAL_SHAPED_DISAGG_CANDIDATE, image=_IMAGE)
     components = {
         c["type"]: c
@@ -514,50 +396,34 @@ def test_disagg_materializes_both_prefill_and_decode_with_their_own_shapes() -> 
     }
     assert set(components) == {"prefill", "decode"}
 
-    prefill_args = " ".join(
-        components["prefill"]["podTemplate"]["spec"]["containers"][0]["args"]
-    )
-    decode_args = " ".join(
-        components["decode"]["podTemplate"]["spec"]["containers"][0]["args"]
-    )
+    prefill_args = components["prefill"]["podTemplate"]["spec"]["containers"][0]["args"]
+    decode_args = components["decode"]["podTemplate"]["spec"]["containers"][0]["args"]
 
-    # Prefill: tp=2, replicas=2, max_num_seqs=4, deepseek-ai/DeepSeek-V3
-    assert "--tensor-parallel-size 2" in prefill_args
-    assert components["prefill"]["replicas"] == 2
-    assert "deepseek-ai/DeepSeek-V3" in prefill_args
-
-    # Decode: tep strategy (tp=4, moe_tp=1), replicas=1, distinct from prefill
-    assert "--tensor-parallel-size 4" in decode_args
+    for role, args in (("prefill", prefill_args), ("decode", decode_args)):
+        for flag, field in (
+            ("--tensor-parallel-size", "tp"),
+            ("--max-num-seqs", "max_num_seqs"),
+            ("--max-num-batched-tokens", "max_num_batched_tokens"),
+            ("--block-size", "block_size"),
+            ("--gpu-memory-utilization", "gpu_memory_utilization"),
+        ):
+            assert args[args.index(flag) + 1] == str(
+                REAL_SHAPED_DISAGG_CANDIDATE[f"{role}_{field}"]
+            )
+        assert (
+            args[args.index("--model") + 1]
+            == REAL_SHAPED_DISAGG_CANDIDATE["model_name"]
+        )
+        assert (
+            components[role]["replicas"]
+            == REAL_SHAPED_DISAGG_CANDIDATE[f"{role}_replicas"]
+        )
     assert (
         components["decode"]["podTemplate"]["spec"]["containers"][0]["resources"][
             "limits"
         ]["nvidia.com/gpu"]
         == "4"
     )
-    assert components["decode"]["replicas"] == 1
-    assert "deepseek-ai/DeepSeek-V3" in decode_args
-
-    # The two roles must not have collapsed onto identical materialized args
-    # -- this is the actual failure mode a broken/incomplete disagg
-    # implementation could produce (e.g. accidentally reusing agg's single-
-    # pass logic for both roles).
-    assert prefill_args != decode_args
-
-
-def test_disagg_prefix_caching_differs_correctly_by_role() -> None:
-    """prefill_enable_prefix_caching=True, decode_enable_prefix_caching=False
-    on the fixture -- must materialize differently per role, not share one
-    value (a plausible copy-paste bug: reading only one role's field for
-    both)."""
-    result = materialize_dgd_from_candidate(REAL_SHAPED_DISAGG_CANDIDATE, image=_IMAGE)
-    components = {
-        c["type"]: c
-        for c in result.dgd["spec"]["components"]
-        if c.get("type") in ("prefill", "decode")
-    }
-    prefill_args = components["prefill"]["podTemplate"]["spec"]["containers"][0]["args"]
-    decode_args = components["decode"]["podTemplate"]["spec"]["containers"][0]["args"]
-
     assert "--enable-prefix-caching" in prefill_args
     assert "--no-enable-prefix-caching" in decode_args
 

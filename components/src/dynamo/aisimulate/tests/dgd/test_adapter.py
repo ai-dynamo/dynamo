@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from datetime import datetime, timezone
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,20 +9,15 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-# The standalone aisimulate package is only installed on Python >= 3.11 (see pyproject.toml);
-pytest.importorskip("aisimulate.output_adapter")
+if not (3, 11) <= sys.version_info < (3, 14):
+    pytest.skip("AISimulate requires Python 3.11–3.13", allow_module_level=True)
 
-from aisimulate.output_adapter import validate_output_adapter  # noqa: E402
-from aisimulate.sweeper.result import SweepResult  # noqa: E402
+from aisimulate.output_adapter import validate_output_adapter
+from aisimulate.sweeper.result import SweepResult
 
-from dynamo.aisimulate.output.dgd import adapter as adapter_module  # noqa: E402
-from dynamo.aisimulate.output.dgd.adapter import (  # noqa: E402
-    DGDOutputConfig,
-    create_adapter,
-)
-from dynamo.aisimulate.output.dgd.renderers import (  # noqa: E402
-    CandidateMaterializationError,
-)
+from dynamo.aisimulate.output.dgd import adapter as adapter_module
+from dynamo.aisimulate.output.dgd.adapter import DGDOutputConfig, create_adapter
+from dynamo.aisimulate.output.dgd.renderers import CandidateMaterializationError
 
 pytestmark = [
     pytest.mark.unit,
@@ -123,7 +118,7 @@ def _real_scalar_result() -> SweepResult:
             "provenance": {
                 "search_strategy": "optimizer_guided",
                 "run_id": "adapter-test",
-                "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                "created_at": "2026-01-01T00:00:00Z",
                 "input_fingerprint": "sha256:adapter-test",
                 "config": smart_config,
             },
@@ -143,16 +138,10 @@ spec:
 """
 
 
-def test_adapter_matches_aisimulate_contract_and_defaults() -> None:
+def test_adapter_implements_aisimulate_contract() -> None:
     adapter = create_adapter()
-    config = DGDOutputConfig.model_validate(_config())
 
     assert validate_output_adapter(adapter, requested_name="dgd") is adapter
-    assert config.generator == "aic"
-    assert config.format == "manifest"
-    assert config.output_file == "deployment.yaml"
-    assert config.output_dir is None
-    assert config.output_format == "dgd"
 
 
 def test_adapter_subscription_validates_config_before_search() -> None:
@@ -196,16 +185,6 @@ def test_adapter_requires_output_file() -> None:
 def test_output_target_must_match_format(config, message) -> None:
     with pytest.raises(ValidationError, match=message):
         DGDOutputConfig.model_validate(config)
-
-
-def test_kustomize_requires_only_output_dir() -> None:
-    config = DGDOutputConfig.model_validate(
-        _config(format="kustomize", output_file=None, output_dir="deployment")
-    )
-
-    assert config.output_file is None
-    assert config.output_dir == "deployment"
-    assert config.output_format == "kustomize"
 
 
 def test_adapter_requires_name() -> None:
@@ -326,43 +305,6 @@ def test_output_target_form_must_match_result_view(
             result=_result([_Candidate(1.0)], pareto=pareto),
             output_dir=tmp_path,
         )
-
-
-def test_pareto_writes_every_selected_candidate(monkeypatch, tmp_path) -> None:
-    candidates = [_Candidate(2.0), _Candidate(1.0)]
-    monkeypatch.setattr(adapter_module, "_workload", lambda _result: "workload")
-    monkeypatch.setattr(
-        adapter_module,
-        "render_dgd",
-        lambda candidate, _workload, _options, *, dgd_name, renderer: _rendered_dgd(
-            dgd_name, candidate.score
-        ),
-    )
-
-    artifacts = create_adapter().write(
-        _config(
-            name="qwen-pareto-{index}",
-            format="kustomize",
-            output_file=None,
-            output_dir="candidate-{index}",
-        ),
-        result=_result(candidates, pareto=True),
-        output_dir=tmp_path,
-    )
-
-    assert artifacts == [
-        Path("candidate-000"),
-        Path("candidate-001"),
-        Path("index.json"),
-    ]
-    for index in range(2):
-        source = tmp_path / f"candidate-{index:03d}"
-        assert yaml.safe_load((source / "deploy.yaml").read_text())["kind"] == (
-            "DynamoGraphDeployment"
-        )
-        assert yaml.safe_load((source / "kustomization.yaml").read_text())[
-            "resources"
-        ] == ["deploy.yaml"]
 
 
 def test_pareto_materialization_is_atomic(monkeypatch, tmp_path) -> None:

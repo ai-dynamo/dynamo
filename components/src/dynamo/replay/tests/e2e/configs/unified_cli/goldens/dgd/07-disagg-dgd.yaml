@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: cli-disaggregated
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: example.invalid/vllm-runtime:custom
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+    runtimeVersionOverride: 1.5.0
+  - name: decode
+    type: decode
+    replicas: 2
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: example.invalid/vllm-runtime:custom
+          workingDir: /workspace/examples/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --tensor-parallel-size
+          - '1'
+          - --pipeline-parallel-size
+          - '1'
+          - --data-parallel-size
+          - '1'
+          - --block-size
+          - '64'
+          - --num-gpu-blocks-override
+          - '128'
+          - --max-num-seqs
+          - '4'
+          - --max-num-batched-tokens
+          - '128'
+          - --cudagraph-capture-sizes
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - --no-enable-prefix-caching
+          - --disaggregation-mode
+          - decode
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+          - --model
+          - components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/tiny-model
+          - --served-model-name
+          - components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/tiny-model
+          - --max-model-len
+          - '2048'
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+            requests:
+              ephemeral-storage: 2Gi
+              nvidia.com/gpu: '1'
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+    runtimeVersionOverride: 1.5.0
+  - name: prefill
+    type: prefill
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: example.invalid/vllm-runtime:custom
+          workingDir: /workspace/examples/backends/vllm
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --tensor-parallel-size
+          - '1'
+          - --pipeline-parallel-size
+          - '1'
+          - --data-parallel-size
+          - '1'
+          - --block-size
+          - '64'
+          - --num-gpu-blocks-override
+          - '256'
+          - --max-num-seqs
+          - '1'
+          - --max-num-batched-tokens
+          - '64'
+          - --cudagraph-capture-sizes
+          - '1'
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+          - --model
+          - components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/tiny-model
+          - --served-model-name
+          - components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/tiny-model
+          - --max-model-len
+          - '2048'
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+            requests:
+              ephemeral-storage: 2Gi
+              nvidia.com/gpu: '1'
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+    runtimeVersionOverride: 1.5.0
