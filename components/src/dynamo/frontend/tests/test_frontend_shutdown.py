@@ -19,8 +19,13 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize("serving_failed", [False, True])
-def test_shutdown_failure_preserves_serving_error(monkeypatch, serving_failed):
+@pytest.mark.parametrize(
+    "serving_failed,failure_phase",
+    [(False, "serve"), (True, "serve"), (True, "engine"), (True, "routes")],
+)
+def test_shutdown_failure_preserves_serving_error(
+    monkeypatch, serving_failed, failure_phase
+):
     # Regression: joining failed shutdown in finally replaces the serving error,
     # obscuring the failure that caused the frontend to stop.
     parser = argparse.ArgumentParser()
@@ -57,10 +62,26 @@ def test_shutdown_failure_preserves_serving_error(monkeypatch, serving_failed):
             if serving_failed:
                 raise serving_error
 
+        if failure_phase != "serve":
+
+            async def initialize(*args):
+                handlers[signal.SIGTERM]()
+                if failure_phase == "engine":
+                    raise serving_error
+                return Mock()
+
+            monkeypatch.setattr(frontend, "make_engine", initialize)
+            if failure_phase == "routes":
+                monkeypatch.setattr(
+                    frontend,
+                    "load_frontend_route_extensions",
+                    Mock(side_effect=serving_error),
+                )
         monkeypatch.setattr(frontend, "run_input", serve)
         expected = serving_error if serving_failed else shutdown_error
         with pytest.raises(type(expected)) as caught:
             await frontend.async_main()
         assert caught.value is expected
+        frontend.graceful_shutdown.assert_awaited_once()
 
     asyncio.run(scenario())
