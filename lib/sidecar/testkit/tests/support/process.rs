@@ -170,8 +170,9 @@ impl Environment {
         &self,
         endpoint: &str,
         mode: DisaggregationMode,
+        grace_secs: u64,
     ) -> Process {
-        Process::spawn::<F>(self, endpoint, mode, 5, false, 1)
+        Process::spawn::<F>(self, endpoint, mode, 5, false, grace_secs)
     }
 
     pub fn spawn_env<F: ProcessFixture>(
