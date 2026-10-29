@@ -13632,18 +13632,30 @@ mod beam_routing_tests {
             Some(BEAM_UNIFIED_FAMILY)
         );
         assert_eq!(
-            selected_family_for_selection(Some(BEAM_UNIFIED_FAMILY), ParserVersion::Auto),
+            selected_family_for_selection(
+                Some(BEAM_UNIFIED_FAMILY),
+                Some(BEAM_UNIFIED_FAMILY),
+                ParserVersion::Auto,
+            ),
             Some(BEAM_UNIFIED_FAMILY)
         );
         assert_eq!(
-            selected_family_for_selection(Some(BEAM_UNIFIED_FAMILY), ParserVersion::V2),
+            selected_family_for_selection(
+                Some(BEAM_UNIFIED_FAMILY),
+                Some(BEAM_UNIFIED_FAMILY),
+                ParserVersion::V2,
+            ),
             Some(BEAM_UNIFIED_FAMILY)
         );
         // There is no v1 Beam parser to fall back to: an explicit `1` selects nothing
         // here (and `validate_parser_version` rejects it), and half a pair under `auto`
         // is rejected by the same validation before this choice is made.
         assert_eq!(
-            selected_family_for_selection(Some(BEAM_UNIFIED_FAMILY), ParserVersion::V1),
+            selected_family_for_selection(
+                Some(BEAM_UNIFIED_FAMILY),
+                Some(BEAM_UNIFIED_FAMILY),
+                ParserVersion::V1,
+            ),
             None
         );
         assert!(FAMILY_NAMES.contains(&BEAM_UNIFIED_FAMILY));
