@@ -317,7 +317,7 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
 
         **Force-reasoning:** <Badge intent="success" minimal>Yes</Badge>
 
-        **Notes:** V1 uses forced think-tag reasoning with tool-boundary handling; auto/V2 resolves `nemotron_v3` / `nemotron3` to the pinned Unified Nemotron V3 family. That library route does not establish model/backend qualification.
+        **Notes:** Auto pairs `qwen3_coder` tools with `nemotron_v3` / `nemotron3` reasoning on Unified; reasoning-only auto stays on V1. Explicit V2 selects Unified. V1 forces think-tag reasoning with tool boundaries. This does not establish model/backend qualification.
       </Accordion>
 
       <Accordion title="Nemotron-Super / -Ultra / -Deci and Llama-Nemotron">
