@@ -46,7 +46,6 @@ pub(crate) struct ModelLimits {
     pub(crate) max_output_tokens: Option<u32>,
 }
 
-/// Registration name and inference limits reported by OpenEngine.
 #[derive(Clone, Debug)]
 pub(crate) struct ModelInfo {
     pub(crate) limits: ModelLimits,
@@ -260,7 +259,6 @@ impl TrtllmClient {
         }
     }
 
-    /// Discover the model identity and limits within the startup deadline.
     /// Transient RPC failures are retried; unsupported Control, invalid model
     /// identity and other terminal errors fail without registering a worker.
     pub(crate) async fn wait_for_model_info(
