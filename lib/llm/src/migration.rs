@@ -246,10 +246,9 @@ impl Migration {
         );
         Arc::new(Self {
             migration_limit,
-            worker_withdrawal: std::env::var(
+            worker_withdrawal: dynamo_runtime::config::env_is_truthy(
                 dynamo_runtime::config::environment_names::worker::DYN_EXPERIMENTAL_WORKER_WITHDRAWAL,
-            )
-            .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")),
+            ),
             max_seq_len,
             model_name: Arc::new(model_name),
             metrics,
