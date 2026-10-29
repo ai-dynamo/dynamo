@@ -92,6 +92,7 @@
 # === global-router  (@ai-dynamo/dynamo-global-router-codeowners) ===
 /lib/global-*/**                                                                                        @ai-dynamo/dynamo-global-router-codeowners
 /lib/global-view-receiver/                                                                              @ai-dynamo/dynamo-global-router-codeowners
+/lib/global-view-broadcaster/                                                                           @ai-dynamo/dynamo-global-router-codeowners
 /components/src/dynamo/pool_relay/                                                                      @ai-dynamo/dynamo-global-router-codeowners
 
 # === backend-vllm  (@ai-dynamo/dynamo-backend-vllm-codeowners) ===
