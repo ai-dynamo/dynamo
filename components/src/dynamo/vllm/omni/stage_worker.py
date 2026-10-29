@@ -185,8 +185,7 @@ class OmniStageWorker:
                 e,
                 exc_info=True,
             )
-            # A marked health canary must fail through the runtime error path;
-            # an error dict would be wrapped as data and count as healthy.
+            # A health canary must raise: an error dict would count as healthy.
             # Ordinary requests keep the dict, which stage_router reads.
             if is_probe(request):
                 raise RuntimeError(
