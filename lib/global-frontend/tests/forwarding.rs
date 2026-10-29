@@ -21,7 +21,7 @@ use dynamo_llm::http::service::service_v2::HttpService;
 use futures::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -55,6 +55,15 @@ async fn bind() -> (TcpListener, Url) {
         listener,
         format!("http://127.0.0.1:{port}/").parse().unwrap(),
     )
+}
+
+/// A URL whose connections are refused. The socket keeps the port bound,
+/// but not listening, so no other test's server can take it.
+fn closed() -> (TcpSocket, Url) {
+    let socket = TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let port = socket.local_addr().unwrap().port();
+    (socket, format!("http://127.0.0.1:{port}/").parse().unwrap())
 }
 
 /// Waits until `url` answers a GET with success.
@@ -376,8 +385,7 @@ async fn pool_errors_pass_through() {
 
 #[tokio::test]
 async fn unreachable_pools_are_unavailable() {
-    let (listener, closed) = bind().await;
-    drop(listener);
+    let (_socket, closed) = closed();
     let global = global_frontend(vec![pool("blue", MODEL, &closed)]).await;
 
     let response = post(
