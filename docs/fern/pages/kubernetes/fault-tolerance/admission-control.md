@@ -21,7 +21,7 @@ These three settings apply **per data-parallel (DP) rank**:
 |---|---|---|
 | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` | Admitted requests that have not finished. | Unset: unlimited |
 | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` | Admitted requests awaiting their first generated token or completion. | Unset: unlimited |
-| `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | Requests waiting outside the engine. Set `0` to disable queueing. | `0`: no queue |
+| `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | Requests waiting outside the engine. Set `0` to disable queueing. A positive queue limit requires at least one engine limit; otherwise, worker startup fails. | `0`: no queue |
 
 Setting either engine limit enables admission control; an engine limit left unset stays unlimited.
 When either engine limit is reached, new requests wait in the gate queue. If the queue is full, the

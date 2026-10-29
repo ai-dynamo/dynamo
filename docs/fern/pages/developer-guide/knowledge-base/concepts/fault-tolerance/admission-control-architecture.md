@@ -108,15 +108,14 @@ combined capacity of its ranks. Restart the worker to change a setting.
 |---|---|---|---|
 | Engine request limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` | `--engine-request-limit`; alias `DYN_ENGINE_REQUEST_LIMIT` | Unset: unlimited |
 | Engine request waiting limit | `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` | Alias `DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT` | Unset: unlimited |
-| Request queue limit | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | Alias `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | `0`: no queue |
+| Request queue limit | `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | Alias `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | `0`: no queue. A positive queue limit requires at least one engine limit; otherwise, worker startup fails. |
 
 Both engine limits accept positive integers. The queue limit accepts non-negative integers; `0`
 disables queueing, so requests that cannot enter immediately are rejected.
 
 Setting either engine limit enables admission control. An engine limit left unset stays unlimited, but
-the gate still reports its occupancy. With both engine limits unset, the gate is disabled whatever the
-queue limit: requests pass straight to the engine, and existing engine and transport behavior governs
-them.
+the gate still reports its occupancy. With both engine limits unset, the gate is disabled: requests pass
+straight to the engine, and existing engine and transport behavior governs them.
 
 An explicit `--engine-request-limit` takes precedence over environment variables. Each canonical
 variable takes precedence over its alias. Invalid environment values log a warning and fall back to
