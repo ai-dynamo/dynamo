@@ -149,8 +149,8 @@ mod tests {
         distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
         engine::{AsyncEngine, AsyncEngineContext},
         pipeline::{
-            AddressedRequest, Context, Error, ManyIn, ManyOut, PushRouter, ResponseStream,
-            RouterMode, SingleIn, StreamingDispatch, context::Controller,
+            AddressedRequest, Context, Error, ManyIn, ManyOut, ResponseStream, RouterMode,
+            SingleIn, StreamingDispatch, context::Controller,
         },
         storage::kv,
         traits::DistributedRuntimeProvider,
@@ -422,14 +422,15 @@ mod tests {
             .await
             .unwrap(),
         );
-        let push_router =
-            PushRouter::<PreprocessedRequest, LlmResponse>::from_client(client, RouterMode::KV)
-                .await
-                .unwrap();
+        let router = RoutingHost::builder(client, RouterMode::KV)
+            .kv_router(chooser.clone())
+            .build()
+            .await
+            .unwrap();
         let binding = Arc::new(PrefillBinding {
             target_id: crate::discovery::WorkerSetTargetId::Legacy(endpoint_id.clone()),
             endpoint_id,
-            router: Arc::new(RoutingHost::new(push_router, chooser.clone(), None).unwrap()),
+            router: Arc::new(router),
             prefill_router_mode: RouterMode::KV,
         });
         (binding, chooser)

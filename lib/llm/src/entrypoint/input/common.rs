@@ -240,15 +240,16 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
                 .map(|filter| (filter, model_manager.lora_load_estimator_for(&endpoint_id)))
         })
         .flatten();
-    let mut host = RoutingHost::builder(router_client, router_mode)
-        .kv_router(chooser)
-        .load_context(load_context)
-        .affinity_coordinator(affinity)
-        .lora(lora);
-    if let Some((indexer, extractor)) = embedding_cache_indexer.zip(cache_key_extractor) {
-        host = host.multimodal_cache(indexer, extractor);
-    }
-    let routing_host = Arc::new(host.build().await?);
+    let routing_host = Arc::new(
+        RoutingHost::builder(router_client, router_mode)
+            .kv_router(chooser)
+            .load_context(load_context)
+            .affinity_coordinator(affinity)
+            .lora(lora)
+            .multimodal_cache(embedding_cache_indexer.zip(cache_key_extractor))
+            .build()
+            .await?,
+    );
     if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
         prefill_router
             .set_decode_routing_host(routing_host.clone())

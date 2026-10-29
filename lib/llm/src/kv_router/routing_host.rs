@@ -57,7 +57,7 @@ mod kv_selection;
 mod occupancy;
 mod request_guard;
 
-pub use builder::{LlmDispatch, LlmPushRouter, RoutingHostBuilder};
+pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
 use builtin::BuiltinWorkerSelector;
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
@@ -320,7 +320,7 @@ pub struct RoutingHost {
     lora: Option<LoraRouting>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
     ///
-    /// Every host except a KV host built with [`RoutingHost::new`] has one.
+    /// Required for every mode except KV, where the [`KvRouter`] owns the client.
     #[allow(dead_code)]
     routing_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
 }
@@ -412,42 +412,6 @@ impl RoutePlan {
 pub type KvPushRouter = RoutingHost;
 
 impl RoutingHost {
-    /// A KV host over a transport the caller built, with hard session affinity
-    /// when `session_affinity_ttl` is set. Prefer [`RoutingHost::builder`].
-    pub fn new(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter>,
-        session_affinity_ttl: Option<Duration>,
-    ) -> Result<Self, Error> {
-        let affinity = session_affinity_ttl
-            .map(|ttl| kv_router.affinity_coordinator(ttl, SessionAffinityMode::Hard))
-            .transpose()?;
-        RoutingHostBuilder::from_transport(inner)
-            .kv_router(kv_router)
-            .affinity_coordinator(affinity)
-            .build_sync()
-    }
-
-    /// A KV host over a transport the caller built, owning `load_context`, with
-    /// session affinity in `session_affinity_mode` when `session_affinity_ttl` is
-    /// set. Prefer [`RoutingHost::builder`].
-    pub fn new_with_load_context(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter>,
-        load_context: Arc<crate::kv_router::RoutingLoadContext>,
-        session_affinity_ttl: Option<Duration>,
-        session_affinity_mode: SessionAffinityMode,
-    ) -> Result<Self, Error> {
-        let affinity = session_affinity_ttl
-            .map(|ttl| kv_router.affinity_coordinator(ttl, session_affinity_mode))
-            .transpose()?;
-        RoutingHostBuilder::from_transport(inner)
-            .kv_router(kv_router)
-            .load_context(load_context)
-            .affinity_coordinator(affinity)
-            .build_sync()
-    }
-
     pub fn required_worker_inputs(&self) -> WorkerInputs {
         match &self.policy {
             RoutingPolicy::Kv(chooser) => chooser.required_worker_inputs(),

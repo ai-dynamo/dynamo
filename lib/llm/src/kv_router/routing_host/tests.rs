@@ -26,7 +26,7 @@ use dynamo_runtime::{
     distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
     error::{BackendError, ErrorType, match_error_chain},
     pipeline::{
-        AddressedRequest, AsyncEngineContext, Context, ManyIn, Operator, PushRouter, RouterMode,
+        AddressedRequest, AsyncEngineContext, Context, ManyIn, Operator, RouterMode,
         ServerStreamingEngine, StreamingDispatch, context::Controller,
     },
     storage::kv::Selector,
@@ -177,6 +177,80 @@ async fn builtin_host_constructs_only_declared_capabilities() {
 }
 
 #[tokio::test]
+async fn builder_rejects_inputs_that_do_not_match_the_mode() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builder-validation".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    let lora = || {
+        (
+            Arc::new(LoraFilter::new(
+                LoraRoutingTable::new(),
+                LoraStateTracker::new(),
+            )),
+            Arc::new(LoadEstimator::new()),
+        )
+    };
+
+    let error = RoutingHost::builder(client.clone(), RouterMode::KV)
+        .build()
+        .await
+        .err()
+        .expect("the builder must reject these inputs");
+    assert!(error.to_string().contains("requires a KvRouter"), "{error}");
+
+    let error = RoutingHost::builder(client.clone(), RouterMode::RoundRobin)
+        .build()
+        .await
+        .err()
+        .expect("the builder must reject these inputs");
+    assert!(
+        error.to_string().contains("requires a RoutingLoadContext"),
+        "{error}"
+    );
+
+    let affinity = AffinityCoordinator::new(
+        Duration::from_secs(10),
+        crate::session_affinity::SessionAffinityMode::Soft,
+    )
+    .unwrap();
+    let error = RoutingHost::builder(client.clone(), RouterMode::RoundRobin)
+        .load_context(load_context.clone())
+        .affinity_coordinator(affinity)
+        .lora(lora())
+        .build()
+        .await
+        .err()
+        .expect("the builder must reject these inputs");
+    assert!(
+        error.to_string().contains("cannot both be enabled"),
+        "{error}"
+    );
+
+    let error = RoutingHost::builder(client, RouterMode::LeastLoaded)
+        .load_context(load_context)
+        .lora(lora())
+        .build()
+        .await
+        .err()
+        .expect("the builder must reject these inputs");
+    assert!(
+        error.to_string().contains("unsupported with LeastLoaded"),
+        "{error}"
+    );
+
+    runtime.shutdown();
+}
+
+#[tokio::test]
 async fn builtin_occupancy_selection_uses_all_selectable_workers() {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -233,14 +307,17 @@ async fn builtin_direct_without_worker_is_invalid_argument() {
         .endpoint("generate".to_string());
     let client = endpoint.client().await.unwrap();
     let load_context = test_load_context(&client).await;
-    let inner = PushRouter::from_client(client, RouterMode::Direct)
+    let affinity = AffinityCoordinator::new(
+        Duration::from_secs(10),
+        crate::session_affinity::SessionAffinityMode::Hard,
+    )
+    .unwrap();
+    let host = RoutingHost::builder(client, RouterMode::Direct)
+        .load_context(load_context)
+        .affinity_coordinator(affinity)
+        .build()
         .await
         .unwrap();
-    let (host, _) = builtin_host_with_affinity(
-        inner,
-        load_context,
-        crate::session_affinity::SessionAffinityMode::Hard,
-    );
 
     let error = host
         .generate(affinity_request("direct-unbound", None))
@@ -273,18 +350,14 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
     let worker_id = client.wait_for_instances().await.unwrap()[0].id();
     let load_context = test_load_context(&client).await;
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-    let inner = PushRouter::from_client_with_dispatch(
+    let (host, _) = builtin_host_with_affinity(
         client,
         RouterMode::Direct,
-        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-    )
-    .await
-    .unwrap();
-    let (host, _) = builtin_host_with_affinity(
-        inner,
+        dispatch.clone(),
         load_context,
         crate::session_affinity::SessionAffinityMode::Soft,
-    );
+    )
+    .await;
     let session_id = SessionAffinityId::new("direct-soft-bound");
     bind_affinity_target(&host, &session_id, AffinityTarget::new(worker_id, Some(0))).await;
 
@@ -362,18 +435,14 @@ async fn builtin_hard_affinity_ignores_local_inhibition() {
     endpoint.register_endpoint_instance().await.unwrap();
     let worker_id = client.wait_for_instances().await.unwrap()[0].id();
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-    let inner = PushRouter::from_client_with_dispatch(
+    let (host, affinity) = builtin_host_with_affinity(
         client.clone(),
         RouterMode::Direct,
-        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-    )
-    .await
-    .unwrap();
-    let (host, affinity) = builtin_host_with_affinity(
-        inner,
+        dispatch.clone(),
         load_context,
         crate::session_affinity::SessionAffinityMode::Hard,
-    );
+    )
+    .await;
 
     let session_id = SessionAffinityId::new("local-inhibition");
     bind_affinity_target(&host, &session_id, AffinityTarget::new(worker_id, Some(1))).await;
@@ -418,13 +487,6 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
     let stale_worker = worker_id.wrapping_add(1);
     client.override_instance_avail(vec![stale_worker, worker_id]);
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-    let inner = PushRouter::from_client_with_dispatch(
-        client,
-        RouterMode::RoundRobin,
-        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-    )
-    .await
-    .unwrap();
     let routing_table = LoraRoutingTable::new();
     routing_table.update_allocation(
         "adapter".to_string(),
@@ -438,10 +500,12 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
     );
     let filter = Arc::new(LoraFilter::new(routing_table, LoraStateTracker::new()));
     let estimator = Arc::new(LoadEstimator::new());
-    let host = RoutingHostBuilder::from_transport(inner)
+    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
         .load_context(load_context)
         .lora((filter, Arc::clone(&estimator)))
-        .build_sync()
+        .dispatch(Arc::clone(&dispatch) as LlmDispatch)
+        .build()
+        .await
         .unwrap();
 
     let mut base_stream = host.generate(Context::new(request())).await.unwrap();
@@ -506,18 +570,14 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
         endpoint.register_endpoint_instance().await.unwrap();
         let worker_id = client.wait_for_instances().await.unwrap()[0].id();
         let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-        let inner = PushRouter::from_client_with_dispatch(
+        let (host, affinity) = builtin_host_with_affinity(
             client,
             mode,
-            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-        )
-        .await
-        .unwrap();
-        let (host, affinity) = builtin_host_with_affinity(
-            inner,
+            dispatch.clone(),
             load_context,
             crate::session_affinity::SessionAffinityMode::Hard,
-        );
+        )
+        .await;
         let session_id = format!("session-{index}");
         let affinity_id = SessionAffinityId::new(session_id.clone());
         let explicit_worker = (mode == RouterMode::Direct).then_some(worker_id);
@@ -591,18 +651,14 @@ async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
         client.override_instance_avail(vec![101, 202]);
         let load_context = test_load_context(&client).await;
         let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-        let inner = PushRouter::from_client_with_dispatch(
+        let (host, affinity) = builtin_host_with_affinity(
             client.clone(),
             mode,
-            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-        )
-        .await
-        .unwrap();
-        let (host, affinity) = builtin_host_with_affinity(
-            inner,
+            dispatch.clone(),
             load_context,
             crate::session_affinity::SessionAffinityMode::Soft,
-        );
+        )
+        .await;
 
         let mut first = affinity_request("rank-fallback", Some(101));
         first.routing_mut().dp_rank = Some(1);
@@ -713,18 +769,14 @@ async fn builtin_soft_affinity_rebinds_after_worker_exit() {
         client.override_instance_avail(vec![101, 202, 303]);
         let load_context = test_load_context(&client).await;
         let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-        let inner = PushRouter::from_client_with_dispatch(
+        let (host, affinity) = builtin_host_with_affinity(
             client.clone(),
             mode,
-            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-        )
-        .await
-        .unwrap();
-        let (host, affinity) = builtin_host_with_affinity(
-            inner,
+            dispatch.clone(),
             load_context,
             crate::session_affinity::SessionAffinityMode::Soft,
-        );
+        )
+        .await;
         let session_id = SessionAffinityId::new("worker-exit");
         bind_affinity_target(&host, &session_id, AffinityTarget::new(101, Some(1))).await;
 
@@ -824,18 +876,14 @@ async fn builtin_direct_distinguishes_unknown_requests_from_stale_affinity() {
     let stale_worker = real_worker.wrapping_add(1);
     client.override_instance_avail(vec![stale_worker, real_worker]);
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-    let inner = PushRouter::from_client_with_dispatch(
+    let (host, affinity) = builtin_host_with_affinity(
         client,
         RouterMode::Direct,
-        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-    )
-    .await
-    .unwrap();
-    let (host, affinity) = builtin_host_with_affinity(
-        inner,
+        dispatch.clone(),
         load_context,
         crate::session_affinity::SessionAffinityMode::Hard,
-    );
+    )
+    .await;
 
     let mut standalone = request();
     standalone.routing_mut().backend_instance_id = Some(stale_worker);
@@ -1800,10 +1848,19 @@ async fn router_with_config_and_classifier(
     if let Some(classifier) = classifier {
         chooser = chooser.with_request_classifier(classifier).unwrap();
     }
-    let inner = PushRouter::from_client(client, RouterMode::KV)
+    let chooser = Arc::new(chooser);
+    let affinity = session_affinity_ttl
+        .map(|ttl| {
+            chooser.affinity_coordinator(ttl, crate::session_affinity::SessionAffinityMode::Hard)
+        })
+        .transpose()
+        .unwrap();
+    let mut router = RoutingHost::builder(client, RouterMode::KV)
+        .kv_router(chooser)
+        .affinity_coordinator(affinity)
+        .build()
         .await
         .unwrap();
-    let mut router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
     // Parallel tests must not share the process-global request counters.
     router.request_metrics = router.request_metrics.with_isolated_counters_for_test();
     router
@@ -1907,14 +1964,20 @@ async fn router_with_recorded_dispatch_and_affinity(
     .await
     .unwrap();
     let dispatch = Arc::new(PendingThenCompletedDispatch::default());
-    let inner = PushRouter::from_client_with_dispatch(
-        client,
-        RouterMode::KV,
-        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-    )
-    .await
-    .unwrap();
-    let router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+    let chooser = Arc::new(chooser);
+    let affinity = session_affinity_ttl
+        .map(|ttl| {
+            chooser.affinity_coordinator(ttl, crate::session_affinity::SessionAffinityMode::Hard)
+        })
+        .transpose()
+        .unwrap();
+    let router = RoutingHost::builder(client, RouterMode::KV)
+        .kv_router(chooser)
+        .affinity_coordinator(affinity)
+        .dispatch(Arc::clone(&dispatch) as LlmDispatch)
+        .build()
+        .await
+        .unwrap();
     (router, dispatch, worker_id, runtime)
 }
 
@@ -3008,16 +3071,20 @@ async fn session_affinity_existing_selection_cancellation_preserves_binding_with
 
 /// A builtin host over `inner` whose session-affinity coordinator has a 10s
 /// TTL and binds in `mode`.
-fn builtin_host_with_affinity(
-    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+async fn builtin_host_with_affinity(
+    client: Client,
+    router_mode: RouterMode,
+    dispatch: LlmDispatch,
     load_context: Arc<RoutingLoadContext>,
     mode: crate::session_affinity::SessionAffinityMode,
 ) -> (RoutingHost, AffinityCoordinator) {
     let affinity = AffinityCoordinator::new(Duration::from_secs(10), mode).unwrap();
-    let host = RoutingHostBuilder::from_transport(inner)
+    let host = RoutingHost::builder(client, router_mode)
         .load_context(load_context)
         .affinity_coordinator(affinity.clone())
-        .build_sync()
+        .dispatch(dispatch)
+        .build()
+        .await
         .unwrap();
     (host, affinity)
 }
@@ -3531,20 +3598,15 @@ async fn two_worker_migration_harness(
     if let Some(classifier) = classifier {
         chooser = chooser.with_request_classifier(classifier).unwrap();
     }
-    let push_router =
-        PushRouter::from_client_with_dispatch(client.clone(), RouterMode::KV, dispatch)
-            .await
-            .unwrap();
     let chooser = Arc::new(chooser);
     let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> = Arc::new(
-        RoutingHost::new_with_load_context(
-            push_router,
-            chooser.clone(),
-            load_context,
-            None,
-            crate::session_affinity::SessionAffinityMode::Hard,
-        )
-        .unwrap(),
+        RoutingHost::builder(client.clone(), RouterMode::KV)
+            .kv_router(chooser.clone())
+            .load_context(load_context)
+            .dispatch(dispatch)
+            .build()
+            .await
+            .unwrap(),
     );
 
     MigrationHarness {

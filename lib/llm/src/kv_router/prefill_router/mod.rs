@@ -1247,9 +1247,7 @@ mod tests {
     #[tokio::test]
     async fn conditional_disagg_rejects_unknown_decode_target_before_fallback() {
         use crate::{kv_router::KvRouter, local_model::runtime_config::ModelRuntimeConfig};
-        use dynamo_runtime::{
-            DistributedRuntime, Runtime, distributed::DistributedConfig, pipeline::PushRouter,
-        };
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
         let runtime = Runtime::from_current().unwrap();
         let distributed =
@@ -1287,10 +1285,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let inner = PushRouter::from_client(client, RouterMode::KV)
-            .await
-            .unwrap();
-        let host = Arc::new(RoutingHost::new(inner, Arc::new(chooser), None).unwrap());
+        let host = Arc::new(
+            RoutingHost::builder(client, RouterMode::KV)
+                .kv_router(Arc::new(chooser))
+                .build()
+                .await
+                .unwrap(),
+        );
         let router = active_conditional_router();
         assert!(router.decode_routing_host.set(host).is_ok());
         let downstream = Arc::new(QueryOnlyDecodeHost::default());
