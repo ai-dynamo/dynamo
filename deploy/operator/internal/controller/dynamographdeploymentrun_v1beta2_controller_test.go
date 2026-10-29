@@ -763,6 +763,17 @@ func assertDGDRRunJobIsolation(
 	if publisher.Image != operatorImage || publisher.ImagePullPolicy != corev1.PullAlways {
 		t.Fatalf("publisher image = %q/%s, want configured operator image/Always", publisher.Image, publisher.ImagePullPolicy)
 	}
+	if want := []string{dgdrRunPublisherBinary}; !reflect.DeepEqual(publisher.Command, want) {
+		t.Fatalf("publisher command = %q, want %q", publisher.Command, want)
+	}
+	if want := []string{
+		"--snapshot-dir", dgdrRunSnapshotPath,
+		"--run-name", run.Name,
+		"--run-uid", string(run.UID),
+		"--sweeper-container", dgdrRunSweeperContainer,
+	}; !reflect.DeepEqual(publisher.Args, want) {
+		t.Fatalf("publisher args = %q, want %q", publisher.Args, want)
+	}
 	if hasMount(sweeper.VolumeMounts, dgdrRunServiceAccountVolume) {
 		t.Fatal("sweeper unexpectedly receives the Kubernetes service-account token")
 	}
