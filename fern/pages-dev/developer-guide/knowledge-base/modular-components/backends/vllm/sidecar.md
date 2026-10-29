@@ -28,6 +28,7 @@ which carries the latest gRPC server updates: [`vllm/vllm-openai:nightly`](https
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Kubernetes multinode tensor parallelism (TP) and hybrid load balancing (hybrid-LB) data parallelism (DP) | Experimental |
 
 ## Launch Locally
 
@@ -59,6 +60,43 @@ Before applying, replace `<your-registry>/dynamo-sidecar` in the manifest with a
 kubectl apply -f lib/sidecar/vllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000
 ```
+
+Multinode deployments require `backendFramework: vllm` and complete `leader` and
+`worker` role PodTemplates. The templates own the native engine commands and
+sidecar placement. The operator does not inject executor or coordination flags.
+See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_tp.yaml),
+which uses the multiprocessing executor with a sidecar on the leader only, and the
+[hybrid-LB DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_dp.yaml),
+where every Pod runs a sidecar for its local DP ranks. Unlike `agg.yaml`, which
+launches `vllm-rs serve`, both multinode examples launch their serving ranks with
+`vllm serve --grpc-port` and `VLLM_USE_RUST_FRONTEND=1`. The TP worker runs
+`vllm serve --headless`. That entry point needs vLLM v0.32.0 or later. The examples
+use it because `vllm-rs serve` does not support `--data-parallel-hybrid-lb`.
+Engine-failure KV recovery remains incomplete and is tracked in
+[DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
+
+A multinode engine starts only when every rank has joined, and vLLM gives a late
+rank 600 seconds by default. Two timeouts set that budget. The Rust frontend waits
+`VLLM_ENGINE_READY_TIMEOUT_S` for its engine cores to register, and torch waits
+`--distributed-timeout-seconds` for the cross-node rendezvous on both the leader
+and the worker. When either expires, the leader's `main` container exits with
+`engine input registration timed out` or a store timeout and restarts. The sidecar
+is not affected. The TP example sets both to 1800 seconds, which matches the
+sidecar's startup deadline and the example's startup probe, so a worker Pod that
+pulls the engine image on a cold node still joins the first attempt. The torch
+timeout also bounds collectives at run time, so a wedged NCCL call surfaces after
+30 minutes instead of 10.
+
+The examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which exist only in
+DGDs created by operator 1.6.0 or later. For an older DGD, see
+[Use the variables in a DGD created before 1.6.0](../../../../../kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160).
+
+In sidecar mode the operator injects only the topology variables into `main`, not
+the vLLM-specific environment. A disaggregated role template must set
+`VLLM_NIXL_SIDE_CHANNEL_HOST` from `status.podIP` on its `main`
+container, as `disagg.yaml` does, so the decode engine can reach the prefill
+engine's NIXL handshake listener. vLLM adds each engine's global data-parallel
+index to the side-channel port.
 
 ## Topologies
 
