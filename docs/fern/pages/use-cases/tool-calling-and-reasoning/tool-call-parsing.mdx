@@ -413,6 +413,12 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
     **Notes:** Recipient-routed ATEM channels and calls. Unified owns reasoning, visible text, and tool output; no V1 selector exists. Library availability does not establish backend guidance support.
   </Accordion>
 
+  <Accordion title="Muse Spark">
+    **Parser:** `muse_spark` (alias `muse_spark_open`)
+
+    **Notes:** Recipient-routed ATEM calls with visible `commentary` output. Unified owns the whole response; no V1 tool parser exists. Backend guidance support is separate.
+  </Accordion>
+
   <Accordion title="Additional Unified registry entries">
     The pinned library also registers `beam`, `nemotron_v3` / `nemotron3`, and `gpt_oss` / `harmony`. See the [routing table](troubleshooting-tool-calls.md#parser-generation-routing). New library entries do not by themselves qualify model rendering, special-token handling, or engine integration.
   </Accordion>

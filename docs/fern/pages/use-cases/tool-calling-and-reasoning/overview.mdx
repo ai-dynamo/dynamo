@@ -23,7 +23,7 @@ Setting this up is two steps: one thing that always runs, then two optional feat
     - **Tool call parsing** extracts `tool_calls` from a model that emits tool-call markup. See [Tool Call Parsing](tool-call-parsing.mdx).
     - **Reasoning parsing** splits chain-of-thought into `reasoning_content` for a model that emits thinking content. See [Reasoning Parsing](reasoning-parsing.md).
 
-    On Unified routes, either selector chooses the family grammar; both must agree when set together. The legacy route uses separate selectors. See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing), including the reasoning-only Qwen exception.
+    Unified routes use a compatible family grammar. Auto uses the V1 split route for mixed formats supported by V1 and rejects combinations unavailable in both generations. See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing) for shared grammars and Beam/Qwen/Nemotron exceptions.
 
     <Note>
     Unified emits reasoning, visible text, and calls in their original order from one parser. The legacy split pipeline extracts reasoning first, then parses tools from the remaining output. Batch responses aggregate those events into response fields; streaming can expose incremental events.
