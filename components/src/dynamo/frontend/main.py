@@ -509,16 +509,31 @@ async def async_main():
     except asyncio.exceptions.CancelledError:
         # Phase 1 cancels the serving task as soon as the signal lands, so this
         # is the normal shutdown path, not an error.
-        pass
+        if not shutdown_task:
+            raise
     finally:
+        serving_error = sys.exc_info()[1]
         # Join the teardown before returning. `run_input` is cancelled the
         # instant Phase 1 fires, so without this the loop closes first and the
         # drain is cancelled partway through.
         if shutdown_task:
+            cancelled = False
+            while not shutdown_task[0].done():
+                try:
+                    await asyncio.wait(shutdown_task)
+                except asyncio.CancelledError:
+                    cancelled = True
             try:
-                await shutdown_task[0]
+                shutdown_task[0].result()
             except asyncio.exceptions.CancelledError:
-                pass
+                if serving_error is None:
+                    raise
+            except Exception:
+                if serving_error is None and not cancelled:
+                    raise
+                logger.exception("Frontend shutdown failed; preserving serving error")
+            if cancelled and serving_error is None:
+                raise asyncio.CancelledError
 
 
 async def graceful_shutdown(runtime: DistributedRuntime) -> None:

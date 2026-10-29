@@ -717,8 +717,9 @@ async def finish_worker_teardown(
     """Run worker teardown to completion, then honour any cancellation.
 
     When ``body_failed`` is true, caller cancellation and metrics-task failure
-    do not replace the propagating body error. Cleanup and deferred-handler
-    failures still propagate.
+    do not replace the propagating body error. Deferred-handler failures also
+    preserve that explicit context, which is lost across the cleanup task.
+    Cleanup failures still propagate.
     """
 
     async def _teardown() -> None:
@@ -731,7 +732,12 @@ async def finish_worker_teardown(
         cleanup()
         if run_deferred_handlers is not None:
             logging.info("Running deferred handlers")
-            await run_deferred_handlers()
+            try:
+                await run_deferred_handlers()
+            except Exception:
+                if not body_failed:
+                    raise
+                logging.exception("Deferred shutdown failed; preserving worker error")
         # Surfaced only once cleanup is done, and never over a body failure.
         if metrics_exc is not None and not body_failed:
             raise metrics_exc

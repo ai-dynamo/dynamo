@@ -3,6 +3,7 @@
 
 use super::connector::Connector;
 use crate::runtime::Runtime;
+use anyhow::Context;
 use etcd_client::{LeaseKeepAliveStream, LeaseKeeper};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,20 +25,32 @@ pub async fn create_lease(
     let teardown_guard = runtime.teardown_guard()?;
     let token = runtime.primary_token();
     if token.is_cancelled() {
+        let _ = teardown_guard.send(Ok(()));
         anyhow::bail!("lease creation cancelled");
     }
 
     let mut lease_client = connector.get_client().lease_client();
-    let lease = lease_client.grant(ttl as i64, None).await?;
+    let lease = match lease_client.grant(ttl as i64, None).await {
+        Ok(lease) => lease,
+        Err(error) => {
+            // No lease ID is available to revoke; preserve the grant failure
+            // for shutdown as well as for the constructor's caller.
+            let _ = teardown_guard.send(Err(anyhow::anyhow!(error.to_string())));
+            return Err(error.into());
+        }
+    };
 
     let id = lease.id() as u64;
     if token.is_cancelled() {
-        if let Err(e) = lease_client.revoke(id as i64).await {
-            tracing::warn!(
-                lease_id = id,
-                error = %e,
-                "Failed to revoke lease after cancellation during creation"
-            );
+        let result = lease_client
+            .revoke(id as i64)
+            .await
+            .map(|_| ())
+            .context("Failed to revoke lease after cancellation during creation");
+        let error = result.as_ref().err().map(|error| format!("{error:#}"));
+        let _ = teardown_guard.send(result);
+        if let Some(error) = error {
+            anyhow::bail!(error);
         }
         anyhow::bail!("lease creation cancelled");
     }
@@ -46,8 +59,8 @@ pub async fn create_lease(
     let child = token.child_token();
 
     tokio::spawn(async move {
-        let _teardown_guard = teardown_guard;
-        match keep_alive(connector, id, ttl, child).await {
+        let result = keep_alive(connector, id, ttl, child).await;
+        match &result {
             Ok(_) => tracing::trace!("keep alive task exited successfully"),
             Err(e) => {
                 tracing::error!(
@@ -59,6 +72,7 @@ pub async fn create_lease(
                 runtime.shutdown();
             }
         }
+        let _ = teardown_guard.send(result);
     });
 
     Ok(id)
@@ -86,16 +100,18 @@ async fn keep_alive(
             };
 
         // Keep-alive loop with the established stream
-        reconnect = keep_alive_with_stream(
-            &connector,
-            sender,
-            receiver,
-            lease_id,
-            &mut deadline,
-            &token,
-        )
-        .await?;
+        reconnect =
+            keep_alive_with_stream(sender, receiver, lease_id, &mut deadline, &token).await?;
     }
+    // Both active streams and cancelled connection/reconnection attempts
+    // converge here, and shutdown observes the revocation result.
+    tracing::debug!(lease_id, "cancellation token triggered; revoking lease");
+    connector
+        .get_client()
+        .lease_client()
+        .revoke(lease_id as i64)
+        .await
+        .context("Failed to revoke lease during cancellation")?;
     Ok(())
 }
 
@@ -113,7 +129,12 @@ async fn new_keep_alive_stream(
 ) -> anyhow::Result<Option<(LeaseKeeper, LeaseKeepAliveStream)>> {
     loop {
         let mut lease_client = connector.get_client().lease_client();
-        match lease_client.keep_alive(lease_id as i64).await {
+        let result = tokio::select! {
+            biased;
+            _ = token.cancelled() => return Ok(None),
+            result = lease_client.keep_alive(lease_id as i64) => result,
+        };
+        match result {
             Ok((sender, receiver)) => {
                 tracing::debug!(lease_id, "Established keep-alive stream");
                 return Ok(Some((sender, receiver))); // success
@@ -125,16 +146,16 @@ async fn new_keep_alive_stream(
                 tokio::select! {
                     biased;
 
+                    _ = token.cancelled() => {
+                        tracing::debug!(lease_id, "Cancellation token triggered during reconnection");
+                        return Ok(None); // cancelled
+                    }
+
                     reconnect_result = connector.reconnect(*deadline) => {
                         match reconnect_result {
                             Err(e) => return Err(e), // cannot reconnect
                             _ => continue, // retry
                         }
-                    }
-
-                    _ = token.cancelled() => {
-                        tracing::debug!(lease_id, "Cancellation token triggered during reconnection");
-                        return Ok(None); // cancelled
                     }
                 }
             }
@@ -149,7 +170,6 @@ async fn new_keep_alive_stream(
 ///     `Ok(false)` if cancelled.
 ///     `Err` for unrecoverable errors such as lease already expired.
 async fn keep_alive_with_stream(
-    connector: &Arc<Connector>,
     mut sender: LeaseKeeper,
     mut receiver: LeaseKeepAliveStream,
     lease_id: u64,
@@ -188,15 +208,6 @@ async fn keep_alive_with_stream(
             }
 
             _ = token.cancelled() => {
-                tracing::debug!(lease_id, "cancellation token triggered; revoking lease");
-                let mut lease_client = connector.get_client().lease_client();
-                if let Err(e) = lease_client.revoke(lease_id as i64).await {
-                    tracing::warn!(
-                        lease_id,
-                        error = %e,
-                        "Failed to revoke lease during cancellation. Cleanup may be incomplete."
-                    );
-                }
                 return Ok(false);
             }
 

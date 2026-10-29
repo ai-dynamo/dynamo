@@ -18,7 +18,10 @@ pytestmark = [
 
 
 @pytest.mark.parametrize("back_to_back", [False, True])
-def test_repeated_signals_join_original_teardown(monkeypatch, back_to_back):
+@pytest.mark.parametrize("cancel_waiter", [False, True])
+def test_repeated_signals_join_original_teardown(
+    monkeypatch, back_to_back, cancel_waiter
+):
     # Regression: replacing the first task lets deferred engine cleanup run
     # while runtime teardown is still pending.
     async def scenario():
@@ -51,11 +54,21 @@ def test_repeated_signals_join_original_teardown(monkeypatch, back_to_back):
             # Let the queued signal task and joiner reach their awaits.
             await asyncio.sleep(0)
             await asyncio.sleep(0)
+            if cancel_waiter:
+                joined.cancel()
+                await asyncio.sleep(0)
+                joined.cancel()
+                await asyncio.sleep(0)
             assert not joined.done()
             engine_cleanup.assert_not_called()
         finally:
             release.set()
-            await joined
+            if cancel_waiter:
+                with pytest.raises(asyncio.CancelledError):
+                    await joined
+            else:
+                await joined
+        await deferred()
         engine_cleanup.assert_called_once()
 
     asyncio.run(scenario())

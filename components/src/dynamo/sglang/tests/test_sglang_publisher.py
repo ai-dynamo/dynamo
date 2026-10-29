@@ -12,6 +12,7 @@ import zmq
 import dynamo.sglang._compat as sglang_compat
 import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.publisher as publisher_mod
+from dynamo.sglang import shutdown
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.nixl_telemetry import _share_scheduler_metrics_ipc_name
 from dynamo.sglang.publisher import (
@@ -1250,3 +1251,40 @@ async def test_finish_worker_teardown_continues_after_metrics_task_failure():
         await finish_worker_teardown(metrics_task, cleanup, run_deferred_handlers)
 
     assert steps == ["cleanup", "run_deferred_handlers"]
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_finish_worker_teardown_preserves_body_error(monkeypatch):
+    # Regression: the owned cleanup task loses sys.exc_info(), allowing runtime
+    # teardown failure to replace the serving error despite body_failed=True.
+    loop = asyncio.get_running_loop()
+    handlers = {}
+    started = asyncio.Event()
+    body_error = ValueError("serving failed")
+    engine_cleanup = Mock()
+
+    async def teardown(*args, **kwargs):
+        started.set()
+        raise RuntimeError("runtime teardown failed")
+
+    monkeypatch.setattr(shutdown, "graceful_shutdown_with_discovery", teardown)
+    monkeypatch.setattr(
+        shutdown.signal, "signal", lambda sig, cb: handlers.update({sig: cb})
+    )
+    monkeypatch.setattr(loop, "add_signal_handler", loop.add_signal_handler)
+    deferred = shutdown.install_graceful_shutdown(loop, Mock(), [], asyncio.Event())
+    loop.add_signal_handler(shutdown.signal.SIGTERM, engine_cleanup)
+    handlers[shutdown.signal.SIGTERM](shutdown.signal.SIGTERM, None)
+    await started.wait()
+    metrics_task = asyncio.create_task(asyncio.Event().wait())
+
+    with pytest.raises(ValueError) as caught:
+        try:
+            raise body_error
+        finally:
+            await finish_worker_teardown(
+                metrics_task, lambda: None, deferred, body_failed=True
+            )
+    assert caught.value is body_error
+    engine_cleanup.assert_called_once()
