@@ -7,8 +7,11 @@ use prometheus::IntCounter;
 
 use crate::{
     kv_router::{
-        KvRouter, indexer::ApproximateRequestLease, metrics::RouterRequestMetrics,
-        prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION, request_lease::RequestAttemptLease,
+        KvRouter,
+        indexer::ApproximateRequestLease,
+        metrics::RouterRequestMetrics,
+        prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
+        request_lease::{RequestAttemptLease, RequestAttemptRelease},
     },
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
@@ -730,6 +733,12 @@ impl RequestGuard {
                 lifecycle.sent(worker);
             }
         }
+    }
+
+    pub(super) fn attempt_release(&self) -> Option<RequestAttemptRelease> {
+        self.cleanup
+            .lifecycle()
+            .map(RequestAttemptLease::release_handle)
     }
 
     pub(super) fn has_approximate_lru(&self) -> bool {

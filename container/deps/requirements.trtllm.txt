@@ -18,6 +18,9 @@
 # Floor them so the --no-deps install refreshes the bundled copies in place to
 # the current patch releases (see also mistune/soupsieve/tornado below).
 aiohttp>=3.14.3
+# Required by gpu_memory_service artifact integrity checks. The GMS wheel is
+# installed with --no-deps in trtllm_runtime.Dockerfile.
+blake3>=1.0.0,<2.0.0
 certifi==2026.10.23
 gitpython>=3.1.58
 
@@ -53,4 +56,4 @@ redis>=6.2.0,<9.0.0
 soupsieve>=2.8.4  # JupyterLab stack; see note above jupyter-server
 tornado>=6.5.6  # JupyterLab stack; see note above jupyter-server
 # Required by ai_dynamo_runtime (companion to msgspec above).
-uvloop>=0.21.0
+uvloop>=0.21.0,<0.23.0

@@ -121,7 +121,7 @@ Set an explicit minimum at component scope. Dynamo resolves the target when omit
 |---|---|---|
 | Standalone single-node component | `PodCliqueTemplateSpec` | `spec.minAvailable` |
 | Multinode, inter-pod GPU memory service, or forced scaling group | `PodCliqueScalingGroupConfig` | `minAvailable` |
-| LPX component with a conductor role | `PodCliqueScalingGroupConfig` | `minAvailable` |
+| LPX component with a conductor role or an agent `runtime` init container | `PodCliqueScalingGroupConfig` | `minAvailable` |
 
 A standalone prefill component can specify:
 
@@ -150,7 +150,9 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 </ParamField>
 
 <Note>
-  Each new non-LPX component must supply `spec.components[*].podTemplate.spec.containers[name=main]` with a non-empty `image`. The runtime image is `spec.components[*].podTemplate.spec.initContainers[name=runtime].image` in Dynamo sidecar mode, or `spec.components[*].podTemplate.spec.containers[name=main].image` otherwise. If that image has no parseable semantic-version tag, set `spec.components[*].runtimeVersionOverride` to its Dynamo runtime version. Also set it when the tag identifies a different version, such as the inference engine's version. See [Runtime Version Compatibility](dynamo-component-deployment.mdx#runtime-version-compatibility). DGD has no graph-level `runtimeVersionOverride`; the DGDR-level field supplies a default when generating components.
+  Each new non-LPX component must supply a shared `podTemplate` or complete `roles[].podTemplate` definitions. Each supplied template must include `spec.containers[name=main]` with a non-empty `image`. Existing components without a `podTemplate` may retain that omission on update.
+
+  For non-LPX components, admission requires `spec.components[*].runtimeVersionOverride` when any runtime image tag lacks a parseable semantic version. The override must also be set when the parsed tag differs from the Dynamo runtime version. In sidecar mode, this applies to runtime init container images. Main container images are not used to infer Dynamo versions, including for roles without a runtime init container. See [Runtime Version Compatibility](dynamo-component-deployment.mdx#runtime-version-compatibility). DGD has no graph-level `runtimeVersionOverride`. The DGDR-level field supplies a default when generating components.
 
   LPX components use `roles[].podTemplate` instead and do not require `runtimeVersionOverride`. See [Shared component spec](dynamo-component-deployment.mdx#shared-component-spec).
 </Note>
@@ -160,7 +162,7 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 </ParamField>
 
 <ParamField path="backendFramework" type="string">
-  GPU backend framework for worker components. When omitted, the operator infers the framework from each worker engine in `containers[name=main]`, including a direct `vllm-rs` command or literal path. When set, it must match the detected engine framework. Native engine shell wrappers and image entrypoints require an explicit framework. Runtime sidecar launch wrappers do not affect inference. Newly inferred backends can trigger an operator-upgrade rollout; see [Dynamo Sidecar Mode](dynamo-component-deployment.mdx#dynamo-sidecar-mode). LPX components omit this field. Backend-specific defaults apply to `main`.
+  GPU backend framework for worker components. When omitted, the operator infers the framework from each worker engine in `containers[name=main]`, including a direct `vllm-rs` command or literal path. When set, it must match the detected engine framework. Native engine shell wrappers and image entrypoints require an explicit framework. SGLang and vLLM multinode sidecars require an explicit `backendFramework`, including when the engine command is detectable. Runtime sidecar launch wrappers do not affect inference. Newly inferred backends can trigger an operator-upgrade rollout; see [Dynamo Sidecar Mode](dynamo-component-deployment.mdx#dynamo-sidecar-mode). LPX components omit this field. Backend-specific defaults apply to `main`.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
