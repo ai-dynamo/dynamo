@@ -57,7 +57,9 @@ def _resolve_trace_paths(dataset: str) -> List[Path]:
         paths = sorted(Path(match) for match in glob.glob(dataset, recursive=True))
         paths = [candidate for candidate in paths if candidate.is_file()]
     else:
-        paths = [path]
+        # A missing path matches nothing; any other path, a named pipe
+        # included, is read as given.
+        paths = [path] if path.exists() else []
 
     paths = _reject_duplicate_copies(paths)
     if not paths:

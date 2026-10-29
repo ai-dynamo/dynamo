@@ -36,10 +36,41 @@ struct FailedDiscovery {
     retry_at: Instant,
 }
 
-const LOAD_STALENESS_LIMIT: Duration = Duration::from_secs(30);
 const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_INITIAL_LOAD_AGE: Duration = Duration::from_secs(5);
 const METRICS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Routing health limits.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RoutingSupervision {
+    pub(crate) metadata_poll_interval: Duration,
+    /// Separate from the interval so tests can poll quickly without timing out RPCs.
+    pub(crate) metadata_poll_timeout: Duration,
+    pub(crate) metadata_recovery_limit: Duration,
+    pub(crate) load_staleness_limit: Duration,
+}
+
+impl RoutingSupervision {
+    pub(crate) const PRODUCTION: Self = Self {
+        metadata_poll_interval: Duration::from_secs(5),
+        metadata_poll_timeout: Duration::from_secs(5),
+        metadata_recovery_limit: Duration::from_secs(30),
+        load_staleness_limit: Duration::from_secs(30),
+    };
+}
+
+/// Short limits so failure-path tests do not wait out [`RoutingSupervision::PRODUCTION`].
+#[cfg(test)]
+impl Default for RoutingSupervision {
+    fn default() -> Self {
+        Self {
+            metadata_poll_interval: Duration::from_millis(25),
+            metadata_poll_timeout: Duration::from_secs(5),
+            metadata_recovery_limit: Duration::from_secs(1),
+            load_staleness_limit: Duration::from_millis(500),
+        }
+    }
+}
 
 struct RoutingState {
     node: Option<crate::node::NodeMetadata>,
@@ -70,6 +101,7 @@ pub struct TrtllmSidecarEngine {
     rediscovered_limits: OnceCell<ModelLimits>,
     discovery_failure: AsyncMutex<Option<FailedDiscovery>>,
     routing: OnceCell<RoutingState>,
+    supervision: RoutingSupervision,
     metrics_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     cancel: CancellationToken,
     load_failed: CancellationToken,
@@ -93,27 +125,38 @@ impl TrtllmSidecarEngine {
             rediscovered_limits: OnceCell::new(),
             discovery_failure: AsyncMutex::new(None),
             routing: OnceCell::new(),
+            supervision: RoutingSupervision::PRODUCTION,
             metrics_task: Arc::new(Mutex::new(None)),
             cancel: CancellationToken::new(),
             load_failed: CancellationToken::new(),
         }
     }
 
+    /// Shorten supervision so failure-path tests do not wait out production limits.
+    #[cfg(test)]
+    pub(crate) fn with_supervision(mut self, supervision: RoutingSupervision) -> Self {
+        self.supervision = supervision;
+        self
+    }
+
     /// Fence a restarted native engine before continuing with stale discovery.
     pub(crate) async fn monitor_routing(&self) -> anyhow::Result<()> {
         tokio::select! {
             _ = self.load_failed.cancelled() => {
-                anyhow::bail!("Routing load remained unavailable for 30 seconds; withdrawing worker")
+                anyhow::bail!(
+                    "Routing load remained unavailable for {} seconds; withdrawing worker",
+                    self.supervision.load_staleness_limit.as_secs_f64()
+                )
             }
             result = async {
-                let mut ticks = tokio::time::interval(Duration::from_secs(5));
+                let mut ticks = tokio::time::interval(self.supervision.metadata_poll_interval);
                 ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     ticks.tick().await;
                     if let (Some((client, _)), Some(routing)) = (self.connection.get(), self.routing.get())
                         && let Some(node) = &routing.node
                     {
-                        return crate::headless::monitor_engine(client, node, &routing.sources).await;
+                        return crate::headless::monitor_engine(client, node, &routing.sources, self.supervision).await;
                     }
                 }
             } => result,
@@ -760,6 +803,7 @@ impl LLMEngine for TrtllmSidecarEngine {
         let cancel = self.cancel.clone();
         let task_slot = Arc::clone(&self.metrics_task);
         let load_failed = self.load_failed.clone();
+        let load_staleness_limit = self.supervision.load_staleness_limit;
 
         let bindings = MetricsBindings {
             dp_ranks: (0..dp_size).collect(),
@@ -771,7 +815,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                     let mut interval = tokio::time::interval(LOAD_POLL_INTERVAL);
                     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     let mut warned = false;
-                    let mut deadline = tokio::time::Instant::now() + LOAD_STALENESS_LIMIT;
+                    let mut deadline = tokio::time::Instant::now() + load_staleness_limit;
                     loop {
                         tokio::select! {
                             biased;
@@ -795,7 +839,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                                 }) {
                                     Ok(snapshots) => {
                                         warned = false;
-                                        deadline = tokio::time::Instant::now() + LOAD_STALENESS_LIMIT;
+                                        deadline = tokio::time::Instant::now() + load_staleness_limit;
                                         for snapshot in snapshots {
                                             publisher.publish(snapshot.dp_rank, snapshot);
                                         }

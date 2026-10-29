@@ -29,6 +29,10 @@ use tokio_util::sync::CancellationToken;
 
 pub type Router = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
+/// How long routers from [`Environment::ready`] keep a faulted worker out. Fault-recovery
+/// tests wait it out, so the production window would dominate their runtime.
+pub const INHIBITED_DURATION: Duration = Duration::from_millis(500);
+
 use crate::support::ProcessFixture;
 
 pub struct Environment {
@@ -99,7 +103,11 @@ impl Environment {
     }
 
     pub async fn ready(&self, component: &str) -> Arc<Router> {
-        let client = self.endpoint(component).client().await.unwrap();
+        let client = self
+            .endpoint(component)
+            .client_with_inhibited_duration(INHIBITED_DURATION)
+            .await
+            .unwrap();
         bounded("sidecar endpoint registration", client.wait_for_instances())
             .await
             .unwrap();

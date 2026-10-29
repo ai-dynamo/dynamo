@@ -16,44 +16,91 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-// ValidateDynamoSidecar validates the runtime init-container contract for admission and rendering.
+// ValidateComponentSidecarConfiguration validates runtime init-container declarations
+// in the component PodTemplate and non-LPX role PodTemplates for admission and rendering.
+// LPX admission validates roles through validateComponentRoleSpec; LPX rendering
+// passes the selected role template as component.PodTemplate.
+// Components without a runtime init container have no sidecar-specific requirements.
 // component and fldPath must not be nil.
-func ValidateDynamoSidecar(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path) field.ErrorList {
+func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path, backendFramework string) field.ErrorList {
 	var allErrs field.ErrorList
+	var hasSidecar bool
+	detail := fmt.Sprintf("component %q with a runtime init container", component.ComponentName)
 
-	// The reserved runtime init container selects sidecar mode regardless of validity.
-	if runtime := GetDynamoSidecar(component); runtime != nil {
-		index := slices.IndexFunc(component.PodTemplate.Spec.InitContainers, func(c corev1.Container) bool { return c.Name == commonconsts.RuntimeContainerName })
-		runtimePath := fldPath.Child("podTemplate", "spec", "initContainers").Index(index)
-		detail := fmt.Sprintf("component %q with a runtime init container", component.ComponentName)
-		if !IsWorkerComponent(string(component.ComponentType)) {
-			allErrs = append(allErrs, field.Forbidden(runtimePath.Child("name"), "is supported only for worker, prefill, and decode components"))
+	// Validate each authored container at its original API path, including invalid role layouts.
+	templates := make([]*corev1.PodTemplateSpec, 1, 1+len(component.Roles))
+	templates[0] = component.PodTemplate
+	paths := make([]*field.Path, 1, 1+len(component.Roles))
+	paths[0] = fldPath.Child("podTemplate")
+	// Avoid duplicate LPX admission errors; validateComponentRoleSpec owns its role checks.
+	if !component.IsLPX() {
+		for i := range component.Roles {
+			templates = append(templates, component.Roles[i].PodTemplate)
+			paths = append(paths, fldPath.Child("roles").Index(i).Child("podTemplate"))
+		}
+	}
+	for i, template := range templates {
+		if template == nil {
+			continue
+		}
+		index := slices.IndexFunc(template.Spec.InitContainers, func(c corev1.Container) bool { return c.Name == commonconsts.RuntimeContainerName })
+		if index < 0 {
+			continue
+		}
+		hasSidecar = true
+		runtime := &template.Spec.InitContainers[index]
+		runtimePath := paths[i].Child("spec", "initContainers").Index(index)
+		if !IsWorkerComponent(string(component.ComponentType)) && !component.IsLPX() {
+			allErrs = append(allErrs, field.Forbidden(runtimePath.Child("name"), "is supported only for worker, prefill, decode, and LPX components"))
 		}
 		if runtime.RestartPolicy == nil || *runtime.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 			allErrs = append(allErrs, field.Invalid(runtimePath.Child("restartPolicy"), ptr.Deref(runtime.RestartPolicy, ""), "must be Always for "+detail))
 		}
-		if engine := GetMainContainer(component); engine == nil {
-			allErrs = append(allErrs, field.Required(fldPath.Child("podTemplate", "spec", "containers"), "main engine container is required for "+detail))
-		} else if engine.Image == "" {
-			index := slices.IndexFunc(component.PodTemplate.Spec.Containers, func(c corev1.Container) bool { return c.Name == commonconsts.MainContainerName })
-			allErrs = append(allErrs, field.Required(fldPath.Child("podTemplate", "spec", "containers").Index(index).Child("image"), "engine image is required for "+detail))
+	}
+
+	// Components without a runtime declaration have no further sidecar requirements.
+	if !hasSidecar {
+		return allErrs
+	}
+
+	// Every native engine needs an explicit image, even a compute-only worker.
+	for i, template := range templates {
+		if template == nil {
+			continue
 		}
-		if component.Multinode != nil {
-			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "is not currently supported for "+detail+"; support is planned for a future release"))
-		}
-		if component.Experimental != nil {
-			if component.Experimental.Checkpoint != nil && component.Experimental.Checkpoint.Enabled {
-				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "checkpoint", "enabled"), "is not currently supported for "+detail+"; support is planned for a future release"))
-			}
-			if component.Experimental.GPUMemoryService != nil {
-				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "gpuMemoryService"), "is not currently supported for "+detail+"; support is planned for a future release"))
-			}
-			if component.Experimental.Failover != nil {
-				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), "is not currently supported for "+detail+"; support is planned for a future release"))
-			}
+		index := slices.IndexFunc(template.Spec.Containers, func(c corev1.Container) bool { return c.Name == commonconsts.MainContainerName })
+		containerPath := paths[i].Child("spec", "containers")
+		if index < 0 {
+			allErrs = append(allErrs, field.Required(containerPath, "main engine container is required for "+detail))
+		} else if template.Spec.Containers[index].Image == "" {
+			allErrs = append(allErrs, field.Required(containerPath.Index(index).Child("image"), "engine image is required for "+detail))
 		}
 	}
 
+	// Multinode sidecars require complete role templates; users own engine launches and placement.
+	if component.Multinode != nil {
+		if backendFramework != string(BackendFrameworkSGLang) {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "Dynamo sidecar multinode support currently requires backendFramework: sglang"))
+		} else if !HasCompleteMultinodeRolePodTemplates(component) {
+			allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "SGLang multinode sidecars require complete leader and worker podTemplates"))
+		} else if GetComponentDynamoSidecar(component) == nil {
+			allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "the leader template must declare runtime to select sidecar mode"))
+		}
+	}
+
+	// Existing incompatibilities apply to the component regardless of template source.
+	if component.Experimental != nil {
+		unsupportedDetail := "is not currently supported for " + detail + "; support is planned for a future release"
+		if component.Experimental.Checkpoint != nil && component.Experimental.Checkpoint.Enabled {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "checkpoint", "enabled"), unsupportedDetail))
+		}
+		if component.Experimental.GPUMemoryService != nil {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "gpuMemoryService"), unsupportedDetail))
+		}
+		if component.Experimental.Failover != nil {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), unsupportedDetail))
+		}
+	}
 	return allErrs
 }
 
@@ -93,24 +140,25 @@ func dynamoSidecarBaseContainer(context ComponentContext) corev1.Container {
 	return container
 }
 
-// mergeDynamoSidecarDefaults merges defaults into the runtime init container.
+// findRuntimeInitContainer returns the declared sidecar, or nil when absent.
 // podSpec must not be nil.
-func mergeDynamoSidecarDefaults(podSpec *corev1.PodSpec, context ComponentContext) error {
-	// Resolve the reserved init container while preserving all other pod-template entries.
-	const name = commonconsts.RuntimeContainerName
+func findRuntimeInitContainer(podSpec *corev1.PodSpec) *corev1.Container {
 	for i := range podSpec.InitContainers {
-		user := &podSpec.InitContainers[i]
-		if user.Name != name {
-			continue
+		if podSpec.InitContainers[i].Name == commonconsts.RuntimeContainerName {
+			return &podSpec.InitContainers[i]
 		}
-
-		// User configuration overrides defaults, including entire probe handlers.
-		base := dynamoSidecarBaseContainer(context)
-		if err := mergeContainerByName(&base, user); err != nil {
-			return fmt.Errorf("merge runtime init container %q: %w", name, err)
-		}
-		podSpec.InitContainers[i] = base
-		return nil
 	}
-	return fmt.Errorf("runtime init container %q does not match any podTemplate init container", name)
+	return nil
+}
+
+// mergeDynamoSidecarDefaults merges defaults into the selected runtime init container.
+// runtime must point to the declared sidecar and must not be nil.
+func mergeDynamoSidecarDefaults(runtime *corev1.Container, context ComponentContext) error {
+	// User configuration overrides defaults, including entire probe handlers.
+	base := dynamoSidecarBaseContainer(context)
+	if err := mergeContainerByName(&base, runtime); err != nil {
+		return fmt.Errorf("merge runtime init container %q: %w", runtime.Name, err)
+	}
+	*runtime = base
+	return nil
 }

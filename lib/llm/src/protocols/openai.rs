@@ -24,6 +24,10 @@ pub(crate) mod delta_common;
 pub mod embeddings;
 pub mod generate;
 pub mod images;
+#[cfg(test)]
+mod media_fixtures;
+#[cfg(test)]
+mod media_schemas;
 pub mod models;
 pub mod pooling;
 pub mod rerank;
@@ -61,6 +65,19 @@ pub(crate) fn nest_media_passthrough(
     );
 }
 
+/// Delivery mode of generated media: a URL to the file, or the bytes as
+/// base64 text.
+///
+/// The set has two values. A request with an unknown value fails to parse.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaDelivery {
+    /// The response carries a URL to the media file.
+    Url,
+    /// The response carries the media bytes as base64 text.
+    B64Json,
+}
+
 /// Side from which prompt tokens are truncated.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -91,6 +108,10 @@ pub(crate) trait OpenAISamplingOptionsProvider {
     fn get_n(&self) -> Option<u8>;
 
     fn get_best_of(&self) -> Option<u8>;
+
+    fn get_logit_bias(&self) -> Option<std::collections::HashMap<u32, f32>> {
+        None
+    }
 
     fn nvext(&self) -> Option<&NvExt>;
 }
@@ -157,7 +178,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
 
         let mut temperature = validate_range(self.get_temperature(), &TEMPERATURE_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating temperature: {}", e))?;
-        // `top_p` must be between MIN_TOP_P and MAX_TOP_P.
+        // `top_p` must be in (MIN_TOP_P_EXCLUSIVE, MAX_TOP_P].
         let mut top_p: Option<f32> = self.get_top_p();
         validate_top_p(top_p).map_err(|e| anyhow::anyhow!("Error validating top_p: {}", e))?;
         let frequency_penalty =
@@ -178,6 +199,8 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
 
         let min_p = validate_range(CommonExtProvider::get_min_p(self), &MIN_P_RANGE)
             .map_err(|e| anyhow::anyhow!("Error validating min_p: {}", e))?;
+
+        let logit_bias = self.get_logit_bias();
 
         if let Some(nvext) = self.nvext() {
             let greedy = nvext.greed_sampling.unwrap_or(false);
@@ -215,6 +238,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             seed,
             use_beam_search: None,
             length_penalty: None,
+            logit_bias,
             guided_decoding,
             include_stop_str_in_output,
         })
