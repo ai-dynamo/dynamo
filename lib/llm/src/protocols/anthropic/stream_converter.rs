@@ -484,10 +484,9 @@ impl AnthropicStreamConverter {
         } else {
             usage
         };
-        let value = event_json_with_usage(event, usage)?;
         Ok(Event::default()
             .event(event_type)
-            .data(serde_json::to_string(&value)?))
+            .data(event_json_with_usage(event, usage)?))
     }
 
     /// Emit the initial `message_start` event.
@@ -933,26 +932,44 @@ fn carries_usage(event: &AnthropicStreamEvent) -> bool {
 /// under-report and disagree with the `total_tokens` a proxy sees on the
 /// equivalent `/v1/chat/completions` request (`prompt_tokens + completion_tokens`,
 /// cached tokens included). Saturating arithmetic guards against overflow.
+///
+/// This runs for every output token, so the event is serialized directly
+/// instead of through an intermediate `serde_json::Value` tree.
 fn event_json_with_usage(
     event: &AnthropicStreamEvent,
     usage: &AnthropicUsage,
-) -> Result<serde_json::Value, anyhow::Error> {
-    let mut value = serde_json::to_value(event)?;
-    if carries_usage(event)
-        && let serde_json::Value::Object(map) = &mut value
-    {
-        let mut usage_value = serde_json::to_value(usage)?;
-        if let serde_json::Value::Object(usage_map) = &mut usage_value {
-            let total = usage
-                .input_tokens
-                .saturating_add(usage.cache_read_input_tokens.unwrap_or(0))
-                .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0))
-                .saturating_add(usage.output_tokens);
-            usage_map.insert("total_tokens".to_string(), serde_json::json!(total));
-        }
-        map.insert("usage".to_string(), usage_value);
+) -> Result<String, anyhow::Error> {
+    if !carries_usage(event) {
+        return Ok(serde_json::to_string(event)?);
     }
-    Ok(value)
+    let total_tokens = usage
+        .input_tokens
+        .saturating_add(usage.cache_read_input_tokens.unwrap_or(0))
+        .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0))
+        .saturating_add(usage.output_tokens);
+    Ok(serde_json::to_string(&EventWithUsage {
+        event,
+        usage: UsageWithTotal {
+            usage,
+            total_tokens,
+        },
+    })?)
+}
+
+/// The event fields followed by `usage`, as one JSON object.
+#[derive(serde::Serialize)]
+struct EventWithUsage<'a> {
+    #[serde(flatten)]
+    event: &'a AnthropicStreamEvent,
+    usage: UsageWithTotal<'a>,
+}
+
+/// The usage fields followed by `total_tokens`, as one JSON object.
+#[derive(serde::Serialize)]
+struct UsageWithTotal<'a> {
+    #[serde(flatten)]
+    usage: &'a AnthropicUsage,
+    total_tokens: u32,
 }
 
 /// A tagged event for testing: the event type string paired with the
@@ -2367,7 +2384,7 @@ mod tests {
                 text: "hi".to_string(),
             },
         };
-        let value = event_json_with_usage(&delta, &usage).expect("serialize");
+        let value = event_value_with_usage(&delta, &usage);
         let usage_obj = value
             .get("usage")
             .expect("content_block_delta must carry usage");
@@ -2396,7 +2413,7 @@ mod tests {
             cache_read_input_tokens: Some(9),
             cache_creation_input_tokens: Some(1),
         };
-        let cached_value = event_json_with_usage(&delta, &cached_usage).expect("serialize");
+        let cached_value = event_value_with_usage(&delta, &cached_usage);
         let cached_usage_obj = cached_value
             .get("usage")
             .expect("content_block_delta must carry usage");
@@ -2429,11 +2446,97 @@ mod tests {
 
         // A non-delta event carries no injected usage.
         let stop = AnthropicStreamEvent::ContentBlockStop { index: 0 };
-        let stop_value = event_json_with_usage(&stop, &usage).expect("serialize");
+        let stop_value = event_value_with_usage(&stop, &usage);
         assert!(
             stop_value.get("usage").is_none(),
             "only content_block_delta gets injected usage"
         );
+    }
+
+    fn event_value_with_usage(
+        event: &AnthropicStreamEvent,
+        usage: &AnthropicUsage,
+    ) -> serde_json::Value {
+        serde_json::from_str(&event_json_with_usage(event, usage).expect("serialize"))
+            .expect("valid JSON")
+    }
+
+    /// Direct serialization must keep the wire bytes, key order included, of
+    /// inserting `usage` into the event's `serde_json::Value`.
+    #[test]
+    fn test_usage_triple_bytes_match_value_insertion() {
+        let usages = [
+            AnthropicUsage::default(),
+            AnthropicUsage {
+                input_tokens: 10,
+                output_tokens: 3,
+                cache_read_input_tokens: Some(7),
+                ..Default::default()
+            },
+            AnthropicUsage {
+                input_tokens: 123_456,
+                output_tokens: 789,
+                cache_creation_input_tokens: Some(11),
+                cache_read_input_tokens: Some(22),
+            },
+        ];
+        let events = [
+            AnthropicStreamEvent::ContentBlockDelta {
+                index: 1,
+                delta: AnthropicDelta::TextDelta {
+                    text: "a\"b\n\u{1F600}\t\\ \u{0007}".to_string(),
+                },
+            },
+            AnthropicStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: AnthropicDelta::TextDelta {
+                    text: String::new(),
+                },
+            },
+            AnthropicStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: AnthropicDelta::ThinkingDelta {
+                    thinking: "step \"1\"\n".to_string(),
+                },
+            },
+            AnthropicStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: AnthropicDelta::SignatureDelta {
+                    signature: "erased".to_string(),
+                },
+            },
+            AnthropicStreamEvent::ContentBlockDelta {
+                index: 3,
+                delta: AnthropicDelta::InputJsonDelta {
+                    partial_json: "{\"city\": \"Par".to_string(),
+                },
+            },
+            AnthropicStreamEvent::Ping {},
+            AnthropicStreamEvent::ContentBlockStop { index: 2 },
+        ];
+        for usage in &usages {
+            for event in &events {
+                let mut expected = serde_json::to_value(event).unwrap();
+                if carries_usage(event)
+                    && let serde_json::Value::Object(map) = &mut expected
+                {
+                    let mut usage_value = serde_json::to_value(usage).unwrap();
+                    let total = usage.input_tokens
+                        + usage.cache_read_input_tokens.unwrap_or(0)
+                        + usage.cache_creation_input_tokens.unwrap_or(0)
+                        + usage.output_tokens;
+                    usage_value
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("total_tokens".to_string(), total.into());
+                    map.insert("usage".to_string(), usage_value);
+                }
+                assert_eq!(
+                    event_json_with_usage(event, usage).unwrap(),
+                    expected.to_string()
+                );
+            }
+        }
     }
 
     /// Regression test: text block must be closed (content_block_stop)
