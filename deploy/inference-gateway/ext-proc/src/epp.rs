@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use dashmap::DashMap;
@@ -35,6 +35,7 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
 
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
+use crate::metrics::{self, Stage};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
     ResponseUsage, resolve_cache_namespace,
@@ -299,6 +300,7 @@ impl Router {
         // scope at the call site. That needs confirmation that Envoy's ext_proc
         // delivers pseudo-headers through to `ctx.request_headers` before being
         // relied on, which is why it is not done here.
+        let parse_started = Instant::now();
         let value: serde_json::Value = serde_json::from_str(request_json)?;
         let has_messages = value
             .get("messages")
@@ -306,17 +308,25 @@ impl Router {
             .is_some_and(|messages| !messages.is_empty());
         if !has_messages && value.get("prompt").is_some() {
             let request: NvCreateCompletionRequest = serde_json::from_value(value)?;
+            metrics::observe_stage(Stage::Parse, parse_started.elapsed());
             return self.tokenize_completion(request, headers).await;
         }
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_value(value)?;
-        self.tokenize_chat(&request, headers)
+        metrics::observe_stage(Stage::Parse, parse_started.elapsed());
+        self.tokenize_chat(request, headers).await
     }
 
     /// Tokenize a `/v1/chat/completions` body via the chat template.
-    fn tokenize_chat(
+    ///
+    /// Rendering and tokenizing a long prompt takes tens of milliseconds of
+    /// CPU, so it runs on the blocking pool, as the frontend's preprocessor
+    /// does. Inline, it held an async worker that also streams other requests'
+    /// bodies and response tokens through this EPP. A cancelled pick does not
+    /// stop the blocking task; it finishes and its result is dropped.
+    async fn tokenize_chat(
         &self,
-        request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+        request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
         headers: &[(String, String)],
     ) -> Result<TokenizeResult> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
@@ -325,12 +335,28 @@ impl Router {
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
-        let cache_namespace = cache_namespace_from_request(request, headers);
+        let cache_namespace = cache_namespace_from_request(&request, headers);
 
-        let encoding = match self.preprocessor.apply_template(request)? {
-            Some(prompt) => self.preprocessor.tokenize_rendered_prompt(&prompt)?,
-            None => self.preprocessor.tokenize("")?,
-        };
+        let preprocessor = Arc::clone(&self.preprocessor);
+        let encoding = tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let prompt = preprocessor.apply_template(&request)?;
+            let rendered = Instant::now();
+            metrics::observe_stage(Stage::Template, rendered - started);
+            let encoding = match prompt {
+                Some(prompt) => preprocessor.tokenize_rendered_prompt(&prompt),
+                None => preprocessor.tokenize(""),
+            };
+            metrics::observe_stage(Stage::Tokenize, rendered.elapsed());
+            encoding
+        })
+        .await
+        .map_err(|e| match e.try_into_panic() {
+            // A tokenizer panic is a bug, not a bad request: re-raise it as
+            // inline tokenization did, rather than answer the client 400.
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(cancelled) => anyhow::anyhow!("tokenization task was cancelled: {cancelled}"),
+        })??;
         Ok(TokenizeResult {
             tokens: encoding.token_ids().to_vec(),
             cache_namespace,
@@ -370,7 +396,10 @@ impl Router {
             None => {
                 // Read the injection verdict before the request is consumed.
                 let safe = completion_text_tokens_safe_to_inject(&request.inner.prompt);
-                (self.tokenize_completion_text(request).await?, safe)
+                let started = Instant::now();
+                let tokens = self.tokenize_completion_text(request).await?;
+                metrics::observe_stage(Stage::Tokenize, started.elapsed());
+                (tokens, safe)
             }
         };
 
@@ -1456,8 +1485,10 @@ impl EndpointPicker for Router {
             .tokenize(body_str, &req.headers)
             .await
             .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
+        metrics::observe_prompt_tokens(tokens.len());
         let policy_class = requested_policy_class(&req.headers)?;
         let reservation_id = Uuid::new_v4().to_string();
+        let select_started = Instant::now();
 
         // Try prefill routing first (disaggregated mode).
         //
@@ -1500,6 +1531,7 @@ impl EndpointPicker for Router {
             )
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+        metrics::observe_stage(Stage::Select, select_started.elapsed());
 
         // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
         // pod reflector and retry selection when the chosen worker has no endpoint.
@@ -1527,6 +1559,7 @@ impl EndpointPicker for Router {
         };
 
         // Register the request with the router for bookkeeping (load tracking).
+        let book_started = Instant::now();
         if let Err(e) = self
             .add_request(
                 &reservation_id,
@@ -1544,6 +1577,7 @@ impl EndpointPicker for Router {
                 "Failed to register request with router bookkeeping"
             );
         }
+        metrics::observe_stage(Stage::Book, book_started.elapsed());
 
         let prefill_worker = prefill_booking
             .as_ref()
