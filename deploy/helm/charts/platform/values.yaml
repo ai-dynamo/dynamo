@@ -254,9 +254,10 @@ dynamo-operator:
       # Multicluster API or "karmada". For each DGD with a DynamoPoolRelay of
       # the same name, the operator then creates a ServiceExport for
       # `<DGD name>-pool-relay` and for each frontend component's Service.
-      # Needs the multicluster.x-k8s.io/v1alpha1 ServiceExport API in this
-      # cluster. Empty exports nothing; clearing it leaves earlier exports in
-      # place until their DGDs are deleted.
+      # Needs the multicluster.x-k8s.io ServiceExport API at v1alpha1 or
+      # v1beta1 in this cluster; the operator writes v1alpha1 unless only
+      # v1beta1 is served. Empty exports nothing; clearing it leaves earlier
+      # exports in place until their DGDs are deleted.
       mcsImplementation: ""
 
     # Metrics configuration

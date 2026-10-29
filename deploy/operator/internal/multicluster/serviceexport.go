@@ -35,7 +35,8 @@ import (
 // watches a member only while its control plane has propagated at least one
 // ServiceExport there, so keep one in place in each member. That setup is outside
 // the operator. The operator reads and writes it at the multicluster.x-k8s.io
-// version that the multiClusterExport feature gate resolved.
+// version that the multiClusterExport feature gate resolved, v1alpha1 or v1beta1;
+// both define the metadata the operator writes alike.
 var ServiceExportGroupKind = schema.GroupKind{
 	Group: "multicluster.x-k8s.io",
 	Kind:  "ServiceExport",

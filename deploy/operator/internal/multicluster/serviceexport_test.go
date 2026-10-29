@@ -106,16 +106,31 @@ func TestServiceNames(t *testing.T) {
 }
 
 func TestRenderServiceExport(t *testing.T) {
-	t.Log("Render the export of pool qwen's PoolRelay Service at the version the gate resolved")
-	export := RenderServiceExport("v1alpha1", "dynamo", "qwen-pool-relay", "qwen")
-	if export.GetAPIVersion() != "multicluster.x-k8s.io/v1alpha1" || export.GetKind() != "ServiceExport" {
-		t.Errorf("export type = %s %s, want multicluster.x-k8s.io/v1alpha1 ServiceExport", export.GetAPIVersion(), export.GetKind())
-	}
-	if export.GetNamespace() != "dynamo" || export.GetName() != "qwen-pool-relay" {
-		t.Errorf("export = %s/%s, want dynamo/qwen-pool-relay", export.GetNamespace(), export.GetName())
-	}
-	if got := export.GetLabels()[commonconsts.KubeLabelDynamoGraphDeploymentName]; got != "qwen" {
-		t.Errorf("DGD label = %q, want qwen", got)
+	for _, tc := range []struct {
+		version        string
+		wantAPIVersion string
+	}{
+		{version: "v1alpha1", wantAPIVersion: "multicluster.x-k8s.io/v1alpha1"},
+		{version: "v1beta1", wantAPIVersion: "multicluster.x-k8s.io/v1beta1"},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			t.Log("Render the export of pool qwen's PoolRelay Service at the served version")
+			export := RenderServiceExport(tc.version, "dynamo", "qwen-pool-relay", "qwen")
+			if export.GetAPIVersion() != tc.wantAPIVersion || export.GetKind() != "ServiceExport" {
+				t.Errorf("export type = %s %s, want %s ServiceExport", export.GetAPIVersion(), export.GetKind(), tc.wantAPIVersion)
+			}
+			if export.GetNamespace() != "dynamo" || export.GetName() != "qwen-pool-relay" {
+				t.Errorf("export = %s/%s, want dynamo/qwen-pool-relay", export.GetNamespace(), export.GetName())
+			}
+			if got := export.GetLabels()[commonconsts.KubeLabelDynamoGraphDeploymentName]; got != "qwen" {
+				t.Errorf("DGD label = %q, want qwen", got)
+			}
+
+			t.Log("Watch and delete exports at the same version")
+			if empty := NewServiceExport(tc.version); empty.GetAPIVersion() != tc.wantAPIVersion || empty.GetKind() != "ServiceExport" {
+				t.Errorf("empty export type = %s %s, want %s ServiceExport", empty.GetAPIVersion(), empty.GetKind(), tc.wantAPIVersion)
+			}
+		})
 	}
 }
 

@@ -21,24 +21,32 @@ import (
 // after each pool's DGD
 // Auto-detection: N/A; API availability is verified when an implementation is configured
 // Requires: an MCS implementation, such as Karmada, serving
-// multicluster.x-k8s.io/v1alpha1 ServiceExport resources
+// multicluster.x-k8s.io/v1alpha1 or multicluster.x-k8s.io/v1beta1 ServiceExport resources
 // Default: false
 const MultiClusterExport Name = "multiClusterExport"
 
+// serviceExportVersions lists the multicluster.x-k8s.io versions that the
+// operator reads and writes ServiceExports in, preferred first. The SIG
+// Multicluster CRDs serve both and define the metadata the operator writes
+// alike; v1beta1 is used where the cluster no longer serves v1alpha1.
+var serviceExportVersions = [...]string{"v1alpha1", "v1beta1"}
+
 // resolveMultiClusterExport verifies API availability for a configured MCS
-// implementation and returns the multicluster.x-k8s.io version at which the
-// cluster serves ServiceExports. A nil config retains the native
-// discovery-unavailable error.
+// implementation and returns the first version in serviceExportVersions at
+// which the cluster serves ServiceExports, or an error when it serves them at
+// neither. A nil config retains the native discovery-unavailable error.
 func resolveMultiClusterExport(ctx context.Context, config *rest.Config) (string, error) {
 	// Every supported implementation reads the SIG Multicluster ServiceExport.
-	const version = "v1alpha1"
-	available, err := detectAPIAvailability(ctx, config, "multicluster.x-k8s.io", version, "serviceexports")
-	if err != nil {
-		return "", err
+	for _, version := range serviceExportVersions {
+		available, err := detectAPIAvailability(ctx, config, "multicluster.x-k8s.io", version, "serviceexports")
+		if err != nil {
+			return "", err
+		}
+		if available {
+			return version, nil
+		}
 	}
-	if !available {
-		return "", errors.New("multiCluster.mcsImplementation is set but the multicluster.x-k8s.io/v1alpha1 " +
-			"ServiceExport API was not detected in the cluster")
-	}
-	return version, nil
+
+	return "", errors.New("multiCluster.mcsImplementation is set but neither the multicluster.x-k8s.io/v1alpha1 " +
+		"nor the multicluster.x-k8s.io/v1beta1 ServiceExport API was detected in the cluster")
 }

@@ -173,8 +173,8 @@ type Gates struct {
 	GPUDiscovery       bool `json:"gpuDiscovery"`
 
 	// ServiceExportVersion is not a gate. It is the multicluster.x-k8s.io
-	// version that the operator reads and writes ServiceExports in, set
-	// whenever MultiClusterExport is enabled.
+	// version, v1alpha1 or v1beta1, that the operator reads and writes
+	// ServiceExports in, set whenever MultiClusterExport is enabled.
 	ServiceExportVersion string `json:"-"`
 }
 
