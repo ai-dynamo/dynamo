@@ -34,7 +34,7 @@ from ..factories import (
     HeldTextRequest,
     TextPrefillFactory,
     build_realtime_text_factories,
-    vllm_parser_names,
+    validate_vllm_parsers,
 )
 from .text_utils import (
     _chat_options,
@@ -343,7 +343,7 @@ class RealtimeTextHandler:
         reasoning_parser: str | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> "RealtimeTextHandler":
-        tool_parser, reasoning_parser = vllm_parser_names(tool_parser, reasoning_parser)
+        validate_vllm_parsers(tool_parser, reasoning_parser)
         chat_completion, text_prefill = build_realtime_text_factories(
             engine_client=engine_client,
             model_name=model_name,
@@ -357,7 +357,7 @@ class RealtimeTextHandler:
             model_name=model_name,
             chat_completion_factory=chat_completion,
             text_prefill_factory=text_prefill,
-            auto_tool_choice=tool_parser is not None,
+            auto_tool_choice=bool(tool_parser),
         )
 
     def _checked_chat_options(

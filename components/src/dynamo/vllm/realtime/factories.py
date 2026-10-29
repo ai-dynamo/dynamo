@@ -45,44 +45,35 @@ _HELD_REQUEST: contextvars.ContextVar[HeldTextRequest | None] = contextvars.Cont
 )
 
 
-def vllm_parser_names(
+def validate_vllm_parsers(
     tool_parser: str | None, reasoning_parser: str | None
-) -> tuple[str | None, str | None]:
-    """Keep only the parser names that vLLM registers.
+) -> None:
+    """Fail unless vLLM registers both configured parsers.
 
     Realtime text parses with vLLM's chat serving, but the names come from the
-    Dynamo parser flags, and some Dynamo parsers have no vLLM counterpart. vLLM
-    rejects unknown names, so an unknown name disables that parsing instead of
-    failing the worker.
+    Dynamo parser flags, and some Dynamo parsers have no vLLM counterpart.
     """
     from vllm.reasoning import ReasoningParserManager
     from vllm.tool_parsers import ToolParserManager
 
-    def known(name: str | None, kind: str, lookup: Callable[[str], Any]) -> bool:
+    for flag, name, lookup in (
+        ("--dyn-tool-call-parser", tool_parser, ToolParserManager.get_tool_parser),
+        (
+            "--dyn-reasoning-parser",
+            reasoning_parser,
+            ReasoningParserManager.get_reasoning_parser,
+        ),
+    ):
         if not name:
-            return False
+            continue
         try:
             lookup(name)
-        except KeyError:
-            logger.warning(
-                "%s parser %r is not a vLLM parser, so realtime text sessions "
-                "run without it",
-                kind,
-                name,
-            )
-            return False
-        return True
-
-    return (
-        tool_parser
-        if known(tool_parser, "Tool call", ToolParserManager.get_tool_parser)
-        else None,
-        reasoning_parser
-        if known(
-            reasoning_parser, "Reasoning", ReasoningParserManager.get_reasoning_parser
-        )
-        else None,
-    )
+        except KeyError as exc:
+            raise ValueError(
+                f"{flag} {name!r} is not a vLLM parser, and realtime text sessions "
+                "parse with vLLM. Use a vLLM parser name, or omit the flag to serve "
+                "realtime text without that parsing."
+            ) from exc
 
 
 class HeldTextRequest:

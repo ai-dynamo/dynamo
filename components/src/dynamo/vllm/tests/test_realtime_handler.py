@@ -1978,19 +1978,22 @@ def test_text_factories_configure_tool_and_reasoning_parsers(monkeypatch):
         assert {key: kwargs[key] for key in expected} == expected
 
 
-def test_vllm_parser_names_drop_names_vllm_does_not_register(caplog):
-    from dynamo.vllm.realtime.factories import vllm_parser_names
+@pytest.mark.parametrize(
+    ("tool_parser", "reasoning_parser", "flag"),
+    [
+        ("nemotron3", "nemotron_v3", "--dyn-tool-call-parser 'nemotron3'"),
+        ("hermes", "gpt_oss", "--dyn-reasoning-parser 'gpt_oss'"),
+    ],
+)
+def test_vllm_parser_validation_rejects_unknown_names(
+    tool_parser, reasoning_parser, flag
+):
+    from dynamo.vllm.realtime.factories import validate_vllm_parsers
 
-    assert vllm_parser_names("hermes", "nemotron_v3") == ("hermes", "nemotron_v3")
-    assert vllm_parser_names(None, None) == (None, None)
-    with caplog.at_level("WARNING"):
-        assert vllm_parser_names("nemotron3", "gpt_oss") == (None, None)
-    assert caplog.messages == [
-        "Tool call parser 'nemotron3' is not a vLLM parser, so realtime text "
-        "sessions run without it",
-        "Reasoning parser 'gpt_oss' is not a vLLM parser, so realtime text "
-        "sessions run without it",
-    ]
+    validate_vllm_parsers("hermes", "nemotron_v3")
+    validate_vllm_parsers(None, None)
+    with pytest.raises(ValueError, match=f"^{flag} is not a vLLM parser"):
+        validate_vllm_parsers(tool_parser, reasoning_parser)
 
 
 @pytest.mark.parametrize(
