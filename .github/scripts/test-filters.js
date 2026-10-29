@@ -322,6 +322,28 @@ const testCases = [
     desc: 'helm file triggers deploy'
   },
 
+  // Multi-Cluster Services registry module and chart
+  {
+    file: 'deploy/global-discovery-mcs/internal/server/app.go',
+    expect: { core: false, operator: false, global_discovery_mcs: true },
+    desc: 'MCS module source triggers the MCS checks only'
+  },
+  {
+    file: 'deploy/global-discovery-mcs/.golangci.yml',
+    expect: { global_discovery_mcs: true },
+    desc: 'MCS module dotfile triggers the MCS checks'
+  },
+  {
+    file: 'deploy/helm/charts/global-discovery-mcs/files/controller-role.yaml',
+    expect: { operator: false, global_discovery_mcs: true },
+    desc: 'MCS chart triggers the MCS checks'
+  },
+  {
+    file: 'deploy/global-discovery-mcs/docs/api.md',
+    expect: { global_discovery_mcs: false, ignore: true },
+    desc: 'MCS documentation alone skips the MCS checks'
+  },
+
   // Framework snapshot lifecycle: backend filter + that framework's checkpoint filter
   {
     file: 'components/src/dynamo/vllm/snapshot.py',

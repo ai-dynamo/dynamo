@@ -317,6 +317,9 @@ protected listener through your network ingress. Keep its upstream connection HT
 and allow long-lived server streams. See the
 [gRPC contract](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/pool_relay/docs/grpc-contract.md)
 for message sizes, reconnect behavior, and error reasons.
+Within one trusted network whose clusters route each other's pod addresses, the Kubernetes
+Multi-Cluster Services API can make a Relay Service visible in the other clusters instead; see
+[Deploy Multi-Cluster Services](multi-cluster-services.md).
 
 ## Optional mTLS Sidecar
 

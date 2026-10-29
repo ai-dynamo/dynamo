@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Phase 2 conflict test, cluster a: the Service shared on port 8080, exported
+# first. The registry makes the oldest export the winner.
+apiVersion: v1
+kind: Service
+metadata:
+  name: shared
+  labels:
+    dynamo.nvidia.com/mcs-export: "true"
+spec:
+  selector:
+    app: echo
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

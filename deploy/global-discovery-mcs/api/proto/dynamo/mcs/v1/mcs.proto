@@ -1,0 +1,404 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package dynamo.mcs.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
+import "dynamo/mcs/v1/common.proto";
+
+option go_package = "github.com/ai-dynamo/dynamo/deploy/global-discovery-mcs/api/gen/go/dynamo/mcs/v1;mcsv1";
+
+// ServiceExportService is the write side of the Multi-Cluster Services
+// (KEP-1645) registry. The mcs-controller of a cluster is the only writer
+// of that cluster's exports and endpoint sets.
+service ServiceExportService
+{
+  // PutServiceExport creates or replaces the export of a Service from one
+  // cluster. generation must exceed the stored one; otherwise the call fails
+  // with FAILED_PRECONDITION and reason STALE_GENERATION.
+  rpc PutServiceExport(PutServiceExportRequest) returns (PutServiceExportResponse)
+  {
+    option (google.api.http) = {
+      put: "/v1/clustersets/{clusterset}/clusters/{cluster}/exports/{namespace}/{name}"
+      body: "*"
+    };
+  }
+
+  // DeleteServiceExport removes the export and its endpoint set. Deleting an
+  // unknown export succeeds.
+  rpc DeleteServiceExport(DeleteServiceExportRequest) returns (DeleteServiceExportResponse)
+  {
+    option (google.api.http) = {
+      delete: "/v1/clustersets/{clusterset}/clusters/{cluster}/exports/{namespace}/{name}"
+    };
+  }
+
+  // ListServiceExports returns the exports of one cluster, for controller
+  // resync after a restart or reconnect.
+  rpc ListServiceExports(ListServiceExportsRequest) returns (ListServiceExportsResponse)
+  {
+    option (google.api.http) = {
+      get: "/v1/clustersets/{clusterset}/clusters/{cluster}/exports"
+    };
+  }
+
+  // ReplaceEndpoints replaces the full endpoint set of an export. It is the
+  // only endpoint write: idempotent across restarts and free of tombstones.
+  // generation must exceed the stored one; a stale write fails with
+  // FAILED_PRECONDITION, reason STALE_GENERATION and the current generation.
+  // At most 1000 endpoints per export per cluster (TOO_MANY_ENDPOINTS).
+  rpc ReplaceEndpoints(ReplaceEndpointsRequest) returns (ReplaceEndpointsResponse)
+  {
+    option (google.api.http) = {
+      put: "/v1/clustersets/{clusterset}/clusters/{cluster}/exports/{namespace}/{name}/endpoints"
+      body: "*"
+    };
+  }
+}
+
+// ServiceImportService is the read side of the Multi-Cluster Services
+// registry. Imports are computed by the server from every export of a
+// (namespace, name) in the clusterset: the oldest export of a cluster with an
+// active lease wins conflicts, ports are unioned, IP families intersected.
+service ServiceImportService
+{
+  // GetServiceImport returns one merged import.
+  rpc GetServiceImport(GetServiceImportRequest) returns (GetServiceImportResponse)
+  {
+    option (google.api.http) = {
+      get: "/v1/clustersets/{clusterset}/imports/{namespace}/{name}"
+    };
+  }
+
+  // ListServiceImports returns the merged imports of a clusterset.
+  rpc ListServiceImports(ListServiceImportsRequest) returns (ListServiceImportsResponse)
+  {
+    option (google.api.http) = {
+      get: "/v1/clustersets/{clusterset}/imports"
+    };
+  }
+
+  // WatchServiceImports streams the merged imports of a clusterset: a
+  // snapshot, then deltas and bookmarks. See EventType.
+  rpc WatchServiceImports(WatchServiceImportsRequest) returns (stream WatchServiceImportsResponse)
+  {
+    option (google.api.http) = {
+      get: "/v1/clustersets/{clusterset}/imports:watch"
+    };
+  }
+}
+
+// ServiceType is the KEP-1645 ServiceImport type.
+enum ServiceType {
+  SERVICE_TYPE_UNSPECIFIED = 0;
+  // One virtual IP per importing cluster (the Service has a cluster IP).
+  SERVICE_TYPE_CLUSTER_SET_IP = 1;
+  // No virtual IP; per-endpoint records (the Service has clusterIP: None).
+  SERVICE_TYPE_HEADLESS = 2;
+}
+
+// Protocol is a Kubernetes port protocol.
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  PROTOCOL_TCP = 1;
+  PROTOCOL_UDP = 2;
+  PROTOCOL_SCTP = 3;
+}
+
+// SessionAffinity is the Kubernetes Service session affinity.
+enum SessionAffinity {
+  SESSION_AFFINITY_UNSPECIFIED = 0;
+  SESSION_AFFINITY_NONE = 1;
+  SESSION_AFFINITY_CLIENT_IP = 2;
+}
+
+// IPFamily is a Kubernetes IP family.
+enum IPFamily {
+  IP_FAMILY_UNSPECIFIED = 0;
+  IP_FAMILY_IPV4 = 1;
+  IP_FAMILY_IPV6 = 2;
+}
+
+// InternalTrafficPolicy is the Kubernetes Service internal traffic policy.
+enum InternalTrafficPolicy {
+  INTERNAL_TRAFFIC_POLICY_UNSPECIFIED = 0;
+  INTERNAL_TRAFFIC_POLICY_CLUSTER = 1;
+  INTERNAL_TRAFFIC_POLICY_LOCAL = 2;
+}
+
+// AddressType is the EndpointSlice address type.
+enum AddressType {
+  ADDRESS_TYPE_UNSPECIFIED = 0;
+  ADDRESS_TYPE_IPV4 = 1;
+  ADDRESS_TYPE_IPV6 = 2;
+  ADDRESS_TYPE_FQDN = 3;
+}
+
+// ServicePort is a port of an exported Service.
+message ServicePort
+{
+  string name = 1;
+  Protocol protocol = 2;
+  string app_protocol = 3;
+  int32 port = 4;
+}
+
+// ClientIPConfig mirrors the Kubernetes ClientIPConfig.
+message ClientIPConfig
+{
+  int32 timeout_seconds = 1;
+}
+
+// SessionAffinityConfig mirrors the Kubernetes SessionAffinityConfig.
+message SessionAffinityConfig
+{
+  ClientIPConfig client_ip = 1;
+}
+
+// ServiceExportSpec is the exported shape of a Service: the fields of the
+// Service that take part in the merge. The controller fills it from the
+// Service and the ServiceExport.
+message ServiceExportSpec
+{
+  // Exported annotations: spec.exportedAnnotations of the ServiceExport plus
+  // the Service's dynamo.nvidia.com/mcs-* annotations.
+  map<string, string> annotations = 1;
+  // Exported labels: spec.exportedLabels of the ServiceExport plus the
+  // Service's dynamo.nvidia.com/mcs-* labels.
+  map<string, string> labels = 2;
+  // creationTimestamp of the ServiceExport; the oldest export wins conflicts.
+  google.protobuf.Timestamp export_creation_timestamp = 3;
+  repeated ServicePort ports = 4;
+  ServiceType type = 5;
+  SessionAffinity session_affinity = 6;
+  SessionAffinityConfig session_affinity_config = 7;
+  repeated IPFamily ip_families = 8;
+  InternalTrafficPolicy internal_traffic_policy = 9;
+  // Kubernetes spec.trafficDistribution, for example PreferClose.
+  string traffic_distribution = 10;
+}
+
+// ServiceExport is the stored export of a Service from one cluster.
+message ServiceExport
+{
+  string clusterset = 1;
+  string cluster = 2;
+  string namespace = 3;
+  string name = 4;
+  ServiceExportSpec spec = 5;
+  // Writer generation of the spec.
+  uint64 generation = 6;
+  google.protobuf.Timestamp updated_at = 7;
+  // Writer generation of the endpoint set; 0 when none was written.
+  uint64 endpoints_generation = 8;
+  int32 endpoint_count = 9;
+  int32 ready_endpoint_count = 10;
+}
+
+// EndpointConditions mirrors the EndpointSlice endpoint conditions.
+message EndpointConditions
+{
+  bool ready = 1;
+  bool serving = 2;
+  bool terminating = 3;
+}
+
+// EndpointPort mirrors an EndpointSlice port.
+message EndpointPort
+{
+  string name = 1;
+  Protocol protocol = 2;
+  string app_protocol = 3;
+  int32 port = 4;
+}
+
+// Endpoint mirrors an EndpointSlice endpoint.
+message Endpoint
+{
+  repeated string addresses = 1;
+  AddressType address_type = 2;
+  EndpointConditions conditions = 3;
+  string hostname = 4;
+  string node_name = 5;
+  string zone = 6;
+  repeated EndpointPort ports = 7;
+  // At most 16 entries.
+  map<string, string> attributes = 8;
+}
+
+// ClusterEndpoints is the endpoint set that one source cluster contributes to
+// an import. Counts are always set; endpoints is filled only when the request
+// asked for endpoints.
+message ClusterEndpoints
+{
+  string cluster = 1;
+  string region = 2;
+  repeated Endpoint endpoints = 3;
+  // Writer generation of the endpoint set.
+  uint64 generation = 4;
+  int32 endpoint_count = 5;
+  int32 ready_endpoint_count = 6;
+}
+
+// Conflict reports a disagreement between exports of one Service.
+message Conflict
+{
+  // A Conflict condition reason, for example PortConflict.
+  string reason = 1;
+  string message = 2;
+  // Cluster whose export won (the oldest export with an active lease).
+  string winning_cluster = 3;
+}
+
+// ClusterStatus is the per-source-cluster status of an import.
+message ClusterStatus
+{
+  string cluster = 1;
+  string region = 2;
+  LeaseState lease_state = 3;
+  // False when the cluster's lease has expired; its endpoints are then
+  // excluded and its export does not take part in conflict resolution.
+  bool participating = 4;
+  // Set when this cluster's export disagrees with the winning export.
+  Conflict conflict = 5;
+  int32 endpoint_count = 6;
+  int32 ready_endpoint_count = 7;
+  uint64 export_generation = 8;
+  // Conditions the controller of this cluster copies onto its ServiceExport
+  // (Ready, Conflict).
+  repeated Condition conditions = 9;
+}
+
+// ServiceImport is the merged, clusterset-wide view of an exported Service.
+// It is computed, never stored.
+message ServiceImport
+{
+  string clusterset = 1;
+  string namespace = 2;
+  string name = 3;
+  ServiceType type = 4;
+  // Union of the participating exports' ports by (port, protocol).
+  repeated ServicePort ports = 5;
+  // Intersection of the participating exports' IP families.
+  repeated IPFamily ip_families = 6;
+  SessionAffinity session_affinity = 7;
+  SessionAffinityConfig session_affinity_config = 8;
+  // Exported annotations and labels of the winning export.
+  map<string, string> annotations = 9;
+  map<string, string> labels = 10;
+  // Set when any participating export conflicts with the winner.
+  Conflict conflict = 11;
+  repeated ClusterStatus clusters = 12;
+  // Endpoints grouped by source cluster, including the importing cluster.
+  repeated ClusterEndpoints endpoints = 13;
+  google.protobuf.Timestamp updated_at = 14;
+}
+
+message PutServiceExportRequest
+{
+  string clusterset = 1;
+  string cluster = 2;
+  string namespace = 3;
+  string name = 4;
+  ServiceExportSpec spec = 5;
+  // Writer generation, max(previous + 1, unix milliseconds).
+  uint64 generation = 6;
+}
+
+message PutServiceExportResponse
+{
+  ServiceExport export = 1;
+}
+
+message DeleteServiceExportRequest
+{
+  string clusterset = 1;
+  string cluster = 2;
+  string namespace = 3;
+  string name = 4;
+}
+
+message DeleteServiceExportResponse {}
+
+message ListServiceExportsRequest
+{
+  string clusterset = 1;
+  string cluster = 2;
+}
+
+message ListServiceExportsResponse
+{
+  repeated ServiceExport exports = 1;
+}
+
+message ReplaceEndpointsRequest
+{
+  string clusterset = 1;
+  string cluster = 2;
+  string namespace = 3;
+  string name = 4;
+  // The full endpoint set; an empty list clears it.
+  repeated Endpoint endpoints = 5;
+  // Writer generation, max(previous + 1, unix milliseconds).
+  uint64 generation = 6;
+}
+
+message ReplaceEndpointsResponse
+{
+  uint64 generation = 1;
+  int32 endpoint_count = 2;
+  int32 ready_endpoint_count = 3;
+}
+
+message GetServiceImportRequest
+{
+  string clusterset = 1;
+  string namespace = 2;
+  string name = 3;
+  bool include_endpoints = 4;
+}
+
+message GetServiceImportResponse
+{
+  ServiceImport service_import = 1;
+}
+
+message ListServiceImportsRequest
+{
+  string clusterset = 1;
+  // Only imports in this namespace; all namespaces when empty.
+  string namespace = 2;
+  // Only imports whose exported labels match.
+  LabelSelector selector = 3;
+  bool include_endpoints = 4;
+}
+
+message ListServiceImportsResponse
+{
+  repeated ServiceImport service_imports = 1;
+  // Revision of the view the list was taken from; usable as resume_revision.
+  string revision = 2;
+}
+
+message WatchServiceImportsRequest
+{
+  string clusterset = 1;
+  string namespace = 2;
+  LabelSelector selector = 3;
+  bool include_endpoints = 4;
+  // Revision from a previous SNAPSHOT_END, BOOKMARK or delta.
+  string resume_revision = 5;
+}
+
+// WatchServiceImportsResponse is one watch event.
+message WatchServiceImportsResponse
+{
+  EventType type = 1;
+  // Set for UPSERT and DELETE.
+  ServiceImport service_import = 2;
+  // Set for SNAPSHOT_END, BOOKMARK and every delta.
+  string revision = 3;
+}

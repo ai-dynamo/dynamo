@@ -1,0 +1,50 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package dynamo.mcs.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/ai-dynamo/dynamo/deploy/global-discovery-mcs/api/gen/go/dynamo/mcs/v1;mcsv1";
+
+// ServerInfoService describes the serving replica.
+service ServerInfoService
+{
+  // GetServerInfo returns the replica's region, version and view epoch, and
+  // the registry endpoints of every region from --advertise-endpoints. Clients try
+  // those endpoints after their configured URLs.
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse)
+  {
+    option (google.api.http) = {
+      get: "/v1/serverinfo"
+    };
+  }
+}
+
+// ServerEndpoint is the address of the registry in one region.
+message ServerEndpoint
+{
+  string region = 1;
+  // gRPC URL, for example https://registry.us-east-1.example.internal:443.
+  string grpc_url = 2;
+  // REST URL, for example https://registry.us-east-1.example.internal.
+  string http_url = 3;
+  // True for the global entry clients should prefer.
+  bool primary = 4;
+}
+
+message GetServerInfoRequest {}
+
+message GetServerInfoResponse
+{
+  string region = 1;
+  string version = 2;
+  // Epoch of this replica's view. Revisions from another view epoch are not
+  // resumable on this replica.
+  string view_epoch = 3;
+  repeated ServerEndpoint endpoints = 4;
+  google.protobuf.Timestamp server_time = 5;
+}

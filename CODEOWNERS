@@ -93,6 +93,7 @@
 # === global-router  (@ai-dynamo/dynamo-global-router-codeowners) ===
 /lib/global-*/**                                                                                        @ai-dynamo/dynamo-global-router-codeowners
 /lib/global-view-receiver/                                                                              @ai-dynamo/dynamo-global-router-codeowners
+/deploy/global-discovery-mcs/                                                                           @ai-dynamo/dynamo-global-router-codeowners
 /lib/global-view-broadcaster/                                                                           @ai-dynamo/dynamo-global-router-codeowners
 /components/src/dynamo/pool_relay/                                                                      @ai-dynamo/dynamo-global-router-codeowners
 /container/global-discovery-service.yaml                                                                @ai-dynamo/dynamo-global-router-codeowners
@@ -582,6 +583,7 @@ requirements.txt                                                                
 /lib/llm/src/block_manager/controller.rs                                                                @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/common/multimodal/                                                               @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/trtllm/multimodal/                                                               @ai-dynamo/dynamo-multimodal-codeowners
+/deploy/helm/charts/global-discovery-mcs/                                                               @ai-dynamo/dynamo-global-router-codeowners
 /deploy/operator/internal/controller/lpx/                                                               @ai-dynamo/dynamo-lpx-codeowners
 /lib/llm/src/block_manager/distributed.rs                                                               @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/bindings/python/rust/llm/pool_relay.rs                                                             @ai-dynamo/dynamo-global-router-codeowners
@@ -602,7 +604,10 @@ requirements.txt                                                                
 /components/src/dynamo/sglang/request_handlers/image_diffusion/                                         @ai-dynamo/dynamo-diffusion-codeowners
 /recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json                                        @ai-dynamo/dynamo-operator-codeowners
 /docs/fern/pages/reference/components/pool-relay-configuration.md                                       @ai-dynamo/dynamo-global-router-codeowners
+/docs/fern/pages/developer-guide/**/multi-cluster-services-registry.md                                  @ai-dynamo/dynamo-global-router-codeowners
+/docs/fern/pages/kubernetes/kv-aware-routing/multi-cluster-services.md                                  @ai-dynamo/dynamo-global-router-codeowners
 /recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json                              @ai-dynamo/dynamo-operator-codeowners
+/docs/fern/pages/reference/components/global-discovery-mcs-configuration.md                             @ai-dynamo/dynamo-global-router-codeowners
 /docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/                     @ai-dynamo/dynamo-backend-triton-codeowners
 /docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md        @ai-dynamo/dynamo-global-router-codeowners
 
@@ -711,6 +716,7 @@ requirements.txt                                                                
 /container/deps/requirements.sglang.txt                                                                 @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /container/deps/requirements.trtllm.txt                                                                 @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
 /container/templates/planner.Dockerfile                                                                 @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-planner-codeowners
+/deploy/global-discovery-mcs/Dockerfile                                                                 @ai-dynamo/dynamo-global-router-codeowners @ai-dynamo/dynamo-ops-codeowners
 /lib/llm/src/preprocessor/media/rdma.rs                                                                 @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
 /lib/llm/src/protocols/openai/images.rs                                                                 @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /lib/llm/src/protocols/openai/videos.rs                                                                 @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
@@ -791,8 +797,8 @@ requirements.txt                                                                
 /deploy/operator/internal/dynamo/backend_vllm*.go                                                       @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /deploy/operator/internal/webhook/**/*checkpoint*                                                       @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners
 /deploy/operator/internal/webhook/**/*checkpoint*                                                       @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners
-/.github/actions/build-deploy-component/action.yml                                                      @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-planner-codeowners
-/.github/actions/check-deploy-component/action.yml                                                      @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners
+/.github/actions/build-deploy-component/action.yml                                                      @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-global-router-codeowners
+/.github/actions/check-deploy-component/action.yml                                                      @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-global-router-codeowners
 /components/src/dynamo/common/backend/publisher.py                                                      @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/common/backend/telemetry.py                                                      @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/common/utils/image_utils.py                                                      @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-diffusion-codeowners

@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: NOTES
+templates:
+  - templates/NOTES.txt
+release:
+  name: mcs
+  namespace: mcs-system
+
+tests:
+  - it: names the registry URLs and the in-cluster registry
+    set:
+      registry.enabled: true
+      registry.store: dynamodb
+      controller.registryAllowInsecureHttp: true
+    asserts:
+      - matchRegexRaw:
+          pattern: "In-cluster gRPC URL: http://mcs-registry.mcs-system.svc:9090"
+      - matchRegexRaw:
+          pattern: "- http://mcs-registry.mcs-system.svc:9090"
+      - matchRegexRaw:
+          pattern: "docs/iam.md"
+
+  - it: says when the CRDs are not installed
+    set:
+      crds.install: false
+      controller.registryUrls:
+        - https://mcs.example.internal
+    asserts:
+      - matchRegexRaw:
+          pattern: "CRDs: not installed"

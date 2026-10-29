@@ -32,6 +32,7 @@ jobs:
       snapshot_sglang: ${{ steps.changes.outputs.snapshot_sglang }}
       snapshot_trtllm: ${{ steps.changes.outputs.snapshot_trtllm }}
       power_agent: ${{ steps.changes.outputs.power_agent }}
+      global_discovery_mcs: ${{ steps.changes.outputs.global_discovery_mcs }}
       sidecar: ${{ steps.changes.outputs.sidecar }}
       deploy: ${{ steps.changes.outputs.deploy }}
       dgdr: ${{ steps.changes.outputs.dgdr }}
@@ -130,6 +131,7 @@ jobs:
       - operator-integration
       - helm-chart-tests
       - power-agent
+      - global-discovery-mcs
       - sidecar-build
       - vllm-build
       - vllm-local-dev-build
@@ -335,6 +337,32 @@ jobs:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
       - name: Lint and test Helm chart
         run: make -C deploy/helm/charts/power-agent lint test
+
+# ============================================================================
+# Global Discovery MCS
+# ============================================================================
+
+  global-discovery-mcs:
+    needs: changed-files
+    if: needs.changed-files.outputs.global_discovery_mcs == 'true'
+    name: Global Discovery MCS
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
+      - name: Build and push the MCS registry image
+        # The Dockerfile's last stage is the shipped image, so no target is
+        # needed. pre-merge.yml runs the module and chart checks.
+        uses: $/.github/actions/build-deploy-component
+        with:
+          component: global-discovery-mcs
+          image_tag: ${{ github.sha }}-global-discovery-mcs
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_repository: ${{ vars.ECR_REPOSITORY }}
 
 # ============================================================================
 # Sidecar
@@ -2027,6 +2055,7 @@ jobs:
       - changed-files
       - operator
       - power-agent
+      - global-discovery-mcs
       - sidecar-build
       - planner-test
       - planner-copy-to-acr

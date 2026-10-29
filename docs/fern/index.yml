@@ -171,6 +171,9 @@ navigation:
             path: pages/kubernetes/kv-aware-routing/dynamo-frontend.md
           - page: Deploy the Pool Relay (Experimental)
             path: pages/kubernetes/kv-aware-routing/pool-relay.md
+          - page: Deploy Multi-Cluster Services (Experimental)
+            path: pages/kubernetes/kv-aware-routing/multi-cluster-services.md
+            slug: multi-cluster-services
           - page: Using GAIE with Dynamo
             path: pages/kubernetes/kv-aware-routing/gateway-api.mdx
           - page: Using GAIE with vanilla vLLM
@@ -478,6 +481,9 @@ navigation:
                       - page: Pool Relay Concepts (Experimental)
                         slug: multi-dc-kv-routing
                         path: pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
+                      - page: Multi-Cluster Services Registry (Experimental)
+                        slug: multi-cluster-services-registry
+                        path: pages/developer-guide/knowledge-base/modular-components/router/multi-cluster-services-registry.md
                   - section: Standalone Services
                     skip-slug: true
                     collapsed: true
@@ -1272,6 +1278,9 @@ navigation:
             path: pages/reference/components/dynosim-sweep-reference.mdx
           - page: Global Router Configuration
             path: pages/reference/components/global-router-configuration.mdx
+          - page: Multi-Cluster Services Configuration
+            path: pages/reference/components/global-discovery-mcs-configuration.md
+            slug: global-discovery-mcs-configuration
           - page: Gateway API Routing
             path: pages/reference/components/gateway-api-routing.mdx
           - page: ThunderAgent Scheduler
