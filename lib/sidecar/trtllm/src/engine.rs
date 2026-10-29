@@ -303,81 +303,14 @@ impl TrtllmSidecarEngine {
             ));
         }
 
-        // `--context-length` wins over what the engine reports, and is the
-        // only source when the engine reports nothing usable. The resolved
-        // value backs both the registered window and the default-`max_tokens`
-        // path in `convert::max_tokens`.
-        let model = &self.model;
-        let limits = match model.context_length {
-            // Configured: the engine is consulted once, to cross-check the
-            // value and to learn its output cap. It may not answer at all --
-            // an older server has no Control service -- and that must not stop
-            // a worker whose window the operator already supplied.
-            //
-            // Neither branch waits for the engine to be *ready*, only to answer.
-            // Readiness belongs to the engine's health service, which is what
-            // the Kubernetes probes use and what DEP #14897 standardises on
-            // (`grpc.health.v1` Check/Watch, with registration driven by
-            // `Watch`). Do not grow a second readiness protocol here.
-            Some(configured) => {
-                let reported = match client.model_info(&model.source).await {
-                    Ok(reported) => reported,
-                    Err(error) => {
-                        // Tolerated because some OpenEngine servicer builds ship
-                        // without Control, which is what --context-length exists
-                        // for. UNIMPLEMENTED also fits an engine left on the
-                        // default --grpc-protocol smg, where Generate will fail
-                        // too -- name both so the log points at the real fix.
-                        tracing::warn!(
-                            %error,
-                            configured_context_length = configured,
-                            "Control.GetModelInfo failed; using the configured \
-                             --context-length. If this is UNIMPLEMENTED, the engine either \
-                             ships no Control service or was started without \
-                             --grpc-protocol openengine"
-                        );
-                        ModelInfo::default()
-                    }
-                };
-                if let Some(engine_context_length) = reported.limits.context_length
-                    && engine_context_length != configured
-                {
-                    tracing::warn!(
-                        configured_context_length = configured,
-                        engine_context_length,
-                        "--context-length disagrees with the context length TensorRT-LLM \
-                         reported; using the configured --context-length"
-                    );
-                }
-                ModelInfo {
-                    limits: client::ModelLimits {
-                        context_length: Some(configured),
-                        ..reported.limits
-                    },
-                    ..reported
-                }
-            }
-            // Nothing configured: the engine is the only source. It binds its
-            // gRPC port only after the model has loaded, but the sidecar and the
-            // engine start independently, so wait for it either way.
-            None => {
-                // Failing here beats registering a worker that advertises
-                // capacity and then rejects, with a non-migratable 4xx, every
-                // request that omits `max_tokens` -- which is most chat
-                // traffic. The operator gets one startup error naming the fix
-                // instead of a worker that looks healthy and serves half.
-                client
-                    .wait_for_model_info(&model.source, deadline, self.transport.retry_interval)
-                    .await
-                    .map_err(|error| {
-                        client::invalid_argument(format!(
-                            "no context length is available: {error}. TensorRT-LLM reports one \
-                             only when it was started with --max_seq_len; otherwise supply \
-                             --context-length."
-                        ))
-                    })?
-            }
-        };
+        let limits = client
+            .wait_for_model_info(
+                &self.model.source,
+                self.model.context_length,
+                deadline,
+                self.transport.retry_interval,
+            )
+            .await?;
         Ok((client, limits))
     }
 }
@@ -494,7 +427,7 @@ impl LLMEngine for TrtllmSidecarEngine {
             "TensorRT-LLM gRPC is ready"
         );
         let mut config = model.engine_config();
-        config.served_model_name = info.served_model_name.clone();
+        config.served_model_name = Some(info.served_model_name.clone());
         if let Some(node) = self.routing.get().and_then(|routing| routing.node.as_ref()) {
             config.runtime_data.insert(
                 crate::node::NODE_METADATA_KEY.to_string(),

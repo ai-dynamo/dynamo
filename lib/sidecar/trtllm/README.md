@@ -17,8 +17,11 @@ you to.
 gRPC server. See the [sidecar overview](../README.md) for installation.
 
 The sidecar reads model metadata from `--model-path`, which must be accessible
-to the sidecar. It registers the served model name reported by the engine; if
-the name is empty or unavailable, it registers the model path as before.
+to the sidecar. It requires the engine to report a non-empty served model name
+through `GetModelInfo` and registers that name. Configure the engine with
+`--served_model_name` to choose the name clients use. Without it, TensorRT-LLM
+may report its model path as the name. Engines without `GetModelInfo` are not
+supported, even when `--context-length` is supplied.
 
 > [!TIP]
 > For the best and latest support, use the upstream TensorRT-LLM nightly image,
