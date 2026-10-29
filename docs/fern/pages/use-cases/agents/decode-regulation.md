@@ -116,14 +116,16 @@ Set these on the vLLM worker.
 | Environment variable | Default | Description |
 |---|---|---|
 | `DYN_DECODE_REGULATION_MODE` | `off` | `off`, `observe` (decide and report, never skip) or `class_blind` (regulate). |
-| `DYN_DECODE_REGULATION_PRIORITY_MIN` | unset | Requests with priority at or above this value are interactive. Unset: requests without agent session headers are interactive, and requests with them are regulated. |
+| `DYN_DECODE_REGULATION_PRIORITY_MIN` | unset | Requests with priority at or above this value are interactive. Unset: a request is interactive unless it carries an agent session ID that does not start with `DYN_DECODE_REGULATION_INTERACTIVE_PREFIX`. |
+| `DYN_DECODE_REGULATION_INTERACTIVE_PREFIX` | `interactive-` | Agent session IDs with this prefix are interactive. Used only when `DYN_DECODE_REGULATION_PRIORITY_MIN` is unset. |
 | `DYN_DECODE_REGULATION_DEADLINE` | unset | `ttft_ms,per_token_ms` of the interactive end-to-end deadline. Unset: the fixed per-token target below. |
 | `DYN_DECODE_REGULATION_SLACK_MARGIN` | `0.9` | Share of the remaining deadline the target plans on. Lower values protect more. |
 | `DYN_DECODE_REGULATION_TAU_INTERACTIVE_MS` | `18.48` | Fixed per-token target, used when `DYN_DECODE_REGULATION_DEADLINE` is unset. |
 | `DYN_DECODE_REGULATION_K` | `4` | A regulated request decodes at least once every `K` steps. |
 | `DYN_DECODE_REGULATION_RHO` | `0.8` | Share of the remaining step budget that regulated requests may fill. |
-| `DYN_DECODE_REGULATION_COEFFS` | MiniMax-M2.7, TP4, H200 | `a,b,c` of the step-time model, in ms, with `L` in tokens. |
+| `DYN_DECODE_REGULATION_COEFFS` | MiniMax-M2.7, TP4, H200 | `a,b,c` of the step-time model, in ms, with `L` in tokens. The worker logs a warning at startup while this is unset. |
 | `DYN_DECODE_REGULATION_PREFILL_COEFFS` | `0,0` | `q,p`: a step that also carries `P` prefill tokens takes `q + p × P` ms longer. |
+| `DYN_DECODE_REGULATION_MAX_OPP_CTX` | `0` | Cap, in tokens, on the total context of regulated requests added to a step. `0`: no cap. |
 | `DYN_DECODE_REGULATION_FAILSAFE_STEPS` | `200` | Decode-only steps with the bias at its limit before regulation turns off. `0` disables the guard. |
 | `DYN_DECODE_REGULATION_TRACE` | unset | Path for a per-step JSONL trace. |
 | `DYN_DECODE_REGULATION_LOG_S` | `10` | Seconds between summary log lines. |
@@ -153,7 +155,7 @@ decode_regulation steps=1830 interactive=2410 regulated=61200 engaged=1090 skipp
 
 The line ends with `DISABLED` after the fail-open guard trips, and the worker logs a warning naming the bias.
 
-The worker's `/metrics` endpoint exposes the same counts, labeled by `model` and `dp_rank`:
+The worker's `/metrics` endpoint exposes the same counts, labeled by `model` and `dp_rank`. Set `DYN_SYSTEM_PORT` to enable the endpoint.
 
 | Metric | Type | Description |
 |---|---|---|

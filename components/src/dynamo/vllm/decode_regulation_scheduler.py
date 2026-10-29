@@ -4,7 +4,7 @@
 """DecodeRegulationScheduler -- InstrumentedScheduler with per-step decode regulation.
 
 The policy and the skip mechanism live in ``decode_regulation`` (no vLLM import, unit
-tested on a fake scheduler); this class binds them to vLLM v0.31.0. Forward
+tested on a fake scheduler); this class binds them to vLLM's scheduler. Forward
 pass metrics keep working: skipped requests are simply not in a step's
 ``SchedulerOutput``, and ``decode_regulation`` log lines report what was skipped.
 
@@ -48,12 +48,10 @@ class DecodeRegulationScheduler(DecodeRegulationMixin, InstrumentedScheduler):
         model = getattr(
             getattr(vllm_config, "model_config", None), "served_model_name", ""
         )
-        dp_rank = getattr(
-            getattr(vllm_config, "parallel_config", None), "data_parallel_rank", 0
-        )
         self._reg_init(
             DecodeRegulationConfig.from_env(),
             unsupported="; ".join(unsupported),
             model_name=model if isinstance(model, str) else str(model),
-            dp_rank=dp_rank or 0,
+            # InstrumentedScheduler resolves the rank vLLM zeroes under external DP.
+            dp_rank=self._fpm_dp_rank,
         )

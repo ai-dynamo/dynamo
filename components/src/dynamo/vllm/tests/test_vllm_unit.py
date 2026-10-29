@@ -2183,6 +2183,47 @@ def test_benchmark_cudagraph_metrics_absent_option_is_not_recorded():
     assert "cudagraph_metrics_auto_enabled" not in bench
 
 
+class TestDecodeRegulationActivation:
+    """DYN_DECODE_REGULATION_MODE selects DecodeRegulationScheduler; unset changes nothing."""
+
+    REG_CLS = "dynamo.vllm.decode_regulation_scheduler.DecodeRegulationScheduler"
+
+    def test_unset_mode_leaves_scheduler_alone(self, monkeypatch):
+        monkeypatch.delenv("DYN_DECODE_REGULATION_MODE", raising=False)
+        monkeypatch.setenv("DYN_DECODE_REGULATION_K", "0")  # ignored while off
+        engine_cfg = _make_engine_config_with_runner(scheduler_cls=None)
+
+        update_engine_config_with_dynamo(_make_dynamo_config(), engine_cfg)
+
+        assert engine_cfg.scheduler_cls is None
+
+    def test_mode_selects_regulation_scheduler(self, monkeypatch):
+        monkeypatch.setenv("DYN_DECODE_REGULATION_MODE", "observe")
+        engine_cfg = _make_engine_config_with_runner(scheduler_cls=None)
+
+        update_engine_config_with_dynamo(_make_dynamo_config(), engine_cfg)
+
+        assert engine_cfg.scheduler_cls == self.REG_CLS
+
+    def test_mode_replaces_instrumented_scheduler_default(self, monkeypatch):
+        monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+        monkeypatch.setenv("DYN_DECODE_REGULATION_MODE", "class_blind")
+        engine_cfg = _make_engine_config_with_runner(scheduler_cls=None)
+
+        update_engine_config_with_dynamo(
+            _make_dynamo_config(fpm_trace=True), engine_cfg
+        )
+
+        assert engine_cfg.scheduler_cls == self.REG_CLS
+
+    def test_conflicting_scheduler_cls_raises(self, monkeypatch):
+        monkeypatch.setenv("DYN_DECODE_REGULATION_MODE", "class_blind")
+        engine_cfg = _make_engine_config_with_runner(scheduler_cls="my.Scheduler")
+
+        with pytest.raises(ValueError, match="--scheduler-cls"):
+            update_engine_config_with_dynamo(_make_dynamo_config(), engine_cfg)
+
+
 class TestEmbeddingWorkerFlag:
     """Parsing + validation for --embedding-worker."""
 

@@ -25,7 +25,7 @@ batch already fits the tightest interactive target, so the policy is free
 outside overload. The prefill chunk
 expected in the same step is added to every prediction.
 
-Mechanism (vLLM v0.31.0): a skipped request keeps its KV and its place in
+Mechanism: a skipped request keeps its KV and its place in
 ``self.running``; the skip sets ``request.next_decode_eligible_step`` to
 ``current_step + 2`` before the parent ``schedule()`` increments ``current_step``,
 so the parent's running loop passes over it for exactly this step. Requests are
@@ -56,7 +56,7 @@ Environment (prefix DYN_DECODE_REGULATION_):
                     consecutive decode-only steps with the step-time bias
                     pinned at its 0.5 / 2.0 clamp (0 = never)
   DEADLINE          ttft_ms,per_token_ms: interactive requests get a
-                    deadline-aware target (BROS-style residual budget):
+                    deadline-aware target (residual budget):
                     margin x (arrival + ttft_ms + per_token_ms x max_tokens -
                     now) / (max_tokens - generated). The step target is the
                     tightest; unset: the fixed TAU_INTERACTIVE_MS
@@ -75,6 +75,8 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Optional
+
+from prometheus_client import CollectorRegistry, Counter, Gauge
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +123,10 @@ class DecodeRegulationConfig:
                 f"DYN_DECODE_REGULATION_MODE={mode!r}: expected one of {MODES}"
             )
         c.mode = mode
+        if mode == "off":
+            # Off must not depend on the other settings: a bad value cannot break a
+            # worker that never opted in.
+            return c
         if env.get("DYN_DECODE_REGULATION_COEFFS"):
             parts = [float(x) for x in env["DYN_DECODE_REGULATION_COEFFS"].split(",")]
             if len(parts) != 3:
@@ -208,7 +214,7 @@ def attach_identity(
 ) -> None:
     """Copy the request's regulation class into ``sampling_params.extra_args``.
 
-    ``extra_args`` reaches the engine ``Request`` unchanged in vLLM v0.31.0 (the
+    ``extra_args`` reaches the engine ``Request`` unchanged in vLLM (the
     KV-connector transfer params ride the same field)."""
     if not cfg.enabled:
         return
@@ -235,8 +241,7 @@ class Cand:
     decoded: int = 0
     skip_run: int = 0
     # Per-token time this request can still afford (ms): its remaining deadline
-    # over its remaining tokens (BROS-style residual budget). None: the fixed
-    # class target applies.
+    # over its remaining tokens. None: the fixed class target applies.
     tau_ms: Optional[float] = None
 
 
@@ -456,7 +461,7 @@ class DecodeRegulationMixin:
     """Applies ``DecodeRegulationPolicy`` to a vLLM (Async)Scheduler; mix in before the scheduler.
 
     Expects the host to provide ``running``, ``current_step``, ``schedule()`` and
-    ``update_from_output()`` with vLLM v0.31.0 semantics."""
+    ``update_from_output()`` with vLLM semantics."""
 
     def _reg_init(
         self,
@@ -472,7 +477,7 @@ class DecodeRegulationMixin:
             logger.warning("decode_regulation disabled: %s", unsupported)
             self._reg_cfg.mode = "off"
         self._reg_metrics = (
-            RegulationMetrics.create(model_name, dp_rank, metrics_registry)
+            RegulationMetrics(model_name, dp_rank, metrics_registry)
             if self._reg_cfg.enabled
             else None
         )
@@ -503,6 +508,12 @@ class DecodeRegulationMixin:
                 self._reg_cfg.deadline,
                 self._reg_cfg.slack_margin,
             )
+            if self._reg_cfg.coeffs == DecodeRegulationConfig.coeffs:
+                logger.warning(
+                    "decode_regulation: DYN_DECODE_REGULATION_COEFFS unset, using the "
+                    "MiniMax-M2.7 on H200 fit; refit for this GPU and model "
+                    "(python3 -m dynamo.vllm.decode_regulation_fit)"
+                )
 
     def _reg_apply(self) -> Optional[Decision]:
         if not self._reg_cfg.enabled or getattr(self, "_bench_active", False):
@@ -597,7 +608,7 @@ class DecodeRegulationMixin:
             self._reg_stats.on_step(pred, actual)
             self._reg_failsafe()
         if self._reg_trace is not None:
-            self._reg_trace.write(
+            self._reg_write_trace(
                 json.dumps(
                     {
                         "t": round(now, 4),
@@ -620,11 +631,22 @@ class DecodeRegulationMixin:
         if now >= self._reg_next_log:
             self._reg_next_log = now + self._reg_cfg.log_s
             if self._reg_trace is not None:
-                self._reg_trace.flush()
+                self._reg_write_trace(None)
             logger.info(
                 "decode_regulation %s",
                 self._reg_stats.summary_and_reset(self._reg_policy.bias),
             )
+
+    def _reg_write_trace(self, line: Optional[str]) -> None:
+        """Write a trace line (None: flush); a trace I/O error must not stop the engine."""
+        try:
+            if line is None:
+                self._reg_trace.flush()
+            else:
+                self._reg_trace.write(line)
+        except OSError as e:
+            logger.warning("decode_regulation trace disabled: %s", e)
+            self._reg_trace = None
 
     def _reg_failsafe(self) -> None:
         """Fail open when the step-time model is persistently wrong.
@@ -641,7 +663,7 @@ class DecodeRegulationMixin:
         if self._reg_pinned >= limit:
             logger.warning(
                 "decode_regulation disabled: step-time bias pinned at %.2f for %d steps; "
-                "refit DYN_DECODE_REGULATION_COEFFS for this GPU and model (fit_step_model.py)",
+                "refit DYN_DECODE_REGULATION_COEFFS for this GPU and model (python3 -m dynamo.vllm.decode_regulation_fit)",
                 b,
                 self._reg_pinned,
             )
@@ -689,8 +711,6 @@ class RegulationMetrics:
     ran overloaded. ``enabled`` drops to 0 when the fail-open guard trips."""
 
     def __init__(self, model_name: str, dp_rank: int, registry: Any) -> None:
-        from prometheus_client import CollectorRegistry, Counter, Gauge
-
         registry = registry if registry is not None else CollectorRegistry()
         names = ["model", "dp_rank"]  # dynamo_* hierarchy labels are injected
         values = {"model": model_name, "dp_rank": str(dp_rank)}
@@ -731,16 +751,6 @@ class RegulationMetrics:
         self.bias = gauge("step_time_bias", "Actual / predicted step time (EWMA).")
         self.enabled.set(1)
         self.bias.set(1.0)
-
-    @classmethod
-    def create(
-        cls, model_name: str, dp_rank: int, registry: Any = None
-    ) -> Optional["RegulationMetrics"]:
-        try:
-            return cls(model_name, dp_rank, registry)
-        except ImportError:
-            logger.debug("prometheus_client unavailable: no decode regulation metrics")
-            return None
 
     def on_decision(self, d: Decision, seconds: float) -> None:
         self.steps.inc()
@@ -784,6 +794,8 @@ class _Stats:
         self.overhead_us.append(seconds * 1e6)
 
     def on_step(self, pred: float, actual: float) -> None:
+        if actual <= 0:
+            return
         self.err.append(abs(pred - actual) / actual)
 
     def summary_and_reset(self, bias: float) -> str:

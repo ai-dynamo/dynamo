@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Per-step decode regulation: policy, identity plumbing, and the
-skip mixin driven by a fake scheduler with vLLM v0.31.0's running-loop rules."""
+skip mixin driven by a fake scheduler with vLLM's running-loop rules."""
 
 import subprocess
 import sys
@@ -149,12 +149,17 @@ def test_skip_lasts_exactly_one_step():
 def test_progress_bound_every_k_steps(k):
     reqs = overloaded(n_subs=16)
     s = Sched(reqs, cfg(k=k))
+    s._reg_policy.observe = lambda *_: None  # fake steps take microseconds
     last = {r.request_id: 0 for r in reqs}
+    skipped = 0
     for i in range(1, 60):
-        for rid in step(s):
+        ran = step(s)
+        skipped += len(reqs) - len(ran)
+        for rid in ran:
             assert i - last[rid] <= k, (rid, i, last[rid])
             last[rid] = i
     assert all(60 - v <= k for v in last.values())
+    assert (skipped > 0) == (k > 1)  # K=1 forces every decode
 
 
 def test_prefill_requests_are_never_skipped():
@@ -224,6 +229,7 @@ def test_deadline_target_from_arrival_and_max_tokens():
 def test_config_deadline_from_env():
     c = DecodeRegulationConfig.from_env(
         {
+            "DYN_DECODE_REGULATION_MODE": "class_blind",
             "DYN_DECODE_REGULATION_DEADLINE": "500,18.48",
             "DYN_DECODE_REGULATION_SLACK_MARGIN": "0.8",
         }
@@ -404,6 +410,10 @@ def test_config_from_env():
                 "DYN_DECODE_REGULATION_K": "0",
             }
         )
+    # Off ignores the other settings, so a bad value can't break a worker.
+    assert not DecodeRegulationConfig.from_env(
+        {"DYN_DECODE_REGULATION_K": "0", "DYN_DECODE_REGULATION_COEFFS": "x"}
+    ).enabled
     on = DecodeRegulationConfig.from_env({"DYN_DECODE_REGULATION_MODE": "on"})
     assert on.mode == "class_blind"
 
@@ -562,12 +572,11 @@ print("RESULT=" + vllm_skip_unsupported(s.Scheduler, r.Request))
 def test_installed_vllm_supports_the_skip():
     """Fails on a vLLM upgrade, or a vLLM plugin, that changes the internals the
     skip relies on. Runs in a subprocess so loading plugins leaves this one alone."""
-    pytest.importorskip("vllm.v1.core.sched.scheduler")
     out = subprocess.run(
         [sys.executable, "-c", _INSTALLED_CHECK],
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=120,
     )
     assert out.returncode == 0, out.stderr[-2000:]
     result = [ln for ln in out.stdout.splitlines() if ln.startswith("RESULT=")]
