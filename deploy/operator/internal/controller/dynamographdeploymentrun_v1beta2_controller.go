@@ -74,6 +74,7 @@ const (
 	dgdrRunResourceComponent       = "aisimulate"
 	dgdrRunServiceAccountTokenTTL  = int64(3600)
 	dgdrRunTraceGroup              = int64(65532)
+	dgdrRunLegacyFSGroup           = int64(65532)
 	dgdrRunReasonPending           = "JobPending"
 	dgdrRunReasonRunning           = "JobRunning"
 	dgdrRunReasonSucceeded         = "SearchSucceeded"
@@ -1248,7 +1249,14 @@ func validateDGDRRunJobSpec(spec *batchv1.JobSpec) error {
 }
 
 func validateDGDRRunPodSecurityContext(security *corev1.PodSecurityContext, run *nvidiacomv1beta2.DynamoGraphDeploymentRun) error {
-	if security == nil || security.FSGroup != nil {
+	if security == nil {
+		return errors.New("pod fsGroup differs")
+	}
+
+	// The pod requests no fsGroup. Earlier operators set fsGroup 65532 on every Run Job; such a Job
+	// mounts no trace claim, so a Run without a trace keeps accepting it and an operator upgrade does
+	// not fail its in-flight sweep.
+	if security.FSGroup != nil && (dgdrRunTraceClaim(run) != nil || *security.FSGroup != dgdrRunLegacyFSGroup) {
 		return errors.New("pod fsGroup differs")
 	}
 	if !apiequality.Semantic.DeepEqual(security.SupplementalGroups, dgdrRunPodSecurityContext(run).SupplementalGroups) {

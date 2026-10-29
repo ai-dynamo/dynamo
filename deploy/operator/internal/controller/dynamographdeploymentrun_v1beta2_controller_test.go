@@ -861,7 +861,7 @@ func TestValidateDGDRRunJobExecutionRejectsImmutableBindingSkew(t *testing.T) {
 		{
 			name: "pod fsGroup",
 			mutate: func(job *batchv1.Job) {
-				job.Spec.Template.Spec.SecurityContext.FSGroup = ptr.To[int64](65532)
+				job.Spec.Template.Spec.SecurityContext.FSGroup = ptr.To[int64](1000)
 			},
 			wantErr: "pod fsGroup differs",
 		},
@@ -1044,6 +1044,14 @@ func TestValidateDGDRRunJobExecutionRejectsImmutableBindingSkew(t *testing.T) {
 		defaulted.Spec.Template.Spec.Containers[1].SecurityContext.ProcMount = ptr.To(corev1.DefaultProcMount)
 		if err := validateDGDRRunJobExecution(defaulted, run, configMap.Name, execution); err != nil {
 			t.Fatalf("validation error = %v, want API defaults accepted", err)
+		}
+	})
+
+	t.Run("a Job from an operator that set fsGroup 65532 remains compatible", func(t *testing.T) {
+		legacy := job.DeepCopy()
+		legacy.Spec.Template.Spec.SecurityContext.FSGroup = ptr.To[int64](65532)
+		if err := validateDGDRRunJobExecution(legacy, run, configMap.Name, execution); err != nil {
+			t.Fatalf("validation error = %v, want the legacy fsGroup accepted for a Run without a trace", err)
 		}
 	})
 }
@@ -2512,9 +2520,13 @@ func TestV1beta2RunControllerDoesNotLetAStaleRunUndoATraceFailure(t *testing.T) 
 		name string
 		// jobCondition, when set, finishes the Job after the trace failure was recorded.
 		jobCondition batchv1.JobConditionType
+		// duplicateJob adds a second, unfinished Job the Run controls, so the stale pass fails the
+		// Run permanently and writes the permanent-failure marker.
+		duplicateJob bool
 	}{
 		{name: "the trace is still unreadable"},
 		{name: "the Job completes after the failure", jobCondition: batchv1.JobComplete},
+		{name: "a second Job appears after the Job completes", jobCondition: batchv1.JobComplete, duplicateJob: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2549,6 +2561,15 @@ func TestV1beta2RunControllerDoesNotLetAStaleRunUndoATraceFailure(t *testing.T) 
 					t.Fatalf("finish Job: %v", err)
 				}
 			}
+			if tt.duplicateJob {
+				duplicate := f.job().DeepCopy()
+				duplicate.Name += "-duplicate"
+				duplicate.ResourceVersion, duplicate.UID = "", ""
+				duplicate.Status = batchv1.JobStatus{}
+				if err := f.client.Create(t.Context(), duplicate); err != nil {
+					t.Fatalf("create duplicate Job: %v", err)
+				}
+			}
 
 			t.Log("A pass that still reads the Running Run conflicts instead of overwriting the failure")
 			cached := f.reconciler.Client
@@ -2577,8 +2598,8 @@ func TestV1beta2RunControllerDoesNotLetAStaleRunUndoATraceFailure(t *testing.T) 
 					`trace PersistentVolumeClaim "request-traces" does not exist in namespace "default"`)
 				return
 			}
-			if kept := f.job(); kept.UID != job.UID {
-				t.Fatalf("Job UID = %q, want the finished Job %q kept", kept.UID, job.UID)
+			if jobs := f.jobs(); len(jobs) != 1 || jobs[0].UID != job.UID {
+				t.Fatalf("Jobs = %d, want only the finished Job %q kept", len(jobs), job.UID)
 			}
 			if got := f.run(); !reflect.DeepEqual(got.Status, failed.Status) {
 				t.Fatalf("status = %+v, want the recorded failure %+v", got.Status, failed.Status)
