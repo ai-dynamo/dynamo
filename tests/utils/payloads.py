@@ -1084,13 +1084,38 @@ class StreamingChatPayload(BasePayload):
         return content
 
 
+def _validate_single_tool_call(
+    call: Dict[str, Any], name: Optional[str], arguments: Dict[str, Any]
+) -> None:
+    """Check one OpenAI tool call: its type, id, function name, and JSON arguments."""
+    assert call.get("type") == "function", f"Tool call type is not function: {call}"
+    assert (
+        isinstance(call.get("id"), str) and call["id"]
+    ), f"Tool call has no id: {call}"
+    function = call.get("function") or {}
+    if name is not None:
+        assert function.get("name") == name, f"Expected tool {name!r}, got {call}"
+    try:
+        parsed = json.loads(function.get("arguments") or "")
+    except json.JSONDecodeError as e:
+        raise AssertionError(f"Tool call arguments are not valid JSON: {call}") from e
+    assert parsed == arguments, f"Expected arguments {arguments!r}, got {parsed!r}"
+
+
 @dataclass
 class ToolCallingChatPayload(ChatPayload):
     """ChatPayload that validates tool calls in the response."""
 
-    def __init__(self, *args, expected_tool_name: Optional[str] = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        expected_tool_name: Optional[str] = None,
+        expected_arguments: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.expected_tool_name = expected_tool_name
+        self.expected_arguments = expected_arguments
 
     def validate(self, response, content: str) -> None:
         """Validate that tool calls exist in the response.
@@ -1149,6 +1174,74 @@ class ToolCallingChatPayload(ChatPayload):
                 )
             else:
                 logger.info(f"Found expected keywords in tool args: {found}")
+
+        # A forced call whose schema admits one argument object has one valid call.
+        if self.expected_arguments is not None:
+            assert len(tool_calls) == 1, f"Expected one tool call, got {tool_calls}"
+            content = message.get("content") or ""
+            assert not content.strip(), f"Unexpected content: {message}"
+            _validate_single_tool_call(
+                tool_calls[0], self.expected_tool_name, self.expected_arguments
+            )
+
+
+@dataclass
+class StreamingToolCallingChatPayload(BasePayload):
+    """Validate the one tool call that a chat SSE stream assembles from its deltas."""
+
+    expected_tool_name: str = field(kw_only=True)
+    expected_arguments: Dict[str, Any] = field(kw_only=True)
+    expected_finish_reason: str = field(kw_only=True)
+    endpoint: str = "/v1/chat/completions"
+    http_stream: bool = True
+
+    def process_response(self, response: Any) -> str:
+        try:
+            return super().process_response(response)
+        finally:
+            response.close()
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        content_parts: List[str] = []
+        calls: Dict[int, Dict[str, Any]] = {}
+        finish_reason = None
+        for chunk in parse_sse_json_chunks(response.content.decode("utf-8")):
+            assert "error" not in chunk, f"Stream error: {chunk!r}"
+            for choice in chunk["choices"]:
+                assert choice["index"] == 0, f"Unexpected choice: {chunk!r}"
+                assert finish_reason is None, "Received choices after terminal chunk"
+                delta = choice.get("delta") or {}
+                content_parts.append(delta.get("content") or "")
+                for part in delta.get("tool_calls") or []:
+                    # The first delta of a call carries its id, type, and name.
+                    # Later deltas only add argument text.
+                    function = part.get("function") or {}
+                    call = calls.setdefault(
+                        part["index"],
+                        {
+                            "id": part.get("id"),
+                            "type": part.get("type"),
+                            "function": {"name": function.get("name"), "arguments": []},
+                        },
+                    )
+                    call["function"]["arguments"].append(
+                        function.get("arguments") or ""
+                    )
+                finish_reason = choice.get("finish_reason")
+
+        content = "".join(content_parts)
+        assert not content.strip(), f"Unexpected content: {content!r}"
+        assert list(calls) == [0], f"Expected one tool call at index 0, got {calls}"
+        call = calls[0]
+        call["function"]["arguments"] = "".join(call["function"]["arguments"])
+        _validate_single_tool_call(
+            call, self.expected_tool_name, self.expected_arguments
+        )
+        assert (
+            finish_reason == self.expected_finish_reason
+        ), f"Unexpected finish reason: {finish_reason!r}"
+        return call["function"]["arguments"]
 
 
 @dataclass

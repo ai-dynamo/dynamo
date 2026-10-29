@@ -40,6 +40,8 @@ from tests.utils.payloads import (
     SGLangMetricsPayload,
     StopStringChatPayload,
     StreamingChatPayload,
+    StreamingToolCallingChatPayload,
+    ToolCallingChatPayload,
     TRTLLMMetricsPayload,
     VLLMMetricsPayload,
 )
@@ -966,6 +968,73 @@ def chat_logprobs_and_structured_output_payloads(
         needs_token_ids=True,
     )
     return [chat_payload_default(), logprobs, unicode_logprobs, structured]
+
+
+def forced_tool_call_payloads() -> list[BasePayload]:
+    """Forced tool calls whose grammar admits one argument object.
+
+    The frontend turns a forced tool_choice into a grammar for the engine. The
+    vLLM sidecar receives a JSON schema. The SGLang sidecar receives a hermes
+    structural tag, because it turns structural tags on by default. Each enum
+    has one value, and the question asks for other values, so only an enforced
+    grammar returns the expected arguments.
+    """
+    arguments = {"city": "Paris", "unit": "celsius"}
+    question = {
+        "role": "user",
+        "content": "What is the weather in Tokyo, in fahrenheit?",
+    }
+    common = {
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the current weather in a city.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string", "enum": ["Paris"]},
+                            "unit": {"type": "string", "enum": ["celsius"]},
+                        },
+                        "required": ["city", "unit"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                },
+            }
+        ],
+        "max_tokens": 64,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    named = ToolCallingChatPayload(
+        body={
+            **common,
+            "messages": [question],
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+            "parallel_tool_calls": False,
+        },
+        expected_response=[],
+        expected_log=[],
+        expected_tool_name="get_weather",
+        expected_arguments=arguments,
+    )
+    required = StreamingToolCallingChatPayload(
+        body={
+            **common,
+            "messages": [question],
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
+            "stream": True,
+        },
+        expected_response=[],
+        expected_log=[],
+        expected_tool_name="get_weather",
+        expected_arguments=arguments,
+        expected_finish_reason="tool_calls",
+    )
+    return [named, required]
 
 
 def http_cancellation_payloads(
