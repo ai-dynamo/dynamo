@@ -71,7 +71,7 @@ To replace only the scoring and picking stage with statically linked Rust code, 
 
 When requests wait in policy-class queues, weighted
 [Deficit Round Robin Queue Scheduling](deficit-round-robin.md) selects the
-physical class to dispatch before worker scoring runs.
+class to dispatch before worker scoring runs.
 
 ## Using the KV Cache Router
 
