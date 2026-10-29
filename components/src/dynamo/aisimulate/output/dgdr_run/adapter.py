@@ -792,8 +792,10 @@ class DGDRRunOutputPlugin:
             raise CandidateMaterializationError("no feasible candidate found")
         workload = SmartSearchConfig.model_validate(result.provenance.config).workload
         directory = Path(resolved.snapshot_dir or output_dir)
+        is_pareto = bool(getattr(result.views, "pareto_front", None))
         adapter = DGDRRunOutputAdapter(
-            resolved, workload, snapshot_dir=directory, keep_arrival_order=True
+            resolved, workload, snapshot_dir=directory, keep_arrival_order=True,
+            is_pareto=is_pareto,
         )
         for candidate in selected:
             adapter.on_candidate(_as_feasible(candidate))
