@@ -398,7 +398,7 @@ def test_text_commit_hands_prefill_to_final_generation(monkeypatch, overflow):
     assert user_items[0]["content"] == [{"type": "input_text", "text": "Hello world"}]
     done = next(event for event in result if event["type"] == "response.done")
     assert done["response"]["status"] == "completed"
-    assert held.closed == 0
+    assert held.closed == 1
 
 
 def test_cancelled_response_closes_its_held_prefill():
@@ -501,6 +501,7 @@ def test_held_request_answers_as_the_last_chunk_of_one_engine_request():
             ]
         finally:
             _HELD_REQUEST.reset(token)
+        await held.close()
         return engine, held, final, outputs
 
     engine, held, final, outputs = asyncio.run(run())
@@ -539,15 +540,94 @@ def test_held_request_engine_falls_back_to_a_new_request(prompt, params):
             ]
         finally:
             _HELD_REQUEST.reset(token)
-        answering = held.answering
         await held.close()
-        return engine, held, outputs, answering
+        return engine, held, outputs
 
-    engine, held, outputs, answering = asyncio.run(run())
+    engine, held, outputs = asyncio.run(run())
     assert outputs == ["direct"]
-    assert not answering
+    assert all(chunk.params is _PREFILL_PARAMS for chunk in engine.chunks)
     assert engine.calls[-1] == ({"prompt_token_ids": prompt}, "chat-1")
     assert engine.aborted == [held._request_id]
+
+
+class _StoppingEngine(_StreamingEngine):
+    """Engine fake that stops after the first prefill chunk, once released."""
+
+    def __init__(self, error: Exception | None) -> None:
+        super().__init__()
+        self.error = error
+        self.stop = asyncio.Event()
+
+    async def generate(self, prompt, sampling_params, request_id, **kwargs):
+        async for chunk in prompt:
+            self.chunks.append(chunk)
+            yield SimpleNamespace(text="warm", finished=False)
+            await self.stop.wait()
+            if self.error is not None:
+                raise self.error
+            return
+
+
+@pytest.mark.parametrize("error", [None, RuntimeError("engine stopped")])
+def test_held_request_ends_an_answer_the_engine_never_took(error):
+    async def run():
+        engine = _StoppingEngine(error)
+        held = _held_request(engine)
+        held.feed([1, 2])
+        await asyncio.sleep(0.01)
+        answer = held.answer([1, 2, 3], _sampling_params())
+        engine.stop.set()
+        try:
+            return [output.text async for output in answer]
+        finally:
+            await held.close()
+
+    if error is None:
+        assert asyncio.run(asyncio.wait_for(run(), timeout=1)) == []
+    else:
+        with pytest.raises(RuntimeError, match="engine stopped"):
+            asyncio.run(asyncio.wait_for(run(), timeout=1))
+
+
+def test_turn_closes_its_held_prefill_when_cancelled_during_generation_setup():
+    held = _FakeHeldRequest()
+    prefill_seen = asyncio.Event()
+    generation_started = asyncio.Event()
+    borrowed = []
+
+    async def prefill(messages, updates, tool_options):
+        async for _ in updates:
+            prefill_seen.set()
+        return held
+
+    async def chat_completion(messages, max_output_tokens, tool_options, prefill):
+        borrowed.append(prefill)
+        generation_started.set()
+        await asyncio.Event().wait()
+
+    async def request_stream():
+        yield {"type": "session.update", "session": _text_session()}
+        yield {"type": "input_text.append", "text": "Hello"}
+        await asyncio.wait_for(prefill_seen.wait(), timeout=5)
+        yield {"type": "input_text.commit"}
+        yield {"type": "response.create"}
+        await asyncio.wait_for(generation_started.wait(), timeout=5)
+        yield {"type": "response.cancel"}
+
+    async def run():
+        handler = RealtimeTextHandler(
+            model_name=TEXT_MODEL,
+            chat_completion_factory=chat_completion,
+            text_prefill_factory=prefill,
+        )
+        return [event async for event in handler.generate(request_stream(), _Context())]
+
+    result = asyncio.run(asyncio.wait_for(run(), timeout=5))
+
+    done = next(event for event in result if event["type"] == "response.done")
+    assert done["response"]["status"] == "cancelled"
+    assert borrowed == [held]
+    assert held.closed == 1
 
 
 def test_response_cancel_waits_for_committed_prefill_cleanup():

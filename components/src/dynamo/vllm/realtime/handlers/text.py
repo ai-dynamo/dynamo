@@ -84,7 +84,6 @@ class _TextTurn(RealtimeTurn):
         self.text = ""
         self.function_calls: list[dict[str, Any]] = []
         self._function_call_positions: dict[int, int] = {}
-        # (event type, item id) pairs of function-call "added" events already queued.
         self._announced: set[tuple[str, str]] = set()
         self.finished = False
 
@@ -170,6 +169,12 @@ class _TextTurn(RealtimeTurn):
             )
         return events
 
+    async def close_prefill(self) -> None:
+        """Close the held prefill request, which the turn owns until it ends."""
+        prefill, self.prefill = self.prefill, None
+        if prefill is not None:
+            await asyncio.shield(prefill.close())
+
     async def emit_function_call(self, call: dict[str, Any]) -> None:
         for event in self.function_call_events(call):
             await self.events.put(event)
@@ -177,7 +182,6 @@ class _TextTurn(RealtimeTurn):
                 self._announced.add((event["type"], event["item"]["id"]))
 
     def _announced_calls(self) -> list[dict[str, Any]]:
-        # A cancel can interrupt the queue put of a call's "added" event.
         return [
             item
             for item in self.function_calls
@@ -293,7 +297,7 @@ class _TextPrefill:
         self._updated.set()
 
     async def held(self) -> HeldTextRequest | None:
-        """Return the held request for final generation, which then owns closing it."""
+        """Return the held request for the response turn, which then owns closing it."""
         self.commit()
         (result,) = await asyncio.shield(
             asyncio.gather(self.task, return_exceptions=True)
@@ -438,9 +442,8 @@ class RealtimeTextHandler:
         stopped = context.async_killed_or_stopped()
         stopped.add_done_callback(cancel_generation)
         try:
-            prefill, turn.prefill = turn.prefill, None
             stream = await self._chat_completion_factory(
-                turn.messages, turn.max_output_tokens, turn.tool_options, prefill
+                turn.messages, turn.max_output_tokens, turn.tool_options, turn.prefill
             )
             async for frame in stream:
                 if context.is_stopped():
@@ -516,8 +519,7 @@ class RealtimeTextHandler:
             # Cancellation may interrupt an output queue put, not stream.__anext__.
             if stream is not None:
                 await stream.aclose()
-            if turn.prefill is not None:
-                await asyncio.shield(turn.prefill.close())
+            await turn.close_prefill()
 
     async def generate(
         self,
@@ -779,6 +781,9 @@ class RealtimeTextHandler:
                     )
                 )
                 if prefill is not None:
+                    prefilled_turns[:] = [
+                        turn for turn in prefilled_turns if turn.prefill is not None
+                    ]
                     prefilled_turns.append(active_response)
                 committed_prefill = None
                 connection.finish_active_turn()
@@ -802,6 +807,7 @@ class RealtimeTextHandler:
                 # Realtime clients must receive terminal item/content events even
                 # when generation is cancelled.
                 await connection.cancel_turn_preserving_output(running)
+                await running.close_prefill()
                 for terminal_event in running.final_events(
                     status="cancelled",
                     status_details={
@@ -829,7 +835,5 @@ class RealtimeTextHandler:
                 await active_prefill.cancel()
             if committed_prefill is not None:
                 await committed_prefill.cancel()
-            # A turn cancelled before generation never hands its request on.
             for turn in prefilled_turns:
-                if turn.prefill is not None:
-                    await asyncio.shield(turn.prefill.close())
+                await turn.close_prefill()

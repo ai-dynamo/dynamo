@@ -24,7 +24,7 @@ StreamingInputFactory = Callable[
 #: Await with chat messages, an optional output-token limit, chat ``tools`` /
 #: ``tool_choice`` options, and the turn's held prefill request, if any, to obtain
 #: a stream of OpenAI chat-completion SSE frames. The caller owns closing that
-#: stream. The factory owns the held request and closes it if it cannot continue it.
+#: stream and the held request. The factory only borrows the held request.
 ChatCompletionFactory = Callable[
     [list[dict[str, Any]], int | None, dict[str, Any], "HeldTextRequest | None"],
     Awaitable[AsyncGenerator[str, None]],
@@ -102,7 +102,6 @@ class HeldTextRequest:
     ) -> None:
         self.fed: list[int] = []
         self.prefill_params = prefill_params
-        self.answering = False
         self._engine = engine_client
         self._make_chunk = make_chunk
         self._pending: list[int] = []
@@ -130,7 +129,6 @@ class HeldTextRequest:
         """Append the rest of the final prompt as the last chunk and stream its outputs."""
         queue: asyncio.Queue[Any] = asyncio.Queue()
         self._next_answer = (sampling_params, queue)
-        self.answering = True
         self._queue(token_ids[len(self.fed) :])
         self._closed = True
         return self._answer_outputs(queue)
@@ -155,17 +153,18 @@ class HeldTextRequest:
     async def _answer_outputs(
         self, queue: asyncio.Queue[Any]
     ) -> AsyncGenerator[Any, None]:
-        try:
-            while (output := await queue.get()) is not None:
-                if isinstance(output, Exception):
-                    raise output
-                yield output
-        finally:
-            await asyncio.shield(self.close())
+        while (output := await queue.get()) is not None:
+            if isinstance(output, Exception):
+                raise output
+            yield output
+
+    def _claim_answer(self) -> asyncio.Queue[Any] | None:
+        if self._answer is None and self._next_answer is not None:
+            _, self._answer = self._next_answer
+            self._next_answer = None
+        return self._answer
 
     async def _inputs(self) -> AsyncGenerator[Any, None]:
-        # Merge appends that arrive while a chunk runs, and route each output by
-        # waiting for the previous chunk before yielding the next.
         while True:
             await self._wake.wait()
             self._wake.clear()
@@ -195,15 +194,15 @@ class HeldTextRequest:
                 if output.finished:
                     break
         except Exception as exc:  # noqa: BLE001 - surfaced as an answer failure
-            if self._answer is None:
+            if (answer := self._claim_answer()) is None:
                 logger.warning("realtime text prefill stopped: %s", exc)
             else:
-                self._answer.put_nowait(exc)
+                answer.put_nowait(exc)
         finally:
             self._closed = True
             self._chunk_done.set()
-            if self._answer is not None:
-                self._answer.put_nowait(None)
+            if (answer := self._claim_answer()) is not None:
+                answer.put_nowait(None)
 
 
 class _HeldRequestEngine:
@@ -232,7 +231,6 @@ class _HeldRequestEngine:
             and len(token_ids) > len(held.fed)
             and held.extends(list(token_ids))
             and sampling_params.structured_outputs is None
-            # The engine seeds a request's generator from its first chunk.
             and sampling_params.seed is None
             and sampling_params.skip_special_tokens
             == held.prefill_params.skip_special_tokens
@@ -385,8 +383,6 @@ def build_realtime_text_factories(
             response = await serving.create_chat_completion(request)
         finally:
             _HELD_REQUEST.reset(token)
-            if prefill is not None and not prefill.answering:
-                await prefill.close()
         if isinstance(response, ErrorResponse):
             raise ValueError(response.error.message)
         return response
@@ -423,8 +419,6 @@ def build_realtime_text_factories(
         held: HeldTextRequest | None = None
         try:
             async for text in updates:
-                # ASR can still extend the last word, which would change its
-                # tokens, so only whole words are prefilled before the commit.
                 text = text[: text.rfind(" ") + 1].rstrip()
                 if not text:
                     continue
@@ -436,8 +430,6 @@ def build_realtime_text_factories(
                     await held.close()
                     held = None
                 if held is None:
-                    # vLLM detokenizes the whole request as its first chunk
-                    # says, so keep the special tokens the final request keeps.
                     held = HeldTextRequest(
                         engine_client,
                         make_chunk,
