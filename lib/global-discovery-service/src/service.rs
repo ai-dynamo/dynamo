@@ -7,7 +7,15 @@
 //! - `POST /pools`: a PoolRelay registers its pool. It calls this on a timer,
 //!   and each call is also the pool's heartbeat.
 //! - `GET /routers`: the Global Router replicas a PoolRelay connects to.
-//! - `GET /pools`: the pools a Global Router routes to.
+//! - `GET /pools`: the pools a Global Router routes to. `complete` is false
+//!   while the list may be missing pools: for one lease after the service
+//!   starts, while PoolRelays may not have registered yet; and with MCS, also
+//!   while another discovery instance has not answered for a lease, so its
+//!   registrations may be missing, and while the MCS watch keeps failing. A
+//!   caller that keeps its own list replaces it with a complete list, but
+//!   merges a partial one: it adds new pools and updates changed ones, keeps
+//!   known pools that are missing, and waits for a complete list to remove
+//!   any. A caller that knows no pools yet still uses a partial list.
 //! - `GET /registrations`: the registrations this instance's PoolRelays
 //!   made, for the other instances ([`crate::peers`]).
 //! - `GET /healthz`: OK while the service can answer from its backend. Use it
