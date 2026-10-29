@@ -30,7 +30,10 @@ selected pool's frontend, with the client's headers except hop-by-hop ones,
 including `x-dynamo-session-id`, `x-request-id`, and `authorization`. The pool's
 status, headers, and body come back unchanged, streamed or not, including its
 error responses and SSE keep-alives. A request whose model no pool serves gets
-404, and one whose pool cannot be reached gets 503. `/v1/models` lists the
+404. A request whose pool frontend cannot be reached (connection refused or
+timed out, or a failed name lookup) goes to one other pool; it gets 503 if that
+fails too, or if the pool may already have the request, so it is never run
+twice. `/v1/models` lists the
 configured models, `/health` is healthy while some pool has a frontend, and
 `/live` always answers.
 
@@ -110,8 +113,8 @@ for each family.
 ## Limitations
 
 Pools are given on the command line; there is no discovery client, polling, or
-registration. There is no automatic failover or retry: unreachable
-pools return 503. The listener has no TLS.
+registration. A request whose pool may already have it is not retried. The
+listener has no TLS.
 
 ## Tests
 

@@ -9,7 +9,7 @@
 
 use std::future::IntoFuture;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
@@ -136,7 +136,7 @@ async fn forward(
         return error(StatusCode::BAD_REQUEST, message.to_owned());
     };
     let snapshot = proxy.pools.borrow().clone();
-    let candidates = snapshot.pools_for(&model).collect::<Vec<_>>();
+    let mut candidates = snapshot.pools_for(&model).collect::<Vec<_>>();
     if candidates.is_empty() {
         metrics.rejected(error_type::NOT_FOUND);
         return error(
@@ -151,58 +151,76 @@ async fn forward(
         .get(HEADER_DYNAMO_SESSION_ID)
         .and_then(|session| session.to_str().ok());
     let request = RoutingRequest::new(&model).with_session(session);
-    let Some(target) = proxy.selector.select(&request, &candidates) else {
-        metrics.rejected(error_type::UNAVAILABLE);
-        let message = format!("no pool can serve model {model}");
-        return error(StatusCode::SERVICE_UNAVAILABLE, message);
-    };
-    let pool = target.pool;
-    let in_flight = proxy.in_flight.start(&pool.id);
-    let Some(url) = route_url(target.frontend, &uri) else {
-        metrics.rejected(error_type::VALIDATION);
-        return error(StatusCode::BAD_REQUEST, "invalid route".to_owned());
-    };
-    tracing::debug!(pool = %pool.id, %url, "forwarding request");
-    // A stream body cannot be copied, so reqwest keeps none for redirects,
-    // and the bytes are freed once written to the pool.
-    let upload = reqwest::Body::wrap_stream(futures::stream::once(futures::future::ready(Ok::<
-        _,
-        io::Error,
-    >(
-        body
-    ))));
-    // If the client leaves while the pool queues the request, this handler
-    // is dropped, which drops the send and closes the pool connection,
-    // cancelling the request there, and counts it as cancelled.
-    let sending = metrics.sending(pool);
-    let upstream = match proxy
-        .http
-        .request(method, url.clone())
-        .headers(headers)
-        .body(upload)
-        .send()
-        .await
-    {
-        Ok(upstream) => upstream,
-        Err(failure) => {
-            sending.answered(None);
-            // reqwest names only the outermost failure ("error sending
-            // request"); the cause, such as a refused or reset connection,
-            // is in its sources.
-            let failure = anyhow::Error::new(failure);
-            tracing::warn!(
-                pool = %pool.id,
-                %url,
-                error = format!("{failure:#}"),
-                "pool frontend failed"
-            );
+    let mut body = Some(body);
+    let mut retried = false;
+    let (pool, in_flight, upstream) = loop {
+        let Some(target) = proxy.selector.select(&request, &candidates) else {
+            metrics.rejected(error_type::UNAVAILABLE);
+            let message = format!("no pool can serve model {model}");
+            return error(StatusCode::SERVICE_UNAVAILABLE, message);
+        };
+        let pool = target.pool;
+        let in_flight = proxy.in_flight.start(&pool.id);
+        let Some(url) = route_url(target.frontend, &uri) else {
+            metrics.rejected(error_type::VALIDATION);
+            return error(StatusCode::BAD_REQUEST, "invalid route".to_owned());
+        };
+        tracing::debug!(pool = %pool.id, %url, "forwarding request");
+        // A stream body cannot be copied, so reqwest keeps none for
+        // redirects. The stream takes the bytes from `unsent` when the
+        // connection first asks for them, and they are freed once written to
+        // the pool; until then, a failed send can give them to another pool.
+        let unsent = Arc::new(Mutex::new(body.take()));
+        let upload = {
+            let unsent = unsent.clone();
+            reqwest::Body::wrap_stream(futures::stream::once(async move {
+                take(&unsent).ok_or_else(|| io::Error::other("the request body was already sent"))
+            }))
+        };
+        // If the client leaves while the pool queues the request, this
+        // handler is dropped, which drops the send and closes the pool
+        // connection, cancelling the request there, and counts it as
+        // cancelled.
+        let sending = metrics.sending(pool);
+        let failure = match proxy
+            .http
+            .request(method.clone(), url.clone())
+            .headers(headers.clone())
+            .body(upload)
+            .send()
+            .await
+        {
+            Ok(upstream) => {
+                sending.answered(Some(upstream.status()));
+                break (pool, in_flight, upstream);
+            }
+            Err(failure) => failure,
+        };
+        sending.answered(None);
+        // reqwest names only the outermost failure ("error sending
+        // request"); the cause, such as a refused or reset connection, is in
+        // its sources.
+        let failure = anyhow::Error::new(failure);
+        // The bytes are still here only if the pool never got them, so it
+        // cannot be running the request, and one other pool may take it.
+        body = take(&unsent).filter(|_| !retried);
+        candidates.retain(|candidate| candidate.id != pool.id);
+        let retry = body.is_some() && !candidates.is_empty();
+        tracing::warn!(
+            pool = %pool.id,
+            %url,
+            error = format!("{failure:#}"),
+            retry,
+            "pool frontend failed"
+        );
+        if !retry {
             let message = format!("pool frontend {url} failed: {failure}");
             return error(StatusCode::SERVICE_UNAVAILABLE, message);
         }
+        retried = true;
     };
 
     let status = upstream.status();
-    sending.answered(Some(status));
     let mut timing = status
         .is_success()
         .then(|| metrics.response(pool, received));
@@ -221,6 +239,11 @@ async fn forward(
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     response
+}
+
+/// Takes the request body from `slot`, where only one send finds it.
+fn take(slot: &Mutex<Option<Bytes>>) -> Option<Bytes> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner).take()
 }
 
 /// `uri`'s path and query below `frontend`, keeping any path the frontend
