@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -35,7 +36,18 @@ pub struct AffinitySelector {
     idle: Duration,
     pins: DashMap<String, Pin>,
     frontends: Cursors<PoolId>,
+    /// Requests placed, by [`OUTCOMES`].
+    selections: [AtomicU64; 4],
 }
+
+/// What became of a placed request's session pin: its pinned pool took it,
+/// the pin moved to another pool, the session had no live pin, or the
+/// request had no session ID.
+const OUTCOMES: [&str; 4] = ["stayed", "moved", "new", "no_session"];
+const STAYED: usize = 0;
+const MOVED: usize = 1;
+const NEW: usize = 2;
+const NO_SESSION: usize = 3;
 
 #[derive(Debug)]
 struct Pin {
@@ -58,7 +70,17 @@ impl AffinitySelector {
             idle,
             pins: DashMap::new(),
             frontends: Cursors::default(),
+            selections: Default::default(),
         }
+    }
+
+    /// The requests placed so far, by what became of their session's pin:
+    /// `stayed`, `moved`, `new` (no live pin) or `no_session`.
+    pub fn selections(&self) -> [(&'static str, u64); 4] {
+        std::array::from_fn(|outcome| {
+            let count = self.selections[outcome].load(Ordering::Relaxed);
+            (OUTCOMES[outcome], count)
+        })
     }
 
     /// Sessions with a live pin.
@@ -66,20 +88,31 @@ impl AffinitySelector {
         self.pins.len()
     }
 
+    /// Pins `session` to `pool`, counting what became of its pin.
     fn pin(&self, session: &str, pool: &PoolId) {
         let used = Instant::now();
-        match self.pins.get_mut(session) {
+        let outcome = match self.pins.get_mut(session) {
             Some(mut pin) => {
+                let outcome = if used.duration_since(pin.used) > self.idle {
+                    NEW
+                } else if pin.pool == *pool {
+                    STAYED
+                } else {
+                    MOVED
+                };
                 if pin.pool != *pool {
                     pin.pool = pool.clone();
                 }
                 pin.used = used;
+                outcome
             }
             None => {
                 let pool = pool.clone();
                 self.pins.insert(session.to_owned(), Pin { pool, used });
+                NEW
             }
-        }
+        };
+        self.selections[outcome].fetch_add(1, Ordering::Relaxed);
     }
 
     /// Drops expired pins. It visits every pin, so run it off the request
@@ -106,8 +139,11 @@ impl PoolSelector for AffinitySelector {
                 .find(|candidate| candidate.pool.id == pin.pool)
         });
         let choice = headroom(&placed, pinned.or(placed.first()), self.headroom_factor)?;
-        if let Some(session) = request.session {
-            self.pin(session, &choice.pool.id);
+        match request.session {
+            Some(session) => self.pin(session, &choice.pool.id),
+            None => {
+                self.selections[NO_SESSION].fetch_add(1, Ordering::Relaxed);
+            }
         }
         target(&self.frontends, choice.pool)
     }
@@ -296,6 +332,20 @@ mod tests {
         // against 0.6 is under twice, so no flip back.
         set_occupancy(&pools, &signals, [0.4, 0.6, 0.6, 0.6]);
         assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+    }
+
+    #[test]
+    fn counts_what_became_of_each_sessions_pin() {
+        let (pools, signals) = fleet();
+        let selector = selector(&signals, Duration::from_secs(60));
+        set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
+        pick(&selector, &pools, Some("s"));
+        pick(&selector, &pools, Some("s"));
+        set_occupancy(&pools, &signals, [0.8, 0.1, 0.1, 0.1]);
+        pick(&selector, &pools, Some("s"));
+        pick(&selector, &pools, None);
+        let selections = [("stayed", 1), ("moved", 1), ("new", 1), ("no_session", 1)];
+        assert_eq!(selector.selections(), selections);
     }
 
     #[test]
