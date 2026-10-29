@@ -76,11 +76,27 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
 ## System and metrics
 
+<ParamField path="DYN_SYSTEM_HOST" type="string" default="0.0.0.0">
+  Bind address for the component system server.
+</ParamField>
+
 <ParamField path="DYN_SYSTEM_PORT" type="integer" default="-1 (disabled)">
-  Port for the backend component's system-status server, which serves `/metrics` and the health endpoints. Disabled by default; local examples use `8081`. Must be set explicitly for backend workers and the standalone router to expose metrics.
+  Port for the component system server. In addition to `/metrics` and the health endpoints, this server can expose `/metadata`, capability-dependent `/engine/*` management routes, and LoRA management routes. Disabled by default; local examples use `8081`. Must be set explicitly for backend workers and the standalone router to expose metrics.
 
   **Operator preset:** `9090` on worker, prefill, decode, and planner pods.
 </ParamField>
+
+<Warning>
+  The system server uses plaintext HTTP and does not authenticate or authorize callers. Keep it private even when health and metrics endpoints must be scraped. Restrict the port with NetworkPolicy or place it behind an authenticated TLS or service-mesh proxy. Treat `/engine/*` and LoRA routes as privileged control surfaces.
+</Warning>
+
+Loopback binding is suitable only when all consumers are local. Operator-generated
+startup, liveness, and readiness probes use HTTP on the Pod address, and other
+components can fetch advertised model metadata from the system server. Setting
+`DYN_SYSTEM_HOST=127.0.0.1` without adapting those consumers breaks that access.
+For Kubernetes deployments, retain the required Pod-address reachability and
+restrict access to trusted consumers. If a proxy fronts the server, preserve
+probe, metrics, and metadata access while restricting management routes.
 
 <ParamField path="DYN_HTTP_PORT" type="integer" default="8000">
   Frontend HTTP port, where `dynamo_frontend_*` metrics are served at `/metrics`. Also configurable via the `--http-port` flag.
@@ -448,6 +464,7 @@ See [Request Trace Reference](request-traces.mdx) for compatibility aliases, sin
 
 ## Related
 
+- [Secure Deployment Guidelines](../../developer-guide/security/secure-deployment-guidelines.md) — Deployment trust model and checklist.
 - [Metrics Catalog](metrics-catalog.mdx) — the `dynamo_*` metrics these variables expose.
 - [Metric Labels](metric-labels.mdx) — the dimensions attached to those metrics.
 - [Operator Metrics](operator-metrics.mdx) — Kubernetes-only metrics enablement knobs.

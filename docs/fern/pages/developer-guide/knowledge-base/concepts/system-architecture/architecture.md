@@ -62,6 +62,24 @@ Workers register endpoints when they start. Clients watch the selected discovery
 
 The runtime also supports memory and file-backed discovery for development. In etcd mode, leases remove stale endpoints after a process stops sending keep-alive messages.
 
+#### Discovery Security
+
+On Kubernetes, use the Dynamo Operator's default Kubernetes discovery and grant
+each workload ServiceAccount only the namespace-scoped permissions it needs for
+`DynamoWorkerMetadata` resources and `EndpointSlice` objects. etcd discovery is
+deprecated for Kubernetes deployments.
+
+For supported local, bare-metal, or legacy deployments that use etcd, do not run
+etcd anonymously on a shared network. Dynamo supports username and password
+authentication through `ETCD_AUTH_USERNAME` and `ETCD_AUTH_PASSWORD`, or mutual
+TLS through `ETCD_AUTH_CA`, `ETCD_AUTH_CLIENT_CERT`, and `ETCD_AUTH_CLIENT_KEY`.
+The three TLS variables contain PEM data, not file paths. When both username
+and password are set, that authentication branch takes precedence and the
+runtime does not apply the TLS variables. Do not expect these settings to combine
+password authentication with a client certificate.
+Configure the etcd server to require the selected method, encrypt connections,
+and authorize clients only for the Dynamo key prefixes they need.
+
 ### Request Plane
 
 The request plane carries RPC traffic between Dynamo components. `DYN_REQUEST_PLANE` selects the transport:
@@ -76,11 +94,71 @@ When the runtime reads this setting from its environment, an absent value select
 
 `DYN_REQUEST_PLANE_CODEC` selects `msgpack` or `json`. The destination endpoint advertises its codec, so one client can communicate with endpoints that use different codecs.
 
+#### Request-Plane Security
+
+TCP request-plane and response-stream connections are plaintext by default. Keep
+their listeners on the trusted network and configure TLS on every participating
+component. Use mTLS when components must authenticate clients as well as servers.
+TLS clients must validate the peer certificate against a trust root constrained
+to the intended servers and verify the expected server identity. mTLS servers
+must likewise use a client trust root constrained to the intended callers.
+
+For environment variables, certificate validation, and rotation behavior, see
+the [TLS reference](../../../../reference/components/tls-configuration.mdx). For
+platform-wide injection, see [Operator TLS](../../../../kubernetes/installation/tls.md).
+
+When the request plane uses NATS, configure a NATS authentication method, TLS or
+mTLS, and server-side subject permissions. TLS on the request plane does not
+protect the separate NIXL/RDMA data-transfer fabric used by disaggregated
+serving. Keep that fabric on the trusted network and restrict it to participating
+workers.
+
+The response transport is selected independently with `DYN_RESPONSE_PLANE`
+(`tcp` by default, or `quic`). QUIC encrypts responses using a generated
+self-signed server certificate. The worker pins the certificate fingerprint
+received in the request's response-connection metadata; it does not use the TCP
+CA settings or require a client certificate. Protect the request transport and
+keep the response listener internal. See [QUIC Response Security](../../../../reference/components/tls-configuration.mdx#quic-response-security)
+for the separate trust boundary.
+
 ### Event Plane
 
 The event plane carries KV cache updates, worker telemetry, and other asynchronous signals. `DYN_EVENT_PLANE` selects `zmq` or `nats`. ZMQ is the default and discovers publishers through the discovery plane. NATS uses subjects scoped by namespace and component.
 
 The request and event planes are independent. For example, a deployment can use TCP for requests and ZMQ for KV events. To route without published KV events, start the frontend with `--no-router-kv-events`.
+
+#### Event-Plane Security
+
+Dynamo's ZMQ transports do not add authentication or encryption. Keep every ZMQ
+publisher, subscriber, broker, and replay endpoint on the trusted network. Bind
+them only to cluster-internal addresses and restrict access with NetworkPolicy or
+equivalent controls.
+
+For NATS, configure one of the client authentication methods that Dynamo checks
+in the following order, and configure the corresponding identity and subject
+permissions on the NATS server:
+
+1. `NATS_AUTH_USERNAME` with `NATS_AUTH_PASSWORD`
+2. `NATS_AUTH_TOKEN`
+3. `NATS_AUTH_NKEY`
+4. `NATS_AUTH_CREDENTIALS_FILE`
+
+The first configured method wins; username/password is selected only when both
+variables are present. If none is selected, the runtime sends username `user`
+and password `user`. Replace these shared defaults with deployment-specific
+credentials and restrict their subject permissions on the server.
+
+Use a `tls://` endpoint and configure TLS or mTLS as described in the
+[NATS TLS reference](../../../../reference/components/tls-configuration.mdx#nats-tls).
+
+Treat KV events as sensitive request-derived data. Raw engine-side stored-block
+events can contain token IDs and cache or LoRA context; token IDs can expose
+block-aligned request text when decoded with the corresponding tokenizer.
+Dynamo's normalized event-plane payloads instead carry deterministic
+per-token-block hashes, which can reveal equality or shared-prefix relationships
+and support offline dictionary attacks against predictable token blocks. Neither
+representation necessarily exposes the complete prompt. See
+[KV event security considerations](../../../advanced-customizations/writing-custom-backends/publish-kv-events.md#security-considerations).
 
 ### Control Connections
 

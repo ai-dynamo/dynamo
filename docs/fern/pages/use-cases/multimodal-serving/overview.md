@@ -50,6 +50,33 @@ Reference implementations for deploying multimodal models for each backend:
 
 To use an author-provided custom vision tower or projector, see [Custom Vision Encoders](custom-vision-encoders.md).
 
+## Media Input Security
+
+Client-supplied media references cause network requests or local file reads from
+inside the serving deployment. Restrict egress from every process that fetches
+media, including the Frontend when frontend decoding is enabled. Keep cloud
+metadata endpoints and internal management services outside that egress boundary.
+
+Dynamo's media fetchers validate destinations and redirect hops. These controls
+apply to paths that fetch through Dynamo; a backend that receives a URL directly
+uses its own fetching policy. For example, standard SGLang image URL loading is
+engine-owned, as described in [Backend Support](#backend-support). Review both
+Dynamo and engine settings for the deployed path.
+
+| Setting | Security effect |
+| --- | --- |
+| `DYN_MM_ALLOW_INTERNAL` | Leave unset or `0` for untrusted media inputs. Setting `1` permits private destinations in Dynamo's Rust and Python fetch paths and permits plaintext HTTP in the Python URL policy. Use it only with an explicit destination policy enforced by the deployment. |
+| `DYN_MM_TRUST_EGRESS_PROXY` | Set `1` only when the configured egress proxy enforces the destination policy. The proxy resolves the origin outside Dynamo's connect-time address check. Strict Python media fetches through an ambient proxy are refused without this opt-in; direct connections remain subject to address checks. |
+| `DYN_MM_LOCAL_PATH` | In Python media-reference paths, leave unset to reject local files, or set a dedicated input directory. Resolved paths, including symlink targets, must remain inside that directory. Do not grant access to model credentials or other sensitive mounts. |
+| `DYN_MM_MAX_DATA_URL_MB` | Bounds inline data URLs in Dynamo's Rust and Python media paths. Keep the bound appropriate for the accepted input size. |
+| `DYN_MM_MAX_FILE_SIZE_MB` | Bounds downloads in Dynamo paths that use the shared media-download limit, including image loading and diffusion input-reference materialization. Engine-owned paths may have separate limits. |
+
+Keep gateway request-size limits and backend decode limits in place as well:
+compressed input size alone does not bound decoded image, video, or audio memory.
+Use authenticated, deployment-controlled cache services and treat cached media
+as sensitive request data. See [Secure Deployment Guidelines](../../developer-guide/security/secure-deployment-guidelines.md)
+for the trust model and production checklist.
+
 ## Shared Image Download Cache
 
 The optional shared cache stores encoded bytes from HTTP and HTTPS image URLs

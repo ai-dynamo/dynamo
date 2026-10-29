@@ -212,7 +212,7 @@ KV hit rate and speculative decode accept length are runtime engine/router signa
 |-------|------|---------|-------------|
 | `report_interval_hours` | float or `null` | `24.0` | Generate an HTML diagnostics report every N hours (simulated time). Set to `null` to disable periodic report generation. |
 | `report_output_dir` | string | `./planner_reports` | Directory for HTML diagnostics reports. |
-| `live_dashboard_port` | int | `8080` | Port for the live diagnostics dashboard HTTP server. Set to `0` to disable. When enabled, visit `http://host:port/` to view a real-time Plotly report of accumulated snapshots. |
+| `live_dashboard_port` | int | `8080` | Port for the unauthenticated live diagnostics dashboard. The server binds to `0.0.0.0`; set to `0` to disable. When enabled, visit `http://host:port/` to view a real-time Plotly report of accumulated snapshots. |
 | `control_api_port` | int | `9086` | Port for the loopback-only runtime endpoint and GPU budget API. Set to `0` to disable. |
 
 ### Runtime Minimum Endpoint API
@@ -394,6 +394,45 @@ candidates, scoring, and decision timing, see
 [Planner Design](planner-design.md#retune-experimental-simulation-only). For every field and the
 search-domain syntax, see the
 [`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only).
+
+## Security
+
+The Planner exposes several privileged diagnostic and extension surfaces:
+
+- The live dashboard binds to `0.0.0.0:<live_dashboard_port>` and does not
+  authenticate callers. Its default port is `8080`. Set `live_dashboard_port: 0`
+  when unused; otherwise keep it private and restrict it to trusted operators.
+- The optional Planner Prometheus listener also has no authentication. Scope it
+  to the monitoring system with NetworkPolicy. The runtime minimum-endpoint API
+  has no authentication but binds only to loopback and is not exposed by a
+  Kubernetes Service; use port-forwarding only from a trusted operator session.
+- Setting `enable_runtime_reconfiguration: true` exposes the separate
+  `GET/PATCH /engine/planner/config` and
+  `GET /engine/planner/operations/{request_id}` APIs on `DYN_SYSTEM_PORT`.
+  This is disabled by default. Unlike the loopback-only `control_api_port` API,
+  these routes use the system server's bind address and have no application
+  authentication. Restrict the system listener to trusted controllers and
+  operators before enabling runtime reconfiguration. Setting `control_api_port: 0`
+  does not disable these routes. See the
+  [system-port reconfiguration API](../../../../reference/components/planner-configuration.mdx#system-port-reconfiguration-api).
+- The plugin-registration gateway is disabled by default and defaults to an
+  in-Pod Unix-domain socket. Prefer that boundary for same-Pod plugins. A TCP
+  gateway carries plugin registration tokens and must not be exposed in plaintext
+  across an untrusted network.
+- The running Planner preserves a legacy compatibility path: if
+  `plugin_registration.auth.trusted_sources` is empty, registration is
+  unauthenticated and a warning is logged. Production deployments that enable
+  external plugins must select `static_secret` explicitly, source the secret from
+  a Kubernetes Secret, and protect it in transit. `allow_unauthenticated` is for
+  development only.
+- Cross-Pod plugin callbacks currently support plaintext gRPC only after the
+  deployer explicitly enables `allow_insecure_grpc`. Keep such traffic inside an
+  authenticated service mesh or a tightly restricted trusted network.
+
+See [Planner Configuration](../../../../reference/components/planner-configuration.mdx#scheduling-and-plugin-pipeline)
+for the exact gateway, authentication, and transport fields, and
+[Secure Deployment Guidelines](../../../security/secure-deployment-guidelines.md)
+for the deployment checklist.
 
 ## Integration with Profiler
 

@@ -50,7 +50,15 @@ is empty; consumers must re-register workers and replay active requests if they 
 restored accounting.
 
 The service binds to `0.0.0.0` and does not provide authentication. Run it on a trusted
-internal network or place it behind an appropriate network policy.
+internal network or place it behind an authenticating proxy and an appropriate
+network policy. See the
+[Secure Deployment Guidelines](../../../security/secure-deployment-guidelines.md)
+for the deployment trust model.
+
+`routing_group` is caller-controlled state partitioning, not caller
+authentication. Derive it only from trusted identity metadata, and isolate
+mutually untrusted tenants into separate service instances. `tenant_id` is not
+supported.
 
 ## Replica Synchronization
 
