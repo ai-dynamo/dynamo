@@ -51,24 +51,29 @@ for migration guidance. This field will be removed in a future API version.
 
 <ParamField path="enabled" type="boolean">
 Deprecated: This field is ignored.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="minReplicas" type="integer">
 Deprecated: This field is ignored.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="maxReplicas" type="integer">
 Deprecated: This field is ignored.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="behavior" type="HorizontalPodAutoscalerBehavior">
 Deprecated: This field is ignored.
 See [HorizontalPodAutoscalerBehavior](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#horizontalpodautoscalerbehavior-v2-autoscaling).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="metrics" type="MetricSpec array">
 Deprecated: This field is ignored.
 See [MetricSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#metricspec-v2-autoscaling).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -183,6 +188,7 @@ Name of the ConfigMap containing the desired data.
 
 <ParamField path="key" type="string" default="disagg.yaml">
 Key in the ConfigMap to select. If not specified, defaults to "disagg.yaml".
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -263,20 +269,23 @@ This status is populated when autoApply is enabled and a DGD is created.
 
 <ParamField path="name" type="string">
 Name is the name of the created DynamoGraphDeployment.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="namespace" type="string">
 Namespace is the namespace of the created DynamoGraphDeployment.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="state" type="DGDState" default="initializing">
+<ParamField path="state" type="DGDState" default="initializing" required={true}>
 State is the current state of the DynamoGraphDeployment. This value is mirrored from the DGD's status.state field.
 See [DGDState](#dgdstate).
-**Validation:** Enum: [initializing pending successful failed]
+**Validation:** Enum: [initializing pending successful failed]  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="created" type="boolean">
 Created indicates whether the DGD has been successfully created. Used to prevent recreation if the DGD is manually deleted by users.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -346,11 +355,13 @@ DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="spec" type="DynamoComponentDeploymentSpec">
 Spec defines the desired state for this Dynamo component deployment.
 See [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -367,22 +378,27 @@ See [ProviderOverride](#provideroverride).
 
 <ParamField path="annotations" type="object (keys:string, values:string)">
 Annotations to add to generated Kubernetes resources for this component (such as Pod, Service, and Ingress when applicable).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="labels" type="object (keys:string, values:string)">
 Labels to add to generated Kubernetes resources for this component.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="serviceName" type="string">
 The name of the component
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="componentType" type="string">
 ComponentType indicates the role of this component (for example, "main"). The DGD-only "lpx" type is experimental, requires the operator's lpx.enabled setting, and may change incompatibly.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="subComponentType" type="string">
 SubComponentType indicates the sub-role of this component (for example, "prefill").
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
@@ -392,35 +408,42 @@ RuntimeVersionOverride declares the Dynamo runtime version in this component's r
 
 <ParamField path="globalDynamoNamespace" type="boolean">
 GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="resources" type="Resources">
 Resources requested and limits for this component, including CPU, memory, GPUs/devices, and any runtime-specific resources.
 See [Resources](#resources).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="autoscaling" type="Autoscaling">
 Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md for migration guidance. This field will be removed in a future API version.
 See [Autoscaling](#autoscaling).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="envs" type="EnvVar array">
 Envs defines additional environment variables to inject into the component containers.
 See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="envFromSecret" type="string">
 EnvFromSecret references a Secret whose key/value pairs will be exposed as environment variables in the component containers.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="volumeMounts" type="VolumeMount array">
 VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component.
 See [VolumeMount](#volumemount).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="ingress" type="IngressSpec">
 Ingress config to expose the component outside the cluster (or through a service mesh).
 See [IngressSpec](#ingressspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="modelRef" type="ModelReference">
@@ -432,6 +455,7 @@ See [ModelReference](#modelreference).
 <ParamField path="sharedMemory" type="SharedMemorySpec">
 SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size).
 See [SharedMemorySpec](#sharedmemoryspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="extraPodMetadata" type="ExtraPodMetadata">
@@ -449,16 +473,18 @@ See [ExtraPodSpec](#extrapodspec).
 <ParamField path="livenessProbe" type="Probe">
 LivenessProbe to detect and restart unhealthy containers.
 See [Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="readinessProbe" type="Probe">
 ReadinessProbe to signal when the container is ready to receive traffic.
 See [Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="replicas" type="integer">
 Replicas is the desired number of Pods for this component. When scalingAdapter is enabled, this field is managed by the DynamoGraphDeploymentScalingAdapter and should not be modified directly.
-**Validation:** Minimum: 0
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="minAvailable" type="integer">
@@ -469,6 +495,7 @@ MinAvailable maps to Grove PodClique minAvailable for single-node and Grove PodC
 <ParamField path="multinode" type="MultinodeSpec">
 Multinode configures worker, prefill, or decode components that span multiple Pods.
 See [MultinodeSpec](#multinodespec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="roles" type="ComponentRoleSpec array">
@@ -535,27 +562,32 @@ DynamoComponentDeploymentSpec defines the desired state of DynamoComponentDeploy
 
 <ParamField path="backendFramework" type="string">
 BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm")
-**Validation:** Enum: [sglang vllm trtllm]
+**Validation:** Enum: [sglang vllm trtllm]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="annotations" type="object (keys:string, values:string)">
 Annotations to add to generated Kubernetes resources for this component (such as Pod, Service, and Ingress when applicable).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="labels" type="object (keys:string, values:string)">
 Labels to add to generated Kubernetes resources for this component.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="serviceName" type="string">
 The name of the component
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="componentType" type="string">
 ComponentType indicates the role of this component (for example, "main"). The DGD-only "lpx" type is experimental, requires the operator's lpx.enabled setting, and may change incompatibly.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="subComponentType" type="string">
 SubComponentType indicates the sub-role of this component (for example, "prefill").
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
@@ -565,35 +597,42 @@ RuntimeVersionOverride declares the Dynamo runtime version in this component's r
 
 <ParamField path="globalDynamoNamespace" type="boolean">
 GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="resources" type="Resources">
 Resources requested and limits for this component, including CPU, memory, GPUs/devices, and any runtime-specific resources.
 See [Resources](#resources).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="autoscaling" type="Autoscaling">
 Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md for migration guidance. This field will be removed in a future API version.
 See [Autoscaling](#autoscaling).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="envs" type="EnvVar array">
 Envs defines additional environment variables to inject into the component containers.
 See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="envFromSecret" type="string">
 EnvFromSecret references a Secret whose key/value pairs will be exposed as environment variables in the component containers.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="volumeMounts" type="VolumeMount array">
 VolumeMounts references PVCs defined at the top level for volumes to be mounted by the component.
 See [VolumeMount](#volumemount).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="ingress" type="IngressSpec">
 Ingress config to expose the component outside the cluster (or through a service mesh).
 See [IngressSpec](#ingressspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="modelRef" type="ModelReference">
@@ -605,6 +644,7 @@ See [ModelReference](#modelreference).
 <ParamField path="sharedMemory" type="SharedMemorySpec">
 SharedMemory controls the tmpfs mounted at /dev/shm (enable/disable and size).
 See [SharedMemorySpec](#sharedmemoryspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="extraPodMetadata" type="ExtraPodMetadata">
@@ -622,16 +662,18 @@ See [ExtraPodSpec](#extrapodspec).
 <ParamField path="livenessProbe" type="Probe">
 LivenessProbe to detect and restart unhealthy containers.
 See [Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="readinessProbe" type="Probe">
 ReadinessProbe to signal when the container is ready to receive traffic.
 See [Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="replicas" type="integer">
 Replicas is the desired number of Pods for this component. When scalingAdapter is enabled, this field is managed by the DynamoGraphDeploymentScalingAdapter and should not be modified directly.
-**Validation:** Minimum: 0
+**Validation:** Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="minAvailable" type="integer">
@@ -642,6 +684,7 @@ MinAvailable maps to Grove PodClique minAvailable for single-node and Grove PodC
 <ParamField path="multinode" type="MultinodeSpec">
 Multinode configures worker, prefill, or decode components that span multiple Pods.
 See [MultinodeSpec](#multinodespec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="roles" type="object array">
@@ -709,16 +752,19 @@ DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentSpec">
 Spec defines the desired state for this graph deployment.
 See [DynamoGraphDeploymentSpec](#dynamographdeploymentspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentStatus">
 Status reflects the current observed state of this graph deployment.
 See [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -772,16 +818,19 @@ v1alpha1 will be removed in a future release.
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentRequestSpec">
 Spec defines the desired state for this deployment request.
 See [DynamoGraphDeploymentRequestSpec](#dynamographdeploymentrequestspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentRequestStatus">
 Status reflects the current observed state of this deployment request.
 See [DynamoGraphDeploymentRequestStatus](#dynamographdeploymentrequeststatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -804,6 +853,7 @@ Backend specifies the inference backend for profiling. The controller automatica
 
 <ParamField path="useMocker" type="boolean">
 UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of a real backend deployment. When true, the deployment uses simulated engines that don't require GPUs, using the profiling data to simulate realistic timing behavior. Mocker is available in all backend images and useful for large-scale experiments. Profiling still runs against the real backend (specified above) to collect performance data.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="profilingConfig" type="ProfilingConfigSpec">
@@ -824,6 +874,7 @@ EnableGPUDiscovery controls whether the operator attempts to discover GPU hardwa
 
 <ParamField path="autoApply" type="boolean">
 AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, only the spec is generated and stored in status. Users can then manually create a DGD using the generated spec.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="deploymentOverrides" type="DeploymentOverridesSpec">
@@ -853,11 +904,13 @@ Backend is extracted from profilingConfig.config.engine.backend for display purp
 
 <ParamField path="observedGeneration" type="integer">
 ObservedGeneration reflects the generation of the most recently observed spec. Used to detect spec changes and enforce immutability after profiling starts.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="conditions" type="Condition array">
 Conditions contains the latest observed conditions of the deployment request. Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady. Conditions are merged by type on patch updates.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="profilingResults" type="string">
@@ -900,6 +953,7 @@ Backend specifies the inference backend for profiling. The controller automatica
 
 <ParamField path="useMocker" type="boolean">
 UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of a real backend deployment. When true, the deployment uses simulated engines that don't require GPUs, using the profiling data to simulate realistic timing behavior. Mocker is available in all backend images and useful for large-scale experiments. Profiling still runs against the real backend (specified above) to collect performance data.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="profilingConfig" type="ProfilingConfigSpec">
@@ -920,6 +974,7 @@ EnableGPUDiscovery controls whether the operator attempts to discover GPU hardwa
 
 <ParamField path="autoApply" type="boolean">
 AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, only the spec is generated and stored in status. Users can then manually create a DGD using the generated spec.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="deploymentOverrides" type="DeploymentOverridesSpec">
@@ -956,11 +1011,13 @@ Backend is extracted from profilingConfig.config.engine.backend for display purp
 
 <ParamField path="observedGeneration" type="integer">
 ObservedGeneration reflects the generation of the most recently observed spec. Used to detect spec changes and enforce immutability after profiling starts.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="conditions" type="Condition array">
 Conditions contains the latest observed conditions of the deployment request. Standard condition types include: Validation, Profiling, SpecGenerated, DeploymentReady. Conditions are merged by type on patch updates.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="profilingResults" type="string">
@@ -1010,14 +1067,17 @@ This prevents conflicts when multiple autoscaling mechanisms are in play.
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentScalingAdapterSpec">
 See [DynamoGraphDeploymentScalingAdapterSpec](#dynamographdeploymentscalingadapterspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentScalingAdapterStatus">
 See [DynamoGraphDeploymentScalingAdapterStatus](#dynamographdeploymentscalingadapterstatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1130,7 +1190,7 @@ See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28
 
 <ParamField path="backendFramework" type="string">
 BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm").
-**Validation:** Enum: [sglang vllm trtllm]
+**Validation:** Enum: [sglang vllm trtllm]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="restart" type="Restart">
@@ -1164,15 +1224,16 @@ ObservedGeneration is the most recent generation observed by the controller.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="state" type="DGDState" default="initializing">
+<ParamField path="state" type="DGDState" default="initializing" required={true}>
 State is a high-level textual status of the graph deployment lifecycle.
 See [DGDState](#dgdstate).
-**Validation:** Enum: [initializing pending successful failed]
+**Validation:** Enum: [initializing pending successful failed]  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="conditions" type="Condition array">
 Conditions contains the latest observed conditions of the graph deployment. The slice is merged by type on patch updates.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="services" type="object (keys:string, values:ServiceReplicaStatus)">
@@ -1223,14 +1284,17 @@ DynamoModel is the Schema for the dynamo models API
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="spec" type="DynamoModelSpec">
 See [DynamoModelSpec](#dynamomodelspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="status" type="DynamoModelStatus">
 See [DynamoModelStatus](#dynamomodelstatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1276,8 +1340,9 @@ See [EndpointInfo](#endpointinfo).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="readyEndpoints" type="integer">
+<ParamField path="readyEndpoints" type="integer" required={true}>
 ReadyEndpoints is the count of endpoints that are ready
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="loraFallbackCoveredEndpoints" type="integer">
@@ -1285,8 +1350,9 @@ LoRAFallbackCoveredEndpoints is the count of legacy prefill endpoints covered by
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="totalEndpoints" type="integer">
+<ParamField path="totalEndpoints" type="integer" required={true}>
 TotalEndpoints is the total count of endpoints
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="conditions" type="Condition array">
@@ -1325,8 +1391,9 @@ EndpointInfo represents a single endpoint (pod) serving the model
 **Kind:** `type`
 **Appears in:** [DynamoModelStatus](#dynamomodelstatus)
 
-<ParamField path="address" type="string">
+<ParamField path="address" type="string" required={true}>
 Address is the full address of the endpoint (e.g., "http://10.0.1.5:9090")
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="podName" type="string">
@@ -1334,8 +1401,9 @@ PodName is the name of the pod serving this endpoint
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="ready" type="boolean">
+<ParamField path="ready" type="boolean" required={true}>
 Ready indicates whether this endpoint is ready to serve traffic. For LoRA models: true only if this endpoint's lifecycle request succeeded. For base models: always false (no probing performed).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="loraFallbackCovered" type="boolean">
@@ -1350,9 +1418,11 @@ LoRAFallbackCovered indicates a legacy prefill endpoint that cannot manage LoRAs
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 <ParamField path="annotations" type="object (keys:string, values:string)">
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="labels" type="object (keys:string, values:string)">
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1363,6 +1433,7 @@ LoRAFallbackCovered indicates a legacy prefill endpoint that cannot manage LoRAs
 
 <ParamField path="mainContainer" type="Container">
 See [Container](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1377,8 +1448,9 @@ multiple engine pods per rank that share GPUs via DRA resource claims.
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
-<ParamField path="enabled" type="boolean">
+<ParamField path="enabled" type="boolean" required={true}>
 Enabled activates failover mode.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="mode" type="GPUMemoryServiceMode" default="intraPod">
@@ -1431,9 +1503,9 @@ GMSClientPodSpec declares an additional GMS client pod for inter-pod GMS.
 **Kind:** `type`
 **Appears in:** [GPUMemoryServiceSpec](#gpumemoryservicespec)
 
-<ParamField path="name" type="string">
+<ParamField path="name" type="string" required={true}>
 Name identifies this client pod.
-**Validation:** MaxLength: 63  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+**Validation:** MaxLength: 63  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec">
@@ -1464,8 +1536,9 @@ GPUMemoryServiceSpec configures the GPU Memory Service (GMS) for a worker compon
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
-<ParamField path="enabled" type="boolean">
+<ParamField path="enabled" type="boolean" required={true}>
 Enabled activates GMS wiring. GPU resources on client containers are replaced with a DRA ResourceClaim for shared GPU access.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="mode" type="GPUMemoryServiceMode" default="intraPod">
@@ -1498,43 +1571,53 @@ See [GMSClientPodSpec](#gmsclientpodspec).
 
 <ParamField path="enabled" type="boolean">
 Enabled exposes the component through an ingress or virtual service when true.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="host" type="string">
 Host is the base host name to route external traffic to this component.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="useVirtualService" type="boolean">
 UseVirtualService indicates whether to configure a service-mesh VirtualService instead of a standard Ingress.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="virtualServiceGateway" type="string">
 VirtualServiceGateway optionally specifies the gateway name to attach the VirtualService to.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="hostPrefix" type="string">
 HostPrefix is an optional prefix added before the host.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="annotations" type="object (keys:string, values:string)">
 Annotations to set on the generated Ingress/VirtualService resources.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="labels" type="object (keys:string, values:string)">
 Labels to set on the generated Ingress/VirtualService resources.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="tls" type="IngressTLSSpec">
 TLS holds the TLS configuration used by the Ingress/VirtualService.
 See [IngressTLSSpec](#ingresstlsspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="hostSuffix" type="string">
 HostSuffix is an optional suffix appended after the host.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="ingressControllerClassName" type="string">
 IngressControllerClassName selects the ingress controller class (e.g., "nginx").
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1545,6 +1628,7 @@ IngressControllerClassName selects the ingress controller class (e.g., "nginx").
 
 <ParamField path="secretName" type="string">
 SecretName is the name of a Kubernetes Secret containing the TLS certificate and key.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1583,10 +1667,10 @@ LabelKey is a Kubernetes node label key (e.g. "topology.kubernetes.io/zone") who
 **Validation:** MaxLength: 317  MinLength: 1  Pattern: `^(([a-z0-9]([-a-z0-9]\{0,61\}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]\{0,61\}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]\{0,61\}[A-Za-z0-9])?)$`  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="domain" type="TopologyDomain">
+<ParamField path="domain" type="TopologyDomain" required={true}>
 Domain is the logical name for the topology level to enforce (e.g. "zone", "rack"). The router uses this to match workers that share the same value for the label identified by `labelKey`.
 See [TopologyDomain](#topologydomain).
-**Validation:** Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+**Validation:** Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="enforcement" type="KvTransferEnforcement" default="required">
@@ -1639,7 +1723,7 @@ URI is the model source URI Supported formats: - S3: s3://bucket/path/to/model -
 
 <ParamField path="nodeCount" type="integer" default="2">
 Indicates the number of nodes to deploy for multinode components. Total number of GPUs is NumberOfNodes * GPU limit. Must be greater than 1 and is immutable after creation.
-**Validation:** Minimum: 2
+**Validation:** Minimum: 2  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1650,6 +1734,7 @@ Indicates the number of nodes to deploy for multinode components. Total number o
 
 <ParamField path="create" type="boolean">
 Create indicates to create a new PVC
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="name" type="string" required={true}>
@@ -1659,16 +1744,19 @@ Name is the name of the PVC
 
 <ParamField path="storageClass" type="string">
 StorageClass to be used for PVC creation. Required when create is true.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="size" type="Quantity">
 Size of the volume in Gi, used during PVC creation. Required when create is true.
 See [Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="volumeAccessMode" type="PersistentVolumeAccessMode">
 VolumeAccessMode is the volume access mode of the PVC. Required when create is true.
 See [PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1724,7 +1812,7 @@ See dynamo/profiler/utils/profiler_argparse.py for the complete schema.
 <ParamField path="config" type="JSON">
 Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler. The profiler will validate the configuration and report any errors.
 See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
-**Validation:** Optional: \&#123;\&#125;  Type: object
+**Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="configMapRef" type="ConfigMapKeySelector">
@@ -1791,7 +1879,7 @@ target identifies the provider resource kind or embedded provider schema. It may
 <ParamField path="value" type="JSON" required={true}>
 value is a sparse fragment of the selected provider schema. For Grove, PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded targets accept `topologyConstraint`. Component contexts also accept `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the deprecated component field preserves its value and leaves the update strategy unchanged. Component contexts also accept rollingUpdate.maxUnavailable.
 See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
-**Validation:** Required: \&#123;\&#125;  Type: object
+**Validation:** Type: object  Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1802,22 +1890,27 @@ See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#
 
 <ParamField path="cpu" type="string">
 CPU specifies the CPU resource request/limit (e.g., "1000m", "2")
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="memory" type="string">
 Memory specifies the memory resource request/limit (e.g., "4Gi", "8Gi")
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="gpu" type="string">
 GPU indicates the number of GPUs to request. Total number of GPUs is NumberOfNodes * GPU in case of multinode deployment.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="gpuType" type="string">
 GPUType can specify a custom GPU type, e.g. "gpu.intel.com/xe" By default if not specified, the GPU type is "nvidia.com/gpu"
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="custom" type="object (keys:string, values:string)">
 Custom specifies additional custom resource requests/limits
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1832,16 +1925,19 @@ GPUs/devices, and any runtime-specific resources.
 <ParamField path="requests" type="ResourceItem">
 Requests specifies the minimum resources required by the component
 See [ResourceItem](#resourceitem).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="limits" type="ResourceItem">
 Limits specifies the maximum resources allowed for the component
 See [ResourceItem](#resourceitem).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="claims" type="ResourceClaim array">
 Claims specifies resource claims for dynamic resource allocation
 See [ResourceClaim](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourceclaim-v1-core).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1886,11 +1982,13 @@ RestartStatus contains the status of the restart of the graph deployment.
 
 <ParamField path="observedID" type="string">
 ObservedID is the restart ID that has been observed and is being processed. Matches the Restart.ID field in the spec.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="phase" type="RestartPhase">
 Phase is the phase of the restart.
 See [RestartPhase](#restartphase).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="inProgress" type="string array">
@@ -1907,7 +2005,7 @@ InProgress contains the names of the services that are currently being restarted
 <ParamField path="type" type="RestartStrategyType" default="Sequential">
 Type specifies the restart strategy type.
 See [RestartStrategyType](#restartstrategytype).
-**Validation:** Enum: [Sequential Parallel]
+**Validation:** Enum: [Sequential Parallel]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="order" type="string array">
@@ -2101,14 +2199,15 @@ ServiceReplicaStatus contains replica information for a single service.
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
 
-<ParamField path="componentKind" type="ComponentKind">
+<ParamField path="componentKind" type="ComponentKind" required={true}>
 ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet").
 See [ComponentKind](#componentkind).
-**Validation:** Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet]
+**Validation:** Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet]  Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="componentName" type="string">
+<ParamField path="componentName" type="string" required={true}>
 ComponentName is the name of the primary underlying resource. DEPRECATED: Use ComponentNames instead. This field will be removed in a future release. During rolling updates, this reflects the new (target) component name.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="componentNames" type="string array">
@@ -2146,14 +2245,14 @@ GPUsPerReplica is the unique GPU allocation added when this service scales by on
 **Validation:** Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="replicas" type="integer">
+<ParamField path="replicas" type="integer" required={true}>
 Replicas is the total number of non-terminated replicas. Required for all component kinds.
-**Validation:** Minimum: 0
+**Validation:** Minimum: 0  Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="updatedReplicas" type="integer">
+<ParamField path="updatedReplicas" type="integer" required={true}>
 UpdatedReplicas is the number of replicas at the current/desired revision. Required for all component kinds.
-**Validation:** Minimum: 0
+**Validation:** Minimum: 0  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="readyReplicas" type="integer">
@@ -2179,10 +2278,12 @@ ScheduledReplicas is the number of replicas the backend scheduler has scheduled,
 
 <ParamField path="disabled" type="boolean">
 Disabled, when true, opts out of mounting a shared-memory medium for the component. When false (or unset), shared memory is enabled and Size is required (enforced by the validating webhook). Size is ignored when Disabled is true.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="size" type="Quantity">
 See [Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -2195,9 +2296,9 @@ optional default pack domain that services without their own constraint inherit.
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
 
-<ParamField path="topologyProfile" type="string">
+<ParamField path="topologyProfile" type="string" required={true}>
 TopologyProfile is the name of the ClusterTopology CR that defines the topology hierarchy for this deployment.
-**Validation:** MinLength: 1
+**Validation:** MinLength: 1  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="packDomain" type="TopologyDomain">
@@ -2216,10 +2317,10 @@ only the pack domain is specified here.
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
-<ParamField path="packDomain" type="TopologyDomain">
+<ParamField path="packDomain" type="TopologyDomain" required={true}>
 PackDomain is the topology domain to pack pods within. Must match a domain defined in the referenced ClusterTopology CR.
 See [TopologyDomain](#topologydomain).
-**Validation:** Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+**Validation:** Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`  Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -2253,10 +2354,12 @@ Name references a PVC name defined in the top-level PVCs map
 
 <ParamField path="mountPoint" type="string">
 MountPoint specifies where to mount the volume. If useAsCompilationCache is true and mountPoint is not specified, a backend-specific default will be used.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="useAsCompilationCache" type="boolean" default="false">
 UseAsCompilationCache indicates this volume should be used as a compilation cache. When true, backend-specific environment variables will be set and default mount points may be used.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -2484,10 +2587,10 @@ ComponentReplicaStatus contains replica information for a single component.
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
-<ParamField path="componentKind" type="ComponentKind">
+<ParamField path="componentKind" type="ComponentKind" required={true}>
 componentKind is the underlying resource kind (e.g. `PodClique`, `Deployment`, `LeaderWorkerSet`).
 See [ComponentKind](#v1beta1-componentkind).
-**Validation:** Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet]
+**Validation:** Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet]  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="componentNames" type="string array">
@@ -2525,14 +2628,14 @@ gpusPerReplica is the unique GPU allocation added when this component scales by 
 **Validation:** Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="replicas" type="integer">
+<ParamField path="replicas" type="integer" required={true}>
 replicas is the total number of non-terminated replicas.
-**Validation:** Minimum: 0
+**Validation:** Minimum: 0  Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="updatedReplicas" type="integer">
+<ParamField path="updatedReplicas" type="integer" required={true}>
 updatedReplicas is the number of replicas at the current/desired revision.
-**Validation:** Minimum: 0
+**Validation:** Minimum: 0  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="readyReplicas" type="integer">
@@ -2731,11 +2834,13 @@ operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="spec" type="DynamoComponentDeploymentSpec">
 spec defines the desired state for this Dynamo component deployment.
 See [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -2876,7 +2981,7 @@ DynamoComponentDeploymentSpec defines the desired state of a DynamoComponentDepl
 
 <ParamField path="backendFramework" type="string">
 backendFramework specifies the backend framework.
-**Validation:** Enum: [sglang vllm trtllm]
+**Validation:** Enum: [sglang vllm trtllm]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="name" type="string" required={true}>
@@ -2996,16 +3101,19 @@ operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentSpec">
 spec defines the desired state for this graph deployment.
 See [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentStatus">
 status reflects the current observed state of this graph deployment.
 See [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -3075,16 +3183,19 @@ Lifecycle:
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentRequestSpec">
 Spec defines the desired state for this deployment request.
 See [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentRequestStatus">
 Status reflects the current observed state of this deployment request.
 See [DynamoGraphDeploymentRequestStatus](#v1beta1-dynamographdeploymentrequeststatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -3386,14 +3497,17 @@ version is handled by the operator's conversion webhook
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentScalingAdapterSpec">
 See [DynamoGraphDeploymentScalingAdapterSpec](#v1beta1-dynamographdeploymentscalingadapterspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentScalingAdapterStatus">
 See [DynamoGraphDeploymentScalingAdapterStatus](#v1beta1-dynamographdeploymentscalingadapterstatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -3425,8 +3539,9 @@ DynamoGraphDeploymentScalingAdapter.
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentScalingAdapter](#v1beta1-dynamographdeploymentscalingadapter)
 
-<ParamField path="replicas" type="integer">
+<ParamField path="replicas" type="integer" required={true}>
 replicas is the current number of replicas for the target component. This is synced from the DGD's component replicas and is required for the scale subresource.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="selector" type="string">
@@ -3483,7 +3598,7 @@ See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28
 
 <ParamField path="backendFramework" type="string">
 backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm").
-**Validation:** Enum: [sglang vllm trtllm]
+**Validation:** Enum: [sglang vllm trtllm]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="restart" type="Restart">
@@ -3518,10 +3633,10 @@ observedGeneration is the most recent generation observed by the controller.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="state" type="DGDState" default="initializing">
+<ParamField path="state" type="DGDState" default="initializing" required={true}>
 state is a high-level textual status of the graph deployment lifecycle.
 See [DGDState](#v1beta1-dgdstate).
-**Validation:** Enum: [initializing pending successful failed]
+**Validation:** Enum: [initializing pending successful failed]  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="conditions" type="Condition array">
@@ -3681,9 +3796,9 @@ GMSClientPodSpec declares an additional GMS client pod for inter-pod GMS.
 **Kind:** `type`
 **Appears in:** [GPUMemoryServiceSpec](#v1beta1-gpumemoryservicespec)
 
-<ParamField path="name" type="string">
+<ParamField path="name" type="string" required={true}>
 name identifies this client pod.
-**Validation:** MaxLength: 63  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+**Validation:** MaxLength: 63  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec">
@@ -3878,10 +3993,10 @@ labelKey is a Kubernetes node label key (e.g. "topology.kubernetes.io/zone") who
 **Validation:** MaxLength: 317  MinLength: 1  Pattern: `^(([a-z0-9]([-a-z0-9]\{0,61\}[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]\{0,61\}[a-z0-9])?)*/)?([A-Za-z0-9]([-A-Za-z0-9_.]\{0,61\}[A-Za-z0-9])?)$`  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="domain" type="TopologyDomain">
+<ParamField path="domain" type="TopologyDomain" required={true}>
 domain is the logical name for the topology level to enforce (e.g. "zone", "rack"). The router uses this to match workers that share the same value for the label identified by `labelKey`.
 See [TopologyDomain](#v1beta1-topologydomain).
-**Validation:** Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+**Validation:** Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="enforcement" type="KvTransferEnforcement" default="required">
@@ -3903,9 +4018,9 @@ LPXConfig identifies the component's compiled model and configures scheduling.
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 
-<ParamField path="buildId" type="string">
+<ParamField path="buildId" type="string" required={true}>
 buildId references the immutable model build.
-**Validation:** MinLength: 1
+**Validation:** MinLength: 1  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="scheduling" type="SchedulingSpec">
@@ -4088,10 +4203,10 @@ Deprecated: The profiler no longer generates Pareto configurations.
 **Kind:** `type`
 **Appears in:** [ProfilingResultsStatus](#profilingresultsstatus)
 
-<ParamField path="config" type="RawExtension">
+<ParamField path="config" type="RawExtension" required={true}>
 Config is the full deployment configuration for this Pareto point.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
-**Validation:** Type: object
+**Validation:** Type: object  Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4219,7 +4334,7 @@ target identifies the provider resource kind or embedded provider schema. It may
 <ParamField path="value" type="JSON" required={true}>
 value is a sparse fragment of the selected provider schema. For Grove, PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded targets accept `topologyConstraint`. Component contexts also accept `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the deprecated component field preserves its value and leaves the update strategy unchanged. Component contexts also accept rollingUpdate.maxUnavailable.
 See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
-**Validation:** Required: \&#123;\&#125;  Type: object
+**Validation:** Type: object  Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4268,11 +4383,13 @@ RestartStatus contains the status of a graph-level restart.
 
 <ParamField path="observedID" type="string">
 observedID is the restart ID currently being processed. Matches `Restart.id` in the spec.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="phase" type="RestartPhase">
 phase is the phase of the restart.
 See [RestartPhase](#v1beta1-restartphase).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="inProgress" type="string array">
@@ -4439,9 +4556,9 @@ SpecTopologyConstraint defines deployment-level topology placement requirements.
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
-<ParamField path="clusterTopologyName" type="string">
+<ParamField path="clusterTopologyName" type="string" required={true}>
 clusterTopologyName is the name of the ClusterTopology resource that defines the topology hierarchy for this deployment.
-**Validation:** MinLength: 1
+**Validation:** MinLength: 1  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="packDomain" type="TopologyDomain">
@@ -4460,10 +4577,10 @@ The topology profile is inherited from the deployment-level
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec)
 
-<ParamField path="packDomain" type="TopologyDomain">
+<ParamField path="packDomain" type="TopologyDomain" required={true}>
 packDomain is the topology domain to pack pods within. Must match a domain defined in the referenced ClusterTopology CR.
 See [TopologyDomain](#v1beta1-topologydomain).
-**Validation:** Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+**Validation:** Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`  Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4570,13 +4687,15 @@ BranchProgress reports progress for one independently optimized AISimulate branc
 **Kind:** `type`
 **Appears in:** [DGDRRunProgress](#dgdrrunprogress)
 
-<ParamField path="name" type="string">
+<ParamField path="name" type="string" required={true}>
 Name is the executor-defined stable branch identifier.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="rounds" type="RoundProgress">
+<ParamField path="rounds" type="RoundProgress" required={true}>
 Rounds reports optimizer progress for this branch.
 See [RoundProgress](#roundprogress).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4589,10 +4708,12 @@ CandidateProgress reports bounded Kubernetes publication, not all internal trial
 
 <ParamField path="paretoFront" type="integer">
 ParetoFront is the number of feasible points on the current Pareto front.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="published" type="integer">
 Published is the number of Candidate resources currently referenced by this run.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4656,14 +4777,17 @@ DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="spec" type="DynamoGraphDeploymentCandidateSpec">
+<ParamField path="spec" type="DynamoGraphDeploymentCandidateSpec" required={true}>
 See [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentCandidateStatus">
 See [DynamoGraphDeploymentCandidateStatus](#dynamographdeploymentcandidatestatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4710,7 +4834,7 @@ See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28
 
 <ParamField path="backendFramework" type="string">
 backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm").
-**Validation:** Enum: [sglang vllm trtllm]
+**Validation:** Enum: [sglang vllm trtllm]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="restart" type="Restart">
@@ -4731,10 +4855,10 @@ See [DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalsp
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="parameters" type="RawExtension">
+<ParamField path="parameters" type="RawExtension" required={true}>
 Parameters are the resolved evaluation parameters for this point.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
-**Validation:** Type: object
+**Validation:** Type: object  Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4769,14 +4893,17 @@ DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment sear
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="spec" type="DynamoGraphDeploymentRequestSpec">
+<ParamField path="spec" type="DynamoGraphDeploymentRequestSpec" required={true}>
 See [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentRequestStatus">
 See [DynamoGraphDeploymentRequestStatus](#v1beta2-dynamographdeploymentrequeststatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4972,14 +5099,17 @@ DynamoGraphDeploymentRun is one immutable accepted DGDR request and its executio
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="spec" type="DynamoGraphDeploymentRunSpec">
+<ParamField path="spec" type="DynamoGraphDeploymentRunSpec" required={true}>
 See [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentRunStatus">
 See [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5099,30 +5229,37 @@ EvaluationProgress reports unique candidate outcomes without creating one resour
 
 <ParamField path="scheduled" type="integer">
 Scheduled is the number of unique evaluations accepted for execution.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="running" type="integer">
 Running is the number of evaluations currently executing.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="feasible" type="integer">
 Feasible is the number of completed evaluations that satisfy all constraints.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="infeasible" type="integer">
 Infeasible is the number of completed evaluations that violate at least one constraint.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="failed" type="integer">
 Failed is the number of evaluations that ended in an execution error.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="unsupported" type="integer">
 Unsupported is the number of configurations rejected as unsupported before evaluation.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="cacheHits" type="integer">
 CacheHits is the number of evaluations satisfied from a prior result.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5176,9 +5313,9 @@ ModelSpec identifies the model whose deployment configurations are evaluated.
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
-<ParamField path="name" type="string">
+<ParamField path="name" type="string" required={true}>
 Name identifies the model in the syntax accepted by the selected backend.
-**Validation:** MinLength: 1
+**Validation:** MinLength: 1  Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5334,8 +5471,9 @@ ResourceReference identifies a namespaced resource by name and UID.
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
 
-<ParamField path="name" type="string">
+<ParamField path="name" type="string" required={true}>
 Name is the resource name.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="uid" type="UID">
@@ -5352,12 +5490,14 @@ RoundProgress reports completed and planned optimizer rounds.
 **Kind:** `type`
 **Appears in:** [BranchProgress](#branchprogress)
 
-<ParamField path="completed" type="integer">
+<ParamField path="completed" type="integer" required={true}>
 Completed is the number of finished rounds.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="total" type="integer">
+<ParamField path="total" type="integer" required={true}>
 Total is the number of planned rounds.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5445,13 +5585,15 @@ CheckpointConfiguration holds checkpoint/restore settings.
 **Kind:** `type`
 **Appears in:** [OperatorConfiguration](#operatorconfiguration)
 
-<ParamField path="enabled" type="boolean">
+<ParamField path="enabled" type="boolean" required={true}>
 Enabled indicates if checkpoint functionality is enabled
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="seccomp" type="CheckpointSeccompConfiguration">
 Seccomp controls the localhost seccomp profile applied to checkpoint and restore pods. A nil value means "use the default profile"; set Seccomp.Disabled=true to disable seccomp injection entirely.
 See [CheckpointSeccompConfiguration](#checkpointseccompconfiguration).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5469,10 +5611,12 @@ build with io_uring support. Set Profile to override the default path.
 
 <ParamField path="disabled" type="boolean">
 Disabled, when true, suppresses seccomp profile injection entirely. Use this for clusters where custom localhost profiles are not allowed (e.g. OpenShift's restricted-v2 SCC) or for CRIU builds that handle io_uring natively.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="profile" type="string">
 Profile is the localhost seccomp profile path. Empty falls back to DefaultSeccompProfile. Ignored when Disabled is true.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5495,6 +5639,7 @@ with a clear error instead of letting pods Pend with a confusing
 
 <ParamField path="enabled" type="boolean">
 Enabled overrides auto-detection of the resource.k8s.io/v1 API. nil = auto-detect. Setting true requires detection to also succeed (the operator will exit at startup otherwise).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5522,6 +5667,7 @@ DiscoveryConfiguration holds discovery backend settings.
 <ParamField path="backend" type="DiscoveryBackend" default="kubernetes">
 Backend is the discovery backend: "kubernetes" or "etcd"
 See [DiscoveryBackend](#discoverybackend).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5534,6 +5680,7 @@ GPUConfiguration holds GPU discovery settings.
 
 <ParamField path="discoveryEnabled" type="boolean" default="true">
 DiscoveryEnabled indicates whether GPU discovery is enabled
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5546,11 +5693,13 @@ GroveConfiguration holds Grove orchestrator settings.
 
 <ParamField path="enabled" type="boolean">
 Enabled overrides auto-detection. nil = auto-detect.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="terminationDelay" type="Duration" default="15m">
 TerminationDelay configures the termination delay for Grove PodCliqueSets
 See [Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5561,60 +5710,74 @@ InfrastructureConfiguration holds service mesh and backend addresses.
 **Kind:** `type`
 **Appears in:** [OperatorConfiguration](#operatorconfiguration)
 
-<ParamField path="natsAddress" type="string">
+<ParamField path="natsAddress" type="string" required={true}>
 NATSAddress is the address of the NATS server
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="etcdAddress" type="string">
+<ParamField path="etcdAddress" type="string" required={true}>
 ETCDAddress is the address of the etcd server
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="modelExpressURL" type="string">
+<ParamField path="modelExpressURL" type="string" required={true}>
 ModelExpressURL is the URL of the Model Express server to inject into all pods
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="prometheusEndpoint" type="string">
+<ParamField path="prometheusEndpoint" type="string" required={true}>
 PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="natsTLSCAPath" type="string">
 NATSTLSCAPath is the CA certificate path for verifying the NATS server
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="natsTLSClientCertPath" type="string">
 NATSTLSClientCertPath is the client certificate path for NATS mTLS
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="natsTLSClientKeyPath" type="string">
 NATSTLSClientKeyPath is the client private key path for NATS mTLS
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="tcpTLSCertPath" type="string">
 TCPTLSCertPath is the server certificate path for TCP TLS
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="tcpTLSKeyPath" type="string">
 TCPTLSKeyPath is the server private key path for TCP TLS
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="tcpTLSCAPath" type="string">
 TCPTLSCAPath is the CA certificate path for verifying TCP peers
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="tcpTLSClientCertPath" type="string">
 TCPTLSClientCertPath is the client certificate path for TCP mTLS
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="tcpTLSClientKeyPath" type="string">
 TCPTLSClientKeyPath is the client private key path for TCP mTLS
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="tcpTLSClientCAPath" type="string">
 TCPTLSClientCAPath is the CA certificate path for verifying TCP client certificates (mTLS)
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="tcpTLSServerName" type="string">
 TCPTLSServerName overrides the TLS SNI hostname used by TCP clients when verifying the server certificate. Useful when dialing by IP (pod address) to a server whose certificate has a DNS SAN.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5625,20 +5788,24 @@ IngressConfiguration holds ingress settings.
 **Kind:** `type`
 **Appears in:** [OperatorConfiguration](#operatorconfiguration)
 
-<ParamField path="virtualServiceGateway" type="string">
+<ParamField path="virtualServiceGateway" type="string" required={true}>
 VirtualServiceGateway is the name of the Istio virtual service gateway
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="controllerClassName" type="string">
+<ParamField path="controllerClassName" type="string" required={true}>
 ControllerClassName is the ingress controller class name
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="controllerTLSSecretName" type="string">
+<ParamField path="controllerTLSSecretName" type="string" required={true}>
 ControllerTLSSecretName is the TLS secret for the ingress controller
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="hostSuffix" type="string">
+<ParamField path="hostSuffix" type="string" required={true}>
 HostSuffix is the suffix for ingress hostnames
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5649,24 +5816,29 @@ IstioMeshConfiguration holds Istio-specific mesh settings.
 **Kind:** `type`
 **Appears in:** [ServiceMeshConfiguration](#servicemeshconfiguration)
 
-<ParamField path="tlsMode" type="string">
+<ParamField path="tlsMode" type="string" required={true}>
 TLSMode is the Istio TLS mode for DestinationRules. Supported values: "DISABLE", "SIMPLE", "ISTIO_MUTUAL", "MUTUAL". Defaults to "SIMPLE".
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="insecureSkipVerify" type="boolean">
 InsecureSkipVerify skips TLS certificate verification in DestinationRules. Defaults to true (matching upstream GAIE behavior with self-signed certs).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="clientCertificate" type="string">
 ClientCertificate is the path (in the istio-proxy sidecar's filesystem) to the file holding the client-side TLS certificate used for mTLS. REQUIRED when TLSMode is "MUTUAL"; ignored for other modes.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="privateKey" type="string">
 PrivateKey is the path (in the istio-proxy sidecar's filesystem) to the file holding the client-side TLS private key used for mTLS. REQUIRED when TLSMode is "MUTUAL"; ignored for other modes.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="caCertificates" type="string">
 CaCertificates is the optional path (in the istio-proxy sidecar's filesystem) to the file holding CA certificates used to verify the server certificate. Used only when TLSMode is "MUTUAL"; for other modes the field is ignored.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5679,6 +5851,7 @@ KaiSchedulerConfiguration holds Kai-scheduler settings.
 
 <ParamField path="enabled" type="boolean">
 Enabled overrides auto-detection. nil = auto-detect.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5691,10 +5864,12 @@ LPXConfiguration holds LPX scheduler integration and model-registry settings.
 
 <ParamField path="enabled" type="boolean" default="false">
 Enabled opts the operator into LPX request production. When true, startup requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API to be installed separately.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="modelRegistryURL" type="string">
+<ParamField path="modelRegistryURL" type="string" required={true}>
 ModelRegistryURL configures the location of the LPU model registry used by LPX. Supported values are an absolute local path (or file:// URL) and gs:// URLs.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5707,6 +5882,7 @@ LWSConfiguration holds LWS orchestrator settings.
 
 <ParamField path="enabled" type="boolean">
 Enabled overrides auto-detection. nil = auto-detect.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5719,14 +5895,17 @@ LeaderElectionConfiguration holds leader election settings.
 
 <ParamField path="enabled" type="boolean" default="false">
 Enabled enables leader election for controller manager
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="id" type="string">
+<ParamField path="id" type="string" required={true}>
 ID is the leader election resource identity
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="namespace" type="string">
+<ParamField path="namespace" type="string" required={true}>
 Namespace is the namespace for the leader election resource
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5739,10 +5918,12 @@ LoggingConfiguration holds logging settings.
 
 <ParamField path="level" type="string" default="info">
 Level is the log level (e.g., "info", "debug")
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="format" type="string" default="json">
 Format is the log format (e.g., "json", "text")
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5753,12 +5934,14 @@ MPIConfiguration holds MPI SSH secret settings.
 **Kind:** `type`
 **Appears in:** [OperatorConfiguration](#operatorconfiguration)
 
-<ParamField path="sshSecretName" type="string">
+<ParamField path="sshSecretName" type="string" required={true}>
 SSHSecretName is the name of the secret containing the SSH key for MPI
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="sshSecretNamespace" type="string">
+<ParamField path="sshSecretNamespace" type="string" required={true}>
 SSHSecretNamespace is the namespace where the MPI SSH secret is located
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5769,16 +5952,19 @@ MetricsServer extends Server with secure serving option.
 **Kind:** `type`
 **Appears in:** [ServerConfiguration](#serverconfiguration)
 
-<ParamField path="bindAddress" type="string">
+<ParamField path="bindAddress" type="string" required={true}>
 BindAddress is the address the server binds to
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="port" type="integer">
+<ParamField path="port" type="integer" required={true}>
 Port is the port the server listens on
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="secure" type="boolean">
 Secure enables secure serving for the metrics endpoint. nil = default to true (secure by default).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5789,13 +5975,15 @@ NamespaceConfiguration determines operator namespace mode.
 **Kind:** `type`
 **Appears in:** [OperatorConfiguration](#operatorconfiguration)
 
-<ParamField path="restricted" type="string">
+<ParamField path="restricted" type="string" required={true}>
 Restricted enables namespace-restricted mode for development and testing. Namespace-restricted mode is not supported for production.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="scope" type="NamespaceScopeConfiguration">
+<ParamField path="scope" type="NamespaceScopeConfiguration" required={true}>
 Scope configures the namespace ownership claim in namespace-restricted mode.
 See [NamespaceScopeConfiguration](#namespacescopeconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5809,11 +5997,13 @@ NamespaceScopeConfiguration configures the development/test namespace ownership 
 <ParamField path="leaseDuration" type="Duration" default="30s">
 LeaseDuration is the duration of namespace scope marker lease before expiration
 See [Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="leaseRenewInterval" type="Duration" default="10s">
 LeaseRenewInterval is the interval for renewing namespace scope marker lease
 See [Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5831,84 +6021,100 @@ OperatorConfiguration is the Schema for the operator configuration.
 `OperatorConfiguration`
 </ParamField>
 
-<ParamField path="server" type="ServerConfiguration">
+<ParamField path="server" type="ServerConfiguration" required={true}>
 Server configuration (metrics, health probes, webhooks)
 See [ServerConfiguration](#serverconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="leaderElection" type="LeaderElectionConfiguration">
+<ParamField path="leaderElection" type="LeaderElectionConfiguration" required={true}>
 Leader election configuration
 See [LeaderElectionConfiguration](#leaderelectionconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="namespace" type="NamespaceConfiguration">
+<ParamField path="namespace" type="NamespaceConfiguration" required={true}>
 Namespace configuration (restricted vs cluster-wide)
 See [NamespaceConfiguration](#namespaceconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="orchestrators" type="OrchestratorConfiguration">
+<ParamField path="orchestrators" type="OrchestratorConfiguration" required={true}>
 Orchestrator configuration with optional overrides
 See [OrchestratorConfiguration](#orchestratorconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="dra" type="DRAConfiguration">
 DRA (Dynamic Resource Allocation) settings with optional override
 See [DRAConfiguration](#draconfiguration).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="infrastructure" type="InfrastructureConfiguration">
+<ParamField path="infrastructure" type="InfrastructureConfiguration" required={true}>
 Service mesh and infrastructure addresses
 See [InfrastructureConfiguration](#infrastructureconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="ingress" type="IngressConfiguration">
+<ParamField path="ingress" type="IngressConfiguration" required={true}>
 Ingress configuration
 See [IngressConfiguration](#ingressconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="serviceMesh" type="ServiceMeshConfiguration">
+<ParamField path="serviceMesh" type="ServiceMeshConfiguration" required={true}>
 ServiceMesh configures automatic generation of service-mesh resources (e.g., Istio DestinationRules) for EPP components.
 See [ServiceMeshConfiguration](#servicemeshconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="rbac" type="RBACConfiguration">
+<ParamField path="rbac" type="RBACConfiguration" required={true}>
 RBAC configuration for cross-namespace resource management (cluster-wide mode)
 See [RBACConfiguration](#rbacconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="mpi" type="MPIConfiguration">
+<ParamField path="mpi" type="MPIConfiguration" required={true}>
 MPI SSH secret configuration
 See [MPIConfiguration](#mpiconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="checkpoint" type="CheckpointConfiguration">
+<ParamField path="checkpoint" type="CheckpointConfiguration" required={true}>
 Checkpoint/restore configuration
 See [CheckpointConfiguration](#checkpointconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="discovery" type="DiscoveryConfiguration">
+<ParamField path="discovery" type="DiscoveryConfiguration" required={true}>
 Discovery backend configuration
 See [DiscoveryConfiguration](#discoveryconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="gpu" type="GPUConfiguration">
+<ParamField path="gpu" type="GPUConfiguration" required={true}>
 GPU discovery configuration
 See [GPUConfiguration](#gpuconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="logging" type="LoggingConfiguration">
+<ParamField path="logging" type="LoggingConfiguration" required={true}>
 Logging configuration
 See [LoggingConfiguration](#loggingconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="security" type="SecurityConfiguration">
+<ParamField path="security" type="SecurityConfiguration" required={true}>
 HTTP/2 and TLS settings
 See [SecurityConfiguration](#securityconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="lpx" type="LPXConfiguration">
+<ParamField path="lpx" type="LPXConfiguration" required={true}>
 LPX scheduler integration and model-registry configuration.
 See [LPXConfiguration](#lpxconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5919,24 +6125,28 @@ OrchestratorConfiguration holds orchestrator override settings.
 **Kind:** `type`
 **Appears in:** [OperatorConfiguration](#operatorconfiguration)
 
-<ParamField path="grove" type="GroveConfiguration">
+<ParamField path="grove" type="GroveConfiguration" required={true}>
 Grove orchestrator configuration
 See [GroveConfiguration](#groveconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="lws" type="LWSConfiguration">
+<ParamField path="lws" type="LWSConfiguration" required={true}>
 LWS orchestrator configuration
 See [LWSConfiguration](#lwsconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="kaiScheduler" type="KaiSchedulerConfiguration">
+<ParamField path="kaiScheduler" type="KaiSchedulerConfiguration" required={true}>
 KaiScheduler configuration
 See [KaiSchedulerConfiguration](#kaischedulerconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="volcanoScheduler" type="VolcanoSchedulerConfiguration">
+<ParamField path="volcanoScheduler" type="VolcanoSchedulerConfiguration" required={true}>
 VolcanoScheduler configuration
 See [VolcanoSchedulerConfiguration](#volcanoschedulerconfiguration).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5947,16 +6157,19 @@ RBACConfiguration holds RBAC settings for cluster-wide mode.
 **Kind:** `type`
 **Appears in:** [OperatorConfiguration](#operatorconfiguration)
 
-<ParamField path="plannerClusterRoleName" type="string">
+<ParamField path="plannerClusterRoleName" type="string" required={true}>
 PlannerClusterRoleName is the ClusterRole for planner
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="dgdrProfilingClusterRoleName" type="string">
+<ParamField path="dgdrProfilingClusterRoleName" type="string" required={true}>
 DGDRProfilingClusterRoleName is the ClusterRole for DGDR profiling jobs
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="eppClusterRoleName" type="string">
+<ParamField path="eppClusterRoleName" type="string" required={true}>
 EPPClusterRoleName is the ClusterRole for EPP
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5969,6 +6182,7 @@ SecurityConfiguration holds HTTP/2 and TLS settings.
 
 <ParamField path="enableHTTP2" type="boolean" default="false">
 EnableHTTP2 enables HTTP/2 for metrics and webhook servers
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5979,12 +6193,14 @@ Server holds a bind address and port.
 **Kind:** `type`
 **Appears in:** [MetricsServer](#metricsserver), [ServerConfiguration](#serverconfiguration), [WebhookServer](#webhookserver)
 
-<ParamField path="bindAddress" type="string">
+<ParamField path="bindAddress" type="string" required={true}>
 BindAddress is the address the server binds to
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="port" type="integer">
+<ParamField path="port" type="integer" required={true}>
 Port is the port the server listens on
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5998,16 +6214,19 @@ ServerConfiguration holds server bind addresses and ports.
 <ParamField path="metrics" type="MetricsServer" default="\{ bindAddress:0.0.0.0 port:8080 secure:true \}">
 Metrics server configuration
 See [MetricsServer](#metricsserver).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="healthProbe" type="Server" default="\{ bindAddress:0.0.0.0 port:8081 \}">
 Health probe server configuration
 See [Server](#server).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="webhook" type="WebhookServer" default="\{ certDir:/tmp/k8s-webhook-server/serving-certs host:0.0.0.0 port:9443 \}">
 Webhook server configuration
 See [WebhookServer](#webhookserver).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -6023,15 +6242,18 @@ correctly without double-TLS issues.
 
 <ParamField path="enabled" type="boolean">
 Enabled overrides service mesh auto-detection. nil = auto-detect.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="provider" type="string">
+<ParamField path="provider" type="string" required={true}>
 Provider selects the service mesh implementation. Supported: "istio", "". Empty string disables service mesh resource generation.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="istio" type="IstioMeshConfiguration">
 Istio holds Istio-specific settings. Only used when Provider is "istio".
 See [IstioMeshConfiguration](#istiomeshconfiguration).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -6044,6 +6266,7 @@ VolcanoSchedulerConfiguration holds Volcano scheduler settings.
 
 <ParamField path="enabled" type="boolean">
 EXPERIMENTAL: Enabled controls Volcano scheduler integration for Grove PodCliqueSets.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -6054,33 +6277,40 @@ WebhookServer extends Server with host and certificate directory.
 **Kind:** `type`
 **Appears in:** [ServerConfiguration](#serverconfiguration)
 
-<ParamField path="bindAddress" type="string">
+<ParamField path="bindAddress" type="string" required={true}>
 BindAddress is the address the server binds to
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="port" type="integer">
+<ParamField path="port" type="integer" required={true}>
 Port is the port the server listens on
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="host" type="string">
+<ParamField path="host" type="string" required={true}>
 Host is the address the webhook server binds to
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="certDir" type="string">
+<ParamField path="certDir" type="string" required={true}>
 CertDir is the directory containing TLS certificates
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="certProvisionMode" type="CertProvisionMode" default="auto">
 CertProvisionMode controls certificate management: "auto" (built-in cert-controller) or "manual" (external)
 See [CertProvisionMode](#certprovisionmode).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="secretName" type="string" default="webhook-server-cert">
 SecretName is the name of the Kubernetes Secret holding webhook TLS certificates
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="serviceName" type="string">
+<ParamField path="serviceName" type="string" required={true}>
 ServiceName is the name of the Kubernetes Service fronting the webhook server. Used to generate certificate SANs. Set by the Helm chart.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 

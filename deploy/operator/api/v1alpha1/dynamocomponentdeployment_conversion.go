@@ -54,7 +54,9 @@ func IsDynamoComponentDeploymentConversionAnnotation(key string) bool {
 // context that shared-spec converters cannot derive from their local inputs.
 // +kubebuilder:object:generate=false
 type DynamoComponentDeploymentConversionContext struct {
-	ObjectName          string
+	// +required
+	ObjectName string
+	// +required
 	IncludeOriginSplits bool
 }
 

@@ -28,6 +28,7 @@ linters:
     - gocyclo
     - govet
     - ineffassign
+    - kubeapilinter
     - lll
     - misspell
     - modernize
@@ -38,6 +39,46 @@ linters:
     - unparam
     - unused
   settings:
+    custom:
+      kubeapilinter:
+        path: "bin/kube-api-linter.so"
+        description: Kube API Linter lints Kube like APIs based on API conventions and best practices.
+        original-url: sigs.k8s.io/kube-api-linter
+        settings:
+          linters:
+            # nofloats, nomaps, and nophase are deliberately NOT enabled: every
+            # existing finding would require a breaking CRD change (SLA float
+            # fields, map-keyed Services/Checkpoints/Components, status Phase
+            # enums). Revisit with a future API version.
+            enable:
+              - conflictingmarkers
+              - duplicatemarkers
+              - optionalorrequired
+              - statussubresource
+              - uniquemarkers
+              - statusoptional
+              - nonullable
+              - forbiddenmarkers
+            disable:
+              - "*"
+          lintersConfig:
+            conflictingmarkers:
+              conflicts:
+                - name: default_vs_required
+                  sets:
+                    - ["default", "kubebuilder:default"]
+                    - ["required", "kubebuilder:validation:Required", "k8s:required"]
+                  description: "A field with a default value cannot be required"
+            forbiddenmarkers:
+              # Identifiers are matched against marker names as indexed by KAL,
+              # which strips the leading `+` from `// +marker` comments.
+              markers:
+                - identifier: "kubebuilder:pruning:PreserveUnknownFields"
+                - identifier: "kubebuilder:validation:XPreserveUnknownFields"
+                - identifier: "kubebuilder:validation:items:XPreserveUnknownFields"
+                - identifier: "kubebuilder:validation:EmbeddedResource"
+                - identifier: "kubebuilder:validation:XEmbeddedResource"
+                - identifier: "kubebuilder:validation:items:XEmbeddedResource"
     staticcheck:
       # SA* matches the v1 staticcheck linter and S1* the v1 gosimple linter.
       # ST* (v1 stylecheck) and QF* (quickfix) were never enabled here.
@@ -118,6 +159,36 @@ linters:
         linters:
           - goconst
           - prealloc
+      # kube-api-linter checks CRD API conventions; only API type packages are in scope.
+      # Path is matched relative to the golangci-lint run directory (deploy/operator/).
+      - linters:
+          - kubeapilinter
+        path-except: ^api/
+      # These status fields intentionally keep their long-standing `required`
+      # CRD invariant (review, #17190): plain counters/enums where absence
+      # would collapse to the zero value, and consumers may rely on presence —
+      # including ScalingAdapterStatus.Replicas for the scale subresource.
+      # The K8s convention that status fields be optional is deliberately not
+      # applied to them.
+      - linters:
+          - kubeapilinter
+        text: '^statusoptional: status field "(ComponentKind|ComponentName|Replicas|UpdatedReplicas|State|Conditions|ReadyEndpoints|TotalEndpoints)"'
+      # The `state` fields carry +kubebuilder:default and stay +required to
+      # preserve the existing CRD contract. Defaulting runs before validation,
+      # so the default-vs-required combination cannot reject an object.
+      - linters:
+          - kubeapilinter
+        text: "^conflictingmarkers: field \\S+\\.State has conflicting markers: default_vs_required"
+      # Pre-existing intentional uses of forbiddenmarkers' opaque-schema
+      # markers: these files embed RawExtension/JSON parameter payloads
+      # (DGDR parameters, deployment candidates, checkpoint blobs), where
+      # pruning:PreserveUnknownFields / validation:EmbeddedResource is the
+      # canonical CRD pattern. The ban guards NEW files; adopting opaque
+      # fields elsewhere needs an explicit decision, not a silent marker.
+      - linters:
+          - kubeapilinter
+        path: ^api/(v1alpha1/(common|dynamocomponentdeployment_types|dynamographdeploymentrequest_types)|v1beta1/(common|dynamographdeploymentrequest_types)|v1beta2/(dynamographdeploymentcandidate_types|dynamographdeploymentrequest_types))\.go$
+        text: "^forbiddenmarkers:"
     paths:
       - third_party$
       - builtin$

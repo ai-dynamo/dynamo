@@ -383,12 +383,15 @@ integration: envtest setup-clustertest ## Run envtests and clustertests, creatin
 		DYNAMO_CLUSTERTEST_OPERATOR_IMAGE='$(CLUSTERTEST_OPERATOR_IMAGE)' \
 		$(MAKE) clustertest
 
+# Depend on the kube-api-linter target, not $(KAL_SO): Make expands
+# prerequisite lists while reading this line, and the KAL_* variables are
+# defined further below, so $(KAL_SO) would expand to empty here.
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter & yamllint
+lint: kube-api-linter ## Run golangci-lint linter & yamllint
 	$(GOLANGCI_LINT) run
 
 .PHONY: lint-fix
-lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
+lint-fix: kube-api-linter ## Run golangci-lint linter and perform fixes
 	$(GOLANGCI_LINT) run --fix
 
 ##@ Build
@@ -578,6 +581,13 @@ YQ_VERSION ?= v4.45.4
 CONTROLLER_TOOLS_VERSION ?= v0.17.3
 ENVTEST_VERSION ?= release-0.19
 GOLANGCI_LINT_VERSION ?= v2.15.0
+KAL_VERSION ?= v0.0.0-20261012124120-79b557aa8c8d
+# Go toolchain used to compile the golangci-lint host binary and its plugin;
+# must be >= the `go` directive of this module's go.mod (golangci-lint refuses
+# to lint a module targeting a newer Go than it was built with) and identical
+# for both artifacts (Go plugin ABI requirement). Resolved from this module's
+# context, e.g. go1.27.2.
+KAL_GO_TOOLCHAIN ?= $(shell go env GOVERSION)
 
 ## Tool Binaries
 KUBECTL ?= $(LOCALBIN)/kubectl-$(KUBECTL_VERSION)
@@ -587,6 +597,8 @@ YQ ?= $(LOCALBIN)/yq-$(YQ_VERSION)
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen-$(CONTROLLER_TOOLS_VERSION)
 ENVTEST ?= $(LOCALBIN)/setup-envtest-$(ENVTEST_VERSION)
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
+KAL_SO_VERSIONED = $(LOCALBIN)/kube-api-linter-$(GOLANGCI_LINT_VERSION)-$(KAL_VERSION).so
+KAL_SO = $(LOCALBIN)/kube-api-linter.so
 
 ## ---------- Binary download targets ----------
 
@@ -649,6 +661,31 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,${GOLANGCI_LINT_VERSION})
+
+# kube-api-linter is a golangci-lint plugin loaded through Go's plugin
+# mechanism, which requires the plugin and the golangci-lint host binary to be
+# compiled from the same source tree with the same toolchain and dependency
+# versions (adding KAL upgrades golangci-lint's own deps, e.g. zap/viper).
+# So build BOTH the .so and the host binary from one throwaway clone of
+# golangci-lint at $(GOLANGCI_LINT_VERSION), overwriting the pristine binary
+# installed by go-install-tool above. The versioned .so filename is the
+# up-to-date stamp: bumping GOLANGCI_LINT_VERSION or KAL_VERSION rebuilds the
+# pair, and $(KAL_SO) symlinks it to the fixed path .golangci.yml loads.
+# Depending on $(GOLANGCI_LINT) keeps the installer from overwriting the
+# paired host binary when `lint` prerequisites run concurrently under make -j.
+$(KAL_SO): $(KAL_SO_VERSIONED)
+	@ln -sf $(notdir $(KAL_SO_VERSIONED)) $(KAL_SO)
+
+$(KAL_SO_VERSIONED): $(GOLANGCI_LINT)
+	@echo "Building kube-api-linter plugin and matching golangci-lint host binary from source (several minutes)..."
+	@rm -rf $(LOCALBIN)/golangci-lint-src $(LOCALBIN)/kube-api-linter-*.so
+	@git clone --depth 1 --branch $(GOLANGCI_LINT_VERSION) --quiet https://github.com/golangci/golangci-lint.git $(LOCALBIN)/golangci-lint-src
+	@cd $(LOCALBIN)/golangci-lint-src && go get sigs.k8s.io/kube-api-linter@$(KAL_VERSION) && GOTOOLCHAIN=$(KAL_GO_TOOLCHAIN) GOFLAGS=-mod=mod go build -buildmode=plugin -o $(KAL_SO_VERSIONED) sigs.k8s.io/kube-api-linter/pkg/plugin && GOTOOLCHAIN=$(KAL_GO_TOOLCHAIN) GOFLAGS=-mod=mod go build -o $(GOLANGCI_LINT) ./cmd/golangci-lint
+	@rm -rf $(LOCALBIN)/golangci-lint-src
+	@touch $(KAL_SO_VERSIONED)
+
+.PHONY: kube-api-linter
+kube-api-linter: $(KAL_SO) ## Build the kube-api-linter golangci-lint plugin.
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary (ideally with version)
