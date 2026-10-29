@@ -58,6 +58,70 @@ fn request() -> PreprocessedRequest {
         .unwrap()
 }
 
+/// The last value recorded on any span for each field name.
+#[derive(Clone, Default)]
+struct RecordedFields(Arc<Mutex<HashMap<&'static str, String>>>);
+
+impl tracing::field::Visit for RecordedFields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(field.name(), format!("{value:?}"));
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(field.name(), value.to_owned());
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecordedFields {
+    fn on_record(
+        &self,
+        _: &tracing::Id,
+        values: &tracing::span::Record<'_>,
+        _: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        values.record(&mut self.clone());
+    }
+}
+
+#[test]
+fn request_dispatch_records_phase_and_attempt() {
+    use dynamo_runtime::pipeline::network::egress::route_span::{
+        RouteTraceContext, attach_route_trace_context,
+    };
+    use tracing_subscriber::prelude::*;
+
+    let recorded = RecordedFields::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(recorded.clone()));
+
+    let mut traced = Context::new(request());
+    traced.insert(LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleTrace::new(true));
+    attach_route_trace_context(&mut traced, RouteTraceContext::new(1, None, None, 0));
+    let span = start_request_dispatch(&traced, RequestPhase::Decode);
+    assert!(!span.is_none());
+    let fields = recorded.0.lock().unwrap().clone();
+    assert_eq!(fields["dynamo.dispatch.phase"], "decode");
+    assert_eq!(fields["dynamo.request.attempt"], "1");
+
+    // The prefill leg has no route trace context, only the copied attempt.
+    let mut prefill = Context::new(request());
+    prefill.insert(LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleTrace::new(true));
+    prefill.insert(DISPATCH_ATTEMPT_CONTEXT_KEY, DispatchAttempt(3));
+    let _prefill_span = start_request_dispatch(&prefill, RequestPhase::Prefill);
+    let fields = recorded.0.lock().unwrap().clone();
+    assert_eq!(fields["dynamo.dispatch.phase"], "prefill");
+    assert_eq!(fields["dynamo.request.attempt"], "3");
+
+    // Without a lifecycle root there is no span, whatever the route context says.
+    assert!(start_request_dispatch(&Context::new(request()), RequestPhase::Decode).is_none());
+}
+
 async fn test_load_context(client: &Client) -> Arc<RoutingLoadContext> {
     RoutingLoadContext::start(
         client.clone(),
@@ -1821,6 +1885,9 @@ async fn router_with_config_and_classifier(
 #[derive(Default)]
 struct PendingThenCompletedDispatch {
     worker_ids: Mutex<Vec<u64>>,
+    /// Stop the request and return an empty stream, as `AddressedRouter` does
+    /// when the response prologue fails after a cancellation.
+    stop_during_handshake: AtomicBool,
 }
 
 #[async_trait]
@@ -1838,6 +1905,13 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
             .lock()
             .unwrap()
             .push(instance.expect("selected worker instance").id());
+        if self.stop_during_handshake.load(Ordering::SeqCst) {
+            context.context().stop();
+            return Ok(ResponseStream::new(
+                Box::pin(stream::empty()),
+                context.context(),
+            ));
+        }
         let output = Annotated::from_data(LLMEngineOutput {
             finish_reason: Some(FinishReason::Stop),
             ..Default::default()
@@ -1956,6 +2030,68 @@ async fn admitted_request_stopped_before_dispatch(
     assert!(request.context().is_stopped());
 
     (request, selection, guard)
+}
+
+/// Run one traced request through `host` and return its dispatch result.
+async fn traced_dispatch_result(
+    host: &RoutingHost,
+    dispatch: &PendingThenCompletedDispatch,
+    stop_during_handshake: bool,
+) -> Option<String> {
+    use tracing_subscriber::prelude::*;
+
+    dispatch
+        .stop_during_handshake
+        .store(stop_during_handshake, Ordering::SeqCst);
+    let recorded = RecordedFields::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(recorded.clone()));
+    let mut request = Context::new(request());
+    request.insert(LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleTrace::new(true));
+    if let Ok(mut stream) = host.generate(request).await {
+        while stream.next().await.is_some() {}
+    }
+    recorded
+        .0
+        .lock()
+        .unwrap()
+        .get("dynamo.dispatch.result")
+        .cloned()
+}
+
+/// A dispatch that returns a stream after the client stopped the request during
+/// the handshake is cancelled, not accepted, on both routing paths.
+#[tokio::test]
+#[serial_test::serial]
+async fn dispatch_cancelled_during_handshake_is_not_accepted() {
+    for (stop, expected) in [(false, "accepted"), (true, "cancelled")] {
+        let (host, dispatch, _, runtime) =
+            router_with_recorded_dispatch(&format!("kv-handshake-cancel-{stop}")).await;
+        assert_eq!(
+            traced_dispatch_result(&host, &dispatch, stop)
+                .await
+                .as_deref(),
+            Some(expected),
+            "kv, stopped during handshake: {stop}"
+        );
+        drop(host);
+        runtime.shutdown();
+
+        let (host, dispatch, _, runtime) = builtin_host_with_recorded_dispatch(
+            &format!("builtin-handshake-cancel-{stop}"),
+            RouterMode::RoundRobin,
+        )
+        .await;
+        assert_eq!(
+            traced_dispatch_result(&host, &dispatch, stop)
+                .await
+                .as_deref(),
+            Some(expected),
+            "builtin, stopped during handshake: {stop}"
+        );
+        drop(host);
+        runtime.shutdown();
+    }
 }
 
 /// Covers the `CancelWhenStopped` arm inside `dispatch_selection` itself. The

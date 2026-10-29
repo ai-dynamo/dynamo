@@ -17,11 +17,13 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{
     error::{DynamoError, ErrorClass, ErrorType, match_error_chain},
+    pipeline::network::egress::route_span::get_route_trace_context,
     pipeline::{
         AsyncEngineContextProvider, Context, ManyOut, Operator, ResponseStream, RouterMode,
         ServerStreamingEngine, SingleIn, async_trait, propagate_first_response_guard,
     },
     protocols::{EndpointId, annotated::Annotated},
+    telemetry::{LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleTrace},
 };
 use futures::stream::{self, StreamExt};
 
@@ -714,7 +716,8 @@ impl
 }
 
 /// Prefill must survive client cancellation once decode needs its KV transfer.
-/// Copy request identity and metadata, but keep a separate cancellation controller.
+/// Copy request identity, metadata, lifecycle trace, and the attempt number,
+/// but keep a separate cancellation controller and route trace context.
 fn independent_prefill_context(
     request: PreprocessedRequest,
     source: &Context<()>,
@@ -722,6 +725,18 @@ fn independent_prefill_context(
     let mut prefill =
         Context::with_id_and_metadata(request, source.id().to_string(), source.metadata().clone());
     propagate_first_response_guard(source, &mut prefill)?;
+    if let Some(lifecycle) = source
+        .get_optional::<LifecycleTrace>(LIFECYCLE_TRACE_CONTEXT_KEY)
+        .map_err(anyhow::Error::msg)?
+    {
+        prefill.insert(LIFECYCLE_TRACE_CONTEXT_KEY, lifecycle.as_ref().clone());
+        if let Some(route) = get_route_trace_context(source) {
+            prefill.insert(
+                super::routing_host::DISPATCH_ATTEMPT_CONTEXT_KEY,
+                super::routing_host::DispatchAttempt(route.attempt()),
+            );
+        }
+    }
     Ok(prefill)
 }
 
@@ -1144,9 +1159,34 @@ mod tests {
             let request = query_only_request();
             let mut source = Context::new(());
             source.insert_metadata("traceparent", "test-trace");
+            let lifecycle = LifecycleTrace::new(true);
+            source.insert(LIFECYCLE_TRACE_CONTEXT_KEY, lifecycle.clone());
+            dynamo_runtime::pipeline::network::egress::route_span::attach_route_trace_context(
+                &mut source,
+                dynamo_runtime::pipeline::network::egress::route_span::RouteTraceContext::new(
+                    2, None, None, 0,
+                ),
+            );
             let prefill = independent_prefill_context(request, &source).unwrap();
+            // The attempt is copied; the route trace context is not shared.
+            assert_eq!(
+                prefill
+                    .get::<super::super::routing_host::DispatchAttempt>(
+                        super::super::routing_host::DISPATCH_ATTEMPT_CONTEXT_KEY
+                    )
+                    .unwrap()
+                    .0,
+                2
+            );
+            assert!(get_route_trace_context(&prefill).is_none());
             assert_eq!(prefill.id(), source.id());
             assert_eq!(prefill.metadata(), source.metadata());
+            assert_eq!(
+                *prefill
+                    .get::<LifecycleTrace>(LIFECYCLE_TRACE_CONTEXT_KEY)
+                    .unwrap(),
+                lifecycle
+            );
 
             if kill {
                 source.context().kill();

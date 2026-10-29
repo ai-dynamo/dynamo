@@ -24,6 +24,7 @@ use dynamo_runtime::{
         },
     },
     protocols::annotated::Annotated,
+    telemetry::{LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleStage, LifecycleTrace},
 };
 use futures::stream::{self, StreamExt};
 use tracing::Instrument;
@@ -74,6 +75,59 @@ pub(crate) struct PrefillDispatch<M> {
     /// Early release for the prefill's scheduler booking, held by `stream`
     /// until prefill finishes. `None` when the routing policy books nothing.
     pub(crate) booking: Option<RequestAttemptRelease>,
+}
+
+/// The request's lifecycle trace, absent when no lifecycle root was opened for it.
+fn request_lifecycle(request: &SingleIn<PreprocessedRequest>) -> Option<Arc<LifecycleTrace>> {
+    request
+        .get_optional::<LifecycleTrace>(LIFECYCLE_TRACE_CONTEXT_KEY)
+        .ok()
+        .flatten()
+}
+
+/// Context key for the attempt of a dispatch without a route trace context.
+/// The independent prefill leg copies the request attempt under it, because it
+/// must not share the attempt's route trace context with the decode leg.
+pub(super) const DISPATCH_ATTEMPT_CONTEXT_KEY: &str = "dynamo.request_lifecycle.dispatch_attempt";
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DispatchAttempt(pub(super) u32);
+
+/// Start `request.dispatch` for one phase leg; never invent a rootless identity.
+fn start_request_dispatch(
+    request: &SingleIn<PreprocessedRequest>,
+    phase: RequestPhase,
+) -> tracing::Span {
+    let span = request_lifecycle(request).map_or_else(tracing::Span::none, |trace| {
+        trace.start(LifecycleStage::RequestDispatch)
+    });
+    span.record("dynamo.dispatch.phase", phase.as_str());
+    // Distinguishes one request's dispatches across migration retries.
+    if !span.is_none()
+        && let Some(attempt) = get_route_trace_context(request)
+            .map(|route| route.attempt())
+            .or_else(|| {
+                request
+                    .get_optional::<DispatchAttempt>(DISPATCH_ATTEMPT_CONTEXT_KEY)
+                    .ok()
+                    .flatten()
+                    .map(|attempt| attempt.0)
+            })
+    {
+        span.record("dynamo.request.attempt", attempt);
+    }
+    span
+}
+
+/// Result of a dispatch that returned a stream. `AddressedRouter` returns an
+/// empty stream when the response prologue fails after the request was stopped
+/// or killed, so, as in `Migration::new_stream`, that return is a cancellation.
+fn completed_dispatch_result(context: &dyn AsyncEngineContext) -> &'static str {
+    if context.is_stopped() || context.is_killed() {
+        "cancelled"
+    } else {
+        "accepted"
+    }
 }
 
 pub(crate) fn is_cancelled(error: &Error) -> bool {
