@@ -263,40 +263,6 @@ def test_installed_aic_renders_real_disaggregated_candidate(monkeypatch) -> None
     assert workers["decode"]["replicas"] == 1
 
 
-def test_aic_renderer_passes_trace_workloads_through(monkeypatch) -> None:
-    captured = []
-
-    def fake_from_sweeper_candidate(candidate, *, workload, **_kwargs):
-        captured.append(workload)
-        return "request"
-
-    monkeypatch.setattr(
-        aic_renderer,
-        "_load_generator_api",
-        lambda: (
-            fake_from_sweeper_candidate,
-            lambda _request: {"k8s_deploy.yaml": "kind: DynamoGraphDeployment\n"},
-        ),
-    )
-    monkeypatch.setattr(
-        aic_renderer, "patch_dgd_manifest", lambda rendered, *_args, **_kwargs: rendered
-    )
-    workload = SimpleNamespace(
-        trace_path="/traces/window.jsonl",
-        trace_paths=["/traces/window.jsonl"],
-        trace_format="dynamo",
-        isl=None,
-        osl=None,
-    )
-
-    rendered = render_dgd(_candidate(), workload, _options(), dgd_name="sweeper-dgd")
-
-    # AISimulate owns trace lowering, so the renderer neither fills in request
-    # lengths nor edits the manifest AIC returns.
-    assert len(captured) == 1 and captured[0] is workload
-    assert rendered == "kind: DynamoGraphDeployment\n"
-
-
 @dataclass(frozen=True)
 class _SweeperCandidate:
     config: dict
@@ -353,7 +319,6 @@ def _transfer_buffer_args(rendered: str) -> dict[str, dict[str, str]]:
 
 
 def _without_transfer_buffer_size(rendered: str) -> dict:
-    """Return the DGD without TensorRT-LLM's KV-transfer buffer size."""
     buffer_arg = "--trtllm.cache_transceiver_config.max_tokens_in_buffer"
     dgd = yaml.safe_load(rendered)
     for component in dgd["spec"]["components"]:

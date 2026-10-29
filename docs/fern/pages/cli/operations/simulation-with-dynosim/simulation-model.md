@@ -96,10 +96,11 @@ transferred KV bytes = charged tokens * kv_bytes_per_token
 `timing_mode: full_prompt` charges the full logical prompt. `destination_missing` charges only the
 prompt footprint absent from the destination and can produce zero delay on a full destination hit.
 
-That time applies to a transfer alone on its links. Each prefill rank sends over one link and each
-decode rank receives over one link, both at the configured bandwidth. Transfers in flight at the
-same time share these links max-min fairly, so concurrent handoffs from one prefill rank, or into one
-decode rank, take longer than a lone transfer.
+That time applies to a transfer alone on its links. In offline prediction, each prefill rank sends
+over one link and each decode rank receives over one link, both at the configured bandwidth.
+Transfers in flight at the same time share these links max-min fairly, so concurrent handoffs from
+one prefill rank, or into one decode rank, take longer than a lone transfer. Live Mocker workers do
+not share links: each transfer waits its own fixed delay.
 
 Set `bytes_per_token: auto` to derive the value from model metadata and parallelism, or provide a
 positive integer. Set a positive `bandwidth_gb_per_second` to apply the transfer delay. TensorRT-LLM
