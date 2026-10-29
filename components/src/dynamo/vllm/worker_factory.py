@@ -29,6 +29,7 @@ from dynamo.common.utils.prometheus import (
     register_embedding_cache_metrics,
     register_image_loader_metrics,
 )
+from dynamo.frontend.thinking import apply_default_thinking_mode_to_template_kwargs
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, Endpoint
 
@@ -1862,7 +1863,6 @@ class WorkerFactory:
         snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """Initialize an aggregated vLLM realtime worker."""
-        del shutdown_event  # Connection cancellation is carried by Dynamo Context.
 
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -1875,7 +1875,7 @@ class WorkerFactory:
             (
                 engine_client,
                 vllm_config,
-                _default_sampling_params,
+                default_sampling_params,
                 prometheus_temp_dir,
                 _component_gauges,
             ) = engine_setup
@@ -1890,7 +1890,7 @@ class WorkerFactory:
             (
                 engine_client,
                 vllm_config,
-                _default_sampling_params,
+                default_sampling_params,
                 prometheus_temp_dir,
                 _component_gauges,
             ) = self.setup_vllm_engine(
@@ -1916,6 +1916,11 @@ class WorkerFactory:
                 model_name=model_name,
                 model_path=config.model_source_path,
                 chat_template_path=config.custom_jinja_template,
+                tool_parser=config.dyn_tool_call_parser,
+                reasoning_parser=config.dyn_reasoning_parser,
+                default_chat_template_kwargs=apply_default_thinking_mode_to_template_kwargs(
+                    {}, config.dyn_default_thinking_mode
+                ),
             )
         if "realtime" in supported_tasks:
             handlers["transcription"] = RealtimeTranscriptionHandler.from_engine(
@@ -1946,22 +1951,99 @@ class WorkerFactory:
             (prometheus_names.labels.MODEL, model_name),
             (prometheus_names.labels.MODEL_NAME, model_name),
         ]
+        serve_tasks = []
+        if config.realtime_chat:
+            if "realtime" not in handlers:
+                raise ValueError(
+                    f"--realtime-chat requires a text generation model, not {model_name!r}"
+                )
+            serve_tasks.append(
+                await self._realtime_chat_endpoint(
+                    runtime,
+                    config,
+                    engine_client,
+                    vllm_config,
+                    default_sampling_params,
+                    shutdown_event,
+                    shutdown_endpoints,
+                    metrics_labels,
+                )
+            )
         logger.info(
             "Starting realtime worker endpoint for model: %s",
             model_name,
         )
-        try:
-            await generate_endpoint.serve_bidirectional_endpoint(
+        serve_tasks.append(
+            generate_endpoint.serve_bidirectional_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
             )
+        )
+        try:
+            await asyncio.gather(*serve_tasks)
         except Exception as exc:
             logger.error("Realtime worker failed: %s", exc)
             raise
         finally:
             if prometheus_temp_dir is not None:
                 prometheus_temp_dir.cleanup()
+
+    async def _realtime_chat_endpoint(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        engine_client: Any,
+        vllm_config: Any,
+        default_sampling_params: Any,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,
+        metrics_labels: list,
+    ) -> Awaitable[None]:
+        """Register the realtime engine's OpenAI endpoints and return their serve task."""
+        chat_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}_chat"
+        )
+        shutdown_endpoints.append(chat_endpoint)
+        model_config = getattr(vllm_config, "model_config", None)
+        chat_handler = DecodeWorkerHandler(
+            runtime,
+            config,
+            engine_client,
+            default_sampling_params,
+            getattr(model_config, "max_model_len", None),
+            model_config=model_config,
+            enable_multimodal=False,
+            generate_endpoint=chat_endpoint,
+            use_vllm_tokenizer=config.use_vllm_tokenizer,
+            shutdown_event=shutdown_event,
+            enable_frontend_decoding=config.frontend_decoding,
+        )
+        chat_handler._first_token_source = await chat_endpoint.first_token_source(
+            WorkerType.Aggregated
+        )
+        await self.register_vllm_model(
+            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens,
+            parse_endpoint_types(config.endpoint_types),
+            chat_endpoint,
+            config,
+            engine_client,
+            vllm_config,
+            worker_type=WorkerType.Aggregated,
+            needs=[],
+        )
+        logger.info(
+            "Starting realtime chat endpoint with endpoint types: %s",
+            config.endpoint_types,
+        )
+        return chat_endpoint.serve_endpoint(
+            chat_handler.generate,  # type: ignore
+            graceful_shutdown=True,
+            metrics_labels=metrics_labels,
+            health_check_payload=VllmHealthCheckPayload(
+                engine_client, use_text_input=config.use_vllm_tokenizer
+            ).to_dict(),
+        )
 
     async def _create_multimodal_encode_worker(
         self,

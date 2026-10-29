@@ -319,6 +319,12 @@ class TestEmbeddingFrontendTokenization:
 
 
 class TestRealtimeWorkerExclusivity:
+    def test_realtime_chat_requires_realtime(self):
+        config = create_config()
+        config.realtime_chat = True
+        with pytest.raises(ValueError, match="--realtime-chat requires --realtime"):
+            config._validate_realtime_worker_exclusivity()
+
     def test_baseline_aggregated_is_accepted(self):
         config = create_config()
         config.realtime = True

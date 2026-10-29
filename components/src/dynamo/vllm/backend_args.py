@@ -285,6 +285,16 @@ class DynamoVllmArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
+            flag_name="--realtime-chat",
+            env_var="DYN_VLLM_REALTIME_CHAT",
+            default=False,
+            help="With --realtime, also serve the --dyn-endpoint-types OpenAI "
+            "endpoints, such as /v1/chat/completions, from the same engine on a "
+            "sibling endpoint.",
+        )
+
+        add_negatable_bool_argument(
+            g,
             flag_name="--classify-worker",
             env_var="DYN_VLLM_CLASSIFY_WORKER",
             default=False,
@@ -620,6 +630,7 @@ class DynamoVllmConfig(ConfigBase):
     embedding_frontend_tokenization: bool = False
     embedding_worker_processes: int = 1
     realtime: bool = False
+    realtime_chat: bool = False
     classify_worker: bool = False
 
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
@@ -1033,6 +1044,8 @@ class DynamoVllmConfig(ConfigBase):
     def _validate_realtime_worker_exclusivity(self) -> None:
         """Realtime serving uses a dedicated aggregated bidirectional worker."""
         if not self.realtime:
+            if self.realtime_chat:
+                raise ValueError("--realtime-chat requires --realtime.")
             return
         if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
             mode = (

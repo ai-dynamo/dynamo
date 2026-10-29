@@ -70,6 +70,7 @@ def _make_config(**overrides) -> Mock:
         # optional gpu_memory_service package (absent in some test images).
         "gms_shadow_mode": False,
         "realtime": False,
+        "realtime_chat": False,
         "classify_worker": False,
     }
     defaults.update(overrides)
@@ -1673,6 +1674,68 @@ async def test_fpm_relay_starts_only_after_shadow_election(
         engine_client.engine_core.call_utility_async.assert_awaited_once_with(
             FPM_SET_WORKER_ID_METHOD_NAME, _RESTORED_ENDPOINT_ID
         )
+
+
+@pytest.mark.asyncio
+async def test_realtime_chat_serves_chat_on_a_sibling_endpoint(
+    restore_path_stubs, monkeypatch
+):
+    """--realtime-chat registers the endpoint types next to the realtime card."""
+    from dynamo.common.utils.endpoint_types import parse_endpoint_types
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.RealtimeTextHandler", Mock(from_engine=Mock())
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory.register_model_taint_route", Mock())
+    snapshot, engine_client = _restore_snapshot_engine()
+    engine_client.get_supported_tasks = AsyncMock(return_value=("generate",))
+    endpoints: dict[str, Mock] = {}
+
+    def endpoint(path: str) -> Mock:
+        return endpoints.setdefault(
+            path,
+            Mock(
+                connection_id=Mock(return_value=_RESTORED_ENDPOINT_ID),
+                first_token_source=AsyncMock(),
+                serve_endpoint=AsyncMock(),
+                serve_bidirectional_endpoint=AsyncMock(),
+            ),
+        )
+
+    register = AsyncMock()
+    factory = _make_factory(register_vllm_model_fn=register)
+    runtime = Mock(endpoint=Mock(side_effect=endpoint))
+    config = _make_config(
+        realtime=True,
+        realtime_chat=True,
+        namespace="dyn",
+        component="backend",
+        endpoint="generate",
+        model="m",
+        served_model_name="m",
+        use_vllm_tokenizer=False,
+        frontend_decoding=False,
+        endpoint_types="chat,completions",
+        dyn_default_thinking_mode=None,
+    )
+    shutdown_endpoints: list = []
+
+    await factory._create_realtime_worker(
+        runtime, config, asyncio.Event(), shutdown_endpoints, snapshot_engine=snapshot
+    )
+
+    realtime, chat = (
+        endpoints["dyn.backend.generate"],
+        endpoints["dyn.backend.generate_chat"],
+    )
+    assert [str(call.args[1]) for call in register.await_args_list] == [
+        str(ModelType.Realtime),
+        str(parse_endpoint_types("chat,completions")),
+    ]
+    assert [call.args[2] for call in register.await_args_list] == [realtime, chat]
+    assert shutdown_endpoints == [realtime, chat]
+    chat.serve_endpoint.assert_awaited_once()
+    realtime.serve_bidirectional_endpoint.assert_awaited_once()
 
 
 @pytest.mark.asyncio

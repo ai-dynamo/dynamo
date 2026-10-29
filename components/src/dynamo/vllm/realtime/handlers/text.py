@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 from dynamo._core import Context
@@ -17,11 +17,13 @@ from dynamo._core import Context
 from ..connection import RealtimeConnection, RealtimeTurn
 from ..events import (
     conversation_item_added_event,
+    conversation_item_deleted_event,
     conversation_item_done_event,
     invalid_request_error_event,
     response_content_part_event,
     response_created_event,
     response_done_event,
+    response_function_call_arguments_event,
     response_output_item_added_event,
     response_output_item_done_event,
     response_output_text_event,
@@ -29,10 +31,14 @@ from ..events import (
 )
 from ..factories import (
     ChatCompletionFactory,
+    HeldTextRequest,
     TextPrefillFactory,
     build_realtime_text_factories,
+    validate_chat_options,
+    validate_vllm_parsers,
 )
 from .text_utils import (
+    _chat_options,
     _max_output_tokens,
     _normalize_text_item,
     _realtime_usage,
@@ -61,8 +67,11 @@ class _TextTurn(RealtimeTurn):
         add_to_conversation: bool,
         items: list[dict[str, Any]],
         metadata: dict[str, str] | None = None,
+        tool_options: dict[str, Any] | None = None,
+        prefill: HeldTextRequest | None = None,
     ) -> None:
         super().__init__()
+        self.prefill = prefill
         self.response_id = f"resp_{uuid.uuid4().hex}"
         self.item_id = f"item_{uuid.uuid4().hex}"
         self.messages = messages
@@ -71,8 +80,12 @@ class _TextTurn(RealtimeTurn):
         self.add_to_conversation = add_to_conversation
         self.items = items
         self.metadata = metadata
+        self.tool_options = tool_options or {}
         self.previous_item_id = items[-1]["id"] if items else None
         self.text = ""
+        self.function_calls: list[dict[str, Any]] = []
+        self._function_call_positions: dict[int, int] = {}
+        self._announced: set[tuple[str, str]] = set()
         self.finished = False
 
         # Announce the turn even if generation is cancelled before its task starts.
@@ -110,6 +123,100 @@ class _TextTurn(RealtimeTurn):
             ),
         }
 
+    def function_call_events(self, call: dict[str, Any]) -> list[dict[str, Any]]:
+        """Accumulate one streamed chat tool-call delta as a Realtime function call."""
+        index = call.get("index", len(self.function_calls))
+        function = call.get("function") or {}
+        events = []
+        position = self._function_call_positions.get(index)
+        if position is None:
+            position = len(self.function_calls)
+            self._function_call_positions[index] = position
+            previous_item_id = (
+                self.function_calls[-1]["id"] if self.function_calls else self.item_id
+            )
+            item = {
+                "id": f"item_{uuid.uuid4().hex}",
+                "object": "realtime.item",
+                "type": "function_call",
+                "status": "in_progress",
+                "call_id": call.get("id") or f"call_{uuid.uuid4().hex}",
+                "name": function.get("name") or "",
+                "arguments": "",
+            }
+            self.function_calls.append(item)
+            events.append(
+                response_output_item_added_event(
+                    self.response_id, dict(item), position + 1
+                )
+            )
+            if self.add_to_conversation:
+                events.append(
+                    conversation_item_added_event(dict(item), previous_item_id)
+                )
+        item = self.function_calls[position]
+        if function.get("name") and not item["name"]:
+            item["name"] = function["name"]
+        if arguments := function.get("arguments"):
+            item["arguments"] += arguments
+            events.append(
+                response_function_call_arguments_event(
+                    "response.function_call_arguments.delta",
+                    self.response_id,
+                    item,
+                    position + 1,
+                    arguments,
+                )
+            )
+        return events
+
+    async def close_prefill(self) -> None:
+        """Close the held prefill request, which the turn owns until it ends."""
+        prefill, self.prefill = self.prefill, None
+        if prefill is not None:
+            await asyncio.shield(prefill.close())
+
+    async def emit_function_call(self, call: dict[str, Any]) -> None:
+        for event in self.function_call_events(call):
+            await self.events.put(event)
+            if event["type"].endswith(".added"):
+                self._announced.add((event["type"], event["item"]["id"]))
+
+    def _announced_calls(self) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in self.function_calls
+            if ("response.output_item.added", item["id"]) in self._announced
+        ]
+
+    def _function_call_final_events(self, status: str) -> list[dict[str, Any]]:
+        events = []
+        previous_item_id = self.item_id
+        for position, item in enumerate(self._announced_calls()):
+            item["status"] = "completed" if status == "completed" else "incomplete"
+            events.append(
+                response_function_call_arguments_event(
+                    "response.function_call_arguments.done",
+                    self.response_id,
+                    item,
+                    position + 1,
+                    item["arguments"],
+                )
+            )
+            events.append(
+                response_output_item_done_event(
+                    self.response_id, dict(item), position + 1
+                )
+            )
+            if (
+                self.add_to_conversation
+                and ("conversation.item.added", item["id"]) in self._announced
+            ):
+                self.items.append(item)
+                events.append(conversation_item_done_event(item, previous_item_id))
+            previous_item_id = item["id"]
+        return events
+
     def final_events(
         self,
         *,
@@ -134,12 +241,13 @@ class _TextTurn(RealtimeTurn):
         if self.add_to_conversation:
             self.items.append(item)
             events.append(conversation_item_done_event(item, self.previous_item_id))
+        events.extend(self._function_call_final_events(status))
         events.append(
             response_done_event(
                 self.response_id,
                 output_modalities=["text"],
                 max_output_tokens=self.wire_max_output_tokens,
-                output=[item],
+                output=[item, *(dict(call) for call in self._announced_calls())],
                 status=status,
                 status_details=status_details,
                 usage=_realtime_usage(usage),
@@ -155,21 +263,24 @@ class _TextPrefill:
     def __init__(
         self,
         *,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         factory: TextPrefillFactory,
+        tool_options: dict[str, Any] | None = None,
     ) -> None:
         self.text = ""
         self._text_bytes = 0
-        self._cancel_requested = False
+        self._committed = False
         self._updated = asyncio.Event()
-        self.task: asyncio.Task[None] = asyncio.create_task(
-            factory(messages, self.updates())
+        self.task: asyncio.Task[HeldTextRequest | None] = asyncio.create_task(
+            factory(messages, self.updates(), tool_options or {})
         )
 
     async def updates(self) -> AsyncGenerator[str, None]:
         while True:
             await self._updated.wait()
             self._updated.clear()
+            if self._committed:
+                return
             yield self.text
 
     def append(self, text: str) -> None:
@@ -182,16 +293,27 @@ class _TextPrefill:
             self._updated.set()
 
     def commit(self) -> None:
-        # Final generation reuses completed prefix blocks. Finishing another
-        # warming generation here would put speculative work on its critical path.
-        if not self._cancel_requested:
-            self._cancel_requested = True
-            self.task.cancel()
+        """End the updates, so the prefill returns the request holding its prefix."""
+        self._committed = True
+        self._updated.set()
+
+    async def held(self) -> HeldTextRequest | None:
+        """Return the held request for the response turn, which then owns closing it."""
+        self.commit()
+        (result,) = await asyncio.shield(
+            asyncio.gather(self.task, return_exceptions=True)
+        )
+        return result if isinstance(result, HeldTextRequest) else None
 
     async def cancel(self) -> None:
         self.commit()
+        self.task.cancel()
         # Session cancellation must not interrupt the engine's abort cleanup.
-        await asyncio.shield(asyncio.gather(self.task, return_exceptions=True))
+        (result,) = await asyncio.shield(
+            asyncio.gather(self.task, return_exceptions=True)
+        )
+        if isinstance(result, HeldTextRequest):
+            await asyncio.shield(result.close())
 
 
 class RealtimeTextHandler:
@@ -203,10 +325,14 @@ class RealtimeTextHandler:
         model_name: str,
         chat_completion_factory: ChatCompletionFactory,
         text_prefill_factory: TextPrefillFactory | None = None,
+        auto_tool_choice: bool = True,
+        chat_options_validator: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.model_name = model_name
         self._chat_completion_factory = chat_completion_factory
         self._text_prefill_factory = text_prefill_factory
+        self._auto_tool_choice = auto_tool_choice
+        self._chat_options_validator = chat_options_validator
 
     @classmethod
     def from_engine(
@@ -216,18 +342,44 @@ class RealtimeTextHandler:
         model_name: str,
         model_path: str,
         chat_template_path: str | None,
+        tool_parser: str | None = None,
+        reasoning_parser: str | None = None,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> "RealtimeTextHandler":
+        validate_vllm_parsers(tool_parser, reasoning_parser)
         chat_completion, text_prefill = build_realtime_text_factories(
             engine_client=engine_client,
             model_name=model_name,
             model_path=model_path,
             chat_template_path=chat_template_path,
+            tool_parser=tool_parser,
+            reasoning_parser=reasoning_parser,
+            default_chat_template_kwargs=default_chat_template_kwargs,
         )
         return cls(
             model_name=model_name,
             chat_completion_factory=chat_completion,
             text_prefill_factory=text_prefill,
+            auto_tool_choice=bool(tool_parser),
+            chat_options_validator=validate_chat_options,
         )
+
+    def _checked_chat_options(
+        self, session: dict[str, Any], response: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        options = _chat_options(session, response)
+        if (
+            not self._auto_tool_choice
+            and options.get("tools")
+            and options.get("tool_choice", "auto") == "auto"
+        ):
+            raise ValueError(
+                "tool_choice 'auto' needs a vLLM tool call parser on this worker; "
+                "use tool_choice 'required', 'none', or a named function"
+            )
+        if self._chat_options_validator is not None:
+            self._chat_options_validator(options)
+        return options
 
     def _validate_session(self, session: Any) -> str | None:
         if not isinstance(session, dict) or session.get("type") != "realtime":
@@ -240,6 +392,7 @@ class RealtimeTextHandler:
             return "automatic truncation is not supported; use truncation='disabled'"
         try:
             _validate_text_options(session, "session")
+            self._checked_chat_options(session)
             _max_output_tokens(session.get("max_output_tokens"))
         except ValueError as exc:
             return str(exc)
@@ -247,7 +400,9 @@ class RealtimeTextHandler:
 
     def _response_options(
         self, value: Any, session: dict[str, Any]
-    ) -> tuple[int | None, int | str, str, bool, bool, dict[str, str] | None]:
+    ) -> tuple[
+        int | None, int | str, str, bool, bool, dict[str, str] | None, dict[str, Any]
+    ]:
         response = {} if value is None else value
         if not isinstance(response, dict):
             raise ValueError("response must be an object")
@@ -276,6 +431,7 @@ class RealtimeTextHandler:
             response.get("conversation") != "none",
             response.get("input") != [],
             metadata,
+            self._checked_chat_options(session, response),
         )
 
     async def _run_turn(self, turn: _TextTurn, context: Context) -> None:
@@ -293,7 +449,7 @@ class RealtimeTextHandler:
         stopped.add_done_callback(cancel_generation)
         try:
             stream = await self._chat_completion_factory(
-                turn.messages, turn.max_output_tokens
+                turn.messages, turn.max_output_tokens, turn.tool_options, turn.prefill
             )
             async for frame in stream:
                 if context.is_stopped():
@@ -312,6 +468,8 @@ class RealtimeTextHandler:
                     usage = payload.get("usage") or usage
                     for choice in payload.get("choices", []):
                         finish_reason = choice.get("finish_reason") or finish_reason
+                        for call in choice.get("delta", {}).get("tool_calls") or []:
+                            await turn.emit_function_call(call)
                         delta = choice.get("delta", {}).get("content")
                         if delta:
                             if not isinstance(delta, str):
@@ -367,6 +525,7 @@ class RealtimeTextHandler:
             # Cancellation may interrupt an output queue put, not stream.__anext__.
             if stream is not None:
                 await stream.aclose()
+            await turn.close_prefill()
 
     async def generate(
         self,
@@ -388,6 +547,7 @@ class RealtimeTextHandler:
         active_response: _TextTurn | None = None
         active_prefill: _TextPrefill | None = None
         committed_prefill: _TextPrefill | None = None
+        prefilled_turns: list[_TextTurn] = []
 
         def append_item(item: dict[str, Any]) -> None:
             previous_item_id = items[-1]["id"] if items else None
@@ -425,7 +585,10 @@ class RealtimeTextHandler:
             event_type = event.get("type")
             running = current_response()
 
-            if event_type == "session.update":
+            if event_type in (
+                "session.update",
+                "session.chat_completion_options.update",
+            ):
                 if active_prefill is not None:
                     emit_error(
                         event,
@@ -433,7 +596,13 @@ class RealtimeTextHandler:
                         "session cannot change while the text buffer is active",
                     )
                     return
-                update = event.get("session")
+                update = (
+                    event.get("session")
+                    if event_type == "session.update"
+                    else {
+                        "chat_completion_options": event.get("chat_completion_options")
+                    }
+                )
                 if not isinstance(update, dict):
                     emit_error(event, "invalid_session", "session must be an object")
                     return
@@ -475,6 +644,37 @@ class RealtimeTextHandler:
                     emit_error(event, "invalid_item", str(exc))
                     return
                 append_item(item)
+            elif event_type == "conversation.item.delete":
+                if running is not None or active_prefill is not None:
+                    emit_error(
+                        event,
+                        "response_in_progress",
+                        "conversation cannot change while input or response is active",
+                    )
+                    return
+                if committed_prefill is not None:
+                    emit_error(
+                        event,
+                        "response_required",
+                        "create a response before starting another input turn",
+                    )
+                    return
+                item_id = event.get("item_id")
+                if not isinstance(item_id, str):
+                    emit_error(event, "invalid_item", "item_id must be a string")
+                    return
+                index = next(
+                    (i for i, item in enumerate(items) if item["id"] == item_id), None
+                )
+                if index is None:
+                    emit_error(
+                        event,
+                        "item_not_found",
+                        f"conversation item {item_id!r} not found",
+                    )
+                    return
+                del items[index]
+                connection.emit(conversation_item_deleted_event(item_id))
             elif event_type == "input_text.append":
                 if running is not None:
                     emit_error(
@@ -505,6 +705,7 @@ class RealtimeTextHandler:
                     active_prefill = _TextPrefill(
                         messages=_text_prompt(items, session["instructions"]),
                         factory=self._text_prefill_factory,
+                        tool_options=_chat_options(session),
                     )
                 try:
                     active_prefill.append(text)
@@ -555,6 +756,7 @@ class RealtimeTextHandler:
                         add_to_conversation,
                         use_conversation,
                         metadata,
+                        tool_options,
                     ) = self._response_options(event.get("response"), session)
                     prompt = _text_prompt(
                         items if use_conversation else [], instructions
@@ -566,8 +768,11 @@ class RealtimeTextHandler:
                 except ValueError as exc:
                     emit_error(event, "invalid_response", str(exc))
                     return
-                if committed_prefill is not None:
-                    await committed_prefill.cancel()
+                prefill = (
+                    await committed_prefill.held()
+                    if committed_prefill is not None
+                    else None
+                )
                 active_response = await connection.ensure_turn(
                     lambda: _TextTurn(
                         messages=prompt,
@@ -576,8 +781,15 @@ class RealtimeTextHandler:
                         add_to_conversation=add_to_conversation,
                         items=items,
                         metadata=metadata,
+                        tool_options=tool_options,
+                        prefill=prefill,
                     )
                 )
+                if prefill is not None:
+                    prefilled_turns[:] = [
+                        turn for turn in prefilled_turns if turn.prefill is not None
+                    ]
+                    prefilled_turns.append(active_response)
                 committed_prefill = None
                 connection.finish_active_turn()
             elif event_type == "response.cancel":
@@ -600,6 +812,7 @@ class RealtimeTextHandler:
                 # Realtime clients must receive terminal item/content events even
                 # when generation is cancelled.
                 await connection.cancel_turn_preserving_output(running)
+                await running.close_prefill()
                 for terminal_event in running.final_events(
                     status="cancelled",
                     status_details={
@@ -627,3 +840,5 @@ class RealtimeTextHandler:
                 await active_prefill.cancel()
             if committed_prefill is not None:
                 await committed_prefill.cancel()
+            for turn in prefilled_turns:
+                await turn.close_prefill()
