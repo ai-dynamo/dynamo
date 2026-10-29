@@ -34,6 +34,9 @@ outputs:
   power_agent:
     description: 'Whether power-agent files changed'
     value: ${{ steps.filter.outputs.power_agent_any_modified }}
+  global_discovery_mcs:
+    description: 'Whether Multi-Cluster Services module or chart files changed'
+    value: ${{ steps.filter.outputs.global_discovery_mcs_any_modified }}
   deploy:
     description: 'Whether deploy files changed'
     value: ${{ steps.filter.outputs.deploy_any_modified }}

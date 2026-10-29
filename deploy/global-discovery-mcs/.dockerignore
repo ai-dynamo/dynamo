@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Built binaries, downloaded tools and envtest assets.
+bin/
+# Coverage output of make test.
+cover.out

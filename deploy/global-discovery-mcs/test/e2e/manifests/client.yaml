@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A client pod for requests through a derived Service. The test applies it in
+# the clusters that import the echo Service.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client
+  labels:
+    app: client
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: client
+      image: __BUSYBOX_IMAGE__
+      imagePullPolicy: IfNotPresent
+      command:
+        - sleep
+        - "86400"

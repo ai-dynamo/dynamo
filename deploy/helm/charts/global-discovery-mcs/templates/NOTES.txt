@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+Multi-Cluster Services {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+{{- if .Values.crds.install }}
+
+CRDs: ServiceExport and ServiceImport (multicluster.x-k8s.io, mcs-api v0.5.2) and
+ClusterProperty (about.k8s.io){{ if .Values.crds.keep }}, kept on uninstall (helm.sh/resource-policy: keep){{ end }}.
+{{- else }}
+
+CRDs: not installed (crds.install=false); the ServiceExport, ServiceImport and
+ClusterProperty CRDs must already be served by the cluster.
+{{- end }}
+
+{{- if .Values.registry.enabled }}
+
+mcs-registry ({{ .Values.registry.store }} store, {{ .Values.registry.replicas }} replica(s)):
+
+  kubectl rollout status deployment/{{ include "global-discovery-mcs.registry.fullname" . }} -n {{ .Release.Namespace }}
+  kubectl port-forward -n {{ .Release.Namespace }} deployment/{{ include "global-discovery-mcs.registry.fullname" . }} {{ .Values.registry.ports.http }} {{ .Values.registry.ports.admin }}
+  curl -s{{ if .Values.registry.tls.secretName }}k https{{ else }} http{{ end }}://localhost:{{ .Values.registry.ports.http }}/v1/clustersets
+  curl -s localhost:{{ .Values.registry.ports.admin }}/readyz
+
+  In-cluster gRPC URL: {{ if .Values.registry.tls.secretName }}https{{ else }}http{{ end }}://{{ include "global-discovery-mcs.registry.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.registry.ports.grpc }}
+{{- if eq .Values.registry.store "dynamodb" }}
+  DynamoDB table "{{ .Values.registry.dynamodb.table }}": credentials come from the pod identity (IRSA or
+  EKS Pod Identity on the ServiceAccount); see deploy/global-discovery-mcs/docs/iam.md.
+{{- end }}
+{{- end }}
+
+{{- if .Values.controller.enabled }}
+
+mcs-controller ({{ .Values.controller.replicas }} replica(s), leader election {{ if .Values.controller.leaderElect }}on{{ else }}off{{ end }}), registry:
+{{- range (include "global-discovery-mcs.controller.registryURLs" . | fromJsonArray) }}
+  - {{ . }}
+{{- end }}
+
+  kubectl rollout status deployment/{{ include "global-discovery-mcs.controller.fullname" . }} -n {{ .Release.Namespace }}
+  kubectl logs -n {{ .Release.Namespace }} deployment/{{ include "global-discovery-mcs.controller.fullname" . }} --tail=50
+
+Export a Service to the clusterset by labelling it (or by creating its ServiceExport):
+
+  kubectl label service <name> -n <namespace> dynamo.nvidia.com/mcs-export=true
+  kubectl get serviceexports,serviceimports -A
+{{- end }}

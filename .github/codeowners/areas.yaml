@@ -75,10 +75,15 @@ areas:
   - lib/global-view-broadcaster/
   - components/src/dynamo/pool_relay/
   - container/global-discovery-service.yaml
+  - deploy/global-discovery-mcs/
+  - deploy/helm/charts/global-discovery-mcs/
   - lib/global-view-receiver/
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
+  - docs/fern/pages/developer-guide/**/multi-cluster-services-registry.md
   - lib/global-*/**
+  - docs/fern/pages/kubernetes/kv-aware-routing/multi-cluster-services.md
   - docs/fern/pages/kubernetes/kv-aware-routing/pool-relay.md
+  - docs/fern/pages/reference/components/global-discovery-mcs-configuration.md
   - docs/fern/pages/reference/components/pool-relay-configuration.md
   - lib/bindings/python/rust/llm/pool_relay.rs
   - lib/llm/src/pool_relay.rs
@@ -1294,6 +1299,10 @@ shared:
   owners:
   - global-router
   - ops
+- glob: deploy/global-discovery-mcs/Dockerfile
+  owners:
+  - global-router
+  - ops
 - glob: deploy/operator/Dockerfile
   owners:
   - operator
@@ -1314,11 +1323,13 @@ shared:
   - operator
   - gms
   - planner
+  - global-router
 - glob: .github/actions/check-deploy-component/action.yml
   owners:
   - ops
   - operator
   - gms
+  - global-router
 - glob: .github/actions/setup-dynamo-operator/action.yml
   owners:
   - ops

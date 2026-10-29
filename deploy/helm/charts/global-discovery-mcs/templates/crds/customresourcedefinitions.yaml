@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- /*
+The CRDs are templates, not crds/ files, so that crds.install can turn them
+off and helm upgrade updates them. files/crds is a copy of
+deploy/global-discovery-mcs/config/crd/bases (make sync-crds); edit the
+module's files, not these.
+*/}}
+{{- if .Values.crds.install }}
+{{- $labels := include "global-discovery-mcs.labels" . | fromYaml }}
+{{- $first := true }}
+{{- range $path, $_ := .Files.Glob "files/crds/*.yaml" }}
+{{- $crd := $.Files.Get $path | fromYaml }}
+{{- if or (hasKey $crd "Error") (ne ($crd.kind | default "") "CustomResourceDefinition") }}
+{{- fail (printf "%s is not a CustomResourceDefinition: %v" $path ($crd.Error | default $crd.kind)) }}
+{{- end }}
+{{- $meta := $crd.metadata }}
+{{- $_ := set $meta "labels" (merge ($meta.labels | default dict) $labels) }}
+{{- if $.Values.crds.keep }}
+{{- $_ := set $meta "annotations" (merge ($meta.annotations | default dict) (dict "helm.sh/resource-policy" "keep")) }}
+{{- end }}
+{{- if not $first }}
+---
+{{- end }}
+{{- $first = false }}
+{{ toYaml $crd }}
+{{- end }}
+{{- end }}

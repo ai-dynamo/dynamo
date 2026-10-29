@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: 'Build Deploy Component'
-description: 'Build and push a deploy component container (operator or power-agent)'
+description: 'Build and push a deploy component container (operator, power-agent or global-discovery-mcs)'
 
 inputs:
   component:
-    description: 'Component to build: operator or power-agent'
+    description: 'Component to build: operator, power-agent or global-discovery-mcs'
     required: true
   image_tag:
     description: 'Image tag to apply to built images'
@@ -111,7 +111,7 @@ runs:
       id: settings
       shell: bash
       run: |
-        if [[ "${{ inputs.component }}" == "operator" ]]; then
+        if [[ "${{ inputs.component }}" == "operator" || "${{ inputs.component }}" == "global-discovery-mcs" ]]; then
           echo "build_platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
         else
           echo "build_platforms=linux/amd64" >> $GITHUB_OUTPUT
@@ -124,7 +124,8 @@ runs:
         # -${TARGETARCH}.cdx.json to subtract each arch's own floor.
         #
         # run_compliance gates the extract/upload steps: it is true only for the
-        # shipped, /legal-bearing stage. power-agent has no baseline.
+        # shipped, /legal-bearing stage. power-agent and global-discovery-mcs
+        # have no baseline.
         BASELINE_STEM=""
         RUN_COMPLIANCE=""
         case "${{ inputs.component }}" in
