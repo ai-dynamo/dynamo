@@ -3,10 +3,10 @@
 
 //! Pool discovery for the Global Router, served over HTTP.
 //!
-//! The contract comes first: [`pool_discovery`], the store traits that the
+//! The contract comes first: [`pool_discovery`], the traits that the
 //! service reads and writes through.
 //!
-//! [`backends`] holds the stores behind that contract: in memory, and from
+//! [`backends`] implements those traits: registrations kept in memory, and
 //! the EndpointSlices that SIG Multicluster (MCS) imports.
 
 pub mod backends;
