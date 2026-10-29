@@ -19,7 +19,6 @@ pub(crate) const RANK: u32 = 0;
 /// How long the load may go without a valid answer before the worker
 /// withdraws.
 pub(crate) const STALENESS_LIMIT: Duration = Duration::from_secs(30);
-/// Bound on one `GetLoad` call, at startup and in each poll.
 pub(crate) const GET_LOAD_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_AGE: Duration = Duration::from_secs(5);
