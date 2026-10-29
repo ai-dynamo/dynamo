@@ -576,6 +576,24 @@ Emitted by the Global Frontend at `/metrics` on its serving port. It forwards ea
   **Experimental.** Requests this Global Frontend has sent to each pool and not yet finished. Other replicas count their own. Labeled by `pool` and `region`; read at scrape time, so a pool removed from the configuration loses its series.
 </ParamField>
 
+With `--router-policy affinity`, the Global Frontend also shows what its selector weighs and decides. These families are read at scrape time.
+
+<ParamField path="dynamo_global_frontend_pool_occupancy_ratio" type="gauge">
+  **Experimental.** How full each pool is against its own capacity, as the selector sees it, 1 being full. Labeled by `pool`, `region` and `resource`: `slots` is requests in flight over the requests the pool's workers can run at once, and `kv` is the KV blocks every request in flight would hold over the pool's blocks. The selector weighs the fuller of the two. A pool has no series while its load is unknown (no fresh report from its PoolRelay), and no `kv` series until the Relay has a complete KV view. The selector treats a pool with unknown load as full.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_region_round_trip_seconds" type="gauge">
+  **Experimental.** The measured round trip to each region: the median TCP connect time to its pools, measured every 30 seconds. Labeled by `region`.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_affinity_selections_total" type="counter">
+  **Experimental.** Requests placed by the affinity selector, by what became of their session's pin. Labeled by `outcome`: `stayed` (the session's pinned pool took it), `moved` (the pin moved to another pool), `new` (the session had no live pin) or `no_session` (no `x-dynamo-session-id`). The share of turns kept on their session's pool is `stayed / (stayed + moved)`.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_affinity_pinned_sessions" type="gauge">
+  **Experimental.** Sessions pinned in this Global Frontend. Pins are per replica and expire after `--session-idle-secs` without a request; an expired pin counts until the next sweep, at most a minute later.
+</ParamField>
+
 ## Related
 
 - [Metric Labels](metric-labels.mdx) — the dimensions attached to these metrics.

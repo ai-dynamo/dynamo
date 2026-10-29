@@ -179,7 +179,7 @@ async fn main() -> Result<()> {
         .build()
         .context("build the pool HTTP client")?;
     let in_flight = Arc::new(InFlightTracker::new());
-    let metrics = Metrics::new(args.region.clone(), in_flight.clone());
+    let mut metrics = Metrics::new(args.region.clone(), in_flight.clone());
     let selector: Arc<dyn PoolSelector> = match args.router_policy {
         RouterPolicy::RoundRobin => Arc::new(RoundRobinSelector::new()),
         RouterPolicy::LeastInFlight => Arc::new(LeastInFlightSelector::new(in_flight.clone())),
@@ -205,12 +205,13 @@ async fn main() -> Result<()> {
             ));
             let idle = Duration::from_secs(args.session_idle_secs);
             let selector = Arc::new(AffinitySelector::new(
-                signals,
+                signals.clone(),
                 region,
                 args.headroom_factor,
                 idle,
             ));
             tokio::spawn(sweep_pins(selector.clone(), shutdown.child_token()));
+            metrics = metrics.with_routing(signals, selector.clone());
             selector
         }
     };

@@ -7,17 +7,20 @@
 //! from the request body: a request's `model` is whatever the client sent,
 //! and would mint a series per string. Pool frontends report what needs the
 //! stream parsed, such as inter-token latency and token counts.
+//!
+//! With affinity routing, the metrics also show what the selector weighs and
+//! decides (see [`Metrics::with_routing`]).
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use axum::http::StatusCode;
-use dynamo_global_router::{InFlightTracker, Pool};
+use dynamo_global_router::{AffinitySelector, InFlightTracker, Pool, PoolSignals};
 use dynamo_llm::http::service::metrics::generate_log_buckets;
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 use prometheus::{
-    Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGaugeVec, Opts, Registry,
-    TextEncoder,
+    GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry, TextEncoder,
 };
 
 use crate::PoolSnapshot;
@@ -43,8 +46,20 @@ pub struct Metrics {
     time_to_first_byte: HistogramVec,
     duration: HistogramVec,
     in_flight: IntGaugeVec,
+    routing: Option<Routing>,
     /// A scrape resets and refills the gauges, so scrapes must not overlap.
     scrape: Mutex<()>,
+}
+
+/// What the affinity selector weighs and decides, read at each scrape.
+#[derive(Debug)]
+struct Routing {
+    signals: Arc<PoolSignals>,
+    affinity: Arc<AffinitySelector>,
+    occupancy: GaugeVec,
+    round_trips: GaugeVec,
+    selections: IntCounterVec,
+    pinned: IntGauge,
 }
 
 impl Metrics {
@@ -131,8 +146,68 @@ impl Metrics {
             time_to_first_byte,
             duration,
             in_flight,
+            routing: None,
             scrape: Mutex::new(()),
         }
+    }
+
+    /// Adds what the affinity selector `affinity` weighs, from `signals`, and
+    /// what it decides.
+    pub fn with_routing(
+        mut self,
+        signals: Arc<PoolSignals>,
+        affinity: Arc<AffinitySelector>,
+    ) -> Self {
+        let registry = &self.registry;
+        let occupancy = register(
+            registry,
+            GaugeVec::new(
+                Opts::new(
+                    name("pool_occupancy_ratio"),
+                    "How full each pool is against its own capacity, as the selector \
+                     sees it, by resource: slots or kv. Absent while unknown",
+                ),
+                &["pool", "region", "resource"],
+            ),
+        );
+        let round_trips = register(
+            registry,
+            GaugeVec::new(
+                Opts::new(
+                    name("region_round_trip_seconds"),
+                    "The measured round trip to each region's pools",
+                ),
+                &["region"],
+            ),
+        );
+        let selections = register(
+            registry,
+            IntCounterVec::new(
+                Opts::new(
+                    name("affinity_selections_total"),
+                    "Requests placed by the affinity selector, by what became of their \
+                     session's pin: stayed, moved, new or no_session",
+                ),
+                &["outcome"],
+            ),
+        );
+        let pinned = register(
+            registry,
+            IntGauge::new(
+                name("affinity_pinned_sessions"),
+                "Sessions pinned in this process, including expired pins until the \
+                 next sweep",
+            ),
+        );
+        self.routing = Some(Routing {
+            signals,
+            affinity,
+            occupancy,
+            round_trips,
+            selections,
+            pinned,
+        });
+        self
     }
 
     /// Counts a request answered without a pool. `error_type` is one of
@@ -186,7 +261,42 @@ impl Metrics {
                 .with_label_values(&[&pool.name, &pool.location.region])
                 .set(clamp_u64_to_i64(self.tracker.get(&pool.id)));
         }
+        if let Some(routing) = &self.routing {
+            routing.refresh(pools);
+        }
         TextEncoder::new().encode_to_string(&self.registry.gather())
+    }
+}
+
+impl Routing {
+    fn refresh(&self, pools: &PoolSnapshot) {
+        self.occupancy.reset();
+        for pool in pools.pools() {
+            let Some(occupancy) = self.signals.occupancy(&pool.id) else {
+                continue;
+            };
+            let resources = [("slots", Some(occupancy.slots)), ("kv", occupancy.kv)];
+            for (resource, value) in resources {
+                if let Some(value) = value {
+                    self.occupancy
+                        .with_label_values(&[&pool.name, &pool.location.region, resource])
+                        .set(value);
+                }
+            }
+        }
+        self.round_trips.reset();
+        for (region, round_trip) in self.signals.region_round_trips().iter() {
+            self.round_trips
+                .with_label_values(&[region])
+                .set(round_trip.as_secs_f64());
+        }
+        // The selector keeps the counts; each scrape catches the counters up.
+        for (outcome, total) in self.affinity.selections() {
+            let counter = self.selections.with_label_values(&[outcome]);
+            counter.inc_by(total.saturating_sub(counter.get()));
+        }
+        let pinned = i64::try_from(self.affinity.pinned_sessions()).unwrap_or(i64::MAX);
+        self.pinned.set(pinned);
     }
 }
 
@@ -257,5 +367,75 @@ impl ResponseMetrics {
 impl Drop for ResponseMetrics {
     fn drop(&mut self) {
         self.duration.observe(self.received.elapsed().as_secs_f64());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use dynamo_global_router::{LoadReport, PoolSelector, RoutingRequest};
+
+    use super::*;
+    use crate::catalog::tests::pool;
+
+    #[test]
+    fn shows_what_the_affinity_selector_weighs_and_decides() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let in_flight = Arc::new(InFlightTracker::new());
+        let signals = Arc::new(PoolSignals::new(in_flight.clone()));
+        // Blue has a report: half its slots, and 1,000 of 16,000 KV blocks
+        // for 16 running requests (2,000 for all 32). Green has none.
+        let window = Duration::from_secs(60);
+        let report = LoadReport {
+            in_flight: 32,
+            generating: 16,
+            max_concurrency: Some(64),
+            window,
+        };
+        signals.record_load(&blue.id, report);
+        signals.record_kv(&blue.id, 1000, 16000, window);
+        let tokyo = ("ap-northeast-1".to_owned(), Duration::from_millis(135));
+        signals.set_region_round_trips(HashMap::from([tokyo]));
+        let region = blue.location.region.clone();
+        let idle = Duration::from_secs(60);
+        let affinity = Arc::new(AffinitySelector::new(signals.clone(), region, 2.0, idle));
+        let metrics = Metrics::new(None, in_flight).with_routing(signals, affinity.clone());
+        let pools = PoolSnapshot::new(vec![blue.clone(), green.clone()]);
+
+        let request = RoutingRequest::new("qwen").with_session(Some("s"));
+        affinity.select(&request, &[&blue, &green]).unwrap();
+        let text = metrics.render(&pools).unwrap();
+        let occupancy = "dynamo_global_frontend_pool_occupancy_ratio";
+        let blue_labels = r#"pool="ohio/dynamo/blue",region="us-east-2""#;
+        for line in [
+            format!("{occupancy}{{{blue_labels},resource=\"slots\"}} 0.5"),
+            format!("{occupancy}{{{blue_labels},resource=\"kv\"}} 0.125"),
+            r#"dynamo_global_frontend_region_round_trip_seconds{region="ap-northeast-1"} 0.135"#
+                .to_owned(),
+            r#"dynamo_global_frontend_affinity_selections_total{outcome="new"} 1"#.to_owned(),
+            "dynamo_global_frontend_affinity_pinned_sessions 1".to_owned(),
+        ] {
+            assert!(
+                text.lines().any(|sample| sample == line),
+                "{line} in\n{text}"
+            );
+        }
+        assert!(!text.contains(&format!(r#"{occupancy}{{pool="ohio/dynamo/green""#)));
+
+        // Counters catch up with the selector at each scrape.
+        affinity.select(&request, &[&blue, &green]).unwrap();
+        let text = metrics.render(&pools).unwrap();
+        for outcome in ["new", "stayed"] {
+            let line = format!(
+                r#"dynamo_global_frontend_affinity_selections_total{{outcome="{outcome}"}} 1"#
+            );
+            assert!(
+                text.lines().any(|sample| sample == line),
+                "{line} in\n{text}"
+            );
+        }
     }
 }

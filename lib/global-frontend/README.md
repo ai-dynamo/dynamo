@@ -91,7 +91,11 @@ pool. The `pool` label is the pool's
 says whether the pool is in `--region` (`unknown` without it), which gives the
 share of requests kept in the region. Nothing is labelled from the request
 body. Inter-token latency and token counts need the stream parsed, so they come
-from the pool frontends' own metrics. See the
+from the pool frontends' own metrics. With `affinity`, `/metrics` also shows
+what the selector weighs and decides: each pool's occupancy by slots and KV
+(absent while its load is unknown), the round trip to each region, each
+request's outcome for its session's pin (`stayed`, `moved`, `new`,
+`no_session`), and the sessions pinned. See the
 [Metrics Catalog](../../docs/fern/pages/reference/observability/metrics-catalog.mdx#global-frontend-metrics)
 for each family.
 
