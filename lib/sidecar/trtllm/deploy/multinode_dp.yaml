@@ -76,7 +76,6 @@ spec:
       podTemplate:
         spec:
           initContainers:
-          # Start the Dynamo sidecar before the engine.
           - name: runtime
             image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261023-75d0686@sha256:fc13f0a227d78499fbaed257e2373bcb54df32ca8e1fcea1e0ad6289087cbcb8
             restartPolicy: Always

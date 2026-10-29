@@ -5,6 +5,7 @@ package dynamo
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -628,6 +629,11 @@ func TestMultinodeSidecarRendering(t *testing.T) {
 		for _, provider := range []commonconsts.MultinodeDeploymentType{commonconsts.MultinodeDeploymentTypeGrove, commonconsts.MultinodeDeploymentTypeLWS} {
 			for _, roleTemplates := range []bool{false, true} {
 				for _, workerRuntime := range []bool{false, true} {
+					// Without a worker template the leader always declares runtime, so a
+					// worker runtime only matters when the backend's launch depends on it.
+					if !roleTemplates && workerRuntime && slices.Equal(backend.args(RoleLeader, true), backend.args(RoleLeader, false)) {
+						continue
+					}
 					for _, engineProbesAndPorts := range []bool{true, false} {
 						for _, componentType := range []v1beta1.ComponentType{v1beta1.ComponentTypeWorker, v1beta1.ComponentTypePrefill, v1beta1.ComponentTypeDecode} {
 							t.Run(fmt.Sprintf("%s/%s/roles=%t/worker-runtime=%t/engine-probes-and-ports=%t/%s", backend.framework, provider, roleTemplates, workerRuntime, engineProbesAndPorts, componentType), func(t *testing.T) {
