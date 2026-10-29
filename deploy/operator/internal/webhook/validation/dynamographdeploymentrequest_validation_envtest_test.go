@@ -1096,6 +1096,16 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 }
 
 func TestDynamoGraphDeploymentRunSpecIsImmutable(t *testing.T) {
+	emptyHardware := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+	emptyHardware.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{}
+	partialHardware := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+	partialHardware.Spec.Hardware.NumGPUsPerNode = nil
+	emptyStatic := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+	partialStatic := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+	partialStatic.Spec.Workload.Static.InputTokens = new(int32(1024))
+	missingSLA := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+	missingSLA.Spec.Objective.SLA = nil
+
 	tests := []struct {
 		name       string
 		oldRun     *nvidiacomv1beta2.DynamoGraphDeploymentRun
@@ -1116,6 +1126,29 @@ func TestDynamoGraphDeploymentRunSpecIsImmutable(t *testing.T) {
 		{
 			name:       "model-only Run is rejected before controller reconciliation",
 			run:        v1beta2ModelOnlyRunForAdmission(v1beta2AdmissionModel),
+			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+		},
+		{
+			name: "exactly empty hardware is an accepted discovery opt-out",
+			run:  emptyHardware,
+		},
+		{
+			name:       "partial hardware is rejected before controller reconciliation",
+			run:        partialHardware,
+			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+		},
+		{
+			name: "exactly empty static workload is an accepted defaults opt-out",
+			run:  emptyStatic,
+		},
+		{
+			name:       "partial static workload is rejected before controller reconciliation",
+			run:        partialStatic,
+			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+		},
+		{
+			name:       "missing SLA is rejected before controller reconciliation",
+			run:        missingSLA,
 			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
 		},
 	}

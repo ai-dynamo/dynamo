@@ -323,7 +323,7 @@ spec:
               type: object
               x-kubernetes-validations:
                 - message: spec must be a fully resolved Request admission snapshot
-                  rule: has(self.model) && has(self.backends) && size(self.backends) > 0 && has(self.hardware) && ((!has(self.hardware.gpu) && !has(self.hardware.numGpusPerNode)) || (has(self.hardware.gpu) && has(self.hardware.gpu.sku) && has(self.hardware.gpu.budget) && has(self.hardware.numGpusPerNode))) && has(self.workload) && has(self.workload.static) && has(self.objective) && has(self.objective.mode) && has(self.objective.metric) && has(self.recommendation) && has(self.recommendation.maxCandidates) && self.recommendation.maxCandidates > 0
+                  rule: has(self.model) && has(self.backends) && size(self.backends) > 0 && has(self.hardware) && ((!has(self.hardware.gpu) && !has(self.hardware.numGpusPerNode)) || (has(self.hardware.gpu) && has(self.hardware.gpu.sku) && has(self.hardware.gpu.budget) && has(self.hardware.numGpusPerNode))) && has(self.workload) && has(self.workload.static) && ((!has(self.workload.static.inputTokens) && !has(self.workload.static.outputTokens) && !has(self.workload.static.load)) || (has(self.workload.static.inputTokens) && has(self.workload.static.outputTokens) && has(self.workload.static.load))) && has(self.objective) && has(self.objective.mode) && has(self.objective.metric) && has(self.objective.sla) && has(self.recommendation) && has(self.recommendation.maxCandidates) && self.recommendation.maxCandidates > 0
             status:
               description: DynamoGraphDeploymentRunStatus represents one search execution's observed state.
               properties:
