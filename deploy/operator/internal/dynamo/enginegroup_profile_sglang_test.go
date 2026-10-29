@@ -20,6 +20,7 @@ package dynamo
 import (
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -246,6 +247,14 @@ func TestResolveSGLangProfileGeometryConfigurationErrors(t *testing.T) {
 			option:          sglangNodesOption,
 			value:           "many",
 			wantError:       "parse SGLang option --nnodes value \"many\"",
+		},
+		{
+			name:            "maximum EP exceeds the API replica range",
+			initialReplicas: 4,
+			gpusPerPod:      1,
+			option:          sglangMaximumEPSizeOption,
+			value:           "2147483648",
+			wantError:       "SGLang maximum EP size 2147483648 exceeds the Engine Group replica range",
 		},
 		{
 			name:            "duplicate alias",
@@ -513,6 +522,7 @@ func TestResolveSGLangProfileGeometryAutomaticBootstrap(t *testing.T) {
 		{name: "one-GPU-per-pod EP2 to EP3", initial: 2, maximum: 3},
 		{name: "EP4 with successive growth up to EP8", initial: 4, maximum: 8},
 		{name: "EP8 with successive growth up to EP16", initial: 8, maximum: 16},
+		{name: "largest supported initial and maximum counts", initial: math.MaxInt32 - 1, maximum: math.MaxInt32},
 		{name: "derive seed from immutable engine arguments", initial: 4, maximum: 8, deriveInitial: true},
 		{name: "EP1 automatic seed is unsupported", initial: 1, maximum: 2, unsupported: true},
 		{name: "EP1 derived seed is unsupported", initial: 1, maximum: 2, deriveInitial: true, unsupported: true},

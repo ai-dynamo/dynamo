@@ -45,6 +45,8 @@ export DYN_DISCOVERY_BACKEND=file   # single host: no etcd or NATS needed
 lib/sidecar/trtllm/launch/agg.sh
 ```
 
+For KV-aware routing, use `launch/agg_kv_router.sh` (two GPUs) or `launch/disagg_kv_router.sh` (four GPUs). Both enable OpenEngine load metrics and publish one ZMQ event source per worker.
+
 In a second terminal:
 
 ```bash
@@ -69,6 +71,8 @@ kubectl create secret generic hf-token-secret -n <namespace> \
 kubectl apply -f lib/sidecar/trtllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 ```
+
+For KV routing, use `deploy/agg_kv_router.yaml` or `deploy/disagg_kv_router.yaml`. These examples pin matching Dynamo frontend and sidecar nightlies (`20261023-75d0686`) and `nvcr.io/nvidia/tensorrt-llm/release:1.4.0a0.dev202610180820` for the engine.
 
 ## Topologies
 

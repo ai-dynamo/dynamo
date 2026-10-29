@@ -237,21 +237,36 @@ func applyEngineGroupTransitionIntent(replica *api.EngineGroupReplicaStatus, tra
 	}
 }
 
-func countAvailableEngineGroupReplicas(replicas []api.EngineGroupReplicaStatus, width int32) int32 {
+func countAvailableEngineGroupReplicas(status domain.GroupStatus, width int32) int32 {
+	topology := status.Membership.Observed.CommittedTopology
+	if topology.Generation <= 0 {
+		return 0
+	}
+
+	// Retirement intent does not change which complete allocations are observed serving.
 	var count int32
-	for _, replica := range replicas {
-		if replica.CurrentAllocation == nil || replica.CurrentAllocation.Availability != api.EngineGroupReplicaAvailabilityAvailable {
+	for _, member := range topology.Replicas {
+		if len(member.Members) != int(width) {
 			continue
 		}
-		available := true
-		var active int32
-		for _, member := range replica.NativeMembers {
-			if member.Membership == api.EngineGroupReplicaMembershipActive {
-				active++
-				available = available && member.Traffic == api.EngineGroupMemberTrafficAdmitted
+		record, found := engineGroupReplicaRecord(status.Registry, member.ReplicaID)
+		if !found || record.Current == nil || len(record.Current.Members) != int(width) ||
+			!domain.MembershipMatchesIncarnation(member, *record.Current) {
+			continue
+		}
+		allocation, found := engineGroupAllocationByReplica(status.Capacity.Observed, member.ReplicaID)
+		if !found || !allocation.Available || !domain.SameIncarnation(allocation.Incarnation, *record.Current) {
+			continue
+		}
+
+		// Admission must cover the complete committed native-member and process identity set.
+		var admitted []domain.ReplicaMembership
+		for _, observed := range status.Traffic.Observed.Admitted {
+			if observed.ReplicaID == member.ReplicaID {
+				admitted = append(admitted, observed)
 			}
 		}
-		if available && active == width {
+		if domain.SameMembershipSet([]domain.ReplicaMembership{member}, admitted) {
 			count++
 		}
 	}
