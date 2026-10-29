@@ -24,6 +24,16 @@ from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
+# etcd lease TTL for every process these tests launch. The runtime default has
+# been 30s since #15266, the same as wait_for_processes_to_terminate's budget,
+# so a process could still be inside its lease when the wait ended. 10s is the
+# pre-#15266 value and leaves time for engine teardown after lease loss.
+# With this TTL each process logs "etcd keepalive detection can take as long as
+# the primary lease TTL" once at startup (default keepalive 15s + 10s >= 10s).
+# That warning is harmless here: stopping etcd closes the connection, so the
+# keepalive stream fails at once and keepalive ping timing plays no part.
+ETCD_LEASE_TTL_SECS = 10
+
 
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
     """Process manager for Dynamo frontend with ETCD HA support."""
@@ -36,6 +46,7 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
         extra_env = {
             "DYN_LOG": "debug",
             "ETCD_ENDPOINTS": ",".join(etcd_endpoints),
+            "ETCD_LEASE_TTL": str(ETCD_LEASE_TTL_SECS),
         }
         # terminate_all_matching_process_names=False is required here: the frontend
         # is launched as `python -m dynamo.frontend`, so its _command_name is the

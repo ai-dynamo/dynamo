@@ -15,6 +15,7 @@ import requests
 
 from tests.conftest import NatsServer
 from tests.fault_tolerance.etcd_ha.utils import (
+    ETCD_LEASE_TTL_SECS,
     DynamoFrontendProcess,
     EtcdCluster,
     send_inference_request,
@@ -98,6 +99,7 @@ class DynamoWorkerProcess(ManagedProcess):
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
         env["ETCD_ENDPOINTS"] = ",".join(etcd_endpoints)
+        env["ETCD_LEASE_TTL"] = str(ETCD_LEASE_TTL_SECS)
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
         if detect_target_device() == "xpu":
@@ -353,7 +355,9 @@ def test_etcd_ha_failover_vllm_disaggregated(
 @pytest.mark.gpu_1
 @pytest.mark.xpu_1
 @pytest.mark.e2e
-@pytest.mark.nightly
+# TODO: revert to pytest.mark.nightly after pre_merge validation
+# on this PR (see .ai/ci-guidelines.md).
+@pytest.mark.pre_merge
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(600)
 def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
