@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use dynamo_global_discovery_client::{
     Capacity, DiscoveryClientError, GlobalDiscoveryClient, Lease, PoolKey, PoolLocation,
-    PoolRegistration, ReplicaEndpoint, ReplicaId,
+    PoolRegistration, RouterReplica, RouterReplicaId,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -77,24 +77,19 @@ async fn serve_register(
     Json(json!({ "heartbeat_interval_s": 5, "lease_duration_s": 15 }))
 }
 
-fn replica(id: &str, url: &str) -> ReplicaEndpoint {
-    ReplicaEndpoint {
-        replica: ReplicaId(id.into()),
+fn replica(id: &str, url: &str) -> RouterReplica {
+    RouterReplica {
+        replica: RouterReplicaId(id.into()),
         url: url.parse().unwrap(),
     }
 }
 
 fn registration() -> PoolRegistration {
     PoolRegistration {
-        key: PoolKey {
-            site_id: "aws-west".into(),
-            namespace: "dynamo".into(),
-            dgd_name: "mocker-west-1".into(),
-        },
+        key: PoolKey::new("aws-west", "dynamo", "mocker-west-1").unwrap(),
         location: PoolLocation {
             region: "us-west-2".into(),
             availability_zone: Some("usw2-az1".into()),
-            cluster: Some("aws-west".into()),
             datacenter: None,
         },
         model: "Qwen/Qwen3-0.6B".into(),
@@ -102,7 +97,7 @@ fn registration() -> PoolRegistration {
         frontends: vec!["http://10.1.22.20:8000".parse().unwrap()],
         capacity: vec![Capacity {
             sku: "H100".into(),
-            count: 8,
+            workers: 8,
         }],
     }
 }
@@ -188,29 +183,22 @@ async fn registers_a_pool() {
 
     let lease = client.register_pool(&registration()).await.unwrap();
 
-    assert_eq!(
-        lease,
-        Lease {
-            heartbeat_interval: Duration::from_secs(5),
-            lease_duration: Duration::from_secs(15),
-        }
-    );
+    assert_eq!(lease, Lease::new(5, 15).unwrap());
     // The field names are the contract with the service, so compare the JSON
     // it received rather than decoding it back into the same struct.
     assert_eq!(
         fake.0.lock().unwrap().registrations,
         [json!({
-            "key": { "site_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1" },
+            "key": { "cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1" },
             "location": {
                 "region": "us-west-2",
                 "availability_zone": "usw2-az1",
-                "cluster": "aws-west",
                 "datacenter": null
             },
             "model": "Qwen/Qwen3-0.6B",
             "capabilities": ["aggregated"],
             "frontends": ["http://10.1.22.20:8000/"],
-            "capacity": [{ "sku": "H100", "count": 8 }]
+            "capacity": [{ "sku": "H100", "workers": 8 }]
         })]
     );
 }

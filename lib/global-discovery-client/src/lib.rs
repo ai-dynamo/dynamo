@@ -6,15 +6,13 @@
 //! ([`GlobalDiscoveryClient::routers`]) and registering its pool
 //! ([`GlobalDiscoveryClient::register_pool`]).
 //!
-//! The crate also defines the router replica types and the list-and-watch
-//! events.
+//! The types it sends and receives are `dynamo-global-common`'s, re-exported
+//! here, so the client reads and writes the JSON as the service does.
 
 mod client;
-mod replicas;
-mod watch;
-mod wire;
 
 pub use client::{DiscoveryClientError, GlobalDiscoveryClient};
-pub use replicas::{ReplicaEndpoint, ReplicaEvent, ReplicaId};
-pub use watch::{Completeness, Snapshot, WatchEvent};
-pub use wire::{Capacity, Lease, PoolKey, PoolLocation, PoolRegistration};
+pub use dynamo_global_common::{
+    Capacity, Lease, LeaseError, PoolKey, PoolKeyError, PoolLocation, PoolRegistration,
+    RouterReplica, RouterReplicaId,
+};
