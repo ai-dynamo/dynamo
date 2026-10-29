@@ -368,13 +368,53 @@ func TestDynamoGraphDeploymentRequestV1beta2DefaultingAdmission(t *testing.T) {
 			check:      expectV1beta2ExplicitValues,
 		},
 		{
-			name: "v1beta2 unknown SKU without budget reports the manual override",
+			name: "v1beta2 explicit node width wins while admission discovers a missing budget",
+			request: v1beta2DefaultingRequest(func(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) {
+				spec.Hardware = &nvidiacomv1beta2.HardwareSpec{
+					GPU:            &nvidiacomv1beta2.GPUHardwareSpec{SKU: new("h200_sxm")},
+					NumGPUsPerNode: new(int32(4)),
+				}
+			}),
+			discovered: discoveredH200,
+			check:      expectV1beta2H200Budget8Width4,
+		},
+		{
+			name: "v1beta2 explicit empty hardware opts out of discovery and typed defaults",
+			request: v1beta2DefaultingRequest(func(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) {
+				spec.Hardware = &nvidiacomv1beta2.HardwareSpec{}
+			}),
+			discoveryErr: errors.New("discovery must not run"),
+			check:        expectV1beta2EmptyHardwareOptOut,
+		},
+		{
+			name: "v1beta2 explicit SKU and budget discover the missing node width",
+			request: v1beta2DefaultingRequest(func(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) {
+				spec.Hardware = &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{
+					SKU: new("h200_sxm"), Budget: new(int32(4)),
+				}}
+			}),
+			discovered: discoveredH200,
+			check:      expectV1beta2H200Budget4Width8,
+		},
+		{
+			name: "v1beta2 fully explicit hardware bypasses discovery",
+			request: v1beta2DefaultingRequest(func(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) {
+				spec.Hardware = &nvidiacomv1beta2.HardwareSpec{
+					GPU:            &nvidiacomv1beta2.GPUHardwareSpec{SKU: new("h200_sxm"), Budget: new(int32(4))},
+					NumGPUsPerNode: new(int32(4)),
+				}
+			}),
+			discoveryErr: errors.New("discovery must not run"),
+			check:        expectV1beta2H200Budget4Width4,
+		},
+		{
+			name: "v1beta2 unknown SKU without capacity or topology reports the manual override",
 			request: v1beta2DefaultingRequest(func(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) {
 				spec.Hardware = &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{
 					SKU: new("future_accelerator"),
 				}}
 			}),
-			wantCreateErr: `spec.hardware.gpu.budget: Required value: cannot discover a GPU budget for SKU "future_accelerator" because it is not known to the bundled AISimulate catalog; set spec.hardware.gpu.budget explicitly`,
+			wantCreateErr: `spec.hardware.gpu.budget: Required value: cannot discover GPU capacity or topology for SKU "future_accelerator" because it is not known to the bundled AISimulate catalog; set spec.hardware.gpu.budget and spec.hardware.numGpusPerNode explicitly`,
 		},
 		{
 			name:       "v1beta2 metadata-only update is idempotent and does not rediscover hardware",
@@ -389,7 +429,7 @@ func TestDynamoGraphDeploymentRequestV1beta2DefaultingAdmission(t *testing.T) {
 			checkUpdate: expectV1beta2MetadataOnlyUpdate,
 		},
 		{
-			name: "v1beta2 removing hardware on update rediscovers both fields",
+			name: "v1beta2 removing hardware on update rediscovers all hardware fields",
 			request: v1beta2DefaultingRequest(func(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) {
 				spec.Hardware = &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{
 					SKU: new("h200_sxm"), Budget: new(int32(4)),
@@ -549,8 +589,40 @@ func expectV1beta2HardwareUpdate(t *testing.T, request *nvidiacomv1beta2.DynamoG
 func expectV1beta2H200x8Hardware(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
 	t.Helper()
 	hardware := request.Spec.Hardware
-	if hardware == nil || hardware.GPU == nil || ptr.Deref(hardware.GPU.SKU, "") != "h200_sxm" || ptr.Deref(hardware.GPU.Budget, 0) != 8 {
-		t.Fatalf("hardware = %#v, want SKU h200_sxm and budget 8", hardware)
+	if hardware == nil || hardware.GPU == nil || ptr.Deref(hardware.GPU.SKU, "") != "h200_sxm" || ptr.Deref(hardware.GPU.Budget, 0) != 8 || ptr.Deref(hardware.NumGPUsPerNode, 0) != 8 {
+		t.Fatalf("hardware = %#v, want SKU h200_sxm, budget 8 and numGpusPerNode 8", hardware)
+	}
+}
+
+func expectV1beta2H200Budget8Width4(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+	t.Helper()
+	hardware := request.Spec.Hardware
+	if hardware == nil || hardware.GPU == nil || ptr.Deref(hardware.GPU.SKU, "") != "h200_sxm" || ptr.Deref(hardware.GPU.Budget, 0) != 8 || ptr.Deref(hardware.NumGPUsPerNode, 0) != 4 {
+		t.Fatalf("hardware = %#v, want SKU h200_sxm, budget 8 and explicit numGpusPerNode 4", hardware)
+	}
+}
+
+func expectV1beta2EmptyHardwareOptOut(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+	t.Helper()
+	hardware := request.Spec.Hardware
+	if hardware == nil || hardware.GPU != nil || hardware.NumGPUsPerNode != nil {
+		t.Fatalf("hardware = %#v, want the explicit empty-object opt-out", hardware)
+	}
+}
+
+func expectV1beta2H200Budget4Width8(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+	t.Helper()
+	hardware := request.Spec.Hardware
+	if hardware == nil || hardware.GPU == nil || ptr.Deref(hardware.GPU.SKU, "") != "h200_sxm" || ptr.Deref(hardware.GPU.Budget, 0) != 4 || ptr.Deref(hardware.NumGPUsPerNode, 0) != 8 {
+		t.Fatalf("hardware = %#v, want SKU h200_sxm, budget 4 and discovered numGpusPerNode 8", hardware)
+	}
+}
+
+func expectV1beta2H200Budget4Width4(t *testing.T, request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+	t.Helper()
+	hardware := request.Spec.Hardware
+	if hardware == nil || hardware.GPU == nil || ptr.Deref(hardware.GPU.SKU, "") != "h200_sxm" || ptr.Deref(hardware.GPU.Budget, 0) != 4 || ptr.Deref(hardware.NumGPUsPerNode, 0) != 4 {
+		t.Fatalf("hardware = %#v, want fully explicit SKU h200_sxm, budget 4 and numGpusPerNode 4", hardware)
 	}
 }
 
