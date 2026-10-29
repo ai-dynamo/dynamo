@@ -19,6 +19,7 @@ package v1beta1
 
 import (
 	batchv1 "k8s.io/api/batch/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -406,8 +407,8 @@ type FeaturesSpec struct {
 // If all four fields are set, discovery is skipped.
 type HardwareSpec struct {
 	// GPUSKU selects the GPU type to target.
-	// When omitted, auto-detected by selecting the GPU with the highest
-	// node count, then highest VRAM. In mixed-GPU clusters, set this to
+	// When omitted, auto-detected as the GPU type of the node with the most GPUs
+	// (ties broken by highest VRAM per GPU). In mixed-GPU clusters, set this to
 	// choose which GPU type to use. Discovery and totalGpus are then
 	// restricted to nodes matching this SKU.
 	// The legacy value gb200_sxm is deprecated; use gb200 instead.
@@ -416,21 +417,30 @@ type HardwareSpec struct {
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
 
 	// VRAMMB is the VRAM per GPU in MiB.
-	// When omitted, auto-detected from cluster GPU nodes.
+	// When omitted, auto-detected from cluster GPU nodes. Nominal values within 10%
+	// of the measured value identify the same shape. When this value differs by more
+	// than 10% from the auto-selected shape and totalGpus is omitted, the request is rejected.
 	// +optional
 	VRAMMB *float64 `json:"vramMb,omitempty"`
 
 	// TotalGPUs is the GPU budget for profiling and deployment.
 	// The profiler uses this to determine parallelism and replica count.
-	// When omitted, computed by counting GPUs on discovered nodes
-	// (filtered by gpuSku when set), temporarily capped at 32 to
-	// limit profiler search space. This cap may be removed in a future
-	// release. Set this field explicitly to override.
+	// When omitted, computed by summing GPUs on nodes matching the selected
+	// shape: GPU type, GPUs per node, and VRAM per GPU. The result is temporarily
+	// capped at 32 to limit profiler search space. For example, same-type nodes
+	// with 8 and 4 GPUs represent 12 GPUs of inventory, while the selected 8-GPU
+	// shape yields an automatic budget of 8. This cap may be removed in a future
+	// release. Set this field explicitly to override the derived budget or use a
+	// numGpusPerNode or vramMb value that differs from the selected shape. A shape
+	// override without an explicit totalGpus is rejected.
 	// +optional
 	TotalGPUs *int32 `json:"totalGpus,omitempty"`
 
 	// NumGPUsPerNode is the number of GPUs per node.
-	// When omitted, auto-detected from cluster GPU nodes.
+	// When omitted, auto-detected as the highest GPU count on any discovered node
+	// of the selected GPU type. In clusters whose nodes have different GPU counts,
+	// set this explicitly to the node size you intend to schedule on. When this value
+	// differs from the auto-selected shape and totalGpus is omitted, the request is rejected.
 	// +optional
 	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
 	// Interconnect describes the primary GPU-to-GPU interconnect *within a node*.
@@ -478,18 +488,17 @@ type HardwareSpec struct {
 	RDMA *bool `json:"rdma,omitempty"`
 }
 
-// DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
-// Only the Model field is required; all other fields are optional and have sensible defaults.
-type DynamoGraphDeploymentRequestSpec struct {
+// DynamoGraphDeploymentRequestNativeSpec contains the native v1beta1 request fields.
+type DynamoGraphDeploymentRequestNativeSpec struct {
 	// Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
 	// Can be a HuggingFace ID or a private model name.
-	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	Model string `json:"model"`
+	// +optional
+	Model string `json:"model,omitempty"`
 
 	// Backend specifies the inference backend to use for profiling and deployment.
 	// +optional
-	// +kubebuilder:default=auto
+	// +python-default=auto
 	// +kubebuilder:validation:Enum=auto;sglang;trtllm;vllm
 	Backend BackendType `json:"backend,omitempty"`
 
@@ -537,7 +546,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// SearchStrategy controls the profiling search depth.
 	// "rapid" performs a fast sweep; "thorough" explores more configurations.
 	// +optional
-	// +kubebuilder:default=rapid
+	// +python-default=rapid
 	// +kubebuilder:validation:Enum=rapid;thorough
 	SearchStrategy SearchStrategy `json:"searchStrategy,omitempty"`
 
@@ -545,8 +554,26 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// after profiling completes. If false, the generated spec is stored in status
 	// for manual review and application.
 	// +optional
-	// +kubebuilder:default=true
+	// +python-default=true
 	AutoApply *bool `json:"autoApply,omitempty"`
+}
+
+// DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
+// Native v1beta1 fields and the V1Beta2 conversion envelope are mutually exclusive.
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) != has(self.model)",message="exactly one of native v1beta1 fields or v1beta2 must be specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.backend) || has(self.image) || has(self.runtimeVersionOverride) || has(self.modelCache) || has(self.hardware) || has(self.workload) || has(self.sla) || has(self.overrides) || has(self.features) || has(self.searchStrategy) || has(self.autoApply))",message="v1beta2 is mutually exclusive with native v1beta1 fields"
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) == has(oldSelf.v1beta2) && (!has(self.v1beta2) || self.v1beta2 == oldSelf.v1beta2)",message="the conversion carrier is immutable"
+type DynamoGraphDeploymentRequestSpec struct {
+	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`
+
+	// V1Beta2 losslessly preserves a native v1beta2 spec while this object is
+	// represented through v1beta1. It is mutually exclusive with native fields.
+	// This field is a read-only conversion view; modify the request through the
+	// native v1beta2 API.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	V1Beta2 *apiextensionsv1.JSON `json:"v1beta2,omitempty"`
 }
 
 // ParetoConfig is retained for compatibility with status objects produced by
@@ -586,8 +613,8 @@ type DeploymentInfoStatus struct {
 	AvailableReplicas *int32 `json:"availableReplicas,omitempty"`
 }
 
-// DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
-type DynamoGraphDeploymentRequestStatus struct {
+// DynamoGraphDeploymentRequestNativeStatus contains the native v1beta1 status fields.
+type DynamoGraphDeploymentRequestNativeStatus struct {
 	// Phase is the high-level lifecycle phase of the deployment request.
 	// +optional
 	Phase DGDRPhase `json:"phase,omitempty"`
@@ -627,6 +654,19 @@ type DynamoGraphDeploymentRequestStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
+// DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.phase) || has(self.profilingPhase) || has(self.dgdName) || has(self.profilingJobName) || has(self.conditions) || has(self.profilingResults) || has(self.deploymentInfo) || has(self.observedGeneration))",message="v1beta2 is mutually exclusive with native v1beta1 status fields"
+type DynamoGraphDeploymentRequestStatus struct {
+	DynamoGraphDeploymentRequestNativeStatus `json:",inline"`
+
+	// V1Beta2 losslessly preserves a native v1beta2 status while this object is
+	// represented through v1beta1.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	V1Beta2 *apiextensionsv1.JSON `json:"v1beta2,omitempty"`
+}
+
 // DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.
 // It provides a simplified, SLA-driven interface for deploying inference models on Dynamo.
 // Users specify a model and optional performance targets; the controller handles profiling,
@@ -652,6 +692,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:printcolumn:name="Message",type=string,JSONPath=`.status.conditions[?(@.type=="Succeeded")].message`
 // +kubebuilder:printcolumn:name="DGD",type=string,JSONPath=`.status.dgdName`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:validation:XValidation:rule="!has(self.status) || !(has(self.status.v1beta2) || has(self.status.phase) || has(self.status.profilingPhase) || has(self.status.dgdName) || has(self.status.profilingJobName) || has(self.status.conditions) || has(self.status.profilingResults) || has(self.status.deploymentInfo) || has(self.status.observedGeneration)) || has(self.spec.v1beta2) == has(self.status.v1beta2)",message="nonempty status must use the representation selected by spec"
 type DynamoGraphDeploymentRequest struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

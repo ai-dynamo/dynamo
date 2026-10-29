@@ -13,9 +13,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/utils/ptr"
 )
 
 const currentWorkerHashAnnotation = "nvidia.com/current-worker-hash"
@@ -142,10 +140,8 @@ func legacyWorkerHashGoldenCases() []legacyWorkerHashGoldenCase {
 								Operator: corev1.TolerationOpExists,
 							}},
 							Volumes: []corev1.Volume{{
-								Name: "cache",
-								VolumeSource: corev1.VolumeSource{
-									EmptyDir: &corev1.EmptyDirVolumeSource{},
-								},
+								Name:     "cache",
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
 							}},
 						},
 					},
@@ -173,7 +169,7 @@ func legacyWorkerHashGoldenCases() []legacyWorkerHashGoldenCase {
 				"worker": {
 					ComponentType:  commonconsts.ComponentTypeWorker,
 					Envs:           []corev1.EnvVar{{Name: "MODEL", Value: "llama"}},
-					EnvFromSecret:  ptr.To("worker-secret"),
+					EnvFromSecret:  new("worker-secret"),
 					VolumeMounts:   []VolumeMount{{Name: "models", MountPoint: "/models", UseAsCompilationCache: true}},
 					SharedMemory:   &SharedMemorySpec{Size: resource.MustParse("2Gi")},
 					LivenessProbe:  &corev1.Probe{InitialDelaySeconds: 5},
@@ -202,7 +198,7 @@ func legacyWorkerHashGoldenCases() []legacyWorkerHashGoldenCase {
 					ComponentType:  commonconsts.ComponentTypeWorker,
 					Annotations:    map[string]string{"ignored": "true"},
 					Labels:         map[string]string{"ignored": "true"},
-					Replicas:       ptr.To(int32(3)),
+					Replicas:       new(int32(3)),
 					Autoscaling:    &Autoscaling{Enabled: true, MinReplicas: 1, MaxReplicas: 10},
 					Ingress:        &IngressSpec{Enabled: true, Host: "example.com"},
 					ModelRef:       &ModelReference{Name: "model"},
@@ -232,11 +228,9 @@ func legacyWorkerHashGoldenCases() []legacyWorkerHashGoldenCase {
 				"worker": {
 					ComponentType: commonconsts.ComponentTypeWorker,
 					ReadinessProbe: &corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							HTTPGet: &corev1.HTTPGetAction{
-								Path: "/health",
-								Port: intstr.FromString("http"),
-							},
+						HTTPGet: &corev1.HTTPGetAction{
+							Path: "/health",
+							Port: intstr.FromString("http"),
 						},
 					},
 				},
@@ -461,10 +455,8 @@ func legacyWorkerHashAfterBetaRoundTrip(src *DynamoGraphDeployment) (string, err
 
 func legacyWorkerHashDGDFromServices(services map[string]*DynamoComponentDeploymentSharedSpec) *DynamoGraphDeployment {
 	return &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "legacy-worker-hash",
-			Namespace: "ns",
-		},
+		Name:      "legacy-worker-hash",
+		Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: services,
 		},
@@ -473,10 +465,8 @@ func legacyWorkerHashDGDFromServices(services map[string]*DynamoComponentDeploym
 
 func legacyWorkerHashDGD() *DynamoGraphDeployment {
 	return &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "legacy-worker-hash",
-			Namespace: "ns",
-		},
+		Name:      "legacy-worker-hash",
+		Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"frontend": {
@@ -487,7 +477,7 @@ func legacyWorkerHashDGD() *DynamoGraphDeployment {
 					ComponentType: commonconsts.ComponentTypeWorker,
 					Annotations:   map[string]string{"resource": "base"},
 					Labels:        map[string]string{"resource": "base"},
-					Replicas:      ptr.To(int32(2)),
+					Replicas:      new(int32(2)),
 					Envs:          []corev1.EnvVar{{Name: "MODEL", Value: "llama"}},
 					ExtraPodMetadata: &ExtraPodMetadata{
 						Labels:      map[string]string{"rollout": "base"},
@@ -512,7 +502,7 @@ func legacyWorkerHashDGDWithResourceMetadataAndNonWorkerChanges() *DynamoGraphDe
 	mutated := legacyWorkerHashDGD()
 	mutated.Spec.Services["worker"].Annotations = map[string]string{"resource": "changed"}
 	mutated.Spec.Services["worker"].Labels = map[string]string{"resource": "changed"}
-	mutated.Spec.Services["worker"].Replicas = ptr.To(int32(99))
+	mutated.Spec.Services["worker"].Replicas = new(int32(99))
 	mutated.Spec.Services["worker"].Ingress = &IngressSpec{
 		Enabled: true,
 		Host:    "changed.example.com",

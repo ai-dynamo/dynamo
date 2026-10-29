@@ -49,9 +49,9 @@ EXPECTED_TYPE_COUNTS = {
     # (PodReference, PodSnapshotSource/Spec/Status,
     # PodSnapshotContentSource/Spec/Status, PodSnapshotReference), which are
     # owned by github.com/ai-dynamo/snapshot.
-    "nvidia.com/v1alpha1": 69,
-    "nvidia.com/v1beta1": 74,
-    "nvidia.com/v1beta2": 28,
+    "nvidia.com/v1alpha1": 71,
+    "nvidia.com/v1beta1": 76,
+    "nvidia.com/v1beta2": 35,
     "operator.config.dynamo.nvidia.com/v1alpha1": 29,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
@@ -76,6 +76,13 @@ V1BETA1_DEDUP_TYPES = (
     "DynamoGraphDeploymentStatus",
     "DynamoGraphDeploymentSpec",
     "DynamoComponentDeploymentSharedSpec",
+)
+V1BETA2_DEDUP_TYPES = (
+    "DynamoGraphDeploymentRequest",
+    "DynamoGraphDeploymentRequestSpec",
+    "DynamoGraphDeploymentRequestStatus",
+    "HardwareSpec",
+    "WorkloadSpec",
 )
 
 
@@ -219,6 +226,26 @@ def test_v1beta1_shared_type_names_use_deduplicated_anchors(
         assert display in by_display, f"v1beta1 missing renamed type '{display}'"
         expected_anchor = f"v1beta1-{type_name.lower()}"
         assert by_display[display].anchor == expected_anchor
+
+
+def test_v1beta2_shared_type_names_use_deduplicated_anchors(
+    reference: kubernetes_api_discovery.KubernetesReference,
+) -> None:
+    """``fix-api-anchors.py`` prefixes actual v1beta2 duplicates with ``v1beta2-``."""
+    v1beta2_pkg = next(p for p in reference.packages if p.name == "nvidia.com/v1beta2")
+    by_display = {t.display_name: t for t in v1beta2_pkg.types}
+    for type_name in V1BETA2_DEDUP_TYPES:
+        display = f"v1beta2 {type_name}"
+        assert display in by_display, f"v1beta2 missing renamed type '{display}'"
+        expected_anchor = f"v1beta2-{type_name.lower()}"
+        assert by_display[display].name == type_name
+        assert by_display[display].anchor == expected_anchor
+
+    run = next(t for t in v1beta2_pkg.types if t.name == "DynamoGraphDeploymentRun")
+    run_spec = next(field for field in run.fields if field.name == "spec")
+    assert (
+        run_spec.type == "[DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec)"
+    )
 
 
 def test_removed_dynamocheckpoint_types_are_absent(

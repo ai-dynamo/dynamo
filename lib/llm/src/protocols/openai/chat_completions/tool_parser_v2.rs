@@ -1,44 +1,42 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Tool calls routed through the `dynamo-parsers-v2` streaming parser, bypassing the jail.
-//!
-//! The families in `V2_FAMILIES` (Qwen3-Coder, DeepSeek-V4) stream
-//! straight through their `dynamo_parsers_v2` parser instead of
-//! `JailedStream`: the v2 parser owns incremental
-//! tool-call emission and drops a parameter value truncated at EOF rather than
-//! guessing it. The jail is never built for these families in either path
-//! (`apply_stream` for streaming, `parse_complete` for batch). Within this legacy
-//! route, other families and non-`auto` tool_choice use the v1 jail / aggregate-
-//! finalize path. Requests selected for UnifiedParser use a separate route in
-//! `preprocessor.rs` and do not depend on this module's gate. The parser is selected
-//! by family name via `dynamo_parsers_v2::create_tool_parser_for_family`, so adding
-//! a family is a one-line change here plus support in that crate.
+//! Parser-generation validation and legacy guided-JSON conversion.
+//! Compatible families use `unified_parser` for streaming and batch.
 
+#[cfg(test)]
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
 use async_stream::stream;
+#[cfg(test)]
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk, FinishReason,
     FunctionCallStream, FunctionType,
 };
 use dynamo_runtime::config::environment_names::llm as env_llm;
+#[cfg(test)]
 use dynamo_runtime::protocols::annotated::Annotated;
+#[cfg(test)]
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
 
 use dynamo_parsers::tool_calling::{
     CalledFunction, ToolCallResponse, ToolCallType, ToolDefinition,
 };
-use dynamo_parsers_v2::{Tool as ToolV2, ToolCallDelta, ToolParser, create_tool_parser_for_family};
+use dynamo_parsers_v2::create_tool_parser_for_family;
+#[cfg(test)]
+use dynamo_parsers_v2::{Tool as ToolV2, ToolCallDelta, ToolParser};
 
 #[cfg(test)]
 use dynamo_parsers_v2::{
-    UnifiedEvent, UnifiedParserEvent, UnifiedParserExt, create_unified_parser_for_family,
+    UnifiedEvent, UnifiedParserEvent, UnifiedParserExt, UnifiedParserStartingState,
+    create_unified_parser_for_family,
 };
 
 use crate::protocols::openai::GuidedToolConstraint;
 
+#[cfg(test)]
 use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_template};
 
 // TODO: when glm47 is added here,
@@ -211,9 +209,26 @@ pub(crate) fn parse_complete_unified(
     tools: Option<&[ToolDefinition]>,
     family: &str,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, String, String)> {
+    parse_complete_unified_with_events(content, tools, family)
+        .map(|(calls, reasoning, text, _)| (calls, reasoning, text))
+}
+
+#[cfg(test)]
+pub(crate) fn parse_complete_unified_with_events(
+    content: &str,
+    tools: Option<&[ToolDefinition]>,
+    family: &str,
+) -> anyhow::Result<(
+    Vec<ToolCallResponse>,
+    String,
+    String,
+    Vec<super::ResponseOutputEvent>,
+)> {
     let v2_tools = to_v2_tools(tools);
     let mut parser = create_unified_parser_for_family(family, &v2_tools)?;
+    parser.preserve_message_phases(true);
     let events = parser.parse_complete(content)?;
+    let mut ordered = Vec::new();
 
     let mut tool_calls = Vec::new();
     let mut reasoning = String::new();
@@ -221,21 +236,47 @@ pub(crate) fn parse_complete_unified(
     for event in events {
         match event {
             UnifiedEvent::Reasoning { text: t } => reasoning.push_str(&t),
-            UnifiedEvent::Text { text: t } => text.push_str(&t),
-            UnifiedEvent::ToolCall { name, arguments } => tool_calls.push(ToolCallResponse {
-                id: format!("call-{}", Uuid::new_v4()),
-                tp: ToolCallType::Function,
-                function: CalledFunction {
-                    name,
-                    // `UnifiedEvent` carries a typed `Value`; the wire wants a string.
-                    arguments: serde_json::to_string(&arguments)
-                        .unwrap_or_else(|_| "{}".to_string()),
-                },
-            }),
+            UnifiedEvent::Text { text: t } => {
+                text.push_str(&t);
+                ordered.push(super::ResponseOutputEvent::Text(t));
+            }
+            UnifiedEvent::MessageStart { phase } => ordered.push(
+                super::ResponseOutputEvent::Boundary(super::MessageBoundary::Start(match phase {
+                    dynamo_parsers_v2::unified::MessagePhase::Commentary => {
+                        dynamo_protocols::types::responses::MessagePhase::Commentary
+                    }
+                    dynamo_parsers_v2::unified::MessagePhase::FinalAnswer => {
+                        dynamo_protocols::types::responses::MessagePhase::FinalAnswer
+                    }
+                })),
+            ),
+            UnifiedEvent::MessageEnd => ordered.push(super::ResponseOutputEvent::Boundary(
+                super::MessageBoundary::End,
+            )),
+            UnifiedEvent::ToolCall { name, arguments } => {
+                let id = format!("call-{}", Uuid::new_v4());
+                ordered.push(super::ResponseOutputEvent::ToolCall(id.clone()));
+                tool_calls.push(ToolCallResponse {
+                    id,
+                    tp: ToolCallType::Function,
+                    function: CalledFunction {
+                        name,
+                        // `UnifiedEvent` carries a typed `Value`; the wire wants a string.
+                        arguments: serde_json::to_string(&arguments)
+                            .unwrap_or_else(|_| "{}".to_string()),
+                    },
+                });
+            }
         }
     }
 
-    Ok((tool_calls, reasoning, text))
+    if !ordered
+        .iter()
+        .any(|event| matches!(event, super::ResponseOutputEvent::Boundary(_)))
+    {
+        ordered.clear();
+    }
+    Ok((tool_calls, reasoning, text, ordered))
 }
 
 /// Convert the two guided-JSON response shapes into parser-native tool calls.
@@ -305,6 +346,7 @@ pub(crate) fn parse_complete_guided_json(
 /// later deltas for that index carry only argument fragments (`id`/`type`/`name`
 /// `None`), matching the OpenAI streaming tool-call contract. `opened` tracks the
 /// indices already opened; shared by the tool-only and unified streaming states.
+#[cfg(test)]
 fn emit_tool_chunks(
     opened: &mut HashSet<usize>,
     calls: Vec<ToolCallDelta>,
@@ -317,6 +359,7 @@ fn emit_tool_chunks(
         .map(|delta| {
             let first = opened.insert(delta.tool_index);
             ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: delta.tool_index as u32,
                 id: first.then(|| format!("call-{}", Uuid::new_v4())),
                 r#type: first.then_some(FunctionType::Function),
@@ -332,11 +375,13 @@ fn emit_tool_chunks(
 
 /// Per-choice streaming state: one parser plus the set of tool indices whose
 /// opening delta (id + type + function name) has already been emitted.
+#[cfg(test)]
 struct ChoiceState {
     parser: Box<dyn ToolParser>,
     opened: HashSet<usize>,
 }
 
+#[cfg(test)]
 impl ChoiceState {
     fn new(family: &str, tools: &[ToolV2]) -> anyhow::Result<Self> {
         Ok(Self {
@@ -359,6 +404,7 @@ type UnifiedChoiceState = super::unified_parser::ChoiceState;
 
 /// Finish every choice that has not received an upstream finish reason. This is
 /// called before a usage-only chunk when one exists, with EOF as a fallback.
+#[cfg(test)]
 fn finish_unterminated_choices(
     states: &mut HashMap<u32, ChoiceState>,
     finished: &mut HashSet<u32>,
@@ -448,10 +494,19 @@ fn finish_unterminated_choices_unified(
         if let Some(last) = choices.last_mut() {
             last.finish_reason = state.unterminated_finish_reason();
         }
+        let mut boundaries = state.take_message_boundaries();
+        boundaries.resize(choices.len(), None);
         responses.extend(
             choices
                 .into_iter()
-                .map(|choice| response_with_choice(template, choice)),
+                .zip(boundaries)
+                .map(|(choice, boundary)| {
+                    let mut response = response_with_choice(template, choice);
+                    if let Some(data) = &mut response.data {
+                        data.message_boundary = boundary;
+                    }
+                    response
+                }),
         );
     }
     responses
@@ -474,6 +529,7 @@ fn response_with_choice(
 /// content and its tool-call deltas become OpenAI tool-call chunks. The jail is never
 /// built. `finish()` runs on a choice's terminating chunk (and again at stream end as
 /// a backstop) so a value truncated mid-stream is dropped instead of leaking markup.
+#[cfg(test)]
 pub(crate) fn apply_stream<S>(
     stream_in: S,
     tool_definitions: Option<Vec<ToolDefinition>>,
@@ -658,9 +714,68 @@ pub(crate) fn apply_unified_stream<S>(
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
 {
+    apply_unified_stream_with_constraint(
+        stream_in,
+        tool_definitions,
+        family,
+        GuidedToolConstraint::None,
+        UnifiedParserStartingState::None,
+        false,
+        emit_tool_calls,
+    )
+}
+
+/// Constraint-aware ATEM unified stream.
+///
+/// Required and named tool choices produce bare guided JSON, but SGLang can emit
+/// the model's native `to=self` reasoning channel before activating that grammar.
+/// Initializing the existing unified parser with both facts preserves the reasoning
+/// events and then decodes the guided payload into tool calls.
+#[cfg(test)]
+pub(crate) fn apply_unified_stream_with_constraint<S>(
+    stream_in: S,
+    tool_definitions: Option<Vec<ToolDefinition>>,
+    family: String,
+    guided_tool_constraint: GuidedToolConstraint,
+    prefill: UnifiedParserStartingState,
+    guided_streaming: bool,
+    emit_tool_calls: bool,
+) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+where
+    S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+{
+    apply_unified_stream_with_phases(
+        stream_in,
+        tool_definitions,
+        family,
+        guided_tool_constraint,
+        prefill,
+        guided_streaming,
+        emit_tool_calls,
+        false,
+    )
+}
+
+// Keep the parser controls explicit at this stream boundary, including the
+// Responses-only phase preservation flag.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_unified_stream_with_phases<S>(
+    stream_in: S,
+    tool_definitions: Option<Vec<ToolDefinition>>,
+    family: String,
+    guided_tool_constraint: GuidedToolConstraint,
+    prefill: UnifiedParserStartingState,
+    guided_streaming: bool,
+    emit_tool_calls: bool,
+    preserve_phases: bool,
+) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+where
+    S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+{
     let v2_tools = to_v2_tools(tool_definitions.as_deref());
     stream! {
-        tracing::debug!(family = %family, "muse unified stream engaged");
+        tracing::debug!(family = %family, "ATEM unified stream engaged");
 
         // The caller only routes supported families here, but if a parser cannot be
         // built we pass every chunk through untouched rather than dropping output.
@@ -717,12 +832,33 @@ where
 
             let originals = std::mem::take(&mut chat_response.inner.choices);
             let mut emitted = Vec::new();
+            let mut boundaries = Vec::new();
             for original in originals {
-                let state = states.entry(original.index).or_insert_with(|| {
-                    // Family validated above; construction is deterministic in-process.
-                    UnifiedChoiceState::new_default(&family, &v2_tools)
-                        .expect("dynamo-parsers-v2 unified parser construction validated above")
-                });
+                let state = match states.entry(original.index) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        match UnifiedChoiceState::new_with_constraint(
+                            &family,
+                            &v2_tools,
+                            prefill,
+                            &guided_tool_constraint,
+                            guided_streaming,
+                        ) {
+                            Ok(mut state) => { state.preserve_message_phases(preserve_phases); entry.insert(state) },
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    family = %family,
+                                    choice = original.index,
+                                    "ATEM unified parser initialization failed; passing choice through"
+                                );
+                                boundaries.push(None);
+                                emitted.push(original);
+                                continue;
+                            }
+                        }
+                    }
+                };
 
                 // Only text content feeds the parser; multimodal parts pass through.
                 let text = match original.delta.content.as_ref() {
@@ -753,8 +889,12 @@ where
                     if parsed.is_empty() {
                         parsed.push(super::unified_parser::empty_choice(original.index));
                     }
+                    let mut sidecars = state.take_message_boundaries();
+                    sidecars.resize(parsed.len(), None);
+                    boundaries.extend(sidecars);
                     emitted.extend(parsed);
                 } else {
+                    boundaries.push(None);
                     emitted.push(original);
                 }
             }
@@ -769,6 +909,7 @@ where
                 let is_last = position == last;
                 let mut data = chat_response.clone();
                 data.inner.choices = vec![choice];
+                data.message_boundary = boundaries.get(position).cloned().flatten();
                 if !is_last {
                     data.inner.usage = None;
                     data.nvext = None;
@@ -851,6 +992,7 @@ mod tests {
     fn chunk(text: &str, finish: bool) -> Annotated<NvCreateChatCompletionStreamResponse> {
         #[allow(deprecated)]
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![ChatChoiceStream {
@@ -1475,18 +1617,18 @@ mod tests {
         for parser in ["muse_glimmer", "muse"] {
             assert_eq!(
                 unified_family(Some(parser), None).as_deref(),
-                enabled().then_some("muse_glimmer"),
-                "explicit V2 selects Muse; its auto exception is request-mode dependent"
+                (selected_version().unwrap() != ParserVersion::V1).then_some("muse_glimmer"),
+                "compatible Muse configurations select V2 unless V1 is explicit"
             );
             assert_eq!(
                 unified_family(None, Some(parser)).as_deref(),
-                enabled().then_some("muse_glimmer"),
-                "explicit V2 selects Muse; its auto exception is request-mode dependent"
+                (selected_version().unwrap() != ParserVersion::V1).then_some("muse_glimmer"),
+                "compatible Muse configurations select V2 unless V1 is explicit"
             );
         }
         assert_eq!(
             unified_family(Some("qwen3_coder"), None).as_deref(),
-            enabled().then_some("qwen3")
+            (selected_version().unwrap() != ParserVersion::V1).then_some("qwen3")
         );
         assert_eq!(unified_family(Some("muse"), Some("qwen3")), None);
         assert_eq!(unified_family(None, None), None);
@@ -1672,7 +1814,7 @@ mod tests {
     // Unregistered families stay on their existing route.
     #[test]
     fn unified_family_returns_none_for_other_families() {
-        for other in ["harmony", "nemotron_deci"] {
+        for other in ["hermes", "nemotron_deci"] {
             assert_eq!(unified_family(Some(other), None), None, "{other} tool");
             assert_eq!(unified_family(None, Some(other)), None, "{other} reasoning");
         }

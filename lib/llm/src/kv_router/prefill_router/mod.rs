@@ -27,7 +27,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
-    kv_router::{RoutingHost, SelectionPolicySource},
+    kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -82,14 +82,18 @@ pub enum PrefillError {
     #[error("Prefill router not yet activated")]
     NotActivated,
 
-    // Callers must include the worker's error text in this message. The
-    // frontend receives this error through `to_pyerr`, which keeps only
-    // `Display` and drops the source chain, so a `#[source]` is never seen.
+    // Callers must include the worker's error text in this message.
+    // The frontend boundary walks the `#[source]` chain, so a classified
+    // InvalidRequest with a public message reaches the client with its own
+    // text.
     #[error("Prefill execution failed: {0}")]
     PrefillError(
         String,
         #[source] Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
     ),
+
+    #[error("Prefill execution failed: Prefill backend cancelled before completing the handoff")]
+    Cancelled,
 
     #[error("No disaggregated params in prefill response: {0}")]
     NoDisaggregatedParams(String),
@@ -524,6 +528,7 @@ impl
                 session_affinity.as_ref().clone(),
             );
         }
+        let prefill_engine_ctx = prefill_context.context();
         let binding = match self.binding.load_full() {
             Some(binding) => binding,
             // The target was replaced after the gate above (a WorkerSet succession
@@ -558,11 +563,18 @@ impl
         let endpoint_id = &binding.endpoint_id;
         let mut prefill_completion = None;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
-            let (prepared, prefill_stream) = router
+            let PrefillDispatch {
+                metadata: prepared,
+                stream: prefill_stream,
+                booking,
+            } = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
                     self.prepare_prefill_dispatch(request, target, endpoint_id)
                 })
                 .await?;
+            if let (Some(state), Some(booking)) = (req.migration_state.as_ref(), booking) {
+                state.store_prefill_release(booking);
+            }
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
                 prefill_completion =
@@ -691,7 +703,11 @@ impl
         };
         let decode = next.generate(context.map(|_| decode_req));
         match prefill_completion {
-            Some(completion) => completion.forward_decode(decode, engine_ctx, output).await,
+            Some(completion) => {
+                completion
+                    .forward_decode(decode, engine_ctx, output, prefill_engine_ctx)
+                    .await
+            }
             None => decode.await,
         }
     }
@@ -890,7 +906,7 @@ mod tests {
         }
     }
 
-    fn active_conditional_router() -> Arc<PrefillRouter> {
+    pub(super) fn active_conditional_router() -> Arc<PrefillRouter> {
         let (_activation_tx, activation_rx) = oneshot::channel();
         let router = PrefillRouter::new(
             activation_rx,
@@ -1172,6 +1188,7 @@ mod tests {
                     std::future::pending(),
                     Context::new(()).context(),
                     PrefillNeed::None,
+                    Context::new(()).context(),
                 )
                 .await
                 .unwrap_err();
