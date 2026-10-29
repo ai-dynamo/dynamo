@@ -595,13 +595,13 @@ func TestDiscoveryEnvFromHonorsExplicitSettings(t *testing.T) {
 			dgd := &v1beta1.DynamoGraphDeployment{Spec: v1beta1.DynamoGraphDeploymentSpec{
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 					ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker,
-					PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					PodTemplate: &corev1.PodTemplateSpec{Annotations: map[string]string{
 						commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: test.mode,
-					}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					}, Spec: corev1.PodSpec{Containers: []corev1.Container{{
 						Name: commonconsts.MainContainerName,
 						Env:  test.env,
 						EnvFrom: []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{
-							LocalObjectReference: corev1.LocalObjectReference{Name: "worker-credentials"},
+							Name: "worker-credentials",
 						}}},
 					}}}},
 				}},
@@ -624,11 +624,11 @@ func TestDeploymentApplyUsesResponseWhenCacheIsStale(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	relay := &v1alpha1.DynamoPoolRelay{ObjectMeta: metav1.ObjectMeta{
+	relay := &v1alpha1.DynamoPoolRelay{
 		Name: "green", Namespace: "inference", UID: "relay-uid",
-	}, Spec: relaySpec("east")}
+		Spec: relaySpec("east")}
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: relay.Name, Namespace: relay.Namespace},
+		Name: relay.Name, Namespace: relay.Namespace,
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
 		}},
@@ -679,9 +679,8 @@ func TestDeploymentApplyUsesResponseWhenCacheIsStale(t *testing.T) {
 		observed.Generation != 2 || observed.Status.ObservedGeneration != 1 {
 		t.Fatalf("used stale cached Deployment after apply: reads=%d, observed=%+v", reads, observed)
 	}
-	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{
-		Name: relay.Name, Namespace: relay.Namespace,
-	}}); err != nil {
+	if _, err := r.Reconcile(ctx, ctrl.Request{
+		Name: relay.Name, Namespace: relay.Namespace}); err != nil {
 		t.Fatal(err)
 	}
 	if err := apiClient.Get(ctx, client.ObjectKeyFromObject(relay), relay); err != nil {
