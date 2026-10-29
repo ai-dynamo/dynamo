@@ -420,9 +420,6 @@ def run_trace_replay(
     _planner_warmup_observations=None,
     # Internal: a retune sweep replays the baseline and every candidate with
     # the canonical router seed and ordinal request ids (common random numbers).
-    # With an SLA-mode planner the pinned AISimulate is not guaranteed to be
-    # bitwise reproducible across processes (its forward-pass sample store
-    # iterates in hash order).
     _deterministic=False,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
