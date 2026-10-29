@@ -58,7 +58,6 @@ impl Fixture {
         self.load.lock().unwrap().lost = true;
     }
 
-    /// When `GetLoad` last answered with load.
     pub fn load_served_at(&self) -> Option<Instant> {
         self.load.lock().unwrap().served_at
     }
