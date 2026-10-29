@@ -236,6 +236,16 @@ def test_load_suite_returns_explicit_case_hardware_pairs(tmp_path) -> None:
     )
 
 
+def test_repository_suite_rows_have_paired_inputs(tmp_path) -> None:
+    for entry in run_cases.load_suite(run_cases._ROOT / "testsuite-issue-8469.yaml"):
+        assert run_cases.missing_case_inputs(entry.case) == (), entry.case
+        run_cases.load_case(
+            entry.case,
+            run_cases.load_hardware(entry.hardware),
+            output_root=tmp_path / "out",
+        )
+
+
 def test_main_does_not_execute_case_wide_skip(monkeypatch, tmp_path, capsys) -> None:
     suite = tmp_path / "suite.yaml"
     suite.write_text(
@@ -451,12 +461,18 @@ def test_renderer_failure_keeps_other_renderer_output(
     candidate = SimpleNamespace(
         config={"backend": "vllm"}, score=3.0, used_gpus=4, metrics={}, objectives=None
     )
+    sweep_calls = []
+    render_calls = []
     monkeypatch.setattr(run_cases, "load_sweep_config", lambda path: config)
-    monkeypatch.setattr(
-        run_cases, "run_sweep", lambda received: SimpleNamespace(candidates=[candidate])
-    )
+
+    def sweep(received):
+        sweep_calls.append(received)
+        return SimpleNamespace(candidates=[candidate])
+
+    monkeypatch.setattr(run_cases, "run_sweep", sweep)
 
     def render(received, workload, options, *, dgd_name, renderer):
+        render_calls.append((received, renderer))
         if renderer == "aic":
             raise RuntimeError("missing bridge")
         return f"kind: DynamoGraphDeployment\nname: {dgd_name}\n"
@@ -478,6 +494,9 @@ def test_renderer_failure_keeps_other_renderer_output(
     )
 
     assert run_cases._run_sweeper_renderers(case, entry) == expected_failures
+    assert sweep_calls == [config]
+    assert [renderer for _, renderer in render_calls] == ["aic", "direct"]
+    assert all(received is candidate for received, _ in render_calls)
     assert (case.generated_dir / "error-sweeper-aic.txt").read_text() == (
         "missing bridge\n"
     )
