@@ -14,7 +14,7 @@ from dynamo.health_check import HEALTH_CHECK_KEY
 
 
 class DrainConflict(RuntimeError):
-    """The worker lifecycle does not permit the requested control."""
+    pass
 
 
 class WorkerDrain:
