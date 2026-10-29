@@ -16,7 +16,7 @@
 //!
 //!   A router matches a connecting PoolRelay against a listing's
 //!   `relay_identities` with [`address_identity`].
-//! - Global Router replicas ([`ReplicaEndpoint`]), and list-and-watch events
+//! - Global Router replicas ([`RouterReplica`]), and list-and-watch events
 //!   and snapshots ([`WatchEvent`], [`Snapshot`]), which the service's watch
 //!   contract and its clients share.
 
@@ -30,5 +30,5 @@ pub use discovery::{
     address_identity,
 };
 pub use pool::{PoolId, PoolIdDeriver, PoolKey, PoolKeyError, PoolLocation, V1PoolIdDeriver};
-pub use replicas::{ReplicaEndpoint, ReplicaEvent, ReplicaId};
+pub use replicas::{RouterReplica, RouterReplicaEvent, RouterReplicaId};
 pub use watch::{Completeness, Snapshot, WatchEvent};

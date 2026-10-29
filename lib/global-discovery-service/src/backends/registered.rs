@@ -187,7 +187,7 @@ async fn join_sources(
             return;
         }
     };
-    let warn_after = lease.lease_duration() * 2;
+    let warn_after = lease.duration() * 2;
     let mut ticks = tokio::time::interval(lease.heartbeat_interval());
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -289,7 +289,7 @@ impl Join {
                 tracing::warn!(
                     ?key,
                     "this pool is registered, but MCS lists no Ready PoolRelay for it, so it is \
-                     not listed. Check that site_id is the pool's MCS cluster name and that its \
+                     not listed. Check that cluster_id is the pool's MCS cluster name and that its \
                      PoolRelay Service is exported."
                 );
             }
@@ -344,7 +344,7 @@ impl JoinState {
             Source::Registrations => &mut self.registered,
         };
         let key = match event {
-            WatchEvent::Added(listing) => {
+            WatchEvent::Upserted(listing) => {
                 let key = listing.key.clone();
                 view.listings.insert(key.clone(), listing);
                 key
@@ -423,7 +423,7 @@ impl JoinState {
             return None;
         }
         self.pools.insert(key.clone(), listing.clone());
-        Some(WatchEvent::Added(listing))
+        Some(WatchEvent::Upserted(listing))
     }
 }
 
@@ -451,7 +451,6 @@ mod tests {
             location: PoolLocation {
                 region: "west".to_owned(),
                 availability_zone: None,
-                cluster: Some("west".to_owned()),
                 datacenter: None,
             },
             model: None,
@@ -469,7 +468,6 @@ mod tests {
             location: PoolLocation {
                 region: "us-west-2".to_owned(),
                 availability_zone: Some("us-west-2a".to_owned()),
-                cluster: Some("west".to_owned()),
                 datacenter: None,
             },
             model: model.to_owned(),
@@ -477,7 +475,7 @@ mod tests {
             frontends: vec![Url::parse("http://mocker-frontend:8000/").unwrap()],
             capacity: vec![Capacity {
                 sku: "H100".to_owned(),
-                count: 8,
+                workers: 8,
             }],
         }
     }
@@ -513,7 +511,7 @@ mod tests {
         fn put(&self, listing: PoolListing) {
             let mut listings = self.listings.lock().unwrap();
             listings.insert(listing.key.clone(), listing.clone());
-            let _ = self.events.send(WatchEvent::Added(listing));
+            let _ = self.events.send(WatchEvent::Upserted(listing));
         }
 
         /// Lists every pool again, with `completeness`, as the MCS store
@@ -593,7 +591,8 @@ mod tests {
         }
 
         async fn register(&self, dgd: &str, model: &str) {
-            self.registrations
+            let _ = self
+                .registrations
                 .register(registered(dgd, model))
                 .await
                 .unwrap();
@@ -650,7 +649,10 @@ mod tests {
         fx.in_mcs("mocker");
         fx.register("mocker", "m1").await;
         let mut watch = fx.directory.list_and_watch(None).await.unwrap();
-        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(_)))));
+        assert!(matches!(
+            watch.next().await,
+            Some(Ok(WatchEvent::Upserted(_)))
+        ));
         assert!(
             matches!(watch.next().await, Some(Ok(WatchEvent::Resync(s))) if s.items.len() == 1)
         );
@@ -659,7 +661,7 @@ mod tests {
         // publishes nothing.
         fx.register("mocker", "m2").await;
         fx.register("mocker", "m2").await;
-        let Some(Ok(WatchEvent::Added(second))) = watch.next().await else {
+        let Some(Ok(WatchEvent::Upserted(second))) = watch.next().await else {
             panic!("expected Added");
         };
         assert_eq!(second.model.as_deref(), Some("m2"));
@@ -671,13 +673,16 @@ mod tests {
             matches!(watch.next().await, Some(Ok(WatchEvent::Removed(k))) if k == key("mocker"))
         );
         fx.in_mcs("mocker");
-        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(_)))));
+        assert!(matches!(
+            watch.next().await,
+            Some(Ok(WatchEvent::Upserted(_)))
+        ));
 
         // A heartbeat keeps the pool while the registration store's first
         // lease passes, and then its lists are complete.
         tokio::time::advance(Duration::from_secs(10)).await;
         fx.register("mocker", "m2").await;
-        tokio::time::advance(lease().lease_duration() - Duration::from_secs(10)).await;
+        tokio::time::advance(lease().duration() - Duration::from_secs(10)).await;
         assert!(
             matches!(watch.next().await, Some(Ok(WatchEvent::Resync(s))) if s.items.len() == 1)
         );
@@ -685,7 +690,7 @@ mod tests {
         // No heartbeat for longer than the lease, as when the pool's cluster
         // is cut off but its imported slices still say Ready: the pool goes
         // within one sweep.
-        tokio::time::advance(lease().lease_duration() + SWEEP_EVERY).await;
+        tokio::time::advance(lease().duration() + SWEEP_EVERY).await;
         assert!(
             matches!(watch.next().await, Some(Ok(WatchEvent::Removed(k))) if k == key("mocker"))
         );
@@ -702,7 +707,10 @@ mod tests {
         // registration store started, a PoolRelay may not have registered.
         assert_eq!(completeness().await, Completeness::Estimated);
         let mut watch = fx.directory.list_and_watch(None).await.unwrap();
-        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(_)))));
+        assert!(matches!(
+            watch.next().await,
+            Some(Ok(WatchEvent::Upserted(_)))
+        ));
         assert!(
             matches!(watch.next().await, Some(Ok(WatchEvent::Resync(s))) if s.completeness == Completeness::Estimated)
         );
@@ -710,7 +718,7 @@ mod tests {
         // The PoolRelay keeps registering while the first lease passes.
         tokio::time::advance(Duration::from_secs(10)).await;
         fx.register("mocker", "m1").await;
-        tokio::time::advance(lease().lease_duration() - Duration::from_secs(10)).await;
+        tokio::time::advance(lease().duration() - Duration::from_secs(10)).await;
         assert!(
             matches!(watch.next().await, Some(Ok(WatchEvent::Resync(s))) if s.completeness == Completeness::Exact && s.items.len() == 1)
         );
@@ -754,7 +762,7 @@ mod tests {
             Source::Registrations,
             resync(vec![listed("registered-only", "m"), listed("both", "m")]),
         );
-        let after = lease().lease_duration() * 2;
+        let after = lease().duration() * 2;
         join.warn_one_sided(after);
         assert_eq!(
             one_sided(&join),
@@ -767,7 +775,7 @@ mod tests {
         // Each is logged once, `after` from when it became one-sided, though
         // its one source changed it meanwhile.
         tokio::time::advance(after / 2).await;
-        join.apply(Source::Mcs, WatchEvent::Added(from_mcs("relay-only")));
+        join.apply(Source::Mcs, WatchEvent::Upserted(from_mcs("relay-only")));
         tokio::time::advance(after / 2).await;
         join.warn_one_sided(after);
         assert_eq!(
@@ -782,7 +790,7 @@ mod tests {
         // after a relist.
         join.apply(
             Source::Registrations,
-            WatchEvent::Added(listed("relay-only", "m")),
+            WatchEvent::Upserted(listed("relay-only", "m")),
         );
         join.apply(
             Source::Registrations,

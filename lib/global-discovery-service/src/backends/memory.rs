@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use crate::pool_discovery::{
     Completeness, Directory, DiscoveryError, Lease, PoolEvent, PoolListing, PoolRegistrar,
-    PoolRegistration, RegistrationExchange, ReplicaEndpoint, ReplicaEvent, ReplicaId, Snapshot,
-    WatchEvent, WatchStream,
+    PoolRegistration, RegistrationExchange, RouterReplica, RouterReplicaEvent, RouterReplicaId,
+    Snapshot, WatchEvent, WatchStream,
 };
 use async_trait::async_trait;
 use dynamo_global_common::PoolKey;
@@ -107,7 +107,7 @@ impl MemoryPoolStore {
                 Arc::clone(&self.pools),
                 self.events.clone(),
                 self.lease.heartbeat_interval().min(SWEEP_EVERY),
-                self.started.checked_add(self.lease.lease_duration()),
+                self.started.checked_add(self.lease.duration()),
                 self.stop.clone(),
             ));
         });
@@ -141,7 +141,7 @@ impl RegistrationExchange for MemoryPoolStore {
         let registration = sorted(registration);
         self.ensure_sweeping();
         let now = Instant::now();
-        let expires_at = now + remaining.min(self.lease.lease_duration());
+        let expires_at = now + remaining.min(self.lease.duration());
         let mut pools = self.lock();
         if let Some(registered) = pools.registrations.get_mut(&registration.key)
             && registered.expires_at > now
@@ -165,7 +165,7 @@ impl RegistrationExchange for MemoryPoolStore {
             },
         );
         // No subscribers is not an error.
-        let _ = self.events.send(WatchEvent::Added(added));
+        let _ = self.events.send(WatchEvent::Upserted(added));
     }
 
     /// The live registrations PoolRelays made here, with the time each has
@@ -206,7 +206,7 @@ fn completeness(
     now: Instant,
     copies_missing: bool,
 ) -> Completeness {
-    if !copies_missing && now.saturating_duration_since(started) >= lease.lease_duration() {
+    if !copies_missing && now.saturating_duration_since(started) >= lease.duration() {
         Completeness::Exact
     } else {
         Completeness::Estimated
@@ -285,13 +285,13 @@ fn listing(registration: &PoolRegistration) -> PoolListing {
 #[async_trait]
 impl PoolRegistrar for MemoryPoolStore {
     /// An unchanged pool only renews its lease. A new or changed one replaces
-    /// the old listing, with an `Added` event. Lists in another order, for
+    /// the old listing, with an `Upserted` event. Lists in another order, for
     /// example from another PoolRelay replica, are not a change.
     async fn register(&self, registration: PoolRegistration) -> Result<Lease, DiscoveryError> {
         let registration = sorted(registration);
         self.ensure_sweeping();
         let now = Instant::now();
-        let expires_at = now + self.lease.lease_duration();
+        let expires_at = now + self.lease.duration();
         let mut pools = self.lock();
         if let Some(registered) = pools.registrations.get_mut(&registration.key)
             && registered.expires_at > now
@@ -311,7 +311,7 @@ impl PoolRegistrar for MemoryPoolStore {
             },
         );
         // No subscribers is not an error.
-        let _ = self.events.send(WatchEvent::Added(added));
+        let _ = self.events.send(WatchEvent::Upserted(added));
         Ok(self.lease)
     }
 }
@@ -350,15 +350,15 @@ impl Directory<PoolListing, PoolKey> for MemoryPoolStore {
 /// `Exact`.
 #[derive(Debug)]
 pub struct StaticReplicaDirectory {
-    replicas: Vec<ReplicaEndpoint>,
+    replicas: Vec<RouterReplica>,
     /// Never sent on. Keeps watch streams open until the directory is
     /// dropped.
-    events: broadcast::Sender<ReplicaEvent>,
+    events: broadcast::Sender<RouterReplicaEvent>,
     stop: CancellationToken,
 }
 
 impl StaticReplicaDirectory {
-    pub fn new(replicas: Vec<ReplicaEndpoint>) -> Self {
+    pub fn new(replicas: Vec<RouterReplica>) -> Self {
         Self {
             replicas,
             events: broadcast::channel(1).0,
@@ -366,7 +366,7 @@ impl StaticReplicaDirectory {
         }
     }
 
-    fn snapshot(&self) -> Snapshot<ReplicaEndpoint> {
+    fn snapshot(&self) -> Snapshot<RouterReplica> {
         Snapshot {
             items: self.replicas.clone(),
             completeness: Completeness::Exact,
@@ -381,15 +381,15 @@ impl Drop for StaticReplicaDirectory {
 }
 
 #[async_trait]
-impl Directory<ReplicaEndpoint, ReplicaId> for StaticReplicaDirectory {
-    async fn list(&self) -> Result<Snapshot<ReplicaEndpoint>, DiscoveryError> {
+impl Directory<RouterReplica, RouterReplicaId> for StaticReplicaDirectory {
+    async fn list(&self) -> Result<Snapshot<RouterReplica>, DiscoveryError> {
         Ok(self.snapshot())
     }
 
     async fn list_and_watch(
         &self,
         cancel_token: Option<CancellationToken>,
-    ) -> Result<WatchStream<ReplicaEndpoint, ReplicaId>, DiscoveryError> {
+    ) -> Result<WatchStream<RouterReplica, RouterReplicaId>, DiscoveryError> {
         let events = self.events.clone();
         let snapshot = self.snapshot();
         Ok(watch_stream(
@@ -417,10 +417,10 @@ mod tests {
         PoolKey::new("west", "dynamo", dgd).unwrap()
     }
 
-    fn capacity(sku: &str, count: u32) -> Capacity {
+    fn capacity(sku: &str, workers: u32) -> Capacity {
         Capacity {
             sku: sku.to_owned(),
-            count,
+            workers,
         }
     }
 
@@ -430,7 +430,6 @@ mod tests {
             location: PoolLocation {
                 region: "us-west-2".to_owned(),
                 availability_zone: None,
-                cluster: Some("west".to_owned()),
                 datacenter: None,
             },
             model: model.to_owned(),
@@ -459,7 +458,7 @@ mod tests {
             lease()
         );
         let mut watch = store.list_and_watch(None).await.unwrap();
-        let Some(Ok(WatchEvent::Added(first))) = watch.next().await else {
+        let Some(Ok(WatchEvent::Upserted(first))) = watch.next().await else {
             panic!("expected the pool");
         };
         assert_eq!(first.capabilities, ["decode", "prefill"]);
@@ -476,7 +475,7 @@ mod tests {
             heartbeat.capabilities.reverse();
             heartbeat.frontends.reverse();
             heartbeat.capacity.push(capacity("H100", 8));
-            store.register(heartbeat).await.unwrap();
+            let _ = store.register(heartbeat).await.unwrap();
         }
         assert_eq!(find(&store, "mocker").await, Some(first));
         // A lease has passed, so the store's lists are complete; the renewals
@@ -486,8 +485,8 @@ mod tests {
         );
 
         // A changed pool is published.
-        store.register(registration("mocker", "m2")).await.unwrap();
-        let Some(Ok(WatchEvent::Added(changed))) = watch.next().await else {
+        let _ = store.register(registration("mocker", "m2")).await.unwrap();
+        let Some(Ok(WatchEvent::Upserted(changed))) = watch.next().await else {
             panic!("expected the change");
         };
         assert_eq!(changed.model.as_deref(), Some("m2"));
@@ -496,9 +495,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_missed_lease_hides_then_removes_the_pool() {
         let store = MemoryPoolStore::new(lease());
-        store.register(registration("mocker", "m1")).await.unwrap();
+        let _ = store.register(registration("mocker", "m1")).await.unwrap();
         let mut watch = store.list_and_watch(None).await.unwrap();
-        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(_)))));
+        assert!(matches!(
+            watch.next().await,
+            Some(Ok(WatchEvent::Upserted(_)))
+        ));
         assert!(matches!(
             watch.next().await,
             Some(Ok(WatchEvent::Resync(_)))
@@ -519,9 +521,9 @@ mod tests {
         assert!(store.lock().registrations.is_empty());
 
         // Registering again brings it back.
-        store.register(registration("mocker", "m1")).await.unwrap();
+        let _ = store.register(registration("mocker", "m1")).await.unwrap();
         assert!(
-            matches!(watch.next().await, Some(Ok(WatchEvent::Added(listing))) if listing.key == key("mocker"))
+            matches!(watch.next().await, Some(Ok(WatchEvent::Upserted(listing))) if listing.key == key("mocker"))
         );
     }
 
@@ -536,7 +538,7 @@ mod tests {
         assert_eq!(first.completeness, Completeness::Estimated);
         assert_eq!(completeness().await, Completeness::Estimated);
 
-        tokio::time::advance(lease().lease_duration()).await;
+        tokio::time::advance(lease().duration()).await;
         assert_eq!(completeness().await, Completeness::Exact);
         // Watchers learn it too. With no pools nothing else is published, so
         // the wait is bounded: a missing Resync fails the test, not hangs it.
@@ -557,7 +559,7 @@ mod tests {
                 .get(&key("mocker"))
                 .map(|registered| registered.registration.model.clone())
         };
-        store.register(registration("mocker", "m1")).await.unwrap();
+        let _ = store.register(registration("mocker", "m1")).await.unwrap();
 
         // A copy older than the local registration changes nothing.
         store.adopt(registration("mocker", "m2"), Duration::from_secs(10));
@@ -569,7 +571,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(5)).await;
         store.adopt(registration("mocker", "m1"), Duration::from_secs(14));
         assert!(store.local_registrations().is_empty());
-        store.register(registration("mocker", "m1")).await.unwrap();
+        let _ = store.register(registration("mocker", "m1")).await.unwrap();
         assert_eq!(store.local_registrations().len(), 1);
 
         // A still newer copy with another model replaces it.
@@ -580,7 +582,7 @@ mod tests {
         // A copy never outlasts this store's lease, and one with no time left
         // is ignored.
         store.adopt(registration("mocker", "m2"), Duration::from_secs(3600));
-        tokio::time::advance(lease().lease_duration() + Duration::from_secs(1)).await;
+        tokio::time::advance(lease().duration() + Duration::from_secs(1)).await;
         assert!(find(&store, "mocker").await.is_none());
         store.adopt(registration("other", "m1"), Duration::ZERO);
         assert!(!store.lock().registrations.contains_key(&key("other")));
@@ -597,7 +599,7 @@ mod tests {
         // Another instance has not answered, so the first lease passes
         // without the lists turning `Exact`, and the sweep announces nothing.
         store.set_copies_missing(true);
-        tokio::time::advance(lease().lease_duration()).await;
+        tokio::time::advance(lease().duration()).await;
         tokio::time::sleep(Duration::from_millis(1)).await;
         assert!(watch.next().now_or_never().is_none());
         assert_eq!(
@@ -622,8 +624,8 @@ mod tests {
 
     #[tokio::test]
     async fn static_replicas_list_and_watch() {
-        let replica = ReplicaEndpoint {
-            replica: ReplicaId("ohio/global-router-0".to_owned()),
+        let replica = RouterReplica {
+            replica: RouterReplicaId("ohio/global-router-0".to_owned()),
             url: Url::parse("http://10.42.0.5:50051").unwrap(),
         };
         let directory = StaticReplicaDirectory::new(vec![replica.clone()]);
@@ -636,7 +638,7 @@ mod tests {
             .list_and_watch(Some(cancel.clone()))
             .await
             .unwrap();
-        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Added(r))) if r == replica));
+        assert!(matches!(watch.next().await, Some(Ok(WatchEvent::Upserted(r))) if r == replica));
         assert!(matches!(
             watch.next().await,
             Some(Ok(WatchEvent::Resync(_)))

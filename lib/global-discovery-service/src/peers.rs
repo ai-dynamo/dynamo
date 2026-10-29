@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::pool_discovery::{
-    Completeness, Lease, RegistrationExchange, ReplicaDirectory, ReplicaEndpoint, ReplicaId,
+    Completeness, Lease, RegistrationExchange, ReplicaDirectory, RouterReplica, RouterReplicaId,
     Snapshot,
 };
 use crate::service::{SharedRegistrations, Sharing};
@@ -95,7 +95,7 @@ impl PeerSync {
             store,
             instance,
             every,
-            lease_duration: lease.lease_duration(),
+            lease_duration: lease.duration(),
             synced,
             client,
         };
@@ -106,11 +106,11 @@ impl PeerSync {
     pub async fn run(self, stop: CancellationToken) {
         // Logged when they become unreachable and when they recover, not on
         // every round.
-        let mut unreachable: HashSet<ReplicaId> = HashSet::new();
+        let mut unreachable: HashSet<RouterReplicaId> = HashSet::new();
         // Logged when it changes. Zero means registrations stay local.
         let mut others_reached = None;
         // When each instance last answered.
-        let mut answered: HashMap<ReplicaId, Instant> = HashMap::new();
+        let mut answered: HashMap<RouterReplicaId, Instant> = HashMap::new();
         let mut ticks = tokio::time::interval(self.every);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
@@ -193,8 +193,8 @@ impl PeerSync {
 /// list of instances may be incomplete, or one has not answered within
 /// `lease_duration`, by when the copies from its last answer have lapsed.
 fn copies_missing(
-    peers: &Snapshot<ReplicaEndpoint>,
-    answered: &HashMap<ReplicaId, Instant>,
+    peers: &Snapshot<RouterReplica>,
+    answered: &HashMap<RouterReplicaId, Instant>,
     lease_duration: Duration,
     now: Instant,
 ) -> bool {
@@ -209,7 +209,7 @@ fn copies_missing(
 /// Also returns when the reply arrived.
 async fn fetch(
     client: &reqwest::Client,
-    peer: &ReplicaEndpoint,
+    peer: &RouterReplica,
 ) -> anyhow::Result<(SharedRegistrations, Instant)> {
     let url = peer.url.join("registrations")?;
     let reply = client
@@ -248,7 +248,7 @@ mod tests {
     /// and the task that asks the others, not yet started.
     async fn instance(
         stop: &CancellationToken,
-        peers: impl FnOnce(&Url) -> Vec<ReplicaEndpoint>,
+        peers: impl FnOnce(&Url) -> Vec<RouterReplica>,
     ) -> (Arc<MemoryPoolStore>, Url, PeerSync) {
         let store = Arc::new(MemoryPoolStore::new(lease()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -275,9 +275,9 @@ mod tests {
         (store, url, sync)
     }
 
-    fn peer(name: &str, url: &Url) -> ReplicaEndpoint {
-        ReplicaEndpoint {
-            replica: ReplicaId(name.to_owned()),
+    fn peer(name: &str, url: &Url) -> RouterReplica {
+        RouterReplica {
+            replica: RouterReplicaId(name.to_owned()),
             url: url.clone(),
         }
     }
@@ -289,7 +289,6 @@ mod tests {
             location: PoolLocation {
                 region: "us-west-2".to_owned(),
                 availability_zone: None,
-                cluster: Some("aws-west".to_owned()),
                 datacenter: None,
             },
             model: model.to_owned(),
@@ -302,12 +301,12 @@ mod tests {
     /// The body `dynamo-global-discovery-client` sends.
     fn registration(model: &str) -> Value {
         json!({
-            "key": {"site_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"},
-            "location": {"region": "us-west-2", "availability_zone": null, "cluster": "aws-west", "datacenter": null},
+            "key": {"cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"},
+            "location": {"region": "us-west-2", "availability_zone": null, "datacenter": null},
             "model": model,
             "capabilities": [],
             "frontends": [],
-            "capacity": [{"sku": "H100", "count": 8}]
+            "capacity": [{"sku": "H100", "workers": 8}]
         })
     }
 
@@ -360,7 +359,7 @@ mod tests {
     async fn registrations_reach_the_other_instances_and_lapse_there() {
         let stop = CancellationToken::new();
         let (a, a_url, _) = instance(&stop, |_| Vec::new()).await;
-        a.register(pool("m1")).await.unwrap();
+        let _ = a.register(pool("m1")).await.unwrap();
         // B asks every instance: A, itself, one that is gone, and one that
         // never answers.
         let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -392,7 +391,7 @@ mod tests {
         assert!(b.local_registrations().is_empty());
 
         // A changed registration replaces the copy.
-        a.register(pool("m2")).await.unwrap();
+        let _ = a.register(pool("m2")).await.unwrap();
         wait_for_models(&b, &["m2"]).await;
 
         // With no more heartbeats, the copy lapses with the original.
@@ -412,7 +411,7 @@ mod tests {
 
     #[test]
     fn copies_may_be_missing_until_every_instance_answers_within_a_lease() {
-        let lease = lease().lease_duration();
+        let lease = lease().duration();
         let url = Url::parse("http://10.43.0.9:8080/").unwrap();
         let peers = |completeness| Snapshot {
             items: vec![peer("a", &url), peer("b", &url)],
@@ -420,8 +419,8 @@ mod tests {
         };
         let then = Instant::now();
         let both = HashMap::from([
-            (ReplicaId("a".to_owned()), then),
-            (ReplicaId("b".to_owned()), then),
+            (RouterReplicaId("a".to_owned()), then),
+            (RouterReplicaId("b".to_owned()), then),
         ]);
         assert!(!copies_missing(
             &peers(Completeness::Exact),
@@ -437,7 +436,7 @@ mod tests {
             then + lease
         ));
         // One never answered.
-        let only_a = HashMap::from([(ReplicaId("a".to_owned()), then)]);
+        let only_a = HashMap::from([(RouterReplicaId("a".to_owned()), then)]);
         assert!(copies_missing(
             &peers(Completeness::Exact),
             &only_a,

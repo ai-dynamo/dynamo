@@ -9,8 +9,8 @@
 //! listed (Ready) replicas, so otherwise no pool could ever reach it. Pool
 //! completeness is a separate signal ([`super::Completeness`]).
 
-pub use dynamo_global_common::{ReplicaEndpoint, ReplicaEvent, ReplicaId};
+pub use dynamo_global_common::{RouterReplica, RouterReplicaEvent, RouterReplicaId};
 
 use super::watch::Directory;
 
-pub type ReplicaDirectory = dyn Directory<ReplicaEndpoint, ReplicaId>;
+pub type ReplicaDirectory = dyn Directory<RouterReplica, RouterReplicaId>;
