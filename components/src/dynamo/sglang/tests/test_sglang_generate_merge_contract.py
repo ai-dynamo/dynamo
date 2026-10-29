@@ -5,8 +5,8 @@
 
 The frontend joins SGLang's streamed chunks into one unary response, and joins
 prefill's prompt-side outputs into decode's response, using the rules in
-``lib/llm/src/protocols/sglang/merge_rules.json``. Those rules copy SGLang code
-listed in the header of ``lib/llm/src/protocols/sglang/merge.rs``.
+``lib/generate-formats/sglang/src/merge_rules.json``. Those rules copy SGLang code
+listed in the header of ``lib/generate-formats/sglang/src/merge.rs``.
 
 These tests fail when an SGLang upgrade adds, renames, or changes a field the
 rules must know about. To fix a failure, read the upstream code named in
@@ -34,16 +34,29 @@ pytestmark = [
 
 RULES_PATH = (
     Path(__file__).resolve().parents[5]
-    / "lib/llm/src/protocols/sglang/merge_rules.json"
+    / "lib/generate-formats/sglang/src/merge_rules.json"
 )
 CATEGORIES = ("append", "take_prefill", "overlay_base64_prefix", "take_last")
-FIX = f"Classify it in {RULES_PATH.name} (see lib/llm/src/protocols/sglang/merge.rs)."
+FIX = (
+    f"Classify it in {RULES_PATH.name} (see lib/generate-formats/sglang/src/merge.rs)."
+)
 
 
 @pytest.fixture(scope="module")
 def rules() -> dict:
     assert RULES_PATH.is_file(), f"merge rules not found at {RULES_PATH}"
-    return json.loads(RULES_PATH.read_text())
+    rules = json.loads(RULES_PATH.read_text())
+    # Chunk joins by field class: deltas append, prompt values come from
+    # prefill, routed-expert rows overlay, and everything else keeps the last
+    # value. Nested pointers refine a field classified above them.
+    joins = {"delta": "append", "prompt": "take_prefill"}
+    joins["sequence_final"] = "overlay_base64_prefix"
+    for category in CATEGORIES:
+        rules[category] = []
+    for path, field_class in rules["fields"].items():
+        if path.count("/") <= 2:
+            rules[joins.get(field_class, "take_last")].append(path)
+    return rules
 
 
 def _sglang_tree(relative: str) -> ast.Module:

@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-vllm-generate"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "vLLM client format for Dynamo /generate"
+
+[dependencies]
+dynamo-kv-router = { workspace = true }
+tracing = { workspace = true }
+dynamo-llm = { path = "../../llm", default-features = false }
+anyhow = { workspace = true }
+dynamo-runtime = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = "0.22"
+dynamo-protocols = { workspace = true }
