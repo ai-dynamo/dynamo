@@ -55,6 +55,8 @@ const (
 	requestTimeout                  = 5 * time.Second
 	dialTimeout                     = 3 * time.Second
 	tlsHandshakeTimeout             = 3 * time.Second
+	metricsIdleConnTimeout          = 90 * time.Second
+	metricsMaxIdleConns             = 100
 	CloudProviderGCP                = "gcp"
 	CloudProviderAWS                = "aws"
 	CloudProviderAKS                = "aks"
@@ -561,19 +563,31 @@ func listGPUOperatorRunningPods(ctx context.Context, k8sClient client.Reader) ([
 // This function does not implement retries or fallback logic.
 // Error handling and multi-pod aggregation are managed by the caller.
 func ScrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, error) {
+	return scrapeMetricsEndpoint(ctx, metricsHTTPClient, endpoint)
+}
+
+// metricsHTTPClient is shared by all scrapes so their connections go back to
+// one bounded, idle-timed pool instead of a new transport per call.
+var metricsHTTPClient = newMetricsHTTPClient(metricsIdleConnTimeout)
+
+func newMetricsHTTPClient(idleConnTimeout time.Duration) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   dialTimeout,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout: tlsHandshakeTimeout,
+			IdleConnTimeout:     idleConnTimeout,
+			MaxIdleConns:        metricsMaxIdleConns,
+		},
+	}
+}
+
+func scrapeMetricsEndpoint(ctx context.Context, client *http.Client, endpoint string) (*GPUInfo, error) {
 	// Set a timeout for the request
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	// Create a custom HTTP client with transport-level timeouts
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   dialTimeout,      // Dial timeout
-				KeepAlive: 30 * time.Second, // Keep-alive for connections
-			}).DialContext,
-			TLSHandshakeTimeout: tlsHandshakeTimeout, // TLS handshake timeout
-		},
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request for %s: %w", endpoint, err)

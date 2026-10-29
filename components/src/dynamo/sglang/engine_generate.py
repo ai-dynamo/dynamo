@@ -49,6 +49,7 @@ def build_native_generate_request(
     prefill_dp_rank: int | None = None,
     lora_path: str | None = None,
     cache_salt: str | None = None,
+    kv_hint: Mapping[str, Any] | None = None,
 ) -> GenerateReqInput:
     """Reconstruct the installed SGLang version native request.
 
@@ -64,6 +65,13 @@ def build_native_generate_request(
     request ID.
     """
     payload = dict(native_payload)
+    # Peer selection is router-owned, never part of the caller's opaque body.
+    payload.pop("kv_hints", None)
+    if (
+        isinstance(kv_hint, Mapping)
+        and "kv_hints" in GenerateReqInput.__dataclass_fields__
+    ):
+        payload["kv_hints"] = dict(kv_hint)
     salt = cache_salt if cache_salt is not None else payload.get("cache_salt")
     if salt is None or salt == "":
         payload.pop("cache_salt", None)

@@ -69,7 +69,7 @@ do not already have an explicit override. This behavior applies across profiler
 versions. Profilers through Dynamo 1.3.0 may discard the field while parsing the
 DGDR, but the operator reapplies the default from the stored DGDR.
 
-Set `spec.runtimeVersionOverride` when an effective generated component image
+Set `spec.runtimeVersionOverride` when an effective generated component runtime image
 uses a non-semantic-version tag or digest, or when its tag does not identify the
 intended Dynamo runtime version. The DGDR value also covers images replaced
 through `spec.overrides.dgd` when that component does not set its own
@@ -84,7 +84,7 @@ These updates do not modify `status.profilingResults.selectedConfig` or the
 forbidden after profiling starts.
 
 When the DGDR-level field is unset, each effective generated DGD component
-follows the [component runtime version rules](dynamo-component-deployment.mdx#runtime-version-compatibility) independently. An overridden image without a
+follows the [component runtime version rules](dynamo-component-deployment.mdx#runtime-version-compatibility) independently. An overridden runtime image without a
 parseable semantic-version tag requires `runtimeVersionOverride` on that
 component.
 
