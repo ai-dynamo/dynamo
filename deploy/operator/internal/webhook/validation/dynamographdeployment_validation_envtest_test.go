@@ -4136,6 +4136,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			dgdAdmissionTestCase{name: backend + " beta rejects multinode sidecar without role templates", deployment: multinodeSidecarDGDForAdmission(t, backend, false, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
 			dgdAdmissionTestCase{name: backend + " beta accepts multinode sidecar with compute-only worker", deployment: multinodeSidecarDGDForAdmission(t, backend, false, true, false)},
 			dgdAdmissionTestCase{name: backend + " beta accepts multinode sidecar with runtime on both roles", deployment: multinodeSidecarDGDForAdmission(t, backend, false, true, true)},
+			dgdAdmissionTestCase{name: backend + " alpha rejects multinode sidecar without role templates", deployment: multinodeSidecarDGDForAdmission(t, backend, true, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
 			dgdAdmissionTestCase{name: backend + " alpha accepts multinode sidecar with compute-only worker", deployment: multinodeSidecarDGDForAdmission(t, backend, true, true, false)},
 			dgdAdmissionTestCase{name: backend + " alpha accepts multinode sidecar with runtime on both roles", deployment: multinodeSidecarDGDForAdmission(t, backend, true, true, true)},
 		)

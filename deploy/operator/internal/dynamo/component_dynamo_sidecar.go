@@ -104,7 +104,7 @@ func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDep
 	return allErrs
 }
 
-// multinodeSidecarBackendSupported reports the engines whose native multinode roles the operator admits.
+// multinodeSidecarBackendSupported reports whether the operator admits native multinode roles for backend.
 func multinodeSidecarBackendSupported(backend BackendFramework) bool {
 	return backend == BackendFrameworkSGLang || backend == BackendFrameworkVLLM
 }
