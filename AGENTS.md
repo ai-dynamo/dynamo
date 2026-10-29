@@ -5,37 +5,34 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo — Agent Guide
 
-[`README.md`](README.md) explains what Dynamo is and what it supports. This guide covers
-working in the repo: where code lives, which skill fits a task, and how to build and test
-a change.
+[`README.md`](README.md) explains what Dynamo is and what it supports.
 
 ## Repository Map
 
 | Path | Contents |
 |------|----------|
-| `lib/` | Rust workspace crates: `runtime`, `llm`, `kv-router`, `kvbm-*`, `mocker`, `sidecar/*` (engine gRPC sidecars), and more (see the root [`Cargo.toml`](Cargo.toml) `[workspace] members`), plus `bindings/python` — the PyO3 extension crate, built via maturin and deliberately excluded from the workspace |
+| `lib/` | Rust crates, including `runtime`, `llm`, `kv-router`, `kvbm-*`, `mocker`, `sidecar/*` (engine gRPC sidecars), and `bindings/python` (the PyO3 extension, built with maturin, outside the Cargo workspace) |
 | `components/src/dynamo/` | Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm`/`tokenspeed` backends, `mocker`, `profiler`, and more |
 | `deploy/` | Kubernetes `operator`, Helm charts, `inference-gateway` ext-proc, `observability` |
 | `container/` | Dockerfiles and build scripts for runtime and dev images |
-| `docs/fern/` | Fern docs site: `pages/` holds every page, the rest is site config (`index.yml`, `docs.yml`, `main.css`, `components/`, `scripts/`, `translations/`) |
+| `docs/fern/` | Fern docs site; pages are in `pages/` |
 | `examples/`, `recipes/` | Runnable examples and deployment recipes |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
-| `.ai/` | Agent topic guidelines: `ais-perf-model-guidelines.md` (canonical AISimulate interface), `bash-launch-guidelines.md`, `ci-guidelines.md`, `linear-ticket-refs.md`, `pytest-guidelines.md`, `python-guidelines.md`, `test-model-size-guardrails.md` |
+| `.ai/` | Topic guidelines for agents (pytest, Python, CI, launch scripts, AISimulate); read the matching one before writing that kind of code |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
 | `agents/`, `agent-docs/` | Role contracts, guides, and rules for the recipe optimization loop |
 
 ## Ecosystem
 
-Repositories this repo integrates with:
-
-| Repo | Role |
-|------|------|
-| [vLLM](https://github.com/vllm-project/vllm), [SGLang](https://github.com/sgl-project/sglang), [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [TokenSpeed](https://github.com/lightseekorg/tokenspeed) | Inference engines that Dynamo serves |
-| [NIXL](https://github.com/ai-dynamo/nixl) | High-throughput inference data-transfer library (KV-cache transfer over RDMA/NVLink) that underpins disaggregated serving |
-| [AIPerf](https://github.com/ai-dynamo/aiperf) | Benchmarking and load-generation tool used by the benchmarking guides |
-| [AISimulate](https://pypi.org/project/aisimulate/) | Predicts serving behavior and searches deployment configurations offline without requiring a GPU cluster |
-| [ModelExpress](https://github.com/ai-dynamo/modelexpress) | Streams model weights GPU-to-GPU via NIXL for fast replica cold-start |
-| [Grove](https://github.com/ai-dynamo/grove) | Kubernetes operator for topology-aware gang scheduling |
+Dynamo serves [vLLM](https://github.com/vllm-project/vllm),
+[SGLang](https://github.com/sgl-project/sglang),
+[TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), and
+[TokenSpeed](https://github.com/lightseekorg/tokenspeed). Related projects:
+[NIXL](https://github.com/ai-dynamo/nixl) (KV-cache transfer),
+[AIPerf](https://github.com/ai-dynamo/aiperf) (load generation),
+[AISimulate](https://pypi.org/project/aisimulate/) (offline configuration search),
+[ModelExpress](https://github.com/ai-dynamo/modelexpress) (GPU-to-GPU weight streaming), and
+[Grove](https://github.com/ai-dynamo/grove) (Kubernetes gang scheduling).
 
 ## Skills
 
@@ -120,10 +117,9 @@ Install the system packages, Rust, and `uv` from
 [Building from Source](docs/fern/pages/developer-guide/advanced-customizations/building-from-source.md),
 plus:
 
-- **protoc 3.15 or newer.** Ubuntu 22.04's `protobuf-compiler` is 3.12, and the `dynamo-llm`
-  build fails on `relay.proto`. CI installs protoc 30.2 from the
-  [protobuf releases](https://github.com/protocolbuffers/protobuf/releases).
-- **Python 3.11 or newer.** `uv venv` finds or downloads one; Ubuntu 22.04's `python3` is 3.10.
+- protoc 3.15 or newer (CI uses 30.2 from the
+  [protobuf releases](https://github.com/protocolbuffers/protobuf/releases))
+- Python 3.11 or newer (`uv venv` can download one)
 
 Python dev build (bindings + wheel, editable):
 
@@ -154,10 +150,7 @@ container/run.sh --mount-workspace -it --image dynamo:latest-vllm-local-dev
 
 ### Rust: build and test efficiently
 
-Most Rust builds wait on one serial chain of crates that ends in `dynamo-llm`. More
-cores, sccache, or a remote cache barely help; the cost is set by which crates you build
-and which test binaries you link. Measured on a 24-core workstation (October 2026,
-rustc 1.96.1), for relative cost:
+Times on a 24-core workstation (October 2026, rustc 1.96.1), for relative cost:
 
 | After you edit | Command | Time |
 |----------------|---------|------|
@@ -200,9 +193,7 @@ cargo clippy --locked --no-deps -p dynamo-kv-router --all-targets -- -D warnings
 - CI's non-default feature checks are in [`pre-merge.yml`](.github/workflows/pre-merge.yml).
   Each is a separate cold build (about 4 min), so run only the one you touched.
 
-On macOS, run `dynamo-llm` checks and targeted tests with `--no-default-features` unless the
-target explicitly requires `block-manager`. The default feature enables Linux/CUDA-oriented NIXL,
-NUMA, and `O_DIRECT` code that is not a valid general-purpose macOS validation path.
+On macOS, build and test `dynamo-llm` with `--no-default-features` unless you need `block-manager`.
 
 ### Python tests
 
@@ -216,28 +207,20 @@ python3 -m pytest tests/router/test_router_e2e_with_mockers.py -k "test_router_d
 
 # GPU end to end: the same, on the backend's serve tests.
 python3 -m pytest tests/serve/test_vllm.py -k guided_decoding -s
-
-# Before you push, list the pre-merge CPU tests in the area you changed.
-python3 -m pytest --collect-only -q -m "pre_merge and gpu_0" tests/router
 ```
 
 `dynamo.mocker` stands in for an engine, so router, planner, and frontend changes can be
 tested end to end without a GPU. Outside the dev containers, install the test plugins with
 `uv pip install -r container/deps/requirements.test.txt`, and put `etcd` and `nats-server` on
 `PATH`: integration fixtures start their own instances. Tests download their Hugging Face
-model unless you pass `--models-dir`. Markers are strict (`--strict-markers`); the full marker
-list lives in [`pyproject.toml`](pyproject.toml) `[tool.pytest.ini_options]`, including GPU
-gating (`gpu_0` … `gpu_8`). Read [`tests/README.md`](tests/README.md),
-[`.ai/pytest-guidelines.md`](.ai/pytest-guidelines.md), and
-[`.ai/test-model-size-guardrails.md`](.ai/test-model-size-guardrails.md) before writing
-tests.
+model unless you pass `--models-dir`. Before writing tests, read
+[`tests/README.md`](tests/README.md), [`.ai/pytest-guidelines.md`](.ai/pytest-guidelines.md),
+and [`.ai/test-model-size-guardrails.md`](.ai/test-model-size-guardrails.md).
 
 ### Lint
 
-```bash
-pre-commit run --files <changed files>   # hooks on what you changed
-pre-commit run --all-files               # every hook; run `pre-commit install` first (it also installs the DCO commit-msg hook)
-```
+Run `pre-commit install` once; the hooks, including the DCO sign-off check, then run on every
+commit. To check before committing, run `pre-commit run --files <changed files>`.
 
 ## Pull Requests
 
