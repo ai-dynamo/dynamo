@@ -1941,9 +1941,8 @@ class ManagedDeployment:
             ),
         )
         # DWM ownership is through Pod UIDs; a DGD label selector can miss it.
-        # Read raw JSON: client models reject valid objects such as an
-        # EndpointSlice with `endpoints: null`, which the API returns for a
-        # slice with no ready endpoints.
+        # Read raw JSON: client models reject `endpoints: null`, which the API
+        # returns for an EndpointSlice with no ready endpoints.
         for name, read in resources:
             record = {
                 "namespace": self.namespace,

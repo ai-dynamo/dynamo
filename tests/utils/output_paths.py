@@ -63,9 +63,8 @@ def resolve_test_output_path(path: Union[str, Path]) -> str:
     return os.path.join(log_root, path_str)
 
 
-# Executions seen per test in this process. Retries of a test (Datadog Auto Test
-# Retries and Early Flake Detection, pytest-rerunfailures) run again in the same
-# process, including under xdist.
+# Executions seen per test in this process. Retries (Datadog, pytest-rerunfailures)
+# run again in the same process, including under xdist.
 _output_dir_attempts: dict[str, int] = {}
 
 
