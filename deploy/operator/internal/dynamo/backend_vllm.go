@@ -179,7 +179,7 @@ func injectFlagsIntoDirectCommand(command, flags, executable, subcommand string)
 func isShellCommand(command string) bool {
 	parts := strings.Split(command, "/")
 	base := parts[len(parts)-1]
-	return base == "sh" || base == "bash"
+	return base == "sh" || base == bashExecutable
 }
 
 const (
