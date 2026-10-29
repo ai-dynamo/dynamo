@@ -670,6 +670,33 @@ async def test_ordered_cancellation_skips_stopped_chunk_processing(processor_nam
 
 
 @pytest.mark.parametrize(
+    "router_hint", [None, {"protocol_version": "0.1", "actions": []}]
+)
+@pytest.mark.parametrize("supports_hints", [False, True])
+def test_native_generate_uses_only_router_hints(
+    monkeypatch, router_hint, supports_hints
+):
+    if supports_hints and "kv_hints" not in GenerateReqInput.__dataclass_fields__:
+        pytest.skip("installed SGLang does not support kv_hints")
+    payload = {"kv_hints": {"caller_controlled": True}}
+    if not supports_hints:
+        monkeypatch.delitem(
+            GenerateReqInput.__dataclass_fields__, "kv_hints", raising=False
+        )
+    native = build_native_generate_request(
+        payload,
+        input_ids=[7],
+        request_id="internal",
+        priority=None,
+        kv_hint=router_hint,
+    )
+    assert getattr(native, "kv_hints", None) == (
+        router_hint if supports_hints else None
+    )
+    assert payload == {"kv_hints": {"caller_controlled": True}}
+
+
+@pytest.mark.parametrize(
     "body_salt,routing_salt,expected_salt",
     [
         (None, None, None),
@@ -1300,7 +1327,7 @@ def test_ordered_cancellation_rejects_native_batch():
     )
 
 
-def test_build_sampling_params_forwards_repetition_controls_for_token_requests():
+def test_build_sampling_params_forwards_sampling_options_for_token_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
     sampling_params = handler._build_sampling_params(
@@ -1313,6 +1340,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
                 "top_p": 0.95,
                 "top_k": 40,
                 "min_p": 0.01,
+                "logit_bias": {"18": -10.0},
                 "seed": 1234,
             },
             "stop_conditions": {"max_tokens": 8},
@@ -1326,6 +1354,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
     assert sampling_params["top_p"] == 0.95
     assert sampling_params["top_k"] == 40
     assert sampling_params["min_p"] == 0.01
+    assert sampling_params["logit_bias"] == {"18": -10.0}
     assert sampling_params["sampling_seed"] == 1234
     assert "seed" not in sampling_params
 
@@ -1699,7 +1728,7 @@ def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
     assert sampling_params["stop_token_ids"] == [32, 34]
 
 
-def test_build_sampling_params_forwards_repetition_controls_for_openai_requests():
+def test_build_sampling_params_forwards_sampling_options_for_openai_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=True)
 
     sampling_params = handler._build_sampling_params(
@@ -1711,6 +1740,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_openai_requests(
             "top_p": 0.95,
             "top_k": 40,
             "min_p": 0.01,
+            "logit_bias": {"18": -10.0},
             "seed": 1234,
             "max_tokens": 8,
         }
@@ -1723,6 +1753,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_openai_requests(
     assert sampling_params["top_p"] == 0.95
     assert sampling_params["top_k"] == 40
     assert sampling_params["min_p"] == 0.01
+    assert sampling_params["logit_bias"] == {"18": -10.0}
     assert sampling_params["sampling_seed"] == 1234
     assert "seed" not in sampling_params
 

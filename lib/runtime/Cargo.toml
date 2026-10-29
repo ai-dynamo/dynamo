@@ -17,6 +17,7 @@ ignored = ["mio"]
 [features]
 default = []
 integration = []
+velo-ucx = ["velo/ucx"]
 testing-etcd = [] # Tests that require an active ETCD server
 # White-box helpers for cross-crate lifecycle tests. Never enabled by a normal build.
 testing = []
@@ -30,6 +31,7 @@ tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO
 nvtx = ["dep:nvtx"]
 
 [dependencies]
+velo = { workspace = true }
 # repo
 dynamo-truthy = { workspace = true }
 
@@ -41,6 +43,7 @@ async-trait = { workspace = true }
 tmq = { workspace = true }
 lru = { version = "0.16" }
 axum = { workspace = true }
+base64 = { version = "0.22" }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
@@ -128,6 +131,7 @@ nix = { version = "0.30.1", default-features = false, features = ["net"] }
 
 [dev-dependencies]
 h2 = "0.4"
+velo = { workspace = true, features = ["test-helpers"] }
 tower = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
 rcgen = { workspace = true }

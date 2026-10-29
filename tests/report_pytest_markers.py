@@ -95,6 +95,9 @@ STUB_MODULES = [
     "transformers.models",
     "transformers.models.qwen2_vl",
     "transformers.models.qwen2_vl.image_processing_qwen2_vl",
+    # Responses replay tests import these; marker collection never tokenizes.
+    "tokenizers",
+    "tokenizers.models",
     "pandas",
     "matplotlib",
     "matplotlib.pyplot",
@@ -134,6 +137,9 @@ STUB_MODULES = [
     "aisimulate.sweeper.search",
     "aisimulate.sweeper.search_space",
     "aisimulate_core",
+    "aisimulate_core.datasets",
+    "pyarrow",
+    "pyarrow.parquet",
     "boto3",
     "boto3.exceptions",
     "boto3.s3",
@@ -255,6 +261,7 @@ STUB_MODULES = [
     "vllm.renderers",
     "vllm.renderers.chat_utils",
     "vllm.renderers.embed_utils",
+    "vllm.renderers.hf",
     "vllm.sampling_params",
     "vllm.tokenizers",
     "vllm.tokenizers.mistral",
@@ -339,6 +346,7 @@ STUB_MODULES = [
 # environment may contain an older, otherwise importable release, so force
 # stubs for these versioned modules during marker-only collection.
 FORCE_STUB_MODULES = {
+    "aisimulate_core.datasets",
     "aisimulate.sdk.task_v2",
     "aisimulate.legacy_cli.main",
     "aisimulate_core.sdk.models",
