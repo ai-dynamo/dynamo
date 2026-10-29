@@ -350,6 +350,8 @@ independent of backend admission; see [Backend Admission Control](../../develope
 </ParamField>
 
 The `dynamo_backend_admission_*` metrics track engine occupancy, queueing, and request outcomes.
+These metrics count requests only when at least one engine limit is configured. With both engine limits
+unlimited, they remain at zero.
 See [Backend Admission Control](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#backend)
 for gate behavior.
 
