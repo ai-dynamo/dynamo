@@ -117,7 +117,6 @@ strum = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tmq = { workspace = true }
-zmq = "0.10"
 tokio = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }
 tokio-util = { workspace = true }
@@ -129,6 +128,7 @@ validator = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
+zmq = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
 
