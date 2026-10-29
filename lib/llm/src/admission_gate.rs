@@ -129,11 +129,12 @@
 //!
 //! Setting either engine limit enables admission control, and an engine limit
 //! left unset stays unlimited. With both unset, the default, admission control
-//! is disabled whatever the queue limit: [`BackendAdmissionGate::admit`] passes
-//! every request straight to its engine without taking the gate's lock,
-//! counting it or queueing it, so the gate neither delays nor refuses any
-//! request and its metrics stay at zero. Queue storage follows the queue limit
-//! either way, so the default queue allocates none.
+//! is disabled: [`BackendAdmissionGate::admit`] passes every request straight
+//! to its engine without taking the gate's lock, counting it or queueing it, so
+//! the gate neither delays nor refuses any request and its metrics stay at
+//! zero. A positive queue limit then fails the gate's creation, and with it the
+//! worker's startup; a queue limit of zero is accepted. Queue storage follows
+//! the queue limit either way, so the default queue allocates none.
 //!
 //! The per-rank limits never change once the gate is created. The engine's
 //! reported `max_num_seqs` is only logged, to help tune them. Its reported DP
@@ -160,7 +161,7 @@ use dynamo_runtime::engine::{
     AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, AsyncEngineStream, Data,
     EngineStream,
 };
-use dynamo_runtime::error::{DynamoError, ErrorType};
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::pipeline::{ManyOut, ServiceEngine, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::Stream;
@@ -235,18 +236,18 @@ const REQUEST_QUEUE_LIMIT: Setting = Setting {
 };
 
 impl Setting {
-    /// The value of the first name `lookup` finds valid, or `None` when the
+    /// The first name `lookup` finds valid, with its value, or `None` when the
     /// setting is left at its default.
     ///
     /// A value that is set but is not an integer of at least `min` is warned
     /// about and passed over, so it cannot hide a valid value behind it.
-    fn resolve(&self, lookup: &impl Fn(&str) -> Option<String>) -> Option<usize> {
+    fn resolve(&self, lookup: &impl Fn(&str) -> Option<String>) -> Option<(&'static str, usize)> {
         for &name in self.names {
             let Some(raw) = lookup(name) else {
                 continue;
             };
             match raw.trim().parse::<usize>() {
-                Ok(value) if value >= self.min => return Some(value),
+                Ok(value) if value >= self.min => return Some((name, value)),
                 _ => tracing::warn!(
                     env = name,
                     value = %raw,
@@ -270,19 +271,41 @@ struct ExplicitLimits {
 }
 
 impl ExplicitLimits {
-    fn from_environment() -> Self {
+    fn from_environment() -> Result<Self, DynamoError> {
         Self::resolve(|name| std::env::var(name).ok())
     }
 
     /// Resolve every setting through `lookup`. Pure, so the names, their
     /// precedence and their validation are testable without touching the
     /// process environment.
-    fn resolve(lookup: impl Fn(&str) -> Option<String>) -> Self {
-        Self {
-            engine_request_limit: ENGINE_REQUEST_LIMIT.resolve(&lookup),
-            engine_request_waiting_limit: ENGINE_REQUEST_WAITING_LIMIT.resolve(&lookup),
-            request_queue_limit: REQUEST_QUEUE_LIMIT.resolve(&lookup),
+    ///
+    /// A positive queue limit with neither engine limit set is an error: with
+    /// admission control disabled, nothing would ever be queued.
+    fn resolve(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, DynamoError> {
+        let value = |setting: &Setting| setting.resolve(&lookup).map(|(_, value)| value);
+        let engine_request_limit = value(&ENGINE_REQUEST_LIMIT);
+        let engine_request_waiting_limit = value(&ENGINE_REQUEST_WAITING_LIMIT);
+        let request_queue_limit = REQUEST_QUEUE_LIMIT.resolve(&lookup);
+        let explicit = Self {
+            engine_request_limit,
+            engine_request_waiting_limit,
+            request_queue_limit: request_queue_limit.map(|(_, limit)| limit),
+        };
+        if let Some((name, limit)) = request_queue_limit
+            && limit > 0
+            && !explicit.admission_enabled()
+        {
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message(format!(
+                    "Backend admission request queue limit {name}={limit} requires an engine \
+                     limit: set {DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT} (or \
+                     --engine-request-limit) or {DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT}, \
+                     or set {name} to 0"
+                ))
+                .build());
         }
+        Ok(explicit)
     }
 
     /// Whether these settings enable admission control: either engine limit is
@@ -463,30 +486,59 @@ const RANK_OVERLOADED_MESSAGE: &str = "Server overloaded: DP rank at capacity";
 /// backpressure.
 const CANCELLED_MESSAGE: &str = "Request cancelled while queued for backend admission";
 
-/// One backend worker's admission gate, held by the object that is the worker
-/// and shared, by cloning this handle, with every endpoint and request path
-/// that serves for it.
+/// Shares one worker's gate between model registration and endpoint serving
+/// setup, which Python backends can run concurrently. Serving paths therefore
+/// need a shared handle before registration initializes the gate.
 ///
-/// Clones share one gate; separately created handles never do. A request
-/// reaches its gate only through the handle its serving path was built with,
-/// so the gate lives as long as its worker and the paths serving for it.
+/// Model registration supplies the component needed to register gate metrics
+/// and initializes the gate before publishing the backend. Invalid gate
+/// configuration aborts registration, so model requests should always find an
+/// initialized gate; the error from `get()` is only a failsafe.
+///
+/// Initializing during endpoint serving setup instead would leave model-card
+/// reports from earlier registration waiting for a gate, requiring additional
+/// coordination. Remove this wrapper when startup runs model registration to
+/// completion before constructing the serving paths; those paths can then
+/// receive the initialized `Arc<BackendAdmissionGate>` directly.
+///
+/// Clones share one gate; separately created handles never do.
 #[derive(Clone, Default)]
 pub struct WorkerAdmissionGate(Arc<OnceLock<Arc<BackendAdmissionGate>>>);
 
 impl WorkerAdmissionGate {
     /// The worker's gate, created by the first call — as the worker first
     /// registers or serves as a model backend — with its settings read from
-    /// the environment then, once.
+    /// the environment then, once. An invalid configuration fails the call
+    /// and creates nothing, so the worker must not start serving.
     ///
     /// `component` is the one the worker serves. It only labels the gate's
     /// metric family and exposes it, once, on that component's registry when
     /// the gate is created (see [`metrics`]); it never selects a gate, and a
     /// later call through any endpoint of the worker returns the same one.
-    pub fn get_or_create(&self, component: &Component) -> Arc<BackendAdmissionGate> {
-        Arc::clone(
-            self.0
-                .get_or_init(|| BackendAdmissionGate::for_component(component)),
-        )
+    pub fn get_or_create(
+        &self,
+        component: &Component,
+    ) -> Result<Arc<BackendAdmissionGate>, DynamoError> {
+        if let Some(gate) = self.0.get() {
+            return Ok(Arc::clone(gate));
+        }
+        let explicit = ExplicitLimits::from_environment()?;
+        Ok(Arc::clone(self.0.get_or_init(|| {
+            BackendAdmissionGate::for_component(component, explicit)
+        })))
+    }
+
+    /// Return the gate initialized during backend startup, or log and return
+    /// an error if startup has not initialized it.
+    pub fn get(&self) -> Result<Arc<BackendAdmissionGate>, DynamoError> {
+        self.0.get().cloned().ok_or_else(|| {
+            let message = "Backend admission gate has not been initialized";
+            tracing::error!("{message}");
+            DynamoError::builder()
+                .error_type(ErrorType::Internal)
+                .message(message)
+                .build()
+        })
     }
 }
 
@@ -1545,12 +1597,12 @@ pub struct BackendAdmissionGate {
 }
 
 impl BackendAdmissionGate {
-    /// The gate of a worker serving `component`: its settings read once from
+    /// The gate of a worker serving `component`, with the settings read from
     /// the environment, and its metric family created, once, on `component`,
     /// as the component's own metrics are.
-    fn for_component(component: &Component) -> Arc<Self> {
+    fn for_component(component: &Component, explicit: ExplicitLimits) -> Arc<Self> {
         let metrics = BackendAdmissionMetrics::new(component);
-        Self::with_metrics(ExplicitLimits::from_environment(), metrics)
+        Self::with_metrics(explicit, metrics)
     }
 
     /// Build a standalone gate whose metrics are exposed nowhere, so tests
@@ -2270,12 +2322,17 @@ mod tests {
     ///////////////////// CONFIGURATION /////////////////////
 
     /// Explicit settings resolved from exactly these environment values.
-    fn explicit_from(env: &[(&str, &str)]) -> ExplicitLimits {
+    fn resolve_from(env: &[(&str, &str)]) -> Result<ExplicitLimits, DynamoError> {
         ExplicitLimits::resolve(|name| {
             env.iter()
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| value.to_string())
         })
+    }
+
+    /// Explicit settings resolved from exactly these valid environment values.
+    fn explicit_from(env: &[(&str, &str)]) -> ExplicitLimits {
+        resolve_from(env).unwrap_or_else(|error| panic!("{env:?}: {error}"))
     }
 
     /// With nothing set, both engine limits are unlimited and there is no
@@ -2384,7 +2441,67 @@ mod tests {
             (vec![(CANONICAL, "invalid")], None),
             (vec![(CANONICAL, "")], None),
         ] {
+            // A positive queue limit needs an engine limit to queue behind.
+            let env = [env, vec![(DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT, "1")]].concat();
             assert_eq!(explicit_from(&env).request_queue_limit, expected, "{env:?}");
+        }
+    }
+
+    /// A positive queue limit with neither engine limit set fails, naming the
+    /// setting that supplied it and how to set an engine limit. Zero stays
+    /// valid alone, and any queue limit is valid beside either engine limit.
+    #[test]
+    fn a_positive_queue_limit_requires_an_engine_limit() {
+        const QUEUE: &str = DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT;
+        const LEGACY_QUEUE: &str = DYN_DYNAMO_REQUEST_QUEUE_LIMIT;
+        for (env, source) in [
+            (vec![(QUEUE, "4")], QUEUE),
+            (vec![(LEGACY_QUEUE, "4")], LEGACY_QUEUE),
+            (vec![(QUEUE, "4"), (LEGACY_QUEUE, "0")], QUEUE),
+            (vec![(QUEUE, "invalid"), (LEGACY_QUEUE, "4")], LEGACY_QUEUE),
+            // An invalid engine limit is passed over, so it sets none.
+            (
+                vec![
+                    (QUEUE, "4"),
+                    (DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT, "0"),
+                ],
+                QUEUE,
+            ),
+        ] {
+            let error = resolve_from(&env).unwrap_err();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::InvalidArgument)
+            );
+            assert_eq!(
+                error.message(),
+                format!(
+                    "Backend admission request queue limit {source}=4 requires an engine \
+                     limit: set DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT (or \
+                     --engine-request-limit) or \
+                     DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT, or set {source} to 0"
+                ),
+                "{env:?}"
+            );
+        }
+        for (env, expected) in [
+            (vec![(QUEUE, "0")], 0),
+            (vec![(LEGACY_QUEUE, "0")], 0),
+            (vec![(QUEUE, "0"), (LEGACY_QUEUE, "4")], 0),
+            (vec![(QUEUE, "4"), (DYN_ENGINE_REQUEST_LIMIT, "1")], 4),
+            (
+                vec![
+                    (LEGACY_QUEUE, "4"),
+                    (DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT, "1"),
+                ],
+                4,
+            ),
+        ] {
+            assert_eq!(
+                explicit_from(&env).request_queue_limit,
+                Some(expected),
+                "{env:?}"
+            );
         }
     }
 
@@ -2406,7 +2523,8 @@ mod tests {
             env.iter()
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| value.to_string())
-        });
+        })
+        .unwrap();
         assert_eq!(
             resolved,
             ExplicitLimits {
@@ -2549,16 +2667,17 @@ mod tests {
     }
 
     /// Either engine limit enables admission control, under any of its names;
-    /// with neither set, by default or with only a queue limit, it is disabled.
+    /// with neither set, by default or with a queue limit of zero, it is
+    /// disabled.
     #[test]
     fn only_an_engine_limit_enables_admission_control() {
         for (env, enabled) in [
             (vec![], false),
             (
-                vec![(DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT, "8")],
+                vec![(DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT, "0")],
                 false,
             ),
-            (vec![(DYN_DYNAMO_REQUEST_QUEUE_LIMIT, "8")], false),
+            (vec![(DYN_DYNAMO_REQUEST_QUEUE_LIMIT, "0")], false),
             (
                 vec![(DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT, "0")],
                 false,
@@ -2692,16 +2811,16 @@ mod tests {
 
     /// The configuration is logged once as the gate is created, at INFO and
     /// with nothing at WARN, whether admission control is disabled — by
-    /// default, or with a queue limit alone — or enabled: each per-rank limit,
-    /// whichever name set it, unset engine limits as `unlimited`, and the
-    /// detected DP ranks and `max_num_seqs`, `unavailable` until reported.
+    /// default, or with a queue limit of zero — or enabled: each per-rank
+    /// limit, whichever name set it, unset engine limits as `unlimited`, and
+    /// the detected DP ranks and `max_num_seqs`, `unavailable` until reported.
     #[test]
     fn the_configuration_is_logged_at_info_as_the_gate_is_created() {
         for (env, limits) in [
             (vec![], ["unlimited", "unlimited", "0"]),
             (
-                vec![(DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT, "8")],
-                ["unlimited", "unlimited", "8"],
+                vec![(DYN_DYNAMO_REQUEST_QUEUE_LIMIT, "0")],
+                ["unlimited", "unlimited", "0"],
             ),
             (
                 vec![(DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT, "3")],
@@ -2913,6 +3032,25 @@ mod tests {
         let returned = tracing::subscriber::with_default(subscriber, run);
         let logged = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
         (returned, logged)
+    }
+
+    #[test]
+    fn getting_an_uninitialized_gate_logs_and_returns_an_error() {
+        let holder = WorkerAdmissionGate::default();
+        let (error, output) = logged(tracing::Level::ERROR, || {
+            holder.get().err().expect("the gate is not initialized")
+        });
+        assert_eq!(error.error_type(), ErrorType::Internal);
+        assert_eq!(
+            error.message(),
+            "Backend admission gate has not been initialized"
+        );
+        assert!(output.contains("ERROR"), "{output}");
+        assert!(output.contains(error.message()), "{output}");
+        assert!(
+            holder.0.get().is_none(),
+            "retrieval must not initialize the gate"
+        );
     }
 
     /// A supplied rank the gate cannot use warns with the rank, and the range

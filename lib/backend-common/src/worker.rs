@@ -1035,6 +1035,14 @@ impl Worker {
             build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
         tracing::debug!("local model built");
 
+        // An LLM engine admits its network requests through this worker's
+        // gate. Create it before the engine receives its endpoint or the model
+        // is published, so an invalid admission configuration fails startup
+        // with nothing published; the ingress below gets the same gate.
+        if let EngineKind::Llm(_) = &self.engine {
+            self.admission_gate.get_or_create(endpoint.component())?;
+        }
+
         // Hand the engine its serving endpoint before registering the model
         // with discovery. on_endpoint_ready is a fatal handoff: doing it first
         // means a failure leaves nothing published, so there is no stale
@@ -1107,7 +1115,7 @@ impl Worker {
                 // before they reach the engine, sized by the model card it
                 // registered above; the local health-check probe below calls
                 // the adapter directly, outside admission.
-                let admission_gate = self.admission_gate.get_or_create(endpoint.component());
+                let admission_gate = self.admission_gate.get()?;
                 admission_gate.record_model_card(local_model.card());
                 let ingress = Ingress::for_engine_with_lifecycle_role(
                     AdmissionEngine::new(admission_gate, engine_adapter.clone()),

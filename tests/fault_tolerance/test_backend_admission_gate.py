@@ -48,10 +48,11 @@ inside the engine without a response, holding both, until the test closes a
 stream ahead of it.
 
 Neither engine limit is set by default, which leaves the gate disabled: every
-request passes straight to the engine, uncounted, whatever the queue limit. So
-every scenario that exercises the gate sets an engine limit, an engine limit it
-leaves unset is unlimited yet still has its occupancy reported, and one
-scenario checks the disabled gate against the engine's own gauges.
+request passes straight to the engine, uncounted, and a positive queue limit
+alone fails the worker's startup. So every scenario that exercises the gate sets
+an engine limit, an engine limit it leaves unset is unlimited yet still has its
+occupancy reported, and one scenario checks the disabled gate against the
+engine's own gauges.
 
 A caller that disconnects while its request is queued is a separate question
 from the gate's own cancellation handling, which its unit tests cover: whether
@@ -80,7 +81,10 @@ import asyncio
 import contextlib
 import functools
 import logging
+import os
 import re
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Coroutine, Iterator
@@ -89,6 +93,7 @@ import aiohttp
 import pytest
 
 from tests.router.helper import (
+    generate_random_suffix,
     managed_runtime,
     poll_for_worker_instances,
     wait_for_frontend_ready,
@@ -985,8 +990,8 @@ def test_request_limit_holds_requests_until_one_finishes(
 @pytest.mark.timeout(60)
 @pytest.mark.parametrize(
     "settings",
-    [{}, {REQUEST_QUEUE_LIMIT_ENV: 4}],
-    ids=["defaults", "queue-limit-only"],
+    [{}, {REQUEST_QUEUE_LIMIT_ENV: 0}],
+    ids=["defaults", "zero-queue-limit"],
 )
 def test_unset_engine_limits_pass_every_request_to_the_engine(
     request,
@@ -996,7 +1001,7 @@ def test_unset_engine_limits_pass_every_request_to_the_engine(
     dynamo_dynamic_ports,
     settings,
 ):
-    """With neither engine limit set, by default or with only a queue limit,
+    """With neither engine limit set, by default or with a queue limit of zero,
     the gate is disabled and every request passes straight to the engine.
 
     The engine runs one sequence. With one stream running, three more streams
@@ -1042,6 +1047,56 @@ def test_unset_engine_limits_pass_every_request_to_the_engine(
         request, dynamo_dynamic_ports, request_plane, settings, max_num_seqs=1
     ) as deployment:
         _run(dynamo_dynamic_ports.frontend_port, deployment, scenario)
+
+
+@pytest.mark.timeout(90)
+def test_a_queue_limit_without_an_engine_limit_fails_worker_startup(
+    request,
+    runtime_services_session,
+    predownload_tokenizers,
+    request_plane,
+    dynamo_dynamic_ports,
+):
+    """A positive queue limit with neither engine limit set is a configuration
+    error: the worker never starts serving, and the mocker exits nonzero with
+    an error naming the queue setting and how to set an engine limit."""
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in ADMISSION_SETTINGS
+    }
+    env.update(
+        {
+            REQUEST_QUEUE_LIMIT_ENV: "4",
+            "DYN_REQUEST_PLANE": request_plane,
+            # The runtime binds its system port before the gate reads its
+            # configuration, so it is this test's own, as in every scenario.
+            "DYN_SYSTEM_PORT": str(dynamo_dynamic_ports.system_ports[0]),
+        }
+    )
+    command = [
+        sys.executable,
+        "-m",
+        "dynamo.mocker",
+        "--model-path",
+        MODEL_NAME,
+        "--endpoint",
+        f"dyn://test-namespace-{generate_random_suffix()}.mocker.generate",
+        "--discovery-backend",
+        "etcd",
+        "--num-workers",
+        "1",
+    ]
+    result = subprocess.run(
+        command, env=env, capture_output=True, text=True, timeout=60
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert (
+        f"Backend admission request queue limit {REQUEST_QUEUE_LIMIT_ENV}=4 requires "
+        f"an engine limit: set {ENGINE_REQUEST_LIMIT_ENV} (or --engine-request-limit) "
+        f"or {ENGINE_REQUEST_WAITING_LIMIT_ENV}, or set {REQUEST_QUEUE_LIMIT_ENV} to 0"
+    ) in output, output
 
 
 ######################### ALIASES #########################

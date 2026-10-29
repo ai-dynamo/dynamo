@@ -1328,3 +1328,38 @@ async def test_endpoints_of_one_python_worker_share_its_gate(request, tmp_path):
         await gate.occupancy_reaches((0, 0))
         assert await gate.total(RECEIVED) == 3
         assert await gate.total(ADMITTED) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize("path", ["pull", "push"])
+async def test_a_queue_limit_without_an_engine_limit_fails_registration(
+    request, tmp_path, path
+):
+    """A positive queue limit, here from the legacy alias, with neither engine
+    limit set fails `register_model`, naming the setting that supplied it. The
+    gate is never created, so its family is never exposed, and the endpoint
+    never becomes a model backend: its requests still bypass admission."""
+    if _run_in_fresh_process(request, tmp_path):
+        return
+
+    for name in ADMITTING_LIMITS:
+        os.environ.pop(name, None)
+    queue_only = {"DYN_DYNAMO_REQUEST_QUEUE_LIMIT": "4"}
+    async with _runtime(tmp_path, "msgpack", queue_only) as (runtime, servers, gate):
+        handlers = Handlers()
+        endpoint, client = await _serve(runtime, servers, path, getattr(handlers, path))
+        await gate.ready()
+        with pytest.raises(Exception) as rejected:
+            await _register(endpoint, "admission-model", WorkerType.Aggregated)
+        assert str(rejected.value) == (
+            "InvalidRequest: Backend admission request queue limit DYN_DYNAMO_REQUEST_QUEUE_LIMIT=4 "
+            "requires an engine limit: set DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT "
+            "(or --engine-request-limit) or "
+            "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT, or set "
+            "DYN_DYNAMO_REQUEST_QUEUE_LIMIT to 0"
+        )
+
+        stream = await client.generate({"token_ids": [1]})
+        assert [response.data() async for response in stream] == [{"ok": True}]
+        assert await gate.worker_ids() == set()

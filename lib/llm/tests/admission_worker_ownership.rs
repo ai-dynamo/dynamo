@@ -369,16 +369,12 @@ async fn each_worker_admits_through_its_own_gate_and_its_endpoints_share_it() {
 
     // Each worker's gate exists once it serves: its own, never the other's,
     // and the same one through every clone of its handle.
-    let (component_a, component_b) = (a.component(), b.component());
-    let gate_a = a.admission_gate.get_or_create(&component_a);
+    let gate_a = a.admission_gate.get().unwrap();
     assert!(Arc::ptr_eq(
         &gate_a,
-        &a.admission_gate.clone().get_or_create(&component_a)
+        &a.admission_gate.clone().get().unwrap()
     ));
-    assert!(!Arc::ptr_eq(
-        &gate_a,
-        &b.admission_gate.get_or_create(&component_b)
-    ));
+    assert!(!Arc::ptr_eq(&gate_a, &b.admission_gate.get().unwrap()));
 
     // A gate registers its family once, on the registry of the component it
     // is created for: reached again through another component object of the
@@ -395,14 +391,19 @@ async fn each_worker_admits_through_its_own_gate_and_its_endpoints_share_it() {
     };
     let (first, second) = (component(), component());
     let handle = WorkerAdmissionGate::default();
-    let gate_c = handle.get_or_create(&first);
-    assert!(Arc::ptr_eq(&gate_c, &handle.get_or_create(&second)));
+    let gate_c = handle.get_or_create(&first).unwrap();
+    assert!(Arc::ptr_eq(
+        &gate_c,
+        &handle.get_or_create(&second).unwrap()
+    ));
     assert_eq!(admission_families(&first), 7);
     assert_eq!(admission_families(&second), 0);
     // Another gate created for that same component object finds the family
     // already registered there: it is still created, with its collectors kept
     // unregistered, and adds no family.
-    let duplicate_gate = WorkerAdmissionGate::default().get_or_create(&first);
+    let duplicate_gate = WorkerAdmissionGate::default()
+        .get_or_create(&first)
+        .unwrap();
     assert!(!Arc::ptr_eq(&gate_c, &duplicate_gate));
     assert_eq!(admission_families(&first), 7);
 
@@ -474,9 +475,7 @@ async fn each_worker_admits_through_its_own_gate_and_its_endpoints_share_it() {
     });
     adapter.runtime_config.max_num_seqs = Some(MAX_NUM_SEQS);
     adapter.runtime_config.data_parallel_size = 8;
-    b.admission_gate
-        .get_or_create(&component_b)
-        .record_model_card(&adapter);
+    b.admission_gate.get().unwrap().record_model_card(&adapter);
     refused(&b.router("generate").await, &mut b).await;
     let b_ranks = BTreeSet::from(["0", "1", "unspecified"].map(String::from));
     assert_eq!(b.ranks(), b_ranks);

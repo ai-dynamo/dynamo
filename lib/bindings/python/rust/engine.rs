@@ -16,10 +16,7 @@ use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
-use dynamo_llm::admission_gate::{
-    AdmissionRequest, AdmissionResponse, BackendAdmissionGate, WorkerAdmissionGate,
-};
-use dynamo_runtime::component::Component;
+use dynamo_llm::admission_gate::{AdmissionRequest, AdmissionResponse, WorkerAdmissionGate};
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use dynamo_runtime::pipeline::network::RequestPlanePayloadCodec;
@@ -207,7 +204,7 @@ impl PythonAsyncEngine {
     pub(crate) fn network_engine(
         &self,
         backend_role: BackendRole,
-        admission: EndpointAdmission,
+        admission: WorkerAdmissionGate,
     ) -> PythonNetworkEngine {
         PythonNetworkEngine {
             engine: self.0.clone(),
@@ -252,28 +249,6 @@ impl BackendRole {
     }
 }
 
-/// How a Python endpoint's network engines reach the admission gate of the
-/// worker the endpoint serves for: that worker's own handle, cloned from its
-/// runtime, and the component the endpoint serves.
-#[derive(Clone)]
-pub(crate) struct EndpointAdmission {
-    gate: WorkerAdmissionGate,
-    component: Component,
-}
-
-impl EndpointAdmission {
-    pub(crate) fn new(gate: WorkerAdmissionGate, component: Component) -> Self {
-        Self { gate, component }
-    }
-
-    /// The worker's gate. `register_model` creates it, for this endpoint's
-    /// component, before it records the role that lets a request use it, so a
-    /// request always receives the gate already created.
-    pub(crate) fn gate(&self) -> Arc<BackendAdmissionGate> {
-        self.gate.get_or_create(&self.component)
-    }
-}
-
 /// Network-only Python engine. Requests stay Python-owned objects, transcoded
 /// directly from the request-plane codec, and each response is encoded
 /// straight into the request's own codec as it leaves the handler.
@@ -281,7 +256,7 @@ impl EndpointAdmission {
 pub(crate) struct PythonNetworkEngine {
     engine: PythonServerStreamingEngine,
     backend_role: BackendRole,
-    admission: EndpointAdmission,
+    admission: WorkerAdmissionGate,
 }
 
 #[async_trait::async_trait]
@@ -315,7 +290,7 @@ impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<EncodedPythonResponse>, Error>
         );
         if uses_admission {
             self.admission
-                .gate()
+                .get()?
                 .admit(&context, dp_rank, generate)
                 .await
         } else {
