@@ -21,6 +21,7 @@ from dynamo.aisimulate.output.dgd.renderers import render_dgd
 from dynamo.aisimulate.output.dgd.renderers.aic import renderer as aic_renderer
 from dynamo.aisimulate.output.dgd.renderers.direct import renderer as direct_renderer
 from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
+from dynamo.profiler.utils.config_modifiers import vllm
 
 pytestmark = [
     pytest.mark.unit,
@@ -197,8 +198,6 @@ def test_installed_aic_renders_real_disaggregated_candidate(monkeypatch) -> None
     pytest.importorskip("aisimulate.generator")
     from aisimulate.generator.request.schema import ModelFacts
 
-    from dynamo.profiler.utils.config_modifiers import vllm
-
     # Keep this package-boundary test deterministic and offline. Model facts
     # are part of the request; the runtime finalizer is covered separately.
     monkeypatch.setattr(vllm, "get_model_context_length", lambda _model: None)
@@ -261,6 +260,76 @@ def test_installed_aic_renders_real_disaggregated_candidate(monkeypatch) -> None
     }
     assert workers["prefill"]["replicas"] == 1
     assert workers["decode"]["replicas"] == 1
+
+
+@pytest.mark.parametrize(
+    "include_null_block_size", [False, True], ids=["omitted", "null"]
+)
+def test_installed_aic_renders_candidate_without_explicit_block_size(
+    monkeypatch, include_null_block_size
+) -> None:
+    # Marker collection stubs AISimulate without its generator request types.
+    from aisimulate.generator.request.schema import ModelFacts
+
+    monkeypatch.setattr(vllm, "get_model_context_length", lambda _model: None)
+    monkeypatch.setattr(vllm, "get_mamba_cache_align_block_size", lambda _model: None)
+    config = {
+        "deployment_mode": "agg",
+        "backend": "vllm",
+        "backend_version": "0.20.1",
+        "model_name": "Qwen/Qwen3-32B",
+        "hardware_sku": "h200_sxm",
+        "context_length": 8192,
+        "tp": 1,
+        "pp": 1,
+        "attention_dp": 1,
+        "moe_tp": 1,
+        "moe_ep": 1,
+        "replicas": 1,
+        "used_gpus": 1,
+        "agg_max_num_batched_tokens": 4096,
+        "agg_max_num_seqs": 64,
+        "agg_gpu_memory_utilization": 0.9,
+        "agg_enable_prefix_caching": True,
+    }
+    if include_null_block_size:
+        config["agg_block_size"] = None
+
+    from_candidate, generate = aic_renderer._load_generator_api()
+    request = from_candidate(
+        {
+            "config": config,
+            "used_gpus": 1,
+            "score": 123.0,
+            "metrics": {"output_throughput_tok_s": 123.0},
+        },
+        workload={"isl": 1024, "osl": 256},
+        deployment_target="dynamo-python",
+        generator_overrides={
+            "generator_dynamo_version": "1.5.0",
+            "K8sConfig": {
+                "k8s_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
+                "name_prefix": "sweeper-dgd",
+            },
+            "NodeConfig": {"num_gpus_per_node": 8},
+        },
+        model_facts=ModelFacts(is_moe=False, architecture="Qwen3ForCausalLM"),
+    )
+
+    rendered = yaml.safe_load(generate(request)["k8s_deploy.yaml"])
+
+    assert rendered["kind"] == "DynamoGraphDeployment"
+    worker = next(
+        component
+        for component in rendered["spec"]["components"]
+        if component.get("type") == "worker"
+    )
+    args = next(
+        container
+        for container in worker["podTemplate"]["spec"]["containers"]
+        if container.get("name") == "main"
+    )["args"]
+    assert "--block-size" not in args
 
 
 @pytest.mark.parametrize(
@@ -376,8 +445,6 @@ def test_installed_aic_renders_trace_workloads_like_synthetic_ones(
     pytest.importorskip("aisimulate.generator")
     from aisimulate.generator.request.schema import ModelFacts
     from aisimulate.sweeper.config import Workload
-
-    from dynamo.profiler.utils.config_modifiers import vllm
 
     # Keep the renders offline: model facts come from the request below.
     monkeypatch.setattr(vllm, "get_model_context_length", lambda _model: None)
