@@ -29,6 +29,7 @@ from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
 from vllm_omni.inputs.data import OmniTokensPrompt
 
 from dynamo import prometheus_names
+from dynamo.common.backend.health_check import is_probe
 from dynamo.llm import ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
@@ -184,6 +185,13 @@ class OmniStageWorker:
                 e,
                 exc_info=True,
             )
+            # A marked health canary must fail through the runtime error path;
+            # an error dict would be wrapped as data and count as healthy.
+            # Ordinary requests keep the dict, which stage_router reads.
+            if is_probe(request):
+                raise RuntimeError(
+                    f"Omni stage {self.stage_id} health check failed: {e}"
+                ) from e
             yield {"error": str(e), "finished": True}
             return
 

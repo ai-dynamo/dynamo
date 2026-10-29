@@ -15,6 +15,7 @@ import yaml
 try:
     from PIL import Image
 
+    from dynamo.health_check import HEALTH_CHECK_KEY
     from dynamo.vllm.omni.stage_worker import (
         OmniStageWorker,
         _create_engine,
@@ -355,6 +356,17 @@ async def test_engine_error_yields_error_chunk():
 
     assert any("error" in c for c in chunks)
     assert any(c.get("finished") for c in chunks)
+
+
+@pytest.mark.asyncio
+async def test_probe_engine_error_propagates_failure():
+    """Marked health canary: engine error raises instead of yielding an error dict."""
+    worker = _make_worker(engine=_ErrorEngine())
+    request = {HEALTH_CHECK_KEY: True, "token_ids": [1]}
+
+    with pytest.raises(RuntimeError, match="engine exploded"):
+        async for chunk in worker.generate(request, _MockContext()):
+            pytest.fail(f"failed probe yielded a response: {chunk!r}")
 
 
 @pytest.mark.asyncio
