@@ -3,7 +3,6 @@
 
 import json
 import logging
-import re
 from pathlib import Path
 from stat import S_ISDIR
 from typing import Optional, Union
@@ -86,45 +85,67 @@ def get_local_model_weight_size(
     return total_size_bytes / (1024**2)
 
 
-# Checkpoint formats in the order loaders prefer them.
+# Checkpoint formats in the order vLLM's default loader prefers them.
 HUB_WEIGHT_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth")
-# Sharded checkpoints are named like "model-00001-of-00004.safetensors".
-SHARD_SUFFIX_PATTERN = re.compile(r"-\d+-of-\d+$")
-# transformers' default checkpoint names; training state such as
-# optimizer.bin can sit next to them and be larger.
-DEFAULT_CHECKPOINT_STEMS = ("model", "pytorch_model")
+# Lists the safetensors files holding the weights when a repo has more.
+SAFETENSORS_INDEX_NAME = "model.safetensors.index.json"
+# Root files that are not model weights: PEFT adapters and training state,
+# as in vLLM's filter_files_not_needed_for_inference.
+NON_WEIGHT_FILENAMES = {
+    "adapter_model.safetensors",
+    "adapter_model.bin",
+    "training_args.bin",
+    "optimizer.bin",
+    "optimizer.pt",
+    "scheduler.bin",
+    "scheduler.pt",
+    "scaler.pt",
+}
 
 
-def _select_hub_checkpoint_files(siblings: list) -> list:
-    """Return the Hub repo files that make up one copy of the model weights.
+def _select_hub_checkpoint_files(model_name: str, info, token: Optional[str]) -> list:
+    """Return the Hub repo files that vLLM would load as the model weights.
 
-    Repos often ship the weights more than once: in a second format (gpt2),
-    as a second file set (Mistral's consolidated weights), or under folders
-    such as ``original/`` (Llama, gpt-oss). Only repo-root files other than
-    PEFT adapters are considered, the first format present wins, and within it
-    the checkpoint (one file or one shard set) with a transformers default name
-    is used, or the largest one when there is none.
+    Like vLLM's default loader, this takes the repo-root files of the first
+    format present, skips non-weight files, and keeps only the files listed in
+    ``model.safetensors.index.json`` when the repo has one. That counts one
+    copy when a repo ships the weights twice (gpt2 in two formats, Mistral's
+    consolidated file, Llama's ``original/`` folder).
     """
+    siblings = info.siblings or []
     root_files = [
         sibling
         for sibling in siblings
         if "/" not in sibling.rfilename
-        and not sibling.rfilename.startswith("adapter_model.")
+        and sibling.rfilename not in NON_WEIGHT_FILENAMES
     ]
     for ext in HUB_WEIGHT_EXTENSIONS:
-        checkpoints: dict[str, list] = {}
-        for sibling in root_files:
-            if sibling.rfilename.endswith(ext):
-                stem = SHARD_SUFFIX_PATTERN.sub("", sibling.rfilename[: -len(ext)])
-                checkpoints.setdefault(stem, []).append(sibling)
-        if checkpoints:
-            for stem in DEFAULT_CHECKPOINT_STEMS:
-                if stem in checkpoints:
-                    return checkpoints[stem]
-            return max(
-                checkpoints.values(),
-                key=lambda files: sum(sibling.size or 0 for sibling in files),
-            )
+        files = [sibling for sibling in root_files if sibling.rfilename.endswith(ext)]
+        if not files:
+            continue
+        if ext == ".safetensors" and any(
+            sibling.rfilename == SAFETENSORS_INDEX_NAME for sibling in siblings
+        ):
+            try:
+                index_path = hf_hub_download(
+                    repo_id=model_name,
+                    filename=SAFETENSORS_INDEX_NAME,
+                    revision=info.sha,
+                    token=token,
+                )
+                with open(index_path) as f:
+                    indexed = set(json.load(f)["weight_map"].values())
+            except (OSError, ValueError, KeyError) as e:
+                # Gated repos list their files but refuse the download.
+                logger.warning(
+                    "Cannot read %s for %s: %s", SAFETENSORS_INDEX_NAME, model_name, e
+                )
+                return []
+            files = [sibling for sibling in files if sibling.rfilename in indexed]
+            # An indexed file missing from the repo would make the sum too small.
+            if len(files) != len(indexed):
+                return []
+        return files
     return []
 
 
@@ -138,7 +159,7 @@ def get_model_weight_size_from_hub(
         info = model_info(model_name, token=token, files_metadata=True)
 
         total_size_bytes = 0
-        checkpoint_files = _select_hub_checkpoint_files(info.siblings or [])
+        checkpoint_files = _select_hub_checkpoint_files(model_name, info, token)
         # A partial sum would undercount, so fall back to the estimate instead.
         if checkpoint_files and all(
             sibling.size is not None for sibling in checkpoint_files

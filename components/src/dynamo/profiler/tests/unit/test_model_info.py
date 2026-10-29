@@ -163,84 +163,103 @@ def test_model_config_falls_back_when_aic_download_fails(monkeypatch) -> None:
 MIB = 1024**2
 
 
-def _hub_info(files, parameters=None):
-    return SimpleNamespace(
-        siblings=[SimpleNamespace(rfilename=name, size=size) for name, size in files],
+def _patch_hub(monkeypatch, tmp_path, files, index=None, parameters=None) -> list:
+    """Serve `files` from a fake Hub repo, with an optional safetensors index.
+
+    An exception as `index` lists the index but makes downloading it fail.
+    """
+    siblings = list(files)
+    index_path = tmp_path / "model.safetensors.index.json"
+    if isinstance(index, Exception):
+        siblings.append((index_path.name, 1))
+    elif index is not None:
+        weight_map = {f"weight{i}": name for i, name in enumerate(index)}
+        index_path.write_text(json.dumps({"weight_map": weight_map}))
+        siblings.append((index_path.name, index_path.stat().st_size))
+    info = SimpleNamespace(
+        sha="abc123",
+        siblings=[
+            SimpleNamespace(rfilename=name, size=size) for name, size in siblings
+        ],
         safetensors=(
             SimpleNamespace(parameters=parameters) if parameters is not None else None
         ),
     )
-
-
-def _patch_hub_model_info(monkeypatch, info) -> list:
     calls = []
 
     def fake_model_info(*args, **kwargs):
         calls.append(kwargs)
         return info
 
+    def fake_hf_hub_download(**kwargs):
+        assert index is not None, "downloaded an index the repo does not have"
+        assert kwargs["revision"] == info.sha
+        if isinstance(index, Exception):
+            raise index
+        return str(index_path)
+
+    monkeypatch.setattr("dynamo.profiler.utils.model_info.model_info", fake_model_info)
     monkeypatch.setattr(
-        "dynamo.profiler.utils.model_info.model_info",
-        fake_model_info,
+        "dynamo.profiler.utils.model_info.hf_hub_download", fake_hf_hub_download
     )
     return calls
 
 
-def test_model_weight_size_from_hub_uses_checkpoint_file_sizes(monkeypatch) -> None:
+def test_model_weight_size_from_hub_uses_checkpoint_file_sizes(
+    monkeypatch, tmp_path
+) -> None:
     """Packed GPTQ weights are sized from the file, not two bytes per param."""
-    info = _hub_info(
+    calls = _patch_hub(
+        monkeypatch,
+        tmp_path,
         [("config.json", 1024), ("model.safetensors", 768_148_704)],
         parameters={"I32": 968_884_224, "BF16": 131_164_160, "F16": 394_240},
     )
-    calls = _patch_hub_model_info(monkeypatch, info)
 
     assert get_model_weight_size_from_hub("test/gptq") == 768_148_704 / MIB
     assert calls[0]["files_metadata"] is True
 
 
 @pytest.mark.parametrize(
-    "files, expected_mib",
+    "files, index, expected_mib",
     [
         # gpt2: the same weights in two formats.
-        ([("model.safetensors", 548 * MIB), ("pytorch_model.bin", 548 * MIB)], 548),
-        # Mistral: a consolidated file next to the transformers shards.
+        (
+            [("model.safetensors", 548 * MIB), ("pytorch_model.bin", 548 * MIB)],
+            None,
+            548,
+        ),
+        # Mistral: a consolidated file next to the indexed shards.
         (
             [
                 ("consolidated.safetensors", 14 * MIB),
                 ("model-00001-of-00002.safetensors", 8 * MIB),
                 ("model-00002-of-00002.safetensors", 6 * MIB),
             ],
+            ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"],
             14,
         ),
-        # gpt-oss: other copies under original/ and metal/.
-        (
-            [
-                ("metal/model.bin", 13 * MIB),
-                ("model-00000-of-00002.safetensors", 5 * MIB),
-                ("model-00001-of-00002.safetensors", 5 * MIB),
-                ("model-00002-of-00002.safetensors", 3 * MIB),
-                ("original/model.safetensors", 13 * MIB),
-            ],
-            13,
-        ),
-        # Llama: an original/ consolidated .pth next to the safetensors.
-        (
-            [
-                ("model-00001-of-00001.safetensors", 15 * MIB),
-                ("original/consolidated.00.pth", 15 * MIB),
-            ],
-            15,
-        ),
-        # Devstral: two shard sets with their own indexes.
+        # Devstral: two shard sets; the model index picks one.
         (
             [
                 ("consolidated-00001-of-00002.safetensors", 7 * MIB),
                 ("consolidated-00002-of-00002.safetensors", 3 * MIB),
-                ("model-00001-of-00003.safetensors", 4 * MIB),
-                ("model-00002-of-00003.safetensors", 4 * MIB),
-                ("model-00003-of-00003.safetensors", 2 * MIB),
+                ("consolidated.safetensors.index.json", 1),
+                ("model-00001-of-00002.safetensors", 6 * MIB),
+                ("model-00002-of-00002.safetensors", 4 * MIB),
             ],
+            ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"],
             10,
+        ),
+        # A single file left next to the indexed shards of the same name.
+        (
+            [
+                ("model-00001-of-00002.safetensors", 5 * MIB),
+                ("model-00002-of-00002.safetensors", 4 * MIB),
+                ("model.safetensors", 9 * MIB),
+            ],
+            ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"],
+            9,
         ),
         # An Accelerate checkpoint: optimizer state is larger than the model.
         (
@@ -249,6 +268,7 @@ def test_model_weight_size_from_hub_uses_checkpoint_file_sizes(monkeypatch) -> N
                 ("pytorch_model.bin", 2 * MIB),
                 ("scheduler.bin", 1),
             ],
+            None,
             2,
         ),
         # A PEFT adapter next to full PyTorch shards.
@@ -259,34 +279,47 @@ def test_model_weight_size_from_hub_uses_checkpoint_file_sizes(monkeypatch) -> N
                 ("pytorch_model-00002-of-00002.bin", 3 * MIB),
                 ("training_args.bin", 1),
             ],
+            None,
             12,
         ),
     ],
 )
 def test_model_weight_size_from_hub_counts_one_checkpoint_copy(
-    monkeypatch, files, expected_mib
+    monkeypatch, tmp_path, files, index, expected_mib
 ) -> None:
-    _patch_hub_model_info(monkeypatch, _hub_info(files))
+    _patch_hub(monkeypatch, tmp_path, files, index=index)
 
     assert get_model_weight_size_from_hub("test/model") == expected_mib
 
 
 @pytest.mark.parametrize(
-    "files",
+    "files, index",
     [
         # Sizes missing for part of the checkpoint.
-        [
-            ("model-00001-of-00002.safetensors", 4 * MIB),
-            ("model-00002-of-00002.safetensors", None),
-        ],
+        (
+            [
+                ("model-00001-of-00002.safetensors", 4 * MIB),
+                ("model-00002-of-00002.safetensors", None),
+            ],
+            None,
+        ),
+        # The index lists a shard the repo does not have.
+        (
+            [("model-00001-of-00002.safetensors", 4 * MIB)],
+            ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"],
+        ),
+        # A gated repo lists its index but refuses the download.
+        (
+            [("model-00001-of-00001.safetensors", 4 * MIB)],
+            OSError("403 Client Error"),
+        ),
         # No weights at the repo root.
-        [("checkpoints/model.safetensors", 4 * MIB)],
+        ([("checkpoints/model.safetensors", 4 * MIB)], None),
     ],
 )
 def test_model_weight_size_from_hub_estimates_without_checkpoint_sizes(
-    monkeypatch, files
+    monkeypatch, tmp_path, files, index
 ) -> None:
-    info = _hub_info(files, parameters={"BF16": 3 * MIB})
-    _patch_hub_model_info(monkeypatch, info)
+    _patch_hub(monkeypatch, tmp_path, files, index=index, parameters={"BF16": 3 * MIB})
 
     assert get_model_weight_size_from_hub("test/model") == 6
