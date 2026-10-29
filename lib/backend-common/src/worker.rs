@@ -322,7 +322,12 @@ impl Default for EngineRouteRecovery {
     fn default() -> Self {
         Self {
             generation: tokio::sync::watch::channel(CancellationToken::new()).0,
-            resumes: tokio::sync::watch::channel(CancellationToken::new()).0,
+            resumes: tokio::sync::watch::channel({
+                let token = CancellationToken::new();
+                token.cancel();
+                token
+            })
+            .0,
             is_routing_enabled: AtomicBool::new(true),
         }
     }
@@ -1025,6 +1030,14 @@ impl Worker {
         self.engine_route_recovery
             .resumes
             .send_replace(CancellationToken::new());
+        if !self
+            .engine_route_recovery
+            .is_routing_enabled
+            .load(Ordering::Acquire)
+        {
+            // An operator pause already withdrew the endpoint.
+            return Ok(());
+        }
         endpoint.unregister_endpoint_instance().await.map_err(|e| {
             err(
                 ErrorType::Backend(BackendError::CannotConnect),
@@ -2120,15 +2133,14 @@ fn wrap_engine_control_callback(
 ) -> EngineRouteCallback {
     let policy = engine_control_policy(&control_name);
     let recovery = routes.recovery.clone();
-    let recovery_resume =
-        matches!(control_name.as_str(), "resume_generation" | "wake_up").then(|| {
-            recovery_resume_callback(
-                control_name.clone(),
-                callback.clone(),
-                engine.clone(),
-                routes.clone(),
-            )
-        });
+    let recovery_resume = (policy == EngineControlPolicy::RegisterAfter).then(|| {
+        recovery_resume_callback(
+            control_name.clone(),
+            callback.clone(),
+            engine.clone(),
+            routes.clone(),
+        )
+    });
     let callback: EngineRouteCallback = Arc::new(move |body| {
         let callback = callback.clone();
         let engine = engine.clone();
@@ -4908,7 +4920,24 @@ mod handoff_and_lifecycle_tests {
 
     #[tokio::test]
     async fn recovery_cancels_old_controls_and_preserves_operator_pause() {
-        let endpoint = test_local_endpoint().await;
+        // File discovery rejects removing an endpoint that a pause already removed.
+        let store = tempfile::tempdir().unwrap();
+        let config = dynamo_runtime::distributed::DistributedConfig {
+            discovery_backend: dynamo_runtime::distributed::DiscoveryBackend::KvStore(
+                dynamo_runtime::storage::kv::Selector::File(store.path().to_path_buf()),
+            ),
+            ..dynamo_runtime::distributed::DistributedConfig::process_local()
+        };
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let drt = dynamo_runtime::DistributedRuntime::new(runtime, config)
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("lifecycle_ns")
+            .unwrap()
+            .component("lifecycle_comp")
+            .unwrap()
+            .endpoint("generate");
         endpoint.register_endpoint_instance().await.unwrap();
         let (engine, _) = HandoffMockEngine::new(
             false,
