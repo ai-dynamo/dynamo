@@ -299,14 +299,21 @@ spec:
   such as `/bin/sh -c ...`, non-Python launchers, and a missing `command` (the
   operator default is a shell) are rejected.
 - The module name is not restricted.
+- The operator rewrites the launch of the `main` container for some configurations,
+  such as multinode components and vLLM elastic expert parallelism on Ray, and wraps
+  it in a shell. Admission checks the rewritten launch, so a direct `python -m`
+  command that the operator wraps is rejected even though you wrote no shell.
 - The `DynamoGraphDeployment` is rejected when you create it or change the
   entrypoint, so the error appears at `kubectl apply` instead of when a restore Pod
   is created. An existing deployment whose entrypoint is unchanged can still be
   updated, for example to change `replicas`, but it cannot restore until you fix the
   entrypoint.
-- Components that use intra-pod failover, role `podTemplate` sources, or a
-  native runtime sidecar are not checked at this level because the operator owns
-  their launch. Restore Pod admission still enforces the entrypoint.
+- With role `podTemplate` sources, each role's target container is checked
+  separately and the error names the role. With intra-pod failover, the `main`
+  container is checked because both engine containers are copies of it.
+- Components with a native runtime sidecar are not checked at this level because
+  the operator owns their launch. Restore Pod admission still enforces the
+  entrypoint.
 
 <Warning>
 Admission cannot inspect your module, so it does not verify the contract. A module

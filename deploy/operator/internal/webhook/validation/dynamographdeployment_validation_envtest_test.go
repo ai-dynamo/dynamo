@@ -2064,6 +2064,31 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment:         betaSnapshotFailoverRestoreDGD(betaShellCommand(), 2),
 		},
 
+		{
+			name:       "checkpoint rejects a python launch that elastic expert parallelism on Ray rewrites into a shell",
+			deployment: betaVLLMRestoreDGD(betaElasticEPArgs("ray"), 1),
+			wantWebhookErrs: []string{
+				betaRestoreEntrypointRewrittenAt("spec.components[1].podTemplate.spec.containers[0].command"),
+			},
+		},
+		{
+			name:       "checkpoint admits elastic expert parallelism that keeps the python launch",
+			deployment: betaVLLMRestoreDGD(betaElasticEPArgs("mp"), 1),
+		},
+		{
+			name:               "unchanged legacy elastic expert parallelism on Ray survives an unrelated update",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaVLLMRestoreDGD(betaElasticEPArgs("ray"), 1),
+			deployment:         betaVLLMRestoreDGD(betaElasticEPArgs("ray"), 2),
+		},
+		{
+			name:       "checkpoint rejects a multinode TRT-LLM python launch with one error at the authored command",
+			deployment: betaMultinodeTRTLLMRestoreDGD(),
+			wantWebhookErrs: []string{
+				betaRestoreEntrypointRewrittenAt("spec.components[1].podTemplate.spec.containers[0].command"),
+			},
+		},
+
 		// KV-transfer CEL rules.
 		{
 			name: "v1beta1 conflicting KV-transfer selectors are rejected by CEL",
@@ -4848,6 +4873,49 @@ func betaSnapshotFailoverRestoreDGD(command []string, replicas int32) *nvidiacom
 		worker.Replicas = &replicas
 		enableBetaSnapshotFailover(worker, "vllm")
 		useBetaRestoreEntrypoint(worker, command)
+	})
+}
+
+// betaRestoreEntrypointRewrittenAt is the rejection of an authored python launch that rendering rewrites.
+func betaRestoreEntrypointRewrittenAt(path string) string {
+	return path + ": Forbidden: checkpoint restore requires the target container to directly run python -m <module>; " +
+		"the operator rewrites this launch when it renders the Pod, and the rewritten launch does not"
+}
+
+// betaElasticEPArgs asks vLLM for elastic expert parallelism on the given data-parallel backend.
+func betaElasticEPArgs(backend string) []string {
+	return []string{"--model", "Qwen/Qwen3-0.6B", "--enable-elastic-ep", "--data-parallel-backend", backend}
+}
+
+// betaVLLMRestoreDGD builds a single-node vLLM worker whose checkpoint target directly runs python with args.
+func betaVLLMRestoreDGD(args []string, replicas int32) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		dgd.Spec.BackendFramework = "vllm"
+		worker := betaWorkerComponent(dgd)
+		worker.Replicas = &replicas
+		worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+			Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+		}
+		useBetaRestoreEntrypoint(worker, betaPythonModuleCommand("dynamo.vllm"))
+		main := &worker.PodTemplate.Spec.Containers[0]
+		main.Args = args
+		main.Resources.Limits = corev1.ResourceList{corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("2")}
+	})
+}
+
+// betaMultinodeTRTLLMRestoreDGD builds a two-node TRT-LLM worker whose checkpoint target directly runs python.
+func betaMultinodeTRTLLMRestoreDGD() *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		dgd.Spec.BackendFramework = "trtllm"
+		worker := betaWorkerComponent(dgd)
+		worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+		worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+			Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+		}
+		useBetaRestoreEntrypoint(worker, betaPythonModuleCommand("dynamo.trtllm"))
+		worker.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
+			corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("2"),
+		}
 	})
 }
 

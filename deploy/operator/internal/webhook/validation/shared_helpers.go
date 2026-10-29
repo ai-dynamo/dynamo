@@ -262,8 +262,9 @@ func mainContainerIndex(containers []corev1.Container) int {
 // entrypoint rule for one restore destination: the Pod template that renders it,
 // the restore target and the launch it receives.
 type restoreEntrypointInputs struct {
-	// roleName names the role whose complete PodTemplate renders the destination;
-	// it is empty for the component-level PodTemplate.
+	// roleName names the role that renders the destination. Before rendering it is
+	// the role whose complete PodTemplate authored the input, or empty for the
+	// component-level PodTemplate, which serves every role.
 	roleName        string
 	targetContainer string
 	// roleIndex and containerIndex locate the target in the authored lists for error
@@ -272,8 +273,13 @@ type restoreEntrypointInputs struct {
 	// containerIndex is -1 when the target container is missing.
 	roleIndex      int
 	containerIndex int
-	command        []string
-	args           []string
+	// command and args are the launch restore admission sees: the rendered launch when
+	// the operator can derive it, otherwise the authored one.
+	command []string
+	args    []string
+	// authoredSupported reports whether the authored launch already satisfies the
+	// contract, so a rejection comes from the operator rewriting it.
+	authoredSupported bool
 }
 
 // supported reports whether the launch satisfies the restore entrypoint contract.
@@ -314,20 +320,32 @@ func restoreEntrypointInputsForTemplate(
 			break
 		}
 	}
+	inputs.authoredSupported = inputs.supported()
 	return inputs
+}
+
+// checkpointRestoreEntrypointOptions carries what rendering needs besides the component:
+// the graph's explicit backend, the graph annotations propagated to components, and
+// whether the graph renders through Grove or LeaderWorkerSet.
+type checkpointRestoreEntrypointOptions struct {
+	backendFramework string
+	annotations      map[string]string
+	grovePathway     bool
 }
 
 // restoreEntrypointInputsFor resolves the entrypoint of every restore destination
 // that restore admission will see for the checkpoint target container. The
 // component-level PodTemplate is one destination; in role-template mode each role
 // with a complete PodTemplate is one, mirroring how rendering selects the template.
-// It reports false when the component does not enable checkpointing for a component
-// type that supports it, or when the launch is not authored by the user (native
-// sidecars), which the authored container does not describe. Intra-pod failover
-// clones main into its engine containers with the same launch, so main is checked.
+// The operator rewrites the launch of the main container while rendering, so its
+// destinations carry the rendered launch whenever it can be derived. It reports
+// false when the component does not enable checkpointing for a component type that
+// supports it, or when the launch is not authored by the user (native sidecars).
 // spec must not be nil.
 func restoreEntrypointInputsFor(
+	ctx context.Context,
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	options checkpointRestoreEntrypointOptions,
 ) ([]restoreEntrypointInputs, bool) {
 	if spec.Experimental == nil || spec.Experimental.Checkpoint == nil || !spec.Experimental.Checkpoint.Enabled {
 		return nil, false
@@ -347,18 +365,63 @@ func restoreEntrypointInputsFor(
 	}
 
 	// A component-level PodTemplate is the complete source for every role.
+	var inputs []restoreEntrypointInputs
 	if spec.PodTemplate != nil || !dynamo.HasRolePodTemplates(spec) {
-		return []restoreEntrypointInputs{restoreEntrypointInputsForTemplate(spec.PodTemplate, "", -1, targetContainer)}, true
-	}
-
-	// Role-template mode renders each role from its own complete PodTemplate.
-	inputs := make([]restoreEntrypointInputs, 0, len(spec.Roles))
-	for i := range spec.Roles {
-		if spec.Roles[i].PodTemplate != nil {
-			inputs = append(inputs, restoreEntrypointInputsForTemplate(spec.Roles[i].PodTemplate, spec.Roles[i].Name, i, targetContainer))
+		inputs = []restoreEntrypointInputs{restoreEntrypointInputsForTemplate(spec.PodTemplate, "", -1, targetContainer)}
+	} else {
+		// Role-template mode renders each role from its own complete PodTemplate.
+		for i := range spec.Roles {
+			if spec.Roles[i].PodTemplate != nil {
+				inputs = append(inputs, restoreEntrypointInputsForTemplate(spec.Roles[i].PodTemplate, spec.Roles[i].Name, i, targetContainer))
+			}
 		}
 	}
-	return inputs, true
+
+	// Only the main container's launch is rewritten while rendering.
+	if targetContainer != consts.MainContainerName {
+		return inputs, true
+	}
+	return renderRestoreEntrypointInputs(ctx, spec, options, inputs), true
+}
+
+// renderRestoreEntrypointInputs replaces the authored launch of each main-container
+// destination with the launch the operator renders for the roles it serves. It keeps
+// the authored inputs when the launch cannot be derived, which includes a template
+// without the main container, so admission is never stricter than restore Pod
+// admission on what it cannot model.
+func renderRestoreEntrypointInputs(
+	ctx context.Context,
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	options checkpointRestoreEntrypointOptions,
+	authored []restoreEntrypointInputs,
+) []restoreEntrypointInputs {
+	deploymentType := consts.MultinodeDeploymentTypeLWS
+	if options.grovePathway {
+		deploymentType = consts.MultinodeDeploymentTypeGrove
+	}
+	launches, err := dynamo.RenderMainContainerLaunches(ctx, spec, options.backendFramework, options.annotations, deploymentType)
+	if err != nil {
+		return authored
+	}
+
+	// Each rendered role becomes one destination located at the authored container that produced it.
+	rendered := make([]restoreEntrypointInputs, 0, len(launches))
+	for _, launch := range launches {
+		for _, input := range authored {
+			// The component-level template (no role name) serves every role; a role template only its own.
+			if input.roleName != "" && input.roleName != string(launch.Role) {
+				continue
+			}
+			input.roleName = string(launch.Role)
+			input.command = launch.Command
+			input.args = launch.Args
+			rendered = append(rendered, input)
+		}
+	}
+	if len(rendered) == 0 {
+		return authored
+	}
+	return rendered
 }
 
 func podTemplateContainers(podTemplate *corev1.PodTemplateSpec) []corev1.Container {
