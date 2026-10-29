@@ -553,7 +553,7 @@ Requires the client to request usage accounting on streaming calls (`"stream_opt
 Emitted by the Global Frontend at `/metrics` on its serving port. It forwards each request, as received, to a pool frontend, so it sees requests and response bytes but not tokens: inter-token latency and token counts come from the pool frontends' `dynamo_frontend_*` metrics. Per-pool series are labeled by `pool`, the pool's `<cluster>/<namespace>/<DGD name>`, and `region`, the pool's region. No label comes from the request body.
 
 <ParamField path="dynamo_global_frontend_requests_total" type="counter">
-  **Experimental.** Requests forwarded to each pool. Labeled by `pool`, `region`, `local` and `status`. `status` is the pool's HTTP status code, counted when its response headers arrive; `no_response` when the pool could not be reached or sent no response; or `cancelled` when the client left before the pool's response headers arrived, for example while the pool queued the request. `local` is `true` for a pool in the Global Frontend's `--region`, `false` for one elsewhere, and `unknown` without `--region`; the share of requests kept in the region is the `local="true"` rate over the total.
+  **Experimental.** Requests forwarded to each pool. Labeled by `pool`, `region`, `local` and `status`. `status` is the pool's HTTP status code, counted when its response headers arrive; `no_response` when the pool could not be reached or sent no response; or `cancelled` when the client left before the pool's response headers arrived. A Dynamo pool frontend sends its headers once a worker has the request, so a request the client gives up on while a worker queues it counts under its status, not as `cancelled`. `local` is `true` for a pool in the Global Frontend's `--region`, `false` for one elsewhere, and `unknown` without `--region`; the share of requests kept in the region is the `local="true"` rate over the total.
 </ParamField>
 
 <ParamField path="dynamo_global_frontend_rejected_requests_total" type="counter">
@@ -561,7 +561,7 @@ Emitted by the Global Frontend at `/metrics` on its serving port. It forwards ea
 </ParamField>
 
 <ParamField path="dynamo_global_frontend_time_to_first_byte_seconds" type="histogram">
-  **Experimental.** Time from the Global Frontend receiving a request to the first body chunk of its pool's successful (2xx) response. For a streamed request this is the pool's first event, usually the first token, so it approximates the time to first token as the client sees it, including the round trip to a pool in another region. Labeled by `pool` and `region`. Buckets match the `dynamo_frontend_time_to_first_token_seconds` defaults.
+  **Experimental.** Time from the Global Frontend receiving a request to the first body chunk of its pool's successful (2xx) response. For a streamed request this is the pool's first event, usually the first token, so it approximates the time to first token as the client sees it, including the round trip to a pool in another region. If the pool frontend sends SSE keep-alives before the first token, the first keep-alive counts as the first byte: at the `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` interval when set, or after 15 seconds for a request whose output a reasoning parser may hold back. Labeled by `pool` and `region`. Buckets match the `dynamo_frontend_time_to_first_token_seconds` defaults.
 </ParamField>
 
 <ParamField path="dynamo_global_frontend_request_duration_seconds" type="histogram">

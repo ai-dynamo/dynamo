@@ -143,7 +143,7 @@ impl Metrics {
 
     /// Counts a request being sent to `pool` once [`Sending::answered`]
     /// gives the pool's answer, or as cancelled if it drops first: the
-    /// client left while the pool queued the request.
+    /// client left before the pool's response headers arrived.
     pub(crate) fn sending<'a>(&'a self, pool: &'a Pool) -> Sending<'a> {
         Sending {
             metrics: self,

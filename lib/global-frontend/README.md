@@ -82,10 +82,11 @@ zero.
 ## Metrics
 
 `/metrics`, on the same port, serves the Global Frontend's Prometheus metrics,
-named `dynamo_global_frontend_*`: requests per pool by response status (or
-`cancelled` when the client leaves before the pool answers),
-requests answered without a pool, time to first byte and duration per pool,
-and requests in flight per pool. The `pool` label is the pool's
+named `dynamo_global_frontend_*`: requests per pool by response status,
+`no_response` when the pool sends no response, or `cancelled` when the client
+leaves before the pool's response headers arrive; requests answered without a
+pool; time to first byte and duration per pool; and requests in flight per
+pool. The `pool` label is the pool's
 `<cluster>/<namespace>/<DGD name>` and `region` its region. On requests, `local`
 says whether the pool is in `--region` (`unknown` without it), which gives the
 share of requests kept in the region. Nothing is labelled from the request
