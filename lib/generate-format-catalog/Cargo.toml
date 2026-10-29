@@ -12,13 +12,13 @@ repository.workspace = true
 description = "Default build-time /generate format catalog for Dynamo"
 
 [dependencies]
-dynamo-llm = { path = "../llm", default-features = false }
+dynamo-llm = { workspace = true }
 anyhow = { workspace = true }
-dynamo-sglang-generate = { path = "../generate-formats/sglang" }
-dynamo-vllm-generate = { path = "../generate-formats/vllm" }
+dynamo-sglang-generate = { workspace = true }
+dynamo-vllm-generate = { workspace = true }
 
 [dev-dependencies]
-dynamo-sglang-generate = { path = "../generate-formats/sglang", features = ["testkit"] }
+dynamo-sglang-generate = { workspace = true, features = ["testkit"] }
 dynamo-runtime = { workspace = true }
 axum = { workspace = true }
 async-trait = { workspace = true }
