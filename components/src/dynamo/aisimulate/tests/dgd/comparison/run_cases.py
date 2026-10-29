@@ -623,22 +623,33 @@ def _run_v1_profiler(case: ComparisonCase) -> None:
         environment = os.environ.copy()
         environment.update(_cache_environment(case))
         environment["DGDR_NAME"] = _dgd_name(case.name)
+        environment["PYTHONUNBUFFERED"] = "1"
         print(
             f"[{case.hardware.name}/{case.name}] v1beta1: {shlex.join(command)}",
             flush=True,
         )
-        result = subprocess.run(
+        output = []
+        with subprocess.Popen(
             command,
             env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-        )
-        print(result.stdout, end="", flush=True)
-        if result.returncode:
+        ) as process:
+            try:
+                for line in process.stdout:
+                    output.append(line)
+                    print(line, end="", flush=True)
+                returncode = process.wait()
+            except BaseException:
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+                raise
+        if returncode:
             raise RuntimeError(
-                result.stdout.strip()
-                or f"v1beta1 profiler exited with status {result.returncode} without diagnostics"
+                "".join(output).strip()
+                or f"v1beta1 profiler exited with status {returncode} without diagnostics"
             )
         final_config = Path(temporary_dir) / "final_config.yaml"
         if not final_config.is_file():

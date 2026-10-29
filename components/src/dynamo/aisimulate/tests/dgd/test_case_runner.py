@@ -20,6 +20,30 @@ pytestmark = [
 ]
 
 
+@pytest.fixture
+def profiler_child(monkeypatch):
+    popen = subprocess.Popen
+    children = []
+
+    def substitute(script, *, stdin=None):
+        def launch(command, **kwargs):
+            assert command[1:3] == ["-m", "dynamo.profiler"]
+            child = popen(
+                [sys.executable, "-c", script, *command[3:]], stdin=stdin, **kwargs
+            )
+            children.append(child)
+            return child
+
+        monkeypatch.setattr(run_cases.subprocess, "Popen", launch)
+        return children
+
+    yield substitute
+    for child in children:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)
+
+
 def _write_case_and_hardware(tmp_path, monkeypatch, *, backend="vllm"):
     cases_root = tmp_path / "cases"
     hardware_root = tmp_path / "hardware"
@@ -288,25 +312,23 @@ def test_load_suite_parses_expected_renderer_failure(tmp_path) -> None:
 )
 @pytest.mark.timeout(10)
 def test_profiler_failure_matches_child_diagnostic(
-    monkeypatch, tmp_path, capfd, stream, diagnostic, match, expected_failure
+    monkeypatch,
+    tmp_path,
+    capfd,
+    profiler_child,
+    stream,
+    diagnostic,
+    match,
+    expected_failure,
 ) -> None:
     _write_case_and_hardware(tmp_path, monkeypatch)
     case = run_cases.load_case(
         "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
     )
-    run_subprocess = subprocess.run
-
-    def failing_profiler(command, **kwargs):
-        assert command[1:3] == ["-m", "dynamo.profiler"]
-        script = (
-            "import os, sys; print('Profiler progress', flush=True); "
-            f"print(os.environ['PROFILER_DIAGNOSTIC'], file=sys.{stream}, flush=True); "
-            "sys.exit(7)"
-        )
-        kwargs["env"] = {**kwargs["env"], "PROFILER_DIAGNOSTIC": diagnostic}
-        return run_subprocess([sys.executable, "-c", script], **kwargs)
-
-    monkeypatch.setattr(run_cases.subprocess, "run", failing_profiler)
+    profiler_child(
+        "import sys; print('Profiler progress', flush=True); "
+        f"print({diagnostic!r}, file=sys.{stream}, flush=True); sys.exit(7)"
+    )
     entry = run_cases.SuiteEntry(
         case=case.name,
         hardware=case.hardware.name,
@@ -331,6 +353,81 @@ def test_profiler_failure_matches_child_diagnostic(
     output = capfd.readouterr()
     assert "Profiler progress" in output.out + output.err
     assert diagnostic in output.out + output.err
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+@pytest.mark.timeout(10)
+def test_profiler_forwards_progress_before_child_exit(
+    monkeypatch, tmp_path, profiler_child, stream
+) -> None:
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    _write_case_and_hardware(tmp_path, monkeypatch)
+    case = run_cases.load_case(
+        "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
+    )
+    run_cases._write_composed_inputs(case)
+    children = profiler_child(
+        "import select, sys\n"
+        "from pathlib import Path\n"
+        f"print('Profiler progress', file=sys.{stream})\n"
+        "ready, _, _ = select.select([sys.stdin], [], [], 5)\n"
+        "if not ready or sys.stdin.readline() != 'continue\\n':\n"
+        "    raise RuntimeError('Progress was not forwarded before profiler exit')\n"
+        "output = Path(sys.argv[sys.argv.index('--output-dir') + 1])\n"
+        "(output / 'final_config.yaml').write_text('kind: DynamoGraphDeployment\\n')\n",
+        stdin=subprocess.PIPE,
+    )
+    observed = []
+    original_print = print
+
+    def acknowledge_progress(*values, **kwargs):
+        original_print(*values, **kwargs)
+        if values and "Profiler progress" in values[0]:
+            child = children[0]
+            assert child.poll() is None, "Profiler output was buffered until child exit"
+            child.stdin.write("continue\n")
+            child.stdin.flush()
+            observed.append(values[0])
+
+    monkeypatch.setattr(run_cases, "print", acknowledge_progress, raising=False)
+
+    run_cases._run_v1_profiler(case)
+
+    assert observed == ["Profiler progress\n"]
+    assert (case.generated_dir / "dgd-profiler-v1beta1.yaml").is_file()
+
+
+@pytest.mark.timeout(10)
+def test_profiler_kills_child_if_forwarding_output_fails(
+    monkeypatch, tmp_path, profiler_child
+) -> None:
+    _write_case_and_hardware(tmp_path, monkeypatch)
+    case = run_cases.load_case(
+        "qwen", run_cases.load_hardware("h200-sxm-8gpu"), output_root=tmp_path / "out"
+    )
+    run_cases._write_composed_inputs(case)
+    children = profiler_child(
+        "import select, sys\n"
+        "print('Profiler progress', flush=True)\n"
+        "ready, _, _ = select.select([sys.stdin], [], [], 5)\n"
+        "if ready:\n"
+        "    sys.stdin.readline()\n"
+        "sys.exit(23)\n",
+        stdin=subprocess.PIPE,
+    )
+    original_print = print
+
+    def fail_forwarding(*values, **kwargs):
+        if values == ("Profiler progress\n",):
+            raise BrokenPipeError("Profiler output consumer closed")
+        original_print(*values, **kwargs)
+
+    monkeypatch.setattr(run_cases, "print", fail_forwarding, raising=False)
+
+    with pytest.raises(BrokenPipeError, match="Profiler output consumer closed"):
+        run_cases._run_v1_profiler(case)
+
+    assert children[0].returncode is not None and children[0].returncode < 0
 
 
 @pytest.mark.parametrize(
