@@ -91,6 +91,7 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         ErrorType::WorkerUnavailable,
     ];
     // Pre-stream request rejections can carry an outer CannotConnect wrapper.
+    // A `Conflict` is a worker refusing a request id it is still serving.
     !is_worker_overloaded(err)
         && match_error_chain(
             err,
@@ -99,6 +100,7 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
                 ErrorType::InvalidRequest,
                 ErrorType::InvalidArgument,
                 ErrorType::Backend(BackendError::InvalidArgument),
+                ErrorType::Conflict,
             ],
         )
 }
@@ -2773,6 +2775,7 @@ mod tests {
             (ErrorType::InvalidRequest, false),
             (ErrorType::InvalidArgument, false),
             (ErrorType::Backend(BackendError::InvalidArgument), false),
+            (ErrorType::Conflict, false),
             (ErrorType::CannotConnect, true),
             (ErrorType::Unavailable, true),
         ] {
