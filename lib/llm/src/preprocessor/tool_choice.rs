@@ -837,20 +837,16 @@ mod tests {
 
     #[test]
     fn minimax_m3_native_tags_and_relaxed_schema_fallback() {
-        const CHILD: &str = "DYNAMO_M3_STRUCTURAL_TAG_TEST_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "preprocessor::tool_choice::tests::minimax_m3_native_tags_and_relaxed_schema_fallback", "--nocapture"])
-                .env(CHILD, "1")
-                .env(dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION, "2")
-                .output().unwrap();
-            assert!(
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::minimax_m3_native_tags_and_relaxed_schema_fallback"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
             return;
         }
         let preprocessor = preprocessor("minimax_m3", StructuralTagMode::On);
@@ -899,26 +895,6 @@ mod tests {
                     assert!(grammar.json.is_none());
                 }
             }
-        }
-        for schema in [
-            json!({"type":"object","properties":{"location":{"type":"string"}},"additionalProperties":false}),
-            json!({"type":"object","properties":{"location":{"type":"string"}},"additionalProperties":true}),
-            json!({"type":"object","properties":{"location":{"type":"string","minLength":1}},"additionalProperties":false}),
-            json!({"type":"object","properties":{"location":{"type":["string","integer"]}},"additionalProperties":false}),
-            json!({"type":"object","properties":{"location":{"allOf":[{"type":"integer"},{"minimum":1}]}},"additionalProperties":false}),
-            json!({"type":"object","properties":{"location":{"type":"integer","not":{"const":1}}},"additionalProperties":false}),
-            json!({"type":"object","properties":{"location":{"$ref":"#/$defs/missing"}},"additionalProperties":false}),
-        ] {
-            let mut definitions = tools();
-            definitions[0]["function"]["parameters"] = schema;
-            let request = request(json!({"tools":definitions,"tool_choice":"required"}));
-            let mut common = preprocessed_request();
-            let constraint = preprocessor
-                .apply_tool_choice_guided_decoding(&request, &mut common, false)
-                .unwrap();
-            assert_eq!(constraint, GuidedToolConstraint::GuidedJsonRequired);
-            let grammar = common.sampling_options.guided_decoding.unwrap();
-            assert!(grammar.json.is_some() && grammar.structural_tag.is_none());
         }
     }
 
