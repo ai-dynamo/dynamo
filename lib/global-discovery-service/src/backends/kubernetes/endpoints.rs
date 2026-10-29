@@ -202,6 +202,8 @@ impl SliceIndex for ReplicaIndex {
             .collect()
     }
 
+    /// A relist: every slice at once. Rebuilds every replica; the cache
+    /// publishes one `Resync` instead of per-replica events.
     fn replace(&mut self, _naming: &ReplicaNaming, entries: HashMap<SliceKey, Vec<RouterReplica>>) {
         self.replicas.clear();
         for (key, endpoints) in &entries {
@@ -417,7 +419,6 @@ mod tests {
         assert!(
             matches!(events.try_recv().unwrap(), WatchEvent::Upserted(e) if e.replica == id("ohio/global-router-0"))
         );
-        // The same slice again changes nothing.
         cache.apply(watcher::Event::Apply(one.clone()));
         assert!(events.try_recv().is_err());
         // The pod moves to a new address: the replica changes.
