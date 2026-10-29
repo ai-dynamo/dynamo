@@ -163,11 +163,7 @@ func Underlay(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 
 	if objective := spec.Objective; objective != nil {
 		if objective.Mode == v1beta2.ObjectiveModePareto {
-			if len(objective.Metrics) > 0 && !isDefaultParetoMetrics(objective.Metrics) {
-				b.err = fmt.Errorf("spec.objective.metrics: the AISimulate public recommendation input only exposes its default Pareto objectives")
-			} else {
-				b.set(TargetPareto, optimizationTarget)
-			}
+			b.set(TargetPareto, optimizationTarget)
 		} else if objective.Metric != nil {
 			target, err := publicMetric(*objective.Metric)
 			if err != nil {
@@ -193,17 +189,6 @@ func Underlay(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 
 func hasStaticWorkloadFields(static *v1beta2.StaticWorkloadSpec) bool {
 	return static.InputTokens != nil || static.OutputTokens != nil || static.Load != nil
-}
-
-func isDefaultParetoMetrics(metrics []v1beta2.ObjectiveMetric) bool {
-	if len(metrics) != 2 {
-		return false
-	}
-	found := map[v1beta2.ObjectiveMetric]bool{}
-	for _, metric := range metrics {
-		found[metric] = true
-	}
-	return found[v1beta2.ObjectiveMetric("ThroughputPerGPU")] && found[v1beta2.ObjectiveMetric("ThroughputPerUser")]
 }
 
 // builder writes public input values, remembering the first failure so the translation reads

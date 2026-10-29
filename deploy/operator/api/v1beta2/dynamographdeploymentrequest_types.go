@@ -163,14 +163,13 @@ type WorkloadSpec struct {
 	Static *StaticWorkloadSpec `json:"static,omitempty"`
 }
 
-// ObjectiveMode selects the optimization mode. Pareto is reserved for a future
-// release and is not admitted until Candidate publication supports Pareto fronts.
-// +kubebuilder:validation:Enum=Optimize
+// ObjectiveMode selects the optimization mode.
+// +kubebuilder:validation:Enum=Optimize;Pareto
 type ObjectiveMode string
 
 const (
 	ObjectiveModeOptimize ObjectiveMode = "Optimize"
-	// ObjectiveModePareto is reserved for the future Pareto API implementation.
+	// ObjectiveModePareto searches for a Pareto front across multiple objectives.
 	ObjectiveModePareto ObjectiveMode = "Pareto"
 )
 
@@ -201,11 +200,14 @@ type ObjectiveSLASpec struct {
 	E2EMs *float64 `json:"e2eMs,omitempty"`
 }
 
-// ObjectiveSpec defines scalar optimization. Pareto fields are reserved for a future release.
-// +kubebuilder:validation:XValidation:rule="!has(self.metrics)",message="metrics is reserved for the future Pareto implementation"
+// ObjectiveSpec defines the optimization objective. Use mode Optimize with a single metric
+// for scalar optimization, or mode Pareto with two metrics for multi-objective search.
 // +kubebuilder:validation:XValidation:rule="!(has(self.metric) && self.metric in ['Goodput', 'GoodputPerGPU']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))",message="Goodput and GoodputPerGPU require at least one SLA bound"
+// +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'Pareto' || !has(self.metric)",message="Pareto mode uses metrics, not metric"
+// +kubebuilder:validation:XValidation:rule="!has(self.mode) || self.mode != 'Optimize' || !has(self.metrics)",message="Optimize mode uses metric, not metrics"
 type ObjectiveSpec struct {
-	// Mode selects scalar optimization. Only Optimize is currently supported.
+	// Mode selects the optimization mode: Optimize for a single scalar target,
+	// Pareto for a multi-objective search across two metrics.
 	// +optional
 	Mode ObjectiveMode `json:"mode,omitempty"`
 
@@ -214,7 +216,9 @@ type ObjectiveSpec struct {
 	// +optional
 	Metric *ObjectiveMetric `json:"metric,omitempty"`
 
-	// Metrics is reserved for the future Pareto implementation.
+	// Metrics selects the two objectives for a Pareto search.
+	// Required when mode is Pareto; ignored otherwise.
+	// When omitted in Pareto mode, AISimulate uses its default Pareto objectives.
 	// +optional
 	// +kubebuilder:validation:MinItems=2
 	// +kubebuilder:validation:MaxItems=2

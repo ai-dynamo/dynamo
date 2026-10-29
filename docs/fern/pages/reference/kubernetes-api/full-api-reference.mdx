@@ -5379,19 +5379,18 @@ ObjectiveMetric is a metric optimized by AISimulate.
 </Accordion>
 
 <Accordion id="objectivemode" title="ObjectiveMode">
-ObjectiveMode selects the optimization mode. Pareto is reserved for a future
-release and is not admitted until Candidate publication supports Pareto fronts.
+ObjectiveMode selects the optimization mode.
 
 
 **Kind:** `enum`
 **Underlying type:** `string`
-**Validation:** Enum: [Optimize]
+**Validation:** Enum: [Optimize Pareto]
 **Appears in:** [ObjectiveSpec](#objectivespec)
 
 **Allowed values**
 
 - <Badge intent="note" minimal>Optimize</Badge>
-- <Badge intent="note" minimal>Pareto</Badge> ObjectiveModePareto is reserved for the future Pareto API implementation.
+- <Badge intent="note" minimal>Pareto</Badge> ObjectiveModePareto searches for a Pareto front across multiple objectives.
 </Accordion>
 
 <Accordion id="objectiveslaspec" title="ObjectiveSLASpec">
@@ -5419,16 +5418,17 @@ E2EMs is an alternative end-to-end bound in milliseconds.
 </Accordion>
 
 <Accordion id="objectivespec" title="ObjectiveSpec">
-ObjectiveSpec defines scalar optimization. Pareto fields are reserved for a future release.
+ObjectiveSpec defines the optimization objective. Use mode Optimize with a single metric
+for scalar optimization, or mode Pareto with two metrics for multi-objective search.
 
 
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="mode" type="ObjectiveMode">
-Mode selects scalar optimization. Only Optimize is currently supported.
+Mode selects the optimization mode: Optimize for a single scalar target, Pareto for a multi-objective search across two metrics.
 See [ObjectiveMode](#objectivemode).
-**Validation:** Enum: [Optimize]  Optional: \&#123;\&#125;
+**Validation:** Enum: [Optimize Pareto]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="metric" type="ObjectiveMetric">
@@ -5438,7 +5438,7 @@ See [ObjectiveMetric](#objectivemetric).
 </ParamField>
 
 <ParamField path="metrics" type="ObjectiveMetric array">
-Metrics is reserved for the future Pareto implementation.
+Metrics selects the two objectives for a Pareto search. Required when mode is Pareto; ignored otherwise. When omitted in Pareto mode, AISimulate uses its default Pareto objectives.
 See [ObjectiveMetric](#objectivemetric).
 **Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  MaxItems: 2  MinItems: 2  Optional: \&#123;\&#125;
 </ParamField>

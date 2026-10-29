@@ -35,8 +35,10 @@ Design points (all adapter-specific, none of them shared with ``dgd``):
   terminal snapshot before returning. A failure to write it is raised, never
   swallowed, so the Sweeper container cannot exit successfully without it.
 
-Scalar searches only for now (best-first ordering by score); a Pareto
-selection policy is a separate piece of work and is rejected explicitly.
+Both scalar and Pareto searches are supported. The live path uses score-based
+retention for both (live snapshots are progress indicators; AISimulate owns the
+final Pareto front selection). The terminal ``write()`` path uses the result's
+``pareto_front`` view for Pareto searches.
 """
 
 from __future__ import annotations
@@ -348,12 +350,7 @@ class DGDRRunOutputAdapter:
         is_pareto: bool = False,
         keep_arrival_order: bool = False,
     ) -> None:
-        if is_pareto:
-            raise NotImplementedError(
-                "dgdr_run only supports scalar objectives so far; Pareto "
-                "retention needs its own selection policy rather than an "
-                "approximation of top-N-by-score"
-            )
+        self._is_pareto = is_pareto
         directory = snapshot_dir if snapshot_dir is not None else config.snapshot_dir
         if directory is None:
             raise ValueError("a snapshot directory is required")
@@ -440,16 +437,15 @@ class DGDRRunOutputAdapter:
             self._round_no = max(self._round_no, round_no)
             self._wake.set()
 
-    @staticmethod
-    def _retain(record: CandidateRecordLike) -> _Retained | None:
-        if record.score is None or record.used_gpus is None:
+    def _retain(self, record: CandidateRecordLike) -> _Retained | None:
+        if (record.score is None and not self._is_pareto) or record.used_gpus is None:
             logger.warning(
                 "dgdr_run: feasible candidate %s has no score/used_gpus; skipped",
                 record.candidate_id,
             )
             return None
         parameters = _plain(dict(record.config))
-        score = float(record.score)
+        score = float(record.score) if record.score is not None else 0.0
         # Every measurement AISimulate resolved for the point (throughput, TTFT, ITL, E2E latency,
         # goodput, power, ...) is kept under its own name, with non-finite values as null. The
         # adapter's rank metadata is added under the reserved names.
@@ -789,8 +785,9 @@ class DGDRRunOutputPlugin:
     ) -> Sequence[str | Path]:
         resolved = DGDRRunOutputConfig.model_validate(dict(config))
         if result.views.pareto_front:
-            raise NotImplementedError("dgdr_run does not support Pareto results yet")
-        selected = list(result.selected_candidates)[: resolved.max_candidates]
+            selected = list(result.views.pareto_front)[: resolved.max_candidates]
+        else:
+            selected = list(result.selected_candidates)[: resolved.max_candidates]
         if not selected:
             raise CandidateMaterializationError("no feasible candidate found")
         workload = SmartSearchConfig.model_validate(result.provenance.config).workload
@@ -840,14 +837,14 @@ class _FinalCandidate:
 def _as_feasible(candidate: Any) -> _FinalCandidate:
     score = getattr(candidate, "score", None)
     used_gpus = getattr(candidate, "used_gpus", None)
-    if score is None or used_gpus is None:
+    if used_gpus is None:
         raise CandidateMaterializationError(
-            "selected candidate has no score/used_gpus, so it cannot be ranked"
+            "selected candidate has no used_gpus, so it cannot be materialized"
         )
     return _FinalCandidate(
         candidate_id=str(getattr(candidate, "candidate_id", "")),
         config=dict(candidate.config),
-        score=score,
+        score=score if score is not None else 0.0,
         used_gpus=used_gpus,
         objectives=getattr(candidate, "objectives", None),
         metrics=dict(getattr(candidate, "metrics", None) or {}),

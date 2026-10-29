@@ -9705,7 +9705,10 @@ spec:
                         - GoodputPerGPU
                       type: string
                     metrics:
-                      description: Metrics is reserved for the future Pareto implementation.
+                      description: |-
+                        Metrics selects the two objectives for a Pareto search.
+                        Required when mode is Pareto; ignored otherwise.
+                        When omitted in Pareto mode, AISimulate uses its default Pareto objectives.
                       items:
                         description: ObjectiveMetric is a metric optimized by AISimulate.
                         enum:
@@ -9722,9 +9725,12 @@ spec:
                       type: array
                       x-kubernetes-list-type: set
                     mode:
-                      description: Mode selects scalar optimization. Only Optimize is currently supported.
+                      description: |-
+                        Mode selects the optimization mode: Optimize for a single scalar target,
+                        Pareto for a multi-objective search across two metrics.
                       enum:
                         - Optimize
+                        - Pareto
                       type: string
                     sla:
                       description: |-
@@ -9753,10 +9759,12 @@ spec:
                           rule: '!has(self.e2eMs) || (!has(self.ttftMs) && !has(self.itlMs))'
                   type: object
                   x-kubernetes-validations:
-                    - message: metrics is reserved for the future Pareto implementation
-                      rule: '!has(self.metrics)'
                     - message: Goodput and GoodputPerGPU require at least one SLA bound
                       rule: '!(has(self.metric) && self.metric in [''Goodput'', ''GoodputPerGPU'']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
+                    - message: Pareto mode uses metrics, not metric
+                      rule: '!has(self.mode) || self.mode != ''Pareto'' || !has(self.metric)'
+                    - message: Optimize mode uses metric, not metrics
+                      rule: '!has(self.mode) || self.mode != ''Optimize'' || !has(self.metrics)'
                 recommendation:
                   description: Recommendation controls bounded projection into DGDC resources.
                   properties:
