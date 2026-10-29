@@ -223,8 +223,8 @@ impl Discovery for KubeDiscoveryClient {
         // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
         let mut metadata = self.metadata.write().await;
 
-        // Clone state for rollback in case CR persistence fails
-        let original_state = metadata.clone();
+        // Publish local state only after persistence succeeds, including on cancellation.
+        let mut candidate = metadata.clone();
 
         let registered_instance = match &instance {
             DiscoveryInstance::Endpoint(inst) => {
@@ -235,7 +235,7 @@ impl Discovery for KubeDiscoveryClient {
                     inst.endpoint,
                     instance_id
                 );
-                metadata.register_endpoint(instance.clone())?;
+                candidate.register_endpoint(instance.clone())?;
                 instance.clone()
             }
             DiscoveryInstance::Model {
@@ -251,7 +251,7 @@ impl Discovery for KubeDiscoveryClient {
                     endpoint,
                     instance_id
                 );
-                metadata.register_model_card(instance.clone())?
+                candidate.register_model_card(instance.clone())?
             }
             DiscoveryInstance::EventChannel { scope, topic, .. } => {
                 tracing::info!(
@@ -260,7 +260,7 @@ impl Discovery for KubeDiscoveryClient {
                     topic,
                     instance_id
                 );
-                metadata.register_event_channel(instance.clone())?;
+                candidate.register_event_channel(instance.clone())?;
                 instance.clone()
             }
             DiscoveryInstance::EventSource { scope, topic, .. } => {
@@ -270,7 +270,7 @@ impl Discovery for KubeDiscoveryClient {
                     topic,
                     instance_id
                 );
-                metadata.register_event_source(instance.clone())?;
+                candidate.register_event_source(instance.clone())?;
                 instance.clone()
             }
         };
@@ -282,18 +282,11 @@ impl Discovery for KubeDiscoveryClient {
             &cr_name,
             &self.pod_info.pod_name,
             &self.pod_info.pod_uid,
-            &metadata,
+            &candidate,
         )?;
 
-        if let Err(e) = apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await {
-            // Rollback local state on CR persistence failure
-            tracing::warn!(
-                "Failed to persist metadata to CR, rolling back local state: {}",
-                e
-            );
-            *metadata = original_state;
-            return Err(e);
-        }
+        apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await?;
+        *metadata = candidate;
 
         tracing::debug!("Persisted metadata to DynamoWorkerMetadata CR");
 
@@ -336,8 +329,8 @@ impl Discovery for KubeDiscoveryClient {
         // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
         let mut metadata = self.metadata.write().await;
 
-        // Clone state for rollback in case CR persistence fails
-        let original_state = metadata.clone();
+        // Publish local state only after persistence succeeds, including on cancellation.
+        let mut candidate = metadata.clone();
 
         match &instance {
             DiscoveryInstance::Endpoint(inst) => {
@@ -348,7 +341,7 @@ impl Discovery for KubeDiscoveryClient {
                     inst.endpoint,
                     instance_id
                 );
-                metadata.unregister_endpoint(&instance)?;
+                candidate.unregister_endpoint(&instance)?;
             }
             DiscoveryInstance::Model {
                 namespace,
@@ -363,7 +356,7 @@ impl Discovery for KubeDiscoveryClient {
                     endpoint,
                     instance_id
                 );
-                metadata.unregister_model_card(&instance)?;
+                candidate.unregister_model_card(&instance)?;
             }
             DiscoveryInstance::EventChannel { scope, topic, .. } => {
                 tracing::info!(
@@ -372,7 +365,7 @@ impl Discovery for KubeDiscoveryClient {
                     topic,
                     instance_id
                 );
-                metadata.unregister_event_channel(&instance)?;
+                candidate.unregister_event_channel(&instance)?;
             }
             DiscoveryInstance::EventSource { scope, topic, .. } => {
                 tracing::info!(
@@ -381,7 +374,7 @@ impl Discovery for KubeDiscoveryClient {
                     topic,
                     instance_id
                 );
-                metadata.unregister_event_source(&instance)?;
+                candidate.unregister_event_source(&instance)?;
             }
         }
 
@@ -392,18 +385,11 @@ impl Discovery for KubeDiscoveryClient {
             &cr_name,
             &self.pod_info.pod_name,
             &self.pod_info.pod_uid,
-            &metadata,
+            &candidate,
         )?;
 
-        if let Err(e) = apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await {
-            // Rollback local state on CR persistence failure
-            tracing::warn!(
-                "Failed to persist metadata removal to CR, rolling back local state: {}",
-                e
-            );
-            *metadata = original_state;
-            return Err(e);
-        }
+        apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await?;
+        *metadata = candidate;
 
         tracing::debug!("Persisted metadata removal to DynamoWorkerMetadata CR");
 
