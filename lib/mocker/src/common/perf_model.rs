@@ -16,8 +16,8 @@ use ndarray_npy::ReadNpyExt;
 use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
-use zip::ZipArchive;
 use zip::result::ZipError;
+use zip::{ZipArchive, ZipReadOptions};
 
 /// Trait to abstract over 1D interpolation for prefill timing
 pub trait PrefillInterpolator: Send + Sync {
@@ -149,14 +149,16 @@ impl<R: Read + Seek> NpzReader<R> {
         Ok(Self(ZipArchive::new(reader)?))
     }
 
-    /// Reads entry `name`, else `{name}.npy`, the name that `numpy.savez` writes.
+    /// Reads entry `name`, else `{name}.npy`, the name that `numpy.savez` writes. It refuses an
+    /// entry whose local header disagrees with the central directory.
     fn by_name<A: ReadNpyExt>(&mut self, name: &str) -> Result<A> {
-        match self.0.by_name(name) {
-            Ok(file) => return Ok(A::read_npy(file)?),
-            Err(ZipError::FileNotFound) => {}
-            Err(err) => return Err(err.into()),
-        }
-        Ok(A::read_npy(self.0.by_name(&format!("{name}.npy"))?)?)
+        let index = self
+            .0
+            .index_for_name(name)
+            .or_else(|| self.0.index_for_name(&format!("{name}.npy")))
+            .ok_or(ZipError::FileNotFound)?;
+        let options = ZipReadOptions::new().enforce_header_consistency(true);
+        Ok(A::read_npy(self.0.by_index_with_options(index, options)?)?)
     }
 }
 
@@ -489,5 +491,26 @@ mod tests {
             missing.downcast_ref(),
             Some(ZipError::FileNotFound)
         ));
+    }
+
+    #[test]
+    fn npz_lookup_rejects_a_local_header_with_another_name() {
+        let mut bytes = Cursor::new(Vec::new());
+        write_npz(
+            &mut bytes,
+            CompressionMethod::Stored,
+            &[("x.npy", npy(&array![1.0]))],
+        );
+        let mut bytes = bytes.into_inner();
+        // Rename the entry in the central directory only, so the two headers disagree.
+        let central = bytes.windows(4).position(|s| s == b"PK\x01\x02").unwrap();
+        bytes[central + 46..central + 51].copy_from_slice(b"a.npy");
+
+        let mut npz = NpzReader::new(Cursor::new(bytes)).unwrap();
+        let error = npz.by_name::<Array1<f64>>("a").unwrap_err();
+        assert!(
+            matches!(error.downcast_ref(), Some(ZipError::InvalidArchive(_))),
+            "{error:#}"
+        );
     }
 }
