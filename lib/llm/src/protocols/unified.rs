@@ -104,6 +104,14 @@ pub struct AnthropicContext {
     pub output_config: Option<serde_json::Value>,
 }
 
+impl AnthropicContext {
+    pub fn omit_thinking(&self) -> bool {
+        self.thinking.as_ref().is_some_and(|thinking| {
+            thinking.display == Some(crate::protocols::anthropic::types::ThinkingDisplay::Omitted)
+        })
+    }
+}
+
 /// Responses API-specific fields preserved from `NvCreateResponse`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ResponsesContext {
@@ -611,6 +619,7 @@ mod tests {
             thinking: Some(ThinkingConfig {
                 thinking_type: "enabled".to_string(),
                 budget_tokens: Some(4096),
+                display: None,
             }),
             service_tier: None,
             container: None,

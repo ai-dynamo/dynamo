@@ -873,6 +873,32 @@ accepted fields, limits, errors, and rolling upgrades.
 | `POST` | `/v1/messages` | Anthropic Messages API (requires `--enable-anthropic-api`) |
 | `POST` | `/v1/messages/count_tokens` | Token counting for the Anthropic API |
 
+#### Tool Failures and Thinking Display
+
+The behavior in this section requires a build containing the fix for
+[#17376](https://github.com/ai-dynamo/dynamo/issues/17376).
+
+For client tool results, `is_error: true` prepends `[Tool execution failed]` and a
+newline to the model-visible tool content. Text, images, their order, and the
+`tool_use_id` remain intact. An omitted or false `is_error` leaves the content
+unchanged. Non-null, non-boolean values return HTTP 400. This text marker is necessary because the internal chat tool-message
+format has no separate error flag.
+
+Set `thinking: {"type": "adaptive", "display": "omitted"}` to suppress readable
+reasoning identified by the backend in both JSON and streaming responses. This
+requires a reasoning parser when the worker emits reasoning inline with text; ordinary
+answer text is not filtered. Each omitted thinking block has empty text and one empty
+streaming delta; tool calls and token usage are preserved. During suppressed output,
+the stream sends a heartbeat every 15 seconds unless a keep-alive interval is configured.
+Thinking that resumes after text or tool calls starts a new block. An omitted `display` or `"summarized"` preserves the backend's readable
+reasoning output; Dynamo does not generate a separate summary. Display is valid
+only with `enabled` or `adaptive` thinking; other mode combinations return HTTP 400.
+Anthropic's beta `display: "updates"` also returns HTTP 400, even with its beta header:
+Dynamo cannot yet distinguish progress-update blocks from reasoning blocks.
+
+Display controls only returned reasoning text. It does not disable reasoning or
+provide Anthropic-compatible encrypted signatures for conversation continuation.
+
 ### Infrastructure
 
 | Method | Path | Description |

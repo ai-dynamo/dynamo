@@ -76,7 +76,7 @@ dynamo-global-common = { path = "lib/global-common", version = "1.7.0" }
 dynamo-memory = { path = "lib/memory", version = "1.7.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.7.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.7.0" }
-dynamo-protocols = { version = "=8.4.0" }
+dynamo-protocols = { version = "=8.4.1" }
 dynamo-parsers = { version = "=10.2.2" }
 
 # Published on crates.io. To see all available versions:
@@ -226,3 +226,7 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+# Temporary prerequisite: replace with its published release before merging.
+[patch.crates-io]
+dynamo-protocols = { git = "https://github.com/maheshrbapatu/frontend-crates", rev = "893b8efd3b6af33216befb2907d89a8b816a9bda" }

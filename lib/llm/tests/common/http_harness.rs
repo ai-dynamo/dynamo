@@ -70,6 +70,7 @@ impl HarnessService {
     pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
+            .timeout(Duration::from_secs(10))
             .build()
             .expect("failed to build harness HTTP client");
         let (listener, port) = bind_random_port().await;
@@ -284,7 +285,7 @@ pub async fn parse_responses_sse(body: &str) -> Result<Vec<JsonSseEvent>> {
     }
 }
 
-async fn parse_json_sse_events(body: &str) -> Result<Vec<JsonSseEvent>> {
+pub async fn parse_json_sse_events(body: &str) -> Result<Vec<JsonSseEvent>> {
     let mut messages = create_message_stream(body);
     let mut events = Vec::new();
 
