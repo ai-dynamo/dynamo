@@ -338,12 +338,12 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                             before["status"]["conditions"][0]["message"],
                             f"reconciled by {prior_version}",
                         )
+                    (self.root / fixtures.CHART).write_text(f"appVersion: {version}\n")
+                    if version == "1.7.0":
                         compatibility_before = compatibility.read_bytes()
                         compatibility_lock_before = (
                             self.tree / "compatibility.lock.json"
                         ).read_bytes()
-                    (self.root / fixtures.CHART).write_text(f"appVersion: {version}\n")
-                    if version == "1.7.0":
                         before_capture = {
                             path.relative_to(self.tree): path.read_bytes()
                             for path in self.tree.rglob("*")
@@ -393,29 +393,32 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                         )
                         self.assertEqual(provenance.read_bytes(), initial_provenance)
 
-                        # Advancing ordinary history alone cannot authorize the next bump.
-                        lock_path = self.tree / "compatibility.lock.json"
-                        fresh_lock = lock_path.read_bytes()
-                        compatibility.write_bytes(compatibility_before)
-                        lock_path.write_bytes(compatibility_lock_before)
-                        next_version = f"1.{int(version.split('.')[1]) + 1}.0"
-                        (self.root / fixtures.CHART).write_text(
-                            f"appVersion: {next_version}\n"
-                        )
-                        with (
-                            patch.object(
-                                fixtures.subprocess,
-                                "check_output",
-                                return_value=f"appVersion: {version}\n",
-                            ),
-                            self.assertRaisesRegex(ValueError, "same last reconciler"),
-                        ):
-                            fixtures.check(base="previous-release")
-                        compatibility.write_bytes(compatibility_after)
-                        lock_path.write_bytes(fresh_lock)
-                        (self.root / fixtures.CHART).write_text(
-                            f"appVersion: {version}\n"
-                        )
+                        if version == "1.7.0":
+                            # Advancing ordinary history alone cannot authorize the next bump.
+                            lock_path = self.tree / "compatibility.lock.json"
+                            fresh_lock = lock_path.read_bytes()
+                            compatibility.write_bytes(compatibility_before)
+                            lock_path.write_bytes(compatibility_lock_before)
+                            next_version = f"1.{int(version.split('.')[1]) + 1}.0"
+                            (self.root / fixtures.CHART).write_text(
+                                f"appVersion: {next_version}\n"
+                            )
+                            with (
+                                patch.object(
+                                    fixtures.subprocess,
+                                    "check_output",
+                                    return_value=f"appVersion: {version}\n",
+                                ),
+                                self.assertRaisesRegex(
+                                    ValueError, "same last reconciler"
+                                ),
+                            ):
+                                fixtures.check(base="previous-release")
+                            compatibility.write_bytes(compatibility_after)
+                            lock_path.write_bytes(fresh_lock)
+                            (self.root / fixtures.CHART).write_text(
+                                f"appVersion: {version}\n"
+                            )
                     fixtures.check()
                     after = next(
                         obj
