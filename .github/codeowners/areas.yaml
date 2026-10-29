@@ -4,7 +4,6 @@ areas:
 - label: frontend
   github_team: '@ai-dynamo/dynamo-frontend-codeowners'
   path_globs:
-  - container/deps/requirements.frontend.txt
   - components/src/dynamo/common/http/
   - components/src/dynamo/common/protocols/
   - components/src/dynamo/frontend/
@@ -87,8 +86,6 @@ areas:
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:
-  - container/deps/requirements.vllm.txt
-  - container/deps/vllm/
   - components/src/dynamo/artifacts/vllm/
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
@@ -97,7 +94,6 @@ areas:
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
-  - container/deps/requirements.trtllm.txt
   - components/src/dynamo/trtllm/
   - components/src/dynamo/trtllm/configs/
   - components/src/dynamo/trtllm/engines/
@@ -112,7 +108,6 @@ areas:
 - label: backend-sglang
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
   path_globs:
-  - container/deps/requirements.sglang.txt
   - components/src/dynamo/sglang/
   - components/src/dynamo/sglang/request_handlers/
   - components/src/dynamo/sglang/tests/
@@ -232,7 +227,6 @@ areas:
 - label: planner
   github_team: '@ai-dynamo/dynamo-planner-codeowners'
   path_globs:
-  - container/deps/requirements.planner.txt
   - components/src/dynamo/aisimulate/
   - components/src/dynamo/global_planner/
   - components/src/dynamo/global_planner/tests/
@@ -252,8 +246,6 @@ areas:
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
-  - Cargo.lock
-  - Cargo.toml
   - components/src/dynamo/artifacts/
   - components/src/dynamo/common/
   - components/src/dynamo/common/backend/
@@ -358,6 +350,8 @@ areas:
   - .gitignore
   - .lycheeignore
   - .pre-commit-config.yaml
+  - Cargo.lock
+  - Cargo.toml
   - codespell.txt
   - conftest.py
   - container/Dockerfile.docs
@@ -503,8 +497,6 @@ areas:
 - label: performance
   github_team: '@ai-dynamo/dynamo-performance-codeowners'
   path_globs:
-  - container/deps/requirements.benchmark.txt
-  - container/deps/requirements.aisimulate.txt
   - benchmarks/README.md
   - benchmarks/__init__.py
   - benchmarks/burstgpt_loadgen/
@@ -579,6 +571,14 @@ required_owners:
   owners:
   - operator
 shared:
+- glob: Cargo.lock
+  owners:
+  - ops
+  - runtime
+- glob: Cargo.toml
+  owners:
+  - ops
+  - runtime
 - glob: .github/review-prompts/README.md
   owners:
   - ops
@@ -1207,8 +1207,13 @@ shared:
   owners:
   - runtime
   - sidecar
+- glob: tests/deploy/
+  owners:
+  - ops
+  - operator
 - glob: tests/deploy/test_dynamocheckpoint.py
   owners:
+  - ops
   - operator
   - gms
 - glob: tests/fault_tolerance/cancellation/utils.py
@@ -1333,6 +1338,34 @@ shared:
   - ops
   - backend-trtllm
 - glob: .devcontainer/vllm/
+  owners:
+  - ops
+  - backend-vllm
+- glob: container/deps/requirements.benchmark.txt
+  owners:
+  - ops
+  - performance
+- glob: container/deps/requirements.frontend.txt
+  owners:
+  - ops
+  - frontend
+- glob: container/deps/requirements.planner.txt
+  owners:
+  - ops
+  - planner
+- glob: container/deps/requirements.sglang.txt
+  owners:
+  - ops
+  - backend-sglang
+- glob: container/deps/requirements.trtllm.txt
+  owners:
+  - ops
+  - backend-trtllm
+- glob: container/deps/requirements.vllm.txt
+  owners:
+  - ops
+  - backend-vllm
+- glob: container/deps/vllm/
   owners:
   - ops
   - backend-vllm
