@@ -21,7 +21,6 @@ from typing import (
 
 import PIL.Image
 from fsspec.implementations.dirfs import DirFileSystem
-from pydantic import ValidationError
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
@@ -376,23 +375,6 @@ class OmniHandler(BaseOmniHandler):
             parsed_request_raw, request_type = parse_request_type(
                 request, self.config.output_modalities
             )
-        except ValidationError as error:
-            if not any(
-                modality.lower() == "image"
-                for modality in (self.config.output_modalities or [])
-            ):
-                raise InvalidArgument(str(error)) from error
-            # Pydantic's rendered exception includes the offending input value.
-            # Only expose a field label, never an inline image or signed URL.
-            reference_error = any(
-                item["loc"][:1] == ("input_reference",)
-                for item in error.errors(include_input=False, include_url=False)
-            )
-            raise InvalidArgument(
-                "Failed to load input_reference"
-                if reference_error
-                else "Invalid image request fields"
-            ) from error
         except ValueError as error:
             raise InvalidArgument(str(error)) from error
         parsed_request = cast(
@@ -813,14 +795,11 @@ class OmniHandler(BaseOmniHandler):
         req: NvCreateVideoRequest,
         nvext: VideoNvExt,
     ) -> None:
-        """Overlay only fields explicitly supplied by a video request."""
-        if nvext.num_frames is not None and nvext.num_frames <= 0:
-            raise ValueError("nvext.num_frames must be greater than zero")
-        if nvext.fps is not None and nvext.fps <= 0:
-            raise ValueError("nvext.fps must be greater than zero")
-        if req.seconds is not None and req.seconds <= 0:
-            raise ValueError("seconds must be greater than zero")
+        """Overlay only fields explicitly supplied by a video request.
 
+        `num_frames`, `fps`, and `seconds` arrive at least 1: the shared
+        request model bounds them as the frontend does.
+        """
         if req.size is not None:
             width, height = parse_size(req.size)
             sp.width = width

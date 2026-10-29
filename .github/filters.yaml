@@ -147,6 +147,10 @@ ignore:
   - 'scripts/validate_agent_instructions.py'
   - 'scripts/validate_skills.py'
   - 'scripts/check_action_pins.py'
+  # Pre-commit generator for the Python media protocol models. Its outputs are
+  # covered by `core` and `frontend`; the generate-media-protocols hook
+  # validates the script itself.
+  - 'scripts/generate_media_protocols.py'
   # Status-gate allowlist validator. Runs from pre-commit on workflow changes
   # and self-tests its own parser, so it needs no backend CI of its own.
   - 'scripts/validate_ci_status_gates.py'
@@ -183,7 +187,7 @@ core:
   - '.cargo/config.toml'
   - 'lib/**'
   - 'tests/**'
-  - 'components/src/dynamo/kv_dc_relay/**'
+  - 'components/src/dynamo/pool_relay/**'
   - 'components/src/dynamo/kv_state_agent/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'
@@ -399,6 +403,7 @@ vllm:
   - 'components/src/dynamo/vllm/**'
   - 'components/src/dynamo/artifacts/vllm/**'
   - 'container/templates/vllm_*'
+  - 'container/templates/ffmpeg_encoder_guard.Dockerfile'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -407,6 +412,7 @@ sglang:
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang*/**'
   - 'container/templates/sglang_*'
+  - 'container/templates/ffmpeg_encoder_guard.Dockerfile'
   - 'container/deps/sglang/**'
   - '!**/*.md'
   - '!**/*.rst'
@@ -416,6 +422,7 @@ trtllm:
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/templates/trtllm_*'
+  - 'container/templates/ffmpeg_encoder_guard.Dockerfile'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -443,7 +450,7 @@ frontend:
   - '*.lock'
   - 'container/deps/*'
   - 'container/compliance/**'
-  - 'components/src/dynamo/kv_dc_relay/**'
+  - 'components/src/dynamo/pool_relay/**'
   - 'components/src/dynamo/kv_state_agent/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'

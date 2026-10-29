@@ -108,8 +108,11 @@ the Dynamo operator, which gives the sidecar `/live` and `/health` probes on
 port `9090`; in host-network LPX Agent Pods the sidecar keeps only the probes its
 template declares. These probes do not track engine loading, so keep the engine's own
 probes on `main`. Sidecar mode supports worker, prefill, and decode components,
-and LPX components through their role templates; multinode deployments are not
-yet supported.
+and LPX components through their role templates.
+SGLang multinode deployments require explicit leader and worker role PodTemplates
+and `backendFramework: sglang`. The leader declares `runtime`; worker placement
+depends on the engine topology. Other backends do not yet support operator-managed
+multinode sidecars. See the [SGLang guide](../../modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes).
 
 ## Topologies
 
