@@ -22,7 +22,7 @@ use dynamo_global_discovery_service::backends::kubernetes::{
 };
 use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
 use dynamo_global_discovery_service::pool_discovery::{
-    PoolDirectory, PoolRegistrar, ReplicaEndpoint, ReplicaId,
+    PoolDirectory, PoolRegistrar, RouterReplica, RouterReplicaId,
 };
 use dynamo_global_discovery_service::service::{self, DiscoveryStore, Tls};
 use kube::Client;
@@ -80,7 +80,7 @@ struct Args {
     /// Memory store: a Global Router replica as `<id>=<url>`. Repeat it for
     /// each replica.
     #[arg(long = "router", value_parser = parse_router)]
-    routers: Vec<ReplicaEndpoint>,
+    routers: Vec<RouterReplica>,
     /// Kubernetes stores: each PoolRelay Service is named
     /// `<DGD name><suffix>`.
     #[arg(
@@ -113,7 +113,7 @@ enum Store {
     Mcs,
 }
 
-fn parse_router(value: &str) -> Result<ReplicaEndpoint, String> {
+fn parse_router(value: &str) -> Result<RouterReplica, String> {
     let (id, url) = value
         .split_once('=')
         .ok_or("expected <id>=<url>".to_owned())?;
@@ -121,8 +121,8 @@ fn parse_router(value: &str) -> Result<ReplicaEndpoint, String> {
         return Err("the replica id is empty".to_owned());
     }
     let url = Url::parse(url).map_err(|error| error.to_string())?;
-    Ok(ReplicaEndpoint {
-        replica: ReplicaId(id.to_owned()),
+    Ok(RouterReplica {
+        replica: RouterReplicaId(id.to_owned()),
         url,
     })
 }
