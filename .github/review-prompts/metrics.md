@@ -70,9 +70,12 @@ rule violation is a contract defect, not a style preference.
 8. **A1-A6.** Check the pull request description for the Metric, Reader, Labels, Series,
    Query?, and Docs block for each new metric. When the block or an answer is missing, ask for
    it under "Questions for the author"; do not report it as a defect. When you cannot see the
-   description, ask the questions anyway. Check that the stated series arithmetic matches the
-   declared labels and buckets: buckets + 3 per histogram label combination in Rust and Go, and
-   buckets + 4 in Python, where each counter label combination is also 2 series.
+   description, ask the questions anyway. Check both numbers that **A6** asks for against the
+   declared labels and buckets: label combinations, and series (1 per combination for a counter
+   or gauge, buckets + 3 for a histogram in Rust and Go, and in Python buckets + 4 per histogram
+   and 2 per counter combination). Report a metric whose declared labels alone can exceed 100
+   combinations in one process when the pull request does not justify it; ask when the count
+   depends on deployment values the diff does not show.
 
 9. **A2, A4, A5.** Search `prometheus_names.rs`, the Metrics Catalog, and
    `metrics-comparison.md` for an existing metric with the same measurement point, or one that
@@ -103,11 +106,11 @@ rule violation is a contract defect, not a style preference.
     `ModelManager::metric_model_for`; other components use a fixed `unknown` value. Report a
     label that mixes different quantities.
 
-14. **L5.** For a new declared `worker_id` or `dp_rank` label, check that the pull request names
-    the router or autoscaler that needs it, and find the code that removes the series when the
-    worker leaves (`remove_label_values`, `clear()`, or a collector that rebuilds at scrape
-    time). Ask when the consumer is not named; report when no removal path exists in a
-    long-lived process.
+14. **L5.** Report a new declared label whose values grow with the number of workers, such as
+    `worker_id` or `dp_rank` on a frontend, router, or planner metric. The correction exports
+    the value from the worker's own metrics, where the runtime's `worker_id` identifies it. For
+    a new `dp_rank` label on a worker's own metric, ask which autoscaler or router needs
+    per-rank values when the pull request does not say.
 
 15. **L6, R1.** Report a new labeled family whose children are created only in the request path,
     or whose registration happens on first use, for example inside `OnceLock::get_or_init` on
