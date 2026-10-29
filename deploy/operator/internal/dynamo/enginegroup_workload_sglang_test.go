@@ -156,7 +156,7 @@ func TestSGLangEngineGroupPreservesExplicitPodSpec(t *testing.T) {
 	operatorConfig.Infrastructure.NATSAddress = "nats://nats.test:4222"
 	operatorConfig.Infrastructure.ETCDAddress = "http://etcd.test:2379"
 	expected, err := generatePodSpecForComponent(component, BackendFrameworkSGLang, nil, dgd, RoleMain, 1, operatorConfig,
-		consts.MultinodeDeploymentTypeGrove, component.ComponentName, nil, roleLaunchOwnedByOperator, nil, func() (int64, error) { return 1, nil })
+		consts.MultinodeDeploymentTypeGrove, component.ComponentName, nil, roleLaunchOwnedByOperator, false, nil, func() (int64, error) { return 1, nil })
 	require.NoError(t, err)
 	expected.Containers[0].LivenessProbe = main.LivenessProbe
 	expected.Containers[0].ReadinessProbe = main.ReadinessProbe

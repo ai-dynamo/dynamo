@@ -665,7 +665,7 @@ func (r *Reconciler) projectEngineGroupStatus(
 	}
 	group.Status.DesiredNativeMemberCount = int32(len(group.Status.DesiredNativeMembers))
 	group.Status.ReplicaStates = projectEngineGroupReplicaStates(status)
-	group.Status.AvailableReplicas = countAvailableEngineGroupReplicas(group.Status.ReplicaStates, profile.NativeMembersPerReplica)
+	group.Status.AvailableReplicas = countAvailableEngineGroupReplicas(status, profile.NativeMembersPerReplica)
 	projectEngineGroupConditions(
 		group,
 		status,

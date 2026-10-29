@@ -34,6 +34,7 @@ from dynamo.sglang.publisher import (
 )
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from dynamo.sglang.state_agent import StateAgentLifecycle
 
 
 async def _warmup_prefill_engine(
@@ -204,7 +205,9 @@ async def init_decode(
         )
 
     body_failed = True
+    state_agent = StateAgentLifecycle()
     try:
+        await state_agent.start(engine, config, generate_endpoint)
         gather_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -239,6 +242,7 @@ async def init_decode(
                 needs=decode_needs,
                 # Decode workers serve the LoRA load endpoints, so they may advertise capacity.
                 serves_lora_load=True,
+                forwards_kv_hints=True,
             ),
         ]
         await asyncio.gather(*gather_tasks)
@@ -248,12 +252,15 @@ async def init_decode(
     else:
         body_failed = False
     finally:
-        await finish_worker_teardown(
-            metrics_task,
-            handler.cleanup,
-            run_deferred_handlers,
-            body_failed=body_failed,
-        )
+        try:
+            await state_agent.close()
+        finally:
+            await finish_worker_teardown(
+                metrics_task,
+                handler.cleanup,
+                run_deferred_handlers,
+                body_failed=body_failed,
+            )
 
 
 async def init_prefill(
@@ -356,7 +363,9 @@ async def init_prefill(
     ready_event = asyncio.Event()
 
     body_failed = True
+    state_agent = StateAgentLifecycle()
     try:
+        await state_agent.start(engine, config, generate_endpoint)
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -399,6 +408,7 @@ async def init_prefill(
                 # Prefill workers also serve the LoRA load endpoints (init_prefill), so they may
                 # advertise capacity.
                 serves_lora_load=True,
+                forwards_kv_hints=True,
             ),
         )
     except Exception as e:
@@ -407,9 +417,12 @@ async def init_prefill(
     else:
         body_failed = False
     finally:
-        await finish_worker_teardown(
-            metrics_task,
-            handler.cleanup,
-            run_deferred_handlers,
-            body_failed=body_failed,
-        )
+        try:
+            await state_agent.close()
+        finally:
+            await finish_worker_teardown(
+                metrics_task,
+                handler.cleanup,
+                run_deferred_handlers,
+                body_failed=body_failed,
+            )

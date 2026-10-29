@@ -11,6 +11,7 @@ use std::{
 };
 
 use crate::kv_router::SelectionPolicySource;
+use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_kv_router::{
     config::KvRouterConfig,
     protocols::RoutingConstraints,
@@ -282,7 +283,7 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
         crate::session_affinity::SessionAffinityMode::Soft,
     );
     let session_id = SessionAffinityId::new("direct-soft-bound");
-    bind_affinity_target(&host, &session_id, AffinityTarget::worker(worker_id)).await;
+    bind_affinity_target(&host, &session_id, AffinityTarget::new(worker_id, Some(0))).await;
 
     let mut stream = host
         .generate(affinity_request("direct-soft-bound", None))
@@ -291,6 +292,7 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
     while stream.next().await.is_some() {}
 
     assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+    assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[Some(0)]);
     drop(host);
     runtime.shutdown();
 }
@@ -298,6 +300,7 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
 #[derive(Default)]
 struct CompletedBuiltinDispatch {
     worker_ids: Mutex<Vec<u64>>,
+    dp_ranks: Mutex<Vec<Option<u32>>>,
 }
 
 #[async_trait]
@@ -309,7 +312,11 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
         request: SingleIn<AddressedRequest<PreprocessedRequest>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (addressed, context) = request.transfer(());
-        let (_, _, instance) = addressed.into_parts();
+        let (content, _, instance) = addressed.into_parts();
+        self.dp_ranks
+            .lock()
+            .unwrap()
+            .push(content.routing.as_ref().and_then(|routing| routing.dp_rank));
         self.worker_ids
             .lock()
             .unwrap()
@@ -366,7 +373,7 @@ async fn builtin_hard_affinity_ignores_local_inhibition() {
     );
 
     let session_id = SessionAffinityId::new("local-inhibition");
-    bind_affinity_target(&host, &session_id, AffinityTarget::worker(worker_id)).await;
+    bind_affinity_target(&host, &session_id, AffinityTarget::new(worker_id, Some(1))).await;
 
     client.report_instance_down(worker_id);
     assert!(client.instance_ids().contains(&worker_id));
@@ -380,9 +387,10 @@ async fn builtin_hard_affinity_ignores_local_inhibition() {
     assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
     assert_eq!(
         affinity.query_target(&session_id, None).unwrap(),
-        Some(AffinityTarget::worker(worker_id))
+        Some(AffinityTarget::new(worker_id, Some(1)))
     );
 
+    assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[Some(1)]);
     drop(host);
     runtime.shutdown();
 }
@@ -534,6 +542,219 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
         );
     }
 
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let component = distributed
+        .namespace("builtin-soft-affinity-rank-fallback".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap();
+
+    for (index, (mode, transport_fallback)) in [
+        (RouterMode::RoundRobin, false),
+        (RouterMode::PowerOfTwoChoices, false),
+        (RouterMode::RoundRobin, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let endpoint = component.endpoint(format!("case-{index}"));
+        let mut client = endpoint.client().await.unwrap();
+        tokio::task::yield_now().await;
+        let id = endpoint.id();
+        let instances: Vec<_> = [101, 202]
+            .into_iter()
+            .map(|instance_id| Instance {
+                namespace: id.namespace.clone(),
+                component: id.component.clone(),
+                endpoint: id.name.clone(),
+                instance_id,
+                transport: dynamo_runtime::component::TransportType::Nats(format!(
+                    "rank-fallback.{index}.{instance_id}"
+                )),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .collect();
+        let (source_tx, source_rx) = watch::channel(instances.clone());
+        client.instance_source = Arc::new(source_rx);
+        client.override_discovered_instances(vec![101, 202]);
+        client.override_instance_avail(vec![101, 202]);
+        let load_context = test_load_context(&client).await;
+        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+        let inner = PushRouter::from_client_with_dispatch(
+            client.clone(),
+            mode,
+            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+        )
+        .await
+        .unwrap();
+        let (host, affinity) = builtin_host_with_affinity(
+            inner,
+            load_context,
+            crate::session_affinity::SessionAffinityMode::Soft,
+        );
+
+        let mut first = affinity_request("rank-fallback", Some(101));
+        first.routing_mut().dp_rank = Some(1);
+        let mut stream = host.generate(first).await.unwrap();
+        while stream.next().await.is_some() {}
+        let mut stream = host
+            .generate(affinity_request("rank-fallback", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[Some(1); 2]);
+
+        if transport_fallback {
+            // The selection view still contains A, but dispatch can only reach B.
+            source_tx.send(instances[1..].to_vec()).unwrap();
+            assert!(client.is_instance_discovered(101));
+            assert!(!client.is_instance_live(101));
+        } else {
+            client.set_overloaded_instances(&[101]);
+        }
+        let mut stream = host
+            .generate(affinity_request("rank-fallback", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.dp_ranks.lock().unwrap().as_slice(),
+            &[Some(1), Some(1), None],
+            "fallback must not inherit the original worker's rank"
+        );
+        assert_eq!(
+            affinity
+                .query_target(&SessionAffinityId::new("rank-fallback"), None)
+                .unwrap(),
+            Some(AffinityTarget::new(101, Some(1))),
+            "worker-only fallback must preserve the known ranked affinity target"
+        );
+
+        let mut stream = host
+            .generate(affinity_request("rank-fallback", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[101, 101, 202, 202]
+        );
+        assert_eq!(
+            dispatch.dp_ranks.lock().unwrap().as_slice(),
+            &[Some(1), Some(1), None, None],
+            "dispatched ranks for {mode:?}, transport_fallback={transport_fallback}"
+        );
+        if transport_fallback {
+            source_tx.send(instances).unwrap();
+        } else {
+            client.set_overloaded_instances(&[]);
+        }
+        let mut stream = host
+            .generate(affinity_request("rank-fallback", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(dispatch.worker_ids.lock().unwrap().last(), Some(&101));
+        assert_eq!(dispatch.dp_ranks.lock().unwrap().last(), Some(&Some(1)));
+        drop(host);
+    }
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_soft_affinity_rebinds_after_worker_exit() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let component = distributed
+        .namespace("builtin-soft-affinity-worker-exit".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap();
+
+    for (index, mode) in [RouterMode::RoundRobin, RouterMode::PowerOfTwoChoices]
+        .into_iter()
+        .enumerate()
+    {
+        let endpoint = component.endpoint(format!("case-{index}"));
+        let mut client = endpoint.client().await.unwrap();
+        tokio::task::yield_now().await;
+        let id = endpoint.id();
+        let instances: Vec<_> = [101, 202, 303]
+            .into_iter()
+            .map(|instance_id| Instance {
+                namespace: id.namespace.clone(),
+                component: id.component.clone(),
+                endpoint: id.name.clone(),
+                instance_id,
+                transport: dynamo_runtime::component::TransportType::Nats(format!(
+                    "worker-exit.{index}.{instance_id}"
+                )),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .collect();
+        let (source_tx, source_rx) = watch::channel(instances.clone());
+        client.instance_source = Arc::new(source_rx);
+        client.override_discovered_instances(vec![101, 202, 303]);
+        client.override_instance_avail(vec![101, 202, 303]);
+        let load_context = test_load_context(&client).await;
+        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+        let inner = PushRouter::from_client_with_dispatch(
+            client.clone(),
+            mode,
+            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+        )
+        .await
+        .unwrap();
+        let (host, affinity) = builtin_host_with_affinity(
+            inner,
+            load_context,
+            crate::session_affinity::SessionAffinityMode::Soft,
+        );
+        let session_id = SessionAffinityId::new("worker-exit");
+        bind_affinity_target(&host, &session_id, AffinityTarget::new(101, Some(1))).await;
+
+        source_tx.send(instances[1..].to_vec()).unwrap();
+        client.override_discovered_instances(vec![202, 303]);
+        client.override_instance_avail(vec![202, 303]);
+        let mut first = host
+            .generate(affinity_request("worker-exit", None))
+            .await
+            .unwrap();
+        while first.next().await.is_some() {}
+        let replacement = *dispatch.worker_ids.lock().unwrap().last().unwrap();
+        assert!([202, 303].contains(&replacement));
+        assert_eq!(
+            affinity.query_target(&session_id, None).unwrap(),
+            Some(AffinityTarget::worker(replacement))
+        );
+
+        for _ in 0..2 {
+            let mut stream = host
+                .generate(affinity_request("worker-exit", None))
+                .await
+                .unwrap();
+            while stream.next().await.is_some() {}
+        }
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[replacement; 3]
+        );
+        assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[None; 3]);
+    }
     runtime.shutdown();
 }
 
@@ -1798,7 +2019,11 @@ struct RecordingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for RecordingClassifier {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(async move { Ok(request) })
     }
@@ -1831,7 +2056,11 @@ struct RejectingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for RejectingClassifier {
-    fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        _request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(async { Err(Box::new(ClassifierRejected) as Box<ClassifierError>) })
     }
@@ -1901,7 +2130,11 @@ struct TypedRejectingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for TypedRejectingClassifier {
-    fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        _request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let error_type = self.error_type;
         Box::pin(async move {
@@ -2100,7 +2333,11 @@ struct PausingClassifier {
 }
 
 impl RequestClassifier for PausingClassifier {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         let entered = Arc::clone(&self.entered);
         let resumed = Arc::clone(&self.resumed);
         Box::pin(async move {
@@ -2215,9 +2452,13 @@ struct TokenContractClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for TokenContractClassifier {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         self.classified
-            .send((request.input_tokens(), request.progress().clone()))
+            .send((request.isl_tokens(), request.progress().clone()))
             .unwrap();
         Box::pin(async move { Ok(request) })
     }
