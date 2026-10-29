@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Document order in prometheus.yaml: 0 dynamo-frontend, 1 dynamo-worker,
+# 2 dynamo-planner, 3 dynamo-epp, 4 dynamo-router.
+suite: PodMonitor engine metrics endpoint
+templates:
+  - charts/dynamo-operator/templates/prometheus.yaml
+
+tests:
+  - it: adds no engine endpoint by default
+    set:
+      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
+    asserts:
+      - notContains:
+          path: spec.podMetricsEndpoints
+          content:
+            port: engine-metrics
+          any: true
+        documentIndex: 1
+
+  - it: adds the engine-metrics endpoint when enabled
+    set:
+      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
+      dynamo-operator.dynamo.metrics.podMonitors.engineMetrics: true
+    asserts:
+      - lengthEqual:
+          path: spec.podMetricsEndpoints
+          count: 5
+        documentIndex: 1
+      # Pin the whole endpoint: the namespace join depends on the base rule
+      # preceding it, and the model fill depends on the source-label order.
+      - equal:
+          path: spec.podMetricsEndpoints[4]
+          value:
+            interval: 5s
+            path: /metrics
+            port: engine-metrics
+            honorLabels: true
+            relabelings:
+              - action: replace
+                sourceLabels:
+                  - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
+                targetLabel: dynamo_component_type
+              - action: replace
+                sourceLabels:
+                  - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+                targetLabel: dynamo_namespace
+              - action: replace
+                sourceLabels:
+                  - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+                  - __meta_kubernetes_pod_label_nvidia_com_dynamo_worker_hash
+                regex: '(.+);(.+)'
+                replacement: '${1}-${2}'
+                targetLabel: dynamo_namespace
+            metricRelabelings:
+              - action: replace
+                sourceLabels:
+                  - model
+                  - model_name
+                regex: ';(.+)'
+                replacement: '${1}'
+                targetLabel: model
+        documentIndex: 1
+
+  - it: honors the configured scrape path
+    set:
+      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
+      dynamo-operator.dynamo.metrics.podMonitors.engineMetrics: true
+      dynamo-operator.dynamo.metrics.podMonitors.engineMetricsPath: /prometheus/metrics
+    asserts:
+      - equal:
+          path: spec.podMetricsEndpoints[4].path
+          value: /prometheus/metrics
+        documentIndex: 1
+
+  - it: keeps the engine endpoint ahead of the NIXL endpoints
+    set:
+      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
+      dynamo-operator.dynamo.metrics.podMonitors.engineMetrics: true
+      dynamo-operator.dynamo.metrics.podMonitors.nixlTelemetry: true
+    asserts:
+      - lengthEqual:
+          path: spec.podMetricsEndpoints
+          count: 13
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[4].port
+          value: engine-metrics
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[5].port
+          value: nixl
+        documentIndex: 1

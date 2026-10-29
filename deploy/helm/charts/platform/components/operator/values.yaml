@@ -172,6 +172,13 @@ dynamo:
       # -- Enable the NIXL telemetry metrics collection on workers.
       # Requires workers with NIXL_TELEMETRY_ENABLE=y in their environment
       nixlTelemetry: false
+      # -- Scrape engine-native metrics (vllm:*, sglang:*) directly from the engine
+      # container in sidecar mode. The engine container must declare a port named
+      # "engine-metrics" and bind its HTTP server to the pod IP; pods without that
+      # named port are ignored, so integrated-mode workers are unaffected.
+      engineMetrics: false
+      # -- Path scraped on the engine-metrics port.
+      engineMetricsPath: /metrics
 
   mpiRun:
     secretName: "mpi-run-ssh-secret"

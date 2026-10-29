@@ -129,6 +129,38 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
       targetLabel: dynamo_component_type
+{{- if .Values.dynamo.metrics.podMonitors.engineMetrics }}
+  - interval: 5s
+    path: {{ .Values.dynamo.metrics.podMonitors.engineMetricsPath | default "/metrics" }}
+    port: engine-metrics
+    honorLabels: true
+    relabelings:
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
+      targetLabel: dynamo_component_type
+    # The runtime namespace is <base>-<worker-hash>; the join fires only when both labels are set.
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+      targetLabel: dynamo_namespace
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_worker_hash
+      regex: '(.+);(.+)'
+      replacement: '${1}-${2}'
+      targetLabel: dynamo_namespace
+    metricRelabelings:
+    # Fill model from the engine's model_name only when the engine did not set model.
+    - action: replace
+      sourceLabels:
+      - model
+      - model_name
+      regex: ';(.+)'
+      replacement: '${1}'
+      targetLabel: model
+{{- end }}
 {{- if .Values.dynamo.metrics.podMonitors.nixlTelemetry }}
   - interval: 5s
     path: /metrics
