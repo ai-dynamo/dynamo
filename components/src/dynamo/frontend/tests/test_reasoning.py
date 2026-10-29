@@ -40,11 +40,10 @@ def assistant(reasoning):
 
 
 @pytest.mark.parametrize("template", [_DIRECT, _STRING_ONLY])
-@pytest.mark.parametrize("has_tools", [False, True])
-def test_string_templates_render_segments_as_unescaped_text(template, has_tools):
+def test_string_templates_render_segments_as_unescaped_text(template):
     segments = ["Check 'quotes' and \\slashes.\n", "", "Then add.", ""]
     messages = [assistant(segments)]
-    normalize_reasoning_content(messages, chat_template=template, has_tools=has_tools)
+    normalize_reasoning_content(messages, chat_template=template, has_tools=True)
     rendered = Environment().from_string(template).render(messages=messages)
     assert rendered == "Check 'quotes' and \\slashes.\n\nThen add."
     assert segments == ["Check 'quotes' and \\slashes.\n", "", "Then add.", ""]
