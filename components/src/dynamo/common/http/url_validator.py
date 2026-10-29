@@ -16,6 +16,7 @@ Set ``DYN_MM_ALLOW_REMOTE_URLS=0`` to refuse every ``http(s)://`` URL.
 
 """
 
+import argparse
 import asyncio
 import ipaddress
 import logging
@@ -204,7 +205,12 @@ class UrlValidationPolicy:
         """Build a policy by reading the ``DYN_MM_*`` environment variables."""
         allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
         raw_allow_remote = os.getenv("DYN_MM_ALLOW_REMOTE_URLS", "").strip()
-        allow_remote = parse_bool(raw_allow_remote) if raw_allow_remote else True
+        try:
+            allow_remote = parse_bool(raw_allow_remote) if raw_allow_remote else True
+        except argparse.ArgumentTypeError as exc:
+            raise ValueError(
+                f"Invalid DYN_MM_ALLOW_REMOTE_URLS={raw_allow_remote!r}: {exc}"
+            ) from exc
         return cls(
             allow_http=allow_internal,
             allow_private_ips=allow_internal,

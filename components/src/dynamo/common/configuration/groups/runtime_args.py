@@ -136,6 +136,12 @@ class DynamoRuntimeConfig(ConfigBase):
 
         self._validate_output_modalities()
 
+        # Fail at startup on an invalid DYN_MM_* value, not on every request.
+        # Imported here: dynamo.common.http imports this configuration package.
+        from dynamo.common.http.url_validator import UrlValidationPolicy
+
+        UrlValidationPolicy.from_env()
+
         if self.engine_request_limit is not None and self.engine_request_limit <= 0:
             raise ValueError(
                 f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"

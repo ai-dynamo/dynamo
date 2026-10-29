@@ -373,3 +373,10 @@ def test_default_thinking_mode_rejects_invalid_value(monkeypatch):
 
     with pytest.raises(SystemExit):
         _parse_runtime_args(["--dyn-default-thinking-mode", "adaptive"])
+
+
+def test_invalid_allow_remote_urls_fails_at_startup(monkeypatch):
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", "disabled")
+
+    with pytest.raises(ValueError, match="DYN_MM_ALLOW_REMOTE_URLS"):
+        _parse_runtime_args([])
