@@ -13,6 +13,12 @@ the distinction between cases, hardware configurations, suites, goldens, and loc
 Sweeper inputs. Known render and deployment exceptions are recorded on the affected suite row with
 a reason and optional evidence links. A missing generated variant has no placeholder golden.
 
+`testsuite-gb300.yaml` reuses the Qwen3-32B aggregated case on a four-GPU GB300 hardware profile.
+The profile maps DGDR v1beta1's `b300_sxm` GPU SKU to AISimulate's `gb300` system name so that both
+generation paths describe the same hardware. The suite records the unresolved binding between
+Sweeper performance-data versions and deployable Dynamo runtime images as explicit exceptions
+instead of treating the generated DGDs as deploy-validated.
+
 The portable runner and comparison-corpus direction build on Ashna Mehrotra's work in
 [PR #14031](https://github.com/ai-dynamo/dynamo/pull/14031).
 
