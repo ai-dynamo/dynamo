@@ -11,6 +11,8 @@
 //! refuses sessions.
 
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
 use dynamo_llm::model_card::ModelDeploymentCard;
@@ -41,6 +43,25 @@ pub struct Fixture {
     config: FixtureConfig,
     service: TrtllmMockerService,
     server: TestServer,
+    load: Arc<Mutex<Load>>,
+}
+
+#[derive(Default)]
+struct Load {
+    lost: bool,
+    served_at: Option<Instant>,
+}
+
+impl Fixture {
+    /// Every later `GetLoad` fails with UNAVAILABLE; generation still serves.
+    pub fn lose_load(&self) {
+        self.load.lock().unwrap().lost = true;
+    }
+
+    /// When `GetLoad` last answered with load.
+    pub fn load_served_at(&self) -> Option<Instant> {
+        self.load.lock().unwrap().served_at
+    }
 }
 
 impl SidecarFixture for Fixture {
@@ -72,10 +93,12 @@ impl SidecarFixture for Fixture {
             args,
         )
         .unwrap();
+        let load = Arc::default();
         let controlled = ControlledService {
             inner: service.clone(),
             control,
             role,
+            load: Arc::clone(&load),
         };
         let control_service = controlled.clone();
         let server = TestServer::start(move |listener, shutdown| async move {
@@ -98,6 +121,7 @@ impl SidecarFixture for Fixture {
             config,
             service,
             server,
+            load,
         }
     }
 
@@ -182,6 +206,7 @@ struct ControlledService {
     inner: TrtllmMockerService,
     control: Controller<Adapter>,
     role: pb::EngineRole,
+    load: Arc<Mutex<Load>>,
 }
 
 #[tonic::async_trait]
@@ -228,7 +253,12 @@ impl Control for ControlledService {
         &self,
         request: Request<pb::GetLoadRequest>,
     ) -> Result<Response<pb::LoadInfo>, Status> {
-        self.inner.get_load(request).await
+        if self.load.lock().unwrap().lost {
+            return Err(Status::unavailable("load is unavailable"));
+        }
+        let response = self.inner.get_load(request).await?;
+        self.load.lock().unwrap().served_at = Some(Instant::now());
+        Ok(response)
     }
 
     async fn health(
