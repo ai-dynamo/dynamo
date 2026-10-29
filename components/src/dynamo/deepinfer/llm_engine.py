@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import concurrent.futures
 import importlib
+import logging
 import math
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -29,6 +30,8 @@ from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.llm.exceptions import Cancelled, EngineShutdown, InvalidArgument
+
+logger = logging.getLogger(__name__)
 
 _QUEUE_SIZE = 64
 
@@ -441,6 +444,7 @@ class DeepInferLLMEngine(LLMEngine):
                                 ),
                             )
         except Exception as exc:
+            logger.exception("DeepInfer pump loop failed")
             self._failure = exc
             for state in self._requests.values():
                 self._fail(state, EngineShutdown(f"DeepInfer driver failed: {exc}"))
