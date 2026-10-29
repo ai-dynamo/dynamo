@@ -9,7 +9,8 @@
 //! `wv * group_tag + left * programs_left + env_s * env_seconds`, where the group
 //! tag is the version its first program started at; higher scores go first.
 
-use std::collections::{BTreeMap, HashMap, HashSet, hash_map::Entry};
+use std::collections::{BTreeMap, HashMap, hash_map::Entry};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -75,9 +76,20 @@ impl GroupTag {
 struct Group {
     wv: u64,
     left: usize,
-    /// Programs that ended without finishing; a retry takes its slot back.
-    dropped: HashSet<String>,
+    /// Programs that ended without finishing, and when; a retry takes its slot back.
+    dropped: HashMap<String, Instant>,
     aged: bool,
+}
+
+impl Group {
+    fn new(tag: &GroupTag, version: u64) -> Self {
+        Self {
+            wv: version,
+            left: tag.size.max(1),
+            dropped: HashMap::new(),
+            aged: false,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -92,24 +104,33 @@ impl Groups {
         match self.0.entry(name.clone()) {
             Entry::Occupied(mut entry) => {
                 let group = entry.get_mut();
-                if group.dropped.remove(session) {
+                if group.dropped.remove(session).is_some() {
                     group.left += 1;
+                } else if group.left == 0 {
+                    *group = Group::new(tag, version);
                 }
             }
             Entry::Vacant(entry) => {
-                entry.insert(Group {
-                    wv: version,
-                    left: tag.size.max(1),
-                    dropped: HashSet::new(),
-                    aged: false,
-                });
+                entry.insert(Group::new(tag, version));
             }
         }
     }
 
-    /// The version `tag`'s group started at, once any of its programs has.
+    /// The version `tag`'s group started at, while any of its programs runs.
     pub(crate) fn wv(&self, tag: &GroupTag) -> Option<u64> {
-        self.0.get(tag.group.as_ref()?).map(|group| group.wv)
+        self.0
+            .get(tag.group.as_ref()?)
+            .filter(|group| group.left > 0)
+            .map(|group| group.wv)
+    }
+
+    /// Whether program `session` of `tag` joins a group that already started:
+    /// one still running, or one waiting for this session's retry.
+    pub(crate) fn started(&self, tag: &GroupTag, session: &str) -> bool {
+        tag.group
+            .as_ref()
+            .and_then(|name| self.0.get(name))
+            .is_some_and(|group| group.left > 0 || group.dropped.contains_key(session))
     }
 
     /// Programs of started groups that have not ended yet.
@@ -134,15 +155,26 @@ impl Groups {
         Some(wv)
     }
 
-    /// Program `session` of `tag` ended without finishing. Its slot is freed
-    /// until the same session starts again; the group is kept while it may.
-    pub(crate) fn drop_program(&mut self, tag: &GroupTag, session: &str) {
+    /// Program `session` of `tag` ended without finishing at `now`. Its slot
+    /// is freed until the same session starts again or `expire` forgets it.
+    pub(crate) fn drop_program(&mut self, tag: &GroupTag, session: &str, now: Instant) {
         let Some(group) = tag.group.as_ref().and_then(|name| self.0.get_mut(name)) else {
             return;
         };
-        if group.dropped.insert(session.to_owned()) {
+        if group.dropped.insert(session.to_owned(), now).is_none() {
             group.left = group.left.saturating_sub(1);
         }
+    }
+
+    /// Forget programs dropped more than `retention` ago, and groups with
+    /// nothing left to wait for.
+    pub(crate) fn expire(&mut self, now: Instant, retention: Duration) {
+        self.0.retain(|_, group| {
+            group
+                .dropped
+                .retain(|_, at| now.saturating_duration_since(*at) < retention);
+            group.left > 0 || !group.dropped.is_empty()
+        });
     }
 
     /// The score of a program of `tag` tagged `wv`, scored by its group once that started.
@@ -185,15 +217,22 @@ mod tests {
             size: 2,
             env_s: 0.0,
         };
+        let now = Instant::now();
+        let retention = Duration::from_secs(60);
         let mut groups = Groups::default();
         groups.start(&tag, 3, "a");
-        groups.drop_program(&tag, "a");
+        groups.drop_program(&tag, "a", now);
         assert_eq!(groups.programs(), 1);
         assert_eq!(groups.end(&tag), Some(3));
         assert_eq!(groups.programs(), 0);
+        assert!(groups.started(&tag, "a") && !groups.started(&tag, "b"));
         groups.start(&tag, 9, "a");
-        assert_eq!(groups.programs(), 1);
+        assert_eq!(groups.wv(&tag), Some(3));
         assert_eq!(groups.end(&tag), None);
-        assert_eq!(groups.programs(), 0);
+        groups.drop_program(&tag, "a", now);
+        groups.expire(now + retention, retention);
+        assert!(groups.0.is_empty());
+        groups.start(&tag, 9, "c");
+        assert_eq!((groups.wv(&tag), groups.programs()), (Some(9), 2));
     }
 }

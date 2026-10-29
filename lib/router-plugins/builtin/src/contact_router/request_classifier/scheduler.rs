@@ -286,7 +286,7 @@ impl State {
         self.refresh_normal_usage();
         self.expire_retained_programs(now);
         if !session_final {
-            self.ensure_program_capacity(&session_id)?;
+            self.ensure_program_capacity(&session_id, now)?;
         }
         self.clear_removed_workers(capacities);
         let notify = Arc::new(Notify::new());
@@ -346,7 +346,11 @@ impl State {
         }
     }
 
-    fn ensure_program_capacity(&mut self, session_id: &str) -> Result<(), ContactRouterError> {
+    fn ensure_program_capacity(
+        &mut self,
+        session_id: &str,
+        now: Instant,
+    ) -> Result<(), ContactRouterError> {
         if self.programs.contains_key(session_id)
             || self.programs.len() < self.config.max_tracked_requests
         {
@@ -364,7 +368,7 @@ impl State {
                 limit: self.config.max_tracked_requests,
             });
         };
-        self.drop_program(&evicted);
+        self.drop_program(&evicted, now);
         Ok(())
     }
 
@@ -481,7 +485,7 @@ impl State {
         }
         limit.is_infinite()
             || program.wv.is_some()
-            || self.groups.wv(&program.tag).is_some()
+            || self.groups.started(&program.tag, session_id)
             || (self.groups.programs() + program.tag.size.max(1)) as f64 <= limit
     }
 
@@ -495,11 +499,11 @@ impl State {
 
     /// Remove a program that ended without finishing; its group stops waiting
     /// for it but does not move the age limit.
-    fn drop_program(&mut self, session_id: &str) {
+    fn drop_program(&mut self, session_id: &str, now: Instant) {
         if let Some(program) = self.remove_program(session_id)
             && program.wv.is_some()
         {
-            self.groups.drop_program(&program.tag, session_id);
+            self.groups.drop_program(&program.tag, session_id, now);
         }
     }
 
@@ -540,6 +544,7 @@ impl State {
     ) -> ReconcileOutcome {
         self.refresh_normal_usage();
         self.kv_capacity = capacities.iter().map(|(_, capacity)| capacity).sum();
+        self.groups.expire(now, self.config.session_retention());
         let mut changed = self.expire_retained_programs(now);
         changed |= self.clear_removed_workers(capacities);
         changed |= self.admit_front_requests(capacities, now);
@@ -1237,7 +1242,7 @@ impl State {
         self.compact_session_waiting(&request.session_id);
 
         if request.session_final && request.began_program {
-            self.drop_program(&request.session_id);
+            self.drop_program(&request.session_id, now);
         } else if completed && request.phase == RequestPhase::Released {
             let pause = self
                 .update_program(&request.session_id, |program| {
@@ -1259,7 +1264,7 @@ impl State {
                     self.replace_program(request.session_id.clone(), prior);
                 }
                 None => {
-                    self.drop_program(&request.session_id);
+                    self.drop_program(&request.session_id, now);
                 }
             }
         }
@@ -1373,7 +1378,7 @@ impl State {
         }
         self.next_retention_expiry = next_expiry;
         for session_id in &expired {
-            self.drop_program(session_id);
+            self.drop_program(session_id, now);
         }
         !expired.is_empty()
     }
