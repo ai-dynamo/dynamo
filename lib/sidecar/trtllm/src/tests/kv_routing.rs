@@ -249,14 +249,16 @@ async fn stale_load_withdraws_worker_without_node_metadata() {
         .expect("set up metrics");
     let gauges = Arc::new(ComponentGauges::new(&metrics, &[0]).expect("component gauges"));
     let publisher = Arc::new(SnapshotPublisher::new(gauges, HashMap::new()));
-    service.hang_load.store(true, Ordering::SeqCst);
+    // Polls fail at once rather than hang, so several finish within the limit:
+    // failed polls must not refresh the deadline.
+    service.disable_load.store(true, Ordering::SeqCst);
     bindings
         .on_publisher_ready
         .take()
         .expect("metrics publisher callback")(publisher)
     .expect("start metrics publisher");
     // This legacy server has no node metadata: load health must still be supervised.
-    let error = tokio::time::timeout(Duration::from_secs(35), engine.monitor_routing())
+    let error = tokio::time::timeout(Duration::from_secs(5), engine.monitor_routing())
         .await
         .expect("bounded load staleness")
         .expect_err("stale routing load must withdraw the worker");
@@ -268,7 +270,7 @@ async fn stale_load_withdraws_worker_without_node_metadata() {
 
     tokio::time::timeout(Duration::from_millis(500), engine.cleanup())
         .await
-        .expect("cleanup must cancel the in-flight GetLoad")
+        .expect("bounded cleanup")
         .expect("cleanup succeeds");
 }
 
@@ -323,6 +325,26 @@ async fn discovery_keeps_events_load_and_dp_targeting_independent() {
     }
 }
 
+/// Drives `monitor` until `observed` holds; the monitor must not finish first.
+/// The timeout only bounds a failure.
+async fn drive_monitor_until(
+    monitor: &mut (impl Future<Output = anyhow::Result<()>> + Unpin),
+    what: &str,
+    observed: impl Fn() -> bool,
+) {
+    let wait = async {
+        while !observed() {
+            tokio::select! {
+                result = &mut *monitor => panic!("worker withdrew before {what}: {result:?}"),
+                () = tokio::time::sleep(Duration::from_millis(1)) => {}
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), wait)
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
 #[tokio::test]
 async fn leader_monitor_rejects_restarted_native_engine() {
     let service = FakeTrtllm::default();
@@ -338,29 +360,52 @@ async fn leader_monitor_rejects_restarted_native_engine() {
         source_owners: [(0, "leader".into())].into(),
     });
     let server = FakeServer::start(service.clone()).await;
+    // The poll timeout outlasts the recovery limit, so a metadata RPC that times
+    // out withdraws the worker instead of passing as a handled status.
+    let supervision = RoutingSupervision::default();
+    assert!(supervision.metadata_poll_timeout > supervision.metadata_recovery_limit);
     let engine = engine_with_kv_routing(&server.endpoint);
     engine.start(0).await.expect("start original engine");
-    // Either metadata RPC may transiently reject work without withdrawing the
-    // unchanged engine. Recovery must not suppress actual identity changes.
+    let errors = || service.metadata_errors_served.load(Ordering::SeqCst);
+    let healthy_polls = || service.kv_sources_served.load(Ordering::SeqCst);
     let monitor = engine.monitor_routing();
     tokio::pin!(monitor);
-    for failure in [&service.server_info_error, &service.kv_sources_error] {
+    // Stay healthy past the recovery limit, which withdraws a monitor that
+    // does not reset its deadline on a successful poll.
+    let polls = healthy_polls();
+    drive_monitor_until(&mut monitor, "a healthy poll", || healthy_polls() > polls).await;
+    let healthy_since = tokio::time::Instant::now();
+    drive_monitor_until(&mut monitor, "the recovery limit", || {
+        healthy_since.elapsed() > supervision.metadata_recovery_limit
+    })
+    .await;
+    // Either metadata RPC may transiently reject work without withdrawing the
+    // unchanged engine. A second injected error shows the monitor received the
+    // first and kept polling.
+    for (rpc, failure) in [
+        ("GetServerInfo", &service.server_info_error),
+        ("GetKvEventSources", &service.kv_sources_error),
+    ] {
         for code in [tonic::Code::Unavailable, tonic::Code::ResourceExhausted] {
+            let served = errors();
             *failure.lock().await = Some(code);
-            assert!(
-                tokio::time::timeout(Duration::from_secs(6), &mut monitor)
-                    .await
-                    .is_err(),
-                "transient {code:?} must not withdraw the worker"
-            );
+            drive_monitor_until(
+                &mut monitor,
+                &format!("a retry after {rpc} {code:?}"),
+                || errors() >= served + 2,
+            )
+            .await;
             *failure.lock().await = None;
-            assert!(
-                tokio::time::timeout(Duration::from_secs(6), &mut monitor)
-                    .await
-                    .is_err()
-            );
+            let polls = healthy_polls();
+            drive_monitor_until(
+                &mut monitor,
+                &format!("recovery from {rpc} {code:?}"),
+                || healthy_polls() > polls,
+            )
+            .await;
         }
     }
+    // Recovery must not suppress actual identity changes.
     service
         .node_metadata
         .lock()
@@ -368,7 +413,7 @@ async fn leader_monitor_rejects_restarted_native_engine() {
         .as_mut()
         .unwrap()
         .engine_id = "restarted".into();
-    let error = tokio::time::timeout(Duration::from_secs(6), &mut monitor)
+    let error = tokio::time::timeout(Duration::from_secs(5), &mut monitor)
         .await
         .expect("detect changed incarnation")
         .expect_err("must withdraw stale discovery");
@@ -442,7 +487,7 @@ async fn sustained_metadata_outage_withdraws_worker() {
     let engine = engine_with_kv_routing(&server.endpoint);
     engine.start(0).await.expect("start original engine");
     *service.kv_sources_error.lock().await = Some(tonic::Code::ResourceExhausted);
-    let error = tokio::time::timeout(Duration::from_secs(35), engine.monitor_routing())
+    let error = tokio::time::timeout(Duration::from_secs(5), engine.monitor_routing())
         .await
         .expect("bounded metadata recovery")
         .expect_err("sustained outage must withdraw worker");
