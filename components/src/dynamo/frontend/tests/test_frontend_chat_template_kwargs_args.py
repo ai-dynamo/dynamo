@@ -70,19 +70,35 @@ def test_default_chat_template_kwargs_reject_chat_template(processor: str) -> No
         )
 
 
-def test_vllm_spellings_fold_into_the_frontend_flag() -> None:
-    config = parse_frontend_config(
-        ["--default-chat-template-kwargs", '{"enable_thinking": false}']
+def test_vllm_spellings_fold_into_the_frontend_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # vLLM's parser read --default_chat_template_kwargs or the dotted form; those
+    # are command-line values, so they win over the environment default.
+    monkeypatch.setenv(
+        "DYN_DEFAULT_CHAT_TEMPLATE_KWARGS",
+        '{"enable_thinking": false, "clear_thinking": false}',
     )
-    # vLLM's parser read --default_chat_template_kwargs or the dotted form.
-    vllm_flags = argparse.Namespace(
-        default_chat_template_kwargs={"enable_thinking": True, "clear_thinking": False}
+    config = parse_frontend_config([])
+    _fold_vllm_default_chat_template_kwargs(
+        config,
+        argparse.Namespace(default_chat_template_kwargs={"enable_thinking": True}),
     )
-    _fold_vllm_default_chat_template_kwargs(config, vllm_flags)
     assert config.default_chat_template_kwargs == {
-        "enable_thinking": False,
+        "enable_thinking": True,
         "clear_thinking": False,
     }
+
+    # A dotted key overrides one key of the JSON form, as in vLLM.
+    monkeypatch.delenv("DYN_DEFAULT_CHAT_TEMPLATE_KWARGS")
+    config = parse_frontend_config(
+        ["--default-chat-template-kwargs", '{"enable_thinking": false, "x": 1}']
+    )
+    _fold_vllm_default_chat_template_kwargs(
+        config,
+        argparse.Namespace(default_chat_template_kwargs={"enable_thinking": True}),
+    )
+    assert config.default_chat_template_kwargs == {"enable_thinking": True, "x": 1}
 
     with pytest.raises(ValueError, match="cannot set chat_template"):
         _fold_vllm_default_chat_template_kwargs(

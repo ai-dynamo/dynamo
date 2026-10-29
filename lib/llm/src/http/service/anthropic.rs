@@ -42,6 +42,7 @@ use super::{
     service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
+use crate::frontend_config::ServingPolicy;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
     AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
@@ -610,22 +611,11 @@ async fn anthropic_messages(
     let prompt_injected_reasoning =
         parsing_options.reasoning_parser.is_some() && !thinking_explicitly_disabled;
 
-    if prompt_injected_reasoning {
-        let args = chat_request
-            .chat_template_args
-            .get_or_insert_with(Default::default);
-        args.entry("enable_thinking".to_string())
-            .or_insert(serde_json::Value::Bool(true));
-        // Preserve reasoning from prior turns. Some templates (Nemotron)
-        // strip historical <think> content by default to save context.
-        // For agentic flows the model needs to see why it made prior decisions.
-        // Ref: NVIDIA's SWE training config also sets this to false:
-        // https://github.com/NVIDIA-NeMo/Nemotron/blob/main/src/nemotron/recipes/super3/stage2_rl/stage2_swe2/config/default.yaml#L287
-        args.entry("truncate_history_thinking".to_string())
-            .or_insert(serde_json::Value::Bool(false));
-    }
-    // After the thinking decision above, so the defaults' thinking keys yield to it.
-    state.serving_policy().apply_to_request(&mut chat_request);
+    apply_anthropic_template_args(
+        &mut chat_request,
+        prompt_injected_reasoning,
+        state.serving_policy(),
+    );
 
     let mut request = context.map(|_req| chat_request);
 
@@ -1258,6 +1248,37 @@ fn gate_anthropic_nvext(
     Ok(())
 }
 
+/// Layer the chat template args for an Anthropic request: the thinking decision,
+/// then the frontend's defaults, then the history fallback.
+fn apply_anthropic_template_args(
+    request: &mut NvCreateChatCompletionRequest,
+    prompt_injected_reasoning: bool,
+    serving_policy: &ServingPolicy,
+) {
+    if prompt_injected_reasoning {
+        request
+            .chat_template_args
+            .get_or_insert_with(Default::default)
+            .entry("enable_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(true));
+    }
+    // After the thinking decision, so the defaults' thinking keys yield to it, and
+    // before the history fallback, so a default can still set that key.
+    serving_policy.apply_to_request(request);
+    if prompt_injected_reasoning {
+        // Preserve reasoning from prior turns. Some templates (Nemotron)
+        // strip historical <think> content by default to save context.
+        // For agentic flows the model needs to see why it made prior decisions.
+        // Ref: NVIDIA's SWE training config also sets this to false:
+        // https://github.com/NVIDIA-NeMo/Nemotron/blob/main/src/nemotron/recipes/super3/stage2_rl/stage2_swe2/config/default.yaml#L287
+        request
+            .chat_template_args
+            .get_or_insert_with(Default::default)
+            .entry("truncate_history_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(false));
+    }
+}
+
 fn apply_anthropic_nvext_policy(
     request: &mut NvCreateChatCompletionRequest,
     headers: &HeaderMap,
@@ -1621,6 +1642,36 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn anthropic_template_args_layer_defaults_between_thinking_and_history() {
+        let args = |defaults: serde_json::Value, prompt_injected_reasoning: bool| {
+            let mut policy = ServingPolicy::default();
+            policy.set_default_chat_template_kwargs(defaults.as_object().cloned());
+            let mut chat_request: NvCreateChatCompletionRequest =
+                request_with_nvext().try_into().unwrap();
+            apply_anthropic_template_args(&mut chat_request, prompt_injected_reasoning, &policy);
+            serde_json::to_value(chat_request.chat_template_args).unwrap()
+        };
+        let defaults = serde_json::json!({
+            "enable_thinking": false,
+            "truncate_history_thinking": true,
+        });
+
+        // The thinking decision wins over a default thinking key, and a default
+        // still sets the history key.
+        assert_eq!(
+            args(defaults.clone(), true),
+            serde_json::json!({"enable_thinking": true, "truncate_history_thinking": true})
+        );
+        // Without a default, the history fallback applies.
+        assert_eq!(
+            args(serde_json::json!({}), true),
+            serde_json::json!({"enable_thinking": true, "truncate_history_thinking": false})
+        );
+        // Without a reasoning parser, the defaults apply as they are.
+        assert_eq!(args(defaults.clone(), false), defaults);
     }
 
     #[test]

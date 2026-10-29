@@ -250,12 +250,15 @@ def _fold_vllm_default_chat_template_kwargs(
     vLLM's parser also takes --default_chat_template_kwargs and the dotted
     --default-chat-template-kwargs.<key> form, which the frontend parser leaves
     unparsed. The HTTP handlers apply the folded value to every request.
+    vLLM's value always comes from the command line, and the frontend value can
+    come from DYN_DEFAULT_CHAT_TEMPLATE_KWARGS, so vLLM's keys win. A dotted key
+    also overrides one key of the JSON form, as in vLLM.
     """
     vllm_defaults = getattr(vllm_flags, "default_chat_template_kwargs", None) or {}
     if vllm_defaults:
         config.default_chat_template_kwargs = {
-            **vllm_defaults,
             **(config.default_chat_template_kwargs or {}),
+            **vllm_defaults,
         }
         config.validate_default_chat_template_kwargs()
 
