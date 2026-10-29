@@ -4230,7 +4230,8 @@ MultiClusterConfiguration configures how the operator exports Global Router
 pools through the Kubernetes Multi-Cluster Services (MCS) API, for the Global
 Discovery Service's Kubernetes stores. The operator exports a pool only when
 MCSImplementation is set and its DGD has the nvidia.com/global-router-pool
-annotation.
+annotation. Each export is a multicluster.x-k8s.io ServiceExport at v1alpha1,
+or at v1beta1 in a cluster that serves only v1beta1.
 
 
 
@@ -4239,7 +4240,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `mcsImplementation` _[MCSImplementation](#mcsimplementation)_ | MCSImplementation is the MCS implementation that imports the exports. Empty,<br />the default, exports nothing: Global Router pools are then discovered without<br />Kubernetes. Clearing it leaves earlier exports in place until their DGDs are<br />deleted. |  |  |
+| `mcsImplementation` _[MCSImplementation](#mcsimplementation)_ | MCSImplementation is the MCS implementation that imports the exports. Empty,<br />the default, exports nothing: Global Router pools are then discovered without<br />Kubernetes. Set, it needs the multicluster.x-k8s.io ServiceExport API at<br />v1alpha1 or v1beta1 in this cluster. Clearing it leaves earlier exports in<br />place until their DGDs are deleted. |  |  |
 
 
 #### NamespaceConfiguration

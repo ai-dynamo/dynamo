@@ -389,7 +389,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 	// deleted, the DGD's own and a user's of the same Service alike.
 	if r.RuntimeConfig.Gate.Enabled(features.MultiClusterExport) {
 		ctrlBuilder = ctrlBuilder.Watches(
-			multicluster.ServiceExportMetadata(),
+			multicluster.ServiceExportMetadata(r.RuntimeConfig.Gate.ServiceExportVersion),
 			handler.EnqueueRequestsFromMapFunc(r.mapServiceExportToDGDRequests),
 			builder.WithPredicates(predicate.Funcs{
 				CreateFunc:  func(ce event.CreateEvent) bool { return true },

@@ -17,16 +17,17 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// ServiceExportGVK is the SIG Multicluster ServiceExport. Every supported
+// ServiceExportGroupKind is the SIG Multicluster ServiceExport. Every supported
 // implementation reads it in the cluster that runs the Service, Karmada included:
 // its ServiceExport controller watches this kind in member clusters. Karmada
 // watches a member only while its control plane has propagated at least one
 // ServiceExport there, so keep one in place in each member. That setup is outside
-// the operator.
-var ServiceExportGVK = schema.GroupVersionKind{
-	Group:   "multicluster.x-k8s.io",
-	Version: "v1alpha1",
-	Kind:    "ServiceExport",
+// the operator. The operator reads and writes it at the multicluster.x-k8s.io
+// version that the multiClusterExport feature gate resolved, v1alpha1 or v1beta1;
+// both define the metadata the operator writes alike.
+var ServiceExportGroupKind = schema.GroupKind{
+	Group: "multicluster.x-k8s.io",
+	Kind:  "ServiceExport",
 }
 
 const (
@@ -70,19 +71,22 @@ func MaxServiceNameLength(implementation configv1alpha1.MCSImplementation) int {
 	return validation.DNS1035LabelMaxLength
 }
 
-// ServiceExportMetadata returns an empty metadata-only ServiceExport, to read,
-// delete or watch exports through the cache without their content.
-func ServiceExportMetadata() *metav1.PartialObjectMetadata {
+// ServiceExportMetadata returns an empty metadata-only ServiceExport at version,
+// to read, delete or watch exports through the cache without their content.
+// version must be a multicluster.x-k8s.io version that the cluster serves.
+func ServiceExportMetadata(version string) *metav1.PartialObjectMetadata {
 	serviceExport := &metav1.PartialObjectMetadata{}
-	serviceExport.SetGroupVersionKind(ServiceExportGVK)
+	serviceExport.SetGroupVersionKind(ServiceExportGroupKind.WithVersion(version))
 	return serviceExport
 }
 
-// RenderServiceExport returns the ServiceExport for the Service named name in
-// namespace, labeled with the DGD that exports it. It sets no owner reference.
-func RenderServiceExport(namespace, name, dgdName string) *unstructured.Unstructured {
+// RenderServiceExport returns the ServiceExport at version for the Service named
+// name in namespace, labeled with the DGD that exports it. It sets no owner
+// reference. version must be a multicluster.x-k8s.io version that the cluster
+// serves.
+func RenderServiceExport(version, namespace, name, dgdName string) *unstructured.Unstructured {
 	serviceExport := &unstructured.Unstructured{}
-	serviceExport.SetGroupVersionKind(ServiceExportGVK)
+	serviceExport.SetGroupVersionKind(ServiceExportGroupKind.WithVersion(version))
 	serviceExport.SetNamespace(namespace)
 	serviceExport.SetName(name)
 	serviceExport.SetLabels(map[string]string{
