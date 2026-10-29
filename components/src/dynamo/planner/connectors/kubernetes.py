@@ -1193,6 +1193,18 @@ class KubernetesConnector(PlannerConnector):
 
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
         deployment_ready = self.kube_api.is_deployment_ready(deployment)
+        # A stuck Frontend Pod keeps the DGD unready but does not affect
+        # worker scaling, so treat that case as ready.
+        frontend_only_unready = (
+            not deployment_ready and self.kube_api.only_frontend_unready(deployment)
+        )
+        if frontend_only_unready:
+            logger.info(
+                "Deployment %s is not Ready only because of Frontend components; "
+                "scaling workers anyway",
+                self.graph_deployment_name,
+            )
+            deployment_ready = True
         ready = deployment_ready
 
         # Validate the DGD snapshot before reading an authoritative adapter on
@@ -1379,7 +1391,13 @@ class KubernetesConnector(PlannerConnector):
         if not deployment_ready and not mutations:
             return
 
-        if blocking:
+        if blocking and frontend_only_unready:
+            # DGD Ready may stay False on the Frontend; wait on workers only.
+            await self.kube_api.wait_for_graph_deployment_ready(
+                self.graph_deployment_name,
+                include_planner=False,
+            )
+        elif blocking:
             await self.kube_api.wait_for_graph_deployment_ready(
                 self.graph_deployment_name,
             )
