@@ -499,7 +499,7 @@ impl State {
         if let Some(program) = self.remove_program(session_id)
             && program.wv.is_some()
         {
-            self.groups.end(&program.tag);
+            self.groups.drop_program(&program.tag, session_id);
         }
     }
 
@@ -810,7 +810,7 @@ impl State {
                 .filter(|program| program.wv.is_none())
                 .map(|program| program.tag.clone())
             {
-                self.groups.start(&tag, version);
+                self.groups.start(&tag, version, &session_id);
                 version = self.groups.wv(&tag).unwrap_or(version);
             }
             self.update_program(&session_id, |program| {

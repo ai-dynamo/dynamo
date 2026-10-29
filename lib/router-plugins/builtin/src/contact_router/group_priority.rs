@@ -9,7 +9,7 @@
 //! `wv * group_tag + left * programs_left + env_s * env_seconds`, where the group
 //! tag is the version its first program started at; higher scores go first.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, hash_map::Entry};
 
 use serde::Deserialize;
 
@@ -75,19 +75,35 @@ impl GroupTag {
 struct Group {
     wv: u64,
     left: usize,
+    /// Programs that ended without finishing; a retry takes its slot back.
+    dropped: HashSet<String>,
+    aged: bool,
 }
 
 #[derive(Default)]
 pub(crate) struct Groups(HashMap<String, Group>);
 
 impl Groups {
-    /// A program of `tag` started at `version`; its group keeps the first start's version.
-    pub(crate) fn start(&mut self, tag: &GroupTag, version: u64) {
-        if let Some(group) = &tag.group {
-            self.0.entry(group.clone()).or_insert(Group {
-                wv: version,
-                left: tag.size.max(1),
-            });
+    /// Program `session` of `tag` started at `version`; its group keeps the first start's version.
+    pub(crate) fn start(&mut self, tag: &GroupTag, version: u64, session: &str) {
+        let Some(name) = &tag.group else {
+            return;
+        };
+        match self.0.entry(name.clone()) {
+            Entry::Occupied(mut entry) => {
+                let group = entry.get_mut();
+                if group.dropped.remove(session) {
+                    group.left += 1;
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(Group {
+                    wv: version,
+                    left: tag.size.max(1),
+                    dropped: HashSet::new(),
+                    aged: false,
+                });
+            }
         }
     }
 
@@ -107,7 +123,26 @@ impl Groups {
         let name = tag.group.as_ref()?;
         let group = self.0.get_mut(name)?;
         group.left = group.left.saturating_sub(1);
-        (group.left == 0).then(|| self.0.remove(name).map(|group| group.wv))?
+        if group.left > 0 || group.aged {
+            return None;
+        }
+        group.aged = true;
+        let wv = group.wv;
+        if group.dropped.is_empty() {
+            self.0.remove(name);
+        }
+        Some(wv)
+    }
+
+    /// Program `session` of `tag` ended without finishing. Its slot is freed
+    /// until the same session starts again; the group is kept while it may.
+    pub(crate) fn drop_program(&mut self, tag: &GroupTag, session: &str) {
+        let Some(group) = tag.group.as_ref().and_then(|name| self.0.get_mut(name)) else {
+            return;
+        };
+        if group.dropped.insert(session.to_owned()) {
+            group.left = group.left.saturating_sub(1);
+        }
     }
 
     /// The score of a program of `tag` tagged `wv`, scored by its group once that started.
@@ -134,12 +169,31 @@ mod tests {
             env_s: 4.0,
         };
         let mut groups = Groups::default();
-        groups.start(&tag, 3);
-        groups.start(&tag, 7);
+        groups.start(&tag, 3, "a");
+        groups.start(&tag, 7, "b");
         assert_eq!(groups.score(&priority, &tag, 7), -3.0 - 20.0 + 2.0);
         groups.end(&tag);
         assert_eq!(groups.score(&priority, &tag, 7), -3.0 - 10.0 + 2.0);
         groups.end(&tag);
         assert_eq!(groups.score(&priority, &tag, 9), -9.0 - 10.0 + 2.0);
+    }
+
+    #[test]
+    fn a_retried_program_takes_its_slot_back() {
+        let tag = GroupTag {
+            group: Some("g".into()),
+            size: 2,
+            env_s: 0.0,
+        };
+        let mut groups = Groups::default();
+        groups.start(&tag, 3, "a");
+        groups.drop_program(&tag, "a");
+        assert_eq!(groups.programs(), 1);
+        assert_eq!(groups.end(&tag), Some(3));
+        assert_eq!(groups.programs(), 0);
+        groups.start(&tag, 9, "a");
+        assert_eq!(groups.programs(), 1);
+        assert_eq!(groups.end(&tag), None);
+        assert_eq!(groups.programs(), 0);
     }
 }
