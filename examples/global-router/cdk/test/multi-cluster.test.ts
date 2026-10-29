@@ -43,6 +43,20 @@ interface Resource {
   readonly Properties: Record<string, unknown>;
 }
 
+interface Crd {
+  readonly kind: string;
+  readonly metadata: { readonly name: string };
+  readonly spec: {
+    readonly conversion?: { readonly strategy: string };
+    readonly versions: ReadonlyArray<{
+      readonly name: string;
+      readonly served: boolean;
+      readonly storage: boolean;
+      readonly schema: unknown;
+    }>;
+  };
+}
+
 const MEMBER: MultiClusterConfig = {
   memberName: "test-west",
   peerCidrs: ["10.43.0.0/16"],
@@ -166,10 +180,9 @@ test("a member admits peer pod traffic, keeps pod addresses and installs the MCS
   assert.equal(crds.Properties.Overwrite, true);
   // Adopted CRDs may predate the stack; deleting one deletes every export.
   assert.equal(crds.DeletionPolicy, "Retain");
-  const names = (JSON.parse(String(crds.Properties.Manifest)) as Array<{
-    kind: string;
-    metadata: { name: string };
-  }>).map((crd) => `${crd.kind}/${crd.metadata.name}`);
+  const names = (JSON.parse(String(crds.Properties.Manifest)) as Crd[]).map(
+    (crd) => `${crd.kind}/${crd.metadata.name}`,
+  );
   assert.deepEqual(names, [
     "CustomResourceDefinition/serviceexports.multicluster.x-k8s.io",
     "CustomResourceDefinition/serviceimports.multicluster.x-k8s.io",
@@ -181,6 +194,30 @@ test("a member admits peer pod traffic, keeps pod addresses and installs the MCS
     template.findOutputs("KarmadaApiEndpointCommand").KarmadaApiEndpointCommand,
     undefined,
   );
+});
+
+test("the MCS CRDs serve v1alpha1 for Karmada and store v1beta1 for MCS controllers", () => {
+  const [crds] = mcsCrdManifests(synthesize(MEMBER));
+  const manifest = JSON.parse(String(crds.Properties.Manifest)) as Crd[];
+  assert.equal(manifest.length, 2);
+  for (const crd of manifest) {
+    const crdName = crd.metadata.name;
+    // Karmada reads only v1alpha1. An MCS controller built on
+    // sigs.k8s.io/mcs-api v0.5 uses v1beta1.
+    assert.deepEqual(
+      crd.spec.versions.map(({ name, served, storage }) => ({ name, served, storage })),
+      [
+        { name: "v1alpha1", served: true, storage: false },
+        { name: "v1beta1", served: true, storage: true },
+      ],
+      crdName,
+    );
+    // Without a conversion webhook, the API server only rewrites
+    // apiVersion, so both versions must share one schema.
+    assert.equal(crd.spec.conversion?.strategy ?? "None", "None", crdName);
+    const [v1alpha1, v1beta1] = crd.spec.versions;
+    assert.deepEqual(v1alpha1.schema, v1beta1.schema, crdName);
+  }
 });
 
 test("the hub runs a pinned Karmada control plane behind an internal load balancer", () => {
@@ -278,7 +315,7 @@ test("rejects invalid multi-cluster settings", () => {
       /not supported/,
     ],
     [
-      "Karmada version without matching CRDs",
+      "Karmada version without pinned setup images",
       { ...HUB, karmadaControlPlane: { ...HUB.karmadaControlPlane!, version: "1.18.0" } },
       /not supported/,
     ],

@@ -95,7 +95,7 @@ export interface PeeringRegionConfig {
 export interface KarmadaControlPlaneConfig {
   /**
    * Karmada release, which pins the chart and its images. It must be
-   * `KARMADA_VERSION`, the release that `crds/` comes from.
+   * `KARMADA_VERSION`, the release that the setup image pins come from.
    */
   readonly version: string;
   /** VPC ranges allowed to reach the internal Karmada API load balancer. */

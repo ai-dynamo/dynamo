@@ -270,9 +270,13 @@ cluster, CDK:
   the pods' MTU, and Path MTU Discovery needs that message to find the limit;
 - excludes the peer VPC ranges from source NAT in the VPC CNI (`aws-node`
   `AWS_VPC_K8S_CNI_EXCLUDE_SNAT_CIDRS`), so traffic between the clusters keeps its pod address;
-- installs the MCS `ServiceExport` and `ServiceImport` CRDs (`crds/`, from Karmada 1.19.0). CDK
-  keeps them if they are removed from the stack or a deployment rolls back, because they may
-  predate the stack and deleting a CRD deletes every `ServiceExport` and `ServiceImport`;
+- installs the SIG Multicluster `ServiceExport` and `ServiceImport` CRDs from
+  `sigs.k8s.io/mcs-api` v0.5.2 (`crds/`). They serve `multicluster.x-k8s.io/v1alpha1`, which
+  Karmada reads, and `v1beta1`, the storage version that a standard MCS controller built on
+  mcs-api uses, so such a controller can run next to Karmada. CDK applies them over existing
+  copies and keeps them if they are removed from the stack or a deployment rolls back, because
+  they may predate the stack and deleting a CRD deletes every `ServiceExport` and
+  `ServiceImport`;
 - in the hub only, and only with `-c karmada=true`, installs the Karmada 1.19.0 control plane
   from the release Helm chart into `karmada-system`, with every image pinned and the
   `PropagateDeps` feature gate on (the chart turns it off, and the import step below needs it).
@@ -294,7 +298,10 @@ pnpm exec cdk deploy --all -c deployment=both
 
 Pass `-c karmada=true` on every later Ohio deployment. Without it, CDK stops managing the control
 plane but leaves it installed: CDK never uninstalls the chart, because its uninstall hook also
-deletes the MCS CRDs and the `karmada-system` namespace.
+deletes the MCS CRDs and the `karmada-system` namespace. If the chart is uninstalled by hand, run
+`kubectl apply -f crds/` on the Ohio bastion to put the CRDs back, because CDK applies them again
+only when the files change. Do not reinstall Karmada's copies, which serve only `v1alpha1`; CDK's
+`overwrite: true` apply installs the mcs-api CRDs, so later deployments do not bring them back.
 
 ### Let the bastions reach the other VPC
 
@@ -374,8 +381,9 @@ the controller's `PropagateDeps` feature gate must be on, which CDK does.
 
 The running clusters have a Karmada control plane that was installed by hand with
 `karmadactl init`, and Helm cannot install over it. Deployments without `-c karmada=true` are
-safe: they add the network settings and take over the MCS CRDs that Karmada propagated. Before
-deploying Ohio with `-c karmada=true`:
+safe: they add the network settings and take over the MCS CRDs that Karmada propagated,
+replacing them with the mcs-api CRDs that also serve `v1beta1`. Before deploying Ohio with
+`-c karmada=true`:
 
 1. Deploy `deployment=both` to add the public routes (above), so both bastions reach the Karmada
    API.
