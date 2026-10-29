@@ -16,7 +16,7 @@ def configure_worker_drain(
     handler, runtime, ready_event, shutdown_event, terminal_event
 ):
     """Enable explicit withdrawal only for the Python LLM serving path."""
-    if not env_bool("DYN_EXPERIMENTAL_SGLANG_WORKER_DRAIN"):
+    if not env_bool("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL"):
         return None
     if handler.config.dynamo_args.response_plane == "quic":
         raise ValueError(

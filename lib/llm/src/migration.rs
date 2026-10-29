@@ -225,6 +225,7 @@ fn is_migratable_for_request(
 
 pub struct Migration {
     migration_limit: u32,
+    worker_withdrawal: bool,
     max_seq_len: Option<u32>,
     model_name: Arc<String>,
     metrics: Arc<Metrics>,
@@ -245,6 +246,10 @@ impl Migration {
         );
         Arc::new(Self {
             migration_limit,
+            worker_withdrawal: std::env::var(
+                dynamo_runtime::config::environment_names::worker::DYN_EXPERIMENTAL_WORKER_WITHDRAWAL,
+            )
+            .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")),
             max_seq_len,
             model_name: Arc::new(model_name),
             metrics,
@@ -321,6 +326,7 @@ where
             self.model_name.clone(),
             self.metrics.clone(),
             session_affinity,
+            self.worker_withdrawal,
         )
         .await?;
         let response_stream = stream::unfold(retry_manager, move |mut retry_manager| async move {
@@ -408,6 +414,7 @@ where
         model_name: Arc<String>,
         metrics: Arc<Metrics>,
         session_affinity: Option<SessionAffinityId>,
+        worker_withdrawal: bool,
     ) -> Result<Self> {
         // TODO: prompt_embeds take precedence over replayed token_ids. Disable migration for
         // embedding prompts until a retry can represent an embedding-based continuation.
@@ -465,7 +472,11 @@ where
             next_generate: next,
             next_stream: None,
             retries_left: u64::from(retries_left) + 1, // +1 to account for the initial attempt
-            draining_reselections_left: WORKER_DRAINING_RESELECTION_LIMIT,
+            draining_reselections_left: if worker_withdrawal {
+                WORKER_DRAINING_RESELECTION_LIMIT
+            } else {
+                0
+            },
             response_started: false,
             max_seq_len,
             model_name,
@@ -1302,6 +1313,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             Arc::new(Metrics::new()),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -1915,6 +1927,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -1939,6 +1952,7 @@ mod tests {
     async fn build_and_observe_prompt(
         behavior: MockBehavior,
         migration_limit: u32,
+        worker_withdrawal: bool,
     ) -> (
         RetryManager<BackendOutput>,
         std::sync::Weak<Vec<TokenIdType>>,
@@ -1958,6 +1972,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             Arc::new(Metrics::new()),
             None,
+            worker_withdrawal,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -1968,7 +1983,8 @@ mod tests {
     /// still reselect at migration limit zero without pinning a long stream.
     #[tokio::test]
     async fn test_retry_manager_releases_prompt_after_final_admission() {
-        let (mut retry_manager, prompt) = build_and_observe_prompt(MockBehavior::Success, 0).await;
+        let (mut retry_manager, prompt) =
+            build_and_observe_prompt(MockBehavior::Success, 0, true).await;
         assert!(
             prompt.upgrade().is_some(),
             "admission may still be rejected"
@@ -1984,8 +2000,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn withdrawal_disabled_releases_prompt_after_dispatch() {
+        let (_manager, prompt) = build_and_observe_prompt(MockBehavior::Success, 0, false).await;
+        assert!(
+            prompt.upgrade().is_none(),
+            "disabled feature retained replay tokens"
+        );
+    }
+
+    #[tokio::test]
     async fn test_retry_manager_keeps_prompt_while_retries_remain() {
-        let (_retry_manager, prompt) = build_and_observe_prompt(MockBehavior::Success, 1).await;
+        let (_retry_manager, prompt) =
+            build_and_observe_prompt(MockBehavior::Success, 1, false).await;
         let prompt = prompt
             .upgrade()
             .expect("prompt released while a retry is possible");
@@ -1995,10 +2021,10 @@ mod tests {
     #[tokio::test]
     async fn test_retry_manager_releases_prompt_after_last_retry() {
         let (mut retry_manager, prompt) =
-            build_and_observe_prompt(MockBehavior::FailThenSuccess, 1).await;
+            build_and_observe_prompt(MockBehavior::FailThenSuccess, 1, false).await;
         assert!(
-            prompt.upgrade().is_some(),
-            "admission may still be rejected"
+            prompt.upgrade().is_none(),
+            "final dispatch retained the prompt"
         );
         assert!(retry_manager.next().await.unwrap().error.is_none());
         assert!(prompt.upgrade().is_none(), "prompt pinned after admission");
@@ -2115,7 +2141,7 @@ mod tests {
 
     #[tokio::test]
     async fn worker_draining_reselects_before_output_without_migration_budget() {
-        for streamed in [false, true] {
+        for (streamed, enabled) in [(false, false), (true, false), (false, true), (true, true)] {
             let context_id = uuid::Uuid::new_v4().to_string();
             let engine = Arc::new(MockEngine::new(
                 MockBehavior::WorkerDraining {
@@ -2130,13 +2156,20 @@ mod tests {
             let calls = engine.call_count.clone();
             let request =
                 Context::with_id_and_metadata(create_mock_request(1), context_id, BTreeMap::new());
-            let migration =
+            let mut migration =
                 Migration::new(0, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
-            let mut stream = migration.generate(request, engine).await.unwrap();
+            Arc::get_mut(&mut migration).unwrap().worker_withdrawal = enabled;
+            let result = migration.generate(request, engine).await;
+            if !enabled && !streamed {
+                assert!(is_worker_draining(result.err().unwrap().as_ref()));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                continue;
+            }
+            let mut stream = result.unwrap();
             let responses = stream.by_ref().collect::<Vec<_>>().await;
-            assert_eq!(calls.load(Ordering::SeqCst), 3);
+            assert_eq!(calls.load(Ordering::SeqCst), if enabled { 3 } else { 1 });
             assert_eq!(responses.len(), 1);
-            assert!(responses[0].error.is_none());
+            assert_eq!(responses[0].error.is_none(), enabled);
         }
     }
 
@@ -2163,8 +2196,9 @@ mod tests {
                 });
             }
             let request = Context::with_id_and_metadata(content, context_id, BTreeMap::new());
-            let migration =
+            let mut migration =
                 Migration::new(0, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+            Arc::get_mut(&mut migration).unwrap().worker_withdrawal = true;
             let result = migration.generate(request, engine).await;
             if streamed {
                 let mut responses = result.unwrap();
@@ -2194,7 +2228,9 @@ mod tests {
         let calls = engine.call_count.clone();
         let request =
             Context::with_id_and_metadata(create_mock_request(1), context_id, BTreeMap::new());
-        let migration = Migration::new(2, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+        let mut migration =
+            Migration::new(2, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+        Arc::get_mut(&mut migration).unwrap().worker_withdrawal = true;
         let mut responses = migration.generate(request, engine).await.unwrap();
         assert!(responses.next().await.unwrap().data.is_some());
         assert!(is_worker_draining(
@@ -2236,6 +2272,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -2298,6 +2335,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -2391,6 +2429,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await;
 
@@ -2441,6 +2480,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         ) // 3 retries
         .await
         .expect("Failed to build RetryManager");
@@ -2510,6 +2550,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         ) // 3 retries
         .await
         .expect("Failed to build RetryManager");
@@ -2592,6 +2633,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await;
 
@@ -2645,6 +2687,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await;
 
@@ -2700,6 +2743,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await;
 
@@ -2781,6 +2825,7 @@ mod tests {
                 Arc::new(TEST_MODEL.to_string()),
                 metrics.clone(),
                 None,
+                false,
             )
             .await
             .expect("a handshake cancelled by the client closes cleanly");
@@ -2908,6 +2953,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -2987,6 +3033,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -3060,6 +3107,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -3125,6 +3173,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -3207,6 +3256,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics,
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -3322,6 +3372,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics,
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -3428,6 +3479,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             Arc::new(Metrics::new()),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -3570,6 +3622,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             Arc::new(Metrics::new()),
             None,
+            false,
         )
         .await
         .expect("initial stream should be created");
@@ -3719,6 +3772,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -3902,6 +3956,7 @@ mod tests {
                     Arc::new(TEST_MODEL.to_string()),
                     Arc::new(Metrics::new()),
                     None,
+                    false,
                 )
                 .await
                 .expect("initial stream should be created");
@@ -4114,6 +4169,7 @@ mod tests {
             Arc::new(TEST_MODEL.to_string()),
             metrics,
             None,
+            false,
         )
         .await
         .expect("Failed to build RetryManager");

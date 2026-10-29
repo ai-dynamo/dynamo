@@ -184,6 +184,9 @@ pub mod runtime {
 
 /// Worker lifecycle environment variables
 pub mod worker {
+    /// Opt-in routing withdrawal on workers and admission reselection on frontends.
+    pub const DYN_EXPERIMENTAL_WORKER_WITHDRAWAL: &str = "DYN_EXPERIMENTAL_WORKER_WITHDRAWAL";
+
     /// Graceful shutdown timeout in seconds
     pub const DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT: &str = "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT";
 }
@@ -1150,6 +1153,7 @@ mod tests {
             runtime::canary::DYN_CANARY_WAIT_TIME,
             // Worker
             worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
+            worker::DYN_EXPERIMENTAL_WORKER_WITHDRAWAL,
             // NATS
             nats::NATS_SERVER,
             nats::DYN_NATS_REQUEST_TIMEOUT_SECS,

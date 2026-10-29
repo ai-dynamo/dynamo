@@ -14,7 +14,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 @pytest.fixture
 def controls(monkeypatch):
-    monkeypatch.setenv("DYN_EXPERIMENTAL_SGLANG_WORKER_DRAIN", "1")
+    monkeypatch.setenv("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL", "1")
     monkeypatch.setenv("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", "0")
     handler = SimpleNamespace(
         generate_endpoint=SimpleNamespace(
@@ -42,14 +42,14 @@ def controls(monkeypatch):
 
 def test_controls_are_opt_in_and_require_a_system_listener(controls, monkeypatch):
     handler, runtime, ready, terminal = controls
-    monkeypatch.delenv("DYN_EXPERIMENTAL_SGLANG_WORKER_DRAIN")
+    monkeypatch.delenv("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL")
     assert (
         configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
         is None
     )
     runtime.system_status_server_url.assert_not_called()
     runtime.register_engine_http_handler.assert_not_called()
-    monkeypatch.setenv("DYN_EXPERIMENTAL_SGLANG_WORKER_DRAIN", "1")
+    monkeypatch.setenv("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL", "1")
     runtime.system_status_server_url.return_value = None
     with pytest.raises(ValueError, match="DYN_SYSTEM_PORT"):
         configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
@@ -142,7 +142,7 @@ def test_quic_is_rejected_only_when_withdrawal_enabled(controls, monkeypatch, en
     handler, runtime, ready, terminal = controls
     handler.config.dynamo_args.response_plane = "quic"
     if not enabled:
-        monkeypatch.delenv("DYN_EXPERIMENTAL_SGLANG_WORKER_DRAIN")
+        monkeypatch.delenv("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL")
         assert (
             configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
             is None

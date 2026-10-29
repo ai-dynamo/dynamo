@@ -184,12 +184,47 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 
 ## Experimental worker withdrawal
 
-Set `DYN_EXPERIMENTAL_SGLANG_WORKER_DRAIN=1` and enable `DYN_SYSTEM_PORT` on
+Set `DYN_EXPERIMENTAL_WORKER_WITHDRAWAL=1` and enable `DYN_SYSTEM_PORT` on
 `python -m dynamo.sglang` LLM workers to expose reversible, pre-delete withdrawal.
 This applies to aggregated, decode, and prefill handlers with TCP or Velo response
 planes. Startup rejects QUIC when withdrawal is enabled because discovery removal
 currently cancels its active responses. It does not use
 SGLang's `pause_generation`, abort requests, or stop the engine.
+
+Use the same `DYN_EXPERIMENTAL_WORKER_WITHDRAWAL` setting on frontends and workers.
+It accepts `1`, `true`, or `yes` (case-insensitive) and defaults to disabled.
+On a frontend it enables bounded admission reselection and retains the prompt's
+shared token buffer until the first response data on the final ordinary attempt.
+With the feature disabled, the final attempt releases its replay reference after
+dispatch as before. The setting is read when the model pipeline is constructed,
+not on every request. Workers use it to enable the controls below.
+
+For DGD deployments, configure it once through the existing graph-level environment:
+
+```yaml
+# Fragment of a nvidia.com/v1beta1 DynamoGraphDeployment
+spec:
+  env:
+    - name: DYN_EXPERIMENTAL_WORKER_WITHDRAWAL
+      value: "1"
+```
+
+The operator propagates this to each component's `main` container, including the
+frontend and aggregated or PD workers, through the existing Grove Pod-template
+path. For `v1alpha1`, use `spec.envs` instead. Component-level entries with the same
+name override the graph value; avoid duplicating this setting there. Workers still
+require the normal `DYN_SYSTEM_PORT` configuration for their system listener.
+
+Environment injection applies to newly created Pods; it does not change running
+processes. Under Grove OnDelete, complete an initial deployment of compatible
+images and this setting before using withdrawal for later releases.
+
+Keeping an `Arc` reference does not copy token data, but can extend the allocation's
+lifetime. For `C` requests waiting for first response data, token-buffer retention
+can be up to `4 * sum(token_vector_capacity)` bytes (`u32` tokens), excluding other
+request state. At a capacity of 128 Ki tokens and 1,024 waiting requests, that is
+512 MiB. This is a sizing example, not measured RSS growth; model limits and actual
+concurrency determine the budget. Other owners may already retain these buffers.
 
 Upgrade frontends and workers to a revision supporting the `backend.worker_draining`
 error reason before enabling this experimental feature. Older frontends may reject
