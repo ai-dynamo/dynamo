@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Global Frontend. See `dynamo_global_frontend` and the crate's README.
+//!
+//! `--selection core` selects through the embedded router core instead of
+//! the Global Router's own selectors, with each pool as one of the core's
+//! workers; `round-robin` and `least-in-flight` are its plugins.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -14,8 +18,8 @@ use dynamo_global_frontend::{
     Metrics, PoolSnapshot, app, follow_relays, measure_round_trips, serve,
 };
 use dynamo_global_router::{
-    AffinitySelector, InFlightTracker, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
-    RoundRobinSelector,
+    AffinitySelector, CorePolicy, CoreSelector, InFlightTracker, LeastInFlightSelector, Pool,
+    PoolSignals, RequestSelector, RoundRobinSelector,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -39,6 +43,26 @@ enum RouterPolicy {
     Affinity,
 }
 
+/// What implements the router policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum SelectionPath {
+    /// The Global Router's own selectors.
+    Legacy,
+    /// The embedded router core, with each pool as one of its workers.
+    Core,
+}
+
+/// The core policy for `policy`, while the core has no affinity.
+fn core_policy(policy: RouterPolicy) -> Result<CorePolicy> {
+    match policy {
+        RouterPolicy::RoundRobin => Ok(CorePolicy::RoundRobin),
+        RouterPolicy::LeastInFlight => Ok(CorePolicy::LeastRequests),
+        RouterPolicy::Affinity => {
+            bail!("--router-policy affinity is not yet supported with --selection core")
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(about = "Serve the OpenAI API and forward each request to a pool frontend")]
 struct Args {
@@ -58,6 +82,8 @@ struct Args {
     connect_timeout_secs: u64,
     #[arg(long, value_enum, default_value_t = RouterPolicy::RoundRobin)]
     router_policy: RouterPolicy,
+    #[arg(long, value_enum, default_value_t = SelectionPath::Legacy)]
+    selection: SelectionPath,
     /// The region this process runs in, named as `--pool` names clusters.
     /// `affinity` tries pools in it first, and metrics tell requests kept in
     /// it from the rest.
@@ -180,10 +206,17 @@ async fn main() -> Result<()> {
         .context("build the pool HTTP client")?;
     let in_flight = Arc::new(InFlightTracker::new());
     let metrics = Metrics::new(args.region.clone(), in_flight.clone());
-    let selector: Arc<dyn PoolSelector> = match args.router_policy {
-        RouterPolicy::RoundRobin => Arc::new(RoundRobinSelector::new()),
-        RouterPolicy::LeastInFlight => Arc::new(LeastInFlightSelector::new(in_flight.clone())),
-        RouterPolicy::Affinity => {
+    let selector: Arc<dyn RequestSelector> = match (args.selection, args.router_policy) {
+        (SelectionPath::Core, policy) => {
+            let core = Arc::new(CoreSelector::new(core_policy(policy)?).await?);
+            tokio::spawn(core.follow(pools.clone(), shutdown.child_token()));
+            core
+        }
+        (SelectionPath::Legacy, RouterPolicy::RoundRobin) => Arc::new(RoundRobinSelector::new()),
+        (SelectionPath::Legacy, RouterPolicy::LeastInFlight) => {
+            Arc::new(LeastInFlightSelector::new(in_flight.clone()))
+        }
+        (SelectionPath::Legacy, RouterPolicy::Affinity) => {
             let region = args.region.clone().context("--region is required")?;
             if args.pool_relays.is_empty() {
                 tracing::warn!(
@@ -299,6 +332,25 @@ mod tests {
         assert_eq!(args.router_policy, RouterPolicy::Affinity);
         let args = Args::try_parse_from(["global-frontend", pool]).unwrap();
         assert_eq!(args.router_policy, RouterPolicy::RoundRobin);
+    }
+
+    #[test]
+    fn selection_defaults_to_legacy_and_the_core_has_no_affinity_yet() {
+        let pool = "--pool=ohio/dynamo/blue=qwen@http://blue:8000";
+        let args = Args::try_parse_from(["global-frontend", pool]).unwrap();
+        assert_eq!(args.selection, SelectionPath::Legacy);
+        let args = Args::try_parse_from(["global-frontend", pool, "--selection", "core"]).unwrap();
+        assert_eq!(args.selection, SelectionPath::Core);
+
+        assert_eq!(
+            core_policy(RouterPolicy::RoundRobin).unwrap(),
+            CorePolicy::RoundRobin
+        );
+        assert_eq!(
+            core_policy(RouterPolicy::LeastInFlight).unwrap(),
+            CorePolicy::LeastRequests
+        );
+        assert!(core_policy(RouterPolicy::Affinity).is_err());
     }
 
     #[test]

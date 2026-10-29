@@ -6,6 +6,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_global_common::PoolId;
 use url::Url;
@@ -54,6 +55,55 @@ pub trait PoolSelector: Send + Sync {
         request: &RoutingRequest<'_>,
         candidates: &[&'a Pool],
     ) -> Option<PoolTarget<'a>>;
+}
+
+/// What a selector holds for one request from its pool choice until the
+/// request ends. Dropping it ends the request wherever the selector counts
+/// it.
+pub trait RequestLifecycle: Send {
+    /// The pool has started answering: its first response bytes arrived.
+    fn prefill_complete(&mut self) {}
+}
+
+/// A pool choice, with whatever the selector holds for the request.
+pub struct Selection<'a> {
+    pub target: PoolTarget<'a>,
+    /// `None` when the selector keeps nothing per request.
+    pub lifecycle: Option<Box<dyn RequestLifecycle>>,
+}
+
+impl<'a> From<PoolTarget<'a>> for Selection<'a> {
+    fn from(target: PoolTarget<'a>) -> Self {
+        Self {
+            target,
+            lifecycle: None,
+        }
+    }
+}
+
+/// The forwarding engine's view of a selector: routing may wait, and may
+/// hold state for the request. Every [`PoolSelector`] is one, holding
+/// nothing; the router core's selector books the request on its pool.
+#[async_trait]
+pub trait RequestSelector: Send + Sync {
+    /// `candidates` and `None` mean what they mean for
+    /// [`PoolSelector::select`].
+    async fn route<'a>(
+        &self,
+        request: &RoutingRequest<'_>,
+        candidates: &[&'a Pool],
+    ) -> Option<Selection<'a>>;
+}
+
+#[async_trait]
+impl<T: PoolSelector> RequestSelector for T {
+    async fn route<'a>(
+        &self,
+        request: &RoutingRequest<'_>,
+        candidates: &[&'a Pool],
+    ) -> Option<Selection<'a>> {
+        self.select(request, candidates).map(Selection::from)
+    }
 }
 
 /// Rotates through the pools serving each model, then through the chosen
