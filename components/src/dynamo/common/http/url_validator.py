@@ -32,6 +32,10 @@ class UrlValidationError(ValueError):
     """Raised when a URL or filesystem path fails the configured policy."""
 
 
+class MediaSizeError(UrlValidationError):
+    """A media reference exceeds a byte budget, rather than failing URL policy."""
+
+
 # Size cap for a ``data:`` URL, which carries its whole payload inline.
 DYN_MM_MAX_DATA_URL_MB: Final = "DYN_MM_MAX_DATA_URL_MB"
 DEFAULT_MAX_DATA_URL_MB: Final = 16
@@ -258,7 +262,7 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
         else:
             size = len(url.encode("utf-8", "surrogatepass"))
         if size > limit:
-            raise UrlValidationError(
+            raise MediaSizeError(
                 f"data: URL is {size} bytes, exceeds the {limit}-byte limit. "
                 f"To raise the limit, set {DYN_MM_MAX_DATA_URL_MB} (in megabytes) "
                 "on both the frontend and the workers."

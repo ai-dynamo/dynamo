@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+pub(crate) mod image_edits;
 mod model;
 pub(crate) mod readiness;
 pub(crate) use model::GenerateEngineSelection;
@@ -43,6 +44,7 @@ mod watcher;
 pub use watcher::{ModelUpdate, ModelWatcher};
 
 mod worker_monitor;
+pub(crate) use worker_monitor::RoutableThresholds;
 pub use worker_monitor::{
     KvWorkerMonitor, LoadThresholdConfig, LoadThresholdHandle, WORKER_TYPE_DECODE,
     WORKER_TYPE_PREFILL, WorkerLoadState,
