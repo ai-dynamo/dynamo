@@ -86,7 +86,7 @@ dynamo-parsers = { version = "=10.2.2" }
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
 # Native count-before-string early streaming still needs a frontend-crates fix.
 # Generic worker MessagePack and Python transcoders require native JSON numbers.
-dynamo-parsers-v2 = { version = "=0.8.7", git = "https://github.com/ai-dynamo/frontend-crates", rev = "3b1eba21c6f02bcfcd3c257187c4127a87ed7bab", default-features = false }
+dynamo-parsers-v2 = { version = "=0.8.10", git = "https://github.com/ai-dynamo/frontend-crates", rev = "c2c185db66bcb3af96e432b6be08889c4a98e9ee", default-features = false }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.7.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.7.0" }
 

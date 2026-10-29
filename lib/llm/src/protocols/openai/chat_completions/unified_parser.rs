@@ -5542,6 +5542,7 @@ pub(crate) mod tests {
         let structured = UnifiedRequestPolicy {
             reasoning_disabled: false,
             structured_response: true,
+            ..Default::default()
         };
         assert!(
             structured
@@ -14180,6 +14181,7 @@ mod beam_routing_tests {
         let structured = UnifiedRequestPolicy {
             reasoning_disabled: false,
             structured_response: true,
+            ..Default::default()
         };
         let framed = parse_complete_with_policy(
             BEAM_UNIFIED_FAMILY,

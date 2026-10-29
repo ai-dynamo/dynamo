@@ -9598,17 +9598,19 @@ mod tests {
             "plain message body is irrelevant to the parser seed"
         );
 
-        let structural_prompt = format!("{header}quoted marker <|ghissue|> remains structural");
-        let structural_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
-            None,
-            Some("gpt_oss"),
-            Some(&structural_prompt),
-        );
-        assert_eq!(
-            structural_prefill.prefix.as_deref().map(str::len),
-            Some(structural_prompt.len()),
-            "marker-bearing bodies must retain their parser state"
-        );
+        for body in ["quoted marker <|ghissue|> remains structural", "partial <|"] {
+            let structural_prompt = format!("{header}{body}");
+            let structural_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                None,
+                Some("gpt_oss"),
+                Some(&structural_prompt),
+            );
+            assert_eq!(
+                structural_prefill.prefix.as_deref().map(str::len),
+                Some(structural_prompt.len()),
+                "marker-bearing bodies must retain their parser state"
+            );
+        }
 
         let incomplete_header = "<|start|>assistant to=";
         let incomplete_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
@@ -10104,6 +10106,78 @@ mod tests {
             (
                 "user",
                 "",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "system",
+                "",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "developer",
+                "",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "tool",
+                "",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "user",
+                "analysis",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "system",
+                "analysis",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "developer",
+                "analysis",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "tool",
+                "analysis",
+                " wörld🙂<|return|>",
+                " wörld🙂",
+                "",
+                false,
+                None,
+            ),
+            (
+                "user",
+                "final",
                 " wörld🙂<|return|>",
                 " wörld🙂",
                 "",
