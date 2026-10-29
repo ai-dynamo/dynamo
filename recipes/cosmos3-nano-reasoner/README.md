@@ -9,6 +9,11 @@ This experimental recipe serves Cosmos3 Nano Reasoner with the released
 `nvcr.io/nim/nvidia/cosmos3:2.1.0` NIM image, pinned by digest, and NVIDIA
 Dynamo. It compares round-robin routing with per-video session affinity.
 
+| Component | Image | Dynamo version |
+| --- | --- | --- |
+| Frontend | `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.1` | 1.6.1 |
+| Workers | `nvcr.io/nim/nvidia/cosmos3:2.1.0` | 1.5.0 (`ai-dynamo` 1.5.0.dev20260902 bundled in the NIM image, with vLLM 0.28.0) |
+
 Use the [Cosmos3 Nano Reasoner Fern recipe](../../docs/fern/pages/recipes/model-recipes/cosmos3-nano-reasoner.mdx)
 for prerequisites, deployment instructions, the smoke test, benchmark commands,
 and measured performance. See [`perf/README.md`](perf/README.md) for benchmark
