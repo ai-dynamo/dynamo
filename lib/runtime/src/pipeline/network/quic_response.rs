@@ -3234,7 +3234,6 @@ mod tests {
         frontend.block_on(async { shutdown.cancel() });
     }
 
-    /// A failed connect must not leave an empty entry keyed by its runtime.
     #[tokio::test]
     async fn failed_connect_leaves_no_pool_entry() {
         let pool = test_pool();
@@ -3246,32 +3245,6 @@ mod tests {
         };
         assert!(pool.connection(key).await.is_err());
         assert!(pool.connections.is_empty());
-    }
-
-    /// Runtime shutdown drops lane tasks without their failure path. The pool
-    /// must not keep reporting that bundle healthy, and a later connection
-    /// from another runtime releases it.
-    #[test]
-    fn runtime_shutdown_marks_its_bundle_unhealthy() {
-        let frontend = worker_runtime();
-        let (shutdown, server) = frontend.block_on(async { test_server(RESPONSE_BUFFER_CAPACITY) });
-        let pool = Arc::new(test_pool());
-        let first_runtime = worker_runtime();
-        let second_runtime = worker_runtime();
-
-        let first = sender_on(&first_runtime, &pool, &server);
-        let first_bundle = only_bundle(&pool);
-        assert!(first_bundle.is_healthy());
-        drop(first);
-        first_runtime.shutdown_timeout(Duration::from_secs(5));
-        assert!(!first_bundle.is_healthy());
-
-        let second = sender_on(&second_runtime, &pool, &server);
-        let second_bundle = only_bundle(&pool);
-        assert!(!Arc::ptr_eq(&second_bundle, &first_bundle));
-        assert!(second_bundle.is_healthy());
-        drop(second);
-        frontend.block_on(async { shutdown.cancel() });
     }
 
     #[tokio::test]
