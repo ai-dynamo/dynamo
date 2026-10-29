@@ -18,6 +18,7 @@
 package validation_test
 
 import (
+	"fmt"
 	"maps"
 	"testing"
 
@@ -25,6 +26,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -36,10 +38,11 @@ import (
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
+// Backend values shared by the DGD and DCD admission tables.
 const (
-	dcdAdmissionSGLangBackend = "sglang"
-	dcdAdmissionVLLMBackend   = "vllm"
-	dcdAdmissionTRTLLMBackend = "trtllm"
+	admissionSGLangBackend = "sglang"
+	admissionVLLMBackend   = "vllm"
+	admissionTRTLLMBackend = "trtllm"
 )
 
 func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
@@ -62,12 +65,14 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		name               string
 		deployment         runtime.Object
 		oldDeployment      runtime.Object
+		oldBeforeUpdate    runtime.Object
 		checkpointOff      bool
 		seedWithoutWebhook bool
 		wantSchemaErr      string
 		wantCELErr         string
 		wantWebhookErrs    []string
 		wantWarnings       []string
+		wantOriginVersion  *string
 		wantPodAnnotations map[string]string
 		wantRoleReplicas   map[string]int32
 	}
@@ -82,26 +87,26 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}
 		})},
 		{name: "DGD-owned SGLang multi-GPU checkpointRef restore is admitted", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-			dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
-			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, dcdAdmissionSGLangBackend)
+			dcd.Spec.BackendFramework = admissionSGLangBackend
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionSGLangBackend)
 			dcd.OwnerReferences = []metav1.OwnerReference{{APIVersion: nvidiacomv1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment", Name: "graph", UID: "graph-uid", Controller: new(true)}}
 			dcd.Spec.Experimental.Checkpoint.CheckpointRef = new("existing-snapshot")
 		})},
 		{name: "TRT-LLM snapshot failover is rejected at admission", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-			dcd.Spec.BackendFramework = dcdAdmissionTRTLLMBackend
-			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, dcdAdmissionTRTLLMBackend)
+			dcd.Spec.BackendFramework = admissionTRTLLMBackend
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionTRTLLMBackend)
 		}), wantWebhookErrs: []string{"spec.experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: trtllm)"}},
 		{name: "inferred TRT-LLM snapshot failover is rejected at admission", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Spec.BackendFramework = ""
-			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, dcdAdmissionTRTLLMBackend)
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionTRTLLMBackend)
 		}), wantWebhookErrs: []string{"spec.experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: trtllm)"}},
 		{name: "TRT-LLM snapshot failover cannot be enabled on update", oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-			dcd.Spec.BackendFramework = dcdAdmissionTRTLLMBackend
-			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, dcdAdmissionTRTLLMBackend)
+			dcd.Spec.BackendFramework = admissionTRTLLMBackend
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionTRTLLMBackend)
 			dcd.Spec.Experimental.Failover = nil
 		}), deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-			dcd.Spec.BackendFramework = dcdAdmissionTRTLLMBackend
-			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, dcdAdmissionTRTLLMBackend)
+			dcd.Spec.BackendFramework = admissionTRTLLMBackend
+			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionTRTLLMBackend)
 		}), wantWebhookErrs: []string{"spec.experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: trtllm)"}},
 		{name: "automatic failover default startup policy cannot bypass election", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, "vllm")
@@ -182,9 +187,9 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
 			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
-		{name: "native sidecar beta rejects multinode", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+		{name: "native sidecar beta multinode requires role templates", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-		}), wantWebhookErrs: []string{`spec.multinode: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
+		}), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
 		{name: "native sidecar alpha rejects gms create",
 			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
@@ -205,16 +210,16 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
 			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
-		{name: "native sidecar alpha rejects multinode", deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+		{name: "native sidecar alpha multinode requires role templates", deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-		}), wantWebhookErrs: []string{`spec.multinode: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
+		}), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
 		{name: "native sidecar requires engine main", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Name = "engine"
 		}), wantWebhookErrs: []string{`spec.podTemplate.spec.containers: Required value: main engine container is required for component "worker" with a runtime init container`}},
 		{name: "native sidecar rejects non-worker component type",
 			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
-			}), wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].name: Forbidden: is supported only for worker, prefill, and decode components`}},
+			}), wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].name: Forbidden: is supported only for worker, prefill, decode, and LPX components`}},
 
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
 		{name: "native sidecar beta create", deployment: nativeDCDForAdmission(t, false, nil)},
@@ -288,7 +293,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			name: "valid deployment",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.Replicas = &validReplicas
-				dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
+				dcd.Spec.BackendFramework = admissionSGLangBackend
 			}),
 		},
 		{
@@ -367,13 +372,14 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1alpha1 role PodTemplates cannot bypass native sidecar restrictions",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.BackendFramework = admissionTRTLLMBackend
 				setAlphaExplicitMultinodeRoleTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec, 2)
 				dcd.Spec.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
 					Name: consts.RuntimeContainerName, Image: "runtime:1.5.0",
 					RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
 				}}
 			}),
-			wantWebhookErrs: []string{`spec.roles[0].podTemplate.spec.initContainers[0].name: Forbidden: Dynamo sidecar mode is not supported in multinode or LPX role pod templates`},
+			wantWebhookErrs: []string{`spec.multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang or vllm`},
 		},
 		{
 			name: "standalone v1alpha1 canonical lpx component is rejected",
@@ -896,7 +902,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					Enabled: true,
 					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
 						Model:            "model",
-						BackendFramework: dcdAdmissionVLLMBackend,
+						BackendFramework: admissionVLLMBackend,
 					},
 				},
 			}),
@@ -966,7 +972,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					TargetContainerName: "Bad_Name",
 					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
 						Model:            "model",
-						BackendFramework: dcdAdmissionVLLMBackend,
+						BackendFramework: admissionVLLMBackend,
 					},
 				},
 			}),
@@ -1022,7 +1028,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					Enabled: true,
 					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
 						Model:            "model",
-						BackendFramework: dcdAdmissionVLLMBackend,
+						BackendFramework: admissionVLLMBackend,
 					},
 					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{
 						GMSClientContainers: []string{"gms-saver"},
@@ -1042,7 +1048,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
 					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
 						Model:            "model",
-						BackendFramework: dcdAdmissionVLLMBackend,
+						BackendFramework: admissionVLLMBackend,
 					},
 					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{
 						GMSClientContainers: []string{"Bad_Name"},
@@ -1156,7 +1162,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					Enabled: true,
 					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
 						Model:            "model",
-						BackendFramework: dcdAdmissionVLLMBackend,
+						BackendFramework: admissionVLLMBackend,
 					},
 					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{
 						GMSClientContainers: []string{"gms-saver"},
@@ -1180,7 +1186,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
 					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
 						Model:            "model",
-						BackendFramework: dcdAdmissionVLLMBackend,
+						BackendFramework: admissionVLLMBackend,
 					},
 					Job: &nvidiacomv1alpha1.ServiceCheckpointJobConfig{
 						GMSClientContainers: []string{"gms-saver"},
@@ -1653,10 +1659,10 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1alpha1 update without changes reaches the webhook",
 			oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
+				dcd.Spec.BackendFramework = admissionSGLangBackend
 			}),
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
+				dcd.Spec.BackendFramework = admissionSGLangBackend
 			}),
 		},
 		{
@@ -1667,10 +1673,10 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1alpha1 backend framework update reaches and is rejected by the webhook",
 			oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
+				dcd.Spec.BackendFramework = admissionSGLangBackend
 			}),
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.BackendFramework = dcdAdmissionVLLMBackend
+				dcd.Spec.BackendFramework = admissionVLLMBackend
 			}),
 			wantWebhookErrs: []string{`spec.backendFramework: Invalid value: "vllm": is immutable and cannot be changed after creation`},
 			wantWarnings:    []string{"Changing spec.backendFramework may cause unexpected behavior"},
@@ -1678,10 +1684,10 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1beta1 backend framework update reaches and is rejected by the v1beta1 webhook",
 			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
+				dcd.Spec.BackendFramework = admissionSGLangBackend
 			}),
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.BackendFramework = dcdAdmissionVLLMBackend
+				dcd.Spec.BackendFramework = admissionVLLMBackend
 			}),
 			wantWebhookErrs: []string{`spec.backendFramework: Invalid value: "vllm": is immutable and cannot be changed after creation`},
 			wantWarnings:    []string{"Changing spec.backendFramework may cause unexpected behavior"},
@@ -1689,11 +1695,11 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1alpha1 replicas update reaches the webhook",
 			oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
+				dcd.Spec.BackendFramework = admissionSGLangBackend
 				dcd.Spec.Replicas = &oneReplica
 			}),
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
+				dcd.Spec.BackendFramework = admissionSGLangBackend
 				dcd.Spec.Replicas = &validReplicas
 			}),
 		},
@@ -2064,6 +2070,68 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		},
 	}
 
+	// DCD admission forwards the backend and enforces complete role templates for each supported backend.
+	for _, backend := range []string{admissionSGLangBackend, admissionVLLMBackend} {
+		tests = append(tests,
+			dcdAdmissionTestCase{name: backend + " sidecar multinode DCD rejects a component template", deployment: multinodeSidecarDCDForAdmission(t, backend, false, false, false), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+			dcdAdmissionTestCase{name: backend + " sidecar multinode DCD accepts complete roles", deployment: multinodeSidecarDCDForAdmission(t, backend, false, true, false)},
+			dcdAdmissionTestCase{name: backend + " sidecar multinode DCD alpha accepts complete roles", deployment: multinodeSidecarDCDForAdmission(t, backend, true, true, false)},
+		)
+	}
+
+	// Origin remains immutable through either served API, including legacy absence.
+	for _, alpha := range []bool{false, true} {
+		created := betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver"}
+		})
+		var submitted runtime.Object = created
+		if alpha {
+			converted := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+			require.NoError(t, converted.ConvertFrom(created))
+			submitted = converted
+		}
+		tests = append(tests, dcdAdmissionTestCase{name: fmt.Sprintf("origin alpha=%t CREATE overwrites authored origin", alpha), deployment: submitted, wantOriginVersion: new("1.6.0")})
+		for _, origin := range []struct{ name, old, new string }{
+			{"legacy unrelated update", "", ""},
+			{"legacy invalid origin unrelated update", "custom-build", "custom-build"},
+			{"cannot repair legacy invalid origin", "custom-build", "1.7.0"},
+			{"cannot remove legacy invalid origin", "custom-build", ""},
+			{"cannot backfill origin", "", "1.7.0"},
+			{"cannot change origin", "1.6.0", "1.7.0"},
+			{"cannot remove origin", "1.6.0", ""},
+		} {
+			old := betaDCDForAdmission(nil)
+			if origin.old != "" {
+				old.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: origin.old}
+			}
+			updated := old.DeepCopy()
+			updated.Annotations = map[string]string{"example.com/unrelated": "edit"}
+			if origin.new != "" {
+				updated.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = origin.new
+			}
+			seed := old.DeepCopy()
+			seed.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}
+			tc := dcdAdmissionTestCase{name: fmt.Sprintf("origin alpha=%t %s", alpha, origin.name), oldDeployment: old, oldBeforeUpdate: seed, deployment: updated, seedWithoutWebhook: true}
+			if alpha {
+				oldAlpha := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+				newAlpha := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+				seedAlpha := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+				require.NoError(t, seedAlpha.ConvertFrom(seed))
+				require.NoError(t, oldAlpha.ConvertFrom(old))
+				require.NoError(t, newAlpha.ConvertFrom(updated))
+				tc.oldDeployment, tc.oldBeforeUpdate, tc.deployment = oldAlpha, seedAlpha, newAlpha
+			}
+			if origin.old != origin.new {
+				badValue := fmt.Sprintf("%q", origin.new)
+				if origin.new == "" {
+					badValue = "null"
+				}
+				tc.wantWebhookErrs = []string{"metadata.annotations[" + consts.KubeAnnotationDynamoOperatorOriginVersion + "]: Invalid value: " + badValue + ": " + apivalidation.FieldImmutableErrorMsg}
+			}
+			tests = append(tests, tc)
+		}
+	}
+
 	t.Log("Add complete-probe cases to the admission table for both API versions")
 	for _, placement := range []string{"main", "frontend sidecar", "role"} {
 		beta := betaDCDForAdmission(nil)
@@ -2114,6 +2182,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			test := admissionTestCase{
 				object:             tt.deployment,
 				oldObject:          tt.oldDeployment,
+				oldBeforeUpdate:    tt.oldBeforeUpdate,
 				gates:              gates,
 				seedWithoutWebhook: tt.seedWithoutWebhook,
 				wantSchemaError:    tt.wantSchemaErr,
@@ -2127,6 +2196,9 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				test.seedGates = &seedGates
 			}
 			actual := runAdmissionTest(t, test)
+			if tt.wantOriginVersion != nil {
+				require.Equal(t, *tt.wantOriginVersion, actual.GetAnnotations()[consts.KubeAnnotationDynamoOperatorOriginVersion])
+			}
 			if tt.wantPodAnnotations != nil || tt.wantRoleReplicas != nil {
 				actualDCD := admittedBetaDCD(t, actual)
 				if tt.wantRoleReplicas != nil {
@@ -2184,7 +2256,7 @@ func alphaDCDForAdmission(
 		Kind:       "DynamoComponentDeployment",
 		Name:       "worker", Namespace: "default",
 		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			BackendFramework: dcdAdmissionVLLMBackend,
+			BackendFramework: admissionVLLMBackend,
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ServiceName:            "worker",
 				RuntimeVersionOverride: "1.1.0",
@@ -2222,7 +2294,7 @@ func betaDCDForAdmission(
 		Kind:       "DynamoComponentDeployment",
 		Name:       "worker", Namespace: "default",
 		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
-			BackendFramework: dcdAdmissionVLLMBackend,
+			BackendFramework: admissionVLLMBackend,
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName:          "worker",
 				RuntimeVersionOverride: "1.1.0",

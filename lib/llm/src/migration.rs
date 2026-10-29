@@ -17,7 +17,7 @@ use crate::{
         common::{
             extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
             llm_backend::{BackendOutput, DecoderCheckpoint, LLMEngineOutput, PreprocessedRequest},
-            preprocessor::MultimodalData,
+            preprocessor::{MigrationState, MultimodalData},
             timing::RequestPhase,
         },
     },
@@ -625,6 +625,15 @@ where
                 attach_first_response_guard(&mut request, Arc::new(source_guards));
             }
             let replayed_tokens = self.replayed_prompt_tokens();
+            // This dispatch is a committed retry; it re-books the request ID.
+            if let Some(release) = self
+                .request
+                .migration_state
+                .as_ref()
+                .and_then(MigrationState::take_prefill_release)
+            {
+                release.release().await;
+            }
             let response_stream = self.next_generate.generate(request).await;
             match response_stream {
                 Ok(next_stream) => {
@@ -3649,6 +3658,7 @@ mod tests {
         }
 
         let captured = Arc::new(Mutex::new(Captured::default()));
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
 
         let context_id = uuid::Uuid::new_v4().to_string();

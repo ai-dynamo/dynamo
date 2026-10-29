@@ -63,6 +63,8 @@ from dynamo.sglang.gateway import (
     effective_gateway_workers,
     gateway_engine_id,
 )
+from dynamo.sglang.kv_hints import publish_kvcr_hint_capabilities
+from dynamo.sglang.state_agent import inventory_sources
 from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
@@ -186,6 +188,7 @@ async def _register_model_with_runtime_config(
     worker_type: WorkerType,
     needs: Optional[List[List[WorkerType]]] = None,
     serves_lora_load: bool = False,
+    forwards_kv_hints: bool = False,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
@@ -201,11 +204,17 @@ async def _register_model_with_runtime_config(
         needs: DNF list of peer roles this worker requires to serve. Empty (or
             `None`) means no peer dependency, which is the correct value for
             Aggregated workers.
+        forwards_kv_hints: Whether the registered handler forwards router hints
+            to the engine. Only LLM decode and prefill handlers opt in.
 
     Returns:
         True if registration succeeded, False otherwise.
     """
     runtime_config = await get_runtime_config(engine, server_args, dynamo_args)
+    if runtime_config is not None and forwards_kv_hints:
+        publish_kvcr_hint_capabilities(runtime_config, engine, server_args, worker_type)
+        if inventory_sources(engine):
+            runtime_config.kv_event_source_mode = "state_agent_v2"
 
     if dynamo_args.use_sglang_tokenizer and not (
         output_type.supports_embedding() or output_type.supports_rerank()
@@ -897,6 +906,7 @@ async def register_model_with_readiness_gate(
     worker_type: WorkerType,
     needs: Optional[List[List[WorkerType]]] = None,
     serves_lora_load: bool = False,
+    forwards_kv_hints: bool = False,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
 
@@ -910,6 +920,7 @@ async def register_model_with_readiness_gate(
         readiness_gate: Optional event to signal when registration completes.
         worker_type: Topology role; see `_register_model_with_runtime_config`.
         needs: DNF peer requirements; see `_register_model_with_runtime_config`.
+        forwards_kv_hints: Whether this handler forwards router hints to the engine.
 
     Raises:
         RuntimeError: If model registration fails.
@@ -924,6 +935,7 @@ async def register_model_with_readiness_gate(
         worker_type=worker_type,
         needs=needs,
         serves_lora_load=serves_lora_load,
+        forwards_kv_hints=forwards_kv_hints,
     )
     if not registration_success:
         logging.error("Model registration failed; shutting down")

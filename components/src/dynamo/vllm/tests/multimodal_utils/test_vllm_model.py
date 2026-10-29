@@ -74,6 +74,7 @@ class TestLoadVisionModel:
         assert kwargs["gpu_memory_utilization"] == 0.125
         assert kwargs["kv_cache_memory_bytes"] == 4294967296
         assert kwargs["max_num_seqs"] == 64
+        assert kwargs["mm_device_do_normalize"] is False
         assert loaded is fake_visual
 
     def test_encoder_kernel_warmup_patch_is_scoped(self, monkeypatch):
