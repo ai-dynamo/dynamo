@@ -158,6 +158,7 @@ pub struct State {
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
+    pub(super) migration_limit: u32,
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -171,6 +172,7 @@ struct StateConfig {
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
+    migration_limit: u32,
 }
 
 fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
@@ -572,6 +574,7 @@ impl State {
             responses_api_enabled: config.responses_api_enabled,
             sse_keep_alive: config.sse_keep_alive,
             streaming_backend_error_check: config.streaming_backend_error_check,
+            migration_limit: config.migration_limit,
         }
     }
 
@@ -770,6 +773,10 @@ struct FrontendLoadTarget {
 #[derive(Clone, Builder)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
 pub struct HttpServiceConfig {
+    /// Replacement worker attempts per eligible realtime transcription socket.
+    #[builder(default)]
+    migration_limit: u32,
+
     #[builder(default = "8787")]
     port: u16,
 
@@ -1338,6 +1345,7 @@ impl HttpServiceConfigBuilder {
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,
                 streaming_backend_error_check: config.streaming_backend_error_check,
+                migration_limit: config.migration_limit,
             },
         ));
         state
