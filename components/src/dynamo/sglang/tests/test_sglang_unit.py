@@ -627,6 +627,26 @@ async def test_parse_args_rejects_dcp_on_backend_without_dcp_support(
 
 
 @pytest.mark.asyncio
+async def test_parse_args_rejects_default_chat_template_kwargs(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(
+            default_chat_template_kwargs={"clear_thinking": False}
+        ),
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert "has no effect on a Dynamo worker" in message
+    assert "python -m dynamo.frontend" in message
+
+
+@pytest.mark.asyncio
 async def test_parse_args_rejects_dcp_on_decode_only_unsupported_backend(
     monkeypatch, mock_sglang_cli, tmp_path
 ):

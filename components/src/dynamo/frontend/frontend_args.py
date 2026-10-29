@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import json
 import os
 import pathlib
 from typing import Any, Dict, Optional
@@ -32,6 +33,13 @@ from . import __version__
 
 _U32_MAX = 2**32 - 1
 _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
+
+
+def _parse_chat_template_kwargs(value: str) -> Dict[str, Any]:
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError("--default-chat-template-kwargs must be a JSON object")
+    return parsed
 
 
 def _mountinfo_path(value: str) -> str:
@@ -216,6 +224,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     enable_streaming_reasoning_dispatch: bool
     reasoning_field_name: str
     exclude_tools_when_tool_choice_none: bool
+    default_chat_template_kwargs: Optional[Dict[str, Any]] = None
     preprocess_workers: Optional[int]
     tokenizer_backend: str
     tokenizer_fallback: bool
@@ -223,6 +232,15 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     frontend_route_extensions: list[str]
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
+
+    def validate_default_chat_template_kwargs(self) -> None:
+        # Request validation rejects a nested chat_template on every path, so
+        # this default would fail every request.
+        if "chat_template" in (self.default_chat_template_kwargs or {}):
+            raise ValueError(
+                "--default-chat-template-kwargs cannot set chat_template. Use "
+                "--custom-jinja-template on the worker to replace the chat template."
+            )
 
     def validate(self) -> None:
         if self.preprocess_workers is None:
@@ -283,6 +301,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                 "--router-session-affinity-ttl-secs must be between 1 and "
                 f"{_MAX_SESSION_AFFINITY_TTL_SECS}"
             )
+        self.validate_default_chat_template_kwargs()
         if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
             raise ValueError(
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
@@ -761,6 +780,21 @@ class FrontendArgGroup(ArgGroup):
                 "Exclude tool definitions from the chat template when "
                 "tool_choice='none'. Prevents models from generating raw XML "
                 "tool calls in the content field."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--default-chat-template-kwargs",
+            env_var="DYN_DEFAULT_CHAT_TEMPLATE_KWARGS",
+            default=None,
+            arg_type=_parse_chat_template_kwargs,
+            help=(
+                "JSON object of chat template kwargs that apply to every chat request "
+                "this frontend serves, for every model. Each request's own "
+                "chat_template_kwargs win per key, and a request thinking control "
+                "replaces the thinking keys. Set this on the frontend, not on the "
+                "engine: the frontend renders the chat template, so the engine flag "
+                "has no effect behind Dynamo."
             ),
         )
         add_argument(

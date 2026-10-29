@@ -15,7 +15,7 @@ use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as 
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::frontend_config::{FrontendApiConfig, MetricsConfig, ServingPolicy};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
@@ -217,6 +217,11 @@ impl LocalModelBuilder {
         self.frontend_api_config
             .streaming_dispatch_mut()
             .set_reasoning_dispatch(enabled);
+        self
+    }
+
+    pub fn serving_policy(&mut self, serving_policy: ServingPolicy) -> &mut Self {
+        self.frontend_api_config.set_serving_policy(serving_policy);
         self
     }
 

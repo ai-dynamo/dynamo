@@ -912,6 +912,15 @@ async def parse_args(args: list[str]) -> Config:
             "values are always higher priority at the API layer."
         )
 
+    # The Dynamo frontend renders the chat template, so SGLang's serving layer
+    # never applies this flag. The frontend owns the template defaults.
+    if getattr(server_args, "default_chat_template_kwargs", None):
+        raise ValueError(
+            "--default-chat-template-kwargs has no effect on a Dynamo worker, because "
+            "the Dynamo frontend renders the chat template. Set "
+            "--default-chat-template-kwargs on the frontend (python -m dynamo.frontend)."
+        )
+
     backend_from_cli = _attention_backend_from_cli(parsed_args)
     _validate_dcp_attention_backend(server_args, backend_from_cli=backend_from_cli)
 

@@ -16,6 +16,7 @@ use dynamo_runtime::config::{
     is_truthy,
 };
 
+use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::reasoning_field::ReasoningField;
 
 /// Process-wide strict-schema policy, initialized before the HTTP service accepts requests.
@@ -176,6 +177,7 @@ pub struct FrontendApiConfig {
     anthropic: AnthropicApiConfig,
     streaming_dispatch: StreamingDispatchConfig,
     reasoning_field: ReasoningField,
+    serving_policy: ServingPolicy,
 }
 
 impl FrontendApiConfig {
@@ -188,6 +190,7 @@ impl FrontendApiConfig {
             anthropic,
             streaming_dispatch,
             reasoning_field,
+            serving_policy: ServingPolicy::default(),
         }
     }
 
@@ -205,6 +208,7 @@ impl FrontendApiConfig {
                 enable_streaming_reasoning_dispatch,
             ),
             reasoning_field,
+            serving_policy: ServingPolicy::default(),
         }
     }
 
@@ -259,6 +263,14 @@ impl FrontendApiConfig {
     pub fn set_reasoning_field(&mut self, reasoning_field: ReasoningField) {
         self.reasoning_field = reasoning_field;
     }
+
+    pub fn serving_policy(&self) -> &ServingPolicy {
+        &self.serving_policy
+    }
+
+    pub fn set_serving_policy(&mut self, serving_policy: ServingPolicy) {
+        self.serving_policy = serving_policy;
+    }
 }
 
 impl Default for FrontendApiConfig {
@@ -267,6 +279,67 @@ impl Default for FrontendApiConfig {
             anthropic: Default::default(),
             streaming_dispatch: Default::default(),
             reasoning_field: default_reasoning_field(),
+            serving_policy: ServingPolicy::default(),
+        }
+    }
+}
+
+/// Serving policy that the frontend owns.
+///
+/// The model card carries engine facts. Policy that only the frontend applies comes from
+/// frontend flags, so one flag works the same for every worker and sidecar. A lever that
+/// shapes the request applies in [`ServingPolicy::apply_to_request`], which each chat
+/// handler calls at the HTTP boundary, before it resolves thinking controls, so every
+/// later reader sees the same request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServingPolicy {
+    default_chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl ServingPolicy {
+    /// Chat template kwargs that apply under each request's own kwargs
+    /// (`--default-chat-template-kwargs`). An empty map is the same as no defaults.
+    pub fn set_default_chat_template_kwargs(
+        &mut self,
+        kwargs: Option<serde_json::Map<String, serde_json::Value>>,
+    ) {
+        self.default_chat_template_kwargs = kwargs.filter(|kwargs| !kwargs.is_empty());
+    }
+
+    /// Merge the default chat template kwargs under the request's own; request keys win.
+    /// An explicit request thinking control replaces every thinking key in the defaults, so
+    /// the defaults rank below the request and above `--dyn-default-thinking-mode`.
+    pub fn apply_to_request(&self, request: &mut NvCreateChatCompletionRequest) {
+        const THINKING_CONTROL_KEYS: [&str; 4] = [
+            "thinking",
+            "enable_thinking",
+            "thinking_mode",
+            "reasoning_effort",
+        ];
+        let Some(defaults) = &self.default_chat_template_kwargs else {
+            return;
+        };
+        let request_controls_thinking = request.thinking.is_some()
+            || request.inner.reasoning_effort.is_some()
+            || request.chat_template_args.as_ref().is_some_and(|args| {
+                THINKING_CONTROL_KEYS
+                    .iter()
+                    .any(|key| args.contains_key(*key))
+            });
+        let mut defaults = defaults
+            .iter()
+            .filter(|(key, _)| {
+                !(request_controls_thinking && THINKING_CONTROL_KEYS.contains(&key.as_str()))
+            })
+            .peekable();
+        if defaults.peek().is_none() {
+            return;
+        }
+        let args = request
+            .chat_template_args
+            .get_or_insert_with(Default::default);
+        for (key, value) in defaults {
+            args.entry(key.clone()).or_insert_with(|| value.clone());
         }
     }
 }
@@ -327,6 +400,63 @@ mod tests {
                 assert_eq!(config.reasoning_field(), ReasoningField::Reasoning);
             },
         );
+    }
+
+    fn policy(defaults: serde_json::Value) -> ServingPolicy {
+        let mut policy = ServingPolicy::default();
+        policy.set_default_chat_template_kwargs(defaults.as_object().cloned());
+        policy
+    }
+
+    fn request(extra: serde_json::Value) -> NvCreateChatCompletionRequest {
+        let mut body = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(body).unwrap()
+    }
+
+    #[test]
+    fn serving_policy_layers_defaults_under_request_kwargs() {
+        let policy =
+            policy(serde_json::json!({"clear_thinking": false, "preserve_thinking": true}));
+        let mut req = request(serde_json::json!({
+            "chat_template_kwargs": {"preserve_thinking": false}
+        }));
+        policy.apply_to_request(&mut req);
+        assert_eq!(
+            serde_json::to_value(req.chat_template_args).unwrap(),
+            serde_json::json!({"clear_thinking": false, "preserve_thinking": false})
+        );
+
+        // No defaults leave the request untouched.
+        let mut req = request(serde_json::json!({}));
+        ServingPolicy::default().apply_to_request(&mut req);
+        assert!(req.chat_template_args.is_none());
+    }
+
+    #[test]
+    fn serving_policy_thinking_defaults_yield_to_request_thinking_controls() {
+        let policy = policy(serde_json::json!({"enable_thinking": false, "clear_thinking": false}));
+
+        // With no request control, the default decides, in every dialect.
+        let mut req = request(serde_json::json!({}));
+        policy.apply_to_request(&mut req);
+        req.normalize_reasoning_template_args().unwrap();
+        let args = req.chat_template_args.unwrap();
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
+        assert_eq!(args.get("thinking"), Some(&serde_json::json!(false)));
+
+        // A top-level reasoning_effort replaces the default's thinking keys.
+        let mut req = request(serde_json::json!({"reasoning_effort": "high"}));
+        policy.apply_to_request(&mut req);
+        req.normalize_reasoning_template_args().unwrap();
+        let args = req.chat_template_args.unwrap();
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(true)));
+        assert_eq!(args.get("clear_thinking"), Some(&serde_json::json!(false)));
     }
 
     #[test]

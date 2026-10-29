@@ -173,6 +173,13 @@ impl SglangSidecarEngine {
             model = %discovery.model_path,
             "sglang sidecar bootstrapped native gRPC discovery"
         );
+        if engine_sets_chat_template_defaults(&discovery.server_info) {
+            tracing::warn!(
+                "SGLang --default-chat-template-kwargs applies only to SGLang's own HTTP \
+                 server. The Dynamo frontend renders the chat template for Dynamo traffic, \
+                 so set --default-chat-template-kwargs on the Dynamo frontend."
+            );
+        }
 
         let native_http_max_event_bytes = args.native_http_max_event_bytes.get();
         let common = args.sidecar.common;
@@ -980,6 +987,14 @@ fn combined_token_limit(discovery: &Discovery) -> Option<u32> {
     discovery.max_model_len?.checked_sub(reserved)
 }
 
+/// The engine's template defaults never reach Dynamo traffic: the frontend renders the template.
+fn engine_sets_chat_template_defaults(server_info: &Value) -> bool {
+    server_info
+        .get("default_chat_template_kwargs")
+        .and_then(Value::as_object)
+        .is_some_and(|kwargs| !kwargs.is_empty())
+}
+
 /// SGLang holds a request's grammar until its reasoning parser sees the end of thinking.
 fn sglang_gates_reasoning(server_info: &Value) -> bool {
     discovery_string(server_info, "reasoning_parser").is_some()
@@ -1222,8 +1237,9 @@ mod tests {
     use super::{
         Args, DisaggregationMode, DiscoveredKvEventSource, Discovery, EngineConfig,
         SglangSidecarEngine, build_engine_config, combined_token_limit, discover_kv_event_sources,
-        discovery_bootstrap_port, hicache_native_offloading_capacity, kv_event_connect_host,
-        omitted_max_tokens_default, resolve_bootstrap_host_with_local, sglang_eagle_enabled,
+        discovery_bootstrap_port, engine_sets_chat_template_defaults,
+        hicache_native_offloading_capacity, kv_event_connect_host, omitted_max_tokens_default,
+        resolve_bootstrap_host_with_local, sglang_eagle_enabled,
     };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
@@ -1344,6 +1360,20 @@ mod tests {
             .unwrap();
             assert!(config.reasoning_parser.is_none());
             assert!(config.tool_call_parser.is_none());
+        }
+    }
+
+    #[test]
+    fn engine_template_defaults_are_detected() {
+        assert!(engine_sets_chat_template_defaults(
+            &json!({"default_chat_template_kwargs": {"enable_thinking": false}})
+        ));
+        for server_info in [
+            json!({}),
+            json!({"default_chat_template_kwargs": null}),
+            json!({"default_chat_template_kwargs": {}}),
+        ] {
+            assert!(!engine_sets_chat_template_defaults(&server_info));
         }
     }
 

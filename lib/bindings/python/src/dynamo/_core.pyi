@@ -3180,6 +3180,7 @@ class EntrypointArgs:
         tokenizer_backend: Optional[str] = None,
         tokenizer_fallback: Optional[bool] = None,
         batch_gateway_url: Optional[str] = None,
+        default_chat_template_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3218,6 +3219,8 @@ class EntrypointArgs:
             tokenizer_backend: Optional tokenizer backend override ("default", "fastokens", or "basetenkenizer")
             tokenizer_fallback: Whether alternate tokenizer load failures fall back to HuggingFace
             batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
+            default_chat_template_kwargs: Chat template kwargs that the frontend applies
+                under each request's own kwargs, for every discovered model
         """
         ...
 
