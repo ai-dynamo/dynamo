@@ -389,9 +389,9 @@ func TestGenerateBasePodSpecRejectsInvalidDynamoSidecar(t *testing.T) {
 			wantErrors: field.ErrorList{field.Required(field.NewPath("spec", "roles"), "multinode sidecars require complete leader and worker podTemplates")},
 		},
 		{
-			name: "multinode worker with unsupported backend", componentType: v1beta1.ComponentTypeWorker, backend: BackendFrameworkTRTLLM,
+			name: "multinode worker with unsupported backend", componentType: v1beta1.ComponentTypeWorker, backend: BackendFrameworkNoop,
 			restartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
-			wantErrors: field.ErrorList{field.Forbidden(field.NewPath("spec", "multinode"), "Dynamo sidecar multinode support currently requires backendFramework: sglang or vllm")},
+			wantErrors: field.ErrorList{field.Forbidden(field.NewPath("spec", "multinode"), "Dynamo sidecar multinode support currently requires backendFramework: sglang, vllm, or trtllm")},
 		},
 	}
 	for _, tc := range cases {
@@ -529,6 +529,9 @@ type multinodeSidecarBackend struct {
 	engineEnv        []corev1.EnvVar
 	sidecarCommand   []string
 	compilationCache *v1beta1.CompilationCacheConfig
+	// leaderStartsAfterWorkers reports the provider startup order the operator keeps
+	// for the backend: TensorRT-LLM leaders launch MPI over SSH into running workers.
+	leaderStartsAfterWorkers bool
 }
 
 // multinodeSidecarBackends lists the engines whose native multinode roles the
@@ -568,6 +571,22 @@ func multinodeSidecarBackends() []multinodeSidecarBackend {
 					args = []string{"serve", "model", "--headless"}
 				}
 				return append(args, "--tensor-parallel-size", "2", "--distributed-executor-backend", "mp", "--nnodes", "2", "--node-rank", "$(DYNAMO_RANK)", "--master-addr", "$(DYNAMO_LEADER_ADDRESS)", "--master-port", "29500", "--distributed-timeout-seconds", "1800")
+			},
+		},
+		{
+			framework:                BackendFrameworkTRTLLM,
+			engineImage:              "nvcr.io/nvidia/tensorrt-llm/release:custom",
+			command:                  []string{"/bin/bash", "-c"},
+			engineEnv:                []corev1.EnvVar{{Name: "OMPI_ALLOW_RUN_AS_ROOT", Value: "1"}, {Name: "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM", Value: "1"}},
+			sidecarCommand:           []string{"dynamo-trtllm-sidecar"},
+			leaderStartsAfterWorkers: true,
+			args: func(role Role, _ bool) []string {
+				// The leader launches every MPI rank over SSH and serves OpenEngine; the worker
+				// only runs sshd. Attention DP adds a node-local relay sidecar, not launch flags.
+				if role == RoleWorker {
+					return []string{"exec /usr/sbin/sshd -D -e -f $HOME/.ssh/sshd_config"}
+				}
+				return []string{`mpirun -n 2 -H "$DYNAMO_LEADER_ADDRESS:1,${DYNAMO_LEADER_ADDRESS/-ldr-0./-wkr-0.}:1" bash -c 'trtllm-llmapi-launch trtllm-serve model --grpc --grpc-protocol openengine --host 0.0.0.0 --port 30001'`}
 			},
 		},
 	}
@@ -626,7 +645,10 @@ func TestMultinodeSidecarRendering(t *testing.T) {
 									component.PodTemplate = sidecarRoleTemplate(backend, RoleLeader, workerRuntime, engineProbesAndPorts)
 								}
 								original := component.DeepCopy()
-								config := &configv1alpha1.OperatorConfiguration{Infrastructure: configv1alpha1.InfrastructureConfiguration{NATSAddress: "nats://nats:4222", ETCDAddress: "http://etcd:2379"}}
+								config := &configv1alpha1.OperatorConfiguration{
+									Infrastructure: configv1alpha1.InfrastructureConfiguration{NATSAddress: "nats://nats:4222", ETCDAddress: "http://etcd:2379"},
+									MPI:            configv1alpha1.MPIConfiguration{SSHSecretName: "mpi-run-ssh-secret"},
+								}
 
 								if !roleTemplates {
 									t.Log("Reject shared native-sidecar templates before rendering either role")
@@ -645,7 +667,7 @@ func TestMultinodeSidecarRendering(t *testing.T) {
 								}
 
 								if provider == commonconsts.MultinodeDeploymentTypeGrove {
-									t.Log("Render the complete Grove group from a 1.6.0-origin DGD and retain concurrent startup")
+									t.Log("Render the complete Grove group from a 1.6.0-origin DGD and keep the backend's startup order")
 									dgd := &v1beta1.DynamoGraphDeployment{
 										Name: "graph", Namespace: "ns",
 										Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"},
@@ -655,7 +677,12 @@ func TestMultinodeSidecarRendering(t *testing.T) {
 									require.NoError(t, err)
 									require.Len(t, pcs.Spec.Template.Cliques, 2)
 									for _, clique := range pcs.Spec.Template.Cliques {
-										require.Empty(t, clique.Spec.StartsAfter)
+										if backend.leaderStartsAfterWorkers && strings.HasSuffix(clique.Name, "-"+commonconsts.GroveRoleSuffixLeader) {
+											require.Len(t, clique.Spec.StartsAfter, 1)
+											require.True(t, strings.HasSuffix(clique.Spec.StartsAfter[0], "-"+commonconsts.GroveRoleSuffixWorker), clique.Spec.StartsAfter[0])
+										} else {
+											require.Empty(t, clique.Spec.StartsAfter)
+										}
 										env := envVarsToMap(clique.Spec.PodSpec.Containers[0].Env)
 										require.NotContains(t, env, "DYN_SYSTEM_ENABLED")
 										require.Contains(t, env, commonconsts.DynamoRankEnvVar)
@@ -693,6 +720,11 @@ func TestMultinodeSidecarRendering(t *testing.T) {
 										require.NotContains(t, env, "DYN_SYSTEM_ENABLED")
 										require.NotContains(t, env, "NATS_SERVER")
 										require.NotContains(t, env, commonconsts.VLLMNixlSideChannelHostEnvVar)
+										// The integrated TensorRT-LLM hook would add this variable and the MPI key mount.
+										require.NotContains(t, env, "OMPI_MCA_orte_keep_fqdn_hostnames")
+										for _, mount := range engine.VolumeMounts {
+											require.NotEqual(t, "/ssh-pk", mount.MountPath)
+										}
 										require.Contains(t, env, commonconsts.DynamoRankEnvVar)
 										require.Contains(t, env, commonconsts.DynamoLeaderAddressEnvVar)
 										if backend.compilationCache != nil {
@@ -706,6 +738,7 @@ func TestMultinodeSidecarRendering(t *testing.T) {
 										require.Equal(t, main.Ports, engine.Ports)
 										for _, volume := range rendered.Volumes {
 											require.NotEqual(t, waitLeaderVolumeName, volume.Name)
+											require.NotEqual(t, config.MPI.SSHSecretName, volume.Name)
 										}
 										for _, init := range rendered.InitContainers {
 											require.NotEqual(t, "wait-for-leader-mp", init.Name)
@@ -841,7 +874,7 @@ func TestMultinodeSidecarRequiresBothRoleTemplates(t *testing.T) {
 			t.Log("Require both role templates directly in sidecar validation and when rendering without webhook admission")
 			complete := tc.omitRole == "" && tc.omitTemplate == ""
 			require.Equal(t, complete, HasCompleteMultinodeRolePodTemplates(component))
-			for _, backend := range []BackendFramework{BackendFrameworkSGLang, BackendFrameworkVLLM} {
+			for _, backend := range []BackendFramework{BackendFrameworkSGLang, BackendFrameworkVLLM, BackendFrameworkTRTLLM} {
 				errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec"), string(backend))
 				if complete {
 					require.Empty(t, errs)

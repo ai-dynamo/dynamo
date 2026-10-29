@@ -1,0 +1,262 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EXPERIMENTAL: engine-primary multinode TensorRT-LLM attention data
+# parallelism behind Dynamo's KV-aware router. One engine group spans two
+# Pods with four attention-DP ranks, two per Pod. The leader launches every
+# MPI rank over SSH, serves OpenEngine gRPC, and registers all four ranks; the
+# router selects the rank. Each rank publishes its own KV events on its node,
+# so the worker runs a Dynamo sidecar too: it discovers the node-local
+# publishers through OpenEngine's follower metadata endpoint and relays them
+# under the leader's worker identity without serving inference.
+#
+# Multinode sidecar components require complete leader and worker role
+# templates. The operator injects DYNAMO_RANK and DYNAMO_LEADER_ADDRESS and
+# does not rewrite the authored engine launch, SSH setup, probes, or mounts.
+# The operator replicates its MPI SSH keypair Secret (mpi-run-ssh-secret by
+# default) into the namespace of every multinode DGD; both roles mount it.
+# The OpenEngine listener binds all Pod interfaces so the kubelet gRPC probes can
+# reach it. It is unauthenticated: any client that reaches the Pod IP can run
+# inference and abort requests. Restrict it with a NetworkPolicy, or bind
+# 127.0.0.1 and use exec probes as agg_kv_router.yaml does.
+# For a DGD created before operator 1.6.0, see docs/fern/pages/kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trtllm-engine-config-multinode-dp
+data:
+  config.yaml: |
+    # Four MPI ranks; with attention DP each rank is one data-parallel rank.
+    # TensorRT-LLM attention DP requires untied input and output embeddings
+    # (Qwen3 models of 4B and below tie them), so this example serves TinyLlama.
+    tensor_parallel_size: 4
+    enable_attention_dp: true
+    # Required for tool_choice constraints.
+    guided_decoding_backend: xgrammar
+    # Batch five decode steps per gRPC chunk to reduce serialization overhead.
+    stream_interval: 5
+    kv_cache_config:
+      use_kv_cache_manager_v2: true
+      enable_block_reuse: true
+      kv_cache_event_hash_algo: v1_block_key
+      kv_events_config:
+        enable_kv_cache_events: true
+        # Each rank binds base port + global rank on its own node (5557-5560).
+        # Sidecars subscribe only to the publishers on their node.
+        endpoint: tcp://127.0.0.1:5557
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-sidecar-multinode-dp
+spec:
+  backendFramework: trtllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    runtimeVersionOverride: "1.6.0"
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261023-75d0686@sha256:e237cc1347d8db6af2f84ace9150a59b950b47472ddc9429924d5e4bc5790395
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+  - name: TRTLLMWorker
+    type: worker
+    replicas: 1
+    runtimeVersionOverride: "1.6.0"
+    multinode:
+      nodeCount: 2
+    roles:
+    - name: leader
+      podTemplate:
+        spec:
+          initContainers:
+          # Start the Dynamo sidecar before the engine.
+          - name: runtime
+            image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261023-75d0686@sha256:fc13f0a227d78499fbaed257e2373bcb54df32ca8e1fcea1e0ad6289087cbcb8
+            restartPolicy: Always
+            command: &sidecarCommand
+            - dynamo-trtllm-sidecar
+            args: &sidecarArgs
+            - --grpc-endpoint
+            - 127.0.0.1:30001
+            - --model-path
+            - TinyLlama/TinyLlama-1.1B-Chat-v1.0
+            - --context-length
+            - "2048"
+            envFrom:
+            - secretRef:
+                name: hf-token-secret
+                optional: true
+          containers:
+          - name: main
+            # Requires a TensorRT-LLM build with OpenEngine node-local discovery, native
+            # KV events, and the grpc.health.v1 service (nightlies from 2026-10-27).
+            image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc2.dev202610270008@sha256:c1e774f48f8c9b5e06bb036c1798b80c9ab5201ebeb1013044ba4f865bb779a7
+            # grpc.health.v1: `liveness` turns NOT_SERVING only on a fatal engine
+            # failure; `inference` follows the executor health poll.
+            startupProbe:
+              grpc:
+                port: 30001
+                service: liveness
+              periodSeconds: 5
+              timeoutSeconds: 5
+              failureThreshold: 360   # Up to 30 min for scheduling, MPI launch, model load, and warmup.
+            livenessProbe:
+              grpc:
+                port: 30001
+                service: liveness
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 6
+            readinessProbe:
+              grpc:
+                port: 30001
+                service: inference
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+            env: &engineEnv
+            # Allow MPI startup as root in the release container (Open MPI 4 and 5 spellings).
+            - name: OMPI_ALLOW_RUN_AS_ROOT
+              value: "1"
+            - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
+              value: "1"
+            - name: PRTE_ALLOW_RUN_AS_ROOT
+              value: "1"
+            - name: PRTE_ALLOW_RUN_AS_ROOT_CONFIRM
+              value: "1"
+            # Keep fully qualified Pod hostnames so mpirun matches the -H list.
+            - name: OMPI_MCA_orte_keep_fqdn_hostnames
+              value: "1"
+            envFrom:
+            - secretRef:
+                name: hf-token-secret
+                optional: true
+            resources:
+              limits:
+                nvidia.com/gpu: "2"
+              requests:
+                # Increase for larger models.
+                ephemeral-storage: 2Gi
+            command:
+            - /bin/bash
+            - -c
+            args:
+            # Ranks 0-1 must run on the leader so trtllm-serve binds OpenEngine here
+            # and each node holds a contiguous rank range; explicit slots fill the
+            # leader before the worker. mpirun -x forwards only what the worker
+            # ranks need; sshd does not inherit container env.
+            - |
+              set -euo pipefail
+              mkdir -p "$HOME/.ssh"
+              cp /ssh-pk/private.key "$HOME/.ssh/id_rsa"
+              chmod 600 "$HOME/.ssh/id_rsa"
+              SSH_OPTS="-p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i $HOME/.ssh/id_rsa"
+              # Grove swaps the role suffix in the leader hostname; LeaderWorkerSet appends
+              # the worker index to the leader Pod name. Sized for nodeCount 2: list every
+              # extra worker in -H and raise -n for larger groups.
+              case "$DYNAMO_LEADER_ADDRESS" in
+                *-ldr-0.*) WORKER="${DYNAMO_LEADER_ADDRESS/-ldr-0./-wkr-0.}" ;;
+                *) WORKER="${DYNAMO_LEADER_ADDRESS/./-1.}" ;;
+              esac
+              deadline=$((SECONDS + 1200))
+              until ssh $SSH_OPTS -o ConnectTimeout=3 "$WORKER" true 2>/dev/null; do
+                [ "$SECONDS" -lt "$deadline" ] || { echo "sshd on $WORKER unreachable for 20 minutes; check the worker role" >&2; exit 1; }
+                echo "waiting for sshd on $WORKER"; sleep 3
+              done
+              EXPORTS=(-x PATH -x LD_LIBRARY_PATH -x OMPI_MCA_orte_keep_fqdn_hostnames)
+              for v in HF_TOKEN HF_HOME PRTE_ALLOW_RUN_AS_ROOT PRTE_ALLOW_RUN_AS_ROOT_CONFIRM; do
+                [ -n "${!v:-}" ] && EXPORTS+=(-x "$v")
+              done
+              exec mpirun --allow-run-as-root --map-by slot --bind-to none \
+                -n 4 -H "$DYNAMO_LEADER_ADDRESS:2,$WORKER:2" \
+                --mca pml ob1 --mca plm_rsh_args "$SSH_OPTS" "${EXPORTS[@]}" \
+                bash -c 'trtllm-llmapi-launch python3 -m tensorrt_llm.commands.serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+                  --grpc --grpc-protocol openengine --openengine-enable-load-metrics \
+                  --host 0.0.0.0 --port 30001 --max_seq_len 2048 \
+                  --extra_llm_api_options /config/config.yaml'
+            volumeMounts: &engineMounts
+            - name: engine-config
+              mountPath: /config
+            - name: ssh-keys
+              mountPath: /ssh-pk
+              readOnly: true
+          volumes: &engineVolumes
+          - name: engine-config
+            configMap:
+              name: trtllm-engine-config-multinode-dp
+          - name: ssh-keys
+            secret:
+              secretName: mpi-run-ssh-secret
+    - name: worker
+      podTemplate:
+        spec:
+          initContainers:
+          # Node-local KV relay: the follower metadata endpoint on this node tells
+          # the sidecar which attention-DP publishers it owns. It registers no
+          # inference endpoint and attaches to the leader's worker identity.
+          - name: runtime
+            image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261023-75d0686@sha256:fc13f0a227d78499fbaed257e2373bcb54df32ca8e1fcea1e0ad6289087cbcb8
+            restartPolicy: Always
+            command: *sidecarCommand
+            args: *sidecarArgs
+            envFrom:
+            - secretRef:
+                name: hf-token-secret
+                optional: true
+          containers:
+          - name: main
+            image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc2.dev202610270008@sha256:c1e774f48f8c9b5e06bb036c1798b80c9ab5201ebeb1013044ba4f865bb779a7
+            # No probes: the worker's process is sshd, and the engine ranks it hosts are
+            # launched and supervised by the leader's mpirun, which the leader waits to
+            # start until sshd answers. Killing sshd ends this container and the ranks
+            # with it; the leader's mpirun then aborts and both containers restart.
+            env: *engineEnv
+            resources:
+              limits:
+                nvidia.com/gpu: "2"
+              requests:
+                ephemeral-storage: 2Gi
+            command:
+            - /bin/bash
+            - -c
+            args:
+            - |
+              set -euo pipefail
+              if ! command -v sshd >/dev/null; then
+                apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server
+              fi
+              mkdir -p "$HOME/.ssh/host_keys" /run/sshd
+              cp /ssh-pk/private.key.pub "$HOME/.ssh/authorized_keys"
+              chmod 600 "$HOME/.ssh/authorized_keys"
+              # sshd gives MPI ranks a login environment, not the container's. Export the
+              # image environment (CUDA include and library paths, PATH, Python) to every
+              # session so JIT compilation and imports on this node match the leader.
+              # Secrets stay out: the leader forwards HF_TOKEN with mpirun -x when set.
+              umask 077
+              env | grep -vE '^(HOME|SHELL|PWD|OLDPWD|SHLVL|TERM|_|HOSTNAME|HF_TOKEN|HUGGING_FACE_HUB_TOKEN|HF_HUB_TOKEN|KUBERNETES_.*|.*_SERVICE_(HOST|PORT).*|.*_PORT(_[0-9]+_(TCP|UDP).*)?)=' > "$HOME/.ssh/environment"
+              for t in rsa ecdsa ed25519; do
+                ssh-keygen -q -t "$t" -N '' -f "$HOME/.ssh/host_keys/ssh_host_${t}_key" </dev/null
+              done
+              cat > "$HOME/.ssh/sshd_config" <<EOF
+              Port 2222
+              HostKey $HOME/.ssh/host_keys/ssh_host_rsa_key
+              HostKey $HOME/.ssh/host_keys/ssh_host_ecdsa_key
+              HostKey $HOME/.ssh/host_keys/ssh_host_ed25519_key
+              PidFile $HOME/.ssh/sshd.pid
+              StrictModes no
+              PermitRootLogin yes
+              PasswordAuthentication no
+              PubkeyAuthentication yes
+              AuthorizedKeysFile $HOME/.ssh/authorized_keys
+              PermitUserEnvironment yes
+              EOF
+              exec /usr/sbin/sshd -D -e -f "$HOME/.ssh/sshd_config"
+            volumeMounts: *engineMounts
+          volumes: *engineVolumes

@@ -370,16 +370,16 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1alpha1 role PodTemplates cannot bypass native sidecar restrictions",
+			name: "v1alpha1 role PodTemplates with a leader runtime need an explicit backend for multinode sidecar mode",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.BackendFramework = admissionTRTLLMBackend
+				dcd.Spec.BackendFramework = ""
 				setAlphaExplicitMultinodeRoleTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec, 2)
 				dcd.Spec.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
 					Name: consts.RuntimeContainerName, Image: "runtime:1.5.0",
 					RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
 				}}
 			}),
-			wantWebhookErrs: []string{`spec.multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang or vllm`},
+			wantWebhookErrs: []string{`spec.multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang, vllm, or trtllm`},
 		},
 		{
 			name: "standalone v1alpha1 canonical lpx component is rejected",
@@ -2071,7 +2071,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 	}
 
 	// DCD admission forwards the backend and enforces complete role templates for each supported backend.
-	for _, backend := range []string{admissionSGLangBackend, admissionVLLMBackend} {
+	for _, backend := range []string{admissionSGLangBackend, admissionVLLMBackend, admissionTRTLLMBackend} {
 		tests = append(tests,
 			dcdAdmissionTestCase{name: backend + " sidecar multinode DCD rejects a component template", deployment: multinodeSidecarDCDForAdmission(t, backend, false, false, false), wantWebhookErrs: []string{`spec.roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
 			dcdAdmissionTestCase{name: backend + " sidecar multinode DCD accepts complete roles", deployment: multinodeSidecarDCDForAdmission(t, backend, false, true, false)},

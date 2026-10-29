@@ -80,7 +80,7 @@ func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDep
 	// Multinode sidecars require complete role templates; users own engine launches and placement.
 	if component.Multinode != nil {
 		if !multinodeSidecarBackendSupported(BackendFramework(backendFramework)) {
-			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "Dynamo sidecar multinode support currently requires backendFramework: sglang or vllm"))
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "Dynamo sidecar multinode support currently requires backendFramework: sglang, vllm, or trtllm"))
 		} else if !HasCompleteMultinodeRolePodTemplates(component) {
 			allErrs = append(allErrs, field.Required(fldPath.Child("roles"), "multinode sidecars require complete leader and worker podTemplates"))
 		} else if GetComponentDynamoSidecar(component) == nil {
@@ -106,7 +106,7 @@ func ValidateComponentSidecarConfiguration(component *v1beta1.DynamoComponentDep
 
 // multinodeSidecarBackendSupported reports whether the operator admits native multinode roles for backend.
 func multinodeSidecarBackendSupported(backend BackendFramework) bool {
-	return backend == BackendFrameworkSGLang || backend == BackendFrameworkVLLM
+	return backend == BackendFrameworkSGLang || backend == BackendFrameworkVLLM || backend == BackendFrameworkTRTLLM
 }
 
 // dynamoSidecarBaseContainer configures the runtime independently of engine health,
