@@ -6,7 +6,7 @@ description: 'Run validation checks for a deploy component'
 
 inputs:
   component:
-    description: 'Component to check: operator'
+    description: 'Component to check: operator or global-discovery-mcs'
     required: true
   platform:
     description: 'Docker platform used for linter and tester targets'
@@ -37,10 +37,10 @@ runs:
           .
 
     - name: Set up Go
-      if: ${{ inputs.component == 'operator' }}
+      if: ${{ inputs.component == 'operator' || inputs.component == 'global-discovery-mcs' }}
       uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
       with:
-        go-version-file: deploy/operator/go.mod
+        go-version-file: deploy/${{ inputs.component }}/go.mod
 
     - name: Set up Python
       if: ${{ inputs.component == 'operator' }}
@@ -88,3 +88,14 @@ runs:
           -o "cache_dir=${RUNNER_TEMP}/dgd-override-pytest-cache" \
           -q \
           components/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py
+
+    # The linter and tester stages above run make lint and make test (unit and
+    # envtest suites). proto-check diffs api/gen against a fresh generation;
+    # check regenerates the RBAC, protos and CRDs, checks go mod tidy, and
+    # fails on a dirty tree.
+    - name: Check global-discovery-mcs generated files
+      if: ${{ inputs.component == 'global-discovery-mcs' }}
+      shell: bash
+      working-directory: ./deploy/global-discovery-mcs
+      run: |
+        make proto-check check

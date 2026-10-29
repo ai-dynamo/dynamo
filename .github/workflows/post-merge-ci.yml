@@ -174,6 +174,35 @@ jobs:
       - name: Lint and test Helm chart
         run: make -C deploy/helm/charts/power-agent lint test
 
+# ============================================================================
+# Global Discovery MCS
+# ============================================================================
+
+  global-discovery-mcs:
+    name: Global Discovery MCS
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push the MCS registry image
+        # The Dockerfile's last stage is the shipped image, so no target is
+        # needed. pre-merge.yml runs the module and chart checks on push too.
+        uses: $/.github/actions/build-deploy-component
+        with:
+          component: global-discovery-mcs
+          image_tag: ${{ github.sha }}-global-discovery-mcs
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_repository: ${{ vars.ECR_REPOSITORY }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-global-discovery-mcs
+
   # ============================================================================
   # SIDECAR BUILD
   # ============================================================================
@@ -1654,7 +1683,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, power-agent, sidecar-build, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, power-agent, global-discovery-mcs, sidecar-build, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
