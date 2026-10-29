@@ -134,6 +134,7 @@ async fn wire_labels(script: Vec<NvCreateChatCompletionStreamResponse>) -> Vec<S
     let task = service.spawn_with_listener(cancel.clone(), listener).await;
 
     let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
         .no_proxy()
         .build()
         .expect("failed to build HTTP client");

@@ -3460,7 +3460,7 @@ impl JsonStructureScanner {
                 }
                 continue;
             }
-            if byte.is_ascii_whitespace() {
+            if matches!(byte, b' ' | b'\t' | b'\r' | b'\n') {
                 continue;
             }
             if self.root_closed {
@@ -11114,6 +11114,17 @@ mod tests {
         assert_eq!(json["tool_call"]["id"], "call_1");
         assert_eq!(json["tool_call"]["function"]["name"], "calculator");
         assert_eq!(json["tool_call"]["function"]["arguments"], r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn test_13972_invalid_whitespace_before_identity_never_dispatches() {
+        let (events, assemblies) = feed_fragments(&[
+            (None, None, Some("{}")),
+            (None, None, Some("\u{c}")),
+            (Some("call_1"), Some("calculator"), None),
+        ]);
+        assert!(events.is_empty());
+        assert_eq!(assemblies[&(0, 0)].state, AssemblyState::Invalid);
     }
 
     // A magnitude `f64` cannot hold is still valid JSON syntax. Confirmation
