@@ -27,6 +27,7 @@ mod request;
 use request::PreparedRequest;
 
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 256;
+/// The Mocker's one scheduler rank, whatever DP rank discovery advertises.
 pub(super) const DP_RANK: u32 = 0;
 /// SGLang's code for a request cancelled by Abort or a disconnect.
 const CLIENT_CLOSED_REQUEST: u32 = 499;
@@ -71,6 +72,14 @@ pub struct MockerServerConfig {
     pub max_concurrent_requests: usize,
     pub bootstrap_host: String,
     pub bootstrap_port: u16,
+    /// This listener's DP rank, as discovery and its KV events report it.
+    pub dp_rank: u32,
+    /// Every DP rank of the deployment, counting attention-DP ranks.
+    pub dp_size: u32,
+    /// Attention DP: report the launch-wide running-request limit.
+    pub enable_dp_attention: bool,
+    /// This listener's offset among its node's listeners.
+    pub port_offset: u32,
 }
 
 impl Default for MockerServerConfig {
@@ -83,6 +92,10 @@ impl Default for MockerServerConfig {
             max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
             bootstrap_host: "127.0.0.1".to_string(),
             bootstrap_port: 8_998,
+            dp_rank: 0,
+            dp_size: 1,
+            enable_dp_attention: false,
+            port_offset: 0,
         }
     }
 }
@@ -97,7 +110,8 @@ struct DiscoveryMetadata {
     max_prefill_tokens: usize,
 }
 
-/// SGLang-compatible service driven by one Mocker scheduler.
+/// SGLang-compatible service driven by one Mocker scheduler: one Rust-server
+/// listener.
 #[derive(Clone)]
 pub struct SglangMockerService {
     config: Arc<MockerServerConfig>,
@@ -121,6 +135,7 @@ impl SglangMockerService {
             config.max_concurrent_requests > 0,
             "max_concurrent_requests must be greater than 0"
         );
+        anyhow::ensure!(config.dp_size > 0, "dp_size must be greater than 0");
         if config.mode == ServerMode::Prefill {
             anyhow::ensure!(
                 !config.bootstrap_host.trim().is_empty(),
@@ -154,12 +169,12 @@ impl SglangMockerService {
             match ZmqKvEventSink::bind(
                 engine_args.runtime.zmq_kv_events_port,
                 engine_args.runtime.zmq_replay_port,
-                DP_RANK,
+                config.dp_rank,
                 page_size,
             ) {
                 Ok(sink) => Some(sink),
                 Err(error) => {
-                    tracing::error!(dp_rank = DP_RANK, %error, "Failed to create ZMQ KV event sink");
+                    tracing::error!(dp_rank = config.dp_rank, %error, "Failed to create ZMQ KV event sink");
                     None
                 }
             }
@@ -205,6 +220,40 @@ impl SglangMockerService {
         })
     }
 
+    /// The `listeners` listeners of one node: listener `k` serves DP rank
+    /// `config.dp_rank + k`, bootstrap port `config.bootstrap_port + k` and
+    /// the configured ZMQ ports + `k`, with its own scheduler.
+    pub fn node(
+        config: MockerServerConfig,
+        engine_args: MockerConfig,
+        listeners: u32,
+    ) -> anyhow::Result<Vec<Self>> {
+        (0..listeners)
+            .map(|offset| {
+                let port = |port: u16| {
+                    u16::try_from(u32::from(port) + offset)
+                        .map_err(|_| anyhow::anyhow!("listener {offset}'s port exceeds 65535"))
+                };
+                let mut engine_args = engine_args.clone();
+                for zmq_port in [
+                    &mut engine_args.runtime.zmq_kv_events_port,
+                    &mut engine_args.runtime.zmq_replay_port,
+                ] {
+                    *zmq_port = zmq_port.map(port).transpose()?;
+                }
+                Self::new(
+                    MockerServerConfig {
+                        dp_rank: config.dp_rank + offset,
+                        bootstrap_port: port(config.bootstrap_port)?,
+                        port_offset: offset,
+                        ..config.clone()
+                    },
+                    engine_args,
+                )
+            })
+            .collect()
+    }
+
     pub fn config(&self) -> &MockerServerConfig {
         &self.config
     }
@@ -237,7 +286,7 @@ impl SglangMockerService {
         let kv_event_sources = discovery
             .kv_event_port
             .map(|port| pb::KvEventSource {
-                dp_rank: DP_RANK,
+                dp_rank: config.dp_rank,
                 endpoint: format!("tcp://127.0.0.1:{port}"),
                 topic: String::new(),
                 block_size: discovery.page_size,
@@ -264,16 +313,27 @@ impl SglangMockerService {
                 disaggregation_bootstrap_port: Some(u32::from(config.bootstrap_port)),
                 node_rank: 0,
                 nnodes: 1,
-                dp_size: 1,
-                dp_rank: Some(DP_RANK),
+                dp_size: config.dp_size,
+                dp_rank: Some(config.dp_rank),
+                // The node's rendezvous: the first listener's bootstrap address.
                 dist_init_addr: Some(format!(
                     "{}:{}",
-                    config.bootstrap_host, config.bootstrap_port
+                    config.bootstrap_host,
+                    u32::from(config.bootstrap_port) - config.port_offset
                 )),
                 page_size: Some(discovery.page_size),
                 dcp_size: 1,
-                max_running_requests: Some(to_u64(discovery.max_running_requests)),
+                // SGLang reports the launch-wide limit and splits it across
+                // attention-DP ranks.
+                max_running_requests: Some(to_u64(discovery.max_running_requests).saturating_mul(
+                    if config.enable_dp_attention {
+                        u64::from(config.dp_size)
+                    } else {
+                        1
+                    },
+                )),
                 max_prefill_tokens: to_u64(discovery.max_prefill_tokens),
+                enable_dp_attention: config.enable_dp_attention,
                 kv_event_sources,
                 ..Default::default()
             }),

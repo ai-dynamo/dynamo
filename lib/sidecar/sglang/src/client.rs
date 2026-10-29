@@ -223,6 +223,9 @@ fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How often a startup retry loop logs while it keeps failing.
+pub(crate) const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Connect and discover the engine before the worker registers, which fixes
 /// its role and identity.
 ///
@@ -234,8 +237,59 @@ pub(crate) async fn bootstrap_discover(
     bootstrap: bool,
 ) -> Result<EngineInfo, DynamoError> {
     let deadline = Instant::now() + transport.startup_deadline;
-    let mut client = connect(endpoint, transport, deadline, bootstrap).await?;
-    discovery::engine_info(discover(&mut client, deadline).await?)
+    let client = connect(endpoint, transport, deadline, bootstrap).await?;
+    let discovery = retry_unavailable(transport.retry_interval, deadline, || {
+        let mut client = client.clone();
+        async move { discover(&mut client, deadline).await }
+    })
+    .await?;
+    discovery::engine_info(discovery)
+}
+
+/// Retry `attempt` while it fails UNAVAILABLE, every `retry_interval` until
+/// `deadline`; any other result returns at once. GetServerInfo answers
+/// UNAVAILABLE until every DP rank's listener is bound
+/// (sgl-project/sglang#46181).
+async fn retry_unavailable<T, F>(
+    retry_interval: Duration,
+    deadline: Instant,
+    mut attempt: impl FnMut() -> F,
+) -> Result<T, DynamoError>
+where
+    F: Future<Output = Result<T, DynamoError>>,
+{
+    let started = Instant::now();
+    let mut attempts = 0_u64;
+    let mut last_logged_at: Option<Instant> = None;
+    loop {
+        attempts += 1;
+        // status_to_dynamo maps UNAVAILABLE, and only that, to CannotConnect.
+        let error = match attempt().await {
+            Err(error) if error.error_type() == ErrorType::Backend(BackendError::CannotConnect) => {
+                error
+            }
+            result => return result,
+        };
+        let now = Instant::now();
+        let retry_at = now + retry_interval;
+        if retry_at >= deadline {
+            return Err(cannot_connect(format!(
+                "SGLang discovery did not succeed within the startup deadline: {error}"
+            )));
+        }
+        if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL) {
+            tracing::warn!(
+                attempt = attempts,
+                elapsed = ?started.elapsed(),
+                remaining = ?deadline.saturating_duration_since(now),
+                retry_interval = ?retry_interval,
+                reason = %error,
+                "SGLang discovery unavailable; retrying"
+            );
+            last_logged_at = Some(now);
+        }
+        tokio::time::sleep_until(retry_at).await;
+    }
 }
 
 /// `bootstrap`: true for synchronous constructors before logging setup;
@@ -319,6 +373,18 @@ impl Pool {
 
     pub fn control_client(&self) -> Client {
         self.clients[0].clone()
+    }
+
+    /// One connection to `uri`, opened on first use.
+    #[cfg(test)]
+    pub(crate) fn lazy(uri: &GrpcEndpoint) -> Self {
+        let channel = tonic::transport::Endpoint::from_shared(uri.as_str().to_string())
+            .expect("a validated endpoint")
+            .connect_lazy();
+        Self {
+            clients: vec![client_from_channel(channel)],
+            next: AtomicUsize::new(0),
+        }
     }
 }
 
@@ -527,8 +593,8 @@ mod tests {
     use tonic::transport::Endpoint;
 
     use super::{
-        LocalKvEventSource, NodeMetadata, client_from_channel, discover, rpc_with_deadline,
-        status_to_dynamo, worker_group_id_from_addresses,
+        GRPC_SERVICE, LocalKvEventSource, NodeMetadata, client_from_channel, discover,
+        rpc_with_deadline, status_to_dynamo, worker_group_id_from_addresses,
     };
 
     fn source(dp_rank: u32, endpoint: &str) -> LocalKvEventSource {
@@ -685,6 +751,56 @@ mod tests {
             error
                 .to_string()
                 .contains("HealthCheck exceeded the configured deadline")
+        );
+    }
+
+    /// Startup discovery retries UNAVAILABLE, which GetServerInfo answers
+    /// until every DP rank's listener is bound, up to the deadline; any other
+    /// error fails at once.
+    #[tokio::test]
+    async fn startup_discovery_retries_only_unavailable() {
+        let interval = Duration::from_millis(1);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let unbound = || status_to_dynamo("GetServerInfo", tonic::Status::unavailable("unbound"));
+        let mut calls = 0;
+        let found = super::retry_unavailable(interval, deadline, || {
+            calls += 1;
+            let result = if calls < 3 { Err(unbound()) } else { Ok(7) };
+            async move { result }
+        })
+        .await
+        .unwrap();
+        assert_eq!((found, calls), (7, 3));
+
+        let mut calls = 0;
+        let error = super::retry_unavailable::<(), _>(interval, deadline, || {
+            calls += 1;
+            super::contract_rpc_with_deadline("GetServerInfo", GRPC_SERVICE, deadline, async {
+                Err(tonic::Status::unimplemented("refused"))
+            })
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(calls, 1, "{error}");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+
+        let error = super::retry_unavailable::<(), _>(
+            interval,
+            Instant::now() + Duration::from_millis(50),
+            || async move { Err(unbound()) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::CannotConnect)
+        );
+        assert!(
+            error.to_string().contains("within the startup deadline"),
+            "{error}"
         );
     }
 

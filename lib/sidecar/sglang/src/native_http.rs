@@ -23,7 +23,7 @@ use tokio_util::{
 
 use crate::client::{self, AbortRpc};
 use crate::discovery::EngineInfo;
-use crate::protocol;
+use crate::protocol::{self, Target};
 
 const PAYLOAD_KEY: &str = "sglang_tito";
 /// SGLang's default `SGLANG_DISAGGREGATION_WAITING_TIMEOUT`, so a healthy engine ends the wait first.
@@ -46,8 +46,7 @@ pub(crate) fn request(
     request: &PreprocessedRequest,
     request_id: &str,
     mode: DisaggregationMode,
-    bootstrap_host: Option<&str>,
-    bootstrap_port: Option<u16>,
+    target: Target<'_>,
 ) -> Result<Option<NativeRequest>, DynamoError> {
     let Some(payload) = request
         .extra_args
@@ -93,8 +92,7 @@ pub(crate) fn request(
         sampling.remove("min_new_tokens");
     }
 
-    let disaggregated =
-        protocol::resolve_disaggregated_params(request, mode, bootstrap_host, bootstrap_port)?;
+    let disaggregated = protocol::resolve_disaggregated_params(request, mode, target)?;
     if let Some(params) = disaggregated.as_ref() {
         body.insert(
             "bootstrap_host".into(),
@@ -102,14 +100,19 @@ pub(crate) fn request(
         );
         body.insert("bootstrap_port".into(), Value::from(params.bootstrap_port));
         body.insert("bootstrap_room".into(), Value::from(params.bootstrap_room));
+        // The prefill rank is part of the rendezvous.
+        match params.disagg_prefill_dp_rank {
+            Some(rank) => body.insert("disagg_prefill_dp_rank".into(), Value::from(rank)),
+            None => body.remove("disagg_prefill_dp_rank"),
+        };
     } else {
         body.remove("bootstrap_host");
         body.remove("bootstrap_port");
         body.remove("bootstrap_room");
     }
 
-    // The engine serves one DP rank, and `generate` refuses a request routed
-    // to another, so a body's own placement is dropped.
+    // SGLang's Rust listeners run a request on their own rank, and the rank
+    // chose this listener, so a body's own placement is dropped.
     body.remove("routed_dp_rank");
     if let Some(lora_path) = routing.and_then(|routing| routing.lora_name.as_ref()) {
         body.insert("lora_path".into(), Value::String(lora_path.clone()));
@@ -710,6 +713,7 @@ mod tests {
     use crate::client::{AbortRpc, client_from_channel};
     use crate::discovery::{EngineInfo, engine_info, parse_discovery};
     use crate::proto as pb;
+    use crate::protocol::Target;
 
     const MAX_EVENT_BYTES: usize = crate::args::DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES.get();
 
@@ -754,6 +758,16 @@ mod tests {
             max_event_bytes: MAX_EVENT_BYTES,
             abort_timeout: Duration::from_secs(1),
             decode_drain_timeout: Duration::from_secs(1),
+        }
+    }
+
+    /// A single-rank worker's target with the bootstrap address `host:port`.
+    fn target<'a>(host: Option<&'a str>, port: Option<u16>) -> Target<'a> {
+        Target {
+            bootstrap_host: host,
+            bootstrap_port: port,
+            prefill_rank: None,
+            global_dp_size: 1,
         }
     }
 
@@ -802,8 +816,7 @@ mod tests {
             &canonical,
             "request-id",
             DisaggregationMode::Prefill,
-            Some("prefill"),
-            Some(5000),
+            target(Some("prefill"), Some(5000)),
         )
         .unwrap()
         .unwrap();
@@ -812,6 +825,47 @@ mod tests {
         assert!(
             native.body["sampling_params"]
                 .get("min_new_tokens")
+                .is_none()
+        );
+    }
+
+    /// The native body carries the rendezvous exactly as the gRPC path does:
+    /// the dispatched rank's port and room, and the rank only when the router
+    /// named it. A stale key from the envelope never survives.
+    #[test]
+    fn native_bodies_name_the_dispatched_prefill_rank() {
+        let mut canonical = canonical_request();
+        canonical.extra_args = Some(json!({"sglang_tito": {"disagg_prefill_dp_rank": 99}}));
+        canonical.routing = Some(RoutingHints {
+            prefill_dp_rank: Some(3),
+            ..Default::default()
+        });
+        let ranked = Target {
+            bootstrap_host: Some("prefill"),
+            bootstrap_port: Some(31_003),
+            prefill_rank: Some(3),
+            global_dp_size: 4,
+        };
+        let native = request(&canonical, "rid", DisaggregationMode::Prefill, ranked)
+            .unwrap()
+            .unwrap();
+        assert_eq!(native.body["disagg_prefill_dp_rank"], 3);
+        assert_eq!(native.body["bootstrap_port"], 31_003);
+        assert_eq!(native.body["bootstrap_room"].as_u64().unwrap() % 4, 3);
+        assert_eq!(native.prefill_handoff.unwrap()["disagg_prefill_dp_rank"], 3);
+
+        canonical.routing = None;
+        let native = request(&canonical, "rid", DisaggregationMode::Prefill, ranked)
+            .unwrap()
+            .unwrap();
+        assert!(native.body.get("disagg_prefill_dp_rank").is_none());
+        assert_eq!(native.body["bootstrap_port"], 31_003);
+        assert_eq!(native.body["bootstrap_room"].as_u64().unwrap() % 4, 3);
+        assert!(
+            native
+                .prefill_handoff
+                .unwrap()
+                .get("disagg_prefill_dp_rank")
                 .is_none()
         );
     }
@@ -838,8 +892,7 @@ mod tests {
             &canonical,
             "actual-rid",
             DisaggregationMode::Aggregated,
-            None,
-            None,
+            target(None, None),
         )
         .unwrap()
         .unwrap();
@@ -865,8 +918,7 @@ mod tests {
             &canonical,
             "rid",
             DisaggregationMode::Aggregated,
-            None,
-            None,
+            target(None, None),
         )
         .unwrap()
         .unwrap();
@@ -883,8 +935,7 @@ mod tests {
                 &canonical,
                 "rid",
                 DisaggregationMode::Aggregated,
-                None,
-                None,
+                target(None, None),
             )
             .unwrap()
             .is_none()
@@ -895,8 +946,7 @@ mod tests {
                 &canonical,
                 "rid",
                 DisaggregationMode::Aggregated,
-                None,
-                None,
+                target(None, None),
             )
             .err()
             .unwrap();
@@ -911,8 +961,7 @@ mod tests {
             &canonical,
             "rid",
             DisaggregationMode::Aggregated,
-            None,
-            None,
+            target(None, None),
         )
         .err()
         .unwrap();
@@ -931,8 +980,7 @@ mod tests {
                 &canonical,
                 "rid",
                 DisaggregationMode::Prefill,
-                Some("prefill"),
-                Some(5000),
+                target(Some("prefill"), Some(5000)),
             )
             .unwrap()
             .unwrap();
@@ -954,8 +1002,7 @@ mod tests {
             &canonical,
             "rid",
             DisaggregationMode::Prefill,
-            Some("prefill"),
-            Some(5000),
+            target(Some("prefill"), Some(5000)),
         )
         .err()
         .unwrap();
@@ -1386,7 +1433,7 @@ mod tests {
         canonical.extra_args = Some(json!({"sglang_tito": {}}));
         canonical.annotations = vec![super::PREFILL_OUTPUT_ANNOTATION.to_string()];
         let mode = DisaggregationMode::Prefill;
-        let native = request(&canonical, "rid", mode, Some("prefill"), Some(5000));
+        let native = request(&canonical, "rid", mode, target(Some("prefill"), Some(5000)));
         let native = native.unwrap().unwrap();
         let response =
             json!({"output_ids": [101], "meta_info": {"finish_reason": {"type": "length"}}});

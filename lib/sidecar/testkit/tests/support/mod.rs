@@ -16,6 +16,7 @@ pub mod sglang;
 pub mod trtllm;
 pub mod vllm;
 
+#[derive(Clone)]
 pub struct FixtureConfig {
     pub model: String,
     pub connections: usize,
