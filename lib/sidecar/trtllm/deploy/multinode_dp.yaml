@@ -45,6 +45,7 @@ spec:
       spec:
         containers:
         - name: main
+          # Same nightly as the sidecar below. Only this pairing was tested.
           image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261023-75d0686@sha256:e237cc1347d8db6af2f84ace9150a59b950b47472ddc9429924d5e4bc5790395
           env:
           - name: DYN_ROUTER_MODE
@@ -61,6 +62,8 @@ spec:
         spec:
           initContainers:
           - name: runtime
+            # Requires OpenEngine routing discovery and the node-local KV relay (ai-dynamo/dynamo#15087),
+            # which are not in the 1.6.x releases.
             image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261023-75d0686@sha256:fc13f0a227d78499fbaed257e2373bcb54df32ca8e1fcea1e0ad6289087cbcb8
             restartPolicy: Always
             command: &sidecarCommand
