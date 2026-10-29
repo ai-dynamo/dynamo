@@ -9,12 +9,6 @@ import copy
 
 import pytest
 
-from dynamo.profiler.utils import dgd_materialization
-from dynamo.profiler.utils.dgd_materialization import (
-    DGDMaterializationPurpose,
-    materialize_dgd,
-)
-
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.gpu_0,
@@ -22,6 +16,15 @@ pytestmark = [
     pytest.mark.planner,
     pytest.mark.parallel,
 ]
+
+try:
+    from dynamo.profiler.utils import dgd_materialization
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+except ImportError as exc:
+    pytest.skip(f"Skip (missing dependency): {exc}", allow_module_level=True)
 
 
 def _component(name: str, component_type: str) -> dict:
