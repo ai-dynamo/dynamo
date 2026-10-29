@@ -397,173 +397,29 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     done; \
     /usr/bin/python3 -c 'import nvidia.dali'
 
-# Replace the base image's PyNvVideoCodec with one past the release that stopped
-# shipping a separate libavcodec. rc24 is the first TensorRT-LLM base image to
-# ship this package at all, and rc24 through the currently pinned rc28 all ship
-# 2.1.0, which bundles libavcodec, libavdevice, libavfilter, libswresample and
-# libswscale alongside the libavformat and libavutil it actually uses. 2.2.x
-# ships only the latter two -- but libavcodec is not gone, it is statically
-# linked into libavformat. That distinction drives the content check below:
-# after the upgrade no file is named libavcodec*, so a filename test cannot see
-# a future release that re-enables decoders inside libavformat.
+# The base image ships PyNvVideoCodec, and it must be the version
+# requirements.trtllm.txt pins. 2.2.x links libavcodec statically into
+# libavformat, so a filename test cannot see a release that re-enables decoders
+# there. check_pynvvideocodec asserts the version, the bundled libraries against
+# codec_policy.yaml and the single FFmpeg source tarball; the enumeration then
+# reads what the shipped libraries actually register. For 2.2.x it reports "0
+# decoders, 0 encoders" and every "expected present" entry as ABSENT -- that is
+# the correct answer, and the probe fails closed if av_codec_iterate is missing.
 #
-# The base copy is uninstalled explicitly first, then whatever is left is removed,
-# rather than letting the install's own upgrade path handle it. Order matters and
-# the obvious shortcut is wrong: the wheel's RECORD is the only complete list of
-# what it wrote -- it reaches a top-level `samples/` and `benchmarks/` tree and an
-# FFmpeg source tarball outside dist-packages (see the whiteout note in
-# pre_runtime) -- so deleting the dist-info first would destroy that list and
-# orphan those trees. The rm stays, after the uninstall, because it does not
-# depend on the installer honouring its own metadata.
+# If a base bump moves PyNvVideoCodec off the pin, move the pin with it
+# (test_pynvvideocodec_spec.py lists every copy). Replacing the base copy here
+# instead also needs a pre_runtime whiteout: the overlay COPY cannot delete the
+# base image's files.
 #
-# The presence test after it is find_spec, not an import: PyNvVideoCodec's
-# __init__ dlopens libnvidia-encode.so.1, which this builder does not have, so an
-# import raises whether or not the wheel is installed and could never fail the
-# build. Same reason the smoke test is omitted further down.
+# The venv cross-check reads dist-info directly rather than asking the venv
+# interpreter: the venv is --system-site-packages, so the interpreter would
+# resolve the system copy and always look correct.
 #
-# This is a surface reduction, not a codec removal, and the difference from the
-# DALI block above matters because the two look identical. 2.1.0's libavcodec
-# registers exactly one decoder -- vp9 -- and no encoders: none of h264, hevc,
-# aac, aac_fixed or aac_latm. That is by construction, not by luck: 2.1.0's
-# /usr/local/external/ffmpeg/readme.txt carries the vendor's own configure line,
-# reading --disable-encoders --disable-decoders --enable-decoder=vp9. 2.2.x drops
-# even vp9 -- its libavformat registers 0 decoders and 0 encoders, which is what
-# enumerate_bundled_decoders.py below reports.
-#
-# Do not expect that configure line to still be in readme.txt. 2.2.3 replaced it
-# with a three-line note that says "demux/mux only" and names the FFmpeg version,
-# so the file no longer states which decoders were enabled. Read the libraries,
-# not the readme.
-#
-# So no prohibited *decoder implementation* ships in either version -- but that
-# is a narrower statement than "nothing prohibited ships". --disable-decoders
-# disables decoders, not FFmpeg code in general: the h264/hevc/aac parsers,
-# demuxers, muxers and bitstream filters (h264_metadata, hevc_metadata,
-# h264_mp4toannexb, h264_redundant_pps -- these do full parameter-set parse and
-# rewrite) remain enabled in both. Do not read the vp9-only finding as "no
-# H.264 code present".
-#
-# What actually fails the build is container/compliance/policy/codec_policy.yaml,
-# whose deny globs match on a libavcodec being present at all, and whose two
-# PyNvVideoCodec waivers are deliberately scoped to libavutil and libavformat so
-# that a bundled libavcodec has to be looked at rather than absorbed silently.
-#
-# The version of those libraries is the main reason to move, and it is easy to
-# miss because the package ships no ffmpeg executable -- only shared libraries.
-# 2.1.0's libavcodec.so.61.3.100 and libavformat.so.61.1.100 embed "FFmpeg
-# version 7.0.2", and they are on the runtime path rather than inert: readelf -d
-# on PyNvVideoCodec_130.cpython-312-x86_64-linux-gnu.so lists libavformat.so.61,
-# libavcodec.so.61, libswresample.so.5 and libavutil.so.59 as NEEDED. 2.2.0
-# moved to FFmpeg 8.1.2 (libavformat.so.62.12.102 / libavutil.so.60.26.102) and
-# 2.2.3 to FFmpeg 9.0.1 (libavformat.so.63.1.101 / libavutil.so.61.1.101).
-# 9.0.1 is the floor deny_components sets for ffmpeg in codec_policy.yaml, so
-# 2.1.0 and 2.2.0 both sit below it.
-#
-# The in-tree FFmpeg is 9.0.1 too, so without more the two copies would share
-# SONAMEs and whichever loaded first would serve both. wheel_builder.Dockerfile
-# builds ours with --build-suffix=_dynamo, which renames its SONAMEs, so each
-# consumer resolves its own copy.
-#
-# Note that the gate did not tell us this. deny_components is evaluated against
-# SBOM components (scan_codecs.scan_sbom), and the SBOM does not enumerate
-# wheel-bundled .so files as an "ffmpeg" component -- the rc24 failure produced
-# zero sbom: findings, and all 20 violations were filename globs. So the floor
-# is unenforced for every wheel-vendored FFmpeg in every image, not just this
-# one. Worth fixing in the scanner; do not assume this check has your back.
-#
-# Two further defects in 2.1.0 that 2.2.0 fixes: GPL-only libpostproc sources
-# while NOTICES.txt declares LGPLv3 only, and on aarch64 binaries built from
-# FFmpeg 7.1 shipped against a 7.0.2 source tarball -- an LGPL
-# source-correspondence mismatch. Package size drops 52M -> 24M (2.1.0's
-# bundled libs are real copies, not symlinks).
-#
-# Do NOT justify this upgrade as removing royalty exposure: the only decoder it
-# removes is vp9, the royalty-free one, and royalties for the GPU-accelerated
-# families are covered by the hardware licensing model.
-#
-# Upgrade rather than waive. A waiver has to be written as a glob, and a glob
-# cannot say "this version's libavcodec is empty" -- it would carry forward to a
-# future version whose libavcodec is not, disarming the check that just fired.
-# Removing the file keeps the narrow waivers, and the tripwire, intact.
-#
-# Pinned exactly: requirements.trtllm.txt installs
-# PyNvVideoCodec==2.2.3 into /opt/dynamo/venv and this stage pins the system copy
-# to the same version, so the guard below is a plain equality and the venv
-# cross-check compares the two copies to each other. tests/dependencies/
-# test_pynvvideocodec_spec.py asserts that, and covers the vllm and sglang
-# requirements files in the same pass. Two assertions follow: a filename test
-# that mirrors the codec gate's deny glob (so a reintroduced libavcodec fails
-# here, with a clear message, rather than later in the scan), and a content test
-# that enumerates what the shipped FFmpeg libraries actually register.
-#
-# Reading the content test's output: for 2.2.x it reports "0 decoders, 0
-# encoders" and prints every entry of its "expected present (sanity check)"
-# block as ABSENT. That is the correct answer here, not a broken probe -- 2.2.x
-# registers no codecs at all, vp9 included. The probe is proved live a different
-# way: enumerate_bundled_decoders.py resolves av_codec_iterate through ctypes,
-# so a library that does not export it raises AttributeError and fails the
-# build rather than reporting a reassuring zero. The check is fail-closed by
-# design; if a future release hides that symbol, this stops the build and wants
-# a human, which is the right outcome for a check whose whole job is to see
-# inside the file.
-#
-# This deliberately overrides a dependency of TensorRT-LLM's, which is why the
-# build log carries a pip resolver complaint here:
-#
-#     tensorrt-llm 1.3.0rc28 requires PyNvVideoCodec~=2.1.0,
-#     but you have pynvvideocodec 2.2.3 which is incompatible
-#
-# The complaint is expected and the override is deliberate. `~=2.1.0` excludes
-# everything above 2.1.x by construction, and 2.1.0 is the version that bundles
-# the libavcodec. tensorrt_llm/media/decoding.py is the only consumer; it uses
-# CreateDemuxer, CreateDecoder, PyNvVCException and OutputColorType, all of which
-# 2.2.3 still exports, and it imports PyNvVideoCodec function-locally so `import
-# tensorrt_llm` does not touch it. Re-check that list when this base image moves:
-# if upstream relaxes its own specifier to admit 2.2.x, this note is the thing
-# to delete.
-#
-# Dynamo's own use is narrower still and unaffected by the one API 2.2.3 drops.
-# common/multimodal/nvdec_decoder.py and the SGLang decoder construct
-# SimpleDecoder and read frames; 2.2.3 removed SimpleDecoder.stop(), which
-# neither calls.
-#
-# System interpreter for the same reason as the opencv removal and the DALI
-# upgrade above: with VIRTUAL_ENV set, plain pip targets the venv and leaves the
-# system-site copy -- the one the scan reads -- in place.
-#
-# No `import PyNvVideoCodec` smoke test here, deliberately. Unlike nvidia.dali it
-# dlopens libnvcuvid and needs NVIDIA_DRIVER_CAPABILITIES to include "video",
-# which the builder does not have, so an import check would fail every build.
+# System interpreter for the same reason as the opencv removal above. No
+# `import PyNvVideoCodec` smoke test: it dlopens libnvcuvid, which the builder
+# does not have.
 RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
     set -eu; \
-    before=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))' 2>/dev/null || echo none); \
-    echo "PyNvVideoCodec in base image: $before"; \
-    if [ "$before" = "none" ]; then \
-        echo "ERROR: base image no longer ships PyNvVideoCodec, so this upgrade has" >&2; \
-        echo "       nothing to act on -- delete this RUN and the whiteout entry that" >&2; \
-        echo "       pairs with it. The venv copy installed from" >&2; \
-        echo "       requirements.trtllm.txt is the one that matters." >&2; \
-        exit 1; \
-    fi; \
-    newest=$(printf '%s\n2.2.3\n' "$before" | sort -V | tail -1); \
-    if [ "$before" = "2.2.3" ] || [ "$newest" != "2.2.3" ]; then \
-        echo "ERROR: base image already carries PyNvVideoCodec $before, so this block" >&2; \
-        echo "       is obsolete -- delete it and let the base version stand. Keep the" >&2; \
-        echo "       libavcodec assertion below and the post-overlay one in" >&2; \
-        echo "       pre_runtime, which are what stop this from regressing." >&2; \
-        exit 1; \
-    fi; \
-    /usr/bin/python3 -m pip uninstall --break-system-packages --yes pynvvideocodec; \
-    rm -rf /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
-        /usr/local/lib/python3.12/dist-packages/pynvvideocodec* \
-        /usr/local/external/ffmpeg; \
-    if /usr/bin/python3 -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("PyNvVideoCodec") else 1)'; then \
-        echo "ERROR: PyNvVideoCodec is still importable after the removal above; the" >&2; \
-        echo "       base ships it somewhere these paths do not reach." >&2; \
-        exit 1; \
-    fi; \
-    /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
-        'PyNvVideoCodec==2.2.3'; \
     PYTHONPATH=/tmp/compliance /usr/bin/python3 -m compliance.check_pynvvideocodec --pinned 2.2.3; \
     v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))'); \
     echo "PyNvVideoCodec version: $v"; \
@@ -583,10 +439,7 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
         echo "PyNvVideoCodec in /opt/dynamo/venv: ${vv:-none}"; \
         [ -n "$vv" ] \
             || { echo "ERROR: /opt/dynamo/venv exists but holds no PyNvVideoCodec;" >&2; \
-                 echo "       requirements.trtllm.txt should have installed one. Read the" >&2; \
-                 echo "       dist-info directly, not via the venv interpreter: the venv is" >&2; \
-                 echo "       --system-site-packages, so the interpreter would resolve the" >&2; \
-                 echo "       system copy this stage just upgraded and always look correct." >&2; \
+                 echo "       requirements.trtllm.txt should have installed one." >&2; \
                  exit 1; }; \
         [ "$vv" = "$v" ] \
             || { echo "ERROR: venv PyNvVideoCodec is $vv but the system copy is $v --" >&2; \
@@ -711,48 +564,6 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # would leave the base image's dist-info beside the new one, and the inventory
 # reads that directory, so the upgrade would not show.
 #
-# PyNvVideoCodec is here for the DALI reason too, and it is the case the codec
-# scan actually catches: the scan runs on this stage (compliance_base_stage is
-# pre_runtime), not on runtime_full. runtime_full REPLACES the package, and a
-# replacement is a deletion plus an install -- 2.1.0's libavcodec/libavdevice/
-# libavfilter/libswresample/libswscale have no counterpart in 2.2.x, so the
-# overlay COPY has nothing to write over them and the base image's copies would
-# come straight back. Without this entry the upgrade buys nothing and the scan
-# fails exactly as it did before. The version-stamped dist-info is renamed by the
-# upgrade (pynvvideocodec-2.1.0.dist-info -> -2.2.3.dist-info), so the glob takes
-# that and the stray `pynvvideocodec.` entry beside it.
-#
-# The SONAMEs move too, which is why the deletion cannot be narrowed to a version
-# glob: 2.1.0 ships libavformat.so.61 / libavutil.so.59 (FFmpeg 7.0.2) and 2.2.3
-# ships libavformat.so.63 / libavutil.so.61 (FFmpeg 9.0.1). The overlay writes
-# over the two bare `libav*.so` symlinks and nothing else -- every versioned file
-# the base carries, and the whole libavcodec/libavdevice/libavfilter/libsw*
-# families, would survive it.
-#
-# /usr/local/external/ffmpeg is the same package, in a place that is easy to
-# miss: PyNvVideoCodec's wheel installs an FFmpeg source tarball through a
-# `../../../external/ffmpeg/src/ffmpeg-<version>.tar.xz` RECORD entry, so it
-# lands OUTSIDE dist-packages and the two globs above do not reach it. It is
-# version-stamped, so this is the aiohttp rename problem again rather than the
-# opencv one: runtime_full removes ffmpeg-7.0.2.tar.xz and writes
-# ffmpeg-9.0.1.tar.xz, the overlay COPY cannot express that deletion, and the
-# image would ship BOTH.
-#
-# Keep the scope of that honest: a source tarball is inert, nothing on the
-# runtime path reads it, and the exposure discussed above is in the shipped .so
-# files, not here. This entry buys ~10.8 MB and a tree that matches what
-# actually ships -- a stale 7.0.2 source sitting beside 9.0.1 binaries invites a
-# future reader to conclude the wrong thing about either. The codec scan cannot
-# arbitrate: its deny globs match libav*.so*/libsw*.so*, never a .tar.xz, and
-# allow_paths lists /usr/local/src/ffmpeg (our in-tree build), not this path.
-#
-# Delete the directory rather than a single file, and note that the tarball is
-# not junk: NOTICES.txt declares LGPLv3 for the bundled FFmpeg, so the source is
-# the corresponding-source obligation for the .so files the extension links
-# against. That is why the overlay must restore runtime_full's copy -- the point
-# is to ship exactly one tarball, the one matching the shipped binaries, not to
-# ship none.
-#
 # Its runtime dependencies are listed for the same reason. pip upgrades those too
 # when the new aiohttp requires versions the base does not carry, and each rename
 # has the same doubling problem. Dropping them here is free: the overlay restores
@@ -774,9 +585,6 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/opencv_python_headless* \
     /usr/local/lib/python3.12/dist-packages/nvidia/dali \
     /usr/local/lib/python3.12/dist-packages/nvidia_dali_* \
-    /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
-    /usr/local/lib/python3.12/dist-packages/pynvvideocodec* \
-    /usr/local/external/ffmpeg \
     /usr/local/share/jupyter/lab \
     /usr/local/share/jupyter/labextensions/@jupyter-notebook/lab-extension \
     /usr/local/lib/python3.12/dist-packages/jupyter_server \
@@ -865,10 +673,8 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
     done; \
     if find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' 2>/dev/null | grep -q .; then \
-        echo "ERROR: post-overlay PyNvVideoCodec carries a libavcodec, so the base" >&2; \
-        echo "       image's 2.1.0 copy survived the overlay -- its whiteout entry is" >&2; \
-        echo "       missing or misspelled. The upgrade in runtime_full cannot fix this" >&2; \
-        echo "       on its own: COPY cannot represent a deletion." >&2; \
+        echo "ERROR: post-overlay PyNvVideoCodec carries a libavcodec that the" >&2; \
+        echo "       runtime_full guard did not see." >&2; \
         find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' >&2; \
         exit 1; \
     fi; \
@@ -883,9 +689,8 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
              echo "       the package layout changed and this check went blind." >&2; exit 1; }; \
     tarballs=$(find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' 2>/dev/null | wc -l); \
     if [ "$tarballs" -gt 1 ]; then \
-        echo "ERROR: more than one FFmpeg source tarball survived the overlay, so the" >&2; \
-        echo "       base image's copy came back alongside the upgraded one -- the" >&2; \
-        echo "       /usr/local/external/ffmpeg whiteout entry is missing." >&2; \
+        echo "ERROR: more than one PyNvVideoCodec FFmpeg source tarball survived" >&2; \
+        echo "       the overlay." >&2; \
         find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' >&2; \
         exit 1; \
     fi
