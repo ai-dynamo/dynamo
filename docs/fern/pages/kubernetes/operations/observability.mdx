@@ -8,7 +8,8 @@ subtitle: View Dynamo metrics, configure structured logs and distributed traces,
 Dynamo provides four core signals for running deployments:
 
 - **Metrics** expose request, latency, routing, worker, cache, and operator measurements. Metrics are
-  enabled by default, and the operator creates the resources required for Prometheus discovery.
+  enabled by default. The platform Helm chart creates the Prometheus discovery resources and the
+  operator labels the pods they select.
 - **Logs** record component events on standard output. Enable structured JSONL output when you need
   reliable filtering and request correlation.
 - **Distributed traces** follow requests from the frontend through participating Dynamo components.
@@ -33,9 +34,10 @@ For exact metric names, labels, variables, schemas, and endpoint responses, use 
 
 ## View Metrics and Dashboards
 
-Application metrics are enabled by default. The operator creates a `PodMonitor` and labels managed
-pods for discovery, so a normal DynamoGraphDeployment (DGD) requires no metrics configuration.
-Operator metrics use a separate `ServiceMonitor` created by the Helm chart.
+Application metrics are enabled by default. The platform Helm chart creates the `PodMonitor`
+resources and the operator labels managed pods for discovery, so a normal DynamoGraphDeployment
+(DGD) requires no metrics configuration. Operator metrics use a separate `ServiceMonitor`, also
+created by the chart.
 
 <Steps toc={true}>
 <Step title="Verify Prometheus discovery" id="verify-prometheus-discovery">
@@ -124,6 +126,9 @@ information.
 </Step>
 </Steps>
 
+To disable the default application metrics for an entire deployment, set the
+`nvidia.com/enable-metrics: "false"` annotation on the DGD.
+
 ### Enable NIXL Telemetry
 
 NIXL transfer metrics are optional and are populated during disaggregated serving or multimodal
@@ -189,8 +194,72 @@ one target appears for such a pod, the remaining ranks are not being scraped.
 </Step>
 </Steps>
 
-To disable the default application metrics for an entire deployment, set the
-`nvidia.com/enable-metrics: "false"` annotation on the DGD.
+### Scrape Engine Metrics in Sidecar Mode
+
+In [sidecar mode](../../developer-guide/knowledge-base/concepts/system-architecture/sidecar-backends.md),
+the Dynamo runtime and the inference engine are separate containers in the worker pod. The
+`dynamo-worker` PodMonitor scrapes the runtime's `system` port as usual, so the `dynamo_component_*`
+families arrive with `container="runtime"`. The engine's own families (`vllm:*`, `sglang:*`) stay in
+the engine container and need a second endpoint, which is off by default.
+
+<Steps toc={true}>
+<Step title="Expose the engine metrics port" id="expose-the-engine-metrics-port">
+
+In the worker's `main` container, turn on the engine's Prometheus endpoint, bind it to the pod IP
+rather than loopback, and declare the port with the name `engine-metrics`:
+
+```yaml
+containers:
+- name: main
+  ports:
+  - name: engine-metrics
+    containerPort: 30000
+```
+
+The name is the contract. The PodMonitor selects container ports by that name and ignores pods that
+do not declare it, so integrated-mode workers are unaffected. Do not reuse `http`, `system`, or
+`nixl`, which the chart already scrapes as frontend sidecar, runtime, and NIXL targets. Flags and
+port numbers differ per engine; see the
+[vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md#metrics),
+[SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#metrics), and
+[TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/sidecar.md#metrics)
+sidecar pages. The example manifests under `lib/sidecar/<engine>/deploy/` already declare the port.
+
+Declaring the port changes the pod template, so an existing deployment rolls its workers.
+
+</Step>
+<Step title="Enable the endpoint in the platform chart" id="enable-the-engine-metrics-endpoint">
+
+Set `dynamo-operator.dynamo.metrics.podMonitors.engineMetrics=true` on the platform chart. The
+endpoint scrapes `/metrics` on the `engine-metrics` port every 5 seconds;
+`dynamo-operator.dynamo.metrics.podMonitors.engineMetricsPath` changes the path for an engine that
+serves it elsewhere.
+
+Engine series keep their native labels, such as `model_name` and vLLM's `engine`. The endpoint adds
+`dynamo_namespace`, joined from the pod's `nvidia.com/dynamo-namespace` and
+`nvidia.com/dynamo-worker-hash` labels to match the hyphenated runtime namespace the worker
+registered under, `dynamo_component_type`, and `model` copied from `model_name` when the engine does
+not set it. It does not add `dynamo_component`, `dynamo_endpoint`, or `worker_id`. The runtime's own
+series carry `dynamo_namespace` in its sanitized underscore form, so join the two families on
+`namespace` and `pod`, which they share, and tell them apart by `container`. See
+[Sidecar mode](../../reference/observability/metric-labels.mdx#sidecar-mode) in the label reference.
+
+</Step>
+<Step title="Verify the engine target" id="verify-the-engine-target">
+
+Each sidecar worker pod now shows two `dynamo-worker` targets on the Prometheus targets page: one on
+port `system` with `container="runtime"` and one on `engine-metrics` with `container="main"`. Confirm
+that an engine family carries the joined namespace:
+
+```promql
+vllm:num_requests_running{container="main", dynamo_namespace=~".+-[0-9a-f]{8}"}
+```
+
+A `DOWN` target on `engine-metrics` means the port is declared but nothing listens on it. Check the
+engine's host binding and, for SGLang, that `--enable-metrics` is set.
+
+</Step>
+</Steps>
 
 ## Configure Structured Logs
 

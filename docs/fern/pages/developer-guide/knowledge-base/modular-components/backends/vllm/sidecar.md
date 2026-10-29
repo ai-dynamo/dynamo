@@ -98,6 +98,20 @@ container, as `disagg.yaml` does, so the decode engine can reach the prefill
 engine's NIXL handshake listener. vLLM adds each engine's global data-parallel
 index to the side-channel port.
 
+## Metrics
+
+Both `vllm-rs serve` and `vllm serve` expose Prometheus metrics at `/metrics` on their HTTP port,
+`8000` by default, bound to the address in `--host`. The example manifests bind `0.0.0.0` and
+declare the port as `engine-metrics`, the name the platform chart's `dynamo-worker` PodMonitor
+scrapes when `dynamo-operator.dynamo.metrics.podMonitors.engineMetrics` is enabled. Chart settings,
+the labels Prometheus adds, and verification steps are in
+[Scrape Engine Metrics in Sidecar Mode](../../../../../kubernetes/operations/observability.mdx#scrape-engine-metrics-in-sidecar-mode).
+
+Declare `engine-metrics` only on containers that run an HTTP server. In single-node and hybrid
+multi-node DP deployments every `vllm serve` process runs one, so every pod serves its local ranks
+with an `engine` label per DP rank. In multi-node TP only the leader does; the follower runs
+`vllm serve --headless` and has no HTTP server.
+
 ## Topologies
 
 The frontend reaches each sidecar over Dynamo's request, discovery, and event
