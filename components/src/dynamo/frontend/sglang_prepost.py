@@ -432,6 +432,7 @@ def encode_chat_prompt_isolating_markers(
             tokenizer.apply_chat_template(template_messages, **template_kwargs)
         )
 
+    _reject_unsupported_tokenizer_controls(template_kwargs)
     text_kwargs = {**template_kwargs, "tokenize": False}
     rendered = tokenizer.apply_chat_template(template_messages, **text_kwargs)
     skeleton = tokenizer.apply_chat_template(substituted, **text_kwargs)
@@ -462,7 +463,44 @@ def encode_chat_prompt_isolating_markers(
             prompt_token_ids.extend(encoder.encode(text, add_special_tokens=False).ids)
         else:
             prompt_token_ids.extend(tokenizer.encode(text, add_special_tokens=False))
-    return prompt_token_ids
+    return _truncate_prompt_token_ids(tokenizer, prompt_token_ids, template_kwargs)
+
+
+# apply_chat_template(tokenize=True) forwards these to tokenizer.__call__; the
+# isolated path renders with tokenize=False, so it must apply them itself.
+_UNSUPPORTED_TOKENIZER_CONTROLS = ("padding", "tokenizer_kwargs", "return_tensors")
+
+
+def _reject_unsupported_tokenizer_controls(template_kwargs: dict[str, Any]) -> None:
+    """Fail closed on tokenizer controls that would change the assembled ids."""
+    active = [
+        key
+        for key in _UNSUPPORTED_TOKENIZER_CONTROLS
+        if template_kwargs.get(key) not in (None, False, "do_not_pad", {})
+    ]
+    if active:
+        raise PreprocessError(
+            f"chat_template_kwargs {active!r} are not supported for message content "
+            "that contains tool-call delimiters while --isolate-tool-call-markers "
+            "is enabled"
+        )
+
+
+def _truncate_prompt_token_ids(
+    tokenizer: Any, prompt_token_ids: list[int], template_kwargs: dict[str, Any]
+) -> list[int]:
+    """Apply ``truncation``/``max_length`` as ``tokenizer.__call__`` would."""
+    truncation = template_kwargs.get("truncation")
+    if truncation not in (True, "longest_first", "only_first"):
+        return prompt_token_ids
+    limit = template_kwargs.get("max_length") or getattr(
+        tokenizer, "model_max_length", None
+    )
+    if not limit or len(prompt_token_ids) <= limit:
+        return prompt_token_ids
+    if getattr(tokenizer, "truncation_side", "right") == "left":
+        return prompt_token_ids[-limit:]
+    return prompt_token_ids[:limit]
 
 
 def resolve_request_force_reasoning(

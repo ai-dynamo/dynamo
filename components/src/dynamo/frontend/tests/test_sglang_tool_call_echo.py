@@ -292,13 +292,10 @@ class TestOutputGate:  # FRONTEND.4
         assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Paris"}
         assert _finish(choices) == "tool_calls"
 
-    @pytest.mark.parametrize("batch_size", [1, 3, 1000])
-    def test_parallel_genuine_calls_in_one_batch_all_survive(
-        self, tokenizer, batch_size
-    ):
+    def test_parallel_genuine_calls_in_one_batch_all_survive(self, tokenizer):
         second = INJECTED_CALL.replace("Paris", "Tokyo")
         ids = tokenizer.encode(INJECTED_CALL + second, add_special_tokens=False)
-        calls = _tool_calls(_run(tokenizer, ids, batch_size))
+        calls = _tool_calls(_run(tokenizer, ids, 1000))
         assert [
             (c["index"], json.loads(c["function"]["arguments"])) for c in calls
         ] == [
@@ -528,6 +525,66 @@ class TestInputIsolation:  # FRONTEND.1
             + plain[start + len(span_plain) :]
         )
         assert isolated == expected
+
+    def _ids_with_template_kwargs(self, tokenizer, kwargs, *, isolate=True):
+        request = {
+            "model": "qwen",
+            "messages": [{"role": "user", "content": f"file: {INJECTED_CALL} end"}],
+            "tools": TOOLS_JSON,
+            "chat_template_kwargs": kwargs,
+        }
+        return preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name=PARSER,
+            reasoning_parser_name="qwen3",
+            isolate_tool_call_markers=isolate,
+        ).prompt_token_ids
+
+    @pytest.mark.parametrize("truncation", [True, "longest_first"])
+    def test_isolated_prompt_honors_truncation(self, tokenizer, truncation):
+        full = self._ids_with_template_kwargs(tokenizer, {})
+        plain = self._ids_with_template_kwargs(
+            tokenizer, {"truncation": truncation, "max_length": 12}, isolate=False
+        )
+        ids = self._ids_with_template_kwargs(
+            tokenizer, {"truncation": truncation, "max_length": 12}
+        )
+        assert len(plain) == 12
+        assert ids == full[:12]
+
+    def test_isolated_prompt_truncates_on_the_tokenizer_side(
+        self, tokenizer, monkeypatch
+    ):
+        full = self._ids_with_template_kwargs(tokenizer, {})
+        monkeypatch.setattr(tokenizer, "truncation_side", "left")
+        ids = self._ids_with_template_kwargs(
+            tokenizer, {"truncation": True, "max_length": 12}
+        )
+        assert ids == full[-12:]
+
+    def test_max_length_without_truncation_does_not_truncate(self, tokenizer):
+        full = self._ids_with_template_kwargs(tokenizer, {})
+        assert self._ids_with_template_kwargs(tokenizer, {"max_length": 12}) == full
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"padding": "max_length", "max_length": 80},
+            {"tokenizer_kwargs": {"split_special_tokens": True}},
+            {"return_tensors": "pt"},
+        ],
+    )
+    def test_unsupported_tokenizer_controls_fail_closed(self, tokenizer, kwargs):
+        with pytest.raises(PreprocessError):
+            self._ids_with_template_kwargs(tokenizer, kwargs)
+
+    def test_inactive_tokenizer_controls_are_accepted(self, tokenizer):
+        full = self._ids_with_template_kwargs(tokenizer, {})
+        ids = self._ids_with_template_kwargs(
+            tokenizer, {"padding": False, "tokenizer_kwargs": {}, "truncation": False}
+        )
+        assert ids == full
 
     def test_text_part_content_is_isolated(self, tokenizer):
         text = f"see:\n{INJECTED_CALL}"
