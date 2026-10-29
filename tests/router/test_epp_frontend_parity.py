@@ -43,3 +43,22 @@ def test_epp_frontend_token_parity(request, predownload_tokenizers, tmp_path):
     cases = frontend_epp_token_parity_cases(ROUTER_MODEL_NAME)
     with EppFrontendParityStack(request, tmp_path, ROUTER_MODEL_NAME) as stack:
         run_frontend_epp_token_parity(stack, cases, include_negative_control=True)
+
+
+def test_epp_frontend_tools_token_parity(request, predownload_tokenizers, tmp_path):
+    """Compare native Frontend and Runtime EPP tokens for tool schema and history.
+
+    Cases (one launch): tool schema declaration and assistant tool_calls plus
+    tool reply history. The runner also checks same-arm schema/omission
+    sensitivity and live negative controls. This covers input rendering only.
+    """
+    from tests.router.common import (
+        frontend_epp_tools_token_parity_cases,
+        run_frontend_epp_tools_token_parity,
+    )
+    from tests.router.epp_parity import EppFrontendParityStack
+
+    _ = predownload_tokenizers
+    cases = frontend_epp_tools_token_parity_cases(ROUTER_MODEL_NAME)
+    with EppFrontendParityStack(request, tmp_path, ROUTER_MODEL_NAME) as stack:
+        run_frontend_epp_tools_token_parity(stack, cases)

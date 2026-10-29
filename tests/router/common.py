@@ -10,6 +10,7 @@ import random
 import threading
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -4247,3 +4248,162 @@ def run_frontend_epp_token_parity(
     raise AssertionError(
         f"{control.name}-negative: same comparator accepted diverged live requests"
     )
+
+
+def frontend_epp_tools_token_parity_cases(model_name: str) -> list[TokenParityCase]:
+    """Reusable actual-token scenarios for tool schema and tool-history rendering.
+
+    Each case carries a real chat body and a sibling that changes only the tool
+    schema or only the tool reply so the same comparator can reject a live
+    mismatch. Payloads are built from local fresh copies.
+    """
+    chat_path = "/v1/chat/completions"
+    weather_tool = {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather for a city.",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+    user_message = {"role": "user", "content": "What is the weather in Paris?"}
+
+    schema_payload = {
+        "model": model_name,
+        "messages": [deepcopy(user_message)],
+        "tools": [deepcopy(weather_tool)],
+        "stream": True,
+        "max_tokens": 1,
+    }
+    schema_divergent = deepcopy(schema_payload)
+    schema_divergent["tools"][0]["function"]["parameters"]["properties"]["unit"] = {
+        "type": "string",
+        "enum": ["celsius", "fahrenheit"],
+    }
+
+    history_payload = {
+        "model": model_name,
+        "messages": [
+            deepcopy(user_message),
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_weather_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": json.dumps({"city": "Paris"}),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_weather_1",
+                "content": json.dumps({"temperature": 18}),
+            },
+            {"role": "user", "content": "Should I bring a jacket?"},
+        ],
+        "tools": [deepcopy(weather_tool)],
+        "stream": True,
+        "max_tokens": 1,
+    }
+    history_divergent = deepcopy(history_payload)
+    history_divergent["messages"][2]["content"] = json.dumps({"temperature": -12})
+
+    return [
+        TokenParityCase(
+            name="tool_schema",
+            path=chat_path,
+            payload=schema_payload,
+            divergent_payload=schema_divergent,
+        ),
+        TokenParityCase(
+            name="tool_history",
+            path=chat_path,
+            payload=history_payload,
+            divergent_payload=history_divergent,
+        ),
+    ]
+
+
+def run_frontend_epp_tools_token_parity(
+    stack,
+    cases: list[TokenParityCase],
+) -> None:
+    """Compare live Frontend/EPP tokens for tool schema and tool-history cases.
+
+    Each case is handed to the existing runner with the live negative control
+    enabled so a schema-only mutation and a reply-only mutation must both be
+    rejected. The declaration case also collects original, tools-omitted, and
+    changed-schema bodies on each arm so a silent ignore of tools cannot pass.
+    """
+    # epp_parity pulls gRPC; common.py is imported by unrelated router tests.
+    from tests.router.epp_parity import unique_request_id
+
+    if not cases:
+        raise AssertionError(
+            "tools token parity requires at least one actual request case"
+        )
+
+    for case in cases:
+        run_frontend_epp_token_parity(stack, [case], include_negative_control=True)
+
+    declaration = next((case for case in cases if case.name == "tool_schema"), None)
+    if declaration is None:
+        raise AssertionError(
+            "tools token parity requires a tool_schema declaration case"
+        )
+
+    omitted_payload = deepcopy(declaration.payload)
+    del omitted_payload["tools"]
+
+    bodies = (
+        ("baseline", declaration.payload),
+        ("tools_omitted", omitted_payload),
+        ("changed_schema", declaration.divergent_payload),
+    )
+    observed: dict[str, dict[str, list[int]]] = {"frontend": {}, "epp": {}}
+    for body_name, payload in bodies:
+        observed["frontend"][body_name] = stack.collect_frontend_tokens(
+            payload,
+            path=declaration.path,
+            request_id=unique_request_id(f"fe-{declaration.name}-{body_name}"),
+        )
+        observed["epp"][body_name] = stack.collect_epp_tokens(
+            payload,
+            path=declaration.path,
+            request_id=unique_request_id(f"epp-{declaration.name}-{body_name}"),
+        )
+
+    arm_labels = {
+        "frontend": "frontend.nvext.token_ids",
+        "epp": "epp.nvext.token_data",
+    }
+    for arm_name, label in arm_labels.items():
+        arm_tokens = observed[arm_name]
+        for other_name in ("tools_omitted", "changed_schema"):
+            case_name = f"{declaration.name}-{arm_name}-{other_name}"
+            baseline_tokens = arm_tokens["baseline"]
+            variant_tokens = arm_tokens[other_name]
+            assert baseline_tokens != variant_tokens, (
+                f"{case_name}: {label} baseline matched {other_name}"
+            )
+            logger.info(
+                "Tools token sensitivity confirmed for %s (%s vs %s)",
+                case_name,
+                f"{label}.baseline",
+                f"{label}.{other_name}",
+            )
+
+    if stack.kube_api.failures:
+        raise AssertionError(
+            "Loopback Kubernetes API recorded unexpected requests: "
+            + "; ".join(stack.kube_api.failures)
+        )
