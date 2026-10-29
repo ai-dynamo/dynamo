@@ -98,7 +98,7 @@ Added by an individual metric family. Each label appears only on the metrics not
 </ParamField>
 
 <ParamField path="policy_class" type="string">
-  `[Shared]` On `dynamo_frontend_router_queue_*` — the resolved physical scheduler queue. With policy-family or cache-bucket configuration, this can differ from the family requested by the client.
+  `[Shared]` On `dynamo_frontend_router_queue_*` — the resolved policy class. A missing or unknown requested class resolves to the default class, so this can differ from the value the client sent.
 </ParamField>
 
 <ParamField path="reason" type="string">

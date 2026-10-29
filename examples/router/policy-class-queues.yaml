@@ -1,84 +1,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 3072
-    bucket: uncached
+# Requests select a class by name with the x-dynamo-meta-policy-class header.
+# A missing or unknown name uses default_policy_class. While both queues are
+# backlogged, the 800:200 quanta split uncached-token scheduling credit 80/20.
+# slo_ttft_ms is validated and stored; queue ordering and expiry do not use it yet.
+default_policy_class: standard
 policy_classes:
-  - name: cached
-    policy_family: standard
-    cache_bucket: cached
-    queue_policy: wspt
-    quantum: 2048
-    prefill_busy_threshold_frac: 16.0
-    request_queue_limit_per_worker: 1024
-    cached_token_queue_limit_per_worker: 2097152
-  - name: uncached
-    policy_family: standard
-    cache_bucket: uncached
+  - name: priority
+    quantum: 800
     queue_policy: fcfs
-    quantum: 512
-    prefill_busy_threshold_frac: 16.0
-    request_queue_limit_per_worker: 512
-    raw_isl_token_queue_limit_per_worker: 1048576
-  - name: latency_cached
-    policy_family: latency
-    cache_bucket: cached
-    queue_policy: wspt
-    quantum: 4096
-    prefill_busy_threshold_frac: 16.0
+    slo_ttft_ms: 1000
+    prefill_busy_threshold_frac: 1.0
     request_queue_limit_per_worker: 256
-  - name: latency_uncached
-    policy_family: latency
-    cache_bucket: uncached
-    queue_policy: wspt
-    quantum: 1024
-    prefill_busy_threshold_frac: 16.0
-    request_queue_limit_per_worker: 128
-    raw_isl_token_queue_limit_per_worker: 524288
-  - name: custom_priority
-    queue_policy: wspt
-    quantum: 4096
-    prefill_busy_threshold_frac: 16.0
-    request_queue_limit_per_worker: 128
+  - name: standard
+    quantum: 200
+    queue_policy: fcfs
+    slo_ttft_ms: 3000
+    prefill_busy_threshold_frac: 1.0
+    request_queue_limit_per_worker: 1024
 
 models:
+  # A model profile replaces the root profile. Its only class is the default.
   example/large-model:
-    default_policy_family: latency
-    uncached_isl_buckets:
-      - min_tokens: 0
-        bucket: cached
-      - min_tokens: 4096
-        bucket: uncached
     policy_classes:
-      - name: latency_cached
-        policy_family: latency
-        cache_bucket: cached
-        queue_policy: wspt
-        quantum: 4096
-        prefill_busy_threshold_frac: 16.0
-        request_queue_limit_per_worker: 256
-      - name: latency_uncached
-        policy_family: latency
-        cache_bucket: uncached
-        queue_policy: wspt
-        quantum: 1024
-        prefill_busy_threshold_frac: 16.0
-        request_queue_limit_per_worker: 128
-      - name: batch_cached
-        policy_family: batch
-        cache_bucket: cached
+      - name: standard
+        quantum: 1000
         queue_policy: fcfs
-        quantum: 2048
-        prefill_busy_threshold_frac: 16.0
-        cached_token_queue_limit_per_worker: 1048576
-      - name: batch_uncached
-        policy_family: batch
-        cache_bucket: uncached
-        queue_policy: fcfs
-        quantum: 1024
-        prefill_busy_threshold_frac: 16.0
-        raw_isl_token_queue_limit_per_worker: 524288
+        slo_ttft_ms: 3000
+        prefill_busy_threshold_frac: 1.0
+        request_queue_limit_per_worker: 1024

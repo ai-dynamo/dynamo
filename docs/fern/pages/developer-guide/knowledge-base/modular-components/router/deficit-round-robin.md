@@ -6,7 +6,7 @@ subtitle: Weighted arbitration across router policy classes
 ---
 
 The router uses a Deficit Round Robin (DRR) variant that is work-conserving
-across dispatchable physical policy classes. DRR determines which class can
+across dispatchable policy classes. DRR determines which class can
 dispatch next; the configured FCFS or WSPT policy determines request order
 within that class's shared and exact-worker lanes.
 
@@ -26,11 +26,11 @@ uncached_tokens = raw_isl_tokens - cached_tokens
 scheduling_cost = max(1, uncached_tokens)
 ```
 
-The router uses exact uncached tokens for cache-bucket classification and uses
-the clamped `scheduling_cost` for DRR and WSPT. The snapshot is not recomputed
-while the request waits.
+The router uses the clamped `scheduling_cost` for DRR and WSPT. Cache state
+does not choose the request's class. The snapshot is not recomputed while the
+request waits.
 
-Each physical policy class defines a positive `quantum`, measured in uncached
+Each policy class defines a positive `quantum`, measured in uncached
 tokens. A class with quantum `4096` earns four times as much DRR credit per
 round as a class with quantum `1024`. This weighting controls token service,
 not request count: variable-size requests consume correspondingly different
@@ -38,7 +38,7 @@ amounts of credit.
 
 ## DRR State
 
-The scheduler maintains the following state for each physical class:
+The scheduler maintains the following state for each class:
 
 - A shared pending heap for requests that can use any eligible worker.
 - One pending heap per exact-worker target, ordered by the same strict priority
@@ -172,33 +172,35 @@ their separate lanes.
 
 ## Configuration
 
-Set each physical class's `quantum` in the router policy YAML:
+Set each class's `quantum` in the router policy YAML. This profile gives
+`priority` 80% and `standard` 20% of the scheduling credit while both are
+backlogged:
 
 ```yaml
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 3072
-    bucket: uncached
-
+default_policy_class: standard
 policy_classes:
-  - name: cached
-    policy_family: standard
-    cache_bucket: cached
-    queue_policy: wspt
-    quantum: 2048
-
-  - name: uncached
-    policy_family: standard
-    cache_bucket: uncached
+  - name: priority
+    quantum: 800
     queue_policy: fcfs
-    quantum: 512
+    slo_ttft_ms: 1000
+  - name: standard
+    quantum: 200
+    queue_policy: fcfs
+    slo_ttft_ms: 3000
 ```
 
+Quantum allocates scheduling credit, not a request count, a worker-slot
+reservation, or a share of physical compute. Suppose both queues are
+backlogged, `priority` is visited first, its next requests cost 300 and 500
+tokens, and `standard`'s next request costs 200. One round dispatches both
+`priority` requests for 800 credit and the `standard` request for 200: an
+80/20 split of charged cost, but a 2:1 split of requests. When `standard` has no
+dispatchable work, `priority` can use the idle capacity. `slo_ttft_ms` does not
+affect this order.
+
 Use larger quantum ratios only when the corresponding classes should receive
-larger shares of uncached-token service. For the complete policy-family and
-cache-bucket schema, thresholds, and per-worker queue limits, see
+larger shares of uncached-token service. For the complete policy-class schema,
+thresholds, and per-worker queue limits, see
 [Configuration and Tuning](configuration-and-tuning.md#policy-class-queues). See
 the tested [sample policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/policy-class-queues.yaml)
 for a complete profile.
@@ -219,21 +221,14 @@ tokens and generates one output token. Save the following configuration as
 `policy-classes.yaml`:
 
 ```yaml
-default_policy_family: regular
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: regular
 policy_classes:
   - name: premium
-    policy_family: premium
-    cache_bucket: all
     queue_policy: fcfs
     quantum: 512
     prefill_busy_threshold: 1536
     request_queue_limit_per_worker: 1024
   - name: regular
-    policy_family: regular
-    cache_bucket: all
     queue_policy: fcfs
     quantum: 128
     prefill_busy_threshold: 1536
@@ -259,7 +254,7 @@ which queueing should begin in your deployment.
 
 ### Select a Class on Each Request
 
-Send the requested policy family in the `x-dynamo-meta-policy-class` header:
+Send the class name in the `x-dynamo-meta-policy-class` header:
 
 ```bash
 curl http://localhost:8000/v1/completions \
@@ -274,9 +269,9 @@ curl http://localhost:8000/v1/completions \
 ```
 
 Requests with a missing or unrecognized class header use the `regular`
-default family in this configuration. See
+default class in this configuration. See
 [Policy-Class Queues](configuration-and-tuning.md#policy-class-queues) for the
-complete class and cache-bucket resolution rules.
+complete class resolution rules.
 
 ### Observe the Premium Share
 
