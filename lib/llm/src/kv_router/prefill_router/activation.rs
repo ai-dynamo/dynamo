@@ -1332,4 +1332,338 @@ mod tests {
         frontend_runtime.shutdown();
         worker_runtime.shutdown();
     }
+
+    /// Holds each prefill in flight after bootstrap until the worker context is
+    /// stopped, reporting that cancellation, or until the test releases it.
+    struct HeldPrefillWorker {
+        cancelled: tokio::sync::mpsc::UnboundedSender<String>,
+        held: tokio_util::sync::CancellationToken,
+    }
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            anyhow::Error,
+        > for HeldPrefillWorker
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            let context = request.context();
+            let worker_context = context.clone();
+            let cancelled = self.cancelled.clone();
+            let held = self.held.clone();
+            let response = async_stream::stream! {
+                yield Annotated::from_data(LLMEngineOutput {
+                    disaggregated_params: Some(serde_json::json!({
+                        "bootstrap_host": "127.0.0.1", "bootstrap_port": 1, "bootstrap_room": 7,
+                    })),
+                    ..Default::default()
+                });
+                tokio::select! {
+                    _ = worker_context.stopped() => {
+                        let _ = cancelled.send(worker_context.id().to_string());
+                    }
+                    _ = held.cancelled() => {}
+                }
+            };
+            Ok(ResponseStream::new(Box::pin(response), context))
+        }
+    }
+
+    /// Fails its first `failures` calls with a migratable error, at dispatch or
+    /// as the first stream item, then streams token 7. The token is not
+    /// terminal, so it is not held back while prefill is in flight.
+    struct UnreachableDecodeHost {
+        stream: bool,
+        failures: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            anyhow::Error,
+        > for UnreachableDecodeHost
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            use std::sync::atomic::Ordering;
+            if self
+                .failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_err()
+            {
+                let token = LLMEngineOutput {
+                    token_ids: vec![7],
+                    ..Default::default()
+                };
+                return Ok(ResponseStream::new(
+                    Box::pin(futures::stream::iter([
+                        Annotated::from_data(token),
+                        Annotated::from_data(LLMEngineOutput::stop()),
+                    ])),
+                    request.context(),
+                ));
+            }
+            let error = dynamo_runtime::error::DynamoError::builder()
+                .error_type(ErrorType::CannotConnect)
+                .message("decode worker unreachable")
+                .build();
+            if !self.stream {
+                return Err(error.into());
+            }
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::iter([Annotated::from_err(error)])),
+                request.context(),
+            ))
+        }
+    }
+
+    /// Remote prefill followed by decode, as the pipeline below `Migration`.
+    struct PrefillThenDecode {
+        router: Arc<PrefillRouter>,
+        decode: Arc<UnreachableDecodeHost>,
+    }
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            anyhow::Error,
+        > for PrefillThenDecode
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            self.router.generate(request, self.decode.clone()).await
+        }
+    }
+
+    /// Run one request through `Migration` with up to one retry, returning its
+    /// first decode tokens or the error the client would see.
+    async fn migrate(
+        router: &Arc<PrefillRouter>,
+        id: &str,
+        decode: UnreachableDecodeHost,
+    ) -> Result<Vec<u32>> {
+        let migration = crate::migration::Migration::new(
+            1,
+            None,
+            "test-model".into(),
+            Arc::new(crate::http::service::metrics::Metrics::new()),
+        );
+        let next: dynamo_runtime::pipeline::ServerStreamingEngine<
+            PreprocessedRequest,
+            Annotated<LLMEngineOutput>,
+        > = Arc::new(PrefillThenDecode {
+            router: router.clone(),
+            decode: Arc::new(decode),
+        });
+        let request = dynamo_runtime::pipeline::Context::with_id_and_metadata(
+            request(),
+            id.to_string(),
+            Default::default(),
+        );
+        let mut response = migration.generate(request, next).await?;
+        let item = response.next().await.expect("decode must respond");
+        if let Some(error) = item.err() {
+            return Err(error.into());
+        }
+        Ok(item.data.map(|data| data.token_ids).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn migration_releases_prefill_booking_only_for_committed_retry() {
+        // Isolate the process-global TCP request server, as in the routing-hop test above.
+        const TEST: &str = concat!(
+            module_path!(),
+            "::migration_releases_prefill_booking_only_for_committed_retry"
+        );
+        let test_name = TEST.split_once("::").unwrap().1;
+        if std::env::var("DYNAMO_ROUTING_HOP_TEST").as_deref() != Ok(test_name) {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", test_name, "--nocapture"])
+                .env("DYNAMO_ROUTING_HOP_TEST", test_name)
+                .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                .env("DYN_TCP_RPC_PORT", "0")
+                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), child.output())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let runtime = Runtime::from_current().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let config = || DistributedConfig {
+            discovery_backend: DiscoveryBackend::KvStore(kv::Selector::File(store.path().into())),
+            nats_config: None,
+            request_plane: RequestPlaneMode::Tcp,
+            response_plane: None,
+            event_transport_kind: EventTransportKind::Zmq,
+        };
+        let namespace = format!("prefill-retry-{}", uuid::Uuid::new_v4());
+        let worker_runtime = DistributedRuntime::new(runtime.clone(), config())
+            .await
+            .unwrap();
+        let worker_endpoint = worker_runtime
+            .namespace(namespace.clone())
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("prefill");
+        let (cancelled, mut cancellations) = tokio::sync::mpsc::unbounded_channel();
+        let held = tokio_util::sync::CancellationToken::new();
+        let worker = worker_endpoint
+            .endpoint_builder()
+            .handler(
+                Ingress::for_engine(Arc::new(HeldPrefillWorker {
+                    cancelled,
+                    held: held.clone(),
+                }))
+                .unwrap(),
+            )
+            .start_with_registration()
+            .await
+            .unwrap();
+        let kv_config = KvRouterConfig {
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            ..Default::default()
+        };
+        let mut advertised = card(Some(RouterConfig::new(RouterMode::KV, kv_config)));
+        advertised.kv_cache_block_size = 64;
+        worker_runtime
+            .discovery()
+            .register(
+                DiscoverySpec::from_model(
+                    namespace.clone(),
+                    "workers".into(),
+                    "prefill".into(),
+                    &advertised,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let frontend_runtime = DistributedRuntime::new(runtime, config()).await.unwrap();
+        let endpoint = frontend_runtime
+            .namespace(namespace.clone())
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("prefill");
+        let router = PrefillRouter::new_with_selection_policy(
+            None,
+            Arc::new(ModelManager::new()),
+            RouterMode::KV,
+            64,
+            None,
+            SelectionPolicySource::Registry,
+            None,
+            None,
+            SessionAffinityMode::Hard,
+            "test-model".into(),
+            namespace,
+            LoadThresholdHandle::new(Default::default()),
+            frontend_runtime.child_token(),
+            None,
+        );
+        let (_admissions, admitted_ids) = watch::channel(vec![worker.instance().id()]);
+        router.set_target(Some(WorkerSetTarget::Committed(CommittedWorkerSetTarget {
+            group: endpoint.id().to_string(),
+            endpoint,
+            generation: 1,
+            card: Arc::new(advertised),
+            admitted_ids,
+        })));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while router.lifecycle_state() != PrefillLifecycleState::Active {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("prefill target must activate");
+
+        // Migration retries a failed attempt under the same request ID, starting
+        // again from remote prefill. Each attempt's prefill is still in flight
+        // when its decode fails, as when a decode worker dies between discovery
+        // and dispatch or fails before its first token.
+        for streamed in [false, true] {
+            let decode = |failures: u32| UnreachableDecodeHost {
+                stream: streamed,
+                failures: failures.into(),
+            };
+            let id = uuid::Uuid::new_v4().to_string();
+            let tokens =
+                tokio::time::timeout(Duration::from_secs(5), migrate(&router, &id, decode(1)))
+                    .await
+                    .expect("retry must not hang")
+                    .unwrap_or_else(|error| {
+                        panic!("migration retry must re-book remote prefill: {error:#}")
+                    });
+            assert_eq!(tokens, vec![7]);
+
+            // Once retries run out, the last attempt's prefill keeps its booking
+            // while it runs.
+            let id = uuid::Uuid::new_v4().to_string();
+            let error =
+                tokio::time::timeout(Duration::from_secs(5), migrate(&router, &id, decode(2)))
+                    .await
+                    .expect("exhausted migration must not hang")
+                    .expect_err("every decode attempt fails");
+            assert!(
+                crate::migration::is_migratable(error.as_ref()),
+                "decode failure must be migratable: {error:#}"
+            );
+            let rebook = router
+                .generate(
+                    dynamo_runtime::pipeline::Context::with_id_and_metadata(
+                        request(),
+                        id,
+                        Default::default(),
+                    ),
+                    Arc::new(PrefillWorker(7)),
+                )
+                .await;
+            match rebook {
+                Ok(_) => panic!("the final attempt's prefill booking must be retained"),
+                Err(error) => assert!(
+                    format!("{error:#}").contains("already exists"),
+                    "unexpected re-book failure: {error:#}"
+                ),
+            }
+        }
+        // An unreachable decode worker may still have received the request, so
+        // its prefill must stay alive to serve the KV transfer.
+        assert!(
+            cancellations.try_recv().is_err(),
+            "a transport failure must not cancel the remote prefill"
+        );
+        held.cancel();
+        drop(router);
+        worker.shutdown().await.unwrap();
+        frontend_runtime.shutdown();
+        worker_runtime.shutdown();
+    }
 }

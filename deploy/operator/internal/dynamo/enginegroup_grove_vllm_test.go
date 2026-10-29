@@ -83,7 +83,7 @@ func TestVLLMGroveRenderingPreservesCommonPodInfrastructure(t *testing.T) {
 	operatorConfig.Infrastructure.ETCDAddress = "http://etcd.test:2379"
 	renderer := groveEngineGroupRenderer{operatorConfig: operatorConfig, runtimeConfig: &controller_common.RuntimeConfig{}}
 	expected, err := generatePodSpecForComponent(component, BackendFrameworkVLLM, nil, dgd, RoleMain, 1, operatorConfig,
-		consts.MultinodeDeploymentTypeGrove, component.ComponentName, nil, roleLaunchOwnedByOperator, nil, func() (int64, error) { return 4, nil })
+		consts.MultinodeDeploymentTypeGrove, component.ComponentName, nil, roleLaunchOwnedByOperator, false, nil, func() (int64, error) { return 4, nil })
 	require.NoError(t, err)
 	expectedMain := &expected.Containers[0]
 	expectedMain.LivenessProbe, expectedMain.ReadinessProbe, expectedMain.StartupProbe = main.LivenessProbe, main.ReadinessProbe, main.StartupProbe

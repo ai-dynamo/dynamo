@@ -2946,6 +2946,27 @@
         }
       ]
     },
+    "nvidia.com.v1beta1.DynamoGraphDeploymentEngineGroup": {
+      "properties": {
+        "apiVersion": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object"
+        }
+      },
+      "type": "object",
+      "x-kubernetes-group-version-kind": [
+        {
+          "group": "nvidia.com",
+          "kind": "DynamoGraphDeploymentEngineGroup",
+          "version": "v1beta1"
+        }
+      ]
+    },
     "nvidia.com.v1beta1.DynamoGraphDeploymentRequest": {
       "properties": {
         "apiVersion": {
