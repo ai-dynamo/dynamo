@@ -100,3 +100,17 @@ func TestWorkloadCandidateRequiresEngineProfileValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestRuntimeJournalIsScopedToPhysicalWorldAndAdapter(t *testing.T) {
+	t.Log("bind adapter evidence to one logical group and physical world without provider-native resources")
+	group := &api.DynamoGraphDeploymentEngineGroup{Name: "world", Namespace: "test", UID: "group-uid"}
+	kube := fake.NewClientBuilder().Build()
+	initial := runtimeJournal(kube, group, "physical-1", "membership")
+	assert.Equal(t, initial.Name, runtimeJournal(kube, group, "physical-1", "membership").Name)
+	assert.Equal(t, group.Namespace, initial.Namespace)
+	assert.Equal(t, group.UID, initial.Owner.UID)
+
+	t.Log("a replacement world or another adapter must not inherit the retained journal")
+	assert.NotEqual(t, initial.Name, runtimeJournal(kube, group, "physical-2", "membership").Name)
+	assert.NotEqual(t, initial.Name, runtimeJournal(kube, group, "physical-1", "traffic").Name)
+}
