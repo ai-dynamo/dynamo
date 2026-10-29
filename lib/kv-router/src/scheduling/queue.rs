@@ -56,7 +56,10 @@ pub use crate::plugins::worker_selection::inputs::DEFAULT_MAX_BATCHED_TOKENS;
 
 mod capacity;
 
-const ADMISSION_CHANNEL_CAPACITY: usize = 65_536;
+/// Callers build an Enqueue's prepared rows only once they hold a slot, so this also
+/// bounds the rows in flight: ranks x ~120 B each, about 60 MiB at 2048 ranks. A
+/// backlog past it waits, in order, for a slot.
+const ADMISSION_CHANNEL_CAPACITY: usize = 256;
 
 struct ClassQueueCounters {
     pending_count: AtomicUsize,
@@ -99,19 +102,19 @@ struct PreparedAdmission {
     /// Configuration generation, loaded before the configuration was read.
     workers_generation: u64,
     available_worker_ids: Option<Arc<HashSet<WorkerId>>>,
-    overloaded_worker_ids: Option<HashSet<WorkerId>>,
+    overloaded_worker_ids: Option<Arc<HashSet<WorkerId>>>,
 }
 
 impl PreparedAdmission {
     /// The rows, when built from the inputs the actor selects with.
     fn into_current(
-        self: Box<Self>,
+        self,
         workers_generation: u64,
         available_worker_ids: Option<&Arc<HashSet<WorkerId>>>,
-        overloaded_worker_ids: Option<&HashSet<WorkerId>>,
+        overloaded_worker_ids: Option<&Arc<HashSet<WorkerId>>>,
     ) -> Option<PreparedCandidates> {
-        // Availability is one shared snapshot until it changes, so this usually
-        // compares pointers.
+        // Availability and overload are each one shared snapshot until they change,
+        // so these usually compare pointers.
         (self.workers_generation == workers_generation
             && self.available_worker_ids.as_ref() == available_worker_ids
             && self.overloaded_worker_ids.as_ref() == overloaded_worker_ids)
@@ -933,9 +936,13 @@ impl<
             return None;
         }
 
+        let Ok(slot) = self.admission_tx.reserve().await else {
+            request.respond(Err(KvSchedulerError::SubscriberShutdown));
+            return None;
+        };
         let prepared = self.prepare_candidates(&request);
         let (ack_tx, ack_rx) = oneshot::channel();
-        let command = AdmissionCommand::Enqueue {
+        slot.send(AdmissionCommand::Enqueue {
             request,
             attempt_tx,
             block_hashes: self.prepare_block_hashes_for_refresh(block_hashes),
@@ -943,15 +950,7 @@ impl<
             queue_metadata,
             lease,
             ack_tx,
-        };
-
-        if let Err(error) = self.admission_tx.send(command).await {
-            let AdmissionCommand::Enqueue { mut request, .. } = error.0 else {
-                return None;
-            };
-            request.respond(Err(KvSchedulerError::SubscriberShutdown));
-            return None;
-        }
+        });
 
         match ack_rx.await {
             Ok(lease) => lease,
@@ -1248,7 +1247,8 @@ impl<
         if request.pinned_worker.is_some() {
             return None;
         }
-        let preparer = self.candidate_preparer.load().as_deref().copied()?;
+        let preparer = self.candidate_preparer.load();
+        let preparer = preparer.as_deref()?;
         // Load before reading the configuration: a change after this load
         // advances the generation before the actor selects with these rows.
         let workers_generation = self.workers_generation.load(AtomicOrdering::Acquire);
@@ -1264,7 +1264,7 @@ impl<
         let eligibility = selection_eligibility(
             request,
             &workers,
-            overloaded_worker_ids.as_ref(),
+            overloaded_worker_ids.as_deref(),
             available_worker_ids.as_deref(),
             None,
             self.exclusive_affinity,
@@ -1934,7 +1934,7 @@ impl<
             let eligibility = selection_eligibility(
                 request,
                 &workers,
-                overloaded_worker_ids.as_ref(),
+                overloaded_worker_ids.as_deref(),
                 available_worker_ids.as_deref(),
                 Some(&self.full_ranks),
                 self.selector.uses_exclusive_affinity_target(),
@@ -3901,7 +3901,6 @@ policy_classes:
         }
     }
 
-    /// Delegates to a composed policy and counts selections from prepared rows.
     struct CountingPreparedPolicy {
         inner: crate::WorkerSelectionPolicy,
         prepared_selections: Arc<AtomicUsize>,
@@ -3979,7 +3978,7 @@ policy_classes:
         slots: Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
         cfg_tx: watch::Sender<HashMap<u64, SimpleWorkerConfig>>,
         available: Arc<StdMutex<Option<Arc<HashSet<WorkerId>>>>>,
-        overloaded: Arc<StdMutex<Option<HashSet<WorkerId>>>>,
+        overloaded: Arc<StdMutex<Option<Arc<HashSet<WorkerId>>>>>,
         reject: Arc<StdMutex<BusyThresholds>>,
         prepared_selections: Arc<AtomicUsize>,
     }
@@ -4107,7 +4106,9 @@ policy_classes:
                 "availability" => {
                     *prepared_queue.available.lock().unwrap() = Some(Arc::new(HashSet::from([1])))
                 }
-                "overload" => *prepared_queue.overloaded.lock().unwrap() = Some(HashSet::from([0])),
+                "overload" => {
+                    *prepared_queue.overloaded.lock().unwrap() = Some(Arc::new(HashSet::from([0])))
+                }
                 _ => {
                     // Past half its 64-token prefill budget, worker 0's only rank is full.
                     *prepared_queue.reject.lock().unwrap() = BusyThresholds {
@@ -4153,6 +4154,32 @@ policy_classes:
         let selected = rx.try_recv().unwrap().unwrap().best_worker;
         assert_eq!(selected, WorkerWithDpRank::new(1, 0));
         assert_eq!(prepared_queue.prepared_selections(), 0);
+    }
+
+    #[tokio::test]
+    async fn prepared_rows_are_built_after_a_channel_slot() {
+        let prepared_queue = make_prepared_queue();
+        let queue = &prepared_queue.queue;
+        // Hold every slot, so the enqueue below waits before preparing.
+        let held = queue
+            .admission_tx
+            .reserve_many(queue.admission_tx.max_capacity())
+            .await
+            .unwrap();
+        let (request, rx) = make_request("request", 64);
+        let enqueue = tokio::spawn({
+            let queue = Arc::clone(queue);
+            async move { queue.enqueue(request).await }
+        });
+        tokio::task::yield_now().await;
+
+        // Worker 0 leaves while the caller waits; rows built after the wait see it.
+        *prepared_queue.available.lock().unwrap() = Some(Arc::new(HashSet::from([1])));
+        drop(held);
+        enqueue.await.unwrap();
+        let selected = rx.await.unwrap().unwrap().best_worker;
+        assert_eq!(selected, WorkerWithDpRank::new(1, 0));
+        assert_eq!(prepared_queue.prepared_selections(), 1);
     }
 
     #[tokio::test]
@@ -4246,7 +4273,7 @@ policy_classes:
         drop(queue.booking_handle(booking.clone()));
         assert!(slots.has_booking(&booking));
         let mut responses = Vec::new();
-        for _ in 0..512 {
+        for _ in 0..ADMISSION_CHANNEL_CAPACITY {
             let (request, _rx) = make_request("probe", 64);
             let (resp_tx, resp_rx) = oneshot::channel();
             permits
@@ -5519,7 +5546,7 @@ policy_classes:
     #[tokio::test(flavor = "multi_thread")]
     async fn test_overloaded_provider_filters_at_admission() {
         let overloaded_worker_provider: OverloadedWorkerProvider =
-            Arc::new(|| Some(HashSet::from([0])));
+            Arc::new(|| Some(Arc::new(HashSet::from([0]))));
         let (queue, _slots) =
             make_queue_with_providers(1, 16, 256, Some(overloaded_worker_provider), None);
 

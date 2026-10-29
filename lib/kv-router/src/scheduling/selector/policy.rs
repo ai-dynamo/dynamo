@@ -3,6 +3,9 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use crossbeam_queue::ArrayQueue;
 
 #[cfg(any(test, feature = "bench"))]
 use super::DefaultWorkerPicker;
@@ -58,7 +61,13 @@ pub(super) struct ComposedPolicyState {
     pub(super) load_inputs: Vec<WorkerLoadInput>,
     /// Each unscored row's fetch target and local prefix while its source waits for every row.
     transfer_targets: Vec<Option<(KvTransferTarget, usize)>>,
+    /// Row buffers selection is done with, for callers to prepare into next.
+    row_buffers: Arc<ArrayQueue<Vec<CandidateData>>>,
 }
+
+/// Enough for the buffers in flight between callers and the actor to come back
+/// without allocating, while bounding what an idle policy keeps.
+const ROW_BUFFERS: usize = 64;
 
 /// Native scorer/picker composition for [`WorkerSelector`].
 ///
@@ -143,6 +152,7 @@ impl WorkerSelectionPolicy {
                 cache_inputs: Vec::new(),
                 load_inputs: Vec::new(),
                 transfer_targets: Vec::new(),
+                row_buffers: Arc::new(ArrayQueue::new(ROW_BUFFERS)),
             })),
         }
     }
@@ -329,17 +339,27 @@ impl ComposedPolicyState {
 /// Rows hold every eligible rank's cache, preferred-taint, and fetch inputs, which
 /// depend only on the request and worker configuration. Load inputs depend on the
 /// actor's earlier bookings, so the actor fills them at selection.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub struct CandidatePreparer {
     inputs: WorkerInputs,
+    row_buffers: Arc<ArrayQueue<Vec<CandidateData>>>,
 }
 
-/// Rows built by [`CandidatePreparer`] for one selection.
 pub struct PreparedCandidates {
     inputs: WorkerInputs,
     rows: Vec<CandidateData>,
     max_raw_cached_tokens: Option<usize>,
     kv_transfer_sources: Option<KvTransferSourceSummary>,
+    row_buffers: Arc<ArrayQueue<Vec<CandidateData>>>,
+}
+
+impl Drop for PreparedCandidates {
+    fn drop(&mut self) {
+        // Back to the pool for the next preparation; a full pool drops it instead.
+        if self.rows.capacity() > 0 {
+            let _ = self.row_buffers.push(std::mem::take(&mut self.rows));
+        }
+    }
 }
 
 impl CandidatePreparer {
@@ -354,7 +374,11 @@ impl CandidatePreparer {
         let materialize_preferred_taint = self.inputs.contains(WorkerInputs::PREFERRED_TAINT);
         let defer_transfer = request.kv_transfer_candidates.is_some()
             && self.inputs.contains(WorkerInputs::KV_TRANSFER);
-        let mut rows = Vec::with_capacity(workers.len());
+        let mut rows = self
+            .row_buffers
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(workers.len()));
+        rows.clear();
         let mut transfer_targets = Vec::new();
         eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
             let preferred_taint_multiplier = if materialize_preferred_taint {
@@ -383,6 +407,7 @@ impl CandidatePreparer {
             rows,
             max_raw_cached_tokens: input.max_raw_cached_tokens(),
             kv_transfer_sources: input.into_kv_transfer_sources(),
+            row_buffers: Arc::clone(&self.row_buffers),
         })
     }
 }
@@ -400,9 +425,12 @@ pub(super) fn collect_prepared_candidates<C: WorkerConfigLike>(
     state: &mut ComposedPolicyState,
     input: &MaterializedSelectionInput<'_>,
     workers: &HashMap<WorkerId, C>,
-    prepared: PreparedCandidates,
+    mut prepared: PreparedCandidates,
 ) -> Result<bool, KvSchedulerError> {
-    input.restore_prepared(prepared.max_raw_cached_tokens, prepared.kv_transfer_sources);
+    input.restore_prepared(
+        prepared.max_raw_cached_tokens,
+        prepared.kv_transfer_sources.take(),
+    );
     let ComposedPolicyState {
         scorers,
         scorer_picker_inputs,
@@ -416,8 +444,9 @@ pub(super) fn collect_prepared_candidates<C: WorkerConfigLike>(
     candidates.clear();
     cache_inputs.clear();
     load_inputs.clear();
-    // Adopt the prepared rows as the scorer rows rather than copying them.
-    *unscored_candidates = prepared.rows;
+    // Adopt the prepared rows as the scorer rows rather than copying them; the
+    // outgoing buffer goes back to the pool when `prepared` drops.
+    std::mem::swap(unscored_candidates, &mut prepared.rows);
     let fill_load = scorer_picker_inputs.contains(WorkerInputs::LOAD);
     for row in unscored_candidates.iter_mut() {
         if fill_load {
@@ -624,8 +653,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
             WorkerSelectionPolicyState::Composed(state) => {
                 let state = state.borrow();
                 // Filters are policy callbacks, so they run on the actor.
-                state.filters.is_empty().then_some(CandidatePreparer {
+                state.filters.is_empty().then(|| CandidatePreparer {
                     inputs: state.scorer_picker_inputs,
+                    row_buffers: Arc::clone(&state.row_buffers),
                 })
             }
         }
