@@ -202,6 +202,23 @@
             "[mobile_data_issue]bad_network_preference[PERSONA:Hard]"
           ]
         }
+      },
+      "openrouter": {
+        "target_minutes": 8,
+        "timeout_seconds": 1500,
+        "image": "ghcr.io/luckyq/openrouter-bench-harness:c963333-p2@sha256:98852cb1c423054a0babd326b395e9643a8f26a16488142369fb7e0f4692bf06",
+        "harness_repo": "https://github.com/OpenRouterTeam/benchmark-harness",
+        "harness_commit": "c9633333c5c4a158eae059bd257f81229ff4589c",
+        "patches": [
+          "0001-score-direct-endpoint-rejections.patch"
+        ],
+        "benchmark": "toolcall_schema_fuzz",
+        "generator": "sentinel",
+        "expected_case_count": 187,
+        "concurrency": 8,
+        "reasoning_effort": "low",
+        "max_tokens": 2048,
+        "request_timeout_ms": 300000
       }
     }
   }

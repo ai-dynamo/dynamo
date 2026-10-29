@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -24,7 +25,7 @@ from .bfcl_capture import FAILURES_FILE, TRACE_FILE
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_PROFILES = ROOT / "profiles.json"
-SUITES = ("custom", "bfcl", "tau2")
+SUITES = ("custom", "bfcl", "tau2", "openrouter")
 CUSTOM_SELECTION_FILE = "custom-case-ids.json"
 CUSTOM_GENERIC_CASE_COUNT = 61
 CUSTOM_MODES = ("nonstream", "stream")
@@ -1070,6 +1071,329 @@ def _run_tau2(
     result["artifacts"] = {"runner_logs": logs, "result_root": str(output_dir)}
 
 
+# --- OpenRouter toolcall-schema-fuzz suite -----------------------------------
+#
+# Runs OpenRouter's benchmark harness from a pinned image that the deployment
+# harness repository builds (upstream commit plus one build-time patch; the
+# image's `provenance` subcommand prints both). The harness generates the
+# requests, talks to the
+# Dynamo endpoint, scores every sample with its own scorer, and writes parquet;
+# this runner only fixes the selection, checks that exactly the expected
+# samples were scored, and normalizes the harness's report into the
+# suite-result contract.
+
+OPENROUTER_CASE_IDS_FILE = "openrouter-case-ids.json"
+OPENROUTER_REPORT_FILE = "openrouter-report.json"
+OPENROUTER_CASE_RESULTS_FILE = "openrouter-case-results.json"
+# The harness writes one UUID-named parquet per invocation and the report
+# reads every parquet it is given, so each run gets a fresh directory and
+# the report only ever sees that run's output.
+OPENROUTER_RESULTS_DIR = "openrouter-results"
+OPENROUTER_BENCHMARK = "toolcall_schema_fuzz"
+OPENROUTER_GENERATORS = ("sentinel", "realistic")
+# The harness's failure categories, mapped onto the Custom failure taxonomy.
+# Every sample already carries the expected call in its history, so a miss is
+# the serving stack's, not the model's.
+OPENROUTER_FAILURE_SUBCATEGORIES = {
+    "request_rejected": "dynamo_api.request_validation",
+    "invalid_json": "dynamo_api.argument_encoding",
+    "schema_violation": "dynamo_api.argument_encoding",
+    "value_mismatch": "dynamo_api.argument_encoding",
+    "no_tool_call": "dynamo_api.tool_choice_enforcement",
+    "call_count": "dynamo_api.tool_choice_enforcement",
+    "wrong_tool": "dynamo_api.tool_choice_enforcement",
+    "unknown_tool": "dynamo_api.tool_choice_enforcement",
+    "unknown_case": "unclassified.probe",
+}
+
+
+def _openrouter_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    generator = str(config.get("generator") or "")
+    if generator not in OPENROUTER_GENERATORS:
+        raise ValueError(
+            f"openrouter generator must be one of {OPENROUTER_GENERATORS}, "
+            f"got {generator!r}"
+        )
+    expected = int(config.get("expected_case_count") or 0)
+    if expected <= 0:
+        raise ValueError("openrouter profile requires expected_case_count > 0")
+    image = str(config.get("image") or "")
+    if not image:
+        raise ValueError("openrouter profile requires an image")
+    return {
+        "generator": generator,
+        "expected_case_count": expected,
+        "image": image,
+        "concurrency": int(config.get("concurrency") or 8),
+        "reasoning_effort": str(config.get("reasoning_effort") or "low"),
+        "max_tokens": int(config.get("max_tokens") or 2048),
+        "request_timeout_ms": int(config.get("request_timeout_ms") or 300000),
+        "timeout_seconds": float(config["timeout_seconds"]),
+    }
+
+
+def _openrouter_commands(
+    args: argparse.Namespace, config: Mapping[str, Any]
+) -> list[list[str]]:
+    settings = _openrouter_config(config)
+    results_dir = Path(args.output_dir) / OPENROUTER_RESULTS_DIR
+    prefix = _docker_prefix(
+        settings["image"],
+        results_dir,
+        forwarded_environment=("OPENROUTER_BASE_URL", "OPENROUTER_API_KEY"),
+    )
+    dump_cases = prefix + ["dump-cases", settings["generator"]]
+    solver_config = {
+        "generator": settings["generator"],
+        "maxTokens": settings["max_tokens"],
+        "timeoutMs": settings["request_timeout_ms"],
+    }
+    bench = prefix + [
+        "bench",
+        "--benchmark",
+        OPENROUTER_BENCHMARK,
+        "--model",
+        args.model,
+        "--reasoning-effort",
+        settings["reasoning_effort"],
+        "--concurrency",
+        str(settings["concurrency"]),
+        "--solver-config",
+        json.dumps(solver_config, sort_keys=True, separators=(",", ":")),
+        "--artifact-dir",
+        "/results/artifacts",
+    ]
+    # The base URL is forwarded through the environment, not the argv, so the
+    # command list stays stable across hosts.
+    report = prefix + ["report"]
+    return [dump_cases, bench, report]
+
+
+def _openrouter_case_ids(log_path: Path) -> list[str]:
+    """Read the case dump the preflight printed and return its stable IDs."""
+    text = log_path.read_text(encoding="utf-8")
+    start = text.find("[")
+    if start < 0:
+        raise ValueError(f"openrouter case dump in {log_path} is not JSON")
+    cases = json.loads(text[start:])
+    if not isinstance(cases, list):
+        raise ValueError(f"openrouter case dump in {log_path} is not a list")
+    ids: list[str] = []
+    for case in cases:
+        case_id = case.get("id") if isinstance(case, dict) else None
+        if not isinstance(case_id, str) or not case_id:
+            raise ValueError(f"openrouter case dump in {log_path} has an invalid ID")
+        ids.append(case_id)
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"openrouter case dump in {log_path} has duplicate IDs")
+    return ids
+
+
+def _openrouter_report(log_path: Path) -> dict[str, Any]:
+    text = log_path.read_text(encoding="utf-8")
+    start = text.find("{")
+    if start < 0:
+        raise ValueError(f"openrouter report in {log_path} is not JSON")
+    payload = json.loads(text[start:])
+    if not isinstance(payload, dict) or not isinstance(payload.get("cases"), list):
+        raise ValueError(f"openrouter report in {log_path} has no cases list")
+    return payload
+
+
+def _openrouter_summary(
+    report: Mapping[str, Any], expected_ids: Sequence[str]
+) -> tuple[dict[str, Any], dict[str, Any], list[str], dict[str, dict[str, Any]]]:
+    """Normalize the harness stability report.
+
+    Returns (summary, coverage_update, problems, case_results). ``problems``
+    is non-empty when the scored sample set differs from the fixed selection
+    or a sample was not scored exactly once. ``case_results`` maps every
+    expected sample ID to its outcome so two runs (for example Dynamo and the
+    native engine serving the same model) can be compared case by case with
+    ``e2e_verifier.compare``.
+    """
+    expected = set(expected_ids)
+    scored: dict[str, Mapping[str, Any]] = {}
+    for case in report["cases"]:
+        if not isinstance(case, dict) or not isinstance(case.get("id"), str):
+            raise ValueError("openrouter report has a case without a string id")
+        scored[case["id"]] = case
+    problems: list[str] = []
+    missing = sorted(expected - set(scored))
+    unexpected = sorted(set(scored) - expected)
+    if missing:
+        problems.append(f"missing={missing[:5]} ({len(missing)})")
+    if unexpected:
+        problems.append(f"unexpected={unexpected[:5]} ({len(unexpected)})")
+    passed = 0
+    completed = 0
+    unrun: list[str] = []
+    failure_kinds: dict[str, int] = {}
+    failure_subcategories: dict[str, int] = {}
+    case_results: dict[str, dict[str, Any]] = {}
+    for case_id in expected_ids:
+        case = scored.get(case_id)
+        if case is None:
+            case_results[case_id] = {"status": "missing"}
+            continue
+        runs = int(case.get("runs") or 0)
+        if runs != 1:
+            unrun.append(case_id)
+            case_results[case_id] = {"status": "unscored", "runs": runs}
+            continue
+        completed += 1
+        passes = int(case.get("passes") or 0)
+        if passes:
+            passed += 1
+            case_results[case_id] = {"status": "pass"}
+            continue
+        failures = case.get("failures") or {}
+        if not isinstance(failures, dict) or not failures:
+            failures = {"unknown_case": 1}
+        # One sample, one primary failure: the harness records a single
+        # category per run, so the dict has one key with count 1.
+        kind = str(next(iter(failures)))
+        failure_kinds[kind] = failure_kinds.get(kind, 0) + 1
+        subcategory = OPENROUTER_FAILURE_SUBCATEGORIES.get(
+            kind, "unclassified.unknown_kind"
+        )
+        failure_subcategories[subcategory] = (
+            failure_subcategories.get(subcategory, 0) + 1
+        )
+        examples = case.get("examples") or {}
+        detail = (
+            next(iter(examples.values()), None) if isinstance(examples, dict) else None
+        )
+        case_results[case_id] = {
+            "status": "fail",
+            "failure_kind": kind,
+            "failure_subcategory": subcategory,
+            **({"detail": str(detail)[:400]} if detail else {}),
+        }
+    if unrun:
+        problems.append(f"not scored exactly once={unrun[:5]} ({len(unrun)})")
+    total = len(expected_ids)
+    summary = {
+        "passed": passed,
+        "failed": completed - passed,
+        "total": total,
+        "completed": completed,
+        "score": passed / completed if completed else None,
+        "failure_kinds": dict(sorted(failure_kinds.items())),
+        "failure_subcategories": dict(sorted(failure_subcategories.items())),
+    }
+    coverage = {
+        "resolved_case_count": total,
+        "scored_case_count": completed,
+        "unscored_case_ids": unrun,
+    }
+    return summary, coverage, problems, case_results
+
+
+def _run_openrouter(
+    args: argparse.Namespace, config: Mapping[str, Any], result: dict[str, Any]
+) -> None:
+    output_dir = Path(args.output_dir)
+    settings = _openrouter_config(config)
+    commands = _openrouter_commands(args, config)
+    result["coverage"].update(
+        {
+            "generator": settings["generator"],
+            "expected_case_count": settings["expected_case_count"],
+        }
+    )
+    if args.dry_run:
+        result["artifacts"] = {"commands": _redact_commands(commands, (args.api_key,))}
+        return
+    environment = os.environ.copy()
+    environment["OPENROUTER_BASE_URL"] = args.base_url.rstrip("/")
+    environment["OPENROUTER_API_KEY"] = args.api_key or "dummy"
+    results_dir = output_dir / OPENROUTER_RESULTS_DIR
+    if results_dir.exists():
+        # A previous run's parquet would be scored again and could mask a
+        # transport failure in this run (the upstream report drops unscored
+        # samples), so every run starts from an empty results directory.
+        shutil.rmtree(results_dir)
+    results_dir.mkdir(parents=True)
+    logs: list[str] = []
+    deadline = time.monotonic() + settings["timeout_seconds"]
+    phases = ("case preflight", "benchmark", "report")
+    expected_ids: list[str] = []
+    for index, command in enumerate(commands):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(command, settings["timeout_seconds"])
+        log_path = output_dir / f"openrouter-{index:02d}-{phases[index].split()[0]}.log"
+        completed = _run_command(
+            command, timeout=remaining, log_path=log_path, env=environment
+        )
+        logs.append(str(log_path))
+        if completed.returncode != 0:
+            result["execution_status"] = "error"
+            result[
+                "error"
+            ] = f"openrouter {phases[index]} exited {completed.returncode}"
+            result["artifacts"] = {"runner_logs": logs, "result_root": str(output_dir)}
+            return
+        if phases[index] == "case preflight":
+            try:
+                expected_ids = _openrouter_case_ids(log_path)
+            except (json.JSONDecodeError, OSError, ValueError) as exc:
+                result["execution_status"] = "error"
+                result["error"] = f"openrouter could not read the case dump: {exc}"
+                result["artifacts"] = {"runner_logs": logs}
+                return
+            if len(expected_ids) != settings["expected_case_count"]:
+                result["execution_status"] = "error"
+                result["error"] = (
+                    f"openrouter {settings['generator']} generator produced "
+                    f"{len(expected_ids)} cases, profile expects "
+                    f"{settings['expected_case_count']}"
+                )
+                result["artifacts"] = {"runner_logs": logs}
+                return
+            selection_hash = hashlib.sha256(
+                json.dumps(expected_ids, separators=(",", ":")).encode()
+            ).hexdigest()
+            _write_json(output_dir / OPENROUTER_CASE_IDS_FILE, expected_ids)
+            result["provenance"]["selection_hash"] = selection_hash
+            result["coverage"]["selection_hash"] = selection_hash
+    try:
+        report = _openrouter_report(Path(logs[-1]))
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        result["execution_status"] = "error"
+        result["error"] = f"openrouter could not read the stability report: {exc}"
+        result["artifacts"] = {"runner_logs": logs, "result_root": str(output_dir)}
+        return
+    _write_json(output_dir / OPENROUTER_REPORT_FILE, report)
+    summary, coverage, problems, case_results = _openrouter_summary(
+        report, expected_ids
+    )
+    result["summary"] = summary
+    result["coverage"].update(coverage)
+    # Per-case outcomes travel with the result so a control run (the native
+    # engine serving the same model) can be diffed against this one.
+    result["case_results"] = case_results
+    _write_json(output_dir / OPENROUTER_CASE_RESULTS_FILE, case_results)
+    result["execution_status"] = "complete" if not problems else "incomplete"
+    if problems:
+        result[
+            "error"
+        ] = "openrouter scored samples did not match the fixed selection: " + "; ".join(
+            problems
+        )
+    # Scores only for now, like BFCL: the qualification profile defines no
+    # pass threshold yet.
+    result["verdict"] = "inconclusive"
+    result["artifacts"] = {
+        "runner_logs": logs,
+        "result_root": str(results_dir),
+        "selection": str(output_dir / OPENROUTER_CASE_IDS_FILE),
+        "report": str(output_dir / OPENROUTER_REPORT_FILE),
+        "case_results": str(output_dir / OPENROUTER_CASE_RESULTS_FILE),
+    }
+
+
 def run(args: argparse.Namespace) -> int:
     profile, profile_hash = _profile(Path(args.profiles), args.profile)
     config = profile.get(args.suite)
@@ -1093,12 +1417,16 @@ def run(args: argparse.Namespace) -> int:
                 }
             elif args.suite == "bfcl":
                 _run_bfcl(args, config, result)
+            elif args.suite == "openrouter":
+                _run_openrouter(args, config, result)
             else:
                 _run_tau2(args, config, result)
         elif args.suite == "custom":
             _run_custom(args, config, result)
         elif args.suite == "bfcl":
             _run_bfcl(args, config, result)
+        elif args.suite == "openrouter":
+            _run_openrouter(args, config, result)
         else:
             _run_tau2(args, config, result)
     except subprocess.TimeoutExpired as exc:

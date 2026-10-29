@@ -14,9 +14,11 @@ from .cli import (
     _bfcl_counts,
     _custom_selection,
     _custom_verdict,
+    _openrouter_config,
     _profile,
     _run_bfcl,
     _run_custom,
+    _run_openrouter,
     main,
 )
 
@@ -786,3 +788,226 @@ def test_tau_rewards_reads_the_normalized_reward_info(tmp_path: Path) -> None:
     from .cli import _tau_rewards
 
     assert _tau_rewards(tmp_path) == [1.0, 0.0]
+
+
+def test_openrouter_dry_run_writes_normalized_contract(tmp_path: Path) -> None:
+    output_dir = tmp_path / "openrouter"
+
+    exit_code = main(
+        [
+            "--suite",
+            "openrouter",
+            "--base-url",
+            "http://127.0.0.1:8000/v1",
+            "--model",
+            "example/model",
+            "--runtime",
+            "dynamo-vllm",
+            "--output-dir",
+            str(output_dir),
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 0
+    result = json.loads((output_dir / "suite-result.json").read_text())
+    assert result["suite"] == "openrouter"
+    assert result["execution_status"] == "planned"
+    assert result["coverage"]["generator"] == "sentinel"
+    assert result["coverage"]["expected_case_count"] == 187
+    assert "@sha256:" in result["provenance"]["runner_image"]
+    commands = result["artifacts"]["commands"]
+    image = result["provenance"]["runner_image"]
+    assert [command[command.index(image) + 1] for command in commands] == [
+        "dump-cases",
+        "bench",
+        "report",
+    ]
+    bench = commands[1]
+    assert bench[bench.index("--benchmark") + 1] == "toolcall_schema_fuzz"
+    assert bench[bench.index("--model") + 1] == "example/model"
+    assert bench[bench.index("--reasoning-effort") + 1] == "low"
+    solver_config = json.loads(bench[bench.index("--solver-config") + 1])
+    assert solver_config == {
+        "generator": "sentinel",
+        "maxTokens": 2048,
+        "timeoutMs": 300000,
+    }
+    # The endpoint travels through the environment, never through argv.
+    assert all("127.0.0.1" not in argument for argument in bench)
+    assert "OPENROUTER_BASE_URL" in bench and "OPENROUTER_API_KEY" in bench
+    # Each run mounts its own results directory, so the report never sees
+    # parquet from an earlier run in the same output directory.
+    mount = bench[bench.index("-v") + 1]
+    assert mount.endswith("/openrouter-results:/results")
+
+
+def _openrouter_case(case_id: str, *, passes: int, failure: str | None = None) -> dict:
+    return {
+        "id": case_id,
+        "scenario": "single",
+        "constructs": ["object", "string"],
+        "runs": 1,
+        "passes": passes,
+        "transport": 0,
+        "stability": "passed_every_run" if passes else "failed_every_run",
+        "failures": {} if failure is None else {failure: 1},
+        "examples": {},
+    }
+
+
+def test_openrouter_normalizes_report_and_checks_selection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    output_dir = tmp_path / "openrouter"
+    output_dir.mkdir()
+    profile, _ = _profile(DEFAULT_PROFILES, "qualification")
+    config = dict(profile["openrouter"])
+    config["expected_case_count"] = 5
+    case_ids = [
+        f"toolcall_schema_fuzz-realistic:loose:case{index}" for index in range(5)
+    ]
+    report = {
+        "cases": [
+            _openrouter_case(case_ids[0], passes=1),
+            _openrouter_case(case_ids[1], passes=1),
+            _openrouter_case(case_ids[2], passes=0, failure="schema_violation"),
+            _openrouter_case(case_ids[3], passes=0, failure="request_rejected"),
+            {**_openrouter_case(case_ids[4], passes=0), "runs": 0, "transport": 1},
+        ],
+        "constructs": {},
+        "scenarios": [],
+        "totals": {"cases": 5, "runs": 4, "passes": 2},
+    }
+
+    def fake_run_command(command, *, log_path, **_kwargs):
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        if "dump-cases" in command:
+            log_path.write_text(
+                json.dumps([{"id": case_id, "tools": []} for case_id in case_ids])
+            )
+        elif "report" in command:
+            log_path.write_text("$ bun report\n" + json.dumps(report))
+        else:
+            log_path.write_text("Running toolcall_schema_fuzz ...\n")
+        return subprocess.CompletedProcess([], 0, "")
+
+    monkeypatch.setattr(
+        "benchmarks.tool_calling.e2e_verifier.cli._run_command", fake_run_command
+    )
+    args = SimpleNamespace(
+        base_url="http://127.0.0.1:8000/v1",
+        model="example/model",
+        runtime="dynamo-vllm",
+        output_dir=str(output_dir),
+        api_key=None,
+        dry_run=False,
+    )
+    result = {"coverage": dict(config), "provenance": {}, "artifacts": {}}
+
+    _run_openrouter(args, config, result)
+
+    assert result["execution_status"] == "incomplete"
+    assert "not scored exactly once" in result["error"]
+    assert result["verdict"] == "inconclusive"
+    assert result["summary"] == {
+        "passed": 2,
+        "failed": 2,
+        "total": 5,
+        "completed": 4,
+        "score": 0.5,
+        "failure_kinds": {"request_rejected": 1, "schema_violation": 1},
+        "failure_subcategories": {
+            "dynamo_api.argument_encoding": 1,
+            "dynamo_api.request_validation": 1,
+        },
+    }
+    assert result["coverage"]["unscored_case_ids"] == [case_ids[4]]
+    assert (output_dir / "openrouter-results").is_dir()
+    assert result["artifacts"]["result_root"].endswith("openrouter-results")
+    assert result["case_results"][case_ids[0]] == {"status": "pass"}
+    assert result["case_results"][case_ids[3]] == {
+        "status": "fail",
+        "failure_kind": "request_rejected",
+        "failure_subcategory": "dynamo_api.request_validation",
+    }
+    assert result["case_results"][case_ids[4]] == {"status": "unscored", "runs": 0}
+    assert (
+        json.loads((output_dir / "openrouter-case-results.json").read_text())
+        == result["case_results"]
+    )
+    assert len(result["provenance"]["selection_hash"]) == 64
+    assert json.loads((output_dir / "openrouter-case-ids.json").read_text()) == case_ids
+
+    # A drifted case set is a contract error, not a score.
+    report["cases"][0]["id"] = "toolcall_schema_fuzz-realistic:loose:renamed"
+    result = {"coverage": dict(config), "provenance": {}, "artifacts": {}}
+    _run_openrouter(args, config, result)
+    assert result["execution_status"] == "incomplete"
+    assert "missing=" in result["error"] and "unexpected=" in result["error"]
+
+
+def test_openrouter_rejects_a_case_count_drift(tmp_path: Path, monkeypatch) -> None:
+    output_dir = tmp_path / "openrouter"
+    output_dir.mkdir()
+    profile, _ = _profile(DEFAULT_PROFILES, "qualification")
+    config = profile["openrouter"]
+
+    def fake_run_command(command, *, log_path, **_kwargs):
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(json.dumps([{"id": "only-one"}]))
+        return subprocess.CompletedProcess([], 0, "")
+
+    monkeypatch.setattr(
+        "benchmarks.tool_calling.e2e_verifier.cli._run_command", fake_run_command
+    )
+    args = SimpleNamespace(
+        base_url="http://127.0.0.1:8000/v1",
+        model="example/model",
+        runtime="dynamo-vllm",
+        output_dir=str(output_dir),
+        api_key=None,
+        dry_run=False,
+    )
+    result = {"coverage": dict(config), "provenance": {}, "artifacts": {}}
+
+    _run_openrouter(args, config, result)
+
+    assert result["execution_status"] == "error"
+    assert "produced 1 cases, profile expects 187" in result["error"]
+
+
+def test_openrouter_profile_rejects_unknown_generator() -> None:
+    profile, _ = _profile(DEFAULT_PROFILES, "qualification")
+    config = {**profile["openrouter"], "generator": "everything"}
+    with pytest.raises(ValueError, match="generator must be one of"):
+        _openrouter_config(config)
+
+
+@pytest.mark.parametrize("runtime", ("vllm-serve", "sglang-serve", "dynamo-vllm"))
+def test_openrouter_is_endpoint_agnostic_across_runtimes(
+    tmp_path: Path, runtime: str
+) -> None:
+    output_dir = tmp_path / runtime
+
+    exit_code = main(
+        [
+            "--suite",
+            "openrouter",
+            "--base-url",
+            "http://127.0.0.1:8000/v1",
+            "--model",
+            "example/model",
+            "--runtime",
+            runtime,
+            "--output-dir",
+            str(output_dir),
+            "--dry-run",
+        ]
+    )
+
+    assert exit_code == 0
+    result = json.loads((output_dir / "suite-result.json").read_text())
+    assert result["runtime"] == runtime
+    # The harness only sees OPENROUTER_BASE_URL; the runtime is a label.
+    assert result["artifacts"]["commands"][1].count("--runtime") == 0

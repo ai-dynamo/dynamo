@@ -36,6 +36,7 @@ benchmark scores.
 | Custom | 61 generic cases in streaming and nonstreaming modes, plus matching model-specific cases or a complete model profile | 10–12 min |
 | BFCL | 50 BFCL v3 cases across 8 categories | 3–5 min |
 | tau2 | 9 tasks: 3 each from airline, retail, and telecom | 10–12 min |
+| OpenRouter | 187 `toolcall_schema_fuzz` sentinel samples (OpenRouter benchmark harness, run as-is) | 6–8 min |
 
 The exact selections, budgets, concurrency, and evaluator image digests live in
 `e2e_verifier/profiles.json`.
@@ -156,6 +157,43 @@ The observer preserves the evaluator's requests and exceptions. A generation
 error still prevents evaluation and yields no numeric score. Captured responses
 are public API output, not pre-parser backend generations.
 
+## OpenRouter flow
+
+The `openrouter` suite runs OpenRouter's open-source benchmark harness
+(`toolcall_schema_fuzz`: every sample already holds the expected call in its
+history and asks the model to repeat it, so a miss points at the serving
+stack) from a pinned image. The image (upstream commit plus one build-time
+patch) is built and published by the deployment harness repository
+(`images/openrouter-bench-harness/` in `e2e_tc_harness`) and referenced here
+by digest, the same way the BFCL evaluator image is. The harness
+generates the requests, scores them with its own scorer, and writes parquet;
+the verifier fixes the generator, checks that exactly the expected sample IDs
+were scored once, and maps the harness failure categories onto the Custom
+failure subcategories.
+
+```mermaid
+flowchart LR
+    I[Pinned harness image] --> D[dump-cases: expected IDs]
+    D --> B[bench against endpoint]
+    B --> R[report.ts: stability JSON]
+    R --> C{Scored IDs exact?}
+    C -->|yes| S[score + failure_subcategories]
+    C -->|no| X[incomplete]
+```
+
+The image carries one build-time patch so a 400/422 from a direct endpoint
+scores as `request_rejected` instead of aborting the run (upstream scores a
+rejection only when the body carries OpenRouter's provider envelope). The
+endpoint is passed through `OPENROUTER_BASE_URL`; `OPENROUTER_API_KEY` is set
+to a placeholder. The image exposes `dump-cases`, `bench`, `report` and
+`provenance` subcommands; `provenance` prints the pinned commit and patches.
+
+The result carries `case_results` (one outcome per sample). Run the suite
+against the native engine serving the same model (the harness's `vllm-serve`
+or `sglang-serve` variant) as the control group and diff the two with
+`e2e_verifier/compare.py`: shared failures are the engine's or the model's,
+candidate-only failures are Dynamo's.
+
 ## tau2 flow
 
 ```mermaid
@@ -221,6 +259,7 @@ flowchart LR
 | `custom/tool_calling_static_report.py` | Detailed Custom JSON, JSONL, and static HTML artifacts |
 | `custom_runner.py` | Per-model request-contract adapter |
 | `e2e_verifier/profiles.json` | Fixed qualification selections and evaluator images |
+| `e2e_verifier/compare.py` | Case-by-case diff of a candidate result against a control (native engine) result |
 | `e2e_verifier/cli.py` | Suite orchestration, coverage checks, and normalized result |
 | `e2e_verifier/test_cli.py` | Verifier contract regression tests |
 | `custom/tests/test_probe_reliability.py` | Custom catalog and selection regression tests |
