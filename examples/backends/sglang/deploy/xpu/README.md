@@ -82,7 +82,7 @@ kubectl get pods -n "${NAMESPACE}"
 ## Testing
 
 ```bash
-kubectl port-forward deployment/sglang-agg-xpu-dra-frontend 8000:8000 \
+kubectl port-forward svc/sglang-agg-xpu-dra-frontend 8000:8000 \
   -n "${NAMESPACE}"
 
 curl localhost:8000/v1/models
