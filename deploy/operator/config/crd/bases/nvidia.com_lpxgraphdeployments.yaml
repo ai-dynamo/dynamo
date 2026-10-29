@@ -72,6 +72,24 @@ spec:
                 LPXGraphDeploymentStatus is the LPX controller's durable lifecycle state.
                 Dynamo consumes readiness only for the current generation and input revision.
               properties:
+                checkpointDownload:
+                  description: |-
+                    checkpointDownload retains download progress for the checkpoints that
+                    resolved hybrid workloads project into their Cyborg conductors. Its
+                    presence also records that the deployment adopts build checkpoints.
+                  properties:
+                    checkpoints:
+                      description: |-
+                        checkpoints is the sorted set of checkpoints, as `<model>@<revision>`,
+                        that were successfully downloaded into model-storage.
+                      items:
+                        type: string
+                      type: array
+                    lastCheckedAt:
+                      description: lastCheckedAt is the oldest Model Express confirmation of the listed checkpoints.
+                      format: date-time
+                      type: string
+                  type: object
                 components:
                   additionalProperties:
                     description: LPXComponentStatus reports logical replicas and readiness for one LPX component.
@@ -204,9 +222,10 @@ spec:
                       runtimeComponentName:
                         description: |-
                           runtimeComponentName is an explicit Dynamo runtime component identity
-                          resolved from the serving role's endpoint override. Omission means the
-                          backend default applies. During rolling updates, worker status keeps the
-                          old active revision value until cutover completes.
+                          resolved from the serving role's endpoint override in combined mode.
+                          Native sidecars omit this field; Kubernetes Planner reads their registered
+                          component identity. During rolling updates, worker status keeps the old
+                          active revision value until cutover completes.
                         type: string
                       runtimeNamespace:
                         description: |-
@@ -234,8 +253,9 @@ spec:
                       servedModelName:
                         description: |-
                           servedModelName is the effective primary model identity exposed by this
-                          component's serving role. During rolling updates, worker status keeps the
-                          old active revision value until cutover completes.
+                          component's serving role in combined mode. Native sidecars omit this field;
+                          Kubernetes Planner reads their registered model identity. During rolling
+                          updates, worker status keeps the old active revision until cutover completes.
                         type: string
                       updatedReplicas:
                         description: updatedReplicas is the number of replicas at the current/desired revision.

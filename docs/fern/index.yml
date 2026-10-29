@@ -92,6 +92,8 @@ navigation:
         contents:
         - page: Install Dynamo
           path: pages/kubernetes/installation/install-dynamo.md
+        - page: Install with AICR
+          path: pages/kubernetes/installation/install-with-aicr.md
         - page: Multinode Orchestration
           path: pages/kubernetes/installation/multinode-orchestration.md
         - page: Gateway API Inference Extension
@@ -167,8 +169,8 @@ navigation:
             path: pages/kubernetes/kv-aware-routing/overview.md
           - page: Using the Dynamo Frontend
             path: pages/kubernetes/kv-aware-routing/dynamo-frontend.md
-          - page: Deploy the DC KV Relay (Experimental)
-            path: pages/kubernetes/kv-aware-routing/kv-dc-relay.md
+          - page: Deploy the Pool Relay (Experimental)
+            path: pages/kubernetes/kv-aware-routing/pool-relay.md
           - page: Using GAIE with Dynamo
             path: pages/kubernetes/kv-aware-routing/gateway-api.mdx
           - page: Using GAIE with vanilla vLLM
@@ -204,6 +206,8 @@ navigation:
             path: pages/kubernetes/fault-tolerance/request-migration.md
           - page: Request Rejection
             path: pages/kubernetes/fault-tolerance/request-rejection.md
+          - page: Admission Control
+            path: pages/kubernetes/fault-tolerance/admission-control.md
           - page: Graceful Shutdown
             path: pages/kubernetes/fault-tolerance/graceful-shutdown.md
 
@@ -353,9 +357,8 @@ navigation:
                   - page: Simulate a Kubernetes Deployment
                     slug: kubernetes-mocker
                     path: pages/kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx
-                  - page: Benchmark Planner Decisions
-                    slug: planner-replay
-                    path: pages/kubernetes/operations/simulation-with-dynosim/dynosim-planner-replay.mdx
+                  - link: Simulate Planner Decisions (AISimulate)
+                    href: /dynamo/dev/knowledge-base/modular-components/planner/aisimulate-planner-replay
                   - section: AISimulate (Experimental)
                     slug: ai-simulate
                     collapsed: true
@@ -401,6 +404,8 @@ navigation:
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md
                   - page: Request Rejection Architecture
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md
+                  - page: Admission Control Architecture
+                    path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md
                   - page: Graceful Shutdown Architecture
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/graceful-shutdown-architecture.md
                   - page: Fault Tolerance Testing
@@ -418,6 +423,8 @@ navigation:
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/overview.md
                   - page: Protocol Field Handling
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/protocol-field-handling.md
+                  - page: OpenAPI Request-Contract Comparison
+                    path: pages/developer-guide/knowledge-base/modular-components/frontend/openapi-request-contract-comparison.md
                   - page: KServe gRPC Frontend
                     slug: kserve-grpc-frontend
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/frontend-guide.md
@@ -468,7 +475,7 @@ navigation:
                         path: pages/developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md
                       - page: Offloading Support Matrix
                         path: pages/developer-guide/knowledge-base/modular-components/router/offloading-support-matrix.md
-                      - page: DC KV Relay Concepts (Experimental)
+                      - page: Pool Relay Concepts (Experimental)
                         slug: multi-dc-kv-routing
                         path: pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
                   - section: Standalone Services
@@ -509,6 +516,9 @@ navigation:
                     path: pages/developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md
                   - page: Planner Examples
                     path: pages/developer-guide/knowledge-base/modular-components/planner/planner-examples.md
+                  - page: Simulate Planner Decisions (AISimulate)
+                    slug: aisimulate-planner-replay
+                    path: pages/developer-guide/knowledge-base/modular-components/planner/aisimulate-planner-replay.mdx
                   - page: Planner Design
                     path: pages/developer-guide/knowledge-base/modular-components/planner/planner-design.md
               - section: Profiler
@@ -810,15 +820,10 @@ navigation:
           - page: Overview
             path: pages/recipes/model-recipes/overview.mdx
             slug: browse
-          - section: Motif Technologies
-            skip-slug: true
-            collapsed: true
-            contents:
-              - page: Motif-3 NVFP4
-                path: pages/recipes/model-recipes/motif-3.mdx
-                slug: motif-3
-          # Grouped by model provider. Each group uses skip-slug so page URLs
-          # stay /recipes/<slug>; within a group, newest models come first.
+          # Grouped by model provider; each group uses skip-slug so page URLs
+          # stay /recipes/<slug>. Edit the recipe catalog and providers.yaml
+          # under pages/recipes/_catalog/, not this list.
+          # recipe-nav:begin — generated by scripts/gen_recipe_nav.py, do not edit
           - section: Z.ai
             skip-slug: true
             collapsed: true
@@ -842,13 +847,6 @@ navigation:
               - page: Kimi-K2.6
                 path: pages/recipes/model-recipes/kimi-k2-6.mdx
                 slug: kimi-k2-6
-          - section: MiniMax
-            skip-slug: true
-            collapsed: true
-            contents:
-              - page: MiniMax M3
-                path: pages/recipes/model-recipes/minimax-m3.mdx
-                slug: minimax-m3
           - section: DeepSeek
             skip-slug: true
             collapsed: true
@@ -894,6 +892,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Nemotron 3.5 Super VL
+                path: pages/recipes/model-recipes/nemotron-3-5-super-vl-120b-a12b.mdx
+                slug: nemotron-3-5-super-vl
               - page: Nemotron 3.5 Lightning
                 path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
                 slug: nemotron-3-5-lightning
@@ -945,6 +946,38 @@ navigation:
               - page: Solar Open2 250B
                 path: pages/recipes/model-recipes/solar-open2-250b.mdx
                 slug: solar-open2-250b
+          - section: Meta
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Muse-Spark-Open-816B-A42B
+                path: pages/recipes/model-recipes/Muse-Spark-Open.mdx
+                slug: Muse-Spark-Open
+          - section: MiniMax
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: MiniMax M3.1
+                path: pages/recipes/model-recipes/minimax-m3-1.mdx
+                slug: minimax-m3-1
+              - page: MiniMax M3
+                path: pages/recipes/model-recipes/minimax-m3.mdx
+                slug: minimax-m3
+          - section: Motif Technologies
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Motif-3 NVFP4
+                path: pages/recipes/model-recipes/motif-3.mdx
+                slug: motif-3
+          - section: Reflection
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Beam-1.0-501B-A23B
+                path: pages/recipes/model-recipes/beam-1-0-501b.mdx
+                slug: beam-1-0-501b
+          # recipe-nav:end
 
       # ==================== Kubernetes Templates ====================
       - section: Kubernetes Templates
@@ -1060,6 +1093,9 @@ navigation:
         path: pages/reference/general/releases/release-history.mdx
         collapsed: true
         contents:
+          - page: Dynamo v1.6.0
+            path: pages/reference/general/releases/dynamo-v1-6-0.mdx
+            slug: v1-6-0
           - page: Dynamo v1.5.0
             path: pages/reference/general/releases/dynamo-v1-5-0.mdx
             slug: v1-5-0
@@ -1196,6 +1232,11 @@ navigation:
               - page: API Reference (K8s)
                 path: pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
 
+      - page: Image Edits API
+        icon: image
+        path: pages/reference/api/image-edits.mdx
+        slug: api/image-edits
+
       - section: Components
         icon: sliders
         slug: components
@@ -1207,9 +1248,9 @@ navigation:
             path: pages/reference/components/tls-configuration.mdx
           - page: Frontend Configuration
             path: pages/reference/components/frontend-configuration.mdx
-          - page: Multi-Datacenter KV Relay Configuration
-            path: pages/reference/components/kv-dc-relay-configuration.md
-            slug: dc-kv-relay-configuration
+          - page: Pool Relay Configuration
+            path: pages/reference/components/pool-relay-configuration.md
+            slug: pool-relay-configuration
           - page: Planner Configuration
             path: pages/reference/components/planner-configuration.mdx
           - page: Profiler Configuration
@@ -1295,7 +1336,7 @@ navigation:
             path: pages/enterprise/overview.mdx
             slug: overview
           - page: Supported Artifacts
-            path: pages/enterprise/supported-artifacts.mdx
+            path: pages/reference/general/enterprise-supported-artifacts.mdx
             slug: supported-artifacts
           - page: Install
             path: pages/enterprise/install.mdx

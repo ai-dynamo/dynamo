@@ -1,0 +1,183 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glm53-flash-aiperf-config
+data:
+  perf.yaml: |
+    schemaVersion: "2.0"
+    randomSeed: 42
+
+    benchmark:
+      model: ${TARGET_MODEL}
+
+      tokenizer:
+        name: ${TOKENIZER}
+        revision: ${TOKENIZER_REVISION}
+        trust_remote_code: true
+
+      endpoint:
+        url: ${INFERENCE_URL}
+        type: chat
+        streaming: true
+        timeout: 7200
+        use_server_token_count: true
+        extra:
+          ignore_eos: true
+
+      dataset:
+        type: file
+        path: ${TRACE_FILE}
+        format: mooncake_trace
+        sampling: sequential
+
+        synthesis:
+          max_isl: ${MAX_ISL:500000}
+          max_osl: ${CAP_OSL:12000}
+
+      warmup:
+        type: concurrency
+        concurrency: ${CONCURRENCY}
+        requests: ${CONCURRENCY}
+
+      profiling:
+        type: concurrency
+        concurrency: ${CONCURRENCY}
+        requests: ${REQUESTS}
+
+      runtime:
+        ui: none
+
+      artifacts:
+        dir: ${ARTIFACT_DIR}
+        summary: [json]
+        records: [jsonl]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: glm53-flash-bench
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 10800
+
+  template:
+    spec:
+      restartPolicy: Never
+
+      # Co-locate the benchmark pod with the target DGD frontend.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                      - frontend
+                  - key: nvidia.com/dynamo-graph-deployment-name
+                    operator: In
+                    values:
+                      # Default target: 2 prefill + 1 decode worker (12 GB200 GPUs).
+                      - glm53-flash-sglang-disagg-gb200
+              topologyKey: kubernetes.io/hostname
+
+      tolerations:
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+          effect: NoSchedule
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+      containers:
+        - name: aiperf
+          image: nvcr.io/nvidia/ai-dynamo/aiperf:0.13.0
+          imagePullPolicy: IfNotPresent
+
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              # The AIPerf image omits pip; bootstrap it from the bundled ensurepip.
+              python3 -m ensurepip --upgrade
+              # GLM-5.3-Flash tokenizer assets require Transformers 5 TokenizersBackend.
+              python3 -m pip install --no-cache-dir 'transformers==5.19.0' 'tokenizers==0.23.2'
+              MODELS_URL="${INFERENCE_URL%/v1/chat/completions}/v1/models"
+              MODEL_READY_DEADLINE=$((SECONDS + 3600))
+              echo "Waiting for $TARGET_MODEL at $MODELS_URL"
+              until wget -qO- -T 5 "$MODELS_URL" | grep -Fq "$TARGET_MODEL"; do
+                if ((SECONDS >= MODEL_READY_DEADLINE)); then
+                  echo "Timed out waiting for $TARGET_MODEL at $MODELS_URL" >&2
+                  exit 1
+                fi
+                sleep 5
+              done
+              # Count requests retained by AIPerf's input-length filter.
+              REQUESTS="$(python3 -c 'import json, os; print(sum(json.loads(line)["input_length"] <= int(os.environ["MAX_ISL"]) for line in open(os.environ["TRACE_FILE"]) if line.strip()))')"
+              export REQUESTS
+              exec aiperf profile --config /etc/aiperf/perf.yaml
+
+          env:
+            - name: TARGET_MODEL
+              value: RadixArk/GLM-5.3-Flash-NVFP4
+
+            - name: TOKENIZER
+              value: RadixArk/GLM-5.3-Flash-NVFP4
+
+            - name: TOKENIZER_REVISION
+              value: f46cf340d35a22d0d83d0c1dac8957cf2b1bcd35
+
+            - name: HF_HOME
+              value: /model-cache
+
+            - name: INFERENCE_URL
+              value: http://glm53-flash-sglang-disagg-gb200-frontend:8000/v1/chat/completions
+
+            - name: TRACE_FILE
+              value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+
+            - name: CONCURRENCY
+              value: "64"
+
+            - name: MAX_ISL
+              value: "500000"
+
+            - name: CAP_OSL
+              value: "12000"
+
+            - name: ARTIFACT_DIR
+              value: /model-cache/aiperf-artifacts
+
+          volumeMounts:
+            - name: aiperf-config
+              mountPath: /etc/aiperf
+              readOnly: true
+
+            # Read the trace and write artifacts on the shared PVC.
+            - name: shared-model-cache
+              mountPath: /model-cache
+
+      volumes:
+        - name: aiperf-config
+          configMap:
+            name: glm53-flash-aiperf-config
+
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

@@ -21,7 +21,7 @@ jobs:
   # SETUP & DETECTION JOBS
   # ============================================================================
   changed-files:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       core: ${{ steps.changes.outputs.core }}
       dev_images: ${{ steps.changes.outputs.dev_images }}
@@ -123,7 +123,7 @@ jobs:
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
   backend-status-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - changed-files
       - operator
@@ -167,12 +167,13 @@ jobs:
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   deploy-status-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs:
       - changed-files
       - deploy-operator
       - deploy-test-vllm
       - deploy-test-sglang
+      - cross-version-compatibility
       - deploy-test-trtllm
       - deploy-test-dgdr
       - deploy-operator-checkpoint-vllm
@@ -270,7 +271,7 @@ jobs:
     needs: changed-files
     if: needs.changed-files.outputs.operator == 'true'
     name: Helm Chart Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -794,6 +795,10 @@ jobs:
 
   # ============================================================================
   # TEST PIPELINES
+  # Whole-job placement uses successful mean runtimes from Oct 2-9, 2026.
+  # A full GPU-test run contributes about 111.3 job-minutes east and 103.9
+  # west, requesting up to 6/5 GPUs respectively if all jobs run concurrently.
+  # Keep each backend suite intact to avoid repeating container/setup work.
   # ============================================================================
 
   vllm-test:
@@ -805,7 +810,8 @@ jobs:
       test_suite_name: vllm
       framework: vllm  # matches the framework passed to vllm-build
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v2 # ARM uses the CPU runner
+      amd_runner_labels: '["gpu-1","amd64","v2","us-east-1"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -841,6 +847,7 @@ jobs:
       framework: vllm  # matches the framework passed to vllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner_labels: '["gpu-2","amd64","v2","us-east-1"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -858,7 +865,8 @@ jobs:
       test_suite_name: sglang
       framework: sglang  # matches the framework passed to sglang-build
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v2 # ARM uses the CPU runner
+      amd_runner_labels: '["gpu-1","amd64","v2","us-east-1"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -887,6 +895,7 @@ jobs:
       framework: sglang  # matches the framework passed to sglang-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner_labels: '["gpu-2","amd64","v2","us-east-1"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -904,7 +913,8 @@ jobs:
       test_suite_name: trtllm
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v2 # ARM uses the CPU runner
+      amd_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -933,6 +943,7 @@ jobs:
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner_labels: '["gpu-2","amd64","v2","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -971,6 +982,7 @@ jobs:
   #     test_suite_name: triton
   #     test_type: QA Test
   #     amd_runner: prod-tester-amd-gpu-v2
+  #     amd_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
   #     target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
   #     cuda_version: '[""]'
   #     platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
@@ -1059,6 +1071,7 @@ jobs:
       needs.changed-files.outputs.benchmarks == 'true'
     uses: $/.github/workflows/dynamo-pipeline.yml
     with:
+      gpu_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
       # `defaulted` is applied by the repository-root conftest.py to any test that
@@ -1270,8 +1283,7 @@ jobs:
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
-      copy_timeout_minutes: 10
+      copy_timeout_minutes: 20
     secrets: inherit
 
   # ============================================================================
@@ -1384,6 +1396,26 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
+  cross-version-compatibility:
+    name: SGLang N-2 compatibility
+    needs: [changed-files, operator, frontend-copy-to-acr, sglang-copy-to-acr, deploy-test-sglang]
+    if: |
+      always() && !cancelled() &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
+      (needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true') &&
+      needs.deploy-test-sglang.result == 'success' &&
+      needs.operator.result == 'success' &&
+      needs.frontend-copy-to-acr.result == 'success' &&
+      needs.sglang-copy-to-acr.result == 'success'
+    uses: $/.github/workflows/cross-version-compatibility.yml
+    with:
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+      worker_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+      operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+    secrets: inherit
+
   deploy-test-dgdr:
     name: DGDR Deploy Test
     needs: [changed-files, deploy-operator, planner-copy-to-acr]
@@ -1406,6 +1438,8 @@ jobs:
       DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
       DD_API_KEY: ${{ secrets.DD_API_KEY }}
 
+  # Serialize checkpoint lifecycles through cleanup: each Snapshot install
+  # reserves resources on the same GPU nodes until its namespace is deleted.
   deploy-operator-checkpoint-vllm:
     name: vLLM Snapshot Operator Setup
     if: |
@@ -1450,8 +1484,12 @@ jobs:
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true') &&
-      needs.operator.result == 'success'
-    needs: [changed-files, operator]
+      needs.operator.result == 'success' &&
+      (needs.deploy-cleanup-checkpoint-vllm.result == 'success' ||
+       (needs.deploy-cleanup-checkpoint-vllm.result == 'skipped' &&
+        needs.changed-files.outputs.snapshot != 'true' &&
+        needs.changed-files.outputs.snapshot_vllm != 'true'))
+    needs: [changed-files, operator, deploy-cleanup-checkpoint-vllm]
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read
@@ -1480,6 +1518,8 @@ jobs:
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
+  # Check both cleanups so a failed vLLM cleanup cannot be bypassed when
+  # the blocked SGLang lifecycle only runs its no-op cleanup.
   deploy-operator-checkpoint-trtllm:
     name: TRTLLM Snapshot Operator Setup
     if: |
@@ -1487,8 +1527,16 @@ jobs:
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true') &&
-      needs.operator.result == 'success'
-    needs: [changed-files, operator]
+      needs.operator.result == 'success' &&
+      (needs.deploy-cleanup-checkpoint-vllm.result == 'success' ||
+       (needs.deploy-cleanup-checkpoint-vllm.result == 'skipped' &&
+        needs.changed-files.outputs.snapshot != 'true' &&
+        needs.changed-files.outputs.snapshot_vllm != 'true')) &&
+      (needs.deploy-cleanup-checkpoint-sglang.result == 'success' ||
+       (needs.deploy-cleanup-checkpoint-sglang.result == 'skipped' &&
+        needs.changed-files.outputs.snapshot != 'true' &&
+        needs.changed-files.outputs.snapshot_sglang != 'true'))
+    needs: [changed-files, operator, deploy-cleanup-checkpoint-vllm, deploy-cleanup-checkpoint-sglang]
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read

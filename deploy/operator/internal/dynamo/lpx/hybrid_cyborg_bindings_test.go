@@ -26,21 +26,24 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	fixture.selectedPropSyncChains = nil
 	snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline:        PipelineLPX,
+		Pipeline:        PipelineHybrid,
 		Models:          []string{"default"},
 		RuntimeBuildRef: "model-build",
-		BuildSnapshot:   normalizeTestSnapshot(t, snapshot),
+		Build:           snapshot,
 	})
 	require.NoError(t, err)
 	projection := projectionBatch[0]
 	projection.stage = testRenderComponentName
+	serving := &dynamov1beta1.DynamoComponentDeploymentSharedSpec{
+		Roles: []dynamov1beta1.ComponentRoleSpec{{Name: dynamov1beta1.ComponentRoleLPXConductor}},
+	}
 	workload := &Workload{
 		modelProjections:     []*ModelProjection{projection},
 		scalingGroupReplicas: 1,
 	}
 
 	t.Log("Render the generated Agent endpoints")
-	plan, err := workload.PlanNodeLocalMaterialization("test-dgd")
+	plan, err := workload.PlanNodeLocalMaterialization("test-dgd", serving)
 	require.NoError(t, err)
 	initial, _, err := workload.renderCyborgConfigMap(plan)
 	require.NoError(t, err)
@@ -49,7 +52,7 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	for _, replicas := range []int32{1, 2, 10, 12} {
 		t.Run(strconv.Itoa(int(replicas)), func(t *testing.T) {
 			workload.scalingGroupReplicas = replicas
-			scaledPlan, err := workload.PlanNodeLocalMaterialization("test-dgd")
+			scaledPlan, err := workload.PlanNodeLocalMaterialization("test-dgd", serving)
 			require.NoError(t, err)
 			configMap, _, err := workload.renderCyborgConfigMap(scaledPlan)
 			require.NoError(t, err)
@@ -91,7 +94,6 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 			fixture := newV2CompilerFixture()
 			partition := fixture.partitions[0]
 			fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-			fixture.numLPUNodes = uint32(2 * test.partitions)
 			fixture.selectedPropSyncChains = test.chains
 			fixture.partitions = make([]testV3CapnpPartition, test.partitions)
 			for index := range fixture.partitions {
@@ -99,12 +101,15 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 				fixture.partitions[index].id = uint32(index)
 			}
 			snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-			projection := projectTestBuild(t, normalizeTestSnapshot(t, snapshot), PipelineLPX)
+			projection := projectTestBuild(t, snapshot, PipelineHybrid)
 			projection.stage = testRenderComponentName
 
 			t.Log("Render only projected endpoints without compressing their physical Agent offsets")
+			serving := &dynamov1beta1.DynamoComponentDeploymentSharedSpec{
+				Roles: []dynamov1beta1.ComponentRoleSpec{{Name: dynamov1beta1.ComponentRoleLPXConductor}},
+			}
 			workload := &Workload{modelProjections: []*ModelProjection{projection}, scalingGroupReplicas: 1}
-			plan, err := workload.PlanNodeLocalMaterialization("test-dgd")
+			plan, err := workload.PlanNodeLocalMaterialization("test-dgd", serving)
 			require.NoError(t, err)
 			require.Len(t, projection.RequestSpec(plan, "agents").Partitions, test.partitions)
 			require.Equal(t, 2*test.partitions, projection.agentReplicas)
@@ -156,7 +161,6 @@ func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
 			t.Log("Create a hybrid HX build with partitions 1-4, a selected chain 2-3, and one CUDA artifact")
 			fixture := newV3CompilerFixture()
 			fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-			fixture.numLPUNodes = 4
 			for id := uint32(2); id <= 4; id++ {
 				partition := fixture.partitions[0]
 				partition.id = id
@@ -164,20 +168,23 @@ func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
 			}
 			fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 5, deviceType: manifestcapnp.DeviceType_cuda})
 			fixture.selectedPropSyncChains = [][]uint32{{2, 3}}
-			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+			normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: normalized,
+				Pipeline: PipelineHybrid, Models: []string{"default"}, Build: normalized,
 				RuntimeBuildRef: "model-build", LocalPartitions: test.selection,
 			})
 			require.NoError(t, err)
-			require.Equal(t, BuildFamilyHX, projections[0].configuredBuild.Family)
+			require.Equal(t, BuildFamilyHX, projections[0].configuredBuild.family)
 
 			t.Log("Render the hybrid workload with an authored Cyborg configuration mount")
 			projections[0].stage = testRenderComponentName
+			serving := &dynamov1beta1.DynamoComponentDeploymentSharedSpec{
+				Roles: []dynamov1beta1.ComponentRoleSpec{{Name: dynamov1beta1.ComponentRoleLPXConductor}},
+			}
 			workload := &Workload{modelProjections: projections, scalingGroupReplicas: 1}
 			workload.digest, err = workloadSetDigest(projections)
 			require.NoError(t, err)
-			plan, err := workload.PlanNodeLocalMaterialization("test-pcs")
+			plan, err := workload.PlanNodeLocalMaterialization("test-pcs", serving)
 			require.NoError(t, err)
 			pcs := renderTestPCS(true)
 			rendered, err := RenderNodeLocal(workload, plan, RenderInput{
@@ -198,9 +205,9 @@ func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
 			require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: "/configs"})
 			require.Contains(t, cyborg.Spec.PodSpec.Volumes, corev1.Volume{
 				Name: lpuConfigVolumeName,
-				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: servers.Name},
-				}},
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					Name: servers.Name,
+				},
 			})
 			require.NotEmpty(t, cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash])
 		})

@@ -10,17 +10,17 @@ use super::*;
 /// transceiver. Ignored by default; run explicitly with both endpoints:
 ///
 /// ```text
-/// TRTLLM_E2E_PREFILL_ENDPOINT=http://127.0.0.1:50051 \
-/// TRTLLM_E2E_DECODE_ENDPOINT=http://127.0.0.1:50052 \
+/// TRTLLM_E2E_PREFILL_ENDPOINT=http://127.0.0.1:30001 \
+/// TRTLLM_E2E_DECODE_ENDPOINT=http://127.0.0.1:30011 \
 ///   cargo test -p dynamo-trtllm-sidecar e2e_real_disagg -- --ignored --nocapture
 /// ```
 #[tokio::test]
 #[ignore = "requires two live TensorRT-LLM OpenEngine servers with a KV transceiver"]
 async fn e2e_real_disagg_handoff() {
     let prefill_endpoint = std::env::var("TRTLLM_E2E_PREFILL_ENDPOINT")
-        .expect("set TRTLLM_E2E_PREFILL_ENDPOINT, e.g. http://127.0.0.1:50051");
+        .expect("set TRTLLM_E2E_PREFILL_ENDPOINT, e.g. http://127.0.0.1:30001");
     let decode_endpoint = std::env::var("TRTLLM_E2E_DECODE_ENDPOINT")
-        .expect("set TRTLLM_E2E_DECODE_ENDPOINT, e.g. http://127.0.0.1:50052");
+        .expect("set TRTLLM_E2E_DECODE_ENDPOINT, e.g. http://127.0.0.1:30011");
     let model = std::env::var("TRTLLM_E2E_MODEL")
         .unwrap_or_else(|_| "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string());
 
@@ -28,6 +28,7 @@ async fn e2e_real_disagg_handoff() {
     let configured = |source: String| ConfiguredModel {
         source,
         context_length: None,
+        ..Default::default()
     };
     let prefill = TrtllmSidecarEngine::new(
         GrpcEndpoint::parse(&prefill_endpoint, "--grpc-endpoint").expect("valid endpoint"),
@@ -116,14 +117,14 @@ async fn e2e_real_disagg_handoff() {
 /// a reachable endpoint:
 ///
 /// ```text
-/// TRTLLM_E2E_ENDPOINT=http://127.0.0.1:50051 \
+/// TRTLLM_E2E_ENDPOINT=http://127.0.0.1:30001 \
 ///   cargo test -p dynamo-trtllm-sidecar e2e_real_openengine -- --ignored --nocapture
 /// ```
 #[tokio::test]
 #[ignore = "requires a live TensorRT-LLM OpenEngine server; set TRTLLM_E2E_ENDPOINT"]
 async fn e2e_real_openengine_server() {
     let endpoint = std::env::var("TRTLLM_E2E_ENDPOINT")
-        .expect("set TRTLLM_E2E_ENDPOINT, e.g. http://127.0.0.1:50051");
+        .expect("set TRTLLM_E2E_ENDPOINT, e.g. http://127.0.0.1:30001");
     let model = std::env::var("TRTLLM_E2E_MODEL")
         .unwrap_or_else(|_| "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string());
 
@@ -134,6 +135,7 @@ async fn e2e_real_openengine_server() {
         ConfiguredModel {
             source: model.clone(),
             context_length: None,
+            ..Default::default()
         },
         AGG,
     );
@@ -144,7 +146,7 @@ async fn e2e_real_openengine_server() {
     eprintln!("[e2e] connected; registered model = {}", config.model);
 
     // "<s> Hello, my name is" in the Llama tokenizer; any valid token IDs work.
-    let request = PreprocessedRequest::builder()
+    let mut request = PreprocessedRequest::builder()
         .model(model)
         .token_ids(vec![1, 15043, 29892, 590, 1024, 338])
         .stop_conditions(StopConditions {
@@ -162,8 +164,30 @@ async fn e2e_real_openengine_server() {
         .build()
         .expect("request");
 
-    let outputs = collect(&engine, request).await;
+    // The router supplies logical rank zero, including for anonymous calls.
+    // Run this with native conversation affinity enabled to verify its stricter
+    // request contract, and with a legacy server to verify rank-zero fallback.
+    request.routing = Some(dynamo_backend_common::engine::RoutingHints {
+        dp_rank: Some(0),
+        ..Default::default()
+    });
+    let outputs = collect(&engine, request.clone()).await;
     eprintln!("[e2e] received {} stream item(s)", outputs.len());
+    request.agent_context =
+        Some(serde_json::from_value(json!({"session_id": "openengine-e2e-session"})).unwrap());
+    for _ in 0..2 {
+        let session_outputs = collect(&engine, request.clone()).await;
+        assert!(
+            session_outputs
+                .iter()
+                .any(|output| output.finish_reason.is_some())
+        );
+        assert!(
+            session_outputs
+                .iter()
+                .any(|output| !output.token_ids.is_empty())
+        );
+    }
 
     let mut generated = Vec::new();
     let mut terminal = None;

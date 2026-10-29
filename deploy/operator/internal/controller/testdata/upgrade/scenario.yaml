@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The one-time bootstrap supplies a fixed runtime image and namespace per scenario.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: hash-upgrade-replay
+  namespace: default
+spec:
+  backendFramework: sglang
+  components:
+    - name: SglangPrefill
+      type: prefill
+      replicas: 2
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: registry.example.com/dynamo/sglang-runtime:replaced-by-catalog
+              command: [python3, -m, dynamo.sglang]
+              args: [--model-path, Qwen/Qwen3-0.6B, --disaggregation-mode, prefill]
+    - name: SglangDecode
+      type: decode
+      replicas: 2
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: registry.example.com/dynamo/sglang-runtime:replaced-by-catalog
+              command: [python3, -m, dynamo.sglang]
+              args: [--model-path, Qwen/Qwen3-0.6B, --disaggregation-mode, decode]

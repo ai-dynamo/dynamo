@@ -43,6 +43,7 @@ from dynamo.sglang._compat import (
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 from dynamo.sglang.capacity import sglang_dp_layout
 from dynamo.sglang.elastic_ep_preflight import check_elastic_ep_backend
+from dynamo.sglang.gateway import effective_gateway_workers
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -169,6 +170,31 @@ def _diffusion_generator_kwargs(server_args: Any) -> dict[str, Any]:
         kwargs["master_port"] = master_port
 
     return kwargs
+
+
+CUDA_COREDUMP_WAIT_ENV = "SGLANG_CUDA_COREDUMP_BEFORE_CRASH_WAIT_SECS"
+
+
+def _default_cuda_coredump_wait(server_args: Any) -> None:
+    """Skip SGLang's pre-crash coredump wait when no coredump can be triggered.
+
+    On SIGQUIT (e.g. a dead detokenizer) SGLang's TokenizerManager tries a CUDA
+    user-triggered coredump and then sleeps this many seconds (default 60) even
+    when the trigger was a no-op, delaying worker exit and pod restart. Leave an
+    explicit value, CUDA_ENABLE_USER_TRIGGERED_COREDUMP=1, or --crash-dump-folder
+    (which makes SGLang enable user-triggered coredumps) untouched.
+    """
+    if CUDA_COREDUMP_WAIT_ENV in os.environ:
+        return
+    if os.environ.get("CUDA_ENABLE_USER_TRIGGERED_COREDUMP") == "1":
+        return
+    if getattr(server_args, "crash_dump_folder", None):
+        return
+    os.environ[CUDA_COREDUMP_WAIT_ENV] = "0"
+    logging.info(
+        "CUDA user-triggered coredumps are disabled; setting %s=0",
+        CUDA_COREDUMP_WAIT_ENV,
+    )
 
 
 def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
@@ -669,6 +695,15 @@ async def parse_args(args: list[str]) -> Config:
         or getattr(parsed_args, "dllm_algorithm", None)
     ):
         raise ValueError("--rerank-worker requires aggregated cross-encoder serving")
+    if dynamo_config.rerank_worker:
+        # Cross-encoders attend bidirectionally: SGLang's XLM-Roberta forward fails
+        # with a cached prefix or chunked prefill, so run each sequence in one pass.
+        if not parsed_args.disable_radix_cache:
+            logging.info("Disabling radix cache for --rerank-worker")
+        parsed_args.disable_radix_cache = True
+        if parsed_args.chunked_prefill_size != -1:
+            logging.info("Disabling chunked prefill for --rerank-worker")
+        parsed_args.chunked_prefill_size = -1
 
     # Enable encoder_only mode for multimodal encode workers to load only vision encoder
     # This significantly reduces memory usage by avoiding loading the full LLM weights
@@ -862,7 +897,13 @@ async def parse_args(args: list[str]) -> Config:
     else:
         # Dynamo expects disjoint output_ids; ServerArgs is read-only after resolution.
         parsed_args.incremental_streaming_output = True
+        # SGLang's PortArgs.init_new reads the raw tokenizer_worker_num; setting
+        # only the resolved value leaves the leader without a tokenizer IPC socket.
+        gateway_count = effective_gateway_workers(parsed_args, dynamo_config)
+        if gateway_count > 1 and parsed_args.tokenizer_worker_num != gateway_count:
+            parsed_args.tokenizer_worker_num = gateway_count
         server_args = ServerArgs.from_cli_args(parsed_args)
+        _default_cuda_coredump_wait(server_args)
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(
