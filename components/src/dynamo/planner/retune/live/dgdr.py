@@ -337,10 +337,10 @@ def need_seconds(shard: Shard, cfg: DgdrExecutorConfig, *, needs_cut: bool) -> f
 
 
 def spec_hash(spec: Mapping[str, Any]) -> str:
-    """First 16 hex digits of the SHA-1 of the canonical JSON of ``spec``."""
+    """First 16 hex digits of the SHA-256 of the canonical JSON of ``spec``."""
 
     canonical = json.dumps(spec, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
 def window_claim_path(cfg: DgdrExecutorConfig, dgd: DgdRef, window_end_ms: int) -> str:
@@ -352,10 +352,10 @@ def window_claim_path(cfg: DgdrExecutorConfig, dgd: DgdRef, window_end_ms: int) 
 def request_name(
     dgd: DgdRef, window_end_ms: int, shard_id: str, digest: str, attempt: int
 ) -> str:
-    """``<dgd prefix>-rt-<sha1(uid|window|shard|spec|attempt)[:10]>``."""
+    """``<dgd prefix>-rt-<sha256(uid|window|shard|spec|attempt)[:10]>``."""
 
     key = f"{dgd.uid}|{int(window_end_ms)}|{shard_id}|{digest}|{attempt}"
-    suffix = hashlib.sha1(key.encode("utf-8")).hexdigest()[:10]
+    suffix = hashlib.sha256(key.encode("utf-8")).hexdigest()[:10]
     prefix = dgd.name[:40].rstrip("-.") or "dgd"
     return f"{prefix}-rt-{suffix}"
 
@@ -367,7 +367,7 @@ def _label_value(value: str) -> str:
         r"([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?", value
     ):
         return value
-    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
     head = re.sub(r"[^-A-Za-z0-9_.]", "-", value)[:52].strip("-_.")
     return f"{head}-{digest}" if head else digest
 
@@ -841,6 +841,19 @@ class _ShardRun:
     run_pending: bool = False
     rows: Optional[dict] = None
     published: int = 0
+
+    def require_name(self) -> str:
+        """The current attempt's Request name.
+
+        It is set once a create is sent or a Request is adopted, so a shard in
+        the ``unknown`` or ``wait`` state, where it is read, always has it.
+        """
+
+        if self.name is None:
+            raise RuntimeError(
+                f"shard {self.shard.id} has no Request name in state {self.state}"
+            )
+        return self.name
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -1317,7 +1330,9 @@ class _DgdrSweep:
 
         existing = self._retrying(
             f"get Request {run.name}",
-            lambda: self.ctx.kube.get_request(run.name, timeout_s=self._timeout()),
+            lambda: self.ctx.kube.get_request(
+                run.require_name(), timeout_s=self._timeout()
+            ),
         )
         if existing is None:
             # Deleted in between; create it again on the next poll.
@@ -1434,7 +1449,9 @@ class _DgdrSweep:
         """After a create whose outcome is unknown: adopt it or create again."""
 
         try:
-            existing = self.ctx.kube.get_request(run.name, timeout_s=self._timeout())
+            existing = self.ctx.kube.get_request(
+                run.require_name(), timeout_s=self._timeout()
+            )
         except KubeError as error:
             self._read_failed(f"get Request {run.name}", error)
             return
@@ -1467,7 +1484,7 @@ class _DgdrSweep:
 
         kube = self.ctx.kube
         try:
-            obj = kube.get_request(run.name, timeout_s=self._timeout())
+            obj = kube.get_request(run.require_name(), timeout_s=self._timeout())
         except KubeError as error:
             self._read_failed(f"get Request {run.name}", error)
             return

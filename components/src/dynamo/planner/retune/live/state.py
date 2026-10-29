@@ -164,7 +164,7 @@ def fingerprint(config: PlannerConfig, startup: Optional[FrontendStartup]) -> st
         "sku": None if dgdr is None else dgdr.sku,
         "startup": None if startup is None else startup.fingerprint_source,
     }
-    digest = hashlib.sha1(canonical_json(payload).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
     return digest[:16]
 
 

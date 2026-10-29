@@ -37,7 +37,7 @@ the output is gzip-compressed and the memory is bounded.
   that evicts the member needed furthest in the future. A member or row
   that no longer matches pass 1 fails the cut (the segment changed).
 * **Atomic output.** The file is written to ``.tmp-<window_end>-<nonce>``
-  next to ``out_path``, fsynced, made 0644 and hard-linked into place; an
+  next to ``out_path``, fsynced, made 0600 and hard-linked into place; an
   existing ``out_path`` is reused (another process cut the same window).
 * **Child process.** ``cut_window`` runs the cut in a ``spawn`` child, like
   the replay sweep's workers, and kills it at the deadline or on cancel, so
@@ -1089,7 +1089,9 @@ def _publish(out_path: str, temp_path: str, write: Callable[[_ByteSink], None]) 
                 write(sink)
             raw.flush()
             os.fsync(raw.fileno())
-        os.chmod(temp_path, 0o644)
+        # Only the owner reads the window. The Run Job reads it as the planner
+        # image user (uid 1000), which the Planner also runs as by default.
+        os.chmod(temp_path, 0o600)
         try:
             os.link(temp_path, out_path)
             created = True

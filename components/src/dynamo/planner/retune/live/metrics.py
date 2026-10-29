@@ -42,93 +42,92 @@ class _Collectors:
     """The metric objects of one registry."""
 
     def __init__(self, registry: CollectorRegistry) -> None:
-        kw = {"registry": registry}
         self.decisions_total = Counter(
             f"{PREFIX}_decisions_total",
             "Retune decisions, counted once the state write persisted them.",
             labelnames=["outcome"],
-            **kw,
+            registry=registry,
         )
         self.failures_total = Counter(
             f"{PREFIX}_failures_total",
             "Failed retune windows and supervisor failures, by reason.",
             labelnames=["reason"],
-            **kw,
+            registry=registry,
         )
         self.skipped_total = Counter(
             f"{PREFIX}_skipped_total",
             "Due windows the launch gate held back, once per window and reason.",
             labelnames=["reason"],
-            **kw,
+            registry=registry,
         )
         self.leader = Gauge(
             f"{PREFIX}_leader",
             "1 while this planner holds the retune leadership Lease.",
-            **kw,
+            registry=registry,
         )
         self.ready = Gauge(
             f"{PREFIX}_ready",
             "1 while every spec and health premise holds, so windows launch.",
-            **kw,
+            registry=registry,
         )
         self.initialized = Gauge(
             f"{PREFIX}_initialized",
             "1 once the leader finished initializing from the persisted state.",
-            **kw,
+            registry=registry,
         )
         self.rollback_pending = Gauge(
             f"{PREFIX}_rollback_pending",
             "1 while routers are being reset to their startup parameters.",
-            **kw,
+            registry=registry,
         )
         self.controller_generation = Gauge(
             f"{PREFIX}_controller_generation",
             "Generation of the installed retune controller; it grows on each rebuild.",
-            **kw,
+            registry=registry,
         )
         self.baseline_score = Gauge(
             f"{PREFIX}_baseline_score",
             "Objective score of the current parameters on the latest decided "
             "window (NaN when not scored).",
-            **kw,
+            registry=registry,
         )
         self.best_score = Gauge(
             f"{PREFIX}_best_score",
             "Best candidate score on the latest decided window (NaN when none).",
-            **kw,
+            registry=registry,
         )
         self.sweep_seconds = Gauge(
             f"{PREFIX}_sweep_seconds",
             "Wall-clock duration of the latest sweep (NaN when it did not run).",
-            **kw,
+            registry=registry,
         )
         self.missing_candidates = Gauge(
             f"{PREFIX}_missing_candidates",
             "Candidates of the latest sweep without a score.",
-            **kw,
+            registry=registry,
         )
         self.router_converged = Gauge(
             f"{PREFIX}_router_converged",
             "1 when every frontend router holds the target policy parameters.",
-            **kw,
+            registry=registry,
         )
         self.router_patch_errors_total = Counter(
             f"{PREFIX}_router_patch_errors_total",
             "Failed /router_policy PATCH or reset calls, by HTTP status or kind.",
             labelnames=["code"],
-            **kw,
+            registry=registry,
         )
         self.trace_sink_missing = Gauge(
             f"{PREFIX}_trace_sink_missing",
             "1 for a Ready frontend pod without its own trace segment directory.",
             labelnames=["pod"],
-            **kw,
+            registry=registry,
         )
         self.trace_dropped_members_total = Counter(
             f"{PREFIX}_trace_dropped_members_total",
             "Trace gzip members dropped by window cuts for a bad CRC, size or "
             "truncation.",
-            **kw,
+            registry=registry,
         )
         for outcome in (*RETUNE_OUTCOMES, *_LIVE_OUTCOMES):
             self.decisions_total.labels(outcome=outcome)

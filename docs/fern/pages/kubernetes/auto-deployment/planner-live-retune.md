@@ -64,7 +64,9 @@ This applies to all DGDR trace Runs, not only those the Planner creates.
 - **A public model.** The Run Job has no Hugging Face credentials and no model mount, so
   `retune.dgdr.model` must be a public Hugging Face repository id that AISimulate can resolve.
 - **A ReadWriteMany claim** in the DGD namespace, dedicated to traces. Create `segments/` and
-  `windows/` at its root, writable by the user the frontend and Planner containers run as.
+  `windows/` at its root, writable by the user the frontend and Planner containers run as. The
+  Planner writes each window file with mode `0600`, and the Run Job reads it as the planner image
+  user (UID 1000), so run the Planner as that user, which is its default.
 - **A KV-router frontend with default routing fields**, and workers that do not set their own
   router mode. See [Deployment rules](#deployment-rules).
 - **One Planner replica.**

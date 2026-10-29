@@ -392,7 +392,7 @@ def test_cut_matches_read_trace_window(tmp_path, seed):
     assert result.dropped_members == 0
     assert result.dropped_bytes == 0
     assert not result.reused
-    assert stat.S_IMODE(out.stat().st_mode) == 0o644
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
     assert _temp_files(out.parent) == []
 
 
@@ -974,7 +974,7 @@ def test_link_enoent_is_window_cut_failed(tmp_path, monkeypatch):
     assert _temp_files(out.parent) == []
 
 
-def test_output_is_deterministic_and_0644_under_any_umask(tmp_path):
+def test_output_is_deterministic_and_0600_under_any_umask(tmp_path):
     root = _random_trace(tmp_path / "segments", 8)
     first, second = _out(tmp_path, "a.jsonl.gz"), _out(tmp_path, "b.jsonl.gz")
     previous = os.umask(0o077)
@@ -985,7 +985,7 @@ def test_output_is_deterministic_and_0644_under_any_umask(tmp_path):
         os.umask(previous)
 
     assert first.read_bytes() == second.read_bytes()
-    assert stat.S_IMODE(first.stat().st_mode) == 0o644
+    assert stat.S_IMODE(first.stat().st_mode) == 0o600
     with gzip.open(first, "rb") as source:
         assert source.read(1)
     # No file name or mtime in the gzip header.
