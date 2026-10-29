@@ -6,8 +6,8 @@ The upstream source is
 ``docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md``
 -- crd-ref-docs output stitched with Dynamo's header/footer by
 ``deploy/operator/Makefile::generate-api-docs`` and post-processed by
-``deploy/operator/docs/fix-api-anchors.py`` so v1alpha1 / v1beta1 same-named
-types get distinct anchors. That Markdown file is the source of truth for
+``deploy/operator/docs/fix-api-anchors.py`` so same-named versioned types get
+distinct anchors. That Markdown file is the source of truth for
 the CRD API surface; this module turns it into a typed model the docs
 generator can render as a compact index without regressing anchors or
 losing content.
@@ -325,7 +325,7 @@ def _parse_type_block(block: str) -> KubernetesType:
     """Parse one ``#### TypeName`` block into a :class:`KubernetesType`."""
     header_line, remainder = block.split("\n", 1)
     display_name = TYPE_H4.match(header_line).group("name").strip()
-    canonical_name = _strip_v1beta1_prefix(display_name)
+    canonical_name = _strip_version_prefix(display_name)
     anchor = _type_anchor(display_name, canonical_name)
     parsed = _parse_type_sections(remainder)
     kind = _classify_type(parsed)
@@ -343,15 +343,16 @@ def _parse_type_block(block: str) -> KubernetesType:
     )
 
 
-def _strip_v1beta1_prefix(display: str) -> str:
-    """Return the underlying type name for a ``v1beta1 <Name>`` display."""
-    return display[len("v1beta1 ") :] if display.startswith("v1beta1 ") else display
+def _strip_version_prefix(display: str) -> str:
+    """Return the underlying type name for a ``<version> <Name>`` display."""
+    return re.sub(r"^v1(?:alpha|beta)\d+\s+", "", display)
 
 
 def _type_anchor(display: str, canonical: str) -> str:
-    """crd-ref-docs anchor slug (with v1beta1 dedup) for a type name."""
-    if display.startswith("v1beta1 "):
-        return f"v1beta1-{canonical.lower()}"
+    """Return the crd-ref-docs anchor slug, including a version prefix."""
+    version_match = re.match(r"^(v1(?:alpha|beta)\d+)\s+", display)
+    if version_match:
+        return f"{version_match.group(1)}-{canonical.lower()}"
     return canonical.lower()
 
 

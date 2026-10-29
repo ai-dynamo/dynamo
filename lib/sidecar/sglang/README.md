@@ -27,6 +27,7 @@ server. See the [sidecar overview](../README.md) for installation.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Kubernetes multinode TP and attention-DP | Experimental; explicit leader and worker PodTemplates |
 
 ## Run locally
 
@@ -49,17 +50,53 @@ curl -s localhost:8000/v1/chat/completions \
 ## Deploy on Kubernetes
 
 Before applying, replace `<your-registry>/dynamo-sidecar` in the manifest with a
-[sidecar image](../README.md#docker) and create the `hf-token-secret`
-Secret that the manifest reads.
+[sidecar image](../README.md#docker). The `hf-token-secret` references are
+optional; create the Secret only for gated or private models.
 
 See [`deploy/`](deploy/) for all manifests. For example, aggregated serving:
 
 ```bash
+# Optional for gated or private models:
 kubectl create secret generic hf-token-secret -n <namespace> \
   --from-literal=HF_TOKEN=<your-hf-token>
 kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
+
+Multinode deployments require `backendFramework: sglang` and complete `leader` and
+`worker` role PodTemplates. The templates own the native engine commands and
+sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and
+[attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). Attention-DP requires SGLang 0.5.22 or later and a Dynamo sidecar
+with matching attention-DP metadata support. Engine-failure KV recovery remains
+incomplete and is tracked in [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
+
+The multinode examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which require
+a DGD originally created by operator 1.6.0 or later. Upgrading the operator or
+switching to sidecar mode does not enable these variables for older DGDs.
+For an older DGD, delete and recreate it after upgrading, or replace the topology
+arguments in both role templates with Grove or LeaderWorkerSet variables. See the
+[SGLang sidecar migration instructions](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#migrate-an-existing-dgd-to-multinode-sidecars)
+for the provider-specific arguments.
+
+### Kubernetes manifest notes
+
+The examples use an engine-primary layout: SGLang runs as the `main` container
+and `dynamo-sglang-sidecar` runs as a restartable `runtime` init container.
+Those reserved names activate operator sidecar behavior. SGLang native gRPC
+requires v0.5.16 or newer. SGLang can alternatively load the sidecar in-process
+with `--sidecar dynamo.sglang.sidecar`.
+
+Aggregated serving uses loopback between the engine and sidecar. Disaggregated
+serving binds SGLang to the pod network so decode workers can reach prefill's
+bootstrap server; the prefill sidecar auto-detects and advertises its pod IP.
+For KV routing, the sidecar normalizes the engine's wildcard ZMQ event address
+against its local gRPC endpoint. Restrict pod-network gRPC and ZMQ ports with
+NetworkPolicy.
+
+Disaggregated serving requires an SGLang image with NIXL/UCX support, RDMA
+devices, `IPC_LOCK`, and shared memory. Tune UCX for the deployment fabric.
+Keep the model, served model name, and tensor parallelism consistent across
+prefill and decode; KV routing also requires a consistent page size.
 
 ## Topologies
 

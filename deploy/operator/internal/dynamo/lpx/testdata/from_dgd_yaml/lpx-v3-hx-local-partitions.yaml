@@ -17,14 +17,13 @@ data:
   partition_ids: "1"
   partition_node_offsets: "0"
   partition_paths: part-1
-  topologies: opaque-v3-topology
 immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpx-v3-hx-local-partitions
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpx-v3-hx-local-partitions-48b8-lpu-33afae9730a491db
+  name: lpx-v3-hx-local-partitions-48b8-lpu-a95647c5cf346f22
   namespace: test
 ---
 metadata:
@@ -42,9 +41,9 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: lpx-v3-hx-local-partitions
-        nvidia.com/extra-resources-hash: 33afae9730a491db748f132a8f97c1747b8225428f8d2a189e7f7b94db86497f
-        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:5b7e0e1208d912bede5aad9900ee605eefba6133ff4ee69a3b3730e70c478c1d
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:1750efbc54e1345379cf7f298294ff47828ec6acb0057e92d7046bd2a0b0ff65
+        nvidia.com/extra-resources-hash: a95647c5cf346f227c3a37fb60aa01b72b7e2c1e1ab16b69774dee83f6703d29
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:eb47772ed5cd7af1f9726ca192bbd164a8c83c3dc783f0ed979c18d51ed6e842
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3844e7fe1bbfd564fc8d27108910f64b0ed6caf1a46645ce8dcc29a0121a1494
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v3HxStrictHybrid
@@ -195,14 +194,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: lpx-v3-hx-local-partitions-48b8-lpu-33afae9730a491db
+              name: lpx-v3-hx-local-partitions-48b8-lpu-a95647c5cf346f22
             name: config
         replicas: 1
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpx-v3-hx-local-partitions
         nvidia.com/extra-resources-hash: 734ce683f6b7ea5f7b0c0172b07d5e1ed45773120ab8c7d834967d180c62cea2
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:1750efbc54e1345379cf7f298294ff47828ec6acb0057e92d7046bd2a0b0ff65
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3844e7fe1bbfd564fc8d27108910f64b0ed6caf1a46645ce8dcc29a0121a1494
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
         lpx.nvidia.com/serving: "true"
@@ -226,6 +225,8 @@ spec:
               value: 0,2,3,4,5,6,7,8,9,10,11,12,13
             - name: GBUILD_MANIFEST_PATH
               value: /nfs/gpt-oss-20b-lp30-hx-lpx/manifest.v2.capnp.bin
+            - name: LPX_MODEL_PATH
+              value: /nfs/gpt-oss-20b-lp30-hx-lpx
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
               valueFrom:
                 fieldRef:
@@ -345,7 +346,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: lpx-v3-hx-local-partitions
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:1750efbc54e1345379cf7f298294ff47828ec6acb0057e92d7046bd2a0b0ff65
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3844e7fe1bbfd564fc8d27108910f64b0ed6caf1a46645ce8dcc29a0121a1494
       cliqueNames:
       - agt
       - cond

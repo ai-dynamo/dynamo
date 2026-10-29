@@ -340,7 +340,7 @@ def test_generate_rejects_request_missing_tensors_key():
 
 
 def _run_half_precision_input(
-    dynamo_dtype: str, shape: list[int], values: list[float]
+    dynamo_dtype: str, shape: list[int], values: list[int]
 ) -> Any:
     """Run one half-precision input through generate and return what Triton got."""
     # Use an int32 output so the response path (np.from_dlpack) stays out of
@@ -357,16 +357,18 @@ def _run_half_precision_input(
 def test_generate_passes_fp16_input_as_numpy():
     """FP16 inputs reach tritonserver as a float16 ndarray, which its
     NUMPY_TO_TRITON_DTYPE mapping accepts."""
-    values = [1.5, -2.25, 0.5]
-    triton_input = _run_half_precision_input("Float16", [3], values)
+    # Rust half values arrive as u16 bit patterns, not numeric floats.
+    bits = [0x3E00, 0xC080, 0x4240]
+    triton_input = _run_half_precision_input("Float16", [3], bits)
 
     assert isinstance(triton_input, np.ndarray)
     assert triton_input.dtype == np.float16
-    np.testing.assert_array_equal(triton_input, np.array(values, dtype=np.float16))
+    np.testing.assert_array_equal(
+        triton_input, np.array([1.5, -2.25, 3.125], dtype=np.float16)
+    )
 
 
-# Values and their little-endian BF16 bytes, used to check the exact input bytes.
-_BF16_ROW = [1.5, -2.25, 3.125, -4.0]
+# Little-endian BF16 bytes for [1.5, -2.25, 3.125, -4.0].
 _BF16_ROW_BYTES = bytes.fromhex("c03f10c0484080c0")
 
 
@@ -374,8 +376,9 @@ _BF16_ROW_BYTES = bytes.fromhex("c03f10c0484080c0")
 def test_generate_passes_bf16_input_as_triton_tensor(batch):
     """BF16 inputs reach tritonserver as a Tensor(DataType.BF16) over the raw
     bytes. tritonserver cannot convert an ml_dtypes.bfloat16 ndarray itself."""
-    shape = [batch, len(_BF16_ROW)]
-    triton_input = _run_half_precision_input("BFloat16", shape, _BF16_ROW * batch)
+    bits = [0x3FC0, 0xC010, 0x4048, 0xC080]
+    shape = [batch, len(bits)]
+    triton_input = _run_half_precision_input("BFloat16", shape, bits * batch)
 
     assert isinstance(triton_input, Tensor)
     assert triton_input.data_type == DataType.BF16

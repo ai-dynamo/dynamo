@@ -23,6 +23,7 @@ use crate::local_model::runtime_config::{
 };
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
+use crate::utils::json::canonicalize_json_object_keys;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_kv_router::identity::{ExplicitIdentityMap, IndexerIdentitySpec};
@@ -33,7 +34,10 @@ use tokenizers::Tokenizer as HfTokenizer;
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
-const DEFAULT_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const FALLBACK_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DEFAULT_TOKENIZER_CACHE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+// Cache RSS measures 1.3-3.3x the token-ID budget once per-entry metadata is included.
+const TOKENIZER_CACHE_MEMORY_FRACTION: u64 = 16;
 static TOKENIZER_CACHE: OnceLock<crate::tokenizers::SharedTokenizerCache> = OnceLock::new();
 
 fn append_runtime_contract_checksum(
@@ -56,19 +60,6 @@ fn append_runtime_contract_checksum(
     bytes.extend_from_slice(key.as_bytes());
     bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
     bytes.extend_from_slice(&value);
-}
-
-fn canonicalize_json_object_keys(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Array(values) => {
-            values.iter_mut().for_each(canonicalize_json_object_keys);
-        }
-        serde_json::Value::Object(map) => {
-            map.values_mut().for_each(canonicalize_json_object_keys);
-            map.sort_keys();
-        }
-        _ => {}
-    }
 }
 
 fn append_indexer_identity_checksum(bytes: &mut Vec<u8>, spec: &IndexerIdentitySpec) {
@@ -100,30 +91,107 @@ fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
     !matches!(value, Some("0"))
 }
 
-fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
-    match value {
-        Some(value) => match value.parse::<usize>() {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::warn!(
-                    env_var = "DYN_TOKENIZER_CACHE_BYTES",
-                    value,
-                    default = DEFAULT_TOKENIZER_CACHE_BYTES,
-                    %error,
-                    "Failed to parse tokenizer cache byte budget; using default"
-                );
-                DEFAULT_TOKENIZER_CACHE_BYTES
-            }
-        },
-        None => DEFAULT_TOKENIZER_CACHE_BYTES,
+#[cfg(target_os = "linux")]
+fn tokenizer_cache_memory_limit() -> Option<u64> {
+    // sysinfo's first process refresh raises the soft RLIMIT_NOFILE to the hard limit.
+    // Restore it so the frontend's DYN_FRONTEND_FD_LIMIT_TARGET still applies.
+    let mut nofile = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit only writes the current limits into the provided struct.
+    let saved = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut nofile) } == 0;
+    let limit = read_cgroup_memory_limit();
+    // SAFETY: restores the limits read above; lowering the soft limit needs no privileges.
+    if saved && unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &nofile) } != 0 {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            "Failed to restore RLIMIT_NOFILE after memory limit detection"
+        );
+    }
+    limit
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tokenizer_cache_memory_limit() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn read_cgroup_memory_limit() -> Option<u64> {
+    let pid = sysinfo::get_current_pid().ok()?;
+    let mut system = sysinfo::System::new();
+    system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().without_tasks(),
+    );
+    // TODO: sysinfo 0.40 adds mountinfo path resolution, hybrid cgroup fixes, and read-failure
+    // propagation (https://github.com/GuillaumeGomez/sysinfo/pull/1723,
+    // https://github.com/GuillaumeGomez/sysinfo/pull/1753). It returns `None` when no finite
+    // limit exists, and `System::new` returns a `Result`.
+    let cgroup_total = system.process(pid)?.cgroup_limits()?.total_memory;
+    finite_memory_limit(cgroup_total, system.total_memory())
+}
+
+/// sysinfo reports host `MemTotal` when no cgroup on the path sets a lower limit. Limits
+/// within 10% of host memory, such as Kubernetes node allocatable on `kubepods.slice`, are
+/// treated as no limit too.
+#[cfg(target_os = "linux")]
+fn finite_memory_limit(cgroup_total: u64, mem_total: u64) -> Option<u64> {
+    (cgroup_total < mem_total - mem_total / 10).then_some(cgroup_total)
+}
+
+fn tokenizer_cache_budget(
+    value: Option<&str>,
+    memory_limit: impl FnOnce() -> Option<u64>,
+) -> (usize, &'static str) {
+    let Some(value) = value else {
+        return match memory_limit() {
+            Some(limit) => (
+                usize::try_from(
+                    (limit / TOKENIZER_CACHE_MEMORY_FRACTION)
+                        .min(MAX_DEFAULT_TOKENIZER_CACHE_BYTES),
+                )
+                .unwrap_or(usize::MAX),
+                "cgroup_limit",
+            ),
+            None => (FALLBACK_TOKENIZER_CACHE_BYTES, "fallback"),
+        };
+    };
+
+    match value.trim().parse::<usize>() {
+        Ok(bytes) => (bytes, "DYN_TOKENIZER_CACHE_BYTES"),
+        Err(error) => {
+            tracing::warn!(
+                env_var = "DYN_TOKENIZER_CACHE_BYTES",
+                value,
+                default = FALLBACK_TOKENIZER_CACHE_BYTES,
+                %error,
+                "Failed to parse tokenizer cache byte budget; using default"
+            );
+            (FALLBACK_TOKENIZER_CACHE_BYTES, "fallback")
+        }
     }
 }
 
 fn shared_tokenizer_cache() -> &'static crate::tokenizers::SharedTokenizerCache {
     TOKENIZER_CACHE.get_or_init(|| {
-        let cache_bytes =
-            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
-        tracing::info!(cache_bytes, "initializing process-wide tokenizer cache");
+        // Lossy conversion lets non-UTF-8 values reach the parse warning.
+        let value = std::env::var_os("DYN_TOKENIZER_CACHE_BYTES")
+            .map(|value| value.to_string_lossy().into_owned());
+        let mut memory_limit = None;
+        let (cache_bytes, source) = tokenizer_cache_budget(value.as_deref(), || {
+            memory_limit = tokenizer_cache_memory_limit();
+            memory_limit
+        });
+        tracing::info!(
+            cache_bytes,
+            source,
+            memory_limit = ?memory_limit,
+            "initializing process-wide tokenizer cache"
+        );
         crate::tokenizers::SharedTokenizerCache::new(cache_bytes)
     })
 }
@@ -1342,9 +1410,15 @@ impl ModelDeploymentCard {
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
     /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — combined token-ID byte budget for all models
-    ///   in this process (default 64 MiB), read once when the first eligible tokenizer
-    ///   creates the shared cache. Models compete for capacity without reserved shares.
-    ///   Cache metadata and tokenizer objects are excluded; eviction is deferred.
+    ///   in this process. On Linux, the default is 1/16 of this process's cgroup memory
+    ///   limit, capped at 8 GiB. Without a cgroup limit below 90% of host memory, or on
+    ///   other platforms, the default is 64 MiB. Valid overrides, including zero, bypass
+    ///   detection; surrounding whitespace is ignored and unparseable values use 64 MiB.
+    ///   The budget is read once when the first eligible tokenizer creates the shared
+    ///   cache and is not resized if the limit changes later. Models compete for
+    ///   capacity without reserved shares.
+    ///   Cache metadata and tokenizer objects are excluded, so resident memory is
+    ///   typically 1.3-3.3x the budget; eviction is deferred.
     /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
     ///   (when the cache is enabled) a partial hit also caches the new suffix so each
     ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
@@ -2571,17 +2645,105 @@ mod tests {
     }
 
     #[test]
-    fn tokenizer_cache_bytes_defaults_to_64_mib_and_accepts_valid_overrides() {
+    fn tokenizer_cache_budget_scales_with_memory_limit() {
+        const MIB: usize = 1024 * 1024;
+        const GIB: u64 = 1024 * 1024 * 1024;
+        for (limit, expected) in [
+            (Some(4 * GIB), (256 * MIB, "cgroup_limit")),
+            (Some(u64::MAX), (8192 * MIB, "cgroup_limit")),
+            (None, (64 * MIB, "fallback")),
+        ] {
+            assert_eq!(
+                super::tokenizer_cache_budget(None, || limit),
+                expected,
+                "limit={limit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tokenizer_cache_budget_overrides_bypass_memory_detection() {
+        const FALLBACK: usize = super::FALLBACK_TOKENIZER_CACHE_BYTES;
+        for (value, expected) in [
+            ("0", (0, "DYN_TOKENIZER_CACHE_BYTES")),
+            (" 1024\n", (1024, "DYN_TOKENIZER_CACHE_BYTES")),
+            ("512MiB", (FALLBACK, "fallback")),
+            ("", (FALLBACK, "fallback")),
+        ] {
+            assert_eq!(
+                super::tokenizer_cache_budget(Some(value), || panic!("unexpected detection")),
+                expected,
+                "value={value:?}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tokenizer_cache_finite_memory_limit_ignores_host_memory_total() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        for (limit, mem_total, expected) in [
+            (89 * GIB, 100 * GIB, Some(89 * GIB)),
+            (90 * GIB, 100 * GIB, None),
+            (100 * GIB, 100 * GIB, None),
+        ] {
+            assert_eq!(
+                super::finite_memory_limit(limit, mem_total),
+                expected,
+                "limit={limit}, mem_total={mem_total}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tokenizer_cache_memory_limit_preserves_nofile_soft_limit() {
+        const CHILD: &str = "DYNAMO_TOKENIZER_CACHE_NOFILE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // sysinfo changes RLIMIT_NOFILE only on its first process refresh, so detect
+            // in a fresh process.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "model_card::tests::tokenizer_cache_memory_limit_preserves_nofile_soft_limit",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        // Stays below the hard limit even when a container sets it to 1024.
+        const SOFT: libc::rlim_t = 64;
+        let mut nofile = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit only writes the current limits into the provided struct.
         assert_eq!(
-            super::tokenizer_cache_bytes(None),
-            super::DEFAULT_TOKENIZER_CACHE_BYTES
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut nofile) },
+            0
         );
-        assert_eq!(super::tokenizer_cache_bytes(Some("1024")), 1024);
-        assert_eq!(super::tokenizer_cache_bytes(Some("0")), 0);
+        assert!(nofile.rlim_max > SOFT);
+        nofile.rlim_cur = SOFT;
+        // SAFETY: lowering the soft limit below the hard limit needs no privileges.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &nofile) }, 0);
+
+        super::tokenizer_cache_memory_limit();
+
+        // SAFETY: getrlimit only writes the current limits into the provided struct.
         assert_eq!(
-            super::tokenizer_cache_bytes(Some("invalid")),
-            super::DEFAULT_TOKENIZER_CACHE_BYTES
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut nofile) },
+            0
         );
+        assert_eq!(nofile.rlim_cur, SOFT);
     }
 
     #[test]
@@ -3599,12 +3761,32 @@ mod ownership_tests {
         );
         let nemotron = card_with_contract(
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"video_pruning_rate": 0.5}),
+            serde_json::json!({
+                "video_pruning_rate": 0.5,
+                "sampling": {"max_frames": 64, "fps": 2.0, "frames": [{"z": 1, "a": 2}, {"y": [3, 1, 2]}]},
+                "enabled": true,
+                "note": null,
+            }),
+        );
+        let same_nemotron = card_with_contract(
+            VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "note": null,
+                "enabled": true,
+                "sampling": {"frames": [{"a": 2, "z": 1}, {"y": [3, 1, 2]}], "fps": 2.0, "max_frames": 64},
+                "video_pruning_rate": 0.5,
+            }),
         );
         let different_nemotron = card_with_contract(
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"video_pruning_rate": 0.25}),
+            serde_json::json!({
+                "video_pruning_rate": 0.5,
+                "sampling": {"max_frames": 64, "fps": 2.0, "frames": [{"z": 1, "a": 3}, {"y": [3, 1, 2]}]},
+                "enabled": true,
+                "note": null,
+            }),
         );
+
         let unrelated = card_with_contract("unrelated_runtime_metadata", serde_json::json!(true));
 
         assert_eq!(missing.mdcsum(), unrelated.mdcsum());
@@ -3616,6 +3798,12 @@ mod ownership_tests {
         assert_ne!(missing.mdcsum(), nemotron.mdcsum());
         assert_ne!(nemotron.mdcsum(), different_nemotron.mdcsum());
         assert_ne!(qwen.mdcsum(), nemotron.mdcsum());
+        assert_eq!(nemotron.mdcsum(), same_nemotron.mdcsum());
+        // Pins the separator, length framing, and canonical bytes of the contract.
+        assert_eq!(
+            nemotron.mdcsum(),
+            "88381ff5b5f10389bacc63e1e2bac947a76ffc5b32c4864b7499f0d10928a96e"
+        );
     }
 }
 

@@ -3,11 +3,11 @@
 
 //! Converts a stream of chat completion SSE chunks into Responses API SSE events.
 //!
-//! The event sequence follows the OpenAI Responses API streaming spec:
+//! A successful text response follows this event sequence:
 //! `response.created` -> `response.in_progress` -> `response.output_item.added` ->
 //! `response.content_part.added` -> N x `response.output_text.delta` ->
 //! `response.output_text.done` -> `response.content_part.done` ->
-//! `response.output_item.done` -> `response.completed` -> `[DONE]`
+//! `response.output_item.done` -> `response.completed`
 
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1455,6 +1455,7 @@ mod tests {
                                 name: name.map(String::from),
                                 arguments: args.map(String::from),
                             }),
+                            custom: None,
                         }]),
                         role: None,
                         refusal: None,

@@ -139,6 +139,14 @@ jobs:
           no_load: true
           use_sccache: false
 
+      - name: Refresh BuildKit builder
+        uses: $/.github/actions/builder-refresher
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          flavor: general
+          arch: linux/amd64,linux/arm64
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+
       # No derived per-backend test image: shared-test.yml pulls the backend's
       # own -test image unmodified and installs the sidecar binary from this
       # artifact via DYNAMO_SIDECAR_BIN (see shared-test.yml's sidecar_binary_artifact
@@ -190,8 +198,13 @@ jobs:
           DIFF_RUN_ID: ${{ github.run_id }}
           DIFF_ARTIFACT_PREFIX: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
         run: |
-          git fetch --deepen=30 --quiet || true
-          git fetch --tags --quiet || true
+          # Fetch HEAD by SHA with an explicit depth; `--deepen` is far slower here.
+          git fetch --no-tags --depth=31 origin "$(git rev-parse HEAD)" --quiet || true
+          # Only the release rule reads tags. With no refspec, this fetch also
+          # downloads every branch on origin, so run it only for release builds.
+          if [[ "${DIFF_BASE_BRANCH}" == release/* || "${DIFF_CURRENT_BRANCH}" == release/* ]]; then
+            git fetch --tags --quiet || true
+          fi
           if [ "${DIFF_BASE_BRANCH}" = "main" ] \
             && [ -n "${DIFF_MERGE_BASE_SHA}" ]; then
             git fetch --no-tags --depth=30 origin "${DIFF_MERGE_BASE_SHA}" --quiet || true

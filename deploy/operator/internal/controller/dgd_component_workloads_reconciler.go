@@ -30,7 +30,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -221,26 +220,16 @@ func applyCheckpointStartupPolicy(
 		component.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(startupPolicy)
 	}
 
-	// Artifact identity is independent of startup policy. Preserve the automatic
-	// SnapshotJob handoff even while WaitForCheckpoint keeps replicas gated.
-	if checkpointInfo.AutomaticSnapshotJob != nil {
-		if err := applyRestoreCandidateMetadataToComponent(component, checkpointInfo); err != nil {
-			return err
-		}
+	// Artifact identity is independent of startup policy: stamp the compatibility
+	// hash and any Ready candidate pin even while WaitForCheckpoint gates replicas.
+	if err := applyRestoreCandidateMetadataToComponent(component, checkpointInfo); err != nil {
+		return err
 	}
 
 	if checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint && !checkpointInfo.Ready {
-		component.Replicas = ptr.To(int32(0))
-		return nil
+		component.Replicas = new(int32(0))
 	}
-	if checkpointInfo.StartupPolicy != "" &&
-		checkpointInfo.StartupPolicy != nvidiacomv1alpha1.CheckpointStartupPolicyImmediate {
-		return nil
-	}
-	if checkpointInfo.AutomaticSnapshotJob != nil {
-		return nil
-	}
-	return applyRestoreCandidateMetadataToComponent(component, checkpointInfo)
+	return nil
 }
 
 func applyRestoreCandidateMetadataToComponent(
