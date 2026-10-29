@@ -1713,6 +1713,7 @@ struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
     continue_final_message: bool,
+    named_tool: Option<&'a str>,
     final_message_start_tag: Option<&'a crate::preprocessor::prompt::FinalMessageTags>,
     /// Beam's render-only view of `tools` / `chat_template_args` (`builtin_tools`
     /// resolved against the declared tools); the request itself is never modified.
@@ -1725,8 +1726,7 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn messages(&self) -> minijinja::value::Value {
-        let mut json = serde_json::to_value(self.inner.typed_messages().unwrap_or_default())
-            .unwrap_or_default();
+        let mut json = serde_json::to_value(self.inner.messages()).unwrap_or_default();
         if self.normalize_tool_call_args
             && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
         {
@@ -1751,9 +1751,47 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn tools(&self) -> Option<minijinja::value::Value> {
-        match &self.rendering {
-            Some(rendering) => rendering.tools.clone(),
-            None => self.inner.tools(),
+        // Beam's render-only view of `tools` (builtin_tools resolved) takes precedence.
+        if let Some(rendering) = &self.rendering {
+            return rendering.tools.clone();
+        }
+        let Some(name) = self.named_tool else {
+            return self.inner.tools();
+        };
+        let tools = self.inner.tools()?;
+        let mut selected: Vec<serde_json::Value> = tools
+            .try_iter()
+            .ok()?
+            .filter(|tool| {
+                tool.get_attr("function")
+                    .and_then(|function| function.get_attr("name"))
+                    .is_ok_and(|tool_name| tool_name.as_str() == Some(name))
+            })
+            .map(|tool| serde_json::to_value(tool).ok())
+            .collect::<Option<_>>()?;
+        // The forced function renders eagerly, matching the Responses path.
+        for tool in selected
+            .iter_mut()
+            .filter_map(serde_json::Value::as_object_mut)
+        {
+            tool.remove("defer_loading");
+            if let Some(function) = tool
+                .get_mut("function")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                function.remove("defer_loading");
+            }
+        }
+        Some(minijinja::value::Value::from_serialize(&selected))
+    }
+
+    fn template_tools(&self) -> Option<minijinja::value::Value> {
+        // A forced function is already selected: render its full schema with
+        // its resolved name, without advertising unrelated deferred members.
+        if self.named_tool.is_some() {
+            None
+        } else {
+            self.inner.template_tools()
         }
     }
 
@@ -2471,6 +2509,11 @@ impl OpenAIPreprocessor {
                 .and_then(|args| args.get("thinking_mode"))
                 .and_then(serde_json::Value::as_str)
                 .is_none_or(|mode| mode != "disabled"),
+
+            // Muse Spark always advertises the `self` recipient. Its public
+            // template has no `disable_reasoning` switch; `reasoning_effort`
+            // controls strength without disabling the reasoning channel.
+            Some("muse_spark_open" | "muse_spark") => true,
 
             // These SGLang reasoners do not expose a per-request off mode.
             Some("deepseek_r1" | "step3" | "gpt_oss" | "kimi") => true,
@@ -3836,6 +3879,20 @@ impl OpenAIPreprocessor {
                 "Cannot continue the final message because the prompt formatter moves it before other messages",
             ));
         }
+        let named_tool = if tool_choice::uses_muse_spark_parser(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) {
+            request.tool_choice().and_then(|choice| {
+                choice
+                    .get_attr("function")
+                    .and_then(|function| function.get_attr("name"))
+                    .ok()
+                    .and_then(|name| name.as_str().map(str::to_owned))
+            })
+        } else {
+            None
+        };
         let final_message_start_tag = (continue_final
             && crate::protocols::openai::chat_completions::unified_parser::configured_family(
                 self.tool_call_parser.as_deref(),
@@ -3852,18 +3909,22 @@ impl OpenAIPreprocessor {
         } else {
             None
         };
-        let formatted_prompt =
-            if self.normalize_tool_call_args || continue_final || rendering.is_some() {
-                self.apply_template_inner(&NormalizedArgsRequest {
-                    inner: request,
-                    normalize_tool_call_args: self.normalize_tool_call_args,
-                    continue_final_message: continue_final,
-                    final_message_start_tag: final_message_start_tag.as_ref(),
-                    rendering,
-                })?
-            } else {
-                self.apply_template_inner(request)?
-            };
+        let formatted_prompt = if self.normalize_tool_call_args
+            || continue_final
+            || rendering.is_some()
+            || named_tool.is_some()
+        {
+            self.apply_template_inner(&NormalizedArgsRequest {
+                inner: request,
+                normalize_tool_call_args: self.normalize_tool_call_args,
+                continue_final_message: continue_final,
+                named_tool: named_tool.as_deref(),
+                final_message_start_tag: final_message_start_tag.as_ref(),
+                rendering,
+            })?
+        } else {
+            self.apply_template_inner(request)?
+        };
         let (formatted_prompt, header_search_end) = match formatted_prompt {
             Some(prompt) => {
                 let prompt = if continue_final {
@@ -5700,7 +5761,7 @@ impl OpenAIPreprocessor {
 
         if let ToolProcessingRoute::Unified(family) = &tool_processing_route {
             let tool_definitions =
-                crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner)?;
+                crate::preprocessor::tool_choice::effective_tool_definitions(request)?;
             let tool_definitions = (!tool_definitions.is_empty()).then_some(tool_definitions);
             let reasoning_disabled = Self::request_disables_reasoning_with_family(
                 request,
@@ -5918,7 +5979,7 @@ impl OpenAIPreprocessor {
 
         // Convert OpenAI tools to parser ToolDefinition format before applying jail
         let tool_definitions =
-            crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner)?;
+            crate::preprocessor::tool_choice::effective_tool_definitions(request)?;
         let tool_definitions = (!tool_definitions.is_empty()).then_some(tool_definitions);
 
         let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = match tool_processing_route
@@ -6715,6 +6776,7 @@ impl OpenAIPreprocessor {
             });
             let mut nv_chunk = Annotated {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+                    message_boundary: None,
                     inner,
                     nvext,
                     prompt_logprobs,
@@ -6849,6 +6911,7 @@ impl OpenAIPreprocessor {
                 } else {
                     p.response_template.take().map(|inner| Annotated {
                         data: Some(NvCreateChatCompletionStreamResponse {
+                            message_boundary: None,
                             inner,
                             nvext,
                             prompt_logprobs,
@@ -6911,7 +6974,7 @@ impl OpenAIPreprocessor {
         // - inkling: `<|message_model|>` / `<|content_thinking|>` /
         //   `<|content_text|>` / `<|content_invoke_tool_json|>` / `<|end_message|>`
         //   channel markers, consumed by both the tool-call and reasoning parsers.
-        // - muse_glimmer: `<|start|>` / `<|message|>` / `<|eom|>` / `<|eot|>`
+        // - muse_glimmer / muse_spark: `<|start|>` / `<|message|>` / `<|eom|>` / `<|eot|>`
         //   channel markers, consumed by the unified parser (reasoning + content +
         //   tool calls); matched on either parser name since the card may set only
         //   the reasoning name.
@@ -7336,6 +7399,10 @@ impl OpenAIPreprocessor {
                 // GPT-OSS cannot disable reasoning; unsupported aliases must not expose it as answer text.
                 "gpt_oss" => false,
                 "gemma4" => thinking != Some(true),
+                // Spark's template cannot disable reasoning, so keep generated
+                // reasoning separate instead of folding it into visible content.
+                // `muse_spark_open` resolves to the canonical `muse_spark` family here.
+                "muse_spark" => false,
                 "deepseek_v4" | "deepseek_v41" => {
                     !Self::deepseek_renderer_reasoning_enabled(chat_template_args.as_ref(), true)
                 }
@@ -8210,6 +8277,19 @@ impl
         let (mut request, context) = request.into_parts();
         let lifecycle = preprocessing_lifecycle(&context);
         let preprocessing = lifecycle.start(LifecycleStage::RequestPreprocessing);
+
+        // In-process callers bypassing HTTP still need the function engine view.
+        request
+            .inner
+            .normalize_custom_tools()
+            .map_err(|error| invalid_argument_error(error.to_string()))?;
+        request.normalize_responses_history_phases(tool_choice::uses_muse_spark_parser(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ));
+        request
+            .normalize_responses_tools(self.formatter.supports_native_tools(&request))
+            .map_err(|error| invalid_argument_error(error.to_string()))?;
 
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
@@ -11240,6 +11320,7 @@ mod tests {
         tool_choice: ChatCompletionToolChoiceOption,
     ) -> NvCreateChatCompletionRequest {
         NvCreateChatCompletionRequest {
+responses_tools: None,
             inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
                 .model("test")
                 .messages(vec![dynamo_protocols::types::ChatCompletionRequestMessage::User(
@@ -11251,7 +11332,9 @@ mod tests {
                     },
                 )])
                 .tools(vec![dynamo_protocols::types::ChatCompletionTool {
+                    custom: None,
                     r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+                    defer_loading: None,
                     function: dynamo_protocols::types::FunctionObject {
                         name: "get_weather".to_string(),
                         description: None,
@@ -11259,8 +11342,6 @@ mod tests {
                         strict: None,
                         defer_loading: None,
                     },
-                    custom: None,
-                    defer_loading: None,
                 }])
                 .tool_choice(tool_choice)
                 .build()
@@ -11778,6 +11859,7 @@ mod tests {
             logprobs: None,
         };
         Annotated::from_data(NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![choice],
@@ -12593,7 +12675,7 @@ mod tests {
             "dynamic system tools grant tool-call response permission"
         );
         let tool_definitions =
-            crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner).unwrap();
+            crate::preprocessor::tool_choice::effective_tool_definitions(&request).unwrap();
 
         let jailed = OpenAIPreprocessor::apply_tool_calling_jail(
             Some("kimi_k3".to_string()),
@@ -15944,6 +16026,7 @@ mod tests {
         }))
         .unwrap();
         let normalized = NormalizedArgsRequest {
+            named_tool: None,
             inner: &request,
             normalize_tool_call_args: true,
             continue_final_message: true,
@@ -15988,6 +16071,7 @@ mod tests {
         let rendered = if continue_final {
             formatter
                 .render_prompt(&NormalizedArgsRequest {
+                    named_tool: None,
                     inner: request,
                     normalize_tool_call_args: false,
                     continue_final_message: true,

@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "ai-dynamo-runtime==1.7.0",
-    "aisimulate==0.13.0.dev202610240000000082 ; python_version >= '3.11' and python_version < '3.14'",
+    "aisimulate==0.13.0.dev202610280000000086 ; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     # Set the CA bundle floor for transitive HTTP clients outside containers too.
     "certifi>=2026.10.23",
@@ -54,7 +54,7 @@ artifact-delivery = [
 
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.4.0rc0",
+    "tensorrt-llm==1.4.0rc1",
     # tensorrt-llm declares an uncapped `mpmath>=1.3.0`; under `--pre` the resolver
     # picks mpmath 1.5.0a0 (mpmath.libmp.bitcount removed) and backtracks sympy to
     # the uncapped 1.14.0rc1, which still imports bitcount -> torch._dynamo dies at

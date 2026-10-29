@@ -34,7 +34,7 @@ impl WorkerScorer for RelativeLoadScorer {
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
-        assert_eq!(context.prompt_tokens(), 17);
+        assert_eq!(context.isl_tokens(), 17);
         assert!(candidates.iter().all(|c| c.cache().is_none()));
         let mut ids: Vec<_> = candidates.iter().map(|c| c.worker().worker_id).collect();
         ids.sort_unstable();

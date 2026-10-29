@@ -130,6 +130,46 @@ Tool calling lets Dynamo connect models to external tools and services by return
   </Step>
 </Steps>
 
+## Custom Freeform Tools
+
+Chat Completions accepts custom tools whose input is freeform text, such as code or
+a patch. Use the existing tool parser for your model and declare a custom tool:
+
+```json
+{
+  "tools": [{
+    "type": "custom",
+    "custom": {
+      "name": "run_python",
+      "description": "Execute Python source code.",
+      "format": {"type": "text"}
+    }
+  }],
+  "tool_choice": {"type": "custom", "custom": {"name": "run_python"}}
+}
+```
+
+Returned `message.tool_calls` entries use `type: "custom"` with
+`custom.name` and `custom.input`. Your application executes the tool and replays
+the assistant call followed by a `role: "tool"` result with its matching
+`tool_call_id`. Ordinary function tools can appear in the same request.
+
+Responses supports the same capability using its own
+[custom-tool API format](https://developers.openai.com/api/docs/guides/function-calling#custom-tools).
+Custom grammar formats are rejected before generation. Streaming custom input is
+buffered until the call completes, then emitted as text in `custom.input`. This
+streamed custom delta is a Dynamo extension to the published
+[OpenAI Chat streaming schema](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events).
+The optional `tool_call_dispatch` events currently cover function tools only;
+custom calls arrive through ordinary data chunks.
+
+Function-oriented engines generate a JSON wrapper with a string `input` field.
+If a completed call does not match that wrapper, Dynamo returns the raw argument
+text as `custom.input`, preserving other calls, content, and usage. Applications
+must validate tool input before executing it. If the token limit interrupts the
+wrapper, Dynamo preserves `finish_reason: "length"` without emitting the
+truncated input.
+
 ## Supported Tool Call Parsers
 
 Choose a model family, then expand the matching model option to see its parser name and configuration details.

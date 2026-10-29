@@ -227,6 +227,9 @@ mod tests {
                             "gpt_oss" => false,
                             "beam" => false,
                             "gemma4" => thinking != Some(true),
+                            // Spark's template has no reasoning-off mode; keep parsing
+                            // its private channel even when thinking=false is requested.
+                            "muse_spark" => false,
                             _ => thinking == Some(false),
                         },
                         "{selector} {tool:?} {reasoning:?} {thinking:?}"
