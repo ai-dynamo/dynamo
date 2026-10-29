@@ -51,7 +51,7 @@ EXPECTED_TYPE_COUNTS = {
     # owned by github.com/ai-dynamo/snapshot.
     "nvidia.com/v1alpha1": 71,
     "nvidia.com/v1beta1": 76,
-    "nvidia.com/v1beta2": 32,
+    "nvidia.com/v1beta2": 35,
     "operator.config.dynamo.nvidia.com/v1alpha1": 29,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (

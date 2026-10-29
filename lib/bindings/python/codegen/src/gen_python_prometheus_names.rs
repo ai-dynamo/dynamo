@@ -75,7 +75,7 @@ const MAX_LINE_LEN: usize = 88;
 
 /// Emit one `NAME = "value"` assignment, wrapping in parentheses exactly the way black
 /// does when the single-line form would exceed `MAX_LINE_LEN`. Comments are left alone —
-/// black does not reflow them, and flake8 has `E501` in `extend-ignore`.
+/// black does not reflow them, and the ruff hook does not select `E501`.
 fn push_assignment(body_pad: &str, name: &str, value: &str, lines: &mut Vec<String>) {
     let single = format!("{}{} = \"{}\"", body_pad, name, value);
     if single.chars().count() <= MAX_LINE_LEN {

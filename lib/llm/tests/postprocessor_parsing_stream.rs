@@ -479,6 +479,7 @@ fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
         logprobs: None,
     };
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],
@@ -524,6 +525,7 @@ fn mock_multi_choice_content_chunk(
         .collect();
 
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices,
@@ -566,6 +568,7 @@ fn mock_reasoning_only_chunk(reasoning: &str) -> NvCreateChatCompletionStreamRes
         logprobs: None,
     };
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],
@@ -603,6 +606,7 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
         logprobs: None,
     };
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],
@@ -627,6 +631,7 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
 fn mock_usage_only_chunk() -> NvCreateChatCompletionStreamResponse {
     use dynamo_protocols::types::{CompletionUsage, CreateChatCompletionStreamResponse};
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![],
@@ -675,6 +680,7 @@ fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStrea
         })
         .collect();
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices,
@@ -706,6 +712,7 @@ async fn postprocessor_parsing_stream_normalizes_repeated_tool_metadata_across_m
         let choice = &mut chunk.inner.choices[0];
         choice.delta.content = content.map(|text| ChatCompletionMessageContent::Text(text.into()));
         choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call-same".to_string()),
             r#type: Some(FunctionType::Function),
@@ -713,7 +720,6 @@ async fn postprocessor_parsing_stream_normalizes_repeated_tool_metadata_across_m
                 name: Some("get_weather".to_string()),
                 arguments: Some(arguments.to_string()),
             }),
-            custom: None,
         }]);
         chunk
     };

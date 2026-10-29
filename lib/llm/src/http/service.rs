@@ -227,6 +227,9 @@ mod tests {
                             "gpt_oss" => false,
                             // Kept on with the Gemma 4 tool-call parser.
                             "gemma4" => thinking != Some(true) && tool.is_none(),
+                            // Spark's template has no reasoning-off mode; keep parsing
+                            // its private channel even when thinking=false is requested.
+                            "muse_spark" => false,
                             _ => thinking == Some(false),
                         },
                         "{selector} {tool:?} {reasoning:?} {thinking:?}"
