@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! How each MCS implementation names imported EndpointSlices. Only the
-//! slices are read: they hold the endpoints, their readiness, and the source
-//! cluster.
+//! slices are read: they hold the endpoints, their readiness, the source
+//! cluster, and optionally that cluster's region.
 
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 
@@ -23,6 +23,12 @@ pub const SOURCE_CLUSTER_LABEL: &str = "multicluster.kubernetes.io/source-cluste
 
 /// Standard MCS: name of the imported Service a slice belongs to.
 pub const SERVICE_NAME_LABEL: &str = "multicluster.kubernetes.io/service-name";
+
+/// Kubernetes well-known topology label: the region of the cluster a slice
+/// came from. Optional. A standard MCS controller that knows the exporting
+/// cluster's region sets it on the slices it imports, as
+/// `deploy/global-discovery-mcs` does. Karmada does not set it.
+pub const REGION_LABEL: &str = "topology.kubernetes.io/region";
 
 /// Kubernetes: name of the Service a slice belongs to.
 pub const KUBERNETES_SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
@@ -135,6 +141,19 @@ pub fn source_cluster(mcs: McsImplementation, slice: &EndpointSlice) -> Option<&
                 .filter(|cluster| !cluster.is_empty())
         }
     }
+}
+
+/// The region of the cluster the slice came from: its [`REGION_LABEL`], read
+/// the same way for every implementation. `None` without the label, or with
+/// an empty one.
+pub fn source_region(slice: &EndpointSlice) -> Option<&str> {
+    slice
+        .metadata
+        .labels
+        .as_ref()?
+        .get(REGION_LABEL)
+        .map(String::as_str)
+        .filter(|region| !region.is_empty())
 }
 
 #[cfg(test)]

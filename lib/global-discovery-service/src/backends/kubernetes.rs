@@ -7,7 +7,20 @@
 //!
 //! It assumes a trusted network where pod addresses are reachable between
 //! clusters (for example Azure CNI with peered VNets, or the AWS VPC CNI with
-//! peered VPCs), and an MCS implementation, Karmada first.
+//! peered VPCs), and an MCS implementation.
+//!
+//! A standard MCS implementation (`--pool-discovery mcs`) labels each
+//! imported slice with its source cluster
+//! (`multicluster.kubernetes.io/source-cluster`) and Service
+//! (`multicluster.kubernetes.io/service-name`). It may also label it with
+//! that cluster's region (`topology.kubernetes.io/region`), as
+//! `deploy/global-discovery-mcs` does, and that becomes the pool's region.
+//! Without the label, a pool's region is its cluster's name.
+//!
+//! Karmada (`--pool-discovery karmada`) is the alternative naming scheme: it
+//! names the imported Service `derived-<service>` and each slice
+//! `imported-<cluster>-<source slice>` instead of labelling them, and sets no
+//! region label.
 //!
 //! Each pool's PoolRelay Service, named `<DGD name>-pool-relay` by default,
 //! needs a `ServiceExport`, and so does the router's Service in the hub, so
