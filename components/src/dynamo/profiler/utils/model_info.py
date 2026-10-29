@@ -3,6 +3,7 @@
 
 import json
 import logging
+import re
 from pathlib import Path
 from stat import S_ISDIR
 from typing import Optional, Union
@@ -85,24 +86,49 @@ def get_local_model_weight_size(
     return total_size_bytes / (1024**2)
 
 
+# Checkpoint formats in the order loaders prefer them.
+HUB_WEIGHT_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth")
+# Sharded checkpoints are named like "model-00001-of-00004.safetensors".
+SHARD_STEM_PATTERN = re.compile(r"-\d+-of-\d+$")
+
+
+def _select_hub_checkpoint_files(siblings: list) -> list:
+    """Return the Hub repo files that make up one copy of the weights.
+
+    Repos often ship the weights more than once: in a second format (gpt2),
+    as a consolidated file next to the shards (Mistral), or under folders such
+    as ``original/`` (Llama, gpt-oss). Only the repo root is considered, the
+    first format present wins, and its shards are used when it has any.
+    """
+    root_files = [sibling for sibling in siblings if "/" not in sibling.rfilename]
+    for ext in HUB_WEIGHT_EXTENSIONS:
+        files = [sibling for sibling in root_files if sibling.rfilename.endswith(ext)]
+        if files:
+            shards = [
+                sibling
+                for sibling in files
+                if SHARD_STEM_PATTERN.search(sibling.rfilename[: -len(ext)])
+            ]
+            return shards or files
+    return []
+
+
 def get_model_weight_size_from_hub(
     model_name: str,
     token: Optional[str] = None,
 ) -> float:
     """Return model size in MB by querying Hugging Face Hub API."""
     try:
-        info = model_info(model_name, token=token)
+        # Sibling file sizes are only populated when file metadata is requested.
+        info = model_info(model_name, token=token, files_metadata=True)
 
-        # Filter for model weight files (safetensors or pytorch bin files)
-        # Also filter out files with None size
-        weight_extensions = [".safetensors", ".bin", ".pt", ".pth"]
         total_size_bytes = 0
-
-        if info.siblings is not None:
-            for sibling in info.siblings:
-                if any(sibling.rfilename.endswith(ext) for ext in weight_extensions):
-                    if sibling.size is not None:
-                        total_size_bytes += sibling.size
+        checkpoint_files = _select_hub_checkpoint_files(info.siblings or [])
+        # A partial sum would undercount, so fall back to the estimate instead.
+        if checkpoint_files and all(
+            sibling.size is not None for sibling in checkpoint_files
+        ):
+            total_size_bytes = sum(sibling.size for sibling in checkpoint_files)
 
         # If no file sizes were available, try to estimate from safetensors metadata
         if total_size_bytes == 0 and info.safetensors is not None:
