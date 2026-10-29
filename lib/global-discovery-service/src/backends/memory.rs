@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! In-memory store: one process keeps every registration. It needs no
+//! The memory backend: one process keeps every registration. It needs no
 //! Kubernetes, so it suits tests and a first deployment. A restarted process
 //! starts empty and fills as PoolRelays register again, so its lists are
 //! `Estimated` until one lease has passed: by then every live pool has
