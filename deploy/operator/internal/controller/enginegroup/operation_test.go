@@ -95,10 +95,11 @@ func TestEngineGroupOperationProjectsResolvedTargets(t *testing.T) {
 
 func TestEngineGroupOperationProjectsMembershipAndWorkflowPhases(t *testing.T) {
 	tests := []struct {
-		name, expected               string
-		outcome                      domain.TransitionOutcome
-		membership                   domain.MembershipTransitionPhase
-		noTarget, absent, mismatched bool
+		name, expected   string
+		outcome          domain.TransitionOutcome
+		membership       domain.MembershipTransitionPhase
+		noTarget, absent bool
+		mismatch         string
 	}{
 		{name: "prework", expected: "Pending", noTarget: true},
 		{name: "unobserved submission", expected: "Submitting", absent: true},
@@ -106,10 +107,13 @@ func TestEngineGroupOperationProjectsMembershipAndWorkflowPhases(t *testing.T) {
 		{name: "committed membership", expected: "Committed", membership: domain.MembershipTransitionPhaseCommitted},
 		{name: "ambiguous outcome", expected: "Unknown", membership: domain.MembershipTransitionPhaseUnknown},
 		{name: "definitive rejection", expected: "Failed", membership: domain.MembershipTransitionPhaseRejected},
-		{name: "uncorrelated commit", expected: "Unknown", membership: domain.MembershipTransitionPhaseCommitted, mismatched: true},
+		{name: "wrong observation ID", expected: "Unknown", membership: domain.MembershipTransitionPhaseCommitted, mismatch: "id"},
+		{name: "wrong observation revision", expected: "Unknown", membership: domain.MembershipTransitionPhaseCommitted, mismatch: "revision"},
+		{name: "wrong observation digest", expected: "Unknown", membership: domain.MembershipTransitionPhaseCommitted, mismatch: "digest"},
 		{name: "compensation", expected: "Aborting", outcome: domain.TransitionOutcomeReverting},
 		{name: "compensated", expected: "Aborted", outcome: domain.TransitionOutcomeRolledBack},
 		{name: "blocked serving", expected: "Failed", outcome: domain.TransitionOutcomeBlocked},
+		{name: "rejected preflight without target", expected: "Failed", outcome: domain.TransitionOutcomeBlocked, noTarget: true},
 		{name: "completed", expected: "Committed", outcome: domain.TransitionOutcomeCompleted},
 	}
 	for _, test := range tests {
@@ -127,7 +131,12 @@ func TestEngineGroupOperationProjectsMembershipAndWorkflowPhases(t *testing.T) {
 				state.Membership.Observed.Transition = nil
 			} else {
 				state.Membership.Observed.Transition.Phase = test.membership
-				if test.mismatched {
+				switch test.mismatch {
+				case "id":
+					state.Membership.Observed.Transition.TransitionID = "unrelated-transition"
+				case "revision":
+					state.Membership.Observed.Transition.ControlRevision++
+				case "digest":
 					state.Membership.Observed.Transition.TargetDigest = "unrelated-target"
 				}
 			}
@@ -136,9 +145,67 @@ func TestEngineGroupOperationProjectsMembershipAndWorkflowPhases(t *testing.T) {
 			t.Log("publish a phase without promoting an uncorrelated result into commit evidence")
 			require.NoError(t, projectEngineGroupOperation(group, state))
 			assert.Equal(t, api.EngineGroupOperationPhase(test.expected), group.Status.Operation.Phase)
-			if test.mismatched || test.absent || test.noTarget {
+			if test.mismatch != "" || test.absent || test.noTarget {
 				assert.Nil(t, group.Status.Operation.CommittedTopology)
 			}
+		})
+	}
+}
+
+func TestEngineGroupNewOperationDoesNotInheritMembershipResult(t *testing.T) {
+	for _, phase := range []domain.MembershipTransitionPhase{
+		domain.MembershipTransitionPhaseCommitted,
+		domain.MembershipTransitionPhaseRejected,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			t.Log("retain the exact terminal membership result of the previous operation")
+			state := engineGroupTestStatus()
+			state.Membership.Observed.Transition.Phase = phase
+			if phase == domain.MembershipTransitionPhaseRejected {
+				state.Transition.Outcome = domain.TransitionOutcomeRolledBack
+				state.Membership.Observed.Transition.ResultTopology = nil
+				state.Membership.Observed.Transition.Failure = &domain.Failure{
+					Classification: domain.FailureClassificationTerminal, Reason: "PreviousRejection",
+				}
+				state.Membership.Observed.CommittedTopology = state.Topologies.Snapshots[0]
+			}
+			group := &api.DynamoGraphDeploymentEngineGroup{Generation: 1}
+			require.NoError(t, projectEngineGroupOperation(group, state))
+
+			t.Log("start a new operation without replacing the retained membership target or observation")
+			plan := engineGroupTestPlan(domain.ResolvedChange{Kind: domain.PlanKindGrow, Grow: &domain.GrowChange{
+				Replicas: []domain.ReplicaTarget{engineGroupTestReplicaTarget("replica-2", "slot-2", "dp-2")},
+			}})
+			plan.ID = "next-plan"
+			state.Transition = &domain.TransitionStatus{
+				Spec: domain.TransitionSpec{ID: "next-operation", Plan: plan,
+					BaseTopologyGeneration: state.Membership.Observed.CommittedTopology.Generation},
+				Outcome: domain.TransitionOutcomeProgressing,
+			}
+			group.Generation++
+			require.NoError(t, projectEngineGroupOperation(group, state))
+			assert.Equal(t, "next-operation", group.Status.Operation.ID)
+			assert.Equal(t, api.EngineGroupOperationPhasePending, group.Status.Operation.Phase)
+			assert.Nil(t, group.Status.Operation.CommittedTopology)
+			assert.Nil(t, group.Status.Operation.Error)
+
+			t.Log("reprojection after restart must not promote the previous native result")
+			group = group.DeepCopy()
+			require.NoError(t, projectEngineGroupOperation(group, state))
+			assert.Equal(t, api.EngineGroupOperationPhasePending, group.Status.Operation.Phase)
+			assert.Nil(t, group.Status.Operation.CommittedTopology)
+			assert.Nil(t, group.Status.Operation.Error)
+
+			t.Log("a definitive rejection of the new plan is Failed even before its target is prepared")
+			failure := &domain.Failure{Classification: domain.FailureClassificationTerminal, Reason: "CurrentPreflightRejection"}
+			state.Transition.PlanPreflight = domain.PreflightStatus{TransitionID: "next-operation", Rejection: failure}
+			state.Transition.Outcome = domain.TransitionOutcomeBlocked
+			state.Transition.Failure = failure
+			require.NoError(t, projectEngineGroupOperation(group, state))
+			assert.Equal(t, api.EngineGroupOperationPhaseFailed, group.Status.Operation.Phase)
+			require.NotNil(t, group.Status.Operation.Error)
+			assert.Equal(t, failure.Reason, group.Status.Operation.Error.Reason)
+			assert.Nil(t, group.Status.Operation.CommittedTopology)
 		})
 	}
 }
