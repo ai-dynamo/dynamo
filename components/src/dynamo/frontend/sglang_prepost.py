@@ -9,7 +9,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any, TypeAlias
 
 from jinja2.exceptions import TemplateError
@@ -974,8 +974,16 @@ def preprocess_chat_request(
 
         normalize_reasoning_content(
             messages,
-            chat_template=getattr(tokenizer, "chat_template", None),
-            has_tools=bool(template_tools),
+            render_template=partial(
+                tokenizer.apply_chat_template,
+                **{
+                    **template_kwargs,
+                    "tokenize": False,
+                    "return_dict": False,
+                    "return_assistant_tokens_mask": False,
+                },
+            ),
+            has_tools=template_kwargs.get("tools") is not None,
         )
         template_messages = _normalize_messages_for_template(messages, tokenizer)
 

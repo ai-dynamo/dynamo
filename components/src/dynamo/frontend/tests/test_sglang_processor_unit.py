@@ -3802,7 +3802,9 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             chat_template = (
                 None
                 if native_encoder
-                else "{% for message in messages if message.role == 'assistant' %}"
+                else "{% if reasoning_effort != 'high' or render_options.mode != 'flat' %}"
+                "{{ raise_exception('request render options required') }}{% endif %}"
+                "{% for message in messages if message.role == 'assistant' %}"
                 "{{ '<think>' ~ message.reasoning_content ~ '</think>' }}"
                 "{% endfor %}"
             )
@@ -3813,7 +3815,9 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
                     .from_string(self.chat_template)
                     .render(messages=messages, **kwargs)
                 )
-                return list(map(ord, prompt))
+                return (
+                    list(map(ord, prompt)) if kwargs.get("tokenize", True) else prompt
+                )
 
             def encode(self, prompt):
                 return list(map(ord, prompt))
@@ -3821,7 +3825,12 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         segments = ["Check 'quotes' and \\slashes.\n", "Then add. 中文", ""]
         request = {
             "model": "deepseek-ai/DeepSeek-V4-Flash",
-            "chat_template_kwargs": {"thinking": True},
+            "reasoning_effort": "high",
+            "chat_template_kwargs": {
+                "thinking": True,
+                "reasoning_effort": "low",
+                "render_options": {"mode": "flat"},
+            },
             "tools": [
                 {
                     "type": "function",
