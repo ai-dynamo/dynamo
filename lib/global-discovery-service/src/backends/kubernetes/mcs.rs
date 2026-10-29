@@ -71,10 +71,22 @@ pub fn service_name(mcs: McsImplementation, slice: &EndpointSlice) -> Option<&st
     }
 }
 
-/// The longest Service name whose slices Karmada can name a cluster for.
-/// Kubernetes names a Service's slices `<service>-<5 random characters>`, but
-/// shortens `<service>-` to 58 characters, and Karmada's names build on those.
-pub const KARMADA_MAX_SERVICE_NAME: usize = 57;
+/// The longest a Service name, or a label value, may be.
+const MAX_NAME_LENGTH: usize = 63;
+
+/// The longest Service name Karmada can import. Karmada names the imported
+/// Service `derived-<service>`, and puts that name in each imported slice's
+/// `kubernetes.io/service-name` label, so a longer name gets neither.
+pub const KARMADA_MAX_SERVICE_NAME: usize = MAX_NAME_LENGTH - KARMADA_DERIVED_PREFIX.len();
+
+/// Whether `mcs` can import a Service of this name. A directory lists
+/// nothing for one it cannot.
+pub fn can_import(mcs: McsImplementation, service: &str) -> bool {
+    match mcs {
+        McsImplementation::Standard => true,
+        McsImplementation::Karmada => service.len() <= KARMADA_MAX_SERVICE_NAME,
+    }
+}
 
 /// Logs a slice of a Service the directory wants, but from an unknown
 /// cluster. Such a slice is skipped, so its pool or router replica is not
@@ -83,8 +95,7 @@ pub fn warn_unknown_cluster(slice: &EndpointSlice, service: &str) {
     tracing::warn!(
         slice = slice.metadata.name.as_deref().unwrap_or_default(),
         service,
-        karmada_max_service_name = KARMADA_MAX_SERVICE_NAME,
-        "skipping an imported EndpointSlice that does not say which cluster it came from; with Karmada, check that the Service name is not too long"
+        "skipping an imported EndpointSlice that does not say which cluster it came from; with Karmada, its name must be imported-<cluster>-<service>-<suffix>"
     );
 }
 
@@ -235,10 +246,9 @@ mod tests {
         // Not imported by Karmada.
         let local = karmada_slice("relay-mocker-west-1-28g2h", "relay-mocker-west-1");
         assert_eq!(source_cluster(McsImplementation::Karmada, &local), None);
-        // The source slice name does not start with the service name, as
-        // when Kubernetes shortens a long Service name.
-        let shortened = karmada_slice("imported-west-relay-mock-28g2h", "relay-mocker-west-1");
-        assert_eq!(source_cluster(McsImplementation::Karmada, &shortened), None);
+        // The source slice is not named after the Service.
+        let misnamed = karmada_slice("imported-west-relay-mock-28g2h", "relay-mocker-west-1");
+        assert_eq!(source_cluster(McsImplementation::Karmada, &misnamed), None);
         // No cluster before the service name.
         let empty = karmada_slice("imported--svc-x1y2z", "svc");
         assert_eq!(source_cluster(McsImplementation::Karmada, &empty), None);
@@ -248,5 +258,13 @@ mod tests {
             &[(KUBERNETES_SERVICE_NAME_LABEL, "svc")],
         );
         assert_eq!(service_name(McsImplementation::Karmada, &plain), None);
+    }
+
+    #[test]
+    fn karmada_imports_names_of_up_to_55_characters() {
+        assert_eq!(KARMADA_MAX_SERVICE_NAME, 55);
+        assert!(can_import(McsImplementation::Karmada, &"a".repeat(55)));
+        assert!(!can_import(McsImplementation::Karmada, &"a".repeat(56)));
+        assert!(can_import(McsImplementation::Standard, &"a".repeat(56)));
     }
 }

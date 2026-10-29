@@ -13,8 +13,8 @@ use dynamo_backend_common::{
 use dynamo_runtime::metrics::prometheus_names::labels;
 
 use crate::args::Args;
-use crate::client::{UNIDENTIFIED_PEER, invalid_argument};
-use crate::pb;
+use crate::client::{UNIDENTIFIED_PEER, invalid_argument, protocol_error};
+use crate::{load, pb};
 
 /// The OpenEngine contract revision this sidecar implements.
 const CLIENT_REVISION: u32 = 1;
@@ -50,6 +50,9 @@ pub(crate) struct DiscoveredEngine {
     pub(crate) max_batched_tokens: Option<u64>,
     pub(crate) tool_call_parser: Option<String>,
     pub(crate) reasoning_parser: Option<String>,
+    /// The engine's validated `GetLoad` answer at startup, when it reports
+    /// load; the sidecar polls load only for such an engine.
+    pub(crate) load: Option<pb::LoadInfo>,
 }
 
 impl DiscoveredEngine {
@@ -120,7 +123,32 @@ impl DiscoveredEngine {
             max_batched_tokens: capacity.max_batched_tokens.filter(|count| *count > 0),
             tool_call_parser: non_empty(model.tool_call_parser),
             reasoning_parser: non_empty(model.reasoning_parser),
+            load: None,
         })
+    }
+
+    /// Keeps the load the engine reports at startup. `None` means it does not
+    /// implement `GetLoad`, and an answer without counters or ranks reports
+    /// no load, as with the TensorRT-LLM sidecar. Load is counted in the
+    /// capacity's KV blocks, so it needs a reported capacity.
+    pub(crate) fn with_load(mut self, load: Option<pb::LoadInfo>) -> Result<Self, DynamoError> {
+        let Some(load) = load.filter(|load| {
+            load.used_kv_blocks.is_some()
+                || load.total_kv_blocks.is_some()
+                || !load.ranks.is_empty()
+        }) else {
+            return Ok(self);
+        };
+        let engine = engine_label(&self.engine_name);
+        if self.total_kv_blocks.is_none() {
+            return Err(protocol_error(
+                engine,
+                "load requires positive kv_block_size and total_kv_blocks",
+            ));
+        }
+        load::snapshot(engine, load.clone())?;
+        self.load = Some(load);
+        Ok(self)
     }
 
     /// Checks the served model name the deployment expects, when it gives one,
@@ -194,8 +222,9 @@ impl DiscoveredEngine {
                 .dyn_reasoning_parser
                 .or_else(|| self.reasoning_parser.clone()),
             exclude_tools_when_tool_choice_none: common.exclude_tools_when_tool_choice_none,
-            // An LPX engine publishes no KV events and hosts no KV indexer.
-            enable_kv_routing: false,
+            // An LPX engine publishes no KV events and hosts no KV indexer, so
+            // this starts only the router's load and first-token publishers.
+            enable_kv_routing: self.load.is_some(),
             enable_local_indexer: false,
             disaggregation_mode: mode,
             route_to_encoder: false,
