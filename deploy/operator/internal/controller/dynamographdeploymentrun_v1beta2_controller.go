@@ -61,7 +61,7 @@ const (
 	dgdrRunInputPath               = dgdrRunInputMountPath + "/" + dgdrRunInputKey
 	dgdrRunSnapshotPath            = "/var/run/aisimulate/output"
 	dgdrRunServiceAccountMountPath = "/var/run/secrets/kubernetes.io/serviceaccount"
-	dgdrRunOperatorBinary          = "/manager"
+	dgdrRunPublisherBinary         = "/dgdr-run-publisher"
 	dgdrRunSweeperContainer        = "sweeper"
 	dgdrRunPublisherContainer      = "publisher"
 	dgdrRunInputVolume             = "input"
@@ -831,9 +831,8 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 							Name:            dgdrRunPublisherContainer,
 							Image:           execution.PublisherImage,
 							ImagePullPolicy: execution.PublisherPullPolicy,
-							Command:         []string{dgdrRunOperatorBinary},
+							Command:         []string{dgdrRunPublisherBinary},
 							Args: []string{
-								dgdrrunpublisher.Subcommand,
 								"--snapshot-dir", execution.SnapshotPath,
 								"--run-name", run.Name,
 								"--run-uid", string(run.UID),
