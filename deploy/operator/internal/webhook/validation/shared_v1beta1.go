@@ -138,11 +138,14 @@ func (v *sharedValidation) warnf(format string, args ...any) {
 type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	grovePathway                      bool
 	validateInferencePoolAvailability bool
-	providerOverridesSupported        bool
-	workloadProvider                  string
-	oldComponent                      *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
-	groveUpdateStrategy               grovev1alpha1.UpdateStrategyType
-	groveStrategyChanged              bool
+	// validateCheckpointRestoreEntrypoint applies the restore entrypoint rule; only
+	// DynamoGraphDeployment components opt in, not standalone DynamoComponentDeployments.
+	validateCheckpointRestoreEntrypoint bool
+	providerOverridesSupported          bool
+	workloadProvider                    string
+	oldComponent                        *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	groveUpdateStrategy                 grovev1alpha1.UpdateStrategyType
+	groveStrategyChanged                bool
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
@@ -258,6 +261,31 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		)...)
 	}
 	allErrs = append(allErrs, validateComponentPodTemplateMode(spec, fldPath)...)
+
+	// Reject a checkpoint target that restore admission would refuse. An unchanged stored
+	// violation survives only while the target identity and launch are identical.
+	if inputs, applies := restoreEntrypointInputsFor(spec); options.validateCheckpointRestoreEntrypoint && applies && !inputs.supported() {
+		unchanged := false
+		if options.oldComponent != nil {
+			oldInputs, oldApplies := restoreEntrypointInputsFor(options.oldComponent)
+			unchanged = oldApplies && inputs.equal(oldInputs)
+		}
+		containersPath := fldPath.Child("podTemplate", "spec", "containers")
+		switch {
+		case unchanged:
+		case inputs.containerIndex < 0:
+			allErrs = append(allErrs, field.Required(
+				containersPath,
+				fmt.Sprintf("must contain the checkpoint target container %q that directly runs python -m <module>", inputs.targetContainer),
+			))
+		default:
+			allErrs = append(allErrs, field.Forbidden(
+				containersPath.Index(inputs.containerIndex).Child("command"),
+				"checkpoint restore requires the target container to directly run python -m <module>; "+
+					"shell wrappers and non-python launchers are not supported",
+			))
+		}
+	}
 
 	// Reject invalid shared-memory quantities before resource-specific validation.
 	if spec.SharedMemorySize != nil && spec.SharedMemorySize.Sign() < 0 {

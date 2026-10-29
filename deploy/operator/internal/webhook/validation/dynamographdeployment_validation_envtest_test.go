@@ -1965,6 +1965,36 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment:      betaCheckpointRestoreDGD(true, betaShellCommand(), 1),
 			wantWebhookErrs: []string{betaRestoreEntrypointForbidden},
 		},
+		{
+			name:               "reordering containers keeps a legacy shell entrypoint exempt",
+			seedWithoutWebhook: true,
+			oldDeployment:      withBetaMetricsContainer(betaCheckpointRestoreDGD(true, betaShellCommand(), 1), false),
+			deployment:         withBetaMetricsContainer(betaCheckpointRestoreDGD(true, betaShellCommand(), 1), true),
+		},
+		{
+			name:               "inserting a sidecar before a legacy shell target keeps it exempt",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaCheckpointRestoreDGD(true, betaShellCommand(), 1),
+			deployment:         withBetaMetricsContainer(betaCheckpointRestoreDGD(true, betaShellCommand(), 1), true),
+		},
+		{
+			name:               "moving the checkpoint target to another container is rejected",
+			seedWithoutWebhook: true,
+			oldDeployment:      withBetaMetricsContainer(betaCheckpointRestoreDGD(true, betaShellCommand(), 1), false),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true, TargetContainerName: betaMetricsContainerName},
+				}
+				useBetaRestoreEntrypoint(worker, betaShellCommand())
+				appendBetaMetricsContainer(worker, false)
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[1].podTemplate.spec.containers[1].command: Forbidden: " +
+					"checkpoint restore requires the target container to directly run python -m <module>; " +
+					"shell wrappers and non-python launchers are not supported",
+			},
+		},
 
 		// KV-transfer CEL rules.
 		{
@@ -4710,6 +4740,25 @@ func betaCheckpointRestoreDGD(enabled bool, command []string, replicas int32) *n
 		}
 		useBetaRestoreEntrypoint(worker, command)
 	})
+}
+
+const betaMetricsContainerName = "metrics"
+
+// appendBetaMetricsContainer adds an unrelated sidecar before or after the existing containers.
+func appendBetaMetricsContainer(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, first bool) {
+	metrics := corev1.Container{Name: betaMetricsContainerName, Image: "registry.example.invalid/metrics:1.0.0"}
+	containers := component.PodTemplate.Spec.Containers
+	if first {
+		component.PodTemplate.Spec.Containers = append([]corev1.Container{metrics}, containers...)
+		return
+	}
+	component.PodTemplate.Spec.Containers = append(containers, metrics)
+}
+
+// withBetaMetricsContainer adds an unrelated sidecar to the worker and returns dgd.
+func withBetaMetricsContainer(dgd *nvidiacomv1beta1.DynamoGraphDeployment, first bool) *nvidiacomv1beta1.DynamoGraphDeployment {
+	appendBetaMetricsContainer(betaWorkerComponent(dgd), first)
+	return dgd
 }
 
 // enableBetaSnapshotFailover constructs a fresh multi-GPU capture/election

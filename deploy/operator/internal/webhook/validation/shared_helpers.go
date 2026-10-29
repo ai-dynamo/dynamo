@@ -25,6 +25,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
@@ -255,6 +256,71 @@ func mainContainerIndex(containers []corev1.Container) int {
 		}
 	}
 	return -1
+}
+
+// restoreEntrypointInputs is the complete input of the checkpoint restore
+// entrypoint rule: the restore target and the launch it receives.
+type restoreEntrypointInputs struct {
+	targetContainer string
+	// containerIndex locates the target in the authored list for error paths only;
+	// the container keeps its identity when siblings are reordered or inserted.
+	containerIndex int
+	command        []string
+	args           []string
+}
+
+// supported reports whether the launch satisfies the restore entrypoint contract.
+func (i restoreEntrypointInputs) supported() bool {
+	return checkpoint.HasSupportedRestoreEntrypoint(&corev1.Container{Command: i.command, Args: i.args})
+}
+
+// equal compares the target identity and launch, treating nil and empty launch slices alike.
+func (i restoreEntrypointInputs) equal(other restoreEntrypointInputs) bool {
+	return i.targetContainer == other.targetContainer &&
+		slices.Equal(i.command, other.command) &&
+		slices.Equal(i.args, other.args)
+}
+
+// restoreEntrypointInputsFor resolves the entrypoint that restore admission will
+// see for the checkpoint target container. It reports false when the component
+// does not enable checkpointing for a component type that supports it, or when the
+// launch is not authored by the user (intra-pod failover, role PodTemplates, and
+// native sidecars), which the authored container does not describe.
+// spec must not be nil.
+func restoreEntrypointInputsFor(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (restoreEntrypointInputs, bool) {
+	if spec.Experimental == nil || spec.Experimental.Checkpoint == nil || !spec.Experimental.Checkpoint.Enabled {
+		return restoreEntrypointInputs{}, false
+	}
+	switch spec.ComponentType {
+	case nvidiacomv1beta1.ComponentTypeWorker, nvidiacomv1beta1.ComponentTypePrefill, nvidiacomv1beta1.ComponentTypeDecode:
+	default:
+		return restoreEntrypointInputs{}, false
+	}
+	if spec.Experimental.Failover != nil || dynamo.HasRolePodTemplates(spec) || dynamo.GetDynamoSidecar(spec) != nil {
+		return restoreEntrypointInputs{}, false
+	}
+
+	inputs := restoreEntrypointInputs{
+		targetContainer: spec.Experimental.Checkpoint.TargetContainerName,
+		containerIndex:  -1,
+	}
+	if inputs.targetContainer == "" {
+		inputs.targetContainer = consts.MainContainerName
+	}
+
+	// An authored command replaces the operator's /bin/sh -c default, so a missing one leaves the shell.
+	containers := podTemplateContainers(spec.PodTemplate)
+	for i := range containers {
+		if containers[i].Name == inputs.targetContainer {
+			inputs.containerIndex = i
+			inputs.command = containers[i].Command
+			inputs.args = containers[i].Args
+			break
+		}
+	}
+	return inputs, true
 }
 
 func podTemplateContainers(podTemplate *corev1.PodTemplateSpec) []corev1.Container {
