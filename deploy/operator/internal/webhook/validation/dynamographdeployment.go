@@ -462,6 +462,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			component,
 			componentPath,
 			dynamoComponentDeploymentSharedSpecValidationOptions{
+				backendFramework:                  spec.BackendFramework,
 				grovePathway:                      opts.grovePathway,
 				validateInferencePoolAvailability: validateInferencePoolAvailability,
 				providerOverridesSupported:        true,
