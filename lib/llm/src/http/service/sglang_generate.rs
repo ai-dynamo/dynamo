@@ -5,7 +5,7 @@
 //!
 //! The public body is parsed only far enough to project Dynamo routing controls;
 //! engine-owned fields stay opaque and are forwarded to the SGLang worker.
-//! Only SGLang's incremental SSE mode is currently exposed.
+//! Workers stream SGLang's incremental output; `stream=false` joins it.
 
 use std::sync::Arc;
 
@@ -30,14 +30,19 @@ use super::disconnect::{
 use super::error::SanitizedError;
 use super::metrics::{CancellationLabels, ErrorType};
 use super::openai::{
-    check_model_serving_ready, check_ready, context_from_headers, find_invalid_argument_in_chain,
-    get_body_limit, get_or_create_request_id,
+    check_model_serving_ready, check_ready, find_invalid_argument_in_chain, get_body_limit,
+    get_or_create_request_id, preprocessed_context_from_headers,
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
+use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+use crate::protocols::response_merge::{
+    PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION, PrefillNeed,
+};
 use crate::protocols::sglang::generate::SglangGenerateRequest;
+use crate::protocols::sglang::merge::merger;
 use crate::protocols::sglang::stream::SglangGenerateStream;
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
@@ -58,7 +63,12 @@ fn canonical_generate_models(
 
 #[derive(Debug)]
 struct RequestContext {
+    /// Server-minted id for the request context, routing, and logs. Never client-chosen:
+    /// in-flight request state is keyed on it.
     request_id: String,
+    /// Client-facing id carried to the worker as the envelope `rid`, following SGLang's body
+    /// `rid` > `x-request-id` precedence. Correlation only.
+    public_request_id: String,
     data_parallel_rank: Option<u32>,
 }
 
@@ -135,7 +145,8 @@ fn adapt_openai_error(response: super::openai::ErrorResponse) -> Response {
 }
 
 fn resolve_request_context(headers: &HeaderMap, body_request_id: Option<&str>) -> RequestContext {
-    let request_id = body_request_id
+    let request_id = get_or_create_request_id(headers);
+    let public_request_id = body_request_id
         .map(ToOwned::to_owned)
         .or_else(|| {
             headers
@@ -143,7 +154,7 @@ fn resolve_request_context(headers: &HeaderMap, body_request_id: Option<&str>) -
                 .and_then(|value| value.to_str().ok())
                 .map(ToOwned::to_owned)
         })
-        .unwrap_or_else(|| get_or_create_request_id(headers));
+        .unwrap_or_else(|| request_id.clone());
     let data_parallel_rank = headers
         .get(X_DATA_PARALLEL_RANK_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -151,6 +162,7 @@ fn resolve_request_context(headers: &HeaderMap, body_request_id: Option<&str>) -
 
     RequestContext {
         request_id,
+        public_request_id,
         data_parallel_rank,
     }
 }
@@ -195,14 +207,27 @@ fn preprocessed_request(
     request: SglangGenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,
-    request_id: &str,
+    public_request_id: &str,
 ) -> anyhow::Result<PreprocessedRequest> {
     let max_tokens = request.max_new_tokens().map_err(anyhow::Error::msg)?;
     let min_tokens = request.min_new_tokens().map_err(anyhow::Error::msg)?;
     let ignore_eos = request.ignore_eos().map_err(anyhow::Error::msg)?;
     let routing_priority = request.priority.unwrap_or_default();
     let cache_namespace = request.cache_namespace().map(str::to_owned);
-    let (input_ids, worker_envelope) = request.into_worker_envelope(request_id);
+    let streaming = request.stream;
+    let (input_ids, worker_envelope) = request.into_worker_envelope(public_request_id);
+    // The router records TTFT and ITL into the request's tracker.
+    let tracker = Arc::new(RequestTracker::new());
+    tracker.record_isl(input_ids.len(), None);
+    // Hold decode output for prefill only when every streamed chunk needs it.
+    let annotations = match merger().prefill_need(&worker_envelope) {
+        PrefillNeed::None => vec![],
+        PrefillNeed::BeforeFirst if streaming => vec![
+            PREFILL_OUTPUT_ANNOTATION.to_string(),
+            PREFILL_OUTPUT_FIRST_ANNOTATION.to_string(),
+        ],
+        _ => vec![PREFILL_OUTPUT_ANNOTATION.to_string()],
+    };
     let mut extra_args = serde_json::Map::new();
     extra_args.insert("sglang_tito".to_string(), worker_envelope);
 
@@ -225,13 +250,14 @@ fn preprocessed_request(
         })
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
-            expected_output_tokens: max_tokens,
             priority_jump: Some(routing_priority.max(0) as f64),
             priority: Some(routing_priority),
             cache_namespace,
             ..Default::default()
         }))
         .extra_args(Some(serde_json::Value::Object(extra_args)))
+        .annotations(annotations)
+        .tracker(Some(tracker))
         .build()
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
 }
@@ -264,13 +290,7 @@ async fn handler(
     if let Err(message) = request.validate() {
         return error_response(StatusCode::BAD_REQUEST, message);
     }
-    if !request.stream {
-        return error_response(
-            StatusCode::NOT_IMPLEMENTED,
-            "non-streaming SGLang generate requests are not implemented; set stream=true"
-                .to_string(),
-        );
-    }
+    let streaming = request.stream;
 
     let models = canonical_generate_models(
         state.manager(),
@@ -319,7 +339,7 @@ async fn handler(
         request,
         &model,
         request_context.data_parallel_rank,
-        &request_context.request_id,
+        &request_context.public_request_id,
     ) {
         Ok(preprocessed) => preprocessed,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
@@ -327,7 +347,7 @@ async fn handler(
 
     let request_id = request_context.request_id;
     let context: Context<PreprocessedRequest> =
-        match context_from_headers(preprocessed, request_id.clone(), &headers) {
+        match preprocessed_context_from_headers(preprocessed, request_id.clone(), &headers) {
             Ok(context) => context,
             Err(response) => return adapt_openai_error(response),
         };
@@ -335,7 +355,7 @@ async fn handler(
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
         endpoint: super::metrics::Endpoint::Generate.to_string(),
-        request_type: "streaming".to_string(),
+        request_type: if streaming { "streaming" } else { "unary" }.to_string(),
     };
     let (mut connection_handle, stream_handle) = create_connection_monitor(
         engine_context,
@@ -347,7 +367,8 @@ async fn handler(
     let dispatch_span = tracing::info_span!(
         target: "request_span",
         "generate",
-        request_id = %request_id
+        request_id = %request_id,
+        x_request_id = %request_context.public_request_id,
     );
     let response = match tokio::spawn(
         dispatch(
@@ -357,6 +378,7 @@ async fn handler(
             model,
             state.clone(),
             stream_handle,
+            streaming,
         )
         .instrument(dispatch_span),
     )
@@ -380,13 +402,16 @@ async fn dispatch(
     model: String,
     state: Arc<service_v2::State>,
     stream_handle: ConnectionHandle,
+    streaming: bool,
 ) -> Response {
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         state.manager().metric_model_for(&model),
         super::metrics::Endpoint::Generate,
-        true,
+        streaming,
         &request_id,
     );
+    let tracked = inflight_guard.request_metrics().clone();
+    tracked.add_input_tokens(context.content().token_ids.len());
     let request_context = context.context();
     let generate_result =
         match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
@@ -458,11 +483,51 @@ async fn dispatch(
     };
 
     let engine_context = stream.context();
-    let stream = SglangGenerateStream::from_annotated_stream(stream).map(|result| {
-        result
-            .map(|value| Event::default().data(value.to_string()))
-            .map_err(axum::Error::new)
+    let stream = stream.inspect(move |delta| {
+        if let Some(output) = &delta.data {
+            tracked.add_output_tokens(output.token_ids.len());
+        }
     });
+    if !streaming {
+        let fold = SglangGenerateStream::fold(stream, merger());
+        return match run_until_killed(request_context.as_ref(), fold).await {
+            Some(Ok(response)) if !request_context.is_killed() && !engine_context.is_killed() => {
+                inflight_guard.mark_ok();
+                Json(response).into_response()
+            }
+            Some(Err(error)) => {
+                let (error_type, body) = stream_error(&error);
+                if error_type == ErrorType::Internal {
+                    tracing::error!(%request_id, %error, "SGLang generate stream failed");
+                }
+                let status = match error_type {
+                    ErrorType::Validation => StatusCode::BAD_REQUEST,
+                    ErrorType::Overload | ErrorType::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+                    ErrorType::Cancelled => {
+                        StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST)
+                    }
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                inflight_guard.mark_error(error_type);
+                let json = [(axum::http::header::CONTENT_TYPE, "application/json")];
+                (status, json, body).into_response()
+            }
+            _ => {
+                inflight_guard.mark_error(ErrorType::Cancelled);
+                cancelled_response()
+            }
+        };
+    }
+    // One buffer reused across chunks.
+    let mut buffer = Vec::new();
+    let render = move |response: &serde_json::Value| {
+        buffer.clear();
+        serde_json::to_writer(&mut buffer, response).map_err(axum::Error::new)?;
+        let json = std::str::from_utf8(&buffer).map_err(axum::Error::new)?;
+        Ok(Event::default().data(json))
+    };
+    let stream = SglangGenerateStream::from_annotated_stream(stream, merger(), render)
+        .map(|result| result.map_err(axum::Error::new).and_then(|event| event));
     let stream = monitor_for_disconnects_with_error(
         stream,
         engine_context,
@@ -483,6 +548,8 @@ mod tests {
 
     use crate::http::service::generate::tests::{WorkerUnavailableEngine, dispatch_test_context};
     use crate::http::service::metrics::{Endpoint, RequestType, Status};
+    use crate::protocols::common::llm_backend::LLMEngineOutput;
+    use dynamo_runtime::protocols::maybe_error::MaybeError;
 
     #[test]
     fn cache_salt_matches_routing_and_native_payload() {
@@ -493,6 +560,7 @@ mod tests {
             }))
             .unwrap();
             let request = preprocessed_request(request, "test-model", None, "request-id").unwrap();
+            assert_eq!(request.tracker.unwrap().isl_tokens(), Some(2));
             let expected = salt.filter(|salt| !salt.is_empty());
             assert_eq!(
                 request.routing.unwrap().cache_namespace.as_deref(),
@@ -503,6 +571,151 @@ mod tests {
                 expected,
             );
         }
+    }
+
+    /// Echoes each request's input ids back, holding every request until `barrier` releases them
+    /// together so both are in flight at once. Records what the worker saw for each request.
+    struct ConcurrentEchoEngine {
+        barrier: tokio::sync::Barrier,
+        seen: std::sync::Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl
+        dynamo_runtime::engine::AsyncEngine<
+            dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
+            dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > for ConcurrentEchoEngine
+    {
+        async fn generate(
+            &self,
+            request: dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
+        ) -> Result<
+            dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > {
+            let rid = request
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra["sglang_tito"]["rid"].as_str())
+                .map(str::to_string);
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.id().to_string(), rid));
+            self.barrier.wait().await;
+            let output = crate::protocols::Annotated::from_data(LLMEngineOutput {
+                engine_data: Some(serde_json::json!({
+                    "sglang_response": {"output_ids": request.token_ids.to_vec()}
+                })),
+                ..Default::default()
+            });
+            Ok(dynamo_runtime::engine::ResponseStream::new(
+                Box::pin(futures::stream::iter([output])),
+                request.context(),
+            ))
+        }
+    }
+
+    async fn concurrent_generate_with_shared_client_id(
+        headers: HeaderMap,
+        body_rid: Option<&str>,
+        expected_public_id: &str,
+    ) {
+        use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+
+        let engine = Arc::new(ConcurrentEchoEngine {
+            barrier: tokio::sync::Barrier::new(2),
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = service_v2::HttpService::builder()
+            .build()
+            .unwrap()
+            .state_clone();
+        let mut card = crate::model_card::ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.needs = Vec::new();
+        card.runtime_config
+            .set_engine_specific(SGLANG_GENERATE_CAPABILITY, true)
+            .unwrap();
+        let mut worker_set =
+            crate::discovery::WorkerSet::new("sglang-ns".to_string(), "sglang".to_string(), card);
+        worker_set.generate_engine =
+            Some(crate::http::service::generate::tests::engine_behind_frontend(engine.clone()));
+        assert!(
+            state
+                .manager()
+                .add_worker_set("sglang-concurrent-model", "sglang-ns", worker_set)
+        );
+
+        let send = |input_ids: Vec<u32>| {
+            let mut body = serde_json::json!({
+                "input_ids": input_ids,
+                "sampling_params": {"max_new_tokens": 4},
+                "stream": false
+            });
+            if let Some(rid) = body_rid {
+                body["rid"] = serde_json::json!(rid);
+            }
+            let request = serde_json::from_value(body).unwrap();
+            handler(State(state.clone()), headers.clone(), Ok(Json(request)))
+        };
+        let (first, second) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            futures::future::join(send(vec![1, 2, 3]), send(vec![7, 8])),
+        )
+        .await
+        .expect("concurrent SGLang generate requests must not hang");
+
+        for (response, expected_ids) in [(first, vec![1, 2, 3]), (second, vec![7, 8])] {
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["output_ids"], serde_json::json!(expected_ids));
+        }
+
+        let seen = engine.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_ne!(
+            seen[0].0, seen[1].0,
+            "each request needs its own context id"
+        );
+        for (context_id, rid) in seen.iter() {
+            assert_ne!(context_id, expected_public_id);
+            assert_eq!(rid.as_deref(), Some(expected_public_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_sglang_requests_sharing_rid_get_their_own_output() {
+        concurrent_generate_with_shared_client_id(
+            HeaderMap::new(),
+            Some("shared-rid"),
+            "shared-rid",
+        )
+        .await;
+    }
+
+    #[test]
+    fn request_context_keeps_client_ids_as_correlation_only() {
+        let mut headers = HeaderMap::new();
+        headers.insert(X_REQUEST_ID_HEADER, "header-request".parse().unwrap());
+        headers.insert(X_DATA_PARALLEL_RANK_HEADER, "2".parse().unwrap());
+
+        let context = resolve_request_context(&headers, Some("body-rid"));
+        assert_eq!(context.public_request_id, "body-rid");
+        assert!(uuid::Uuid::parse_str(&context.request_id).is_ok());
+        assert_eq!(context.data_parallel_rank, Some(2));
+
+        let context = resolve_request_context(&headers, None);
+        assert_eq!(context.public_request_id, "header-request");
+        assert_ne!(context.request_id, "header-request");
+
+        let context = resolve_request_context(&HeaderMap::new(), None);
+        assert_eq!(context.public_request_id, context.request_id);
     }
 
     #[tokio::test]
@@ -522,6 +735,7 @@ mod tests {
             "test-model".to_string(),
             state.clone(),
             ConnectionHandle::create_disabled(tx),
+            true,
         )
         .await;
 
@@ -708,6 +922,7 @@ mod tests {
             "test-model".to_string(),
             state.clone(),
             stream_handle,
+            true,
         )
         .await;
         connection_handle.disarm();
@@ -728,5 +943,115 @@ mod tests {
             ),
             1
         );
+    }
+
+    struct ReplayEngine(Vec<crate::protocols::Annotated<LLMEngineOutput>>);
+
+    #[async_trait::async_trait]
+    impl
+        dynamo_runtime::engine::AsyncEngine<
+            dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
+            dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > for ReplayEngine
+    {
+        async fn generate(
+            &self,
+            request: dynamo_runtime::pipeline::SingleIn<PreprocessedRequest>,
+        ) -> Result<
+            dynamo_runtime::pipeline::ManyOut<crate::protocols::Annotated<LLMEngineOutput>>,
+            dynamo_runtime::pipeline::Error,
+        > {
+            let stream = Box::pin(futures::stream::iter(self.0.clone()));
+            Ok(dynamo_runtime::engine::ResponseStream::new(
+                stream,
+                request.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_dispatch_preserves_native_json() {
+        let native = serde_json::json!({
+            "text": "Unicode: λ\nCR: \r",
+            "meta_info": {"routed_experts": "AQID".repeat(16384)},
+            "unknown_field": {"value": true}
+        });
+        let outputs = vec![crate::protocols::Annotated::from_data(LLMEngineOutput {
+            engine_data: Some(serde_json::json!({"sglang_response": native})),
+            ..Default::default()
+        })];
+        let state = service_v2::HttpService::builder()
+            .build()
+            .unwrap()
+            .state_clone();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let response = dispatch(
+            Arc::new(ReplayEngine(outputs)),
+            dispatch_test_context(),
+            "req-stream".to_string(),
+            "test-model".to_string(),
+            state,
+            ConnectionHandle::create_disabled(tx),
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert_eq!(body, format!("data: {native}\n\ndata: [DONE]\n\n"));
+    }
+
+    #[tokio::test]
+    async fn unary_dispatch_joins_chunks_and_maps_stream_errors() {
+        let chunk = |ids: serde_json::Value| {
+            crate::protocols::Annotated::from_data(LLMEngineOutput {
+                engine_data: Some(serde_json::json!({"sglang_response": {"output_ids": ids}})),
+                ..Default::default()
+            })
+        };
+        let invalid = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .message("bad sampling params")
+            .build();
+        let failed = crate::protocols::Annotated::from_err(invalid);
+        for (outputs, status, body) in [
+            (
+                vec![chunk(serde_json::json!([5])), chunk(serde_json::json!([6]))],
+                StatusCode::OK,
+                serde_json::json!({"output_ids": [5, 6]}),
+            ),
+            (
+                vec![chunk(serde_json::json!([5])), failed],
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"error": {"message": "bad sampling params"}}),
+            ),
+        ] {
+            let state = service_v2::HttpService::builder()
+                .build()
+                .unwrap()
+                .state_clone();
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let response = dispatch(
+                Arc::new(ReplayEngine(outputs)),
+                dispatch_test_context(),
+                "req-unary".to_string(),
+                "test-model".to_string(),
+                state,
+                ConnectionHandle::create_disabled(tx),
+                false,
+            )
+            .await;
+            assert_eq!(response.status(), status);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                body
+            );
+        }
     }
 }

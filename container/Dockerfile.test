@@ -8,7 +8,26 @@
 # Usage: docker build -f container/Dockerfile.test --target test_planner --build-arg BASE_IMAGE=<planner-image> .
 ARG BASE_IMAGE
 
+# Helm is needed by chart tests collected in the runtime test lanes.
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS helm_binary
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+ARG TARGETARCH
+# Match deploy/operator/Makefile and the Helm Chart Tests job.
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) checksum=ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd ;; \
+        arm64) checksum=7944e3defd386c76fd92d9e6fec5c2d65a323f6fadc19bfb5e704e3eee10348e ;; \
+        *) echo "Unsupported Helm architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl --fail --location --retry 5 --connect-timeout 30 --max-time 300 \
+        "https://get.helm.sh/helm-v3.17.3-linux-${TARGETARCH}.tar.gz" -o /tmp/helm.tar.gz; \
+    echo "${checksum}  /tmp/helm.tar.gz" | sha256sum -c -; \
+    mkdir /out; \
+    tar -xzf /tmp/helm.tar.gz --strip-components=1 -C /out "linux-${TARGETARCH}/helm"
+
 FROM ${BASE_IMAGE} AS test_image
+COPY --from=helm_binary --chmod=755 /out/helm /usr/local/bin/helm
 
 # Install test dependencies on top of runtime image.
 # No uv cache: this image is built from a SHA-tagged base, so the layer is
@@ -46,11 +65,13 @@ COPY --chmod=664 --chown=dynamo:0 tests/marker_categories.py /workspace/tests/ma
 # COPY also creates parent directories: keep them traversable by ARC's uid 1001.
 COPY --chmod=755 --chown=dynamo:0 \
     .github/scripts/apply_dev_version.py \
+    .github/scripts/helm_chart_version.py \
     .github/scripts/retry_kubectl.sh \
     .github/scripts/collect_vcluster_diagnostics.sh /workspace/.github/scripts/
 # Required: blocks dynamo.vllm/sglang from shadowing the installed packages.
 COPY --chmod=664 --chown=dynamo:0 conftest.py /workspace/conftest.py
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+COPY --chmod=775 --chown=dynamo:0 lib/gpu_memory_service/tests/ /workspace/lib/gpu_memory_service/tests/
 
 # The ARC runner executes the job pod as uid 1001 with a non-dynamo gid (see
 # shared-test.yml), which lands in "other" perms on this baked dynamo:0 tree.
