@@ -637,6 +637,218 @@ def test_configuration_boundaries(
         make_config(tmp_path, **overrides)
 
 
+@pytest.mark.parametrize(
+    "candidate_parameters",
+    [
+        pytest.param(
+            {
+                "hardware_sku": "concrete_candidate_sku",
+                "systems_paths": ["/external/systems"],
+            },
+            id="operator-explicit-width",
+        ),
+        pytest.param({}, id="standalone-backwards-compatible"),
+    ],
+)
+def test_explicit_node_width_does_not_load_a_system_spec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_parameters: dict[str, Any],
+) -> None:
+    def unexpected_load(*_: Any, **__: Any) -> dict[str, Any]:
+        pytest.fail("an explicit num_gpus_per_node must bypass system-spec loading")
+
+    monkeypatch.setattr(adapter_module, "load_system_spec", unexpected_load)
+    config = make_config(tmp_path, num_gpus_per_node=4)
+
+    assert (
+        config.generation_options("vllm", candidate_parameters).num_gpus_per_node == 4
+    )
+
+
+@pytest.mark.parametrize(
+    ("hardware_sku", "num_gpus_per_node"),
+    [
+        pytest.param("h200_sxm", 8, id="auto-resolved-concrete-catalog-sku"),
+        pytest.param("external_future_gpu", 16, id="external-systems-path-sku"),
+    ],
+)
+def test_concrete_candidate_sku_uses_aisimulates_system_spec_loader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hardware_sku: str,
+    num_gpus_per_node: int,
+) -> None:
+    systems_paths = (
+        ["/external/systems"] if hardware_sku.startswith("external") else None
+    )
+    loaded: list[tuple[str, list[str] | None]] = []
+
+    def load(sku: str, systems_paths: list[str] | None = None) -> dict[str, Any]:
+        loaded.append((sku, systems_paths))
+        return {"node": {"num_gpus_per_node": num_gpus_per_node}}
+
+    monkeypatch.setattr(adapter_module, "load_system_spec", load)
+    config = make_config(tmp_path, num_gpus_per_node=None)
+    # AISimulate unrolls engine.hardware:auto and per-candidate choices before
+    # publishing the CandidateRecord, so its config always carries a concrete SKU.
+    candidate_parameters: dict[str, Any] = {"hardware_sku": hardware_sku}
+    if systems_paths is not None:
+        candidate_parameters["systems_paths"] = systems_paths
+
+    assert (
+        config.generation_options("vllm", candidate_parameters).num_gpus_per_node
+        == num_gpus_per_node
+    )
+    assert loaded == [(hardware_sku, systems_paths)]
+
+
+@pytest.mark.parametrize(
+    ("candidate_parameters", "message"),
+    [
+        pytest.param(None, "candidate parameters are required", id="missing-candidate"),
+        pytest.param({}, "nonempty hardware_sku", id="missing-hardware-sku"),
+        pytest.param(
+            {"hardware_sku": ""}, "nonempty hardware_sku", id="empty-hardware-sku"
+        ),
+        pytest.param(
+            {"hardware_sku": "h200_sxm", "systems_paths": []},
+            "candidate systems_paths",
+            id="empty-systems-paths",
+        ),
+    ],
+)
+def test_candidate_topology_source_is_required_at_materialization(
+    tmp_path: Path,
+    candidate_parameters: dict[str, Any] | None,
+    message: str,
+) -> None:
+    config = make_config(tmp_path, num_gpus_per_node=None)
+
+    with pytest.raises(CandidateMaterializationError, match=message):
+        config.generation_options("vllm", candidate_parameters)
+
+
+@pytest.mark.parametrize(
+    "system_spec",
+    [
+        pytest.param([], id="non-object-system-spec"),
+        pytest.param({}, id="missing-node"),
+        pytest.param({"node": None}, id="non-object-node"),
+        pytest.param({"node": {}}, id="missing-node-width"),
+        pytest.param({"node": {"num_gpus_per_node": 0}}, id="non-positive-node-width"),
+        pytest.param({"node": {"num_gpus_per_node": True}}, id="boolean-node-width"),
+        pytest.param({"node": {"num_gpus_per_node": "8"}}, id="string-node-width"),
+    ],
+)
+def test_malformed_system_spec_topology_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    system_spec: Any,
+) -> None:
+    monkeypatch.setattr(
+        adapter_module,
+        "load_system_spec",
+        lambda _, systems_paths=None: system_spec,
+    )
+    config = make_config(tmp_path, num_gpus_per_node=None)
+
+    with pytest.raises(
+        CandidateMaterializationError,
+        match="AISimulate system spec.*(object|positive integer)",
+    ):
+        config.generation_options("vllm", {"hardware_sku": "malformed_system"})
+
+
+def test_system_spec_topology_errors_are_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        adapter_module,
+        "load_system_spec",
+        lambda _, systems_paths=None: {},
+    )
+    config = make_config(tmp_path, num_gpus_per_node=None)
+
+    with pytest.raises(CandidateMaterializationError) as raised:
+        config.generation_options("vllm", {"hardware_sku": "x" * 1000})
+
+    assert len(str(raised.value)) == adapter_module._MAX_ERROR_MESSAGE
+
+
+def test_custom_candidate_system_root_reaches_candidate_materialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    materialized_node_widths: list[int] = []
+    systems_root = tmp_path / "external-systems"
+    systems_root.mkdir()
+    (systems_root / "custom_twelve_gpu_node.yaml").write_text(
+        "node:\n  num_gpus_per_node: 12\n",
+        encoding="utf-8",
+    )
+
+    def capture_node_width(
+        candidate: Any, workload: Any, options: Any, **kwargs: Any
+    ) -> str:
+        del candidate, workload, kwargs
+        materialized_node_widths.append(options.num_gpus_per_node)
+        return "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\n"
+
+    monkeypatch.setattr(adapter_module, "render_dgd", capture_node_width)
+    adapter = DGDRRunOutputAdapter(
+        make_config(tmp_path, num_gpus_per_node=None),
+        workload=None,
+    )
+    candidate = record("a", 1.0)
+    candidate.config.update(
+        {
+            "hardware_sku": "custom_twelve_gpu_node",
+            "systems_paths": [str(systems_root)],
+        }
+    )
+    adapter.on_candidate(candidate)
+    adapter.close()
+
+    assert materialized_node_widths == [12]
+    assert load(tmp_path)["candidates"][0]["outcome"] == "materialized"
+
+
+def test_invalid_candidate_topology_does_not_abort_other_candidates(
+    tmp_path: Path,
+    renders: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def load_candidate_system(
+        sku: str, systems_paths: list[str] | None = None
+    ) -> dict[str, Any]:
+        del systems_paths
+        if sku == "broken_system":
+            return {"node": {}}
+        return {"node": {"num_gpus_per_node": 8}}
+
+    monkeypatch.setattr(adapter_module, "load_system_spec", load_candidate_system)
+    adapter = DGDRRunOutputAdapter(
+        make_config(tmp_path, num_gpus_per_node=None, max_candidates=2),
+        workload=None,
+    )
+    broken = record("broken-topology", 2.0)
+    broken.config["hardware_sku"] = "broken_system"
+    valid = record("valid-topology", 1.0)
+    valid.config["hardware_sku"] = "h200_sxm"
+
+    adapter.on_candidate(broken)
+    adapter.on_candidate(valid)
+    adapter.close()
+
+    snapshot = load(tmp_path)
+    assert snapshot["run"] == {"phase": "Succeeded", "terminal": True}
+    assert [candidate["outcome"] for candidate in snapshot["candidates"]] == [
+        "materialization_failed",
+        "materialized",
+    ]
+    assert renders == ["valid-topology"]
+
+
 def test_max_candidates_has_no_default_of_its_own() -> None:
     # The operator supplies the already-defaulted API value; a missing one must fail.
     with pytest.raises(ValueError, match="max_candidates"):

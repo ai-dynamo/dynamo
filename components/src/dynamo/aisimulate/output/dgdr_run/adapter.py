@@ -60,6 +60,7 @@ from aisimulate.output_adapter import (
 )
 from aisimulate.sweeper.config import SmartSearchConfig
 from aisimulate.sweeper.result import SweepResult
+from aisimulate_core.sdk.perf_database import load_system_spec
 from pydantic import BaseModel, ConfigDict, Field
 
 from dynamo.aisimulate.output.dgd.renderers import (
@@ -223,13 +224,79 @@ class DGDRRunOutputConfig(BaseModel):
     # the historical fixed-image behavior unless they opt into per-candidate derivation.
     derive_runtime_images: bool = False
     runtime_version_override: str | None = None
-    num_gpus_per_node: int = Field(gt=0)
+    # Standalone callers can continue supplying the node width directly; when both are
+    # present, the explicit value wins without consulting the candidate's system spec.
+    num_gpus_per_node: int | None = Field(default=None, gt=0)
     # The already-defaulted spec.recommendation.maxCandidates (API range 1..100). The adapter owns
     # no default of its own: a missing value must fail, not silently change the cardinality.
     max_candidates: int = Field(ge=1, le=100)
     snapshot_interval_seconds: float = Field(default=5.0, ge=0)
 
-    def generation_options(self, backend: str) -> DGDGenerationOptions:
+    def resolved_num_gpus_per_node(
+        self, candidate_parameters: Mapping[str, Any] | None = None
+    ) -> int:
+        """Return the explicit node width or resolve the candidate's concrete SKU."""
+        if self.num_gpus_per_node is not None:
+            return self.num_gpus_per_node
+
+        if candidate_parameters is None:
+            raise CandidateMaterializationError(
+                "candidate parameters are required when num_gpus_per_node is not provided"
+            )
+        hardware_sku = candidate_parameters.get("hardware_sku")
+        if not isinstance(hardware_sku, str) or not hardware_sku.strip():
+            raise CandidateMaterializationError(
+                "candidate parameters must contain a nonempty hardware_sku when "
+                "num_gpus_per_node is not provided"
+            )
+        systems_paths = candidate_parameters.get("systems_paths")
+        if systems_paths is not None and (
+            not isinstance(systems_paths, list)
+            or not systems_paths
+            or any(
+                not isinstance(path, str) or not path.strip() for path in systems_paths
+            )
+        ):
+            raise CandidateMaterializationError(
+                "candidate systems_paths must be a nonempty list of nonempty strings"
+            )
+        try:
+            system_spec = load_system_spec(hardware_sku, systems_paths=systems_paths)
+        except Exception as exc:
+            raise CandidateMaterializationError(
+                _bounded(
+                    "could not load AISimulate system spec for hardware_sku "
+                    f"{hardware_sku!r}"
+                )
+            ) from exc
+        if not isinstance(system_spec, Mapping):
+            raise CandidateMaterializationError(
+                _bounded(
+                    f"AISimulate system spec for hardware_sku {hardware_sku!r} "
+                    "must be an object"
+                )
+            )
+        node_spec = system_spec.get("node")
+        if not isinstance(node_spec, Mapping):
+            raise CandidateMaterializationError(
+                _bounded(
+                    f"AISimulate system spec for hardware_sku {hardware_sku!r} "
+                    "must contain an object at node"
+                )
+            )
+        num_gpus_per_node = node_spec.get("num_gpus_per_node")
+        if type(num_gpus_per_node) is not int or num_gpus_per_node < 1:
+            raise CandidateMaterializationError(
+                _bounded(
+                    f"AISimulate system spec for hardware_sku {hardware_sku!r} must "
+                    "contain a positive integer at node.num_gpus_per_node"
+                )
+            )
+        return num_gpus_per_node
+
+    def _generation_options(
+        self, backend: str, num_gpus_per_node: int
+    ) -> DGDGenerationOptions:
         runtime_image = (
             derive_backend_image(self.runtime_image, backend)
             if self.derive_runtime_images
@@ -239,7 +306,25 @@ class DGDRRunOutputConfig(BaseModel):
             runtime_image=runtime_image,
             runtime_version_override=self.runtime_version_override,
             namespace=self.namespace,
-            num_gpus_per_node=self.num_gpus_per_node,
+            num_gpus_per_node=num_gpus_per_node,
+        )
+
+    def validate_generation_options(self, backend: str) -> None:
+        """Fail fast on static rendering options before any candidate exists."""
+        # A candidate's concrete topology arrives later; width 1 validates only image
+        # and version fields and is never passed to a renderer.
+        num_gpus_per_node = (
+            self.num_gpus_per_node if self.num_gpus_per_node is not None else 1
+        )
+        self._generation_options(backend, num_gpus_per_node)
+
+    def generation_options(
+        self,
+        backend: str,
+        candidate_parameters: Mapping[str, Any] | None = None,
+    ) -> DGDGenerationOptions:
+        return self._generation_options(
+            backend, self.resolved_num_gpus_per_node(candidate_parameters)
         )
 
 
@@ -275,7 +360,7 @@ class DGDRRunOutputAdapter:
         self._directory = Path(directory)
         self._config = config
         # Validate the source image and runtime version before the first callback.
-        config.generation_options("vllm")
+        config.validate_generation_options("vllm")
         self._workload = workload
         self._max_candidates = config.max_candidates
         self._interval = config.snapshot_interval_seconds
@@ -611,7 +696,7 @@ class DGDRRunOutputAdapter:
                 _RenderInput(config=item.parameters, used_gpus=item.used_gpus),
                 self._workload,
                 self._config.generation_options(
-                    str(item.parameters.get("backend", ""))
+                    str(item.parameters.get("backend", "")), item.parameters
                 ),
                 dgd_name=_dgd_name(self._config.name, item.id),
                 renderer=self._config.generator,
@@ -672,7 +757,7 @@ class DGDRRunOutputPlugin:
         snapshot is still produced by ``write()``.
         """
         resolved = DGDRRunOutputConfig.model_validate(dict(config))
-        resolved.generation_options("vllm")
+        resolved.validate_generation_options("vllm")
         workload = getattr(context, "workload", None)
         if workload is None or resolved.snapshot_dir is None:
             return None
