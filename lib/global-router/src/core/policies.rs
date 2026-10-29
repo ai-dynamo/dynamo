@@ -10,9 +10,14 @@
 //!
 //! The core's built-in selector weighs KV overlap and projected load; it has
 //! no plain "fewest active requests" picker, so [`LeastRequestsPicker`] is
-//! written here.
+//! written here. [`HeadroomPicker`] is the affinity rule of
+//! [`crate::AffinitySelector`] (`placement::headroom`), reading the same
+//! [`PoolSignals`]; the session pin it defaults to comes from the core's
+//! session affinity table as the request's affinity target.
 
+use std::cmp::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::{
@@ -26,20 +31,27 @@ use dynamo_kv_router::services::selection::{
 };
 use dynamo_kv_router::{RoutingPartitionRef, WorkerId, WorkerType};
 
-use super::CorePolicy;
+use super::directory::PoolDirectory;
+use super::{AffinityConfig, CorePolicy};
+use crate::signals::PoolSignals;
 
 impl CorePolicy {
     /// The name the policy is registered and selected under.
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::RoundRobin => "global-round-robin",
             Self::LeastRequests => "global-least-requests",
+            Self::Affinity(_) => "global-affinity",
         }
     }
 }
 
-/// A registry with every policy of [`CorePolicy`].
-pub fn registry() -> Result<RouterPluginRegistry, WorkerSelectionPolicyRegistryError> {
+/// A registry with every policy of [`CorePolicy`]. The affinity picker is
+/// registered only with its configuration, which `policy` carries.
+pub fn registry(
+    policy: &CorePolicy,
+    directory: Arc<PoolDirectory>,
+) -> Result<RouterPluginRegistry, WorkerSelectionPolicyRegistryError> {
     let mut registry = RouterPluginRegistry::default();
     registry.register_worker_selection(
         CorePolicy::RoundRobin.name(),
@@ -49,6 +61,13 @@ pub fn registry() -> Result<RouterPluginRegistry, WorkerSelectionPolicyRegistryE
         CorePolicy::LeastRequests.name(),
         provider(LeastRequestsPicker::default),
     )?;
+    if let CorePolicy::Affinity(affinity) = policy {
+        let affinity = affinity.clone();
+        registry.register_worker_selection(
+            policy.name(),
+            provider(move || HeadroomPicker::new(&affinity, directory.clone())),
+        )?;
+    }
     Ok(registry)
 }
 
@@ -66,7 +85,7 @@ pub fn reads_bookings(policy: CorePolicy) -> bool {
 
 /// The router policy configuration that selects `policy` for the
 /// aggregated pool, as the core reads it from YAML.
-pub fn policy_config(policy: CorePolicy) -> String {
+pub fn policy_config(policy: &CorePolicy) -> String {
     let name = policy.name();
     format!(
         "worker_selection:\n  aggregated: {name}\n  instances:\n    - name: {name}\n      type: {name}\n"
@@ -74,16 +93,20 @@ pub fn policy_config(policy: CorePolicy) -> String {
 }
 
 /// A provider for a policy of one picker and no scorers, with a fresh
-/// picker for each partition. The policies take no parameters.
-fn provider<P>(picker: fn() -> P) -> WorkerSelectionPolicyProvider
+/// picker from `picker` for each partition. The policies take no
+/// parameters.
+fn provider<P, F>(picker: F) -> WorkerSelectionPolicyProvider
 where
     P: WorkerPicker + 'static,
+    F: Fn() -> P + Send + Sync + 'static,
 {
+    let picker = Arc::new(picker);
     Arc::new(
         move |_parameters: &WorkerSelectionPolicyParameters| -> Result<
             WorkerSelectionPolicyFactory,
             WorkerSelectionPolicyProviderError,
         > {
+            let picker = picker.clone();
             Ok(Arc::new(
                 move |config: &KvRouterConfig, worker_type: WorkerType, _: RoutingPartitionRef<'_>| {
                     WorkerSelectionPolicy::new(
@@ -153,6 +176,125 @@ impl WorkerPicker for LeastRequestsPicker {
         let turn = self.ties;
         self.ties = self.ties.wrapping_add(1);
         nth_by_worker(tied, turn)
+    }
+}
+
+/// Keeps each session on one pool and moves it only for a pool with much
+/// more room: the rule of [`crate::AffinitySelector`], over the same
+/// signals, with the core's session table holding the pin.
+///
+/// Candidates are ordered nearest region first, then less full, then by
+/// worker id; unknown distances and loads come last. The default is the
+/// session's bound pool (the request's affinity target), else the first
+/// candidate. The request leaves the default only for the first candidate
+/// with more than `headroom_factor` times the default's spare capacity; a
+/// full default, or one whose load is unknown, leaves for the first
+/// candidate with any room, and stays if none has. The core then binds the
+/// session to the pool picked (soft affinity), so the pin moves with it.
+pub struct HeadroomPicker {
+    signals: Arc<PoolSignals>,
+    directory: Arc<PoolDirectory>,
+    region: String,
+    headroom_factor: f64,
+}
+
+/// One candidate with what the picker weighs.
+struct Candidate {
+    row: usize,
+    worker: WorkerId,
+    /// Occupancy, 1 being full; `None` without a fresh report.
+    load: Option<f64>,
+    /// Round trip to the pool's region; zero for this region.
+    distance: Option<Duration>,
+}
+
+impl HeadroomPicker {
+    pub fn new(config: &AffinityConfig, directory: Arc<PoolDirectory>) -> Self {
+        Self {
+            signals: config.signals.clone(),
+            directory,
+            region: config.region.clone(),
+            headroom_factor: config.headroom_factor,
+        }
+    }
+
+    /// The candidates from least to most expensive.
+    fn place(&self, rows: &[ScoredWorkerCandidate]) -> Vec<Candidate> {
+        let pools = self.directory.snapshot();
+        let round_trips = self.signals.region_round_trips();
+        let mut placed = rows
+            .iter()
+            .enumerate()
+            .map(|(row, candidate)| {
+                let worker = candidate.worker().worker_id;
+                let entry = pools.get(&worker);
+                Candidate {
+                    row,
+                    worker,
+                    load: entry
+                        .and_then(|entry| self.signals.occupancy(&entry.id))
+                        .map(|occupancy| occupancy.load),
+                    distance: entry.and_then(|entry| {
+                        if entry.region == self.region {
+                            Some(Duration::ZERO)
+                        } else {
+                            round_trips.get(&entry.region).copied()
+                        }
+                    }),
+                }
+            })
+            .collect::<Vec<_>>();
+        placed.sort_by(|left, right| {
+            known_first(left.distance, right.distance)
+                .then_with(|| known_first_f64(left.load, right.load))
+                .then_with(|| left.worker.cmp(&right.worker))
+        });
+        placed
+    }
+}
+
+impl WorkerPicker for HeadroomPicker {
+    fn pick(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        let placed = self.place(input.candidates());
+        let Some(first) = placed.first() else {
+            return Err(WorkerSelectionPolicyError::failed("no candidates"));
+        };
+        let bound = context.affinity_target().map(|target| target.worker_id);
+        let default = bound
+            .and_then(|worker| placed.iter().find(|candidate| candidate.worker == worker))
+            .unwrap_or(first);
+        let need = default
+            .load
+            .map_or(0.0, |load| (self.headroom_factor * (1.0 - load)).max(0.0));
+        let choice = placed
+            .iter()
+            .filter(|candidate| candidate.worker != default.worker)
+            .find(|candidate| candidate.load.is_some_and(|load| 1.0 - load > need))
+            .unwrap_or(default);
+        Ok(choice.row)
+    }
+}
+
+/// Smaller first; unknown last.
+fn known_first<T: Ord>(left: Option<T>, right: Option<T>) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn known_first_f64(left: Option<f64>, right: Option<f64>) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.total_cmp(&right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
     }
 }
 
