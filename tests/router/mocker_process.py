@@ -101,13 +101,21 @@ class MockerProcess:
         model_name: str = "mocker",
         zmq_replay: bool = False,
         extra_env: Mapping[str, str | None] | None = None,
+        namespace: str | None = None,
+        display_name: str | None = None,
     ):
         if standalone_selector and not standalone_indexer:
             raise ValueError("standalone_selector requires standalone_indexer=True")
 
-        namespace_suffix = generate_random_suffix()
-        self.namespace = f"test-namespace-{namespace_suffix}"
+        if namespace is None:
+            namespace_suffix = generate_random_suffix()
+            self.namespace = f"test-namespace-{namespace_suffix}"
+        elif not namespace:
+            raise ValueError("namespace must be non-empty when provided")
+        else:
+            self.namespace = namespace
         self.component_name = "mocker"
+        self._display_name = display_name or "dynamo-mocker"
         self.model_name = model_name
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_mockers
@@ -202,7 +210,7 @@ class MockerProcess:
                 health_check_urls=[],
                 log_dir=request.node.name,
                 terminate_all_matching_process_names=False,
-                display_name="dynamo-mocker",
+                display_name=self._display_name,
             )
 
         logger.info(

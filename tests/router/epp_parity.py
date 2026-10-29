@@ -27,7 +27,7 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -65,8 +65,23 @@ EXT_PROC_PROTO_ROOT = (
     / "proto"
 )
 WORKER_CONTAINER_NAME = "mocker"
+WORKER_A_CONTAINER_NAME = "mocker-a"
+WORKER_B_CONTAINER_NAME = "mocker-b"
+PROVIDER_CONTAINER_NAME = "kv-indexer"
 FRONTEND_CONTAINER_NAME = "frontend"
 EPP_CONTAINER_NAME = "epp"
+KV_INDEXER_QUERY_ENDPOINT = "kv_indexer_query"
+WORKER_INSTANCE_ID_HEADER = "x-dynamo-worker-instance-id"
+DP_RANK_HEADER = "x-dynamo-dp-rank"
+ROUTING_MODE_HEADER = "x-dynamo-routing-mode"
+DESTINATION_ENDPOINT_HEADER = "x-gateway-destination-endpoint"
+AGGREGATED_ROUTING_MODE = "aggregated"
+READINESS_DEADLINE_S = 45.0
+PROVIDER_QUERY_SETTLE_S = 0.25
+WORKER_BLOCK_SIZE = 16
+WORKER_DP_SIZE = 1
+U64_MAX = (1 << 64) - 1
+U32_MAX = (1 << 32) - 1
 FULL_DUPLEX_STREAMED = 4
 PROCESS_TIMEOUT_S = 240.0
 EXT_PROC_TIMEOUT_S = 45.0
@@ -147,6 +162,17 @@ class PodIdentity:
     pod_uid: str
     pod_namespace: str
     source: str
+
+
+@dataclass(frozen=True)
+class RouteObservation:
+    """Typed first-selection observation from Frontend SSE or EPP headers."""
+
+    worker_id: int
+    dp_rank: int
+    token_ids: list[int]
+    routing_mode: str | None = None
+    destination: str | None = None
 
 
 def resolve_pod_identity() -> PodIdentity:
@@ -383,6 +409,64 @@ class LoopbackKubeAPI:
             },
         }
         self._store_pod(pod, event_type="ADDED")
+
+    def add_ready_container(
+        self,
+        *,
+        identity: PodIdentity,
+        dynamo_namespace: str,
+        container_name: str,
+        http_port: int,
+    ) -> None:
+        """Add one Ready container without replacing other containers on the Pod."""
+        container_spec = {
+            "name": container_name,
+            "ports": [
+                {
+                    "name": "http",
+                    "containerPort": http_port,
+                    "protocol": "TCP",
+                }
+            ],
+        }
+        container_status = {
+            "name": container_name,
+            "ready": True,
+            "containerID": f"containerd://epp-parity-{container_name}",
+            "image": "mocker:test",
+            "imageID": "containerd://epp-parity-image",
+        }
+        with self._cv:
+            existing = self._pods.get(identity.pod_name)
+            if existing is None:
+                self.upsert_worker_pod(
+                    identity=identity,
+                    dynamo_namespace=dynamo_namespace,
+                    container_name=container_name,
+                    http_port=http_port,
+                )
+                return
+            stored = json.loads(json.dumps(existing))
+            containers = stored.setdefault("spec", {}).setdefault("containers", [])
+            statuses = stored.setdefault("status", {}).setdefault("containerStatuses", [])
+            if any(item.get("name") == container_name for item in containers):
+                raise AssertionError(
+                    f"fixture Pod already has container {container_name!r}; "
+                    "refusing to overwrite an existing Ready container"
+                )
+            containers.append(container_spec)
+            statuses.append(container_status)
+            labels = stored.setdefault("metadata", {}).setdefault("labels", {})
+            labels.setdefault("nvidia.com/dynamo-namespace", dynamo_namespace)
+            self._store_pod(stored, event_type="MODIFIED")
+
+    def listed_pods(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [json.loads(json.dumps(pod)) for pod in self._pods.values()]
+
+    def listed_metadata(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [json.loads(json.dumps(obj)) for obj in self._metadata.values()]
 
     def _next_rv(self) -> str:
         self._resource_version += 1
@@ -1055,6 +1139,93 @@ def decode_epp_token_data(body: bytes) -> list[int]:
     return [int(token) for token in token_data]
 
 
+def _header_text(header: Any) -> str:
+    raw = bytes(header.raw_value) if header.raw_value else b""
+    if raw:
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise AssertionError("EPP routing header raw_value is not UTF-8") from exc
+    value = header.value
+    if not isinstance(value, str):
+        raise AssertionError("EPP routing header value is not a string")
+    return value
+
+
+def _collect_set_headers(responses: list[Any]) -> dict[str, list[str]]:
+    collected: dict[str, list[str]] = {}
+    for response in responses:
+        if not response.HasField("request_headers"):
+            continue
+        headers_response = response.request_headers
+        if not headers_response.HasField("response"):
+            continue
+        mutation = headers_response.response.header_mutation
+        for option in mutation.set_headers:
+            if not option.HasField("header"):
+                continue
+            header = option.header
+            key = header.key.lower()
+            collected.setdefault(key, []).append(_header_text(header))
+    return collected
+
+
+def _require_unique_header(collected: dict[str, list[str]], name: str) -> str:
+    values = collected.get(name.lower(), [])
+    if not values:
+        raise AssertionError(f"EPP stream missing unique {name} header mutation")
+    unique = set(values)
+    if len(values) != 1 or len(unique) != 1:
+        raise AssertionError(
+            f"EPP stream has duplicate or ambiguous {name} header mutations: {values}"
+        )
+    value = values[0].strip()
+    if not value:
+        raise AssertionError(f"EPP {name} header mutation is empty")
+    return value
+
+
+def _parse_unsigned_header(name: str, value: str, maximum: int) -> int:
+    if not value.isdigit():
+        raise AssertionError(f"EPP {name} header is malformed: {value!r}")
+    parsed = int(value)
+    if parsed > maximum:
+        raise AssertionError(f"EPP {name} header is out of range: {value!r}")
+    return parsed
+
+
+def _parse_u64_header(name: str, value: str) -> int:
+    return _parse_unsigned_header(name, value, U64_MAX)
+
+
+def _parse_u32_header(name: str, value: str) -> int:
+    return _parse_unsigned_header(name, value, U32_MAX)
+
+
+def _extract_unique_routing_headers(responses: list[Any]) -> dict[str, Any]:
+    collected = _collect_set_headers(responses)
+    worker_id = _parse_u64_header(
+        WORKER_INSTANCE_ID_HEADER,
+        _require_unique_header(collected, WORKER_INSTANCE_ID_HEADER),
+    )
+    dp_rank = _parse_u32_header(
+        DP_RANK_HEADER, _require_unique_header(collected, DP_RANK_HEADER)
+    )
+    routing_mode = _require_unique_header(collected, ROUTING_MODE_HEADER)
+    if routing_mode != AGGREGATED_ROUTING_MODE:
+        raise AssertionError(
+            f"EPP {ROUTING_MODE_HEADER} must be {AGGREGATED_ROUTING_MODE!r}, "
+            f"got {routing_mode!r}"
+        )
+    destination = _require_unique_header(collected, DESTINATION_ENDPOINT_HEADER)
+    return {
+        "worker_id": worker_id,
+        "dp_rank": dp_rank,
+        "routing_mode": routing_mode,
+        "destination": destination,
+    }
+
+
 class ExtProcParityDriver:
     """Drive a complete ext_proc request/response lifecycle against real /epp."""
 
@@ -1069,6 +1240,46 @@ class ExtProcParityDriver:
         request_id: str,
         timeout_s: float = EXT_PROC_TIMEOUT_S,
     ) -> list[int]:
+        pb2 = self._modules.pb2
+        responses = self._collect_responses(
+            payload, path=path, request_id=request_id, timeout_s=timeout_s
+        )
+        return decode_epp_token_data(
+            _extract_unique_terminal_request_body(pb2, responses)
+        )
+
+    def collect_route_observation(
+        self,
+        payload: dict[str, Any],
+        *,
+        path: str,
+        request_id: str,
+        timeout_s: float = EXT_PROC_TIMEOUT_S,
+    ) -> RouteObservation:
+        pb2 = self._modules.pb2
+        responses = self._collect_responses(
+            payload, path=path, request_id=request_id, timeout_s=timeout_s
+        )
+        token_ids = decode_epp_token_data(
+            _extract_unique_terminal_request_body(pb2, responses)
+        )
+        headers = _extract_unique_routing_headers(responses)
+        return RouteObservation(
+            worker_id=headers["worker_id"],
+            dp_rank=headers["dp_rank"],
+            token_ids=token_ids,
+            routing_mode=headers["routing_mode"],
+            destination=headers["destination"],
+        )
+
+    def _collect_responses(
+        self,
+        payload: dict[str, Any],
+        *,
+        path: str,
+        request_id: str,
+        timeout_s: float,
+    ) -> list[Any]:
         pb2 = self._modules.pb2
         stub_cls = self._modules.grpc.ExternalProcessorStub
         stream = _RequestStream()
@@ -1166,24 +1377,13 @@ class ExtProcParityDriver:
                         "EPP returned ImmediateResponse while draining: "
                         f"{leftover.immediate_response.details}"
                     )
-            return decode_epp_token_data(
-                _extract_unique_terminal_request_body(pb2, responses)
-            )
+            return responses
         finally:
             stream.close()
             channel.close()
 
 
-def collect_frontend_query_token_ids(
-    frontend_url: str,
-    payload: dict[str, Any],
-    *,
-    path: str,
-    request_id: str,
-    timeout_s: float = FRONTEND_QUERY_TIMEOUT_S,
-) -> list[int]:
-    import requests
-
+def _with_query_instance_id(payload: dict[str, Any]) -> dict[str, Any]:
     annotated = json.loads(json.dumps(payload))
     nvext = dict(annotated.get("nvext") or {})
     annotations = list(nvext.get("annotations") or [])
@@ -1194,6 +1394,20 @@ def collect_frontend_query_token_ids(
         annotations.append("query_instance_id:")
     nvext["annotations"] = annotations
     annotated["nvext"] = nvext
+    return annotated
+
+
+def _post_frontend_query(
+    frontend_url: str,
+    payload: dict[str, Any],
+    *,
+    path: str,
+    request_id: str,
+    timeout_s: float,
+) -> str:
+    import requests
+
+    annotated = _with_query_instance_id(payload)
     with requests.Session() as session:
         session.trust_env = False
         with session.post(
@@ -1207,12 +1421,11 @@ def collect_frontend_query_token_ids(
                 raise AssertionError(
                     f"Frontend query_instance_id returned HTTP {response.status_code}"
                 )
-            body = response.text
-    return _parse_frontend_query_sse(body)
+            return response.text
 
 
-def _parse_frontend_query_sse(body: str) -> list[int]:
-    """Require a complete query_instance_id SSE stream before comparing tokens."""
+def _frontend_sse_data_events(body: str) -> list[str]:
+    """Return complete query_instance_id SSE data fields, including final [DONE]."""
     data_events: list[str] = []
     for raw_line in body.splitlines():
         line = raw_line.strip()
@@ -1227,6 +1440,69 @@ def _parse_frontend_query_sse(body: str) -> list[int]:
         raise AssertionError("Frontend query stream missing final [DONE]")
     if any(event == "[DONE]" for event in data_events[:-1]):
         raise AssertionError("Frontend query stream has [DONE] before the final event")
+    return data_events
+
+
+def _require_u64(name: str, value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise AssertionError(f"{name} is not an integer: {value!r}")
+    if value < 0 or value > U64_MAX:
+        raise AssertionError(f"{name} is out of unsigned64 range: {value!r}")
+    return value
+
+
+def _require_u32(name: str, value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise AssertionError(f"{name} is not an integer: {value!r}")
+    if value < 0 or value > U32_MAX:
+        raise AssertionError(f"{name} is out of unsigned32 range: {value!r}")
+    return value
+
+
+def collect_frontend_query_token_ids(
+    frontend_url: str,
+    payload: dict[str, Any],
+    *,
+    path: str,
+    request_id: str,
+    timeout_s: float = FRONTEND_QUERY_TIMEOUT_S,
+) -> list[int]:
+    return _parse_frontend_query_sse(
+        _post_frontend_query(
+            frontend_url,
+            payload,
+            path=path,
+            request_id=request_id,
+            timeout_s=timeout_s,
+        )
+    )
+
+
+def collect_frontend_query_route(
+    frontend_url: str,
+    payload: dict[str, Any],
+    *,
+    path: str,
+    request_id: str,
+    timeout_s: float = FRONTEND_QUERY_TIMEOUT_S,
+) -> RouteObservation:
+    return _parse_frontend_query_route(
+        _post_frontend_query(
+            frontend_url,
+            payload,
+            path=path,
+            request_id=request_id,
+            timeout_s=timeout_s,
+        )
+    )
+
+
+def _parse_frontend_query_sse(body: str) -> list[int]:
+    """Require a complete query_instance_id SSE stream before comparing tokens."""
+    return _token_ids_from_sse_events(_frontend_sse_data_events(body))
+
+
+def _token_ids_from_sse_events(data_events: list[str]) -> list[int]:
     observed: list[int] | None = None
     for event in data_events[:-1]:
         try:
@@ -1259,6 +1535,98 @@ def _parse_frontend_query_sse(body: str) -> list[int]:
     if observed is None:
         raise AssertionError("Frontend nvext.token_ids is absent")
     return observed
+
+
+def _typed_worker_rank(info: Mapping[str, Any]) -> tuple[int, int]:
+    """Require matching prefill/decode worker fields; rank follows the same role."""
+    pairs: list[tuple[int, int]] = []
+    for id_key, rank_key, role in (
+        ("prefill_worker_id", "prefill_dp_rank", "prefill"),
+        ("decode_worker_id", "decode_dp_rank", "decode"),
+    ):
+        worker = info.get(id_key)
+        rank = info.get(rank_key)
+        if worker is None and rank is None:
+            continue
+        if worker is None or rank is None:
+            raise AssertionError(
+                f"Frontend nvext.worker_id {role} fields are incomplete: {dict(info)}"
+            )
+        pairs.append(
+            (
+                _require_u64(f"Frontend nvext.worker_id.{id_key}", worker),
+                _require_u32(f"Frontend nvext.worker_id.{rank_key}", rank),
+            )
+        )
+    if not pairs:
+        raise AssertionError("Frontend nvext.worker_id is missing a worker id")
+    if len(pairs) != 2:
+        raise AssertionError(
+            "Frontend aggregated nvext.worker_id must populate both prefill "
+            f"and decode fields: {dict(info)}"
+        )
+    if pairs[0] != pairs[1]:
+        raise AssertionError(
+            "Frontend nvext.worker_id prefill and decode attribution disagree: "
+            f"{dict(info)}"
+        )
+    return pairs[0]
+
+
+def _parse_frontend_query_route(body: str) -> RouteObservation:
+    """Require a complete query_instance_id SSE stream with unique worker/rank."""
+    data_events = _frontend_sse_data_events(body)
+    token_ids = _token_ids_from_sse_events(data_events)
+    observed: tuple[int, int] | None = None
+    for event in data_events[:-1]:
+        chunk = json.loads(event)
+        if not isinstance(chunk, dict):
+            continue
+        nvext_chunk = chunk.get("nvext")
+        if not isinstance(nvext_chunk, dict) or "worker_id" not in nvext_chunk:
+            continue
+        worker_info = nvext_chunk["worker_id"]
+        if not isinstance(worker_info, dict):
+            raise AssertionError("Frontend nvext.worker_id is not an object")
+        parsed = _typed_worker_rank(worker_info)
+        if observed is None:
+            observed = parsed
+        elif parsed != observed:
+            raise AssertionError(
+                "Frontend query stream has ambiguous worker_id at distinct positions"
+            )
+    if observed is None:
+        raise AssertionError("Frontend nvext.worker_id is absent")
+    return RouteObservation(
+        worker_id=observed[0],
+        dp_rank=observed[1],
+        token_ids=token_ids,
+        routing_mode=AGGREGATED_ROUTING_MODE,
+    )
+
+
+def wait_for_frontend_models(
+    frontend_url: str, timeout_s: float = PROCESS_TIMEOUT_S
+) -> None:
+    import requests
+
+    deadline = time.monotonic() + timeout_s
+    last_error = "frontend /v1/models not checked"
+    with requests.Session() as session:
+        session.trust_env = False
+        while time.monotonic() < deadline:
+            try:
+                response = session.get(f"{frontend_url}/v1/models", timeout=2)
+                if check_http_ok(response):
+                    payload = response.json()
+                    models = payload.get("data") if isinstance(payload, dict) else None
+                    if isinstance(models, list) and models:
+                        return
+                    last_error = "frontend /v1/models returned no models"
+            except (requests.RequestException, ValueError) as exc:
+                last_error = str(exc)
+            time.sleep(0.25)
+    raise TimeoutError(f"Frontend models were not ready: {last_error}")
 
 
 class EppFrontendParityStack:
@@ -1385,7 +1753,7 @@ class EppFrontendParityStack:
                 kubeconfig=kubeconfig,
             )
         )
-        self._wait_for_frontend_models()
+        wait_for_frontend_models(self.frontend_url)
         if self.kube_api.failures:
             raise RuntimeError(
                 "Loopback Kubernetes API recorded unexpected requests: "
@@ -1414,29 +1782,782 @@ class EppFrontendParityStack:
             raise close_error
         return None
 
-    def _wait_for_frontend_models(self) -> None:
-        import requests
-
-        deadline = time.monotonic() + PROCESS_TIMEOUT_S
-        last_error = "frontend /v1/models not checked"
-        with requests.Session() as session:
-            session.trust_env = False
-            while time.monotonic() < deadline:
-                try:
-                    response = session.get(f"{self.frontend_url}/v1/models", timeout=2)
-                    if check_http_ok(response):
-                        payload = response.json()
-                        models = (
-                            payload.get("data") if isinstance(payload, dict) else None
-                        )
-                        if isinstance(models, list) and models:
-                            return
-                        last_error = "frontend /v1/models returned no models"
-                except (requests.RequestException, ValueError) as exc:
-                    last_error = str(exc)
-                time.sleep(0.25)
-        raise TimeoutError(f"Frontend models were not ready: {last_error}")
-
 
 def unique_request_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4()}"
+
+
+@contextmanager
+def scoped_process_env(overlay: Mapping[str, str | None]) -> Iterator[None]:
+    """Apply process env for one runtime construction, then restore the parent."""
+    previous: dict[str, str | None] = {}
+    try:
+        for name, value in overlay.items():
+            previous[name] = os.environ.get(name)
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        yield
+    finally:
+        for name, old in previous.items():
+            if old is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old
+
+
+def provider_query_metric_name() -> str:
+    from dynamo.prometheus_names import name_prefix, work_handler
+
+    return f"{name_prefix.COMPONENT}_{work_handler.REQUESTS_TOTAL}"
+
+
+def first_selection_router_env(*, use_remote_indexer: bool) -> dict[str, str | None]:
+    """One cache-sensitive router overlay for the provider and both consumers.
+
+    Explicit values pin temperature 0 and cache-sensitive credit/scale/tracking.
+    ``None`` clears inherited selectors and deprecated overlap-weight aliases so
+    ``KvRouterConfig``'s env parser cannot silently pick another scorer.
+    """
+    return {
+        "DYN_ROUTER_TEMPERATURE": "0",
+        "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT": "1",
+        "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY": "0",
+        "DYN_ROUTER_PREFILL_LOAD_SCALE": "1",
+        "DYN_ROUTER_TRACK_PREFILL_TOKENS": "true",
+        "DYN_ROUTER_TRACK_OUTPUT_BLOCKS": "false",
+        "DYN_ROUTER_REPLICA_SYNC": "false",
+        "DYN_ROUTER_TRACKING_HASH": "public-xxh3-v1",
+        "DYN_SHARED_CACHE_TYPE": "none",
+        "DYN_ROUTER_CONDITIONAL_DISAGG": "false",
+        "DYN_ROUTER_PREFILL_LOAD_MODEL": "none",
+        "DYN_ROUTER_USE_KV_EVENTS": "true",
+        "DYN_USE_REMOTE_INDEXER": "true" if use_remote_indexer else "false",
+        "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT": None,
+        "DYN_OVERLAP_SCORE_WEIGHT": None,
+        "DYN_ROUTER_POLICY_CONFIG": None,
+        "DYN_ROUTER_WORKER_SELECTION_POLICY": None,
+        "DYN_ROUTER_PREFILL_POLICY": None,
+        "DYN_ROUTER_DECODE_POLICY": None,
+        "DYN_ROUTER_QUEUE_THRESHOLD": None,
+        "DYN_SHARED_CACHE_MULTIPLIER": None,
+        "DYN_ROUTER_TRACKING_KEY_FILE": None,
+        "DYN_ROUTER_TRACKING_KEY_ID": None,
+        "DYN_USE_KV_EVENTS": None,
+    }
+
+
+def scrape_provider_query_count(
+    metrics_url: str,
+    *,
+    namespace: str,
+    component: str,
+    provider_instance_id: int,
+) -> float:
+    import requests
+    from dynamo.prometheus_names import labels
+    from tests.utils.prometheus import find_metric_samples
+
+    with requests.Session() as session:
+        session.trust_env = False
+        response = session.get(f"{metrics_url}/metrics", timeout=2)
+    if response.status_code != 200:
+        raise AssertionError(
+            f"provider /metrics returned HTTP {response.status_code}"
+        )
+    metric_name = provider_query_metric_name()
+    samples = find_metric_samples(
+        response.text,
+        metric_name,
+        {
+            labels.NAMESPACE: namespace,
+            labels.COMPONENT: component,
+            labels.ENDPOINT: KV_INDEXER_QUERY_ENDPOINT,
+            labels.WORKER_ID: format(provider_instance_id, "x"),
+        },
+    )
+    if not samples:
+        raise AssertionError(
+            "provider did not export "
+            f"{metric_name} with "
+            f"{labels.ENDPOINT}={KV_INDEXER_QUERY_ENDPOINT!r} "
+            f"{labels.WORKER_ID}={format(provider_instance_id, 'x')!r}"
+        )
+    return sum(samples)
+
+
+def catalog_named_endpoint_instances(
+    metadata_objects: list[Mapping[str, Any]],
+    endpoint_name: str,
+    *,
+    namespace: str,
+    component: str,
+) -> dict[int, dict[str, Any]]:
+    """Map actual endpoint instance IDs from fixture DynamoWorkerMetadata."""
+    catalog: dict[int, dict[str, Any]] = {}
+    for obj in metadata_objects:
+        spec = obj.get("spec") or {}
+        data = spec.get("data") if isinstance(spec, dict) else None
+        if not isinstance(data, dict):
+            continue
+        endpoints = data.get("endpoints")
+        if not isinstance(endpoints, dict):
+            continue
+        cr_name = (obj.get("metadata") or {}).get("name")
+        owner_uid = _owner_pod_uid(obj)
+        for endpoint in endpoints.values():
+            if not isinstance(endpoint, dict):
+                continue
+            if endpoint.get("endpoint") != endpoint_name:
+                continue
+            if endpoint.get("namespace") != namespace:
+                continue
+            if endpoint.get("component") != component:
+                continue
+            raw_id = endpoint.get("instance_id")
+            if not isinstance(raw_id, int) or isinstance(raw_id, bool):
+                raise AssertionError(
+                    f"DynamoWorkerMetadata {endpoint_name} instance_id is "
+                    f"malformed: {raw_id!r}"
+                )
+            if raw_id in catalog and catalog[raw_id]["cr_name"] != cr_name:
+                raise AssertionError(
+                    f"{endpoint_name} instance_id {raw_id} is registered on "
+                    "multiple CRs"
+                )
+            catalog[raw_id] = {
+                "cr_name": cr_name,
+                "namespace": endpoint.get("namespace"),
+                "component": endpoint.get("component"),
+                "endpoint": endpoint_name,
+                "owner_uid": owner_uid,
+            }
+    return catalog
+
+
+def catalog_generate_instances(
+    metadata_objects: list[Mapping[str, Any]],
+    *,
+    namespace: str,
+    component: str,
+) -> dict[int, dict[str, Any]]:
+    """Map generate-endpoint instance IDs from the expected namespace/component."""
+    return catalog_named_endpoint_instances(
+        metadata_objects, "generate", namespace=namespace, component=component
+    )
+
+
+def _owner_pod_uid(obj: Mapping[str, Any]) -> str | None:
+    owners = (obj.get("metadata") or {}).get("ownerReferences") or []
+    if not isinstance(owners, list):
+        return None
+    uids: list[str] = []
+    for owner in owners:
+        if not isinstance(owner, dict):
+            continue
+        if owner.get("kind") != "Pod":
+            continue
+        uid = owner.get("uid")
+        if isinstance(uid, str) and uid:
+            uids.append(uid)
+    if not uids:
+        return None
+    unique = set(uids)
+    if len(unique) != 1:
+        raise AssertionError(f"DynamoWorkerMetadata has ambiguous Pod owners: {uids}")
+    return unique.pop()
+
+
+def catalog_worker_model_configs(
+    metadata_objects: list[Mapping[str, Any]],
+    *,
+    namespace: str,
+    component: str,
+) -> dict[int, dict[str, Any]]:
+    """Read registered generate-worker model cards from fixture metadata."""
+    configs: dict[int, dict[str, Any]] = {}
+    for obj in metadata_objects:
+        spec = obj.get("spec") or {}
+        data = spec.get("data") if isinstance(spec, dict) else None
+        if not isinstance(data, dict):
+            continue
+        cards = data.get("model_cards")
+        if not isinstance(cards, dict):
+            continue
+        for card in cards.values():
+            if not isinstance(card, dict):
+                continue
+            if card.get("namespace") != namespace or card.get("component") != component:
+                continue
+            raw_id = card.get("instance_id")
+            if not isinstance(raw_id, int) or isinstance(raw_id, bool):
+                raise AssertionError(
+                    f"DynamoWorkerMetadata model card instance_id is malformed: {raw_id!r}"
+                )
+            card_json = card.get("card_json")
+            if not isinstance(card_json, dict):
+                raise AssertionError(
+                    f"DynamoWorkerMetadata model card JSON is missing for {raw_id}"
+                )
+            runtime = card_json.get("runtime_config")
+            if not isinstance(runtime, dict):
+                raise AssertionError(
+                    f"worker {raw_id} model card is missing runtime_config"
+                )
+            configs[raw_id] = {
+                "kv_cache_block_size": card_json.get("kv_cache_block_size"),
+                "data_parallel_size": runtime.get("data_parallel_size"),
+                "kv_event_publishing_enabled": runtime.get(
+                    "kv_event_publishing_enabled"
+                ),
+            }
+    return configs
+
+
+def ready_container_names(pod: Mapping[str, Any]) -> set[str]:
+    statuses = (pod.get("status") or {}).get("containerStatuses") or []
+    names: set[str] = set()
+    if not isinstance(statuses, list):
+        return names
+    for status in statuses:
+        if isinstance(status, dict) and status.get("ready") and status.get("name"):
+            names.add(str(status["name"]))
+    return names
+
+
+class EppFrontendRoutingParityStack:
+    """Two mockers, one served remote index, and fresh FE/EPP consumers."""
+
+    def __init__(self, request, tmp_path: Path, model_name: str) -> None:
+        self.request = request
+        self.tmp_path = tmp_path
+        self.model_name = model_name
+        self.identity = resolve_pod_identity()
+        self._stack = ExitStack()
+        self._lock: FileLock | None = None
+        self.kube_api: LoopbackKubeAPI | None = None
+        self.kubeconfig: Path | None = None
+        self.namespace: str | None = None
+        self.component_name = "mocker"
+        self.mocker_a = None
+        self.mocker_b = None
+        self.frontend_port: int | None = None
+        self.provider_metrics_port: int | None = None
+        self.worker_http_ports: dict[str, int] = {}
+        self.pod_destination: str | None = None
+        self.worker_ids: dict[str, int] = {}
+        self.worker_configs: dict[int, dict[str, Any]] = {}
+        self.provider_instance_id: int | None = None
+        self.provider_runtime = None
+        self.provider_router = None
+        self.provider_router_config = None
+        self.policy_parameters: dict[str, float] = {}
+        self.driver: ExtProcParityDriver | None = None
+        self._loop = None
+        self._previous_loop = None
+        self._allocated_ports: list[int] = []
+        self._consumer_stack: ExitStack | None = None
+        self._consumer_pair_seq = 0
+
+    @property
+    def frontend_url(self) -> str:
+        if self.frontend_port is None:
+            raise RuntimeError("routing parity stack has not started")
+        return f"http://127.0.0.1:{self.frontend_port}"
+
+    @property
+    def provider_metrics_url(self) -> str:
+        if self.provider_metrics_port is None:
+            raise RuntimeError("routing parity stack has not started")
+        return f"http://127.0.0.1:{self.provider_metrics_port}"
+
+    def collect_frontend_route(
+        self, payload: dict[str, Any], *, path: str, request_id: str
+    ) -> RouteObservation:
+        return collect_frontend_query_route(
+            self.frontend_url, payload, path=path, request_id=request_id
+        )
+
+    def collect_epp_route(
+        self, payload: dict[str, Any], *, path: str, request_id: str
+    ) -> RouteObservation:
+        if self.driver is None:
+            raise RuntimeError("routing parity stack has not started")
+        observation = self.driver.collect_route_observation(
+            payload, path=path, request_id=request_id
+        )
+        if self.pod_destination is None:
+            raise AssertionError("fixture pod destination was not recorded")
+        if observation.destination != self.pod_destination:
+            raise AssertionError(
+                "EPP destination does not match the fixture Pod mapping: "
+                f"{observation.destination!r} != {self.pod_destination!r}"
+            )
+        return observation
+
+    def __enter__(self) -> EppFrontendRoutingParityStack:
+        from tests.router.mocker_process import MockerProcess
+
+        try:
+            return self._start(MockerProcess)
+        except Exception:
+            self._stack.close()
+            raise
+
+    def _start(self, mocker_cls) -> EppFrontendRoutingParityStack:
+        import asyncio
+
+        from dynamo.llm import KvRouter, KvRouterConfig
+        from tests.router.common import _create_kv_router_with_timeout
+        from tests.router.helper import get_runtime, poll_for_worker_instances
+
+        self._lock = acquire_epp_session_lock()
+        self._stack.callback(self._lock.release)
+        assert_epp_ports_free()
+        allocated = allocate_ports(5, DynamoPortRange.ROUTER.value)
+        self._allocated_ports = allocated
+        self.request.addfinalizer(lambda: deallocate_ports(list(allocated)))
+        (
+            api_port,
+            frontend_port,
+            worker_a_http,
+            worker_b_http,
+            provider_metrics_port,
+        ) = allocated
+        self.frontend_port = frontend_port
+        self.provider_metrics_port = provider_metrics_port
+        self.worker_http_ports = {
+            WORKER_A_CONTAINER_NAME: worker_a_http,
+            WORKER_B_CONTAINER_NAME: worker_b_http,
+        }
+        self.pod_destination = f"127.0.0.1:{worker_a_http}"
+
+        kubeconfig = write_loopback_kubeconfig(
+            self.tmp_path / "kubeconfig",
+            "127.0.0.1",
+            api_port,
+            self.identity.pod_namespace,
+        )
+        self.kubeconfig = kubeconfig
+        self.kube_api = LoopbackKubeAPI(self.identity.pod_namespace, api_port)
+        self.kube_api.start()
+        self._stack.callback(self.kube_api.stop)
+
+        proto_modules = _ExtProcModules(self.tmp_path / "ext_proc_pb")
+        self._stack.callback(proto_modules.close)
+        self.driver = ExtProcParityDriver(proto_modules)
+
+        mocker_a_env = loopback_process_env(
+            kubeconfig, self.identity, WORKER_A_CONTAINER_NAME
+        )
+        worker_args = {
+            "speedup_ratio": 10.0,
+            "block_size": WORKER_BLOCK_SIZE,
+            "dp_size": WORKER_DP_SIZE,
+            "enable_prefix_caching": True,
+        }
+        self.mocker_a = mocker_cls(
+            self.request,
+            mocker_args=worker_args,
+            num_mockers=1,
+            store_backend="kubernetes",
+            request_plane="tcp",
+            extra_env=mocker_a_env,
+            display_name="dynamo-mocker-a",
+        )
+        self.namespace = self.mocker_a.namespace
+        mocker_b_env = loopback_process_env(
+            kubeconfig, self.identity, WORKER_B_CONTAINER_NAME
+        )
+        self.mocker_b = mocker_cls(
+            self.request,
+            mocker_args=worker_args,
+            num_mockers=1,
+            store_backend="kubernetes",
+            request_plane="tcp",
+            extra_env=mocker_b_env,
+            namespace=self.namespace,
+            display_name="dynamo-mocker-b",
+        )
+        self.kube_api.add_ready_container(
+            identity=self.identity,
+            dynamo_namespace=self.namespace,
+            container_name=WORKER_A_CONTAINER_NAME,
+            http_port=worker_a_http,
+        )
+        self.kube_api.add_ready_container(
+            identity=self.identity,
+            dynamo_namespace=self.namespace,
+            container_name=WORKER_B_CONTAINER_NAME,
+            http_port=worker_b_http,
+        )
+        self.kube_api.add_ready_container(
+            identity=self.identity,
+            dynamo_namespace=self.namespace,
+            container_name=PROVIDER_CONTAINER_NAME,
+            http_port=provider_metrics_port,
+        )
+        self._stack.enter_context(self.mocker_a)
+        self._stack.enter_context(self.mocker_b)
+
+        provider_env = loopback_process_env(
+            kubeconfig, self.identity, PROVIDER_CONTAINER_NAME
+        )
+        provider_env.update(first_selection_router_env(use_remote_indexer=False))
+        provider_env["DYN_SYSTEM_PORT"] = str(provider_metrics_port)
+        try:
+            self._previous_loop = asyncio.get_event_loop()
+        except RuntimeError:
+            self._previous_loop = None
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._stack.callback(self._close_loop)
+
+        async def create_provider_runtime():
+            return get_runtime(
+                store_backend="kubernetes",
+                request_plane="tcp",
+                event_plane="zmq",
+            )
+
+        with scoped_process_env(provider_env):
+            self.provider_runtime = self._loop.run_until_complete(
+                create_provider_runtime()
+            )
+            self._stack.callback(self._shutdown_provider)
+            generate_path = f"{self.namespace}.{self.component_name}.generate"
+            endpoint = self.provider_runtime.endpoint(generate_path)
+            self.provider_router_config = KvRouterConfig(
+                use_kv_events=True,
+                serve_indexer=True,
+                use_remote_indexer=False,
+                router_temperature=0.0,
+                router_replica_sync=False,
+                router_track_prefill_tokens=True,
+                router_track_output_blocks=False,
+                overlap_score_credit=1.0,
+                overlap_score_credit_decay=0.0,
+                prefill_load_scale=1.0,
+                shared_cache_type="none",
+                conditional_disagg_enabled=False,
+                router_tracking_hash="public-xxh3-v1",
+                router_policy_config=None,
+                router_prefill_policy=None,
+                router_decode_policy=None,
+                router_queue_threshold=None,
+                router_prefill_load_model="none",
+            )
+            self.policy_parameters = self.provider_router_config.policy_parameters(
+                "aggregated"
+            )
+            self.provider_router = _create_kv_router_with_timeout(
+                router_factory=lambda: KvRouter(
+                    endpoint=endpoint,
+                    block_size=WORKER_BLOCK_SIZE,
+                    kv_router_config=self.provider_router_config,
+                ),
+                num_workers=2,
+                engine_workers=self.mocker_a,
+            )
+
+        async def wait_for_catalog() -> dict[str, int]:
+            generate_ids = await poll_for_worker_instances(
+                endpoint, 2, max_wait_time=120
+            )
+            query_endpoint = self.provider_runtime.endpoint(
+                f"{self.namespace}.{self.component_name}.{KV_INDEXER_QUERY_ENDPOINT}"
+            )
+            query_client = await query_endpoint.client()
+            record_endpoint = self.provider_runtime.endpoint(
+                f"{self.namespace}.{self.component_name}."
+                "kv_indexer_record_routing_decision"
+            )
+            record_client = await record_endpoint.client()
+            deadline = time.monotonic() + PROCESS_TIMEOUT_S
+            catalog: dict[int, dict[str, Any]] = {}
+            query_instances: list[Any] = []
+            models: dict[int, dict[str, Any]] = {}
+            while time.monotonic() < deadline:
+                listed = self.kube_api.listed_metadata()
+                catalog = catalog_generate_instances(
+                    listed,
+                    namespace=self.namespace,
+                    component=self.component_name,
+                )
+                query_catalog = catalog_named_endpoint_instances(
+                    listed,
+                    KV_INDEXER_QUERY_ENDPOINT,
+                    namespace=self.namespace,
+                    component=self.component_name,
+                )
+                record_catalog = catalog_named_endpoint_instances(
+                    listed,
+                    "kv_indexer_record_routing_decision",
+                    namespace=self.namespace,
+                    component=self.component_name,
+                )
+                query_instances = list(query_client.instances())
+                record_ids = set(record_client.instance_ids())
+                models = catalog_worker_model_configs(
+                    listed,
+                    namespace=self.namespace,
+                    component=self.component_name,
+                )
+                if (
+                    len(catalog) == 2
+                    and set(generate_ids) == set(catalog)
+                    and len(query_instances) == 1
+                    and len(query_catalog) == 1
+                    and not record_ids
+                    and not record_catalog
+                    and set(models) >= set(catalog)
+                    and self._ready_joins_complete(catalog, query_catalog)
+                    and self._worker_models_match(models, catalog)
+                ):
+                    break
+                await asyncio.sleep(0.25)
+            else:
+                raise TimeoutError(
+                    "generate workers or served kv_indexer_query did not register: "
+                    f"generate={generate_ids} catalog={sorted(catalog)} "
+                    f"query={[inst.instance_id for inst in query_instances]} "
+                    f"record={record_client.instance_ids()} models={models}"
+                )
+            if len(query_instances) != 1:
+                raise AssertionError(
+                    "served kv_indexer_query must be exactly one discovered "
+                    f"instance, got {[inst.instance_id for inst in query_instances]}"
+                )
+            provider = query_instances[0]
+            if (
+                provider.namespace != self.namespace
+                or provider.component != self.component_name
+                or provider.endpoint != KV_INDEXER_QUERY_ENDPOINT
+            ):
+                raise AssertionError(
+                    "kv_indexer_query instance metadata does not match the "
+                    f"served provider: {provider}"
+                )
+            self.provider_instance_id = provider.instance_id
+            if self.provider_instance_id in catalog:
+                raise AssertionError(
+                    "provider kv_indexer_query instance must not be a generate "
+                    f"target: {self.provider_instance_id}"
+                )
+            self.worker_configs = {
+                worker_id: models[worker_id] for worker_id in catalog
+            }
+            labeled = sorted(catalog)
+            logger.info(
+                "routing catalog ready workers=%s provider=%s policy=%s configs=%s",
+                {"A": labeled[0], "B": labeled[1]},
+                self.provider_instance_id,
+                self.policy_parameters,
+                self.worker_configs,
+            )
+            return {"A": labeled[0], "B": labeled[1]}
+
+        self.worker_ids = self._loop.run_until_complete(wait_for_catalog())
+        if self.kube_api.failures:
+            raise RuntimeError(
+                "Loopback Kubernetes API recorded unexpected requests: "
+                + "; ".join(self.kube_api.failures)
+            )
+        return self
+
+    def run_until_complete(self, coro):
+        if self._loop is None:
+            raise RuntimeError("routing parity stack has not started")
+        return self._loop.run_until_complete(coro)
+
+    def open_consumer_pair(self, *, include_epp: bool = True) -> None:
+        if (
+            self.kubeconfig is None
+            or self.namespace is None
+            or self.frontend_port is None
+        ):
+            raise RuntimeError("routing parity stack has not started")
+        if self._consumer_stack is not None:
+            raise RuntimeError("a consumer pair is already open")
+        from tests.router.router_process import FrontendRouterProcess, RuntimeEppProcess
+
+        if include_epp:
+            assert_epp_ports_free()
+        self._consumer_pair_seq += 1
+        pair_label = f"pair-{self._consumer_pair_seq}"
+        stack = ExitStack()
+        try:
+            frontend_env = loopback_process_env(
+                self.kubeconfig, self.identity, FRONTEND_CONTAINER_NAME
+            )
+            frontend_env.update(first_selection_router_env(use_remote_indexer=True))
+            frontend = FrontendRouterProcess(
+                self.request,
+                WORKER_BLOCK_SIZE,
+                self.frontend_port,
+                self.namespace,
+                "kubernetes",
+                request_plane="tcp",
+                event_plane="zmq",
+                router_mode="kv",
+                min_initial_workers=2,
+                use_remote_indexer=True,
+                extra_env=frontend_env,
+            )
+            frontend.display_name = (
+                f"dynamo-frontend-kv-{self.frontend_port}-{pair_label}"
+            )
+            frontend.log_dir = f"{self.request.node.name}/{pair_label}-frontend"
+            stack.enter_context(frontend)
+            if include_epp:
+                epp_env = loopback_process_env(
+                    self.kubeconfig, self.identity, EPP_CONTAINER_NAME
+                )
+                epp_env.update(first_selection_router_env(use_remote_indexer=True))
+                epp_env.update(
+                    {
+                        "DYN_NAMESPACE": self.namespace,
+                        "DYN_COMPONENT_NAME": self.component_name,
+                    }
+                )
+                epp = RuntimeEppProcess(
+                    self.request,
+                    binary=epp_binary_path(),
+                    grpc_port=EPP_GRPC_PORT,
+                    health_port=EPP_HEALTH_PORT,
+                    extra_env=epp_env,
+                    timeout=PROCESS_TIMEOUT_S,
+                    kubeconfig=self.kubeconfig,
+                )
+                epp.display_name = f"dynamo-runtime-epp-{pair_label}"
+                epp.log_dir = f"{self.request.node.name}/{pair_label}-epp"
+                stack.enter_context(epp)
+            wait_for_frontend_models(self.frontend_url)
+        except Exception:
+            stack.close()
+            raise
+        self._consumer_stack = stack
+        logger.info(
+            "opened consumer %s include_epp=%s frontend_log=%s",
+            pair_label,
+            include_epp,
+            frontend.log_dir,
+        )
+
+    def close_consumer_pair(self) -> None:
+        stack = self._consumer_stack
+        self._consumer_stack = None
+        if stack is not None:
+            stack.close()
+
+    def provider_query_count(self) -> float:
+        if self.namespace is None:
+            raise RuntimeError("routing parity stack has not started")
+        if self.provider_instance_id is None:
+            raise RuntimeError(
+                "routing parity stack has not discovered the kv_indexer_query instance"
+            )
+        return scrape_provider_query_count(
+            self.provider_metrics_url,
+            namespace=self.namespace,
+            component=self.component_name,
+            provider_instance_id=self.provider_instance_id,
+        )
+
+    def dump_provider_events(self) -> str:
+        if self.provider_router is None:
+            raise RuntimeError("routing parity stack has not started")
+        return self.run_until_complete(self.provider_router.dump_events())
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        close_error = None
+        try:
+            self.close_consumer_pair()
+        except Exception as err:
+            close_error = err
+        try:
+            self._stack.close()
+        except Exception as err:
+            if close_error is None:
+                close_error = err
+        failures = list(self.kube_api.failures) if self.kube_api is not None else []
+        if failures:
+            api_error = AssertionError(
+                "Loopback Kubernetes API recorded unexpected requests: "
+                + "; ".join(failures)
+            )
+            if exc_type is None:
+                if close_error is not None:
+                    raise api_error from close_error
+                raise api_error
+            return None
+        if close_error is not None and exc_type is None:
+            raise close_error
+        return None
+
+    def _shutdown_provider(self) -> None:
+        router = self.provider_router
+        self.provider_router = None
+        if router is not None:
+            del router
+        runtime = self.provider_runtime
+        self.provider_runtime = None
+        if runtime is not None:
+            runtime.shutdown()
+
+    def _close_loop(self) -> None:
+        import asyncio
+
+        loop = self._loop
+        previous = self._previous_loop
+        self._loop = None
+        self._previous_loop = None
+        if loop is not None and not loop.is_closed():
+            loop.close()
+        asyncio.set_event_loop(previous)
+
+    def _ready_joins_complete(
+        self,
+        generate_catalog: Mapping[int, Mapping[str, Any]],
+        query_catalog: Mapping[int, Mapping[str, Any]],
+    ) -> bool:
+        pods = self.kube_api.listed_pods()
+        if len(pods) != 1:
+            return False
+        pod = pods[0]
+        pod_uid = (pod.get("metadata") or {}).get("uid")
+        if pod_uid != self.identity.pod_uid:
+            return False
+        ready = ready_container_names(pod)
+        expected = {
+            WORKER_A_CONTAINER_NAME,
+            WORKER_B_CONTAINER_NAME,
+            PROVIDER_CONTAINER_NAME,
+        }
+        if not expected.issubset(ready):
+            return False
+        for info in generate_catalog.values():
+            if info.get("owner_uid") != pod_uid:
+                return False
+        for info in query_catalog.values():
+            if info.get("owner_uid") != pod_uid:
+                return False
+        return True
+
+    def _worker_models_match(
+        self,
+        models: Mapping[int, Mapping[str, Any]],
+        generate_catalog: Mapping[int, Mapping[str, Any]],
+    ) -> bool:
+        for worker_id in generate_catalog:
+            config = models.get(worker_id)
+            if config is None:
+                return False
+            if config.get("kv_cache_block_size") != WORKER_BLOCK_SIZE:
+                return False
+            if config.get("data_parallel_size") != WORKER_DP_SIZE:
+                return False
+            if config.get("kv_event_publishing_enabled") is not True:
+                return False
+        return True

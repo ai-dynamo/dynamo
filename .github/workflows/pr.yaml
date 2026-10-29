@@ -1171,6 +1171,7 @@ jobs:
           TRANSFORMERS_OFFLINE: "1"
         run: |
           python3 -m pytest tests/router/test_epp_frontend_parity.py \
+            tests/router/test_epp_frontend_routing_parity.py \
             -n 0 \
             -m 'pre_merge and gpu_0 and runtime_epp' \
             --models-dir="${HF_HUB_CACHE}" \

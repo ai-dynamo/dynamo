@@ -4407,3 +4407,631 @@ def run_frontend_epp_tools_token_parity(
             "Loopback Kubernetes API recorded unexpected requests: "
             + "; ".join(stack.kube_api.failures)
         )
+
+
+########################################################
+# Frontend / Runtime EPP first-selection conformance
+########################################################
+
+
+@dataclass(frozen=True)
+class FirstSelectionCase:
+    """One actual HTTP body used for a quiescent first-selection comparison."""
+
+    name: str
+    path: str
+    payload: dict[str, Any]
+    label: str
+
+
+def frontend_epp_first_selection_cases(model_name: str) -> list[FirstSelectionCase]:
+    """Opposite long-prefix completions for aggregated first-selection parity."""
+    shared = "prefix cache routing stem " * 8
+    path = "/v1/completions"
+    return [
+        FirstSelectionCase(
+            name="route_a",
+            path=path,
+            payload={
+                "model": model_name,
+                "prompt": shared + ("north unique routing branch " * 12),
+                "stream": True,
+                "max_tokens": 1,
+            },
+            label="A",
+        ),
+        FirstSelectionCase(
+            name="route_b",
+            path=path,
+            payload={
+                "model": model_name,
+                "prompt": shared + ("south unique routing branch " * 12),
+                "stream": True,
+                "max_tokens": 1,
+            },
+            label="B",
+        ),
+    ]
+
+
+def _route_mismatch_message(
+    left,
+    right,
+    *,
+    left_label: str,
+    right_label: str,
+    case_name: str,
+) -> str:
+    return (
+        f"{case_name}: route observation mismatch: "
+        f"{left_label}=(worker_id={left.worker_id}, dp_rank={left.dp_rank}) "
+        f"{right_label}=(worker_id={right.worker_id}, dp_rank={right.dp_rank})"
+    )
+
+
+def assert_route_observations_match(
+    left,
+    right,
+    *,
+    left_label: str,
+    right_label: str,
+    case_name: str,
+) -> None:
+    """Compare typed first-selection routes only: (worker_id, dp_rank)."""
+    if (left.worker_id, left.dp_rank) != (right.worker_id, right.dp_rank):
+        raise AssertionError(
+            _route_mismatch_message(
+                left,
+                right,
+                left_label=left_label,
+                right_label=right_label,
+                case_name=case_name,
+            )
+        )
+
+
+def assert_route_observations_differ(
+    left,
+    right,
+    *,
+    left_label: str,
+    right_label: str,
+    case_name: str,
+) -> None:
+    """Require the same route comparator to reject distinct live observations."""
+    left_route = (left.worker_id, left.dp_rank)
+    right_route = (right.worker_id, right.dp_rank)
+    if left_route == right_route:
+        raise AssertionError(
+            f"{case_name}: live observations are not distinct routes: "
+            f"{left_label}={left_route} {right_label}={right_route}"
+        )
+    try:
+        assert_route_observations_match(
+            left,
+            right,
+            left_label=left_label,
+            right_label=right_label,
+            case_name=case_name,
+        )
+    except AssertionError as exc:
+        expected = _route_mismatch_message(
+            left,
+            right,
+            left_label=left_label,
+            right_label=right_label,
+            case_name=case_name,
+        )
+        if str(exc) == expected:
+            return
+        raise
+    raise AssertionError(
+        f"{case_name}: same route comparator accepted distinct live observations "
+        f"{left_label}=(worker_id={left.worker_id}, dp_rank={left.dp_rank}) "
+        f"{right_label}=(worker_id={right.worker_id}, dp_rank={right.dp_rank})"
+    )
+
+
+def _assert_catalog_valid_route(observation, worker_ids: dict[str, int], case_name: str) -> None:
+    if observation.dp_rank != 0:
+        raise AssertionError(
+            f"{case_name}: expected aggregated dp_rank=0, got {observation.dp_rank}"
+        )
+    if observation.worker_id not in worker_ids.values():
+        raise AssertionError(
+            f"{case_name}: worker_id {observation.worker_id} is not a catalog "
+            f"generate target {worker_ids}"
+        )
+
+
+def _wait_for_provider_query_increase(stack, before: float, *, arm: str) -> float:
+    from tests.router.epp_parity import PROVIDER_QUERY_SETTLE_S
+
+    deadline = time.monotonic() + 5.0
+    last = before
+    while time.monotonic() < deadline:
+        time.sleep(PROVIDER_QUERY_SETTLE_S)
+        last = stack.provider_query_count()
+        if last > before:
+            return last
+    raise AssertionError(
+        f"{arm}: provider {stack.component_name}.kv_indexer_query request "
+        f"counter did not increase (before={before}, after={last})"
+    )
+
+
+def _stable_provider_query_baseline(stack, *, arm: str) -> float:
+    from tests.router.epp_parity import PROVIDER_QUERY_SETTLE_S
+
+    first = stack.provider_query_count()
+    time.sleep(PROVIDER_QUERY_SETTLE_S)
+    second = stack.provider_query_count()
+    if first != second:
+        raise AssertionError(
+            f"{arm}: provider query counter is not stable before the arm "
+            f"({first} -> {second})"
+        )
+    return second
+
+
+def _require_cache_sensitive_policy(stack) -> dict[str, float]:
+    parameters = stack.policy_parameters
+    required = (
+        "overlap_score_credit",
+        "overlap_score_credit_decay",
+        "prefill_load_scale",
+        "router_temperature",
+    )
+    missing = [name for name in required if name not in parameters]
+    if missing:
+        raise AssertionError(
+            f"aggregated policy_parameters missing {missing}: {parameters}"
+        )
+    if parameters["overlap_score_credit"] != 1.0:
+        raise AssertionError(
+            "aggregated overlap_score_credit must be 1.0, "
+            f"got {parameters['overlap_score_credit']}"
+        )
+    if parameters["overlap_score_credit_decay"] != 0.0:
+        raise AssertionError(
+            "aggregated overlap_score_credit_decay must be 0.0, "
+            f"got {parameters['overlap_score_credit_decay']}"
+        )
+    if parameters["prefill_load_scale"] != 1.0:
+        raise AssertionError(
+            "aggregated prefill_load_scale must be 1.0, "
+            f"got {parameters['prefill_load_scale']}"
+        )
+    if parameters["router_temperature"] != 0.0:
+        raise AssertionError(
+            "aggregated router_temperature must be 0 for deterministic first "
+            f"selection, got {parameters['router_temperature']}"
+        )
+    config = stack.provider_router_config
+    if not config.router_track_prefill_tokens:
+        raise AssertionError(
+            "served KvRouter must retain router_track_prefill_tokens for "
+            "cache-sensitive prefill accounting"
+        )
+    if config.router_track_output_blocks:
+        raise AssertionError("served KvRouter must keep output-block tracking off")
+    if config.router_replica_sync:
+        raise AssertionError("served KvRouter must keep replica sync off")
+    return parameters
+
+
+def _router_event_sort_key(event: dict[str, Any]) -> tuple[Any, ...]:
+    try:
+        data = event["event"]["data"]["stored"]
+        first_block = data["blocks"][0]
+        return (
+            event["worker_id"],
+            first_block["tokens_hash"],
+            data["parent_hash"],
+        )
+    except (KeyError, IndexError, TypeError) as exc:
+        raise AssertionError(
+            "provider dump_events entry is not a stored RouterEvent"
+        ) from exc
+
+
+def _provider_cache_snapshot(stack) -> list[dict[str, Any]]:
+    parsed = json.loads(stack.dump_provider_events())
+    if not isinstance(parsed, list):
+        raise AssertionError("provider dump_events must be a JSON list of RouterEvent")
+    events: list[dict[str, Any]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            raise AssertionError("provider dump_events list contains a non-object")
+        events.append(item)
+    return sorted(events, key=_router_event_sort_key)
+
+
+def _assert_provider_snapshot_unchanged(
+    frozen: list[dict[str, Any]], current: list[dict[str, Any]], case_name: str
+) -> None:
+    assert_event_dumps_equal(
+        frozen,
+        current,
+        f"{case_name}.frozen",
+        f"{case_name}.current",
+    )
+
+
+def _prepare_first_selection_snapshot(stack, cases: list[FirstSelectionCase]):
+    from tests.router.epp_parity import (
+        READINESS_DEADLINE_S,
+        collect_frontend_query_token_ids,
+        unique_request_id,
+    )
+    from tests.router.helper import send_request_via_python_kv_router
+
+    if stack.provider_router is None:
+        raise AssertionError("first-selection readiness requires a served KvRouter")
+
+    policy = _require_cache_sensitive_policy(stack)
+    worker_a = stack.worker_ids["A"]
+    worker_b = stack.worker_ids["B"]
+    logger.info(
+        "first-selection readiness workers=%s provider=%s policy=%s configs=%s",
+        stack.worker_ids,
+        stack.provider_instance_id,
+        policy,
+        stack.worker_configs,
+    )
+
+    async def activate_publishers() -> None:
+        deadline = time.monotonic() + READINESS_DEADLINE_S
+        for worker_id, label in ((worker_a, "A"), (worker_b, "B")):
+            key = (worker_id, 0)
+            attempt = 0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError(
+                        f"publisher activation for {label} exhausted the 45s "
+                        f"budget after {attempt} probes key={key}"
+                    )
+                attempt += 1
+                probe = [random.randint(1, 10000) for _ in range(32)]
+                try:
+                    await asyncio.wait_for(
+                        send_request_via_python_kv_router(
+                            kv_python_router=stack.provider_router,
+                            model_name=stack.model_name,
+                            token_ids=probe,
+                            stop_conditions={"ignore_eos": True, "max_tokens": 2},
+                            worker_id=worker_id,
+                            dp_rank=0,
+                        ),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise AssertionError(
+                        f"publisher probe request/stream for {label} outlived "
+                        f"the 45s readiness budget on attempt {attempt}"
+                    ) from exc
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError(
+                        f"publisher activation for {label} exhausted the 45s "
+                        f"budget after probe {attempt} before overlap"
+                    )
+                probe_deadline = min(deadline, time.monotonic() + 2.0)
+                indexed = False
+                while time.monotonic() < probe_deadline:
+                    query_budget = probe_deadline - time.monotonic()
+                    if query_budget <= 0:
+                        break
+                    try:
+                        scores = await asyncio.wait_for(
+                            stack.provider_router.get_overlap_scores(
+                                probe, include_shared=False
+                            ),
+                            timeout=query_budget,
+                        )
+                    except asyncio.TimeoutError:
+                        if time.monotonic() >= deadline:
+                            raise AssertionError(
+                                f"publisher overlap query for {label} outlived "
+                                "the 45s readiness budget"
+                            )
+                        break
+                    blocks = {
+                        (row["worker_id"], row["dp_rank"]): row["device_blocks"]
+                        for row in scores["workers"]
+                    }
+                    if blocks.get(key, 0) >= 2:
+                        indexed = True
+                        break
+                    await asyncio.sleep(
+                        min(0.05, max(probe_deadline - time.monotonic(), 0.0))
+                    )
+                if indexed:
+                    break
+
+    stack.run_until_complete(activate_publishers())
+
+    token_ids_by_label: dict[str, list[int]] = {}
+    stack.open_consumer_pair(include_epp=False)
+    try:
+        for case in cases:
+            token_ids_by_label[case.label] = collect_frontend_query_token_ids(
+                stack.frontend_url,
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id(f"fe-ready-{case.name}"),
+            )
+    finally:
+        stack.close_consumer_pair()
+
+    async def warm_and_gate() -> None:
+        deadline = time.monotonic() + READINESS_DEADLINE_S
+        last: dict[str, dict[tuple[int, int], int]] = {}
+        last_loads: dict[str, list[dict[str, Any]]] = {}
+        for case in cases:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(
+                    f"{case.name}: pinned warmup exhausted the 45s budget before send"
+                )
+            tokens = token_ids_by_label[case.label]
+            target = stack.worker_ids[case.label]
+            try:
+                await asyncio.wait_for(
+                    send_request_via_python_kv_router(
+                        kv_python_router=stack.provider_router,
+                        model_name=stack.model_name,
+                        token_ids=tokens,
+                        stop_conditions={"ignore_eos": True, "max_tokens": 2},
+                        worker_id=target,
+                        dp_rank=0,
+                    ),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError as exc:
+                raise AssertionError(
+                    f"{case.name}: pinned warmup request/stream outlived the "
+                    "45s readiness budget"
+                ) from exc
+            complete_blocks = len(tokens) // 16
+            if complete_blocks < 2:
+                raise AssertionError(
+                    f"{case.name}: readiness tokens must cover at least two full "
+                    f"blocks, got {len(tokens)} tokens"
+                )
+        while time.monotonic() < deadline:
+            ready = True
+            for case in cases:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    ready = False
+                    break
+                tokens = token_ids_by_label[case.label]
+                try:
+                    scores = await asyncio.wait_for(
+                        stack.provider_router.get_overlap_scores(
+                            tokens, include_shared=False
+                        ),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise AssertionError(
+                        f"{case.name}: get_overlap_scores outlived the remaining "
+                        "45s readiness budget"
+                    ) from exc
+                blocks = {
+                    (row["worker_id"], row["dp_rank"]): row["device_blocks"]
+                    for row in scores["workers"]
+                }
+                last[case.label] = blocks
+                preferred = stack.worker_ids[case.label]
+                other = worker_b if case.label == "A" else worker_a
+                preferred_blocks = blocks.get((preferred, 0), 0)
+                other_blocks = blocks.get((other, 0), 0)
+                complete_blocks = len(tokens) // 16
+                if preferred_blocks < complete_blocks or preferred_blocks <= other_blocks:
+                    ready = False
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    ready = False
+                    break
+                try:
+                    loads = await asyncio.wait_for(
+                        stack.provider_router.get_potential_loads(tokens),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise AssertionError(
+                        f"{case.name}: get_potential_loads outlived the remaining "
+                        "45s readiness budget"
+                    ) from exc
+                last_loads[case.label] = loads
+                by_worker = {
+                    (row["worker_id"], row["dp_rank"]): row for row in loads
+                }
+                preferred_load = by_worker.get((preferred, 0))
+                other_load = by_worker.get((other, 0))
+                if preferred_load is None or other_load is None:
+                    ready = False
+                    continue
+                if (
+                    preferred_load["active_requests"] != 0
+                    or other_load["active_requests"] != 0
+                ):
+                    ready = False
+                    continue
+                if (
+                    preferred_load["potential_prefill_tokens"]
+                    >= other_load["potential_prefill_tokens"]
+                ):
+                    ready = False
+            if ready:
+                logger.info(
+                    "first-selection snapshot margins=%s loads=%s policy=%s",
+                    last,
+                    last_loads,
+                    policy,
+                )
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.05, remaining))
+        raise AssertionError(
+            "provider overlap/load snapshot did not reach a full-block non-tie "
+            f"quiescent margin before the 45s readiness budget: {last} "
+            f"loads={last_loads}"
+        )
+
+    stack.run_until_complete(warm_and_gate())
+    stack.token_ids_by_label = token_ids_by_label
+
+
+def run_frontend_epp_first_selection_parity(stack, cases: list[FirstSelectionCase]) -> None:
+    """Compare live FE query-only and first EPP selections on a frozen snapshot."""
+    from tests.router.epp_parity import unique_request_id
+
+    if len(cases) != 2 or {case.label for case in cases} != {"A", "B"}:
+        raise AssertionError("first-selection parity requires opposite A/B cases")
+
+    _prepare_first_selection_snapshot(stack, cases)
+    frozen_events = _provider_cache_snapshot(stack)
+    logger.info(
+        "first-selection frozen snapshot events=%s workers=%s provider=%s",
+        len(frozen_events),
+        stack.worker_ids,
+        stack.provider_instance_id,
+    )
+
+    observed: dict[str, tuple[Any, Any]] = {}
+    for case in cases:
+        stack.open_consumer_pair()
+        try:
+            before = _stable_provider_query_baseline(stack, arm=f"{case.name}-frontend")
+            frontend_route = stack.collect_frontend_route(
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id(f"fe-sel-{case.name}"),
+            )
+            after_fe = _wait_for_provider_query_increase(
+                stack, before, arm=f"{case.name}-frontend"
+            )
+            epp_before = _stable_provider_query_baseline(stack, arm=f"{case.name}-epp")
+            if epp_before < after_fe:
+                raise AssertionError(
+                    f"{case.name}-epp: provider counter decreased between arms "
+                    f"({after_fe} -> {epp_before})"
+                )
+            epp_route = stack.collect_epp_route(
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id(f"epp-sel-{case.name}"),
+            )
+            after_epp = _wait_for_provider_query_increase(
+                stack, epp_before, arm=f"{case.name}-epp"
+            )
+            _assert_catalog_valid_route(
+                frontend_route, stack.worker_ids, f"{case.name}-frontend"
+            )
+            _assert_catalog_valid_route(epp_route, stack.worker_ids, f"{case.name}-epp")
+            expected_worker = stack.worker_ids[case.label]
+            if frontend_route.worker_id != expected_worker:
+                raise AssertionError(
+                    f"{case.name}: frontend first selection {frontend_route.worker_id} "
+                    f"does not follow the verified snapshot worker {expected_worker}"
+                )
+            assert_ordered_token_ids_match(
+                frontend_route.token_ids,
+                epp_route.token_ids,
+                left_label="frontend.token_ids",
+                right_label="epp.token_ids",
+                case_name=case.name,
+            )
+            assert_route_observations_match(
+                frontend_route,
+                epp_route,
+                left_label="frontend",
+                right_label="epp",
+                case_name=case.name,
+            )
+            current_events = _provider_cache_snapshot(stack)
+            _assert_provider_snapshot_unchanged(
+                frozen_events, current_events, case.name
+            )
+            logger.info(
+                "%s pair result frontend=%s epp=%s counters=%s->%s->%s",
+                case.name,
+                (frontend_route.worker_id, frontend_route.dp_rank),
+                (epp_route.worker_id, epp_route.dp_rank),
+                before,
+                after_fe,
+                after_epp,
+            )
+            observed[case.label] = (frontend_route, epp_route)
+        finally:
+            stack.close_consumer_pair()
+
+    if observed["A"][0].worker_id == observed["B"][0].worker_id:
+        raise AssertionError(
+            "R_A and R_B must flip the expected generate target; "
+            f"both selected worker_id={observed['A'][0].worker_id}"
+        )
+    logger.info(
+        "first-selection target flip A=%s B=%s",
+        observed["A"][0].worker_id,
+        observed["B"][0].worker_id,
+    )
+
+    control_a = cases[0] if cases[0].label == "A" else cases[1]
+    control_b = cases[0] if cases[0].label == "B" else cases[1]
+    stack.open_consumer_pair()
+    try:
+        before = _stable_provider_query_baseline(stack, arm="negative-frontend")
+        frontend_route = stack.collect_frontend_route(
+            control_a.payload,
+            path=control_a.path,
+            request_id=unique_request_id("fe-neg-route-a"),
+        )
+        after_fe = _wait_for_provider_query_increase(
+            stack, before, arm="negative-frontend"
+        )
+        epp_before = _stable_provider_query_baseline(stack, arm="negative-epp")
+        if epp_before < after_fe:
+            raise AssertionError(
+                f"negative-epp: provider counter decreased between arms "
+                f"({after_fe} -> {epp_before})"
+            )
+        epp_route = stack.collect_epp_route(
+            control_b.payload,
+            path=control_b.path,
+            request_id=unique_request_id("epp-neg-route-b"),
+        )
+        _wait_for_provider_query_increase(stack, epp_before, arm="negative-epp")
+        _assert_catalog_valid_route(frontend_route, stack.worker_ids, "negative-frontend")
+        _assert_catalog_valid_route(epp_route, stack.worker_ids, "negative-epp")
+        assert_route_observations_differ(
+            frontend_route,
+            epp_route,
+            left_label="frontend.R_A",
+            right_label="epp.R_B",
+            case_name="live-negative-route",
+        )
+        current_events = _provider_cache_snapshot(stack)
+        _assert_provider_snapshot_unchanged(
+            frozen_events, current_events, "live-negative-route"
+        )
+        logger.info(
+            "live-negative-route rejected frontend.R_A=%s epp.R_B=%s",
+            (frontend_route.worker_id, frontend_route.dp_rank),
+            (epp_route.worker_id, epp_route.dp_rank),
+        )
+    finally:
+        stack.close_consumer_pair()
+
+    if stack.kube_api.failures:
+        raise AssertionError(
+            "Loopback Kubernetes API recorded unexpected requests: "
+            + "; ".join(stack.kube_api.failures)
+        )

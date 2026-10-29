@@ -458,6 +458,7 @@ frontend:
   - 'components/src/dynamo/artifacts/**'
   - 'tests/frontend/router_ais_image_smoke.py'
   - 'tests/router/test_epp_frontend_parity.py'
+  - 'tests/router/test_epp_frontend_routing_parity.py'
   - 'tests/router/epp_parity.py'
   - 'tests/router/common.py'
   - 'tests/router/mocker_process.py'
