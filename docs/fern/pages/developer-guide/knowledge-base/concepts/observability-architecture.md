@@ -119,9 +119,13 @@ flowchart LR
 | --- | --- | --- | --- | --- |
 | `x-request-id` | Caller header, any string | None; it never keys state | `x_request_id` on the frontend and worker spans and their log events; forwarded in the request plane headers; handed to the engine with the trace headers | Echoed as the `x-request-id` response header |
 | `traceparent` / `tracestate` | Caller header | None | Parent of the frontend span; re-injected into the request plane so the worker's `handle_payload` span is a child; handed to the engine so engine spans join the same trace | No |
-| `request_id` | Generated UUID on the frontend span; the request context uses the same value | Keys the frontend's in-flight response map, the router's request lifecycle, migration retries (the same value is reused per attempt), and the worker's in-flight map | `request_id` on frontend and worker spans and log events; the `request-id` header on the request plane | The response body `id` and the `request_id` SSE annotation |
+| `request_id` | Generated UUID on the frontend span; the request context uses the same value | Keys the frontend's in-flight response map, the router's request lifecycle, migration retries (the same value is reused per attempt), and the worker's in-flight map | `request_id` on frontend and worker spans and log events; the `request-id` header on the request plane | The response body `id`; a `request_id` SSE annotation when the request opts in with `nvext.annotations: ["request_id"]` |
 | Public request id | Caller body `request_id` or `rid`, or `x-request-id`, on the generate and SGLang routes; the KServe gRPC request `id` | None | Not recorded on spans | Echoed in the generate response body, the SGLang `rid`, and the KServe response `id` |
 | Engine request id | vLLM reuses `request_id`; SGLang generates its own per call; TensorRT-LLM uses its own client id | Engine scheduling and abort | Engine logs and metrics; SGLang and TensorRT-LLM log the mapping to `request_id` | No |
+
+The `request-id` request plane header is always set. The `x-request-id`, `traceparent`, and
+`tracestate` headers are injected from the trace-context layer, so they reach the worker only when the
+sending process runs with JSONL logging, OTLP export, or the legacy `DYN_LOGGING_JSONL=1` switch.
 
 The caller-supplied identifiers are correlation inputs only. Reusing an `x-request-id` across
 requests, or sending the `request-id` or `x-dynamo-request-id` headers, does not change how Dynamo

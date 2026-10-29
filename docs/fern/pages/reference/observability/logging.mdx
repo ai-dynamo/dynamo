@@ -121,7 +121,7 @@ internally. The other is supplied by the caller and is used only for correlation
 
 | Identifier | Who sets it | Where it appears |
 | --- | --- | --- |
-| `request_id` | Dynamo generates a UUID for every HTTP and gRPC request | `request_id` on the frontend and worker request spans and their log events; the `request-id` header on the internal request plane; the response body `id` (`chatcmpl-<uuid>`, `cmpl-<uuid>`) and the `request_id` SSE annotation |
+| `request_id` | Dynamo generates a UUID for every HTTP and gRPC request | `request_id` on the frontend and worker request spans and their log events; the `request-id` header on the internal request plane; the response body `id` (`chatcmpl-<uuid>`, `cmpl-<uuid>`) and, when the request sets `nvext.annotations` to `["request_id"]`, a `request_id` SSE annotation at the front of the stream |
 | `x-request-id` | Caller, as an HTTP request header, any string | `x_request_id` on the frontend and worker request spans and their log events; forwarded to the backend engine with the trace headers; echoed back as the `x-request-id` response header |
 
 The caller-supplied value never replaces the generated `request_id`. Two requests that arrive with
@@ -136,6 +136,13 @@ without using it internally:
 - The SGLang native `/generate` route echoes `rid`; the body field takes precedence over the header.
   SGLang itself keys session continuation by `rid` when the body carries `session_params`, so a
   session request's `rid` must stay unique and must not be shared by concurrent requests.
+
+Forwarding `x-request-id`, `traceparent`, and `tracestate` to workers depends on the trace-context
+layer, which is active only when a process logs JSONL (`DYN_LOGGING_CONSOLE_FORMAT=jsonl`), exports
+OTLP (`OTEL_EXPORT_ENABLED=true`), or sets the legacy `DYN_LOGGING_JSONL=1`. With the default readable
+format and no OTLP export, workers still receive the generated `request_id` on the request plane but
+not the caller's `x-request-id` or trace headers. Enable one of these on every participating process
+before relying on `x_request_id` or `trace_id` to correlate across components.
 
 To follow one request across components, search logs or traces for its `request_id`. To find the
 request a caller is asking about, search for the caller's `x_request_id`. JSONL logs also carry
