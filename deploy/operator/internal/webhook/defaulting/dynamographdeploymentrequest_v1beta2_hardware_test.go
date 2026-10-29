@@ -20,6 +20,8 @@ package defaulting
 import (
 	"context"
 	"errors"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -119,6 +121,29 @@ func TestResolveHardwareCompletesTheTypedHardwareOrRejects(t *testing.T) {
 				t.Fatalf("discovery filter = %q, want %q", probe.filter, tt.wantFilter)
 			}
 		})
+	}
+}
+
+func TestResolveHardwareRejectsDiscoveredNodeWidthBeyondAPI(t *testing.T) {
+	if strconv.IntSize <= 32 {
+		t.Skip("the host int cannot represent a value above the API int32 maximum")
+	}
+	tooManyGPUs := int64(math.MaxInt32) + 1
+	probe := &fakeDiscoverer{found: gpu.GPUInfo{
+		System:            "h200_sxm",
+		GPUsPerNode:       int(tooManyGPUs),
+		SelectedShapeGPUs: 8,
+	}}
+	spec := &nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{}
+	_, err := DGDRV1beta2Options{Hardware: probe}.resolveHardware(
+		context.Background(), admissionv1.Create, nil, spec,
+	)
+	want := "spec.hardware.numGpusPerNode: Invalid value: 2147483648: discovered node width exceeds the API maximum of 2147483647"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %v, want it to contain %q", err, want)
+	}
+	if probe.calls != 1 {
+		t.Fatalf("discovery calls = %d, want 1", probe.calls)
 	}
 }
 
