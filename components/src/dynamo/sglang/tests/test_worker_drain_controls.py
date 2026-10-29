@@ -25,7 +25,9 @@ def controls(monkeypatch):
                 return_value=SimpleNamespace(instance_ids=Mock(return_value=[7]))
             ),
         ),
-        config=SimpleNamespace(dynamo_args=SimpleNamespace(engine_routes=[])),
+        config=SimpleNamespace(
+            dynamo_args=SimpleNamespace(engine_routes=[], response_plane="tcp")
+        ),
         engine=SimpleNamespace(tokenizer_manager=SimpleNamespace(is_pause=False)),
         _engine_route_lock=asyncio.Lock(),
     )
@@ -75,31 +77,20 @@ async def test_control_methods_and_withdrawal_failure(controls):
 
 
 @pytest.mark.asyncio
-async def test_status_tracks_background_work_without_authorizing_deletion(controls):
+async def test_status_reports_withdrawal_and_terminal_resume_conflict(controls):
     handler, runtime, ready, terminal = controls
-    pending = asyncio.create_task(asyncio.Event().wait())
-    handler._consume_tasks = {pending}
-    try:
-        configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
-        control = runtime.register_engine_http_handler.call_args.args[1]
-        response = await control({"path": "drain", "method": "POST", "body": None})
-        assert response["status"] == 200
-        assert response["body"]["admin_withdrawn"]
-        response = await control({"path": "status", "method": "GET", "body": None})
-        status = response["body"]
-        assert status["background_tasks"] == 1
-        assert status["inflight_requests"] == 0
-        assert status["engine_quiescent"] is None
-        assert not status["completion_supported"]
-        assert status["state"] == "draining"
-        terminal.set()
-        response = await control({"path": "resume", "method": "POST", "body": {}})
-        assert response["status"] == 409
-        handler.generate_endpoint.register_endpoint_instance.assert_not_called()
-    finally:
-        pending.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await pending
+    configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
+    control = runtime.register_engine_http_handler.call_args.args[1]
+    response = await control({"path": "drain", "method": "POST", "body": None})
+    assert response["status"] == 200
+    response = await control({"path": "status", "method": "GET", "body": None})
+    assert response["body"]["state"] == "withdrawn"
+    assert response["body"]["admin_withdrawn"]
+    assert not response["body"]["accepting_requests"]
+    terminal.set()
+    response = await control({"path": "resume", "method": "POST", "body": {}})
+    assert response["status"] == 409
+    handler.generate_endpoint.register_endpoint_instance.assert_not_called()
 
 
 def test_controls_do_not_shadow_a_configured_engine_route(controls):
@@ -119,15 +110,44 @@ async def test_model_ready_does_not_allow_drain_before_own_endpoint_registered(
     handler, runtime, ready, terminal = controls
     client = handler.generate_endpoint.client.return_value
     client.instance_ids.return_value = [8]
+
+    async def create_client():
+        await asyncio.sleep(0)
+        return client
+
+    handler.generate_endpoint.client.side_effect = create_client
     drain = configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
     control = runtime.register_engine_http_handler.call_args.args[1]
-    response = await control({"path": "drain", "method": "POST", "body": {}})
-    assert response["status"] == 409
+    responses = await asyncio.gather(
+        control({"path": "drain", "method": "POST", "body": {}}),
+        control({"path": "status", "method": "GET", "body": None}),
+    )
+    assert responses[0]["status"] == 409
+    assert responses[1]["body"]["state"] == "starting"
     handler.generate_endpoint.unregister_endpoint_instance.assert_not_called()
+    # Repeated startup polls must reuse the same discovery monitor.
+    await control({"path": "status", "method": "GET", "body": None})
+    handler.generate_endpoint.client.assert_awaited_once()
     client.instance_ids.return_value = [7, 8]
     response = await control({"path": "drain", "method": "POST", "body": {}})
     assert response["status"] == 200
     assert drain.withdrawn
     client.instance_ids.return_value = [8]
     response = await control({"path": "status", "method": "GET", "body": None})
-    assert response["body"]["state"] == "draining"
+    assert response["body"]["state"] == "withdrawn"
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_quic_is_rejected_only_when_withdrawal_enabled(controls, monkeypatch, enabled):
+    handler, runtime, ready, terminal = controls
+    handler.config.dynamo_args.response_plane = "quic"
+    if not enabled:
+        monkeypatch.delenv("DYN_EXPERIMENTAL_SGLANG_WORKER_DRAIN")
+        assert (
+            configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
+            is None
+        )
+    else:
+        with pytest.raises(ValueError, match="QUIC"):
+            configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
+    runtime.register_engine_http_handler.assert_not_called()

@@ -30,7 +30,10 @@ def endpoint():
 
 
 @pytest.mark.asyncio
-async def test_drain_preserves_admitted_stream_and_rejects_late_work(endpoint, ready):
+@pytest.mark.parametrize("grace_period", [0, 0.001])
+async def test_drain_preserves_admitted_stream_and_rejects_late_work(
+    endpoint, ready, grace_period
+):
     release = asyncio.Event()
 
     async def generate(request, context):
@@ -45,14 +48,19 @@ async def test_drain_preserves_admitted_stream_and_rejects_late_work(endpoint, r
         terminal_event=asyncio.Event(),
         ready_event=ready,
         is_paused=lambda: False,
-        grace_period=0,
+        grace_period=grace_period,
     )
     tracked = drain.wrap(generate)
     assert tracked.__wrapped__ is generate
     stream = tracked({}, None)
     assert await anext(stream) == "first"
     status = await drain.drain({})
-    assert status["inflight_requests"] == 1
+    if grace_period:
+        assert status["state"] == "withdrawing"
+        assert status["accepting_requests"]
+        await asyncio.wait_for(drain._grace_task, 1)
+        status = await drain.status({})
+    assert status["state"] == "withdrawn"
     assert not status["accepting_requests"]
     assert status["admin_withdrawn"]
     with pytest.raises(WorkerDraining):
@@ -62,10 +70,7 @@ async def test_drain_preserves_admitted_stream_and_rejects_late_work(endpoint, r
     with pytest.raises(StopAsyncIteration):
         await anext(stream)
     status = await drain.status({})
-    assert status["state"] == "draining"
-    assert status["inflight_requests"] == 0
-    assert status["engine_quiescent"] is None
-    assert not status["completion_supported"]
+    assert status["state"] == "withdrawn"
 
 
 @pytest.mark.asyncio
@@ -94,7 +99,7 @@ async def test_cancelled_drain_request_does_not_cancel_withdrawal(endpoint, read
         await request
     release.set()
     status = await asyncio.wait_for(drain.drain({}), 1)
-    assert status["state"] == "draining"
+    assert status["state"] == "withdrawn"
     assert not status["accepting_requests"]
     endpoint.unregister_endpoint_instance.assert_awaited_once()
 
@@ -121,7 +126,7 @@ async def test_discovery_failures_are_observable_and_resume_can_retry(endpoint, 
     with pytest.raises(RuntimeError, match="register failed"):
         await drain.resume({})
     status = await drain.status({})
-    assert status["state"] == "draining"
+    assert status["state"] == "withdrawn"
     assert not status["accepting_requests"]
     assert status["last_error"] == "register failed"
     endpoint.register_endpoint_instance.side_effect = None
@@ -178,6 +183,7 @@ async def test_resume_cancels_pending_router_grace(endpoint, ready):
     )
     status = await drain.drain({})
     assert status["accepting_requests"]
+    assert status["state"] == "withdrawing"
     grace = drain._grace_task
     assert (await drain.resume({}))["accepting_requests"]
     with pytest.raises(asyncio.CancelledError):
@@ -187,7 +193,7 @@ async def test_resume_cancels_pending_router_grace(endpoint, ready):
 
 
 @pytest.mark.asyncio
-async def test_stream_close_releases_admission_count(endpoint, ready):
+async def test_stream_close_reaches_engine_generator(endpoint, ready):
     closed = asyncio.Event()
 
     async def generate():
@@ -208,10 +214,8 @@ async def test_stream_close_releases_admission_count(endpoint, ready):
     )
     stream = drain.wrap(generate)()
     await anext(stream)
-    assert (await drain.status({}))["inflight_requests"] == 1
     await stream.aclose()
     assert closed.is_set()
-    assert (await drain.status({}))["inflight_requests"] == 0
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@
 
 """Experimental lifecycle controls on the worker system listener."""
 
+import asyncio
 import logging
 
 from dynamo.common.utils.env import env_bool
@@ -17,6 +18,11 @@ def configure_worker_drain(
     """Enable explicit withdrawal only for the Python LLM serving path."""
     if not env_bool("DYN_EXPERIMENTAL_SGLANG_WORKER_DRAIN"):
         return None
+    if handler.config.dynamo_args.response_plane == "quic":
+        raise ValueError(
+            "worker withdrawal does not support the QUIC response plane: "
+            "discovery removal cancels active responses"
+        )
     if runtime.system_status_server_url() is None:
         raise ValueError("worker drain requires DYN_SYSTEM_PORT")
     for descriptor in parse_engine_route_descriptors(
@@ -36,9 +42,11 @@ def configure_worker_drain(
     )
 
     endpoint_started = False
+    discovery_client = None
+    discovery_lock = asyncio.Lock()
 
     async def control(request):
-        nonlocal endpoint_started
+        nonlocal endpoint_started, discovery_client
         action = request["path"].strip("/")
         method = "GET" if action == "status" else "POST"
         if action not in ("drain", "resume", "status"):
@@ -52,10 +60,13 @@ def configure_worker_drain(
             return {"status": 400, "body": {"error": "Expected an empty JSON object"}}
         try:
             if not endpoint_started and ready_event.is_set():
-                client = await handler.generate_endpoint.client()
-                endpoint_started = (
-                    handler.generate_endpoint.connection_id() in client.instance_ids()
-                )
+                async with discovery_lock:
+                    if discovery_client is None:
+                        discovery_client = await handler.generate_endpoint.client()
+                    endpoint_started = endpoint_started or (
+                        handler.generate_endpoint.connection_id()
+                        in discovery_client.instance_ids()
+                    )
             if action != "status" and not endpoint_started:
                 raise DrainConflict("worker endpoint is not ready")
             response = await getattr(controller, action)(body)
@@ -67,11 +78,6 @@ def configure_worker_drain(
         if not endpoint_started and response["state"] != "stopping":
             response["state"] = "starting"
         response["engine_paused"] = bool(handler.engine.tokenizer_manager.is_pause)
-        response["background_tasks"] = sum(
-            not task.done()
-            for name in ("_consume_tasks", "_abort_tasks")
-            for task in getattr(handler, name, ())
-        )
         return {"status": 200, "body": response}
 
     runtime.register_engine_http_handler("worker_lifecycle", control)

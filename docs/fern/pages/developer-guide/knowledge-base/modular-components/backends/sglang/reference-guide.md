@@ -186,7 +186,9 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 
 Set `DYN_EXPERIMENTAL_SGLANG_WORKER_DRAIN=1` and enable `DYN_SYSTEM_PORT` on
 `python -m dynamo.sglang` LLM workers to expose reversible, pre-delete withdrawal.
-This applies to aggregated, decode, and prefill handlers. It does not use
+This applies to aggregated, decode, and prefill handlers with TCP or Velo response
+planes. Startup rejects QUIC when withdrawal is enabled because discovery removal
+currently cancels its active responses. It does not use
 SGLang's `pause_generation`, abort requests, or stop the engine.
 
 Upgrade frontends and workers to a revision supporting the `backend.worker_draining`
@@ -200,7 +202,7 @@ it accessible only to trusted administrators.
 | Method | Worker system path | Behavior |
 | --- | --- | --- |
 | `POST` | `/engine/worker_lifecycle/drain` | Withdraw from discovery, allow routing convergence, then close new request admission |
-| `GET` | `/engine/worker_lifecycle/status` | Report local lifecycle, admission, background work, and completion capability |
+| `GET` | `/engine/worker_lifecycle/status` | Report local withdrawal and admission state |
 | `POST` | `/engine/worker_lifecycle/resume` | Reopen admission and restore discovery registration |
 
 Requests must have no body or an empty JSON object. Invalid methods return 405;
@@ -226,17 +228,23 @@ rejected while SGLang generation is paused; continue the engine first, then
 resume the worker. SIGTERM fences resume immediately but preserves the existing
 discovery-first shutdown grace before admission closes.
 
+Status progresses from `serving` to `withdrawing` during discovery withdrawal and
+the routing-convergence window, then to `withdrawn` when discovery unregistration
+has succeeded and local new-request admission is closed. `admin_withdrawn` records
+the successful manual discovery withdrawal; it may already be `true` during the
+convergence window. `starting` and `stopping` fence control operations.
+
 > [!WARNING]
-> This increment provides routing withdrawal and observation, not permission to
-> delete a Pod. It does not expose an authoritative engine-idle/KV-transfer query:
-> `completion_supported` is `false`, `engine_quiescent` is `null`, and a withdrawn
-> worker stays `draining` even when `inflight_requests` and `background_tasks` are
-> zero. Generator completion and fixed delays do not prove scheduler or remote KV
-> work has finished. Do not use these values as a safe-to-delete signal.
+> `withdrawn` describes routing withdrawal, not completion of engine requests or KV
+> transfers. This API neither tracks nor waits for that work and provides no
+> `drained` or safe-to-delete signal. Discovery propagation is asynchronous, so
+> it also does not prove that every frontend has observed the change. Engine work
+> completion and Pod-deletion timing remain the responsibility of the engine and
+> operator. This increment alone does not guarantee a lossless release.
 
 Worker state is process-local. A restart creates a new worker identity; confirm
 Pod UID and instance identity before any maintenance action. WorkerSet batching,
 automatic Pod deletion, and replacement inference-admission gating are separate
 increments in the [manual Grove OnDelete release proposal](https://github.com/ai-dynamo/dynamo/issues/17568).
-The complete workflow requires authoritative drain completion before deletion and
-real targeted inference validation before the replacement enters business traffic.
+Engine completion reporting and real targeted inference validation before a
+replacement enters business traffic remain follow-up work.

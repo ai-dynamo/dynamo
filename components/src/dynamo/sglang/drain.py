@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Reversible withdrawal; local stream completion is not engine quiescence."""
+"""Reversible routing withdrawal without engine completion tracking."""
 
 import asyncio
 import math
@@ -41,7 +41,6 @@ class WorkerDrain:
         self._state = "starting"
         self._accepting = True
         self._withdrawn = False
-        self._inflight = 0
         self._last_error: str | None = None
         self._grace_task: asyncio.Task | None = None
         self._operations: set[asyncio.Task] = set()
@@ -109,9 +108,6 @@ class WorkerDrain:
             "state": self._state,
             "admin_withdrawn": self._withdrawn,
             "accepting_requests": self._ready_event.is_set() and self._accepting,
-            "inflight_requests": self._inflight,
-            "engine_quiescent": None,
-            "completion_supported": False,
             "last_error": self._last_error,
         }
 
@@ -141,9 +137,9 @@ class WorkerDrain:
                 raise DrainConflict("worker shutdown has started")
             if not self._ready_event.is_set():
                 raise DrainConflict("worker registration is not ready")
-            if self._state == "draining":
+            if self._state in ("withdrawing", "withdrawn"):
                 return await self.status({})
-            self._state = "draining"
+            self._state = "withdrawing"
             self._last_error = None
             try:
                 await self._endpoint.unregister_endpoint_instance()
@@ -156,6 +152,7 @@ class WorkerDrain:
             if not self._is_stopping():
                 if self._grace_period == 0:
                     self._accepting = False
+                    self._state = "withdrawn"
                 else:
                     self._grace_task = asyncio.create_task(self._close_after_grace())
             return await self.status({})
@@ -163,8 +160,9 @@ class WorkerDrain:
     async def _close_after_grace(self) -> None:
         await asyncio.sleep(self._grace_period)
         async with self._lock:
-            if self._state == "draining":
+            if self._state == "withdrawing":
                 self._accepting = False
+                self._state = "withdrawn"
 
     async def resume(self, body: dict) -> dict:
         self._validate_body(body)
@@ -188,6 +186,8 @@ class WorkerDrain:
                 await self._endpoint.register_endpoint_instance()
             except Exception as error:
                 self._accepting = False
+                if not self._is_stopping():
+                    self._state = "withdrawn"
                 self._last_error = str(error)
                 raise
             self._withdrawn = False
@@ -205,7 +205,7 @@ class WorkerDrain:
 
     def wrap(self, handler):
         @wraps(handler)
-        async def tracked(*args, **kwargs):
+        async def admitted(*args, **kwargs):
             request = args[0] if args else kwargs.get("request")
             health_check = False
             if isinstance(request, Mapping):
@@ -219,12 +219,8 @@ class WorkerDrain:
                 and (not self._ready_event.is_set() or not self._accepting)
             ):
                 raise WorkerDraining("worker is not accepting new requests")
-            self._inflight += 1
-            try:
-                async with aclosing(handler(*args, **kwargs)) as stream:
-                    async for item in stream:
-                        yield item
-            finally:
-                self._inflight -= 1
+            async with aclosing(handler(*args, **kwargs)) as stream:
+                async for item in stream:
+                    yield item
 
-        return tracked
+        return admitted
