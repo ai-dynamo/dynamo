@@ -1,21 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="380" viewBox="0 0 1100 380" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1028" height="374" viewBox="36 8 1028 374" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">ThunderAgent pauses sessions that wait on tools</title>
   <desc id="desc">Agent sessions feed the ThunderAgent scheduler in the frontend. A session in an LLM turn keeps running. A session waiting on a tool is paused while KV cache is under pressure, and it resumes when there is room.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1100" height="380" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">THUNDERAGENT</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Pause sessions that wait on tools to protect KV cache</text>
+  <rect x="36" y="8" width="1028" height="374" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="19.5" font-weight="700" letter-spacing="1.6" fill="#5A8F00">THUNDERAGENT</text>
+  <text x="50" y="68" font-size="33.0" font-weight="700" fill="#1A1A1A">Pause sessions that wait on tools to protect KV cache</text>
   <rect x="50" y="120" width="290" height="68" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="66" y="148" font-size="14" font-weight="700" fill="#1A1A1A">Session A</text>
-  <text x="66" y="170" font-size="13" fill="#4C7A00">running</text>
+  <text x="66" y="148" font-size="21.0" font-weight="700" fill="#1A1A1A">Session A</text>
+  <text x="66" y="170" font-size="19.5" fill="#4C7A00">running</text>
   <line x1="342" y1="154" x2="390" y2="154" stroke="#234CDA" stroke-width="2.5"/>
   <rect x="50" y="210" width="290" height="68" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="66" y="238" font-size="14" font-weight="700" fill="#1A1A1A">Session B</text>
-  <text x="66" y="260" font-size="13" fill="#92400E">waiting on a tool: paused</text>
+  <text x="66" y="238" font-size="21.0" font-weight="700" fill="#1A1A1A">Session B</text>
+  <text x="66" y="260" font-size="19.5" fill="#92400E">waiting on a tool: paused</text>
   <line x1="342" y1="244" x2="390" y2="244" stroke="#234CDA" stroke-width="2.5"/>
   <rect x="50" y="300" width="290" height="68" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
-  <text x="66" y="328" font-size="14" font-weight="700" fill="#1A1A1A">Session C</text>
-  <text x="66" y="350" font-size="13" fill="#4B5563">tool done: resumed</text>
+  <text x="66" y="328" font-size="21.0" font-weight="700" fill="#1A1A1A">Session C</text>
+  <text x="66" y="350" font-size="19.5" fill="#4B5563">tool done: resumed</text>
   <line x1="342" y1="334" x2="390" y2="334" stroke="#234CDA" stroke-width="2.5"/>
   <line x1="390" y1="154" x2="390" y2="334" stroke="#234CDA" stroke-width="2.5"/>
   <line x1="390" y1="220" x2="440" y2="220" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
@@ -30,13 +30,13 @@
   <line x1="521.260303038033" y1="201.560303038033" x2="518.0924646583173" y2="198.39246465831727" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
   <line x1="527.2" y1="199.1" x2="527.2" y2="194.62" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
   <line x1="533.139696961967" y1="201.560303038033" x2="536.3075353416828" y2="198.39246465831727" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
-  <text x="530" y="240.5" font-size="13" font-weight="700" fill="#234CDA" text-anchor="middle">ThunderAgent</text>
+  <text x="530" y="240.5" font-size="19.5" font-weight="700" fill="#234CDA" text-anchor="middle">ThunderAgent</text>
   <line x1="618" y1="220" x2="748" y2="220" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
   <rect x="760" y="130" width="290" height="180" rx="12" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
-  <text x="905" y="158" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">KV cache</text>
+  <text x="905" y="158" font-size="21.0" font-weight="700" fill="#1A1A1A" text-anchor="middle">KV cache</text>
   <rect x="780" y="176" width="250" height="30" rx="5" fill="#F4F9E8" stroke="#76B900"/>
-  <text x="794" y="197" font-size="13" font-weight="700" fill="#4C7A00">A</text>
+  <text x="794" y="197" font-size="19.5" font-weight="700" fill="#4C7A00">A</text>
   <rect x="780" y="216" width="250" height="30" rx="5" fill="#FFF7E6" stroke="#D97706"/>
-  <text x="794" y="237" font-size="13" font-weight="700" fill="#92400E">B</text>
+  <text x="794" y="237" font-size="19.5" font-weight="700" fill="#92400E">B</text>
   <rect x="780" y="256" width="250" height="30" rx="5" fill="#F3F4F6" stroke="#9CA3AF" stroke-dasharray="4 3"/>
 </svg>

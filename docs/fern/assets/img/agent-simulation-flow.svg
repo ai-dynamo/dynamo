@@ -1,10 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="330" viewBox="0 0 1100 330" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="898" height="314" viewBox="36 8 898 314" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">Capture an agent run once, replay it many ways</title>
   <desc id="desc">A real agent run is captured as a request trace. The trace is replayed live with AIPerf against real GPUs, or offline with DynoSim in a simulator.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1100" height="330" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">AGENT SIMULATION</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Capture once, replay live or offline</text>
+  <rect x="36" y="8" width="898" height="314" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="19.5" font-weight="700" letter-spacing="1.6" fill="#5A8F00">AGENT SIMULATION</text>
+  <text x="50" y="68" font-size="33.0" font-weight="700" fill="#1A1A1A">Capture once, replay live or offline</text>
   <rect x="65.0" y="140.0" width="170" height="100" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
   <rect x="138.79999999999998" y="169.1" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
   <rect x="143.28" y="173.58" width="7.840000000000001" height="7.840000000000001" fill="#374151"/>
@@ -14,13 +14,13 @@
   <line x1="133.2" y1="177.5" x2="138.79999999999998" y2="177.5" stroke="#374151" stroke-width="2"/><line x1="155.6" y1="177.5" x2="161.2" y2="177.5" stroke="#374151" stroke-width="2"/>
   <line x1="152.79999999999998" y1="163.5" x2="152.79999999999998" y2="169.1" stroke="#374151" stroke-width="2"/><line x1="152.79999999999998" y1="185.9" x2="152.79999999999998" y2="191.5" stroke="#374151" stroke-width="2"/>
   <line x1="133.2" y1="183.1" x2="138.79999999999998" y2="183.1" stroke="#374151" stroke-width="2"/><line x1="155.6" y1="183.1" x2="161.2" y2="183.1" stroke="#374151" stroke-width="2"/>
-  <text x="150" y="210.5" font-size="13" font-weight="700" fill="#374151" text-anchor="middle">Agent run</text>
+  <text x="150" y="210.5" font-size="19.5" font-weight="700" fill="#374151" text-anchor="middle">Agent run</text>
   <rect x="335.0" y="140.0" width="170" height="100" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
   <path d="M406.0,163.5 L421.4,163.5 L428.4,170.5 L428.4,191.5 L406.0,191.5 Z" fill="#F0F4FF" stroke="#234CDA" stroke-width="2" stroke-linejoin="round"/>
   <line x1="410.2" y1="176.1" x2="424.2" y2="176.1" stroke="#234CDA" stroke-width="1.6"/>
   <line x1="410.2" y1="180.86" x2="424.2" y2="180.86" stroke="#234CDA" stroke-width="1.6"/>
   <line x1="410.2" y1="185.62" x2="424.2" y2="185.62" stroke="#234CDA" stroke-width="1.6"/>
-  <text x="420" y="210.5" font-size="13" font-weight="700" fill="#234CDA" text-anchor="middle">Request trace</text>
+  <text x="420" y="210.5" font-size="19.5" font-weight="700" fill="#234CDA" text-anchor="middle">Request trace</text>
   <line x1="238" y1="190" x2="332" y2="190" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
   <rect x="680.0" y="72.0" width="240" height="96" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
   <rect x="788.8000000000001" y="99.1" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#4C7A00" stroke-width="2"/>
@@ -31,13 +31,13 @@
   <line x1="783.2" y1="107.5" x2="788.8000000000001" y2="107.5" stroke="#4C7A00" stroke-width="2"/><line x1="805.6" y1="107.5" x2="811.2" y2="107.5" stroke="#4C7A00" stroke-width="2"/>
   <line x1="802.8000000000001" y1="93.5" x2="802.8000000000001" y2="99.1" stroke="#4C7A00" stroke-width="2"/><line x1="802.8000000000001" y1="115.9" x2="802.8000000000001" y2="121.5" stroke="#4C7A00" stroke-width="2"/>
   <line x1="783.2" y1="113.1" x2="788.8000000000001" y2="113.1" stroke="#4C7A00" stroke-width="2"/><line x1="805.6" y1="113.1" x2="811.2" y2="113.1" stroke="#4C7A00" stroke-width="2"/>
-  <text x="800" y="140.5" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">Live replay: AIPerf</text>
+  <text x="800" y="140.5" font-size="19.5" font-weight="700" fill="#4C7A00" text-anchor="middle">Live replay: AIPerf</text>
   <rect x="680.0" y="212.0" width="240" height="96" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
   <rect x="783.2" y="233.5" width="28" height="28" rx="4" fill="#F0F4FF" stroke="#4C7A00" stroke-width="2"/>
   <rect x="787.6800000000001" y="251.35" width="5.04" height="7.35" fill="#4C7A00"/>
   <rect x="795.24" y="246.1" width="5.04" height="12.600000000000001" fill="#4C7A00"/>
   <rect x="802.8000000000001" y="240.85" width="5.04" height="17.85" fill="#4C7A00"/>
-  <text x="800" y="280.5" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">Offline: DynoSim</text>
+  <text x="800" y="280.5" font-size="19.5" font-weight="700" fill="#4C7A00" text-anchor="middle">Offline: DynoSim</text>
   <line x1="508" y1="175" x2="676" y2="128" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
   <line x1="508" y1="205" x2="676" y2="252" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
 </svg>

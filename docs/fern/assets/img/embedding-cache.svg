@@ -1,10 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="400" viewBox="0 0 1100 400" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1003" height="386" viewBox="36 8 1003 386" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">Embedding cache: hit and miss</title>
   <desc id="desc">An image seen before is a hit in the embedding cache, so the vision encoder is skipped. A new image is a miss: the vision encoder runs and its embedding is saved to the cache for next time.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1100" height="400" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">EMBEDDING CACHE</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Skip the vision encoder for images already encoded</text>
+  <rect x="36" y="8" width="1003" height="386" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="19.5" font-weight="700" letter-spacing="1.6" fill="#5A8F00">EMBEDDING CACHE</text>
+  <text x="50" y="68" font-size="33.0" font-weight="700" fill="#1A1A1A">Skip the vision encoder for images already encoded</text>
   <rect x="60" y="130" width="47.5" height="38" rx="4" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
   <circle cx="73.3" cy="141.4" r="3.8000000000000003" fill="#76B900"/>
   <polygon points="63.8,161.16 78.05,147.48 86.6,155.84 94.19999999999999,149.0 103.7,161.16" fill="#76B900"/>
@@ -14,33 +14,33 @@
   <circle cx="73.3" cy="273.4" r="3.8000000000000003" fill="#234CDA"/>
   <polygon points="63.8,293.15999999999997 78.05,279.48 86.6,287.84000000000003 94.19999999999999,281.0 103.7,293.15999999999997" fill="#234CDA"/>
   <circle cx="107.5" cy="262" r="9.12" fill="#234CDA" stroke="#FFFFFF" stroke-width="1.5"/>
-  <text x="107.5" y="265.42" font-size="11.4" font-weight="700" text-anchor="middle" fill="#FFFFFF">N</text>
+  <text x="107.5" y="265.42" font-size="17.1" font-weight="700" text-anchor="middle" fill="#FFFFFF">N</text>
   <rect x="265.0" y="165.0" width="190" height="110" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
   <path d="M343.2,199.044 L343.2,218.756 A14.0,4.928000000000001 0 0 0 371.2,218.756 L371.2,199.044" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
   <ellipse cx="357.2" cy="199.044" rx="14.0" ry="4.928000000000001" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
   <path d="M343.2,208.9 A14.0,4.928000000000001 0 0 0 371.2,208.9" fill="none" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="360" y="240.5" font-size="13" font-weight="700" fill="#234CDA" text-anchor="middle">Embedding cache</text>
+  <text x="360" y="240.5" font-size="19.5" font-weight="700" fill="#234CDA" text-anchor="middle">Embedding cache</text>
   <rect x="555.0" y="242.0" width="190" height="96" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
   <rect x="633.2" y="263.5" width="28" height="28" rx="6.16" fill="#FFF7E6" stroke="#92400E" stroke-width="2"/>
   <polyline points="641.0400000000001,271.9 653.36,271.9 647.2,283.66 641.0400000000001,271.9" fill="none" stroke="#92400E" stroke-width="1.6"/>
   <circle cx="641.0400000000001" cy="271.9" r="2.52" fill="#92400E"/>
   <circle cx="653.36" cy="271.9" r="2.52" fill="#92400E"/>
   <circle cx="647.2" cy="283.66" r="2.52" fill="#92400E"/>
-  <text x="650" y="310.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Vision encoder</text>
+  <text x="650" y="310.5" font-size="19.5" font-weight="700" fill="#92400E" text-anchor="middle">Vision encoder</text>
   <rect x="875.0" y="172.0" width="150" height="96" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
   <rect x="933.2" y="193.5" width="28" height="28" rx="6.16" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
   <polyline points="941.0400000000001,201.9 953.36,201.9 947.2,213.66 941.0400000000001,201.9" fill="none" stroke="#234CDA" stroke-width="1.6"/>
   <circle cx="941.0400000000001" cy="201.9" r="2.52" fill="#234CDA"/>
   <circle cx="953.36" cy="201.9" r="2.52" fill="#234CDA"/>
   <circle cx="947.2" cy="213.66" r="2.52" fill="#234CDA"/>
-  <text x="950" y="240.5" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">LLM</text>
+  <text x="950" y="240.5" font-size="19.5" font-weight="700" fill="#1A1A1A" text-anchor="middle">LLM</text>
   <line x1="150" y1="160" x2="262" y2="205" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
   <line x1="150" y1="290" x2="262" y2="238" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
   <path d="M410,160 C410,92 950,92 950,170" fill="none" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <text x="680" y="106" font-size="12" fill="#4B5563" text-anchor="middle">hit: skip the encoder</text>
+  <text x="680" y="106" font-size="18.0" fill="#4B5563" text-anchor="middle">hit: skip the encoder</text>
   <line x1="458" y1="250" x2="552" y2="285" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
-  <text x="500" y="252" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">miss</text>
+  <text x="500" y="252" font-size="19.5" font-weight="700" fill="#92400E" text-anchor="middle">miss</text>
   <line x1="748" y1="270" x2="876" y2="242" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
   <path d="M650,340 C650,380 360,380 360,278" fill="none" stroke="#9CA3AF" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrow-gray)"/>
-  <text x="505" y="376" font-size="12" fill="#4B5563" text-anchor="middle">save</text>
+  <text x="505" y="376" font-size="18.0" fill="#4B5563" text-anchor="middle">save</text>
 </svg>

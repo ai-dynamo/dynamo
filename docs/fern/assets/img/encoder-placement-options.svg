@@ -1,64 +1,64 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="628" viewBox="0 0 1300 628" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1278" height="609" viewBox="36 9 1278 609" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">Three multimodal serving topologies</title>
   <desc id="desc">Aggregated serving runs an aggregated worker on each of four identical GPUs. Colocated encoder runs encoder workers and a prefill and decode worker together on each of four identical GPUs using CUDA MPS. Disaggregated encoder puts encoder workers on two lower-tier GPUs and sends embeddings over NIXL to prefill and decode workers on four other GPUs.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1300" height="628" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">ENCODER PLACEMENT</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Three ways to place the vision encoder</text>
+  <rect x="36" y="9" width="1278" height="609" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="18.2" font-weight="700" letter-spacing="1.6" fill="#5A8F00">ENCODER PLACEMENT</text>
+  <text x="50" y="68" font-size="30.8" font-weight="700" fill="#1A1A1A">Three ways to place the vision encoder</text>
   <rect x="50" y="100" width="390" height="504" rx="14" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="245.0" y="136" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="middle">Aggregated serving</text>
-  <text x="245.0" y="158" font-size="13" fill="#4B5563" text-anchor="middle">4 identical GPUs</text>
+  <text x="245.0" y="136" font-size="25.2" font-weight="700" fill="#1A1A1A" text-anchor="middle">Aggregated serving</text>
+  <text x="245.0" y="158" font-size="18.2" fill="#4B5563" text-anchor="middle">4 identical GPUs</text>
   <rect x="480" y="100" width="390" height="504" rx="14" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="675.0" y="136" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="middle">Colocated encoder</text>
-  <text x="675.0" y="158" font-size="13" fill="#4B5563" text-anchor="middle">4 identical GPUs, colocate workers using MPS</text>
+  <text x="675.0" y="136" font-size="25.2" font-weight="700" fill="#1A1A1A" text-anchor="middle">Colocated encoder</text>
+  <text x="675.0" y="158" font-size="18.2" fill="#4B5563" text-anchor="middle">4 identical GPUs, colocate workers using MPS</text>
   <rect x="910" y="100" width="390" height="504" rx="14" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="1105.0" y="136" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="middle">Disaggregated encoder</text>
-  <text x="1105.0" y="158" font-size="13" fill="#4B5563" text-anchor="middle">Mixed hardware, offload encoders to lower-tier</text>
-  <text x="1105.0" y="175" font-size="13" fill="#4B5563" text-anchor="middle">compute</text>
+  <text x="1105.0" y="136" font-size="25.2" font-weight="700" fill="#1A1A1A" text-anchor="middle">Disaggregated encoder</text>
+  <text x="1105.0" y="158" font-size="18.2" fill="#4B5563" text-anchor="middle">Mixed hardware, offload encoders to lower-tier</text>
+  <text x="1105.0" y="175" font-size="18.2" fill="#4B5563" text-anchor="middle">compute</text>
   <rect x="70" y="190" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="84" y="225.0" font-size="13" font-weight="700" fill="#4C7A00">GPU 0</text>
-  <text x="84" y="246.0" font-size="13" fill="#1A1A1A">Aggregated worker</text>
+  <text x="84" y="225.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 0</text>
+  <text x="84" y="246.0" font-size="18.2" fill="#1A1A1A">Aggregated worker</text>
   <rect x="500" y="190" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="514" y="225.0" font-size="13" font-weight="700" fill="#4C7A00">GPU 0</text>
-  <text x="514" y="246.0" font-size="13" fill="#1A1A1A">Encoder workers + PD worker</text>
+  <text x="514" y="225.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 0</text>
+  <text x="514" y="246.0" font-size="18.2" fill="#1A1A1A">Encoder workers + PD worker</text>
   <rect x="70" y="288" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="84" y="323.0" font-size="13" font-weight="700" fill="#4C7A00">GPU 1</text>
-  <text x="84" y="344.0" font-size="13" fill="#1A1A1A">Aggregated worker</text>
+  <text x="84" y="323.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 1</text>
+  <text x="84" y="344.0" font-size="18.2" fill="#1A1A1A">Aggregated worker</text>
   <rect x="500" y="288" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="514" y="323.0" font-size="13" font-weight="700" fill="#4C7A00">GPU 1</text>
-  <text x="514" y="344.0" font-size="13" fill="#1A1A1A">Encoder workers + PD worker</text>
+  <text x="514" y="323.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 1</text>
+  <text x="514" y="344.0" font-size="18.2" fill="#1A1A1A">Encoder workers + PD worker</text>
   <rect x="70" y="386" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="84" y="421.0" font-size="13" font-weight="700" fill="#4C7A00">GPU 2</text>
-  <text x="84" y="442.0" font-size="13" fill="#1A1A1A">Aggregated worker</text>
+  <text x="84" y="421.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 2</text>
+  <text x="84" y="442.0" font-size="18.2" fill="#1A1A1A">Aggregated worker</text>
   <rect x="500" y="386" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="514" y="421.0" font-size="13" font-weight="700" fill="#4C7A00">GPU 2</text>
-  <text x="514" y="442.0" font-size="13" fill="#1A1A1A">Encoder workers + PD worker</text>
+  <text x="514" y="421.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 2</text>
+  <text x="514" y="442.0" font-size="18.2" fill="#1A1A1A">Encoder workers + PD worker</text>
   <rect x="70" y="484" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="84" y="519.0" font-size="13" font-weight="700" fill="#4C7A00">GPU 3</text>
-  <text x="84" y="540.0" font-size="13" fill="#1A1A1A">Aggregated worker</text>
+  <text x="84" y="519.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 3</text>
+  <text x="84" y="540.0" font-size="18.2" fill="#1A1A1A">Aggregated worker</text>
   <rect x="500" y="484" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="514" y="519.0" font-size="13" font-weight="700" fill="#4C7A00">GPU 3</text>
-  <text x="514" y="540.0" font-size="13" fill="#1A1A1A">Encoder workers + PD worker</text>
+  <text x="514" y="519.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 3</text>
+  <text x="514" y="540.0" font-size="18.2" fill="#1A1A1A">Encoder workers + PD worker</text>
   <rect x="930.0" y="190" width="168.0" height="72" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="944.0" y="219.0" font-size="13" font-weight="700" fill="#234CDA">GPU 0</text>
-  <text x="944.0" y="240.0" font-size="13" fill="#1A1A1A">Encoder workers</text>
+  <text x="944.0" y="219.0" font-size="18.2" font-weight="700" fill="#234CDA">GPU 0</text>
+  <text x="944.0" y="240.0" font-size="18.2" fill="#1A1A1A">Encoder workers</text>
   <rect x="1112.0" y="190" width="168.0" height="72" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="1126.0" y="219.0" font-size="13" font-weight="700" fill="#234CDA">GPU 1</text>
-  <text x="1126.0" y="240.0" font-size="13" fill="#1A1A1A">Encoder workers</text>
+  <text x="1126.0" y="219.0" font-size="18.2" font-weight="700" fill="#234CDA">GPU 1</text>
+  <text x="1126.0" y="240.0" font-size="18.2" fill="#1A1A1A">Encoder workers</text>
   <line x1="1014.0" y1="266" x2="1014.0" y2="302" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
   <line x1="1196.0" y1="266" x2="1196.0" y2="302" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <text x="1105.0" y="280" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">Embeddings</text>
-  <text x="1105.0" y="296" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">via NIXL</text>
+  <text x="1105.0" y="280" font-size="16.8" font-weight="700" fill="#4C7A00" text-anchor="middle">Embeddings</text>
+  <text x="1105.0" y="296" font-size="16.8" font-weight="700" fill="#4C7A00" text-anchor="middle">via NIXL</text>
   <rect x="930" y="310.0" width="350" height="57" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="944" y="337.0" font-size="13" font-weight="700" fill="#4C7A00">GPU 2</text>
-  <text x="944" y="358.0" font-size="13" fill="#1A1A1A">PD worker</text>
+  <text x="944" y="337.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 2</text>
+  <text x="944" y="358.0" font-size="18.2" fill="#1A1A1A">PD worker</text>
   <rect x="930" y="377.0" width="350" height="57" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="944" y="404.0" font-size="13" font-weight="700" fill="#4C7A00">GPU 3</text>
-  <text x="944" y="425.0" font-size="13" fill="#1A1A1A">PD worker</text>
+  <text x="944" y="404.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 3</text>
+  <text x="944" y="425.0" font-size="18.2" fill="#1A1A1A">PD worker</text>
   <rect x="930" y="444.0" width="350" height="57" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="944" y="471.0" font-size="13" font-weight="700" fill="#4C7A00">GPU 4</text>
-  <text x="944" y="492.0" font-size="13" fill="#1A1A1A">PD worker</text>
+  <text x="944" y="471.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 4</text>
+  <text x="944" y="492.0" font-size="18.2" fill="#1A1A1A">PD worker</text>
   <rect x="930" y="511.0" width="350" height="57" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="944" y="538.0" font-size="13" font-weight="700" fill="#4C7A00">GPU 5</text>
-  <text x="944" y="559.0" font-size="13" fill="#1A1A1A">PD worker</text>
+  <text x="944" y="538.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 5</text>
+  <text x="944" y="559.0" font-size="18.2" fill="#1A1A1A">PD worker</text>
 </svg>

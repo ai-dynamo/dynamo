@@ -1,10 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="480" viewBox="0 0 1100 480" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1081" height="464" viewBox="36 8 1081 464" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">Sequential versus parallel image decoding</title>
   <desc id="desc">Example with five images of about 50 ms each. Decoding them one after another on the worker takes about 250 ms. Decoding them in parallel in the Rust frontend takes about 60 ms, saving about 200 ms per request. Illustrative.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1100" height="480" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">FRONTEND MEDIA DECODING</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Decode images in parallel in the Rust frontend</text>
+  <rect x="36" y="8" width="1081" height="464" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="19.5" font-weight="700" letter-spacing="1.6" fill="#5A8F00">FRONTEND MEDIA DECODING</text>
+  <text x="50" y="68" font-size="33.0" font-weight="700" fill="#1A1A1A">Decode images in parallel in the Rust frontend</text>
   <rect x="50" y="100" width="32.5" height="26" rx="4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
   <circle cx="59.1" cy="107.8" r="2.6" fill="#234CDA"/>
   <polygon points="52.6,121.32 62.35,111.96000000000001 68.2,117.68 73.4,113.0 79.9,121.32" fill="#234CDA"/>
@@ -20,33 +20,33 @@
   <rect x="226" y="100" width="32.5" height="26" rx="4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
   <circle cx="235.1" cy="107.8" r="2.6" fill="#234CDA"/>
   <polygon points="228.6,121.32 238.35,111.96000000000001 244.2,117.68 249.4,113.0 255.9,121.32" fill="#234CDA"/>
-  <text x="290" y="120" font-size="13" fill="#4B5563">5 images, about 50 ms each</text>
-  <text x="50" y="196" font-size="17" font-weight="700" fill="#1A1A1A">Sequential</text>
-  <text x="50" y="216" font-size="13" fill="#4B5563">Worker</text>
+  <text x="290" y="120" font-size="19.5" fill="#4B5563">5 images, about 50 ms each</text>
+  <text x="50" y="196" font-size="25.5" font-weight="700" fill="#1A1A1A">Sequential</text>
+  <text x="50" y="216" font-size="19.5" fill="#4B5563">Worker</text>
   <rect x="230.0" y="172" width="150.0" height="54" fill="#9CA3AF" stroke="#FFFFFF" stroke-width="1.5"/>
-  <text x="305.0" y="205" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 1</text>
+  <text x="305.0" y="205" font-size="19.5" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 1</text>
   <rect x="380.0" y="172" width="150.0" height="54" fill="#C4C8CE" stroke="#FFFFFF" stroke-width="1.5"/>
-  <text x="455.0" y="205" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 2</text>
+  <text x="455.0" y="205" font-size="19.5" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 2</text>
   <rect x="530.0" y="172" width="150.0" height="54" fill="#9CA3AF" stroke="#FFFFFF" stroke-width="1.5"/>
-  <text x="605.0" y="205" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 3</text>
+  <text x="605.0" y="205" font-size="19.5" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 3</text>
   <rect x="680.0" y="172" width="150.0" height="54" fill="#C4C8CE" stroke="#FFFFFF" stroke-width="1.5"/>
-  <text x="755.0" y="205" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 4</text>
+  <text x="755.0" y="205" font-size="19.5" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 4</text>
   <rect x="830.0" y="172" width="150.0" height="54" fill="#9CA3AF" stroke="#FFFFFF" stroke-width="1.5"/>
-  <text x="905.0" y="205" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 5</text>
-  <text x="996.0" y="207" font-size="21" font-weight="700" fill="#374151">250 ms</text>
+  <text x="905.0" y="205" font-size="19.5" font-weight="700" fill="#FFFFFF" text-anchor="middle">img 5</text>
+  <text x="996.0" y="207" font-size="31.5" font-weight="700" fill="#374151">250 ms</text>
   <rect x="410.0" y="262" width="570.0" height="196" rx="8" fill="#F4F9E8" opacity="0.65"/>
-  <text x="50" y="352" font-size="17" font-weight="700" fill="#4C7A00">Parallel</text>
-  <text x="50" y="372" font-size="13" fill="#4B5563">Frontend</text>
+  <text x="50" y="352" font-size="25.5" font-weight="700" fill="#4C7A00">Parallel</text>
+  <text x="50" y="372" font-size="19.5" fill="#4B5563">Frontend</text>
   <rect x="230.0" y="276" width="150.0" height="26" rx="3" fill="#76B900"/>
-  <text x="240.0" y="294" font-size="12" font-weight="700" fill="#FFFFFF">img 1</text>
+  <text x="240.0" y="294" font-size="18.0" font-weight="700" fill="#FFFFFF">img 1</text>
   <rect x="237.5" y="308" width="150.0" height="26" rx="3" fill="#76B900"/>
-  <text x="247.5" y="326" font-size="12" font-weight="700" fill="#FFFFFF">img 2</text>
+  <text x="247.5" y="326" font-size="18.0" font-weight="700" fill="#FFFFFF">img 2</text>
   <rect x="245.0" y="340" width="150.0" height="26" rx="3" fill="#76B900"/>
-  <text x="255.0" y="358" font-size="12" font-weight="700" fill="#FFFFFF">img 3</text>
+  <text x="255.0" y="358" font-size="18.0" font-weight="700" fill="#FFFFFF">img 3</text>
   <rect x="252.5" y="372" width="150.0" height="26" rx="3" fill="#76B900"/>
-  <text x="262.5" y="390" font-size="12" font-weight="700" fill="#FFFFFF">img 4</text>
+  <text x="262.5" y="390" font-size="18.0" font-weight="700" fill="#FFFFFF">img 4</text>
   <rect x="260.0" y="404" width="150.0" height="26" rx="3" fill="#76B900"/>
-  <text x="270.0" y="422" font-size="12" font-weight="700" fill="#FFFFFF">img 5</text>
-  <text x="432.0" y="330" font-size="21" font-weight="700" fill="#4C7A00">about 60 ms</text>
-  <text x="695.0" y="428" font-size="16" font-weight="700" fill="#4C7A00" text-anchor="middle">about 200 ms saved</text>
+  <text x="270.0" y="422" font-size="18.0" font-weight="700" fill="#FFFFFF">img 5</text>
+  <text x="432.0" y="330" font-size="31.5" font-weight="700" fill="#4C7A00">about 60 ms</text>
+  <text x="695.0" y="428" font-size="24.0" font-weight="700" fill="#4C7A00" text-anchor="middle">about 200 ms saved</text>
 </svg>

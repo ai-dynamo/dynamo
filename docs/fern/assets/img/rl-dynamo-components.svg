@@ -1,23 +1,23 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="560" viewBox="0 0 1300 560" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1253" height="547" viewBox="36 9 1253 547" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">Where Dynamo fits in the reinforcement learning loop</title>
   <desc id="desc">In the RL loop, prompts go to rollout serving, which Dynamo provides: the router sends them to workers, and fault tolerance keeps them running. Samples go to rewards and then to the trainer, which belong to the RL framework and harness. Updated policy weights return to the workers through ModelExpress and NIXL. Request traces and DynoSim profile and replay the serving workload.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1300" height="560" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">REINFORCEMENT LEARNING</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Dynamo serves the rollouts. Your framework owns the rest</text>
+  <rect x="36" y="9" width="1253" height="547" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="17.6" font-weight="700" letter-spacing="1.6" fill="#5A8F00">REINFORCEMENT LEARNING</text>
+  <text x="50" y="68" font-size="29.7" font-weight="700" fill="#1A1A1A">Dynamo serves the rollouts. Your framework owns the rest</text>
   <rect x="900" y="86" width="16" height="16" rx="4" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
-  <text x="924" y="99" font-size="13" font-weight="700" fill="#4C7A00">Dynamo</text>
+  <text x="924" y="99" font-size="17.6" font-weight="700" fill="#4C7A00">Dynamo</text>
   <rect x="1010" y="86" width="16" height="16" rx="4" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2"/>
-  <text x="1034" y="99" font-size="13" font-weight="700" fill="#374151">RL framework and harness</text>
+  <text x="1034" y="99" font-size="17.6" font-weight="700" fill="#374151">RL framework and harness</text>
   <rect x="55.0" y="182.0" width="170" height="96" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
   <path d="M126.0,203.5 L141.4,203.5 L148.4,210.5 L148.4,231.5 L126.0,231.5 Z" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2" stroke-linejoin="round"/>
   <line x1="130.2" y1="216.1" x2="144.2" y2="216.1" stroke="#9CA3AF" stroke-width="1.6"/>
   <line x1="130.2" y1="220.86" x2="144.2" y2="220.86" stroke="#9CA3AF" stroke-width="1.6"/>
   <line x1="130.2" y1="225.62" x2="144.2" y2="225.62" stroke="#9CA3AF" stroke-width="1.6"/>
-  <text x="140" y="250.5" font-size="13" font-weight="700" fill="#374151" text-anchor="middle">Prompts and tasks</text>
+  <text x="140" y="250.5" font-size="17.6" font-weight="700" fill="#374151" text-anchor="middle">Prompts and tasks</text>
   <line x1="228" y1="230" x2="296" y2="230" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
   <rect x="300" y="128" width="540" height="248" rx="14" fill="#F4F9E8" stroke="#76B900" stroke-width="2.5"/>
-  <text x="318" y="152" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4C7A00">DYNAMO</text>
+  <text x="318" y="152" font-size="16.2" font-weight="700" letter-spacing="1.2" fill="#4C7A00">DYNAMO</text>
   <rect x="345.0" y="180.0" width="150" height="100" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
   <circle cx="417.2" cy="217.5" r="8.4" fill="#F0F4FF" stroke="#4C7A00" stroke-width="2"/>
   <circle cx="417.2" cy="217.5" r="2.8000000000000003" fill="#4C7A00"/>
@@ -29,7 +29,7 @@
   <line x1="411.260303038033" y1="211.560303038033" x2="408.0924646583172" y2="208.39246465831727" stroke="#4C7A00" stroke-width="3" stroke-linecap="round"/>
   <line x1="417.2" y1="209.1" x2="417.2" y2="204.62" stroke="#4C7A00" stroke-width="3" stroke-linecap="round"/>
   <line x1="423.139696961967" y1="211.560303038033" x2="426.3075353416827" y2="208.39246465831727" stroke="#4C7A00" stroke-width="3" stroke-linecap="round"/>
-  <text x="420" y="250.5" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">Router</text>
+  <text x="420" y="250.5" font-size="17.6" font-weight="700" fill="#4C7A00" text-anchor="middle">Router</text>
   <rect x="640" y="176" width="170" height="46" rx="8" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
   <rect x="659.6" y="190.6" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#4C7A00" stroke-width="2"/>
   <rect x="664.08" y="195.08" width="7.840000000000001" height="7.840000000000001" fill="#4C7A00"/>
@@ -39,7 +39,7 @@
   <line x1="654" y1="199.0" x2="659.6" y2="199.0" stroke="#4C7A00" stroke-width="2"/><line x1="676.4" y1="199.0" x2="682" y2="199.0" stroke="#4C7A00" stroke-width="2"/>
   <line x1="673.6" y1="185" x2="673.6" y2="190.6" stroke="#4C7A00" stroke-width="2"/><line x1="673.6" y1="207.4" x2="673.6" y2="213" stroke="#4C7A00" stroke-width="2"/>
   <line x1="654" y1="204.6" x2="659.6" y2="204.6" stroke="#4C7A00" stroke-width="2"/><line x1="676.4" y1="204.6" x2="682" y2="204.6" stroke="#4C7A00" stroke-width="2"/>
-  <text x="694" y="205" font-size="14" font-weight="700" fill="#4C7A00">Worker</text>
+  <text x="694" y="205" font-size="18.9" font-weight="700" fill="#4C7A00">Worker</text>
   <line x1="498" y1="230" x2="636" y2="199" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
   <rect x="640" y="232" width="170" height="46" rx="8" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
   <rect x="659.6" y="246.6" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#4C7A00" stroke-width="2"/>
@@ -50,7 +50,7 @@
   <line x1="654" y1="255.0" x2="659.6" y2="255.0" stroke="#4C7A00" stroke-width="2"/><line x1="676.4" y1="255.0" x2="682" y2="255.0" stroke="#4C7A00" stroke-width="2"/>
   <line x1="673.6" y1="241" x2="673.6" y2="246.6" stroke="#4C7A00" stroke-width="2"/><line x1="673.6" y1="263.4" x2="673.6" y2="269" stroke="#4C7A00" stroke-width="2"/>
   <line x1="654" y1="260.6" x2="659.6" y2="260.6" stroke="#4C7A00" stroke-width="2"/><line x1="676.4" y1="260.6" x2="682" y2="260.6" stroke="#4C7A00" stroke-width="2"/>
-  <text x="694" y="261" font-size="14" font-weight="700" fill="#4C7A00">Worker</text>
+  <text x="694" y="261" font-size="18.9" font-weight="700" fill="#4C7A00">Worker</text>
   <line x1="498" y1="230" x2="636" y2="255" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
   <rect x="640" y="288" width="170" height="46" rx="8" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
   <rect x="659.6" y="302.6" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#4C7A00" stroke-width="2"/>
@@ -61,20 +61,20 @@
   <line x1="654" y1="311.0" x2="659.6" y2="311.0" stroke="#4C7A00" stroke-width="2"/><line x1="676.4" y1="311.0" x2="682" y2="311.0" stroke="#4C7A00" stroke-width="2"/>
   <line x1="673.6" y1="297" x2="673.6" y2="302.6" stroke="#4C7A00" stroke-width="2"/><line x1="673.6" y1="319.4" x2="673.6" y2="325" stroke="#4C7A00" stroke-width="2"/>
   <line x1="654" y1="316.6" x2="659.6" y2="316.6" stroke="#4C7A00" stroke-width="2"/><line x1="676.4" y1="316.6" x2="682" y2="316.6" stroke="#4C7A00" stroke-width="2"/>
-  <text x="694" y="317" font-size="14" font-weight="700" fill="#4C7A00">Worker</text>
+  <text x="694" y="317" font-size="18.9" font-weight="700" fill="#4C7A00">Worker</text>
   <line x1="498" y1="230" x2="636" y2="311" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <rect x="340" y="338" width="133" height="24" rx="12.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="406.5" y="354.5" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">KV-aware routing</text>
-  <rect x="640" y="338" width="126" height="24" rx="12.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="703.0" y="354.5" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">Fault tolerance</text>
+  <rect x="325.2" y="338" width="162.6" height="24" rx="12.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="406.5" y="354.5" font-size="16.2" font-weight="700" fill="#4C7A00" text-anchor="middle">KV-aware routing</text>
+  <rect x="626.2" y="338" width="153.7" height="24" rx="12.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="703.0" y="354.5" font-size="16.2" font-weight="700" fill="#4C7A00" text-anchor="middle">Fault tolerance</text>
   <line x1="842" y1="230" x2="904" y2="230" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
-  <text x="873" y="218" font-size="12" fill="#4B5563" text-anchor="middle">samples</text>
+  <text x="873" y="218" font-size="16.2" fill="#4B5563" text-anchor="middle">samples</text>
   <rect x="915.0" y="182.0" width="150" height="96" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
   <rect x="973.2" y="203.5" width="28" height="28" rx="4" fill="#F0F4FF" stroke="#9CA3AF" stroke-width="2"/>
   <rect x="977.6800000000001" y="221.35" width="5.04" height="7.35" fill="#9CA3AF"/>
   <rect x="985.24" y="216.1" width="5.04" height="12.600000000000001" fill="#9CA3AF"/>
   <rect x="992.8000000000001" y="210.85" width="5.04" height="17.85" fill="#9CA3AF"/>
-  <text x="990" y="250.5" font-size="13" font-weight="700" fill="#374151" text-anchor="middle">Evaluate rollouts</text>
+  <text x="990" y="250.5" font-size="17.6" font-weight="700" fill="#374151" text-anchor="middle">Evaluate rollouts</text>
   <line x1="1068" y1="230" x2="1140" y2="230" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
   <rect x="1145.0" y="182.0" width="130" height="96" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
   <rect x="1193.2" y="203.5" width="28" height="28" rx="6.16" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2"/>
@@ -82,14 +82,14 @@
   <circle cx="1201.04" cy="211.9" r="2.52" fill="#9CA3AF"/>
   <circle cx="1213.3600000000001" cy="211.9" r="2.52" fill="#9CA3AF"/>
   <circle cx="1207.2" cy="223.66" r="2.52" fill="#9CA3AF"/>
-  <text x="1210" y="250.5" font-size="13" font-weight="700" fill="#374151" text-anchor="middle">Trainer</text>
+  <text x="1210" y="250.5" font-size="17.6" font-weight="700" fill="#374151" text-anchor="middle">Trainer</text>
   <path d="M1210,282 C1210,454 560,454 560,410 L560,380" fill="none" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <rect x="790" y="428" width="165" height="28" rx="14.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="872.5" y="446.5" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">ModelExpress + NIXL</text>
-  <text x="960" y="450" font-size="12" fill="#4B5563">updated policy · weight sync</text>
+  <rect x="770.5" y="428" width="203.9" height="28" rx="14.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="872.5" y="446.5" font-size="17.6" font-weight="700" fill="#4C7A00" text-anchor="middle">ModelExpress + NIXL</text>
+  <text x="982.5" y="450" font-size="16.2" fill="#4B5563">updated policy · weight sync</text>
   <rect x="300" y="494" width="540" height="48" rx="12" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.2" stroke-dasharray="5 5"/>
-  <rect x="330" y="506" width="202" height="28" rx="14.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="431.0" y="524.5" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">Request traces + DynoSim</text>
-  <text x="544" y="525" font-size="12" fill="#4B5563">profile and replay the rollouts</text>
-  <text x="1104" y="218" font-size="12" fill="#4B5563" text-anchor="middle">rewards</text>
+  <rect x="304.8" y="506" width="252.3" height="28" rx="14.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="431.0" y="524.5" font-size="17.6" font-weight="700" fill="#4C7A00" text-anchor="middle">Request traces + DynoSim</text>
+  <text x="565.2" y="525" font-size="16.2" fill="#4B5563">profile and replay the rollouts</text>
+  <text x="1104" y="218" font-size="16.2" fill="#4B5563" text-anchor="middle">rewards</text>
 </svg>

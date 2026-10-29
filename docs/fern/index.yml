@@ -706,16 +706,20 @@ navigation:
             path: pages/use-cases/reinforcement-learning/weight-updates.md
           - page: RL Profiling and Simulation
             path: pages/use-cases/reinforcement-learning/operations-and-simulation.md
-          - page: verl Integration
-            path: pages/use-cases/reinforcement-learning/verl.md
-          - page: NeMo RL Integration
-            path: pages/use-cases/reinforcement-learning/nemo-rl.md
-          - page: Slime Integration
-            path: pages/use-cases/reinforcement-learning/slime.md
-          - page: External Trainer Integration
-            path: pages/use-cases/reinforcement-learning/implementation-guide.md
-          - page: RL Integration Reference
-            path: pages/use-cases/reinforcement-learning/integration-reference.md
+          - section: RL Framework Integrations
+            skip-slug: true
+            collapsed: open-by-default
+            contents:
+              - page: verl Integration
+                path: pages/use-cases/reinforcement-learning/verl.md
+              - page: NeMo RL Integration
+                path: pages/use-cases/reinforcement-learning/nemo-rl.md
+              - page: Slime Integration
+                path: pages/use-cases/reinforcement-learning/slime.md
+              - page: External Trainer Integration
+                path: pages/use-cases/reinforcement-learning/implementation-guide.md
+              - page: RL Integration Reference
+                path: pages/use-cases/reinforcement-learning/integration-reference.md
 
       # ==================== Agents ====================
       - section: Agents
@@ -818,6 +822,9 @@ navigation:
         icon: wand-magic-sparkles
         slug: diffusion
         contents:
+          - page: FastVideo
+            slug: fastvideo
+            path: pages/use-cases/diffusion/fastvideo.md
           - page: Text to Image
             path: pages/use-cases/diffusion/text-to-image.md
           - page: Text to Video
@@ -826,9 +833,6 @@ navigation:
           - page: Image to Video
             slug: image-to-video
             path: pages/use-cases/diffusion/image-to-video.md
-          - page: FastVideo
-            slug: fastvideo
-            path: pages/use-cases/diffusion/fastvideo.md
 
       - section: GPU Sharing
         collapsed: true

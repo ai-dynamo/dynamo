@@ -1,31 +1,31 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="380" viewBox="0 0 1200 380" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1138" height="351" viewBox="36 9 1138 351" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">Priority hints reorder requests under contention</title>
   <desc id="desc">Requests arrive in order: three background requests, then one interactive request. When workers are busy, the router queue releases the interactive request first. Priority can also act in the engine scheduler and in KV cache eviction.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1200" height="380" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">REQUEST PRIORITY</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Higher priority goes first when workers are busy</text>
-  <text x="50" y="112" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">ARRIVAL</text>
+  <rect x="36" y="9" width="1138" height="351" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="17.6" font-weight="700" letter-spacing="1.6" fill="#5A8F00">REQUEST PRIORITY</text>
+  <text x="50" y="68" font-size="29.7" font-weight="700" fill="#1A1A1A">Higher priority goes first when workers are busy</text>
+  <text x="50" y="112" font-size="16.2" font-weight="700" letter-spacing="1.2" fill="#4B5563">ARRIVAL</text>
   <rect x="50.0" y="125.0" width="112" height="50" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="106.0" y="152.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
+  <text x="106.0" y="152.5" font-size="17.6" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
   <rect x="176.0" y="125.0" width="112" height="50" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="232.0" y="152.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
+  <text x="232.0" y="152.5" font-size="17.6" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
   <rect x="302.0" y="125.0" width="112" height="50" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="358.0" y="152.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
+  <text x="358.0" y="152.5" font-size="17.6" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
   <rect x="428.0" y="125.0" width="112" height="50" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="484.0" y="152.5" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">Interactive</text>
+  <text x="484.0" y="152.5" font-size="17.6" font-weight="700" fill="#4C7A00" text-anchor="middle">Interactive</text>
   <line x1="554" y1="150" x2="610" y2="150" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
   <rect x="616" y="100" width="544" height="100" rx="12" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="632" y="120" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">ROUTER QUEUE</text>
+  <text x="632" y="120" font-size="16.2" font-weight="700" letter-spacing="1.2" fill="#4B5563">ROUTER QUEUE</text>
   <rect x="632.0" y="133.0" width="112" height="50" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="688.0" y="160.5" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">Interactive</text>
+  <text x="688.0" y="160.5" font-size="17.6" font-weight="700" fill="#4C7A00" text-anchor="middle">Interactive</text>
   <rect x="758.0" y="133.0" width="112" height="50" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="814.0" y="160.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
+  <text x="814.0" y="160.5" font-size="17.6" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
   <rect x="884.0" y="133.0" width="112" height="50" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="940.0" y="160.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
+  <text x="940.0" y="160.5" font-size="17.6" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
   <rect x="1010.0" y="133.0" width="112" height="50" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="1066.0" y="160.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
-  <text x="50" y="244" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">THREE PLACES PRIORITY CAN ACT</text>
+  <text x="1066.0" y="160.5" font-size="17.6" font-weight="700" fill="#92400E" text-anchor="middle">Background</text>
+  <text x="50" y="244" font-size="16.2" font-weight="700" letter-spacing="1.2" fill="#4B5563">THREE PLACES PRIORITY CAN ACT</text>
   <rect x="70.0" y="274.0" width="300" height="72" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
   <circle cx="217.2" cy="297.0" r="8.4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
   <circle cx="217.2" cy="297.0" r="2.8000000000000003" fill="#234CDA"/>
@@ -37,9 +37,9 @@
   <line x1="211.260303038033" y1="291.060303038033" x2="208.09246465831725" y2="287.8924646583173" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
   <line x1="217.2" y1="288.6" x2="217.2" y2="284.12" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
   <line x1="223.139696961967" y1="291.060303038033" x2="226.30753534168272" y2="287.8924646583173" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
-  <text x="220" y="331.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">Router queue</text>
+  <text x="220" y="331.0" font-size="18.9" font-weight="700" fill="#1A1A1A" text-anchor="middle">Router queue</text>
   <circle cx="84.0" cy="288.0" r="11" fill="#234CDA"/>
-  <text x="84.0" y="292.5" font-size="12" font-weight="700" fill="#FFFFFF" text-anchor="middle">1</text>
+  <text x="84.0" y="292.5" font-size="16.2" font-weight="700" fill="#FFFFFF" text-anchor="middle">1</text>
   <rect x="440.0" y="274.0" width="300" height="72" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
   <rect x="578.8000000000001" y="288.6" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
   <rect x="583.2800000000001" y="293.08" width="7.840000000000001" height="7.840000000000001" fill="#234CDA"/>
@@ -49,16 +49,16 @@
   <line x1="573.2" y1="297.0" x2="578.8000000000001" y2="297.0" stroke="#234CDA" stroke-width="2"/><line x1="595.6" y1="297.0" x2="601.2" y2="297.0" stroke="#234CDA" stroke-width="2"/>
   <line x1="592.8000000000001" y1="283.0" x2="592.8000000000001" y2="288.6" stroke="#234CDA" stroke-width="2"/><line x1="592.8000000000001" y1="305.4" x2="592.8000000000001" y2="311.0" stroke="#234CDA" stroke-width="2"/>
   <line x1="573.2" y1="302.6" x2="578.8000000000001" y2="302.6" stroke="#234CDA" stroke-width="2"/><line x1="595.6" y1="302.6" x2="601.2" y2="302.6" stroke="#234CDA" stroke-width="2"/>
-  <text x="590" y="331.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">Engine scheduler</text>
+  <text x="590" y="331.0" font-size="18.9" font-weight="700" fill="#1A1A1A" text-anchor="middle">Engine scheduler</text>
   <circle cx="454.0" cy="288.0" r="11" fill="#234CDA"/>
-  <text x="454.0" y="292.5" font-size="12" font-weight="700" fill="#FFFFFF" text-anchor="middle">2</text>
+  <text x="454.0" y="292.5" font-size="16.2" font-weight="700" fill="#FFFFFF" text-anchor="middle">2</text>
   <line x1="372" y1="310" x2="418" y2="310" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
   <rect x="810.0" y="274.0" width="300" height="72" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
   <path d="M943.2,288.544 L943.2,308.256 A14.0,4.928000000000001 0 0 0 971.2,308.256 L971.2,288.544" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
   <ellipse cx="957.2" cy="288.544" rx="14.0" ry="4.928000000000001" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
   <path d="M943.2,298.4 A14.0,4.928000000000001 0 0 0 971.2,298.4" fill="none" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="960" y="331.0" font-size="14" font-weight="700" fill="#1A1A1A" text-anchor="middle">KV cache eviction</text>
+  <text x="960" y="331.0" font-size="18.9" font-weight="700" fill="#1A1A1A" text-anchor="middle">KV cache eviction</text>
   <circle cx="824.0" cy="288.0" r="11" fill="#234CDA"/>
-  <text x="824.0" y="292.5" font-size="12" font-weight="700" fill="#FFFFFF" text-anchor="middle">3</text>
+  <text x="824.0" y="292.5" font-size="16.2" font-weight="700" fill="#FFFFFF" text-anchor="middle">3</text>
   <line x1="742" y1="310" x2="788" y2="310" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
 </svg>

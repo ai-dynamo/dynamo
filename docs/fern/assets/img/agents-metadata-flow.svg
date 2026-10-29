@@ -1,10 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="350" viewBox="0 0 1200 350" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1159" height="328" viewBox="31 8 1159 328" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">How Dynamo uses agent request metadata</title>
   <desc id="desc">An agent harness sends each request with a session ID and a priority. The Dynamo frontend reads them. The router uses the session ID for affinity and the priority for queue order. The engine uses the priority for scheduling and cache eviction. The frontend records a request trace.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1200" height="350" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">AGENTS ON DYNAMO</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">The harness labels each request, and Dynamo acts on the label</text>
+  <rect x="31" y="8" width="1159" height="328" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="19.5" font-weight="700" letter-spacing="1.6" fill="#5A8F00">AGENTS ON DYNAMO</text>
+  <text x="50" y="68" font-size="33.0" font-weight="700" fill="#1A1A1A">The harness labels each request, and Dynamo acts on the label</text>
   <rect x="45.0" y="150.0" width="170" height="100" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
   <rect x="118.8" y="179.1" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
   <rect x="123.28" y="183.58" width="7.840000000000001" height="7.840000000000001" fill="#374151"/>
@@ -14,14 +14,14 @@
   <line x1="113.2" y1="187.5" x2="118.8" y2="187.5" stroke="#374151" stroke-width="2"/><line x1="135.6" y1="187.5" x2="141.2" y2="187.5" stroke="#374151" stroke-width="2"/>
   <line x1="132.8" y1="173.5" x2="132.8" y2="179.1" stroke="#374151" stroke-width="2"/><line x1="132.8" y1="195.9" x2="132.8" y2="201.5" stroke="#374151" stroke-width="2"/>
   <line x1="113.2" y1="193.1" x2="118.8" y2="193.1" stroke="#374151" stroke-width="2"/><line x1="135.6" y1="193.1" x2="141.2" y2="193.1" stroke="#374151" stroke-width="2"/>
-  <text x="130" y="220.5" font-size="13" font-weight="700" fill="#374151" text-anchor="middle">Agent harness</text>
-  <rect x="250" y="130" width="91" height="24" rx="12.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="295.5" y="146.5" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">session ID</text>
-  <rect x="250" y="164" width="77" height="24" rx="12.0" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="288.5" y="180.5" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">priority</text>
+  <text x="130" y="220.5" font-size="19.5" font-weight="700" fill="#374151" text-anchor="middle">Agent harness</text>
+  <rect x="236.0" y="130" width="119.0" height="24" rx="12.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="295.5" y="146.5" font-size="18.0" font-weight="700" fill="#4C7A00" text-anchor="middle">session ID</text>
+  <rect x="238.9" y="164" width="99.2" height="24" rx="12.0" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="288.5" y="180.5" font-size="18.0" font-weight="700" fill="#92400E" text-anchor="middle">priority</text>
   <line x1="220" y1="205" x2="360" y2="205" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
   <rect x="366" y="108" width="810" height="214" rx="12" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="382" y="130" font-size="12" font-weight="700" letter-spacing="1.2" fill="#4B5563">DYNAMO</text>
+  <text x="382" y="130" font-size="18.0" font-weight="700" letter-spacing="1.2" fill="#4B5563">DYNAMO</text>
   <rect x="385.0" y="150.0" width="190" height="100" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
   <circle cx="477.2" cy="187.5" r="8.4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
   <circle cx="477.2" cy="187.5" r="2.8000000000000003" fill="#234CDA"/>
@@ -33,7 +33,7 @@
   <line x1="471.260303038033" y1="181.560303038033" x2="468.0924646583172" y2="178.39246465831727" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
   <line x1="477.2" y1="179.1" x2="477.2" y2="174.62" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
   <line x1="483.139696961967" y1="181.560303038033" x2="486.3075353416827" y2="178.39246465831727" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
-  <text x="480" y="220.5" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">Frontend</text>
+  <text x="480" y="220.5" font-size="19.5" font-weight="700" fill="#1A1A1A" text-anchor="middle">Frontend</text>
   <rect x="675.0" y="150.0" width="190" height="100" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
   <circle cx="767.2" cy="187.5" r="8.4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
   <circle cx="767.2" cy="187.5" r="2.8000000000000003" fill="#234CDA"/>
@@ -45,7 +45,7 @@
   <line x1="761.260303038033" y1="181.560303038033" x2="758.0924646583173" y2="178.39246465831727" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
   <line x1="767.2" y1="179.1" x2="767.2" y2="174.62" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
   <line x1="773.139696961967" y1="181.560303038033" x2="776.3075353416828" y2="178.39246465831727" stroke="#234CDA" stroke-width="3" stroke-linecap="round"/>
-  <text x="770" y="220.5" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">Router</text>
+  <text x="770" y="220.5" font-size="19.5" font-weight="700" fill="#1A1A1A" text-anchor="middle">Router</text>
   <rect x="965.0" y="150.0" width="190" height="100" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
   <rect x="1048.8" y="179.1" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
   <rect x="1053.28" y="183.58" width="7.840000000000001" height="7.840000000000001" fill="#234CDA"/>
@@ -55,15 +55,15 @@
   <line x1="1043.2" y1="187.5" x2="1048.8" y2="187.5" stroke="#234CDA" stroke-width="2"/><line x1="1065.6000000000001" y1="187.5" x2="1071.2" y2="187.5" stroke="#234CDA" stroke-width="2"/>
   <line x1="1062.8" y1="173.5" x2="1062.8" y2="179.1" stroke="#234CDA" stroke-width="2"/><line x1="1062.8" y1="195.9" x2="1062.8" y2="201.5" stroke="#234CDA" stroke-width="2"/>
   <line x1="1043.2" y1="193.1" x2="1048.8" y2="193.1" stroke="#234CDA" stroke-width="2"/><line x1="1065.6000000000001" y1="193.1" x2="1071.2" y2="193.1" stroke="#234CDA" stroke-width="2"/>
-  <text x="1060" y="220.5" font-size="13" font-weight="700" fill="#1A1A1A" text-anchor="middle">Engine</text>
+  <text x="1060" y="220.5" font-size="19.5" font-weight="700" fill="#1A1A1A" text-anchor="middle">Engine</text>
   <line x1="576" y1="200" x2="672" y2="200" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
   <line x1="866" y1="200" x2="962" y2="200" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <rect x="700" y="262" width="77" height="24" rx="12.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="738.5" y="278.5" font-size="12" font-weight="700" fill="#4C7A00" text-anchor="middle">affinity</text>
-  <rect x="778" y="262" width="56" height="24" rx="12.0" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="806.0" y="278.5" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">queue</text>
-  <rect x="1000" y="262" width="77" height="24" rx="12.0" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
-  <text x="1038.5" y="278.5" font-size="12" font-weight="700" fill="#92400E" text-anchor="middle">priority</text>
-  <rect x="440" y="262" width="56" height="24" rx="12.0" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="468.0" y="278.5" font-size="12" font-weight="700" fill="#374151" text-anchor="middle">trace</text>
+  <rect x="688.9" y="262" width="99.2" height="24" rx="12.0" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="738.5" y="278.5" font-size="18.0" font-weight="700" fill="#4C7A00" text-anchor="middle">affinity</text>
+  <rect x="787.4" y="262" width="69.5" height="24" rx="12.0" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="822.1" y="278.5" font-size="18.0" font-weight="700" fill="#92400E" text-anchor="middle">queue</text>
+  <rect x="988.9" y="262" width="99.2" height="24" rx="12.0" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
+  <text x="1038.5" y="278.5" font-size="18.0" font-weight="700" fill="#92400E" text-anchor="middle">priority</text>
+  <rect x="433.2" y="262" width="69.5" height="24" rx="12.0" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="468.0" y="278.5" font-size="18.0" font-weight="700" fill="#374151" text-anchor="middle">trace</text>
 </svg>

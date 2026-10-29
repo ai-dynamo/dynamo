@@ -1,32 +1,32 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="450" viewBox="0 0 1100 450" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="973" height="434" viewBox="36 8 973 434" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">Shared image cache: hits and misses</title>
   <desc id="desc">An image seen before is a hit: its bytes come from the shared cache with no download. A new image is a miss: it is downloaded once from the origin, stored in the shared cache, and reused by every worker.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect width="1100" height="450" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="13" font-weight="700" letter-spacing="1.6" fill="#5A8F00">SHARED IMAGE CACHE</text>
-  <text x="50" y="68" font-size="22" font-weight="700" fill="#1A1A1A">Download an image once, reuse it on every worker</text>
+  <rect x="36" y="8" width="973" height="434" fill="#FFFFFF"/>
+  <text x="50" y="40" font-size="19.5" font-weight="700" letter-spacing="1.6" fill="#5A8F00">SHARED IMAGE CACHE</text>
+  <text x="50" y="68" font-size="33.0" font-weight="700" fill="#1A1A1A">Download an image once, reuse it on every worker</text>
   <rect x="80" y="140" width="50.0" height="40" rx="4" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
   <circle cx="94.0" cy="152.0" r="4.0" fill="#76B900"/>
   <polygon points="84.0,172.8 99.0,158.4 108.0,167.2 116.0,160.0 126.0,172.8" fill="#76B900"/>
   <circle cx="130.0" cy="140" r="9.6" fill="#76B900" stroke="#FFFFFF" stroke-width="1.5"/>
   <path d="M125.2,140 L128.8,143.6 L135.2,136.4" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="70" y="214" font-size="13" font-weight="700" fill="#4C7A00">seen before</text>
+  <text x="70" y="214" font-size="19.5" font-weight="700" fill="#4C7A00">seen before</text>
   <rect x="80" y="290" width="50.0" height="40" rx="4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
   <circle cx="94.0" cy="302.0" r="4.0" fill="#234CDA"/>
   <polygon points="84.0,322.8 99.0,308.4 108.0,317.2 116.0,310.0 126.0,322.8" fill="#234CDA"/>
   <circle cx="130.0" cy="290" r="9.6" fill="#234CDA" stroke="#FFFFFF" stroke-width="1.5"/>
-  <text x="130.0" y="293.6" font-size="12.0" font-weight="700" text-anchor="middle" fill="#FFFFFF">N</text>
-  <text x="88" y="364" font-size="13" font-weight="700" fill="#234CDA">new</text>
+  <text x="130.0" y="293.6" font-size="18.0" font-weight="700" text-anchor="middle" fill="#FFFFFF">N</text>
+  <text x="88" y="364" font-size="19.5" font-weight="700" fill="#234CDA">new</text>
   <rect x="400" y="150" width="190" height="190" rx="16" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
   <path d="M468,186.692 L468,224.708 A27.0,9.504000000000001 0 0 0 522,224.708 L522,186.692" fill="#F4F9E8" stroke="#4C7A00" stroke-width="2"/>
   <ellipse cx="495.0" cy="186.692" rx="27.0" ry="9.504000000000001" fill="#F4F9E8" stroke="#4C7A00" stroke-width="2"/>
   <path d="M468,205.7 A27.0,9.504000000000001 0 0 0 522,205.7" fill="none" stroke="#4C7A00" stroke-width="1.5"/>
-  <text x="495" y="270" font-size="15" font-weight="700" fill="#4C7A00" text-anchor="middle">Shared cache</text>
-  <text x="495" y="292" font-size="12" fill="#4B5563" text-anchor="middle">Redis or Dragonfly</text>
+  <text x="495" y="270" font-size="22.5" font-weight="700" fill="#4C7A00" text-anchor="middle">Shared cache</text>
+  <text x="495" y="292" font-size="18.0" fill="#4B5563" text-anchor="middle">Redis or Dragonfly</text>
   <line x1="170" y1="168" x2="396" y2="215" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <text x="280" y="170" font-size="14" font-weight="700" fill="#4C7A00" text-anchor="middle">hit</text>
+  <text x="280" y="170" font-size="21.0" font-weight="700" fill="#4C7A00" text-anchor="middle">hit</text>
   <line x1="170" y1="318" x2="396" y2="280" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
-  <text x="280" y="318" font-size="14" font-weight="700" fill="#92400E" text-anchor="middle">miss</text>
+  <text x="280" y="318" font-size="21.0" font-weight="700" fill="#92400E" text-anchor="middle">miss</text>
   <rect x="805.0" y="132.0" width="190" height="96" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
   <rect x="888.8000000000001" y="159.1" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#4C7A00" stroke-width="2"/>
   <rect x="893.2800000000001" y="163.58" width="7.840000000000001" height="7.840000000000001" fill="#4C7A00"/>
@@ -36,15 +36,15 @@
   <line x1="883.2" y1="167.5" x2="888.8000000000001" y2="167.5" stroke="#4C7A00" stroke-width="2"/><line x1="905.6" y1="167.5" x2="911.2" y2="167.5" stroke="#4C7A00" stroke-width="2"/>
   <line x1="902.8000000000001" y1="153.5" x2="902.8000000000001" y2="159.1" stroke="#4C7A00" stroke-width="2"/><line x1="902.8000000000001" y1="175.9" x2="902.8000000000001" y2="181.5" stroke="#4C7A00" stroke-width="2"/>
   <line x1="883.2" y1="173.1" x2="888.8000000000001" y2="173.1" stroke="#4C7A00" stroke-width="2"/><line x1="905.6" y1="173.1" x2="911.2" y2="173.1" stroke="#4C7A00" stroke-width="2"/>
-  <text x="900" y="200.5" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">Worker</text>
+  <text x="900" y="200.5" font-size="19.5" font-weight="700" fill="#4C7A00" text-anchor="middle">Worker</text>
   <line x1="592" y1="200" x2="802" y2="190" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
   <rect x="805.0" y="292.0" width="190" height="96" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="1.5"/>
   <circle cx="897.2" cy="327.5" r="14.0" fill="#FFFFFF" stroke="#92400E" stroke-width="2"/>
   <ellipse cx="897.2" cy="327.5" rx="6.3" ry="14.0" fill="none" stroke="#92400E" stroke-width="1.5"/>
   <line x1="883.2" y1="327.5" x2="911.2" y2="327.5" stroke="#92400E" stroke-width="1.5"/>
-  <text x="900" y="360.5" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">Image origin</text>
+  <text x="900" y="360.5" font-size="19.5" font-weight="700" fill="#92400E" text-anchor="middle">Image origin</text>
   <line x1="592" y1="300" x2="802" y2="332" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
-  <text x="700" y="332" font-size="12" fill="#4B5563" text-anchor="middle">download once</text>
+  <text x="700" y="332" font-size="18.0" fill="#4B5563" text-anchor="middle">download once</text>
   <path d="M900,392 C900,428 520,428 520,342" fill="none" stroke="#76B900" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrow-green)"/>
-  <text x="720" y="424" font-size="12" fill="#4B5563" text-anchor="middle">store</text>
+  <text x="720" y="424" font-size="18.0" fill="#4B5563" text-anchor="middle">store</text>
 </svg>
