@@ -181,7 +181,7 @@ async fn forward(
                 error = format!("{failure:#}"),
                 "pool frontend failed"
             );
-            let message = format!("pool frontend {url} failed: {failure}");
+            let message = format!("the pool serving model {model} could not be reached");
             return error(StatusCode::SERVICE_UNAVAILABLE, message);
         }
     };

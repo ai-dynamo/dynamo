@@ -395,6 +395,9 @@ async fn unreachable_pools_are_unavailable() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // The pool's address stays in the log, out of the client's error.
+    let body = response.text().await.unwrap();
+    assert!(!body.contains(closed.authority()), "{body}");
 }
 
 #[tokio::test]
