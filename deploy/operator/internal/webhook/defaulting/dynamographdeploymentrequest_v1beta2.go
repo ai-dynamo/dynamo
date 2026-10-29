@@ -52,9 +52,10 @@ const (
 //
 // Admission owns every v1beta2 default, and each default has this one owner: backends,
 // objective.mode, the scalar metric, objective.sla, recommendation.maxCandidates,
-// workload.static and the cluster hardware. workload.static: {} opts out of the static
+// workload.static and discovered cluster hardware. workload.static: {} opts out of the static
 // workload; a nonempty static object receives any missing inputTokens, outputTokens and load
-// defaults. objective.sla: {} opts out of the latency defaults.
+// defaults. objective.sla: {} opts out of the latency defaults. hardware: {} opts out of
+// cluster discovery and typed hardware defaults; a nonempty object is completed.
 // spec.aisimulate.inputOverrides never changes a default. It overrides the defaulted typed
 // values later, when the input is lowered.
 
@@ -123,14 +124,15 @@ func decodeOldSpecV1beta2(
 // dynamoGraphDeploymentRequestV1beta2DefaultOptions carries the request-scoped values the
 // traversal needs. An empty field means the environment had nothing to offer.
 type dynamoGraphDeploymentRequestV1beta2DefaultOptions struct {
-	// hardware is the GPU identity and budget discovered from the cluster.
+	// hardware is the GPU identity, budget and node width discovered from the cluster.
 	hardware hardwareDefaultsV1beta2
 }
 
 // hardwareDefaultsV1beta2 is the hardware the cluster can offer for the values a Request omits.
 type hardwareDefaultsV1beta2 struct {
-	sku    string
-	budget int32
+	sku            string
+	budget         int32
+	numGPUsPerNode int32
 }
 
 // defaultDynamoGraphDeploymentRequestSpecV1beta2 defaults spec in place. It applies on
@@ -160,7 +162,8 @@ func defaultNativeSearchInputV1beta2(
 		input.Backends = []nvidiacomv1beta2.Backend{"vllm", "sglang", "trtllm"}
 	}
 
-	// Hardware has no static default: it exists only when the cluster supplied some.
+	// Omitted hardware receives discovered values. An explicit empty object reaches this
+	// traversal with empty hardware options and remains the opt-out object.
 	if input.Hardware == nil && opts.hardware != (hardwareDefaultsV1beta2{}) {
 		input.Hardware = &nvidiacomv1beta2.HardwareSpec{}
 	}
@@ -190,6 +193,9 @@ func defaultHardwareSpecV1beta2(hardware *nvidiacomv1beta2.HardwareSpec, default
 	}
 	if hardware.GPU != nil {
 		defaultGPUHardwareSpecV1beta2(hardware.GPU, defaults)
+	}
+	if hardware.NumGPUsPerNode == nil && defaults.numGPUsPerNode > 0 {
+		hardware.NumGPUsPerNode = new(defaults.numGPUsPerNode)
 	}
 }
 

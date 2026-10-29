@@ -18,6 +18,7 @@
 package validation_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -547,6 +548,49 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		},
 
 		{
+			name: "v1beta2 unknown hardware without capacity or topology recommends the manual override",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{"gpu": map[string]any{
+					"sku": "future_accelerator",
+				}}
+			}),
+			gpuDiscovery: true,
+			wantWebhook: []string{
+				`spec.hardware.gpu.budget: Required value: cannot discover GPU capacity or topology for SKU "future_accelerator" because it is not known to the bundled AISimulate catalog; set spec.hardware.gpu.budget and spec.hardware.numGpusPerNode explicitly`,
+			},
+		},
+		{
+			name: "v1beta2 unknown explicit hardware is passed through with a warning",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{
+					"gpu":            map[string]any{"sku": "future_accelerator", "budget": int64(4)},
+					"numGpusPerNode": int64(2),
+				}
+			}),
+			gpuDiscovery: true,
+			discoveryErr: errors.New("discovery must not run for complete explicit hardware"),
+			wantWarnings: []string{
+				`spec.hardware.gpu.sku: "future_accelerator" is not known to the AISimulate release bundled with this operator; the value is passed through unchanged and may work with an external AISimulate systems catalog`,
+			},
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if got := v1beta2String(t, result, "spec", "hardware", "gpu", "sku"); got != "future_accelerator" {
+					t.Fatalf("spec.hardware.gpu.sku = %q, want unchanged override", got)
+				}
+			},
+		},
+		{
+			name: "v1beta2 bundled hardware does not warn",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["hardware"] = map[string]any{
+					"gpu":            map[string]any{"sku": "h200_sxm", "budget": int64(4)},
+					"numGpusPerNode": int64(8),
+				}
+			}),
+			gpuDiscovery: true,
+			discoveryErr: errors.New("discovery must not run for complete explicit hardware"),
+		},
+
+		{
 			name: "v1beta2 public input overrides may configure non-reserved dgdr run fields",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				setV1beta2InputOverrides(spec, map[string]any{"dgdr_run": map[string]any{
@@ -782,11 +826,14 @@ func TestDynamoGraphDeploymentRunSpecIsImmutable(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			actual := runAdmissionTest(t, admissionTestCase{
+			test := admissionTestCase{
 				object:       tt.run,
-				oldObject:    tt.oldRun,
 				wantCELError: tt.wantCELErr,
-			})
+			}
+			if tt.oldRun != nil {
+				test.oldObject = tt.oldRun
+			}
+			actual := runAdmissionTest(t, test)
 			if tt.wantCELErr == "" && actual.GetGeneration() != 1 {
 				t.Fatalf("generation = %d, want 1 for a metadata-only update", actual.GetGeneration())
 			}
@@ -1053,8 +1100,9 @@ func setV1beta2InputOverrides(spec map[string]any, overrides map[string]any) {
 
 // setBeta2AdmissionHardware names the hardware, so fixtures do not depend on GPU discovery.
 func setBeta2AdmissionHardware(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
-	sku, budget := "h100_sxm", int32(4)
+	sku, budget, numGPUsPerNode := "h100_sxm", int32(4), int32(4)
 	request.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{
-		GPU: &nvidiacomv1beta2.GPUHardwareSpec{SKU: &sku, Budget: &budget},
+		GPU:            &nvidiacomv1beta2.GPUHardwareSpec{SKU: &sku, Budget: &budget},
+		NumGPUsPerNode: &numGPUsPerNode,
 	}
 }

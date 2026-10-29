@@ -4805,7 +4805,7 @@ See [Backend](#backend).
 </ParamField>
 
 <ParamField path="hardware" type="HardwareSpec">
-Hardware bounds the accelerator configurations evaluated by the search. Admission discovers any omitted hardware values from the cluster.
+Hardware bounds the accelerator configurations evaluated by the search. When omitted, admission discovers SKU, budget and node width. An exactly empty object opts out of operator hardware discovery and typed defaults. Admission completes every nonempty object with any missing hardware values; explicit values remain authoritative.
 See [HardwareSpec](#v1beta2-hardwarespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4887,7 +4887,7 @@ See [Backend](#backend).
 </ParamField>
 
 <ParamField path="hardware" type="HardwareSpec">
-Hardware bounds the accelerator configurations evaluated by the search. Admission discovers any omitted hardware values from the cluster.
+Hardware bounds the accelerator configurations evaluated by the search. When omitted, admission discovers SKU, budget and node width. An exactly empty object opts out of operator hardware discovery and typed defaults. Admission completes every nonempty object with any missing hardware values; explicit values remain authoritative.
 See [HardwareSpec](#v1beta2-hardwarespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5010,7 +5010,7 @@ See [Backend](#backend).
 </ParamField>
 
 <ParamField path="hardware" type="HardwareSpec">
-Hardware bounds the accelerator configurations evaluated by the search. Admission discovers any omitted hardware values from the cluster.
+Hardware bounds the accelerator configurations evaluated by the search. When omitted, admission discovers SKU, budget and node width. An exactly empty object opts out of operator hardware discovery and typed defaults. Admission completes every nonempty object with any missing hardware values; explicit values remain authoritative.
 See [HardwareSpec](#v1beta2-hardwarespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5146,27 +5146,33 @@ GPUHardwareSpec describes accelerator identity and the maximum allocation per ca
 **Appears in:** [HardwareSpec](#v1beta2-hardwarespec)
 
 <ParamField path="sku" type="string">
-SKU identifies the accelerator using the AISimulate hardware catalog name. Known values in the bundled AISimulate release are `a100_pcie`, `a100_sxm`, `a30`, `b200_sxm`, `b300_sxm`, `b60`, `gb200`, `gb300`, `h100_pcie`, `h100_sxm`, `h200_sxm`, `l4`, `l40s`, and `rtx_pro_6000_server`. The field remains open so an external AISimulate systems catalog can add identifiers. Admission passes an unknown identifier through unchanged and warns when `budget` is also explicit. Without an explicit `budget`, it rejects the identifier because cluster discovery cannot associate capacity with it. When omitted, admission discovers the accelerator.
+SKU identifies the accelerator using the AISimulate hardware catalog name. Known values in the bundled AISimulate release are `a100_pcie`, `a100_sxm`, `a30`, `b200_sxm`, `b300_sxm`, `b60`, `gb200`, `gb300`, `h100_pcie`, `h100_sxm`, `h200_sxm`, `l4`, `l40s`, and `rtx_pro_6000_server`. The field remains open so an external AISimulate systems catalog can add identifiers. Admission passes an unknown identifier through unchanged and warns when `budget` and the parent `numGpusPerNode` are also explicit. Without both, it rejects the identifier because cluster discovery cannot associate capacity or topology with it. When omitted from a nonempty hardware object, admission discovers the accelerator.
 **Validation:** MinLength: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="budget" type="integer">
-Budget is the maximum total number of GPUs one candidate may use. When omitted for a known SKU, admission derives the available GPU budget from the cluster. An SKU unknown to the bundled AISimulate catalog requires an explicit `budget`.
+Budget is the maximum total number of GPUs one candidate may use. When omitted for a known SKU, admission derives the available GPU budget from the cluster. An SKU unknown to the bundled AISimulate catalog requires an explicit `budget` and an explicit `numGpusPerNode` in the parent hardware object.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
 <Accordion id="v1beta2-hardwarespec" title="v1beta2 HardwareSpec">
-HardwareSpec bounds the accelerator configurations evaluated by the search.
+HardwareSpec bounds the accelerator configurations evaluated by the search. An exactly empty
+object opts out of operator cluster discovery and typed hardware defaults.
 
 
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="gpu" type="GPUHardwareSpec">
-GPU describes accelerator identity and the maximum allocation per candidate. Admission resolves omitted fields from the cluster when the SKU is known.
+GPU describes accelerator identity and the maximum allocation per candidate. In a nonempty hardware object, admission resolves an omitted SKU or budget from the cluster.
 See [GPUHardwareSpec](#gpuhardwarespec).
 **Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="numGpusPerNode" type="integer">
+NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers to AISimulate's num_gpus_per_node input. An explicit value is authoritative. In a nonempty hardware object, admission discovers an omitted value from the selected cluster node shape. The Run controller never discovers this value. An exactly empty hardware object opts out of all operator hardware discovery and typed hardware defaults, leaving AISimulate input and defaults authoritative.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5241,7 +5247,7 @@ See [Backend](#backend).
 </ParamField>
 
 <ParamField path="hardware" type="HardwareSpec">
-Hardware bounds the accelerator configurations evaluated by the search. Admission discovers any omitted hardware values from the cluster.
+Hardware bounds the accelerator configurations evaluated by the search. When omitted, admission discovers SKU, budget and node width. An exactly empty object opts out of operator hardware discovery and typed defaults. Admission completes every nonempty object with any missing hardware values; explicit values remain authoritative.
 See [HardwareSpec](#v1beta2-hardwarespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

@@ -458,7 +458,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	if err != nil {
 		cloudProvider = CloudProviderUnknown
 	}
-	bestNode.OtherModels = collectOtherModels(filterSKU, bestSKU, len(allNodes),
+	bestNode.OtherModels = collectOtherModels(filterSKU, bestSKU, bestNode.Model, len(allNodes),
 		func(i int) (nvidiacomv1beta1.GPUSKUType, string) { return allNodes[i].sku, allNodes[i].info.Model })
 	bestNode.System = bestSKU
 	bestNode.CloudProvider = cloudProvider
@@ -931,7 +931,7 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 		rdmaDetected = true
 	}
 
-	bestNode.OtherModels = collectOtherModels(filterSKU, bestSKU, len(allNodes),
+	bestNode.OtherModels = collectOtherModels(filterSKU, bestSKU, bestNode.Model, len(allNodes),
 		func(i int) (nvidiacomv1beta1.GPUSKUType, string) { return allNodes[i].sku, allNodes[i].info.Model })
 	bestNode.System = bestSKU
 	bestNode.NodesWithGPUs = nodesWithGPUs

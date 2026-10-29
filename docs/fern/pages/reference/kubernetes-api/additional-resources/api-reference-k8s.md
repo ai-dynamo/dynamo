@@ -3452,7 +3452,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
-| `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />Admission discovers any omitted hardware values from the cluster. |  | Optional: \{\} <br /> |
+| `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />When omitted, admission discovers SKU, budget and node width. An exactly empty object opts<br />out of operator hardware discovery and typed defaults. Admission completes every nonempty<br />object with any missing hardware values; explicit values remain authoritative. |  | Optional: \{\} <br /> |
 | `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults.<br />spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
@@ -3494,7 +3494,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
-| `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />Admission discovers any omitted hardware values from the cluster. |  | Optional: \{\} <br /> |
+| `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />When omitted, admission discovers SKU, budget and node width. An exactly empty object opts<br />out of operator hardware discovery and typed defaults. Admission completes every nonempty<br />object with any missing hardware values; explicit values remain authoritative. |  | Optional: \{\} <br /> |
 | `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults.<br />spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
@@ -3558,7 +3558,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
-| `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />Admission discovers any omitted hardware values from the cluster. |  | Optional: \{\} <br /> |
+| `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />When omitted, admission discovers SKU, budget and node width. An exactly empty object opts<br />out of operator hardware discovery and typed defaults. Admission completes every nonempty<br />object with any missing hardware values; explicit values remain authoritative. |  | Optional: \{\} <br /> |
 | `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults.<br />spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
@@ -3624,15 +3624,16 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `sku` _string_ | SKU identifies the accelerator using the AISimulate hardware catalog name.<br />Known values in the bundled AISimulate release are `a100_pcie`, `a100_sxm`,<br />`a30`, `b200_sxm`, `b300_sxm`, `b60`, `gb200`, `gb300`, `h100_pcie`,<br />`h100_sxm`, `h200_sxm`, `l4`, `l40s`, and `rtx_pro_6000_server`.<br />The field remains open so an external AISimulate systems catalog can add identifiers.<br />Admission passes an unknown identifier through unchanged and warns when `budget` is also<br />explicit. Without an explicit `budget`, it rejects the identifier because cluster discovery<br />cannot associate capacity with it. When omitted, admission discovers the accelerator. |  | MinLength: 1 <br />Optional: \{\} <br /> |
-| `budget` _integer_ | Budget is the maximum total number of GPUs one candidate may use.<br />When omitted for a known SKU, admission derives the available GPU budget from the cluster.<br />An SKU unknown to the bundled AISimulate catalog requires an explicit `budget`. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `sku` _string_ | SKU identifies the accelerator using the AISimulate hardware catalog name.<br />Known values in the bundled AISimulate release are `a100_pcie`, `a100_sxm`,<br />`a30`, `b200_sxm`, `b300_sxm`, `b60`, `gb200`, `gb300`, `h100_pcie`,<br />`h100_sxm`, `h200_sxm`, `l4`, `l40s`, and `rtx_pro_6000_server`.<br />The field remains open so an external AISimulate systems catalog can add identifiers.<br />Admission passes an unknown identifier through unchanged and warns when `budget` and the<br />parent `numGpusPerNode` are also explicit. Without both, it rejects the identifier because<br />cluster discovery cannot associate capacity or topology with it. When omitted from a<br />nonempty hardware object, admission discovers the accelerator. |  | MinLength: 1 <br />Optional: \{\} <br /> |
+| `budget` _integer_ | Budget is the maximum total number of GPUs one candidate may use.<br />When omitted for a known SKU, admission derives the available GPU budget from the cluster.<br />An SKU unknown to the bundled AISimulate catalog requires an explicit `budget` and an<br />explicit `numGpusPerNode` in the parent hardware object. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### v1beta2 HardwareSpec
 
 
 
-HardwareSpec bounds the accelerator configurations evaluated by the search.
+HardwareSpec bounds the accelerator configurations evaluated by the search. An exactly empty
+object opts out of operator cluster discovery and typed hardware defaults.
 
 
 
@@ -3644,7 +3645,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpu` _[GPUHardwareSpec](#gpuhardwarespec)_ | GPU describes accelerator identity and the maximum allocation per candidate.<br />Admission resolves omitted fields from the cluster when the SKU is known. |  | Optional: \{\} <br /> |
+| `gpu` _[GPUHardwareSpec](#gpuhardwarespec)_ | GPU describes accelerator identity and the maximum allocation per candidate.<br />In a nonempty hardware object, admission resolves an omitted SKU or budget from the cluster. |  | Optional: \{\} <br /> |
+| `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers<br />to AISimulate's num_gpus_per_node input.<br />An explicit value is authoritative. In a nonempty hardware object, admission discovers<br />an omitted value from the selected cluster node shape. The Run controller never discovers<br />this value. An exactly empty hardware object opts out of all operator hardware discovery<br />and typed hardware defaults, leaving AISimulate input and defaults authoritative. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### KVCapacityFractionRange
@@ -3718,7 +3720,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
-| `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />Admission discovers any omitted hardware values from the cluster. |  | Optional: \{\} <br /> |
+| `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />When omitted, admission discovers SKU, budget and node width. An exactly empty object opts<br />out of operator hardware discovery and typed defaults. Admission completes every nonempty<br />object with any missing hardware values; explicit values remain authoritative. |  | Optional: \{\} <br /> |
 | `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults.<br />spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |

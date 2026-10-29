@@ -48,8 +48,12 @@ func (f *fakeDiscoverer) Discover(ctx context.Context, filterSKU nvidiacomv1beta
 	return &found, f.err
 }
 
-func hardwareOfV1beta2(sku *string, budget *int32) *nvidiacomv1beta2.HardwareSpec {
-	return &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{SKU: sku, Budget: budget}}
+func hardwareOfV1beta2(sku *string, budget *int32, numGPUsPerNode ...*int32) *nvidiacomv1beta2.HardwareSpec {
+	hardware := &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{SKU: sku, Budget: budget}}
+	if len(numGPUsPerNode) > 0 {
+		hardware.NumGPUsPerNode = numGPUsPerNode[0]
+	}
+	return hardware
 }
 
 func hardwareSpecV1beta2(hardware *nvidiacomv1beta2.HardwareSpec) *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec {
@@ -61,7 +65,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 	num := func(n int32) *int32 { return &n }
 	h200x8 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8, SelectedShapeGPUs: 8}
 	h200x64 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 8, TotalGPUs: 64, SelectedShapeGPUs: 64}
-	completeH100 := hardwareOfV1beta2(str("h100_sxm"), num(4))
+	completeH100 := hardwareOfV1beta2(str("h100_sxm"), num(4), num(8))
 	tests := []struct {
 		name              string
 		op                admissionv1.Operation
@@ -74,6 +78,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 		timeout           time.Duration
 		wantSKU           string
 		wantBudget        int32
+		wantGPUsPerNode   int32
 		wantCalls         int
 		wantFilter        string
 		wantErr           string
@@ -81,36 +86,65 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 		wantMaxTimeout    time.Duration
 	}{
 		{name: "no discoverer leaves omitted hardware unresolved", op: admissionv1.Create, withoutDiscoverer: true},
-		{name: "omitted hardware discovers the SKU and the budget", op: admissionv1.Create, found: h200x8, wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1, wantMinTimeout: time.Millisecond, wantMaxTimeout: defaultHardwareDiscoveryTimeout},
-		{name: "an empty hardware object is automatic discovery", op: admissionv1.Create, hardware: &nvidiacomv1beta2.HardwareSpec{}, found: h200x8, wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1},
+		{name: "omitted hardware discovers the SKU budget and node width", op: admissionv1.Create, found: h200x8, wantSKU: "h200_sxm", wantBudget: 8, wantGPUsPerNode: 8, wantCalls: 1, wantMinTimeout: time.Millisecond, wantMaxTimeout: defaultHardwareDiscoveryTimeout},
+		{name: "an empty hardware object opts out of discovery", op: admissionv1.Create, hardware: &nvidiacomv1beta2.HardwareSpec{}, discoveryErr: errors.New("discovery must not run")},
 		{
 			name: "same-SKU nodes with different GPU counts use the selected node shape", op: admissionv1.Create,
 			found:   gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 2, TotalGPUs: 12, SelectedShapeGPUs: 8},
-			wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1,
+			wantSKU: "h200_sxm", wantBudget: 8, wantGPUsPerNode: 8, wantCalls: 1,
 		},
 		{
 			name: "an empty gpu object is automatic discovery", op: admissionv1.Create,
 			hardware: &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{}}, found: h200x8,
-			wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1,
+			wantSKU: "h200_sxm", wantBudget: 8, wantGPUsPerNode: 8, wantCalls: 1,
 		},
-		{name: "the discovered budget is capped", op: admissionv1.Create, found: h200x64, wantSKU: "h200_sxm", wantBudget: 32, wantCalls: 1},
-		{name: "the discovered budget honors a configured cap", op: admissionv1.Create, found: h200x64, maxBudget: 8, wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1},
+		{name: "the discovered budget is capped", op: admissionv1.Create, found: h200x64, wantSKU: "h200_sxm", wantBudget: 32, wantGPUsPerNode: 8, wantCalls: 1},
+		{name: "the discovered budget honors a configured cap", op: admissionv1.Create, found: h200x64, maxBudget: 8, wantSKU: "h200_sxm", wantBudget: 8, wantGPUsPerNode: 8, wantCalls: 1},
 		{
 			name: "a SKU alone keeps the SKU, filters the cluster and persists the capped budget", op: admissionv1.Create,
 			hardware: hardwareOfV1beta2(str("h200_sxm"), nil), found: h200x64,
-			wantBudget: 32, wantCalls: 1, wantFilter: "h200_sxm",
-		},
-		{name: "a budget alone keeps the budget and discovers the SKU", op: admissionv1.Create, hardware: hardwareOfV1beta2(nil, num(4)), found: h200x8, wantSKU: "h200_sxm", wantCalls: 1},
-		{name: "an explicit budget above the cluster size is kept", op: admissionv1.Create, hardware: hardwareOfV1beta2(nil, num(64)), found: h200x8, wantSKU: "h200_sxm", wantCalls: 1},
-		{name: "an explicit SKU and budget bypass discovery", op: admissionv1.Create, hardware: hardwareOfV1beta2(str("h200_sxm"), num(64)), discoveryErr: errors.New("down")},
-		{
-			name: "an unknown explicit SKU and budget are authoritative", op: admissionv1.Create,
-			hardware: hardwareOfV1beta2(str("future_accelerator"), num(4)), discoveryErr: errors.New("down"),
+			wantBudget: 32, wantGPUsPerNode: 8, wantCalls: 1, wantFilter: "h200_sxm",
 		},
 		{
-			name: "an unknown SKU alone requires an explicit budget", op: admissionv1.Create,
+			name: "a failed discovery for a SKU alone asks for capacity and topology", op: admissionv1.Create,
+			hardware: hardwareOfV1beta2(str("h200_sxm"), nil), discoveryErr: errors.New("cluster unreadable"),
+			wantCalls: 1, wantFilter: "h200_sxm",
+			wantErr: `spec.hardware.gpu.budget: Required value: could not be discovered for SKU "h200_sxm" (cluster unreadable); set spec.hardware.gpu.budget and spec.hardware.numGpusPerNode`,
+		},
+		{name: "a budget alone keeps the budget and discovers the SKU", op: admissionv1.Create, hardware: hardwareOfV1beta2(nil, num(4)), found: h200x8, wantSKU: "h200_sxm", wantGPUsPerNode: 8, wantCalls: 1},
+		{name: "an explicit budget above the cluster size is kept", op: admissionv1.Create, hardware: hardwareOfV1beta2(nil, num(64)), found: h200x8, wantSKU: "h200_sxm", wantGPUsPerNode: 8, wantCalls: 1},
+		{name: "an explicit SKU and budget discover the missing node width", op: admissionv1.Create, hardware: hardwareOfV1beta2(str("h200_sxm"), num(64)), found: h200x8, wantGPUsPerNode: 8, wantCalls: 1, wantFilter: "h200_sxm"},
+		{
+			name: "a failed node-width discovery asks for the missing field", op: admissionv1.Create,
+			hardware: hardwareOfV1beta2(str("h200_sxm"), num(64)), discoveryErr: errors.New("cluster unreadable"),
+			wantCalls: 1, wantFilter: "h200_sxm",
+			wantErr: `spec.hardware.numGpusPerNode: Required value: could not be discovered for SKU "h200_sxm" (cluster unreadable); set spec.hardware.numGpusPerNode`,
+		},
+		{
+			name: "a discovered shape without a node width asks for the missing field", op: admissionv1.Create,
+			hardware: hardwareOfV1beta2(str("h200_sxm"), num(64)),
+			found:    gpu.GPUInfo{System: "h200_sxm", SelectedShapeGPUs: 8}, wantCalls: 1, wantFilter: "h200_sxm",
+			wantErr: `spec.hardware.numGpusPerNode: Required value: could not be discovered for SKU "h200_sxm"; set spec.hardware.numGpusPerNode`,
+		},
+		{name: "fully explicit hardware bypasses discovery", op: admissionv1.Create, hardware: hardwareOfV1beta2(str("h200_sxm"), num(64), num(4)), discoveryErr: errors.New("down")},
+		{
+			name: "an explicit node width is authoritative while a missing budget triggers discovery", op: admissionv1.Create,
+			hardware: hardwareOfV1beta2(str("h200_sxm"), nil, num(4)), found: h200x8,
+			wantBudget: 8, wantCalls: 1, wantFilter: "h200_sxm",
+		},
+		{
+			name: "an unknown explicit SKU and budget require an explicit node width", op: admissionv1.Create,
+			hardware: hardwareOfV1beta2(str("future_accelerator"), num(4)),
+			wantErr:  `spec.hardware.numGpusPerNode: Required value: cannot discover a node width for SKU "future_accelerator" because it is not known to the bundled AISimulate catalog; set spec.hardware.numGpusPerNode explicitly`,
+		},
+		{
+			name: "fully explicit unknown hardware is authoritative", op: admissionv1.Create,
+			hardware: hardwareOfV1beta2(str("future_accelerator"), num(4), num(2)), discoveryErr: errors.New("down"),
+		},
+		{
+			name: "an unknown SKU alone requires explicit capacity and topology", op: admissionv1.Create,
 			hardware: hardwareOfV1beta2(str("future_accelerator"), nil), found: h200x8,
-			wantErr: `spec.hardware.gpu.budget: Required value: cannot discover a GPU budget for SKU "future_accelerator" because it is not known to the bundled AISimulate catalog; set spec.hardware.gpu.budget explicitly`,
+			wantErr: `spec.hardware.gpu.budget: Required value: cannot discover GPU capacity or topology for SKU "future_accelerator" because it is not known to the bundled AISimulate catalog; set spec.hardware.gpu.budget and spec.hardware.numGpusPerNode explicitly`,
 		},
 		{name: "a failed discovery rejects", op: admissionv1.Create, discoveryErr: errors.New("no GPUs found"), wantCalls: 1,
 			wantErr: "spec.hardware.gpu: Required value: the cluster's GPUs could not be discovered (no GPUs found)"},
@@ -146,20 +180,21 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 		{
 			name: "a pinned SKU is not ambiguous in a heterogeneous cluster", op: admissionv1.Create,
 			hardware: hardwareOfV1beta2(str("h200_sxm"), nil), found: h200x8,
-			wantBudget: 8, wantCalls: 1, wantFilter: "h200_sxm",
+			wantBudget: 8, wantGPUsPerNode: 8, wantCalls: 1, wantFilter: "h200_sxm",
 		},
 		{
 			name: "no GPUs at all reject the missing budget", op: admissionv1.Create,
 			found: gpu.GPUInfo{System: "h200_sxm"}, wantCalls: 1,
 			wantErr: `spec.hardware.gpu.budget: Required value: no GPUs of SKU "h200_sxm" were found in the cluster`,
 		},
-		{name: "a configured timeout bounds discovery", op: admissionv1.Create, found: h200x8, timeout: time.Hour, wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1, wantMinTimeout: time.Minute, wantMaxTimeout: time.Hour},
+		{name: "a configured timeout bounds discovery", op: admissionv1.Create, found: h200x8, timeout: time.Hour, wantSKU: "h200_sxm", wantBudget: 8, wantGPUsPerNode: 8, wantCalls: 1, wantMinTimeout: time.Minute, wantMaxTimeout: time.Hour},
 		{name: "an unchanged incomplete update does not discover", op: admissionv1.Update, oldHardware: hardwareOfV1beta2(str("h100_sxm"), nil), hardware: hardwareOfV1beta2(str("h100_sxm"), nil), discoveryErr: errors.New("down")},
 		{name: "an update without a stored spec does not discover", op: admissionv1.Update, found: h200x8},
-		{name: "removing only the budget discovers only the budget", op: admissionv1.Update, oldHardware: completeH100, hardware: hardwareOfV1beta2(str("h100_sxm"), nil), found: h200x8, wantBudget: 8, wantCalls: 1, wantFilter: "h100_sxm"},
-		{name: "removing only the SKU discovers only the SKU", op: admissionv1.Update, oldHardware: completeH100, hardware: hardwareOfV1beta2(nil, num(4)), found: h200x8, wantSKU: "h200_sxm", wantCalls: 1},
-		{name: "removing all hardware discovers both fields", op: admissionv1.Update, oldHardware: completeH100, found: h200x8, wantSKU: "h200_sxm", wantBudget: 8, wantCalls: 1},
-		{name: "changing complete hardware keeps the explicit override", op: admissionv1.Update, oldHardware: completeH100, hardware: hardwareOfV1beta2(str("b200_sxm"), num(2)), discoveryErr: errors.New("down")},
+		{name: "removing only the budget discovers the budget", op: admissionv1.Update, oldHardware: completeH100, hardware: hardwareOfV1beta2(str("h100_sxm"), nil, num(8)), found: h200x8, wantBudget: 8, wantCalls: 1, wantFilter: "h100_sxm"},
+		{name: "removing only the SKU discovers the SKU", op: admissionv1.Update, oldHardware: completeH100, hardware: hardwareOfV1beta2(nil, num(4), num(8)), found: h200x8, wantSKU: "h200_sxm", wantCalls: 1},
+		{name: "removing all hardware discovers all fields", op: admissionv1.Update, oldHardware: completeH100, found: h200x8, wantSKU: "h200_sxm", wantBudget: 8, wantGPUsPerNode: 8, wantCalls: 1},
+		{name: "replacing hardware with an empty object opts out", op: admissionv1.Update, oldHardware: completeH100, hardware: &nvidiacomv1beta2.HardwareSpec{}, discoveryErr: errors.New("discovery must not run")},
+		{name: "changing complete hardware keeps the explicit override", op: admissionv1.Update, oldHardware: completeH100, hardware: hardwareOfV1beta2(str("b200_sxm"), num(2), num(8)), discoveryErr: errors.New("down")},
 		{name: "delete never discovers", op: admissionv1.Delete, oldHardware: completeH100, found: h200x8},
 		{name: "connect never discovers", op: admissionv1.Connect, oldHardware: completeH100, found: h200x8},
 		{name: "an unknown operation never discovers", oldHardware: completeH100, found: h200x8},
@@ -187,8 +222,8 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if err == nil && (got.sku != tt.wantSKU || got.budget != tt.wantBudget) {
-				t.Fatalf("defaults = %+v, want sku %q budget %d", got, tt.wantSKU, tt.wantBudget)
+			if err == nil && (got.sku != tt.wantSKU || got.budget != tt.wantBudget || got.numGPUsPerNode != tt.wantGPUsPerNode) {
+				t.Fatalf("defaults = %+v, want sku %q budget %d numGpusPerNode %d", got, tt.wantSKU, tt.wantBudget, tt.wantGPUsPerNode)
 			}
 			if probe.calls != tt.wantCalls {
 				t.Fatalf("discovery calls = %d, want %d", probe.calls, tt.wantCalls)
@@ -204,4 +239,36 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefaultHardwareSpecV1beta2(t *testing.T) {
+	t.Run("preserves the explicit empty-object opt-out", func(t *testing.T) {
+		hardware := &nvidiacomv1beta2.HardwareSpec{}
+		defaultHardwareSpecV1beta2(hardware, hardwareDefaultsV1beta2{})
+		if hardware.GPU != nil || hardware.NumGPUsPerNode != nil {
+			t.Fatalf("hardware = %#v, want the empty-object opt-out unchanged", hardware)
+		}
+	})
+
+	t.Run("persists every discovered field", func(t *testing.T) {
+		hardware := &nvidiacomv1beta2.HardwareSpec{}
+		defaultHardwareSpecV1beta2(hardware, hardwareDefaultsV1beta2{
+			sku: "h200_sxm", budget: 8, numGPUsPerNode: 8,
+		})
+		if hardware.GPU == nil || hardware.GPU.SKU == nil || *hardware.GPU.SKU != "h200_sxm" ||
+			hardware.GPU.Budget == nil || *hardware.GPU.Budget != 8 ||
+			hardware.NumGPUsPerNode == nil || *hardware.NumGPUsPerNode != 8 {
+			t.Fatalf("hardware = %#v, want every discovered field", hardware)
+		}
+	})
+
+	t.Run("preserves an explicit node width", func(t *testing.T) {
+		hardware := &nvidiacomv1beta2.HardwareSpec{NumGPUsPerNode: new(int32(4))}
+		defaultHardwareSpecV1beta2(hardware, hardwareDefaultsV1beta2{
+			sku: "h200_sxm", budget: 8, numGPUsPerNode: 8,
+		})
+		if hardware.NumGPUsPerNode == nil || *hardware.NumGPUsPerNode != 4 {
+			t.Fatalf("numGpusPerNode = %v, want explicit value 4", hardware.NumGPUsPerNode)
+		}
+	})
 }

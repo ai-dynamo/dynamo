@@ -31,10 +31,18 @@ Dynamo release includes `a100_pcie`, `a100_sxm`, `a30`, `b200_sxm`, `b300_sxm`,
 
 Admission passes an explicit SKU through unchanged. It warns when the bundled
 catalog does not contain that identifier, but does not reject it: an external
-AISimulate systems catalog may provide additional identifiers. Set both `sku`
-and `budget` to override cluster hardware discovery completely. With only an
-unknown explicit SKU, admission cannot associate discovered capacity with that
-identifier and rejects the request with instructions to set `budget` explicitly.
+AISimulate systems catalog may provide additional identifiers.
+
+Omit `hardware` to let admission discover and persist `sku`, `budget`, and
+`numGpusPerNode`. An exactly empty `hardware: {}` object opts out of all operator
+cluster and DCGM discovery and typed hardware defaults. Any nonempty object,
+including `hardware: {gpu: {}}`, is partial hardware intent: admission discovers
+and persists each missing field while preserving every explicit value. The Run
+controller never performs hardware discovery.
+
+Set all three values to bypass discovery with fully explicit hardware. An unknown
+SKU must provide both `budget` and `numGpusPerNode`, because admission cannot map
+that identifier to cluster capacity or topology.
 
 ```yaml
 apiVersion: nvidia.com/v1beta2
@@ -47,7 +55,25 @@ spec:
   hardware:
     gpu:
       sku: future_accelerator # Passed to AISimulate unchanged; admission warns if unknown.
-      budget: 8              # Makes the explicit hardware independent of cluster discovery.
+      budget: 8
+    numGpusPerNode: 8        # Completes explicit hardware; admission performs no discovery.
+```
+
+To leave the complete hardware input to AISimulate and `inputOverrides`, use the
+empty-object opt-out and supply both the upstream hardware selector and candidate
+GPU budget yourself. The operator does not validate this opaque input against the
+AISimulate schema yet; invalid or incomplete overrides fail during the Run.
+
+```yaml
+spec:
+  hardware: {}
+  aisimulate:
+    inputOverrides:
+      engine:
+        hardware: h200_sxm
+      optimization:
+        constraints:
+          max_candidate_gpus: 8
 ```
 
 ## Spec reference

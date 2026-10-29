@@ -48,27 +48,40 @@ type GPUHardwareSpec struct {
 	// `a30`, `b200_sxm`, `b300_sxm`, `b60`, `gb200`, `gb300`, `h100_pcie`,
 	// `h100_sxm`, `h200_sxm`, `l4`, `l40s`, and `rtx_pro_6000_server`.
 	// The field remains open so an external AISimulate systems catalog can add identifiers.
-	// Admission passes an unknown identifier through unchanged and warns when `budget` is also
-	// explicit. Without an explicit `budget`, it rejects the identifier because cluster discovery
-	// cannot associate capacity with it. When omitted, admission discovers the accelerator.
+	// Admission passes an unknown identifier through unchanged and warns when `budget` and the
+	// parent `numGpusPerNode` are also explicit. Without both, it rejects the identifier because
+	// cluster discovery cannot associate capacity or topology with it. When omitted from a
+	// nonempty hardware object, admission discovers the accelerator.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	SKU *string `json:"sku,omitempty"`
 
 	// Budget is the maximum total number of GPUs one candidate may use.
 	// When omitted for a known SKU, admission derives the available GPU budget from the cluster.
-	// An SKU unknown to the bundled AISimulate catalog requires an explicit `budget`.
+	// An SKU unknown to the bundled AISimulate catalog requires an explicit `budget` and an
+	// explicit `numGpusPerNode` in the parent hardware object.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	Budget *int32 `json:"budget,omitempty"`
 }
 
-// HardwareSpec bounds the accelerator configurations evaluated by the search.
+// HardwareSpec bounds the accelerator configurations evaluated by the search. An exactly empty
+// object opts out of operator cluster discovery and typed hardware defaults.
 type HardwareSpec struct {
 	// GPU describes accelerator identity and the maximum allocation per candidate.
-	// Admission resolves omitted fields from the cluster when the SKU is known.
+	// In a nonempty hardware object, admission resolves an omitted SKU or budget from the cluster.
 	// +optional
 	GPU *GPUHardwareSpec `json:"gpu,omitempty"`
+
+	// NumGPUsPerNode is the number of GPUs available to one candidate on each node. It lowers
+	// to AISimulate's num_gpus_per_node input.
+	// An explicit value is authoritative. In a nonempty hardware object, admission discovers
+	// an omitted value from the selected cluster node shape. The Run controller never discovers
+	// this value. An exactly empty hardware object opts out of all operator hardware discovery
+	// and typed hardware defaults, leaving AISimulate input and defaults authoritative.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
 }
 
 // KVCapacityFractionRange defines the searched fraction of a candidate's KV capacity.
@@ -260,7 +273,9 @@ type NativeSearchInput struct {
 	Backends []Backend `json:"backends,omitempty"`
 
 	// Hardware bounds the accelerator configurations evaluated by the search.
-	// Admission discovers any omitted hardware values from the cluster.
+	// When omitted, admission discovers SKU, budget and node width. An exactly empty object opts
+	// out of operator hardware discovery and typed defaults. Admission completes every nonempty
+	// object with any missing hardware values; explicit values remain authoritative.
 	// +optional
 	Hardware *HardwareSpec `json:"hardware,omitempty"`
 
