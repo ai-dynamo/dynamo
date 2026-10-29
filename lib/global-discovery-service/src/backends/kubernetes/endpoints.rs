@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 
 use crate::pool_discovery::{
-    Completeness, Directory, DiscoveryError, ReplicaEndpoint, ReplicaEvent, ReplicaId, Snapshot,
-    WatchEvent, WatchStream,
+    Completeness, Directory, DiscoveryError, RouterReplica, RouterReplicaEvent, RouterReplicaId,
+    Snapshot, WatchEvent, WatchStream,
 };
 use async_trait::async_trait;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
@@ -57,15 +57,15 @@ impl McsReplicaDirectory {
 }
 
 #[async_trait]
-impl Directory<ReplicaEndpoint, ReplicaId> for McsReplicaDirectory {
-    async fn list(&self) -> Result<Snapshot<ReplicaEndpoint>, DiscoveryError> {
+impl Directory<RouterReplica, RouterReplicaId> for McsReplicaDirectory {
+    async fn list(&self) -> Result<Snapshot<RouterReplica>, DiscoveryError> {
         self.0.list().await
     }
 
     async fn list_and_watch(
         &self,
         cancel_token: Option<CancellationToken>,
-    ) -> Result<WatchStream<ReplicaEndpoint, ReplicaId>, DiscoveryError> {
+    ) -> Result<WatchStream<RouterReplica, RouterReplicaId>, DiscoveryError> {
         self.0.list_and_watch(cancel_token).await
     }
 }
@@ -83,7 +83,7 @@ impl ReplicaNaming {
     /// Per-pod DNS names are not used: they exist only for pods with
     /// hostnames. `None` for a slice of another Service, a slice whose source
     /// cluster is unknown, or one without the named port.
-    fn replicas(&self, slice: &EndpointSlice) -> Option<Vec<ReplicaEndpoint>> {
+    fn replicas(&self, slice: &EndpointSlice) -> Option<Vec<RouterReplica>> {
         if mcs::service_name(self.mcs, slice) != Some(self.service.as_str()) {
             return None;
         }
@@ -111,8 +111,8 @@ impl ReplicaNaming {
                     .as_ref()
                     .and_then(|target| target.name.clone())
                     .unwrap_or_else(|| address.to_string());
-                Some(ReplicaEndpoint {
-                    replica: ReplicaId(format!("{cluster}/{name}")),
+                Some(RouterReplica {
+                    replica: RouterReplicaId(format!("{cluster}/{name}")),
                     url,
                 })
             })
@@ -124,16 +124,16 @@ impl ReplicaNaming {
 #[derive(Default)]
 struct ReplicaIndex {
     /// The replicas each slice lists.
-    slices: HashMap<SliceKey, Vec<ReplicaEndpoint>>,
+    slices: HashMap<SliceKey, Vec<RouterReplica>>,
     /// Every listed replica, with the slices that list it.
-    replicas: HashMap<ReplicaId, BTreeMap<SliceKey, ReplicaEndpoint>>,
+    replicas: HashMap<RouterReplicaId, BTreeMap<SliceKey, RouterReplica>>,
 }
 
 impl ReplicaIndex {
     /// A replica in several slices is served at its IPv4 address if it has
     /// one, as on a dual-stack cluster, so its URL does not depend on how the
     /// slices are named. Otherwise from the first slice in key order.
-    fn served(&self, id: &ReplicaId) -> Option<&ReplicaEndpoint> {
+    fn served(&self, id: &RouterReplicaId) -> Option<&RouterReplica> {
         let listed = self.replicas.get(id)?;
         listed
             .values()
@@ -143,12 +143,12 @@ impl ReplicaIndex {
 }
 
 impl SliceIndex for ReplicaIndex {
-    type Item = ReplicaEndpoint;
-    type Key = ReplicaId;
+    type Item = RouterReplica;
+    type Key = RouterReplicaId;
     type Rules = ReplicaNaming;
-    type Entry = Vec<ReplicaEndpoint>;
+    type Entry = Vec<RouterReplica>;
 
-    fn entry(naming: &ReplicaNaming, slice: &EndpointSlice) -> Option<Vec<ReplicaEndpoint>> {
+    fn entry(naming: &ReplicaNaming, slice: &EndpointSlice) -> Option<Vec<RouterReplica>> {
         naming.replicas(slice)
     }
 
@@ -157,16 +157,16 @@ impl SliceIndex for ReplicaIndex {
         &mut self,
         _naming: &ReplicaNaming,
         key: SliceKey,
-        entry: Option<Vec<ReplicaEndpoint>>,
-    ) -> Vec<ReplicaEvent> {
+        entry: Option<Vec<RouterReplica>>,
+    ) -> Vec<RouterReplicaEvent> {
         let old = self.slices.remove(&key).unwrap_or_default();
         let new = entry.unwrap_or_default();
-        let touched: HashSet<ReplicaId> = old
+        let touched: HashSet<RouterReplicaId> = old
             .iter()
             .chain(&new)
             .map(|endpoint| endpoint.replica.clone())
             .collect();
-        let before: Vec<(ReplicaId, Option<ReplicaEndpoint>)> = touched
+        let before: Vec<(RouterReplicaId, Option<RouterReplica>)> = touched
             .into_iter()
             .map(|id| {
                 let served = self.served(&id).cloned();
@@ -195,18 +195,14 @@ impl SliceIndex for ReplicaIndex {
             .filter_map(|(id, before)| match (before, self.served(&id)) {
                 (Some(_), None) => Some(WatchEvent::Removed(id)),
                 (before, Some(after)) if before.as_ref() != Some(after) => {
-                    Some(WatchEvent::Added(after.clone()))
+                    Some(WatchEvent::Upserted(after.clone()))
                 }
                 _ => None,
             })
             .collect()
     }
 
-    fn replace(
-        &mut self,
-        _naming: &ReplicaNaming,
-        entries: HashMap<SliceKey, Vec<ReplicaEndpoint>>,
-    ) {
+    fn replace(&mut self, _naming: &ReplicaNaming, entries: HashMap<SliceKey, Vec<RouterReplica>>) {
         self.replicas.clear();
         for (key, endpoints) in &entries {
             for endpoint in endpoints {
@@ -222,7 +218,7 @@ impl SliceIndex for ReplicaIndex {
             .collect();
     }
 
-    fn snapshot(&self) -> Snapshot<ReplicaEndpoint> {
+    fn snapshot(&self) -> Snapshot<RouterReplica> {
         Snapshot {
             items: self
                 .replicas
@@ -320,8 +316,8 @@ mod tests {
         cache.apply(watcher::Event::InitDone);
     }
 
-    fn id(name: &str) -> ReplicaId {
-        ReplicaId(name.to_owned())
+    fn id(name: &str) -> RouterReplicaId {
+        RouterReplicaId(name.to_owned())
     }
 
     /// Served replicas as (id, URL), sorted.
@@ -419,7 +415,7 @@ mod tests {
         );
         cache.apply(watcher::Event::Apply(one.clone()));
         assert!(
-            matches!(events.try_recv().unwrap(), WatchEvent::Added(e) if e.replica == id("ohio/global-router-0"))
+            matches!(events.try_recv().unwrap(), WatchEvent::Upserted(e) if e.replica == id("ohio/global-router-0"))
         );
         // The same slice again changes nothing.
         cache.apply(watcher::Event::Apply(one.clone()));
@@ -431,7 +427,7 @@ mod tests {
             &[("10.42.0.9", Some(true), Some("global-router-0"))],
         )));
         assert!(
-            matches!(events.try_recv().unwrap(), WatchEvent::Added(e) if e.url.as_str() == "http://10.42.0.9:50051/")
+            matches!(events.try_recv().unwrap(), WatchEvent::Upserted(e) if e.url.as_str() == "http://10.42.0.9:50051/")
         );
         // It stops being Ready.
         cache.apply(watcher::Event::Apply(slice(
@@ -539,7 +535,7 @@ mod tests {
         let WatchEvent::Resync(snapshot) = events.try_recv().unwrap() else {
             panic!("expected Resync");
         };
-        let ids: Vec<ReplicaId> = snapshot.items.into_iter().map(|e| e.replica).collect();
+        let ids: Vec<RouterReplicaId> = snapshot.items.into_iter().map(|e| e.replica).collect();
         assert_eq!(ids, [id("west/global-router-1")]);
         assert_eq!(
             served(&cache),

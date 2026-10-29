@@ -127,6 +127,22 @@ class PlannerPreDeploymentSweepMode(str, Enum):
     Thorough = "thorough"
 
 
+class AISDatasetProfileSpec(BaseModel):
+    """One execution-profile manifest in an already downloaded local dataset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    root: str = Field(min_length=1)
+    manifest: str = Field(min_length=1)
+
+    @field_validator("root")
+    @classmethod
+    def absolute_root(cls, value: str) -> str:
+        if not Path(value).is_absolute():
+            raise ValueError("dataset root must be an absolute local path")
+        return value
+
+
 class AISPerfModelSpec(BaseModel):
     """Role-indexed AISimulate canonical configurations.
 
@@ -136,7 +152,18 @@ class AISPerfModelSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    roles: dict[Literal["prefill", "decode", "aggregated"], dict[str, Any]]
+    roles: dict[Literal["prefill", "decode", "aggregated"], dict[str, Any]] = Field(
+        default_factory=dict
+    )
+    dataset_profiles: dict[
+        Literal["prefill", "decode", "aggregated"], AISDatasetProfileSpec
+    ] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def distinct_sources(self):
+        if self.roles.keys() & self.dataset_profiles.keys():
+            raise ValueError("each AIS role must have exactly one configuration source")
+        return self
 
     @field_validator("roles")
     @classmethod
@@ -1822,9 +1849,13 @@ class PlannerConfig(BaseModel):
                 "agg": ("aggregated",),
             }[self.mode]
             for role in required_roles:
-                if role not in self.ais_perf_model.roles:
+                if (
+                    role not in self.ais_perf_model.roles
+                    and role not in self.ais_perf_model.dataset_profiles
+                ):
                     raise ValueError(
-                        f"ais_perf_model.roles.{role} is required for mode={self.mode!r}"
+                        f"ais_perf_model.roles.{role} or dataset_profiles.{role} "
+                        f"is required for mode={self.mode!r}"
                     )
 
         intervals = [float(self.load_adjustment_interval_seconds)]
