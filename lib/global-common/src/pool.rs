@@ -30,21 +30,24 @@ impl fmt::Display for PoolId {
 
 /// Stable deployment coordinates that a [`PoolIdDeriver`] turns into a [`PoolId`].
 ///
-/// `namespace` is the Kubernetes namespace containing the DGD, not the
-/// Dynamo runtime namespace derived by the operator. In JSON it is
-/// `{"site_id", "namespace", "dgd_name"}`, and reading it checks each field as
-/// [`PoolKey::new`] does.
+/// `cluster_id` is the cluster ID the pool's PoolRelay runs with
+/// (`--cluster-id`, `DYN_CLUSTER_ID`). Where MCS also reports the pool, that
+/// ID must be the cluster's name in the ClusterSet, so a registration and the
+/// pool MCS reports have one key. `namespace` is the Kubernetes namespace
+/// containing the DGD, not the Dynamo runtime namespace derived by the
+/// operator. In JSON it is `{"cluster_id", "namespace", "dgd_name"}`, and
+/// reading it checks each field as [`PoolKey::new`] does.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "PoolKeyFields", into = "PoolKeyFields")]
 pub struct PoolKey {
-    site_id: String,
+    cluster_id: String,
     namespace: String,
     dgd_name: String,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PoolKeyFields {
-    site_id: String,
+    cluster_id: String,
     namespace: String,
     dgd_name: String,
 }
@@ -53,14 +56,14 @@ impl TryFrom<PoolKeyFields> for PoolKey {
     type Error = PoolKeyError;
 
     fn try_from(fields: PoolKeyFields) -> Result<Self, Self::Error> {
-        Self::new(fields.site_id, fields.namespace, fields.dgd_name)
+        Self::new(fields.cluster_id, fields.namespace, fields.dgd_name)
     }
 }
 
 impl From<PoolKey> for PoolKeyFields {
     fn from(key: PoolKey) -> Self {
         Self {
-            site_id: key.site_id,
+            cluster_id: key.cluster_id,
             namespace: key.namespace,
             dgd_name: key.dgd_name,
         }
@@ -75,25 +78,25 @@ pub enum PoolKeyError {
 
 impl PoolKey {
     pub fn new(
-        site_id: impl Into<String>,
+        cluster_id: impl Into<String>,
         namespace: impl Into<String>,
         dgd_name: impl Into<String>,
     ) -> Result<Self, PoolKeyError> {
-        let site_id = site_id.into();
+        let cluster_id = cluster_id.into();
         let namespace = namespace.into();
         let dgd_name = dgd_name.into();
-        validate(&site_id, "site_id")?;
+        validate(&cluster_id, "cluster_id")?;
         validate(&namespace, "namespace")?;
         validate(&dgd_name, "dgd_name")?;
         Ok(Self {
-            site_id,
+            cluster_id,
             namespace,
             dgd_name,
         })
     }
 
-    pub fn site_id(&self) -> &str {
-        &self.site_id
+    pub fn cluster_id(&self) -> &str {
+        &self.cluster_id
     }
 
     pub fn namespace(&self) -> &str {
@@ -128,7 +131,7 @@ pub struct V1PoolIdDeriver;
 impl PoolIdDeriver for V1PoolIdDeriver {
     fn derive(&self, key: &PoolKey) -> PoolId {
         let mut hasher = blake3::Hasher::new_derive_key("dynamo.global_view.pool_id.v1");
-        for part in [&key.site_id, &key.namespace, &key.dgd_name] {
+        for part in [&key.cluster_id, &key.namespace, &key.dgd_name] {
             let bytes = part.as_bytes();
             hasher.update(&(bytes.len() as u64).to_be_bytes());
             hasher.update(bytes);
@@ -137,11 +140,11 @@ impl PoolIdDeriver for V1PoolIdDeriver {
     }
 }
 
+/// The cluster a pool runs in is [`PoolKey::cluster_id`], not a field here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolLocation {
     pub region: String,
     pub availability_zone: Option<String>,
-    pub cluster: Option<String>,
     pub datacenter: Option<String>,
 }
 
@@ -149,14 +152,13 @@ pub struct PoolLocation {
 mod tests {
     use super::*;
 
-    fn key(site: &str, namespace: &str, dgd: &str) -> PoolKey {
-        PoolKey::new(site, namespace, dgd).unwrap()
+    fn key(cluster: &str, namespace: &str, dgd: &str) -> PoolKey {
+        PoolKey::new(cluster, namespace, dgd).unwrap()
     }
 
     #[test]
     fn identity_survives_deriver_restart() {
         let pool = key("ohio", "dynamo", "mocker-1");
-        assert_eq!(V1PoolIdDeriver.derive(&pool), V1PoolIdDeriver.derive(&pool));
         // Pinned: changing the derivation changes every deployed pool's ID.
         assert_eq!(
             V1PoolIdDeriver.derive(&pool).as_str(),
@@ -190,7 +192,9 @@ mod tests {
     fn rejects_invalid_coordinates() {
         assert_eq!(
             PoolKey::new("", "dynamo", "mocker-1"),
-            Err(PoolKeyError::InvalidField { field: "site_id" })
+            Err(PoolKeyError::InvalidField {
+                field: "cluster_id"
+            })
         );
         assert_eq!(
             PoolKey::new("ohio", " dynamo", "mocker-1"),
@@ -211,12 +215,11 @@ mod tests {
     #[test]
     fn key_json_is_checked_when_read() {
         let pool = key("ohio", "dynamo", "mocker-1");
-        let json =
-            serde_json::json!({"site_id": "ohio", "namespace": "dynamo", "dgd_name": "mocker-1"});
+        let json = serde_json::json!({"cluster_id": "ohio", "namespace": "dynamo", "dgd_name": "mocker-1"});
         assert_eq!(serde_json::to_value(&pool).unwrap(), json);
         assert_eq!(serde_json::from_value::<PoolKey>(json).unwrap(), pool);
         let invalid =
-            serde_json::json!({"site_id": " ", "namespace": "dynamo", "dgd_name": "mocker-1"});
+            serde_json::json!({"cluster_id": " ", "namespace": "dynamo", "dgd_name": "mocker-1"});
         assert!(serde_json::from_value::<PoolKey>(invalid).is_err());
     }
 }
