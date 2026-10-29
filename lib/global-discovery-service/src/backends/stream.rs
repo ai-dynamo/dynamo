@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The list-and-watch stream every directory here serves: one `Added` per
+//! The list-and-watch stream every directory here serves: one `Upserted` per
 //! current item, then a `Resync` with the same set, then changes. A
 //! subscriber that falls behind gets a fresh `Resync`.
 
@@ -84,7 +84,7 @@ fn initial_events<T: Clone, K>(snapshot: Snapshot<T>) -> Vec<WatchEvent<T, K>> {
         .items
         .iter()
         .cloned()
-        .map(WatchEvent::Added)
+        .map(WatchEvent::Upserted)
         .collect();
     events.push(WatchEvent::Resync(snapshot));
     events
@@ -121,7 +121,7 @@ mod tests {
         );
         assert!(matches!(
             stream.next().await,
-            Some(Ok(WatchEvent::Added(1)))
+            Some(Ok(WatchEvent::Upserted(1)))
         ));
         assert!(matches!(
             stream.next().await,
@@ -131,7 +131,7 @@ mod tests {
         // Three changes overflow the two-event buffer.
         for item in 2..5 {
             items.lock().unwrap().push(item);
-            events.send(WatchEvent::Added(item)).unwrap();
+            events.send(WatchEvent::Upserted(item)).unwrap();
         }
         let Some(Ok(WatchEvent::Resync(snapshot))) = stream.next().await else {
             panic!("expected a fresh Resync");

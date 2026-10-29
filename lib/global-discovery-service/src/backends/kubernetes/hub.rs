@@ -103,7 +103,6 @@ fn location(cluster: &str) -> PoolLocation {
     PoolLocation {
         region: cluster.to_owned(),
         availability_zone: None,
-        cluster: Some(cluster.to_owned()),
         datacenter: None,
     }
 }
@@ -256,7 +255,7 @@ impl PoolIndex {
         };
         let listing = PoolListing {
             key: key.clone(),
-            location: location(key.site_id()),
+            location: location(key.cluster_id()),
             model: None,
             capabilities: Vec::new(),
             frontends: Vec::new(),
@@ -267,7 +266,7 @@ impl PoolIndex {
             return None;
         }
         state.listing = Some(listing.clone());
-        Some(WatchEvent::Added(listing))
+        Some(WatchEvent::Upserted(listing))
     }
 }
 
@@ -454,7 +453,6 @@ mod tests {
         );
         let listing = listing(&cache, &key("west", "mocker")).expect("live pool");
         assert_eq!(listing.location.region, "west");
-        assert_eq!(listing.location.cluster.as_deref(), Some("west"));
         assert_eq!(listing.relay_identities, ["ip:10.43.66.175"]);
         assert_eq!(listing.model, None);
     }
@@ -527,7 +525,10 @@ mod tests {
 
         let live = slice("west", "mocker", "a1b2c", &[("10.43.0.1", true)]);
         cache.apply(watcher::Event::Apply(live.clone()));
-        assert!(matches!(events.try_recv().unwrap(), WatchEvent::Added(_)));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            WatchEvent::Upserted(_)
+        ));
         // The same slice again changes nothing.
         cache.apply(watcher::Event::Apply(live.clone()));
         assert!(events.try_recv().is_err());
@@ -543,7 +544,10 @@ mod tests {
         );
         // Ready again.
         cache.apply(watcher::Event::Apply(live.clone()));
-        assert!(matches!(events.try_recv().unwrap(), WatchEvent::Added(_)));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            WatchEvent::Upserted(_)
+        ));
         cache.apply(watcher::Event::Delete(live));
         assert!(matches!(events.try_recv().unwrap(), WatchEvent::Removed(_)));
         assert!(cache.read().index.pools.is_empty());
@@ -764,7 +768,7 @@ mod tests {
         );
         assert!(matches!(
             stream.next().await,
-            Some(Ok(WatchEvent::Added(_)))
+            Some(Ok(WatchEvent::Upserted(_)))
         ));
         assert!(
             matches!(stream.next().await, Some(Ok(WatchEvent::Resync(s))) if s.items.len() == 1)
@@ -792,7 +796,7 @@ mod tests {
         );
         let mut stream = cache.subscribe(CancellationToken::new(), CancellationToken::new());
         assert!(
-            matches!(stream.next().await, Some(Ok(WatchEvent::Added(r))) if r.key == key("west", "mocker"))
+            matches!(stream.next().await, Some(Ok(WatchEvent::Upserted(r))) if r.key == key("west", "mocker"))
         );
         assert!(matches!(
             stream.next().await,
