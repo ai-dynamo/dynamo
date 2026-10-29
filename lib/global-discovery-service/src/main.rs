@@ -37,7 +37,7 @@ use dynamo_global_discovery_service::peers::PeerSync;
 use dynamo_global_discovery_service::pool_discovery::{
     PoolDirectory, PoolRegistrar, RouterReplica, RouterReplicaId,
 };
-use dynamo_global_discovery_service::service::{self, DiscoveryBackend, Tls};
+use dynamo_global_discovery_service::service::{self, PoolDiscoveryBackend, Tls};
 use kube::Client;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -124,13 +124,13 @@ struct Args {
     #[arg(long, default_value = "http", help_heading = WITH_MCS)]
     frontend_port_name: String,
     /// Namespace of the Global Router Service.
-    #[arg(long, help_heading = WITH_MCS)]
+    #[arg(long, help_heading = WITH_MCS, required_if_eq_any = MCS_VALUES)]
     router_namespace: Option<String>,
     /// The Global Router Service, exported through MCS.
-    #[arg(long, help_heading = WITH_MCS)]
+    #[arg(long, help_heading = WITH_MCS, required_if_eq_any = MCS_VALUES)]
     router_service: Option<String>,
     /// The router Service's named port for state streams.
-    #[arg(long, help_heading = WITH_MCS)]
+    #[arg(long, help_heading = WITH_MCS, required_if_eq_any = MCS_VALUES)]
     router_port_name: Option<String>,
     /// This service's own Service, exported through MCS. With it, the
     /// instances in every cluster share their registrations, over plain
@@ -141,12 +141,21 @@ struct Args {
     #[arg(long, help_heading = WITH_MCS)]
     peer_service: Option<String>,
     /// Namespace of `--peer-service`. Defaults to `--router-namespace`.
-    #[arg(long, help_heading = WITH_MCS)]
+    #[arg(long, help_heading = WITH_MCS, requires = "peer_service")]
     peer_namespace: Option<String>,
     /// The named HTTP port of `--peer-service`.
-    #[arg(long, default_value = "http", help_heading = WITH_MCS)]
+    #[arg(
+        long,
+        default_value = "http",
+        help_heading = WITH_MCS,
+        requires = "peer_service"
+    )]
     peer_port_name: String,
 }
+
+/// The `--pool-discovery` values that read MCS, for clap's
+/// `required_if_eq_any`.
+const MCS_VALUES: [(&str, &str); 2] = [("pool_discovery", "karmada"), ("pool_discovery", "mcs")];
 
 /// Where the pool and router lists come from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -186,8 +195,9 @@ fn parse_router(value: &str) -> Result<RouterReplica, String> {
     })
 }
 
-/// Parses the flags. A flag under the `--help` heading of another
-/// `--pool-discovery` value fails, as clap's own errors do.
+/// Parses the flags. A flag set under the `--help` heading of another
+/// `--pool-discovery` value fails, as clap's own errors do. A flag left at
+/// its default is not refused.
 fn parse_args<I, T>(args: I) -> Result<Args, clap::Error>
 where
     I: IntoIterator<Item = T>,
@@ -204,10 +214,11 @@ where
         .get_arguments()
         .find(|arg| {
             arg.get_help_heading() == Some(refused)
-                && matches.value_source(arg.get_id().as_str()) == Some(ValueSource::CommandLine)
+                && matches
+                    .value_source(arg.get_id().as_str())
+                    .is_some_and(|source| source != ValueSource::DefaultValue)
         })
-        .and_then(|arg| arg.get_long())
-        .map(str::to_owned);
+        .map(|arg| arg.get_long().unwrap_or(arg.get_id().as_str()).to_owned());
     match given {
         Some(flag) => Err(command.error(
             ErrorKind::ArgumentConflict,
@@ -260,7 +271,7 @@ fn registration_storage(args: &Args, lease: Lease) -> Arc<MemoryPoolStore> {
 }
 
 /// Pools from registrations; router replicas from `--router`.
-fn registrations_backend(args: &Args) -> Result<DiscoveryBackend> {
+fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
     let registrations = registration_storage(args, lease(args)?);
     let mut ids = HashSet::new();
     if let Some(repeated) = args
@@ -272,7 +283,7 @@ fn registrations_backend(args: &Args) -> Result<DiscoveryBackend> {
     }
     let pools: Arc<PoolDirectory> = registrations.clone();
     let registrar: Arc<dyn PoolRegistrar> = registrations;
-    Ok(DiscoveryBackend {
+    Ok(PoolDiscoveryBackend {
         pools,
         routers: Arc::new(StaticReplicaDirectory::new(args.routers.clone())),
         registrar: Some(registrar),
@@ -289,7 +300,7 @@ async fn mcs_backend(
     args: &Args,
     mcs: McsImplementation,
     shutdown: &CancellationToken,
-) -> Result<DiscoveryBackend> {
+) -> Result<PoolDiscoveryBackend> {
     let (Some(namespace), Some(name), Some(port_name)) = (
         &args.router_namespace,
         &args.router_service,
@@ -363,7 +374,7 @@ async fn mcs_backend(
         port_name: port_name.clone(),
     };
     let registrar: Arc<dyn PoolRegistrar> = registrations;
-    Ok(DiscoveryBackend {
+    Ok(PoolDiscoveryBackend {
         pools: Arc::new(pools),
         routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
         registrar: Some(registrar),
@@ -408,6 +419,31 @@ mod tests {
 
     const ROUTER: &str = "--router=aws-ohio/global-router-0=http://10.42.0.5:50051";
 
+    /// `--pool-discovery karmada` with the router flags it needs, then `extra`.
+    fn karmada<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+        let mut args = vec![
+            "gds",
+            "--pool-discovery",
+            "karmada",
+            "--router-namespace",
+            "global-discovery",
+            "--router-service",
+            "global-router",
+            "--router-port-name",
+            "http",
+        ];
+        args.extend_from_slice(extra);
+        args
+    }
+
+    /// `args` fail because `--{flag}` works only with `--pool-discovery {values}`.
+    fn assert_refused(args: &[&str], flag: &str, values: &str) {
+        let error = parse_args(args.iter().copied()).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
+        let reason = format!("--{flag} works only with --pool-discovery {values}");
+        assert!(error.to_string().contains(&reason), "{error}");
+    }
+
     #[test]
     fn pools_come_from_registrations_kept_in_memory_by_default() {
         let args = parse_args(["gds"]).unwrap();
@@ -416,59 +452,108 @@ mod tests {
     }
 
     #[test]
+    fn every_flag_says_which_pool_discovery_it_works_with() {
+        // The flags that work with every --pool-discovery value. Any other
+        // flag needs one of the two headings, which `parse_args` enforces.
+        const EVERY_VALUE: &[&str] = &[
+            "listen",
+            "tls_cert_path",
+            "tls_key_path",
+            "tls_client_ca_cert_path",
+            "pool_discovery",
+            "registration_storage",
+            "heartbeat_interval_secs",
+            "lease_duration_secs",
+            "help",
+        ];
+        for arg in Args::command().get_arguments() {
+            let id = arg.get_id().as_str();
+            let headed = matches!(arg.get_help_heading(), Some(WITH_REGISTRATIONS | WITH_MCS));
+            assert_ne!(
+                EVERY_VALUE.contains(&id),
+                headed,
+                "--{id}: list it in EVERY_VALUE or give it a --pool-discovery heading"
+            );
+        }
+    }
+
+    #[test]
+    fn mcs_needs_the_router_service() {
+        let error = parse_args(["gds", "--pool-discovery", "mcs"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument, "{error}");
+        let all = karmada(&[]);
+        assert!(parse_args(all.clone()).is_ok());
+        for flag in [
+            "--router-namespace",
+            "--router-service",
+            "--router-port-name",
+        ] {
+            let mut args = all.clone();
+            let at = args.iter().position(|arg| *arg == flag).unwrap();
+            args.drain(at..at + 2);
+            let error = parse_args(args).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument, "{error}");
+            assert!(error.to_string().contains(flag), "{error}");
+        }
+    }
+
+    #[test]
+    fn peer_flags_need_peer_service() {
+        for flag in ["--peer-namespace=other", "--peer-port-name=grpc"] {
+            let error = parse_args(karmada(&[flag])).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument, "{error}");
+            assert!(error.to_string().contains("--peer-service"), "{error}");
+            assert!(parse_args(karmada(&["--peer-service=gds", flag])).is_ok());
+        }
+    }
+
+    #[test]
     fn a_flag_for_another_pool_discovery_fails() {
         assert!(parse_args(["gds", ROUTER]).is_ok());
-        let error = parse_args(["gds", "--pool-discovery", "karmada", ROUTER]).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("--router works only with --pool-discovery registrations"),
-            "{error}"
+        assert_refused(&karmada(&[ROUTER]), "router", "registrations");
+        assert_refused(
+            &["gds", "--router-service", "global-router"],
+            "router-service",
+            "karmada or mcs",
         );
-        assert!(
-            parse_args([
-                "gds",
-                "--pool-discovery",
-                "mcs",
-                "--router-service",
-                "global-router"
-            ])
-            .is_ok()
+        assert_refused(
+            &["gds", "--frontend-service-suffix=-web"],
+            "frontend-service-suffix",
+            "karmada or mcs",
         );
-        assert!(parse_args(["gds", "--router-service", "global-router"]).is_err());
-        assert!(parse_args(["gds", "--peer-service", "global-discovery-service"]).is_err());
+        assert_refused(
+            &["gds", "--peer-service", "global-discovery-service"],
+            "peer-service",
+            "karmada or mcs",
+        );
         // Every --pool-discovery value takes registrations.
         assert!(
-            parse_args([
-                "gds",
-                "--pool-discovery",
-                "karmada",
+            parse_args(karmada(&[
                 "--lease-duration-secs",
-                "30"
-            ])
+                "30",
+                "--registration-storage",
+                "memory"
+            ]))
             .is_ok()
         );
-        // A flag left at its default is not refused.
-        assert!(parse_args(["gds", "--pool-discovery", "karmada"]).is_ok());
+        // Flags left at their defaults are not refused, whatever their heading.
+        assert!(parse_args(karmada(&[])).is_ok());
     }
 
     #[test]
     fn service_suffixes_can_start_with_a_hyphen_but_not_be_empty() {
-        let args = parse_args([
-            "gds",
-            "--pool-discovery",
-            "karmada",
+        let args = parse_args(karmada(&[
             "--pool-service-suffix",
             "-pool-gateway",
             "--frontend-service-suffix",
             "-web",
-        ])
+        ]))
         .unwrap();
         assert_eq!(args.pool_service_suffix, "-pool-gateway");
         assert_eq!(args.frontend_service_suffix, "-web");
         // An empty suffix would make every imported Service a pool.
         for empty in ["--pool-service-suffix=", "--frontend-service-suffix="] {
-            assert!(parse_args(["gds", "--pool-discovery", "karmada", empty]).is_err());
+            assert!(parse_args(karmada(&[empty])).is_err());
         }
     }
 

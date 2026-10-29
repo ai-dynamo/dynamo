@@ -232,7 +232,7 @@ mod tests {
     use super::*;
     use crate::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
     use crate::pool_discovery::{Directory, PoolDirectory, PoolRegistrar, PoolRegistration};
-    use crate::service::{self, DiscoveryBackend};
+    use crate::service::{self, PoolDiscoveryBackend};
 
     /// A PoolRelay registers every second, and a registration lasts three.
     fn lease() -> Lease {
@@ -263,7 +263,7 @@ mod tests {
         let registrar: Arc<dyn PoolRegistrar> = store.clone();
         tokio::spawn(service::serve(
             listener,
-            DiscoveryBackend {
+            PoolDiscoveryBackend {
                 pools,
                 routers: Arc::new(StaticReplicaDirectory::new(Vec::new())),
                 registrar: Some(registrar),

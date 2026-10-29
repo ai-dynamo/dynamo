@@ -4,9 +4,8 @@
 //! Pool discovery for the Global Router, served over HTTP.
 //!
 //! The contract comes first:
-//! - [`service`]: the HTTP API (`POST /pools`, `GET /pools`, `GET /routers`,
-//!   `GET /healthz`), whose JSON types are in `dynamo_global_common`, and
-//!   [`DiscoveryBackend`], the backend behind it.
+//! - [`service`]: the HTTP API, whose JSON types are in `dynamo_global_common`,
+//!   and [`PoolDiscoveryBackend`], the backend behind it.
 //! - [`pool_discovery`]: the traits that backend is built from.
 //!
 //! [`backends`] implements those traits: registrations kept in memory, and
@@ -18,4 +17,4 @@ pub mod peers;
 pub mod pool_discovery;
 pub mod service;
 
-pub use service::{DiscoveryBackend, Tls, routes, serve};
+pub use service::{PoolDiscoveryBackend, Tls, routes, serve};

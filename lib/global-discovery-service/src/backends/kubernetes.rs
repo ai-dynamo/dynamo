@@ -37,7 +37,7 @@
 //! ```ignore
 //! let registrations = Arc::new(MemoryPoolStore::new(lease));
 //! let imported = McsPoolDirectory::new(client.clone(), mcs, suffix, frontends)?;
-//! let backend = DiscoveryBackend {
+//! let backend = PoolDiscoveryBackend {
 //!     pools: Arc::new(RegisteredPoolDirectory::new(Arc::new(imported), registrations.clone(), lease)),
 //!     routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
 //!     registrar: Some(registrations),
