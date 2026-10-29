@@ -200,7 +200,8 @@ fn parse_router(value: &str) -> Result<RouterReplica, String> {
 
 /// Parses the flags. A flag set under the `--help` heading of another
 /// `--pool-discovery` value fails, as clap's own errors do. A flag left at
-/// its default is not refused.
+/// its default is not refused. The checks that span flags are here too, so
+/// that every flag mistake gets clap's usage and exit code.
 fn parse_args<I, T>(args: I) -> Result<Args, clap::Error>
 where
     I: IntoIterator<Item = T>,
@@ -226,6 +227,23 @@ where
         return Err(command.error(
             ErrorKind::ArgumentConflict,
             format!("--{flag} works only {}", refused.to_lowercase()),
+        ));
+    }
+    if let Err(error) = Lease::new(parsed.heartbeat_interval_secs, parsed.lease_duration_secs) {
+        return Err(command.error(
+            ErrorKind::ValueValidation,
+            format!("check --heartbeat-interval-secs and --lease-duration-secs: {error}"),
+        ));
+    }
+    let mut ids = HashSet::new();
+    if let Some(repeated) = parsed
+        .routers
+        .iter()
+        .find(|router| !ids.insert(&router.replica))
+    {
+        return Err(command.error(
+            ErrorKind::ValueValidation,
+            format!("--router {} is given twice", repeated.replica.0),
         ));
     }
     // Karmada imports no Service with a longer name, and the API server
@@ -277,13 +295,11 @@ fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
     let registrations = match args.registration_storage {
         RegistrationStorage::Memory => Arc::new(MemoryPoolStore::new(lease)),
     };
-    let mut ids = HashSet::new();
-    if let Some(repeated) = args
-        .routers
-        .iter()
-        .find(|router| !ids.insert(&router.replica))
-    {
-        bail!("--router {} is given twice", repeated.replica.0);
+    if args.routers.is_empty() {
+        tracing::warn!(
+            "no --router given, so GET /routers lists no Global Router replica for PoolRelays to \
+             connect to"
+        );
     }
     let pools: Arc<PoolDirectory> = registrations.clone();
     let registrar: Arc<dyn PoolRegistrar> = registrations;
@@ -537,6 +553,24 @@ mod tests {
             "mailto:x@y",
         ] {
             assert!(parse_router(&format!("r0={url}")).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_bad_lease_or_a_repeated_router_is_a_usage_error() {
+        for args in [
+            // The default lease is 15 s.
+            vec!["gds", "--heartbeat-interval-secs", "20"],
+            vec!["gds", "--lease-duration-secs", "0"],
+            vec!["gds", ROUTER, ROUTER],
+        ] {
+            let error = parse_args(args.clone()).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                ErrorKind::ValueValidation,
+                "{args:?}: {error}"
+            );
+            assert_eq!(error.exit_code(), 2, "{args:?}");
         }
     }
 

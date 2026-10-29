@@ -166,9 +166,12 @@ fn error_response(error: DiscoveryError) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use crate::pool_discovery::{Directory, RouterReplica, RouterReplicaId, Snapshot, WatchStream};
     use async_trait::async_trait;
     use dynamo_global_common::Lease;
+    use dynamo_global_discovery_client::GlobalDiscoveryClient;
     use serde_json::{Value, json};
     use url::Url;
 
@@ -267,6 +270,22 @@ mod tests {
                 "complete": false
             })
         );
+        shutdown.cancel();
+    }
+
+    /// The real client against the real routes, so that the two cannot
+    /// drift apart while both test suites pass.
+    #[tokio::test]
+    async fn the_discovery_client_registers_and_lists_routers() {
+        let (base, shutdown) = start(registrations_backend()).await;
+        let client =
+            GlobalDiscoveryClient::new(Url::parse(&base).unwrap(), Duration::from_secs(5)).unwrap();
+        let pool: PoolRegistration = serde_json::from_value(registration()).unwrap();
+        let lease = client.register_pool(&pool).await.unwrap();
+        assert_eq!(lease, Lease::new(5, 15).unwrap());
+        assert_eq!(client.routers().await.unwrap(), vec![router_replica()]);
+        let (_, pools) = get_json(&base, "/pools").await;
+        assert_eq!(pools["pools"][0]["key"], registration()["key"]);
         shutdown.cancel();
     }
 
