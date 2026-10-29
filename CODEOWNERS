@@ -582,6 +582,7 @@ requirements.txt                                                                
 /lib/llm/src/block_manager/controller.rs                                                                @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/common/multimodal/                                                               @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/trtllm/multimodal/                                                               @ai-dynamo/dynamo-multimodal-codeowners
+/deploy/helm/charts/global-discovery-mcs/                                                               @ai-dynamo/dynamo-global-router-codeowners
 /deploy/operator/internal/controller/lpx/                                                               @ai-dynamo/dynamo-lpx-codeowners
 /lib/llm/src/block_manager/distributed.rs                                                               @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/bindings/python/rust/llm/pool_relay.rs                                                             @ai-dynamo/dynamo-global-router-codeowners

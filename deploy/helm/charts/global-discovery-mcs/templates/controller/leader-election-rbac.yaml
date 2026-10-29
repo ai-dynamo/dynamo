@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if and .Values.controller.enabled .Values.controller.leaderElect .Values.rbac.create }}
+# Leader election: the Lease mcs-controller.dynamo.nvidia.com in the release
+# namespace (--operator-namespace, from POD_NAMESPACE) and its Events.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "global-discovery-mcs.controller.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "global-discovery-mcs.componentLabels" (dict "context" . "component" "controller") | nindent 4 }}
+rules:
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+      - events.k8s.io
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "global-discovery-mcs.controller.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "global-discovery-mcs.componentLabels" (dict "context" . "component" "controller") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "global-discovery-mcs.controller.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "global-discovery-mcs.controller.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
