@@ -354,7 +354,9 @@ impl RoutingHost {
         let target_for_worker = |worker_id| {
             AffinityTarget::new(
                 worker_id,
-                soft_affinity_target.and_then(|target| target.dp_rank),
+                soft_affinity_target
+                    .filter(|target| target.worker_id == worker_id)
+                    .and_then(|target| target.dp_rank),
             )
         };
         let uses_occupancy = self
