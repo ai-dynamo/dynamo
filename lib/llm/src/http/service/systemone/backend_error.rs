@@ -8,9 +8,20 @@ use super::{
     DispatchError,
 };
 
-pub(super) fn classify(cause: &(dyn std::error::Error + 'static)) -> DispatchError {
+pub(super) fn classify(
+    cause: &(dyn std::error::Error + 'static),
+    is_pinned: bool,
+) -> DispatchError {
     if metrics::request_was_cancelled(cause) {
         return DispatchError::cancelled();
+    }
+    if is_pinned
+        && std::iter::successors(Some(cause), |error| error.source())
+            .any(|error| error.is::<crate::kv_router::UnknownWorkerTarget>())
+    {
+        return DispatchError::unavailable(
+            "server-selected scoring worker rejected pinned placement",
+        );
     }
     if metrics::request_was_rejected(cause) {
         return DispatchError {

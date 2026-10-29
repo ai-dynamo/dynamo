@@ -83,6 +83,7 @@ struct StartedBranch {
     prepared: PreparedBranch,
     tracker: Arc<RequestTracker>,
     stream: ManyOut<Annotated<LLMEngineOutput>>,
+    is_pinned: bool,
 }
 
 struct BranchResult {
@@ -663,7 +664,7 @@ async fn run_branch(
     let stream = run_until_killed(parent_context.as_ref(), selection.engine.generate(context))
         .await
         .ok_or_else(DispatchError::cancelled)?
-        .map_err(|cause| backend_error::classify(cause.as_ref()))?;
+        .map_err(|cause| backend_error::classify(cause.as_ref(), pinned.is_some()))?;
     let stream_context = stream.context();
     parent_context.link_child(stream_context.clone());
     if parent_context.is_killed() {
@@ -675,6 +676,7 @@ async fn run_branch(
             prepared,
             tracker,
             stream,
+            is_pinned: pinned.is_some(),
         },
         selection.card.runtime_config.data_parallel_start_rank,
         selection.card.runtime_config.data_parallel_size,
@@ -716,6 +718,7 @@ async fn read_branch(
         prepared,
         tracker,
         stream,
+        is_pinned,
     } = started;
     let responses = SglangGenerateStream::from_annotated_stream(
         stream,
@@ -733,7 +736,7 @@ async fn read_branch(
             if cause.class() == dynamo_runtime::error::ErrorClass::BackendProtocol {
                 DispatchError::malformed("invalid native scoring stream")
             } else {
-                backend_error::classify(&cause)
+                backend_error::classify(&cause, is_pinned)
             }
         })?;
         let finish = frame
