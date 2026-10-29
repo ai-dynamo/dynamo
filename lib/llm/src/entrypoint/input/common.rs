@@ -25,6 +25,7 @@ use crate::{
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
     session_affinity::{AffinityCoordinator, SessionAffinityMode, create_affinity_coordinator},
+    shadow::ShadowOrigin,
     types::{
         Annotated,
         openai::chat_completions::{
@@ -54,6 +55,7 @@ pub struct PreprocessedRouting {
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
     prefill_router: Arc<PrefillRouter>,
     encoder_router: Arc<EncoderRouter>,
+    shadow_taps: Option<crate::shadow::ShadowTaps>,
 }
 
 pub struct PreparedEngine {
@@ -314,6 +316,10 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         backend_engine,
         prefill_router,
         encoder_router,
+        shadow_taps: {
+            use dynamo_runtime::traits::DistributedRuntimeProvider;
+            crate::shadow::taps(client.endpoint.component().drt()).await?
+        },
     })
 }
 
@@ -322,6 +328,10 @@ pub async fn prepare_engine(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<PreparedEngine> {
+    // The dynamic arm builds its pipelines in a background watcher; a bad tap
+    // config must fail here, not there.
+    crate::shadow::taps(&distributed_runtime).await?;
+
     match engine_config {
         EngineConfig::Dynamic {
             model: local_model,
@@ -420,7 +430,12 @@ pub async fn prepare_engine(
             let pipeline = build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine, model.card().tokenizer()?)
+            >(
+                model.card(),
+                inner_engine,
+                model.card().tokenizer()?,
+                crate::shadow::taps(&distributed_runtime).await?,
+            )
             .await?;
 
             let service_name = model.service_name().to_string();
@@ -439,6 +454,7 @@ pub async fn build_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     engine: ExecutionContext,
     tokenizer: crate::tokenizers::Tokenizer,
+    shadow_taps: Option<crate::shadow::ShadowTaps>,
 ) -> anyhow::Result<Arc<ServiceFrontend<SingleIn<Req>, ManyOut<Annotated<Resp>>>>>
 where
     Req: Data,
@@ -458,13 +474,43 @@ where
     let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let engine = ServiceBackend::from_engine(engine);
 
-    Ok(frontend
-        .link(preprocessor.forward_edge())?
-        .link(backend.forward_edge())?
-        .link(engine)?
-        .link(backend.backward_edge())?
-        .link(preprocessor.backward_edge())?
-        .link_terminal(frontend)?)
+    let shadow_tap = shadow_taps.as_ref().map(|taps| {
+        crate::shadow::tap_for(taps, shadow_origin::<Req>()).into_operator_for::<BackendOutput>()
+    });
+    let detokenize = backend.forward_edge();
+    let preprocessed = frontend.link(preprocessor.forward_edge())?;
+    match &shadow_tap {
+        Some(tap) => preprocessed
+            .link(tap.forward_edge())?
+            .link(detokenize.clone())?,
+        None => preprocessed.link(detokenize.clone())?,
+    };
+    let generated = detokenize.link(engine)?.link(backend.backward_edge())?;
+    let postprocess = preprocessor.backward_edge();
+    match &shadow_tap {
+        Some(tap) => generated
+            .link(tap.backward_edge())?
+            .link(postprocess.clone())?,
+        None => generated.link(postprocess.clone())?,
+    };
+    Ok(postprocess.link_terminal(frontend)?)
+}
+
+/// The shadow tap sits below the point where the public APIs become one type.
+/// The request type the pipeline was built for is all it can know of the
+/// origin.
+fn shadow_origin<Req: 'static>() -> ShadowOrigin {
+    use std::any::TypeId;
+    let request = TypeId::of::<Req>();
+    if request == TypeId::of::<NvCreateChatCompletionRequest>() {
+        ShadowOrigin::Chat
+    } else if request
+        == TypeId::of::<crate::types::openai::completions::NvCreateCompletionRequest>()
+    {
+        ShadowOrigin::Completions
+    } else {
+        ShadowOrigin::Other
+    }
 }
 
 impl PreprocessedRouting {
@@ -497,9 +543,19 @@ impl PreprocessedRouting {
         let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
-        let engine = frontend
-            .link(preprocessor_op.forward_edge())?
-            .link(migration.forward_edge())?
+        let shadow_tap = self.shadow_taps.as_ref().map(|taps| {
+            crate::shadow::tap_for(taps, shadow_origin::<Req>())
+                .into_operator_for::<BackendOutput>()
+        });
+        let migration_in = migration.forward_edge();
+        let preprocessed = frontend.link(preprocessor_op.forward_edge())?;
+        match &shadow_tap {
+            Some(tap) => preprocessed
+                .link(tap.forward_edge())?
+                .link(migration_in.clone())?,
+            None => preprocessed.link(migration_in.clone())?,
+        };
+        let migrated = migration_in
             .link(token_backend.forward_edge())?
             .link(encoder_op.forward_edge())?
             .link(prefill_op.forward_edge())?
@@ -507,9 +563,15 @@ impl PreprocessedRouting {
             .link(prefill_op.backward_edge())?
             .link(encoder_op.backward_edge())?
             .link(token_backend.backward_edge())?
-            .link(migration.backward_edge())?
-            .link(preprocessor_op.backward_edge())?
-            .link_terminal(frontend)?;
+            .link(migration.backward_edge())?;
+        let postprocess = preprocessor_op.backward_edge();
+        match &shadow_tap {
+            Some(tap) => migrated
+                .link(tap.backward_edge())?
+                .link(postprocess.clone())?,
+            None => migrated.link(postprocess.clone())?,
+        };
+        let engine = postprocess.link_terminal(frontend)?;
 
         Ok(engine)
     }
@@ -535,15 +597,30 @@ impl PreprocessedRouting {
         let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
-        let engine = frontend
-            .link(migration.forward_edge())?
+        let shadow_tap = self.shadow_taps.as_ref().map(|taps| {
+            crate::shadow::tap_for(taps, ShadowOrigin::Preprocessed)
+                .into_operator_for::<LLMEngineOutput>()
+        });
+        let migration_in = migration.forward_edge();
+        match &shadow_tap {
+            Some(tap) => frontend
+                .link(tap.forward_edge())?
+                .link(migration_in.clone())?,
+            None => frontend.link(migration_in.clone())?,
+        };
+        let migrated = migration_in
             .link(encoder_op.forward_edge())?
             .link(prefill_op.forward_edge())?
             .link(backend)?
             .link(prefill_op.backward_edge())?
             .link(encoder_op.backward_edge())?
-            .link(migration.backward_edge())?
-            .link_terminal(frontend)?;
+            .link(migration.backward_edge())?;
+        let engine = match &shadow_tap {
+            Some(tap) => migrated
+                .link(tap.backward_edge())?
+                .link_terminal(frontend)?,
+            None => migrated.link_terminal(frontend)?,
+        };
 
         Ok(engine)
     }
