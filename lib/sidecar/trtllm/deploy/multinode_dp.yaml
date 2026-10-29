@@ -1,24 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# EXPERIMENTAL: engine-primary multinode TensorRT-LLM attention data
-# parallelism behind Dynamo's KV-aware router. One engine group spans two
-# Pods with four attention-DP ranks, two per Pod. The leader launches every
-# MPI rank over SSH, serves OpenEngine gRPC, and registers all four ranks; the
-# router selects the rank. Each rank publishes its own KV events on its node,
-# so the worker runs a Dynamo sidecar too: it discovers the node-local
-# publishers through OpenEngine's follower metadata endpoint and relays them
-# under the leader's worker identity without serving inference.
-#
-# Multinode sidecar components require complete leader and worker role
-# templates. The operator injects DYNAMO_RANK and DYNAMO_LEADER_ADDRESS and
-# does not rewrite the authored engine launch, SSH setup, probes, or mounts.
-# The operator replicates its MPI SSH keypair Secret (mpi-run-ssh-secret by
-# default) into the namespace of every multinode DGD; both roles mount it.
-# The OpenEngine listener binds all Pod interfaces so the kubelet gRPC probes can
-# reach it. It is unauthenticated: any client that reaches the Pod IP can run
-# inference and abort requests. Restrict it with a NetworkPolicy, or bind
-# 127.0.0.1 and use exec probes as agg_kv_router.yaml does.
+# EXPERIMENTAL: multinode TensorRT-LLM attention data parallelism (attention-DP) with explicit leader and worker templates.
+# One engine group spans two Pods with four attention-DP ranks. The leader
+# launches every MPI rank with mpirun over SSH and serves all four ranks. The
+# worker runs sshd and a Dynamo sidecar that relays its node-local KV events.
+# See docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/sidecar.md#deploy-on-kubernetes.
 # For a DGD created before operator 1.6.0, see docs/fern/pages/kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160.
 
 apiVersion: v1
@@ -27,9 +14,7 @@ metadata:
   name: trtllm-engine-config-multinode-dp
 data:
   config.yaml: |
-    # Four MPI ranks; with attention DP each rank is one data-parallel rank.
-    # TensorRT-LLM attention DP requires untied input and output embeddings
-    # (Qwen3 models of 4B and below tie them), so this example serves TinyLlama.
+    # Attention DP needs untied embeddings. Qwen3 4B and below tie them, so this example serves TinyLlama.
     tensor_parallel_size: 4
     enable_attention_dp: true
     # Required for tool_choice constraints.
@@ -42,8 +27,7 @@ data:
       kv_cache_event_hash_algo: v1_block_key
       kv_events_config:
         enable_kv_cache_events: true
-        # Each rank binds base port + global rank on its own node (5557-5560).
-        # Sidecars subscribe only to the publishers on their node.
+        # Each rank publishes on its own node at this port plus its global rank.
         endpoint: tcp://127.0.0.1:5557
 ---
 apiVersion: nvidia.com/v1beta1
@@ -94,13 +78,11 @@ spec:
                 optional: true
           containers:
           - name: main
-            # Requires a TensorRT-LLM build with OpenEngine node-local discovery, native
-            # KV events, and the grpc.health.v1 service (nightlies from 2026-10-27).
-            # The launch below relies on this image's Open MPI 5: it allows root, and
-            # its ssh launcher keeps the full -H hostname that Pod DNS needs.
+            # Requires OpenEngine node-local discovery and KV events (NVIDIA/TensorRT-LLM#19440)
+            # and the grpc.health.v1 service used by the probes below (NVIDIA/TensorRT-LLM#20437,
+            # nightlies from 2026-10-27).
             image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc2.dev202610270008@sha256:c1e774f48f8c9b5e06bb036c1798b80c9ab5201ebeb1013044ba4f865bb779a7
-            # grpc.health.v1: `liveness` turns NOT_SERVING only on a fatal engine
-            # failure; `inference` follows the executor health poll.
+            # The liveness service fails only on a fatal engine error. The inference service tracks the executor.
             startupProbe:
               grpc:
                 port: 30001
@@ -136,18 +118,14 @@ spec:
             - /bin/bash
             - -c
             args:
-            # -H slots fill in order, so ranks 0-1 land on the leader, where trtllm-serve
-            # binds OpenEngine, and each node holds a contiguous rank range. mpirun binds
-            # each rank to one core by default; the engine needs every core. The worker
-            # exports the container environment to its sshd sessions, so only HF_TOKEN
-            # travels with mpirun -x.
+            # -H slots fill in order: ranks 0-1 on the leader, 2-3 on the worker.
+            # --bind-to none: mpirun's default pins each rank to one core.
             - |
               set -euo pipefail
               # The operator mounts the key group-readable; ssh insists on 0600.
               install -Dm600 /ssh-pk/private.key "$HOME/.ssh/id_rsa"
-              # Grove swaps the role suffix in the leader hostname; LeaderWorkerSet appends
-              # the worker index to the leader Pod name. Sized for nodeCount 2: list every
-              # extra worker in -H and raise -n for larger groups.
+              # Worker hostname: Grove swaps the role suffix, LeaderWorkerSet appends the
+              # worker index. For nodeCount above 2, add each extra worker to -H and raise -n.
               case "$DYNAMO_LEADER_ADDRESS" in
                 *-ldr-0.*) WORKER="${DYNAMO_LEADER_ADDRESS/-ldr-0./-wkr-0.}" ;;
                 *) WORKER="${DYNAMO_LEADER_ADDRESS/./-1.}" ;;
@@ -171,14 +149,11 @@ spec:
               name: trtllm-engine-config-multinode-dp
           - name: ssh-keys
             secret:
-              secretName: mpi-run-ssh-secret
+              secretName: mpi-run-ssh-secret  # Replicated by the operator into every multinode DGD namespace.
     - name: worker
       podTemplate:
         spec:
           initContainers:
-          # Node-local KV relay: the follower metadata endpoint on this node tells
-          # the sidecar which attention-DP publishers it owns. It registers no
-          # inference endpoint and attaches to the leader's worker identity.
           - name: runtime
             image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261023-75d0686@sha256:fc13f0a227d78499fbaed257e2373bcb54df32ca8e1fcea1e0ad6289087cbcb8
             restartPolicy: Always
@@ -191,10 +166,8 @@ spec:
           containers:
           - name: main
             image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc2.dev202610270008@sha256:c1e774f48f8c9b5e06bb036c1798b80c9ab5201ebeb1013044ba4f865bb779a7
-            # No probes: the worker's process is sshd, and the engine ranks it hosts are
-            # launched and supervised by the leader's mpirun, which the leader waits to
-            # start until sshd answers. Killing sshd ends this container and the ranks
-            # with it; the leader's mpirun then aborts and both containers restart.
+            # No probes: sshd is the only process here. The leader waits for it, then
+            # launches and supervises this node's ranks through mpirun.
             resources:
               limits:
                 nvidia.com/gpu: "2"
@@ -204,11 +177,9 @@ spec:
             - /bin/bash
             - -c
             args:
-            # The release image ships no sshd. The package creates host keys but not
-            # its privilege-separation directory. sshd gives MPI ranks a login
-            # environment, not the container's, so export the container environment
-            # (CUDA include and library paths, PATH, Python) to every session; without
-            # it Triton JIT on this node cannot find cuda.h.
+            # The image ships no sshd, and apt does not create /run/sshd. Ranks run in
+            # sshd sessions, so export the container environment to them: Triton JIT
+            # needs the CUDA paths. Tokens stay out. The leader passes HF_TOKEN with mpirun -x.
             - |
               set -euo pipefail
               command -v sshd >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server; }
