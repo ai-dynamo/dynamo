@@ -936,7 +936,7 @@ pub struct HttpServiceConfig {
     rl_port: u16,
 
     /// Distributed runtime used by the RL worker discovery API and to publish
-    /// frontend load to the KV DC Relay.
+    /// frontend load to the Pool Relay.
     #[builder(default = "None")]
     runtime: Option<DistributedRuntime>,
 
@@ -1144,7 +1144,7 @@ impl HttpService {
     }
 
     fn start_frontend_load_publisher(&self, cancel_token: &CancellationToken) {
-        if !crate::kv_dc_relay::serving_load_publishing_enabled() {
+        if !crate::pool_relay::serving_load_publishing_enabled() {
             return;
         }
         let Some(target) = &self.frontend_load_target else {
@@ -1425,6 +1425,7 @@ impl HttpServiceConfigBuilder {
 
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
+        super::image_edits::validate_config()?;
         LazyLock::force(&DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION);
         let metrics_config = config.metrics_config.clone();
         let model_ready_metrics_prefix = metrics_config.prefix();

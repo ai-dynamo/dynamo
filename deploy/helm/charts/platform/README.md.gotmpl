@@ -48,6 +48,24 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### v1.7.0
 
+#### Runtime Compatibility
+
+##### Frontend Startup Probe Defaults
+
+**Change:** Generated frontend startup probes require both a workload origin of operator
+1.7.0 or later and a frontend runtime of 1.6.0 or later. Standalone DCDs record their
+immutable origin only on CREATE; UPDATE never backfills existing resources. DGD-managed
+DCDs inherit the parent graph origin, even when the child is created by a newer operator.
+Frontend sidecars use the same origin and resolve their own image version.
+
+**Existing deployments:** Workloads created by operator 1.6.x or earlier, and resources
+without a resolvable origin, retain their previous frontend defaults during operator-only
+upgrades. Explicitly authored complete probes remain effective.
+
+**Action:** To enable startup protection on an existing workload, configure a complete
+`startupProbe` on its frontend container. This is an intentional Pod-template update;
+plan for frontend replacement, including a possible single-replica Grove Service outage.
+
 #### Operator behavior breaking changes
 
 ##### Legacy LWS migration cleanup removed
@@ -98,6 +116,24 @@ HTTP 403 when listing Pods, Planner warns and uses existing status/default fallb
 Grant Pod-list access to enable registered native names, models, and capabilities;
 other API errors still propagate.
 
+##### LPX model paths in every container
+
+**Change:** The operator sets the LPX model-path variables (`LPX_MODEL_PATH`, or
+`LPX_DRAFT_MODEL_PATH` and `LPX_TARGET_MODEL_PATH` for a speculative pair) in every
+regular and init container of every LPX role. Previously it set them only in `main`
+of the conductor role for LPU-only builds and of the agent role for hybrid builds.
+The operator's value replaces any value authored under these names.
+
+**Affected:** Every DGD with an LPX component: at least the agent template of an
+LPU-only build or the conductor template of a hybrid build gains these variables.
+
+**Action:** Plan for a one-time rollout of LPX workloads when upgrading to v1.7.0.
+No manifest change is needed unless a container sets one of these variables to its
+own value; rename that variable before upgrading.
+
+**Existing deployments:** Reconciliation rolls each LPX workload once without an
+authored manifest change.
+
 #### New behavior
 
 ##### LWS no longer requires Volcano
@@ -117,6 +153,23 @@ installed but no Volcano API automatically enable LWS orchestration.
 Without separately configured gang scheduling or group admission
 (e.g., through Kueue), multinode DGD/DCD workloads using LWS may remain
 partially scheduled.
+
+##### Multinode sidecars for SGLang and vLLM
+
+**Change:** Admission accepts `multinode` on a component that declares a `runtime` init
+container when `backendFramework` is `sglang` or `vllm` and the component supplies complete
+`leader` and `worker` role templates. The operator renders the authored engine commands,
+probes, and ports unchanged and merges Dynamo defaults into each declared `runtime`.
+
+**Affected:** New multinode DGDs that opt into sidecar mode.
+
+**Action:** None for existing workloads. To opt in, see the
+[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes)
+and [vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes)
+sidecar guides.
+
+**Existing deployments:** No existing workload rolls. Components without a `runtime` init
+container keep running the engine and Dynamo together in `main`.
 
 ### v1.6.0
 
@@ -222,6 +275,11 @@ created by Dynamo 1.6.0 when Grove is managed outside the platform chart.
 using rollout budgets or Coherent updates, or creating new multinode DGDs. Updating Dynamo's
 dependency or platform chart does not upgrade separately managed Grove installations.
 
+**Existing deployments:** `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` are injected only into DGDs
+created by operator 1.6.0 or later. An operator upgrade does not add them to an older DGD, and
+later edits of that DGD do not add them. See
+[Use the variables in a DGD created before 1.6.0](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160).
+
 #### External Grove installation preflight
 
 With `global.grove.enabled=true` and `global.grove.install=false`, a read-only
@@ -268,10 +326,6 @@ Helm 3.18+ also prints them via `helm.sh/hook-output-log-policy: hook-failed`, u
 installer's Pod/log read permissions. With older Helm, read them with `kubectl logs`.
 Successful Jobs are deleted. Supporting ServiceAccount/ClusterRole/ClusterRoleBinding hooks
 persist until the next attempt and require manual removal when retiring the release.
-
-**Existing deployments:** The operator origin version gates alias injection. An operator-only
-upgrade leaves existing multinode workload pod templates unchanged and does not roll them solely to
-add the aliases.
 
 ### v1.5.0
 
