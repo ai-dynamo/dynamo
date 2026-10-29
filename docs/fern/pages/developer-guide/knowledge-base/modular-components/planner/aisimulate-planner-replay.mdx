@@ -497,7 +497,8 @@ With `aisimulate predict --stack dynamo`:
 Recommended: set `evaluation.sla` with `ttft_ms` and `itl_ms`. Predict fills `retune.sla_ttft_ms`
 and `retune.sla_itl_ms` from it when they are unset, so retune scores candidates against the SLA
 that AISimulate reports goodput for. Without it, scoring uses the Planner's `ttft_ms` and `itl_ms`,
-which then keep their `PlannerConfig` defaults.
+which then keep their `PlannerConfig` defaults. The SLA applies only to the default
+`retune.objective`, `GoodputPerGPU`, and to `Goodput`.
 
 With `dynamo.replay.run_trace_replay`:
 
@@ -682,7 +683,7 @@ Each record has these fields. Times are Planner-clock seconds from the start of 
 | `num_requests`, `num_candidates` | Requests in the window and candidates in the sweep |
 | `previous`, `chosen` | The point before the decision and the point chosen, as `router` and `planner` maps keyed by live names (`router_temperature`, `load_scaling_down_sensitivity`) |
 | `planner_changes` | Planner fields the decision changes |
-| `baseline_score`, `best_score`, `top` | The current point's score, the best score, and up to five `[candidate, score]` pairs |
+| `baseline_score`, `best_score`, `top` | The current point's score, the best score, and up to five `[candidate, score]` pairs, best first. Scores are in the units of [`retune.objective`](../../../../reference/components/planner-configuration.mdx#objectives); for `TTFT` and `E2ELatency` they are milliseconds and lower is better |
 | `predictor_presweep` | Load-predictor pre-sweep: `winner`, `fields`, per-candidate `losses`, `eval_steps`, `warmup_steps`, and `wall_s` |
 | `predictor_warmup` | Number of traffic observations that warm a newly selected load predictor; `null` unless an `applied` decision replaces the predictor |
 | `sweep_wall_s`, `decision_latency_s` | The sweep's wall-clock time, and the delay after launch at which the decision could land; `null` for `busy` and decisions that fail before a sweep runs |
@@ -730,7 +731,8 @@ aisimulate predict --stack dynamo --config retune-router.yaml \
 ### Measure the Gain
 
 Run the same config without retune and compare `summary.goodput_output_throughput_tok_s`,
-`summary.gpu_hours`, and the latency percentiles:
+`summary.gpu_hours`, and the latency percentiles, or the summary metric of a non-default
+`retune.objective`, such as `summary.mean_ttft_ms` for `TTFT`:
 
 - For Scenario 1, replace the whole `planner` section with
   `--set 'planner={policy: disabled}'`. Do not only remove `retune`: without it, the two `false`
@@ -757,9 +759,7 @@ replica counts fixed; see [Replay in Advisory Mode](#replay-in-advisory-mode).
 Each candidate is replayed once. All candidate replays of a window, the current point's included,
 use the same router seed and request ids, so a candidate that changes no routing or scaling
 decision scores exactly the current point and is kept. A candidate that changes decisions is still
-judged on one sample path of one window. With the pinned AISimulate release, an inner Planner with
-`optimization_target: sla` can still decide differently in two replays of the same candidate, so
-such a candidate can miss an exact tie; see
+judged on one sample path of one window; see
 [Candidates and the Sweep](planner-design.md#candidates-and-the-sweep).
 The outer replay keeps its default, unseeded routing, so two runs of the same config can differ in
 the outer replay's results and, with autoscaling, in the replica counts a window starts from. Set

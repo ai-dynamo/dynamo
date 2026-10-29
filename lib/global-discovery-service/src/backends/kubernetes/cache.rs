@@ -325,6 +325,8 @@ impl<I: SliceIndex> SliceCache<I> {
         }
     }
 
+    /// A watch stream that starts at the first complete list and ends when
+    /// `cancel` (the caller's) or `stop` (the directory's) is cancelled.
     pub(super) fn subscribe(
         self: &Arc<Self>,
         cancel: CancellationToken,

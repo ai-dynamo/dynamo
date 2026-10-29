@@ -15,10 +15,12 @@
 //! PoolRelay endpoint is Ready. Its `relay_identities` are that PoolRelay
 //! pod's addresses, for routers on a trusted network to admit it.
 //!
-//! With Karmada, a Service name may have at most 57 characters: DGD names up
-//! to 46 with the default suffix. Kubernetes shortens a longer Service's
-//! EndpointSlice names, and Karmada's names then no longer say which cluster
-//! a slice came from. Such slices are skipped, with a warning.
+//! With Karmada, a Service name may have at most 55 characters: DGD names up
+//! to 44 with the default `-pool-relay` suffix. Karmada imports a Service as
+//! `derived-<name>`, and that name may have at most 63 characters, so
+//! Karmada imports nothing for a longer name, and the store never sees that
+//! Service's endpoints. [`McsReplicaDirectory::new`] logs an error for a
+//! Service whose name is too long.
 //!
 //! Create the PoolRelay Service and its `ServiceExport` in the workload
 //! cluster, not through Karmada propagation. Kubernetes copies a Service's

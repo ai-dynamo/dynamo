@@ -271,6 +271,7 @@ def test_candidate_replays_share_common_random_numbers(tmp_path):
             60.0,
             100.0,
             8.0,
+            "GoodputPerGPU",
         )
 
     baseline = evaluate({})
@@ -741,6 +742,7 @@ def test_every_replay_kwarg_is_classified_for_retune(tmp_path, monkeypatch):
                 100.0,
                 10.0,
                 60.0,
+                "GoodputPerGPU",
             )
     assert set().union(*calls) == _PINNED | _PER_CANDIDATE
     # Common random numbers; an inner planner is warmed from the read task's
