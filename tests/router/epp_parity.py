@@ -128,7 +128,9 @@ def acquire_epp_session_lock() -> FileLock:
 
 
 def assert_epp_ports_free() -> None:
-    busy = [port for port in (EPP_GRPC_PORT, EPP_HEALTH_PORT) if _port_is_occupied(port)]
+    busy = [
+        port for port in (EPP_GRPC_PORT, EPP_HEALTH_PORT) if _port_is_occupied(port)
+    ]
     if busy:
         raise RuntimeError(
             "Standard /epp hardcodes gRPC 9002 and health 9003; refusing to start "
@@ -178,7 +180,9 @@ def resolve_pod_identity() -> PodIdentity:
     )
 
 
-def write_loopback_kubeconfig(path: Path, api_host: str, api_port: int, namespace: str) -> Path:
+def write_loopback_kubeconfig(
+    path: Path, api_host: str, api_port: int, namespace: str
+) -> Path:
     """Write a kubeconfig that can only reach this fixture's loopback listener."""
     if api_host not in {"127.0.0.1", "localhost"}:
         raise ValueError("loopback kubeconfig host must be 127.0.0.1 or localhost")
@@ -388,7 +392,9 @@ class LoopbackKubeAPI:
         with self._cv:
             stored = json.loads(json.dumps(pod))
             stored.setdefault("metadata", {})["resourceVersion"] = self._next_rv()
-            stored["metadata"].setdefault("uid", self._uid_for("pod", stored["metadata"]["name"]))
+            stored["metadata"].setdefault(
+                "uid", self._uid_for("pod", stored["metadata"]["name"])
+            )
             name = stored["metadata"]["name"]
             existed = name in self._pods
             self._pods[name] = stored
@@ -453,7 +459,9 @@ class LoopbackKubeAPI:
             handled = self._dispatch(handler, method, path, query, body)
         except Exception as exc:  # unexpected fixture bug, not a kube proxy
             self._record_failure(method, path, f"handler error: {exc}")
-            self._write_status(handler, 500, {"message": "fixture handler error", "code": 500})
+            self._write_status(
+                handler, 500, {"message": "fixture handler error", "code": 500}
+            )
             return
         if handled:
             return
@@ -492,9 +500,7 @@ class LoopbackKubeAPI:
         body: bytes,
     ) -> bool:
         pods_prefix = f"/api/v1/namespaces/{self.namespace}/pods"
-        dwm_prefix = (
-            f"/apis/nvidia.com/v1alpha1/namespaces/{self.namespace}/dynamoworkermetadatas"
-        )
+        dwm_prefix = f"/apis/nvidia.com/v1alpha1/namespaces/{self.namespace}/dynamoworkermetadatas"
         if path == pods_prefix:
             if method != "GET":
                 return False
@@ -532,24 +538,32 @@ class LoopbackKubeAPI:
                 with self._lock:
                     obj = self._metadata.get(name)
                 if obj is None:
-                    self._write_status(handler, 404, _not_found("dynamoworkermetadatas", name))
+                    self._write_status(
+                        handler, 404, _not_found("dynamoworkermetadatas", name)
+                    )
                     return True
                 self._write_json(handler, 200, obj)
                 return True
             if method == "DELETE":
                 self._delete_metadata(name)
-                self._write_status(handler, 200, {"kind": "Status", "status": "Success", "code": 200})
+                self._write_status(
+                    handler, 200, {"kind": "Status", "status": "Success", "code": 200}
+                )
                 return True
             if method == "PATCH":
                 try:
                     payload = json.loads(body.decode("utf-8") or "{}")
                 except json.JSONDecodeError:
                     self._record_failure(method, path, "PATCH body is not JSON")
-                    self._write_status(handler, 400, {"message": "invalid JSON", "code": 400})
+                    self._write_status(
+                        handler, 400, {"message": "invalid JSON", "code": 400}
+                    )
                     return True
                 if not isinstance(payload, dict):
                     self._record_failure(method, path, "PATCH body is not an object")
-                    self._write_status(handler, 400, {"message": "invalid JSON object", "code": 400})
+                    self._write_status(
+                        handler, 400, {"message": "invalid JSON object", "code": 400}
+                    )
                     return True
                 payload.setdefault("apiVersion", "nvidia.com/v1alpha1")
                 payload.setdefault("kind", "DynamoWorkerMetadata")
@@ -560,7 +574,9 @@ class LoopbackKubeAPI:
                 return True
         return False
 
-    def _list_pods(self, query: dict[str, list[str]], headers: Mapping[str, str]) -> dict[str, Any]:
+    def _list_pods(
+        self, query: dict[str, list[str]], headers: Mapping[str, str]
+    ) -> dict[str, Any]:
         with self._lock:
             items = [
                 pod
@@ -632,7 +648,9 @@ class LoopbackKubeAPI:
                 snapshot = [
                     obj
                     for obj in store.values()
-                    if _matches_labels(obj.get("metadata", {}).get("labels") or {}, query)
+                    if _matches_labels(
+                        obj.get("metadata", {}).get("labels") or {}, query
+                    )
                 ]
                 watcher.start_rv = current_rv
             else:
@@ -679,7 +697,9 @@ class LoopbackKubeAPI:
                 if event is None:
                     break
                 obj = event.get("object") or {}
-                if not _matches_labels(obj.get("metadata", {}).get("labels") or {}, query):
+                if not _matches_labels(
+                    obj.get("metadata", {}).get("labels") or {}, query
+                ):
                     continue
                 event_rv = _object_rv(obj)
                 if event_rv <= watcher.start_rv:
@@ -945,7 +965,9 @@ def _loopback_epp_channel(timeout_s: float) -> grpc.Channel:
             ("grpc.enable_http_proxy", 0),
         ),
     )
-    grpc.channel_ready_future(channel).result(timeout=min(timeout_s, TLS_HANDSHAKE_TIMEOUT_S))
+    grpc.channel_ready_future(channel).result(
+        timeout=min(timeout_s, TLS_HANDSHAKE_TIMEOUT_S)
+    )
     return channel
 
 
@@ -990,7 +1012,9 @@ def _extract_unique_terminal_request_body(pb2: Any, responses: list[Any]) -> byt
         if response.HasField("request_body"):
             bodies.append(response)
     if not bodies:
-        raise AssertionError("EPP stream completed without a RequestBody token mutation")
+        raise AssertionError(
+            "EPP stream completed without a RequestBody token mutation"
+        )
     if len(bodies) != 1:
         raise AssertionError(
             f"EPP stream contained {len(bodies)} RequestBody mutations; expected exactly one"
@@ -1024,7 +1048,9 @@ def decode_epp_token_data(body: bytes) -> list[int]:
     token_data = nvext.get("token_data")
     if not isinstance(token_data, list) or not token_data:
         raise AssertionError("EPP nvext.token_data is absent or empty")
-    if not all(isinstance(token, int) and not isinstance(token, bool) for token in token_data):
+    if not all(
+        isinstance(token, int) and not isinstance(token, bool) for token in token_data
+    ):
         raise AssertionError("EPP nvext.token_data contains a non-integer")
     return [int(token) for token in token_data]
 
@@ -1082,11 +1108,15 @@ class ExtProcParityDriver:
             saw_terminal_request_body = False
             while not saw_terminal_request_body:
                 if time.monotonic() > deadline:
-                    raise AssertionError("timed out waiting for EPP RequestBody mutation")
+                    raise AssertionError(
+                        "timed out waiting for EPP RequestBody mutation"
+                    )
                 try:
                     response = next(response_iter)
                 except StopIteration as exc:
-                    raise AssertionError("EPP stream ended before a token mutation") from exc
+                    raise AssertionError(
+                        "EPP stream ended before a token mutation"
+                    ) from exc
                 responses.append(response)
                 if response.HasField("immediate_response"):
                     raise AssertionError(
@@ -1202,7 +1232,9 @@ def _parse_frontend_query_sse(body: str) -> list[int]:
         try:
             chunk = json.loads(event)
         except json.JSONDecodeError as exc:
-            raise AssertionError("Frontend query stream has a non-JSON data field") from exc
+            raise AssertionError(
+                "Frontend query stream has a non-JSON data field"
+            ) from exc
         if not isinstance(chunk, dict):
             raise AssertionError("Frontend query stream data field is not an object")
         if "error" in chunk:
@@ -1213,7 +1245,9 @@ def _parse_frontend_query_sse(body: str) -> list[int]:
         tokens = nvext_chunk["token_ids"]
         if not isinstance(tokens, list) or not tokens:
             raise AssertionError("Frontend nvext.token_ids is absent or empty")
-        if not all(isinstance(token, int) and not isinstance(token, bool) for token in tokens):
+        if not all(
+            isinstance(token, int) and not isinstance(token, bool) for token in tokens
+        ):
             raise AssertionError("Frontend nvext.token_ids contains a non-integer")
         as_ints = [int(token) for token in tokens]
         if observed is None:
@@ -1392,7 +1426,9 @@ class EppFrontendParityStack:
                     response = session.get(f"{self.frontend_url}/v1/models", timeout=2)
                     if check_http_ok(response):
                         payload = response.json()
-                        models = payload.get("data") if isinstance(payload, dict) else None
+                        models = (
+                            payload.get("data") if isinstance(payload, dict) else None
+                        )
                         if isinstance(models, list) and models:
                             return
                         last_error = "frontend /v1/models returned no models"

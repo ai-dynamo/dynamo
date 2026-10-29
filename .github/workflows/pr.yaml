@@ -780,7 +780,7 @@ jobs:
       artifact_retention_days: '7'
       # Include cold multi-arch compilation and the later test-image/compliance stages.
       build_timeout_minutes: 90
-      build_frontend_test_image: true
+      build_frontend_test_image: ${{ needs.changed-files.outputs.frontend == 'true' }}
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr

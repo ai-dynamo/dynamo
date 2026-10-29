@@ -176,7 +176,10 @@ def validate_loopback_kubeconfig(kubeconfig: str | os.PathLike[str]) -> Path:
     text = path.read_text(encoding="utf-8")
     if "https://" in text:
         raise RuntimeError("KUBECONFIG must not target a TLS or cluster Kubernetes API")
-    if "server: http://127.0.0.1:" not in text and "server: http://localhost:" not in text:
+    if (
+        "server: http://127.0.0.1:" not in text
+        and "server: http://localhost:" not in text
+    ):
         raise RuntimeError(
             "KUBECONFIG must target the allocated loopback Kubernetes API on 127.0.0.1"
         )
