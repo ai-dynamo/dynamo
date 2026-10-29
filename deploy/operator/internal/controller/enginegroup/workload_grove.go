@@ -28,10 +28,13 @@ type GroveWorkloadProvider struct {
 	Client client.Client
 }
 
-// Resolve proves the complete owner chain before exposing provider-neutral physical capacity.
+// +kubebuilder:rbac:groups="",resources=pods,verbs=patch
+// +kubebuilder:rbac:groups="",resources=pods/status,verbs=patch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets;podcliquescalinggroups,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
+
+// Resolve proves the complete owner chain before exposing provider-neutral physical capacity.
 func (p *GroveWorkloadProvider) Resolve(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup) (WorkloadBinding, error) {
 	owner := metav1.GetControllerOf(group)
 	if group.UID == "" || owner == nil || owner.Kind != api.DynamoGraphDeploymentGVK.Kind || owner.APIVersion != api.GroupVersion.String() {
