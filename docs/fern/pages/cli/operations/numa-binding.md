@@ -34,9 +34,10 @@ rm -rf /var/lib/apt/lists/*
 These packages provide `numactl`, `numastat`, `ip`, `lscpu`, `taskset`, and `ps`. UCX libraries
 alone do not provide the optional `ucx_info` diagnostic.
 
-## Inspect the Topology
+## Choose CPU and Memory Placement
 
-Inspect topology inside the container or scheduler allocation that will run the workers:
+Inside the worker's container or scheduler allocation, find the CPUs and host-memory nodes
+closest to each GPU:
 
 ```bash
 numactl --hardware
@@ -48,22 +49,11 @@ nvidia-smi --query-gpu=index,uuid,pci.bus_id --format=csv
 Match GPU UUIDs or PCI addresses to the engine's `CUDA_VISIBLE_DEVICES` order before building
 per-GPU mappings. `nvidia-smi -i` uses physical NVML indices, UUIDs, or PCI addresses, not positions
 in that CUDA list. GPU IDs need not follow socket order; a socket can have several NUMA nodes.
-For physical GPU `0`, query the nearest CPU and memory nodes respectively:
+For physical GPU `0`, `nvidia-smi topo -C -i 0` reports the nearest CPU node and
+`nvidia-smi topo -M -i 0` reports the nearest memory node. Use a CPU-bearing node for CPU binding;
+GPU HBM may appear as a memory-only node.
 
-```bash
-nvidia-smi topo -C -i 0
-nvidia-smi topo -M -i 0
-```
-
-Use a CPU-bearing node for `--cpunodebind`; GPU HBM may appear as a memory-only node.
-Check the [nvidia-smi Topology section](https://docs.nvidia.com/deploy/nvidia-smi/index.html)
-and NVIDIA's
-[hardware-coherent memory guide](https://developer.nvidia.com/blog/understanding-memory-management-on-hardware-coherent-platforms/).
-
-## Choose a CPU and Memory Policy
-
-`numactl` sets CPU and memory policies before starting a process. Children inherit those policies,
-although an engine or launcher can change them during startup.
+Apply the selected placement with `numactl` before starting the process:
 
 | Option | Effect |
 |---|---|
@@ -72,9 +62,11 @@ although an engine or launcher can change them during startup.
 | `--membind=N` | Allocate host memory only on node `N`; exhaustion can cause allocation failure or an out-of-memory (OOM) kill. |
 | `--preferred=N` | Prefer host memory on node `N`, with fallback to other permitted nodes. |
 
-Choose `--preferred` for remote-memory fallback, or `--membind` when locality is mandatory and
-the node has enough memory. Existing pages and shared buffers are not all relocated by either
-option. See the [numactl manual](https://man7.org/linux/man-pages/man8/numactl.8.html).
+Children inherit the policy, although engines can rebind during startup. Existing pages and
+shared buffers can retain their previous placement. See the
+[numactl manual](https://man7.org/linux/man-pages/man8/numactl.8.html),
+[nvidia-smi Topology section](https://docs.nvidia.com/deploy/nvidia-smi/index.html), and
+[hardware-coherent memory guide](https://developer.nvidia.com/blog/understanding-memory-management-on-hardware-coherent-platforms/).
 
 > [!IMPORTANT]
 > Apply binding to the process or rank that owns each GPU. Wrapping a whole tensor parallel (TP)
