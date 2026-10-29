@@ -1058,7 +1058,10 @@ async fn assert_streaming_completions_observe_empty_chunk_metrics(
 
         wait_for_metrics_ready(port).await;
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
         let metrics_url = format!("http://localhost:{port}/metrics");
         let request_task = {
             let client = client.clone();
@@ -1084,7 +1087,11 @@ async fn assert_streaming_completions_observe_empty_chunk_metrics(
         .await;
 
         gate.add_permits(1);
-        let body = request_task.await.unwrap().unwrap();
+        let body = tokio::time::timeout(Duration::from_secs(10), request_task)
+            .await
+            .expect("completions request timed out")
+            .unwrap()
+            .unwrap();
         let texts: Vec<String> = body
             .lines()
             .filter_map(|line| line.strip_prefix("data: "))
