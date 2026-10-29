@@ -244,7 +244,6 @@ impl CoreSelector {
     }
 
     /// Requests booked on `pool`, this replica's and its peers'.
-    #[cfg(test)]
     fn booked(&self, pool: &Pool) -> usize {
         self.service
             .loads(Some(&pool.model), Some(ROUTING_GROUP))
@@ -302,6 +301,14 @@ impl RequestSelector for CoreSelector {
             return None;
         };
         let target = target(&self.frontends, pool)?;
+        // The bookings include this one and, with replica sync, the peers'.
+        tracing::debug!(
+            model = request.model,
+            session,
+            pool = %pool.name,
+            booked = self.booked(pool),
+            "the router core picked a pool"
+        );
         Some(Selection {
             target,
             lifecycle: reservation
