@@ -46,7 +46,8 @@ use axum::{
     routing::get,
 };
 use dynamo_runtime::engine::AsyncEngineContextProvider;
-use dynamo_runtime::pipeline::{Context, RequestStream};
+use dynamo_runtime::pipeline::{Context, ManyIn, ManyOut, RequestStream};
+use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{SinkExt, StreamExt, stream::SplitSink};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -224,6 +225,7 @@ impl RealtimeSession {
         }
     }
 
+    /// Keep the client connection across worker attempts, retrying only eligible failures.
     async fn run<S, T>(
         &mut self,
         ws_rx: &mut S,
@@ -245,6 +247,7 @@ impl RealtimeSession {
         }
     }
 
+    /// Send setup first and keep the worker's stop guard alive through connection and forwarding.
     async fn run_attempt<S, T>(
         &mut self,
         ws_rx: &mut S,
@@ -256,73 +259,83 @@ impl RealtimeSession {
         S: futures::Stream<Item = Result<Message, axum::Error>> + Unpin,
         T: futures::Sink<Message, Error = axum::Error> + Unpin,
     {
-        let Self {
-            engine,
-            recovery,
-            incoming,
-            cancel,
-        } = self;
         let (req_tx, req_rx) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
         req_tx.try_send(setup)?;
         let input = Context::new(RequestStream::new(Box::pin(ReceiverStream::new(req_rx))));
         let _stop = StopGeneration(input.context());
-        let connecting = engine.generate(input);
+        let Some(responses) = self.connect_worker(ws_rx, close_reason, input).await? else {
+            return Ok(());
+        };
+        self.forward_events(ws_rx, ws_tx, close_reason, &req_tx, responses)
+            .await
+    }
+
+    /// Wait for a worker while buffering at most one client event and observing recovery's deadline.
+    /// `Ok(None)` ends the session on client disconnect or frontend shutdown without a retry.
+    async fn connect_worker<S>(
+        &mut self,
+        ws_rx: &mut S,
+        close_reason: &Mutex<Option<Message>>,
+        input: ManyIn<DynamoRealtimeClientEvent>,
+    ) -> anyhow::Result<Option<ManyOut<Annotated<RealtimeServerEvent>>>>
+    where
+        S: futures::Stream<Item = Result<Message, axum::Error>> + Unpin,
+    {
+        let connecting = self.engine.generate(input);
         tokio::pin!(connecting);
-        let mut responses = loop {
+        loop {
             tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                _ = wait_for_deadline(recovery.deadline()) => anyhow::bail!("realtime recovery timed out"),
-                response = &mut connecting => break response?,
-                msg = ws_rx.next(), if incoming.is_none() => {
-                    if !queue_client_message(msg, incoming, close_reason) { return Ok(()); }
+                _ = self.cancel.cancelled() => return Ok(None),
+                _ = wait_for_deadline(self.recovery.deadline()) => anyhow::bail!("realtime recovery timed out"),
+                response = &mut connecting => return response.map(Some),
+                msg = ws_rx.next(), if self.incoming.is_none() => {
+                    if !queue_client_message(msg, &mut self.incoming, close_reason) { return Ok(None); }
                 }
             }
-        };
+        }
+    }
+
+    /// Forward saved input before live input and reconcile worker output before delivery.
+    /// If the worker stops reading, drain terminal output before deciding whether to retry.
+    async fn forward_events<S, T>(
+        &mut self,
+        ws_rx: &mut S,
+        ws_tx: &mut T,
+        close_reason: &Mutex<Option<Message>>,
+        req_tx: &mpsc::Sender<DynamoRealtimeClientEvent>,
+        mut responses: ManyOut<Annotated<RealtimeServerEvent>>,
+    ) -> anyhow::Result<()>
+    where
+        S: futures::Stream<Item = Result<Message, axum::Error>> + Unpin,
+        T: futures::Sink<Message, Error = axum::Error> + Unpin,
+    {
         let mut pending = None;
         let mut is_sender_closed = false;
         let mut sender_deadline = None;
         loop {
             if pending.is_none() {
-                pending = recovery.next_replay()?;
+                pending = self.recovery.next_replay()?;
                 if pending.is_none()
-                    && !recovery.is_replaying()
-                    && let Some(event) = incoming.take()
+                    && !self.recovery.is_replaying()
+                    && let Some(event) = self.incoming.take()
                 {
-                    recovery.record(&event);
+                    self.recovery.record(&event);
                     pending = Some(event);
                 }
             }
             tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                _ = wait_for_deadline(recovery.deadline()) => anyhow::bail!("realtime recovery timed out"),
+                _ = self.cancel.cancelled() => return Ok(()),
+                _ = wait_for_deadline(self.recovery.deadline()) => anyhow::bail!("realtime recovery timed out"),
                 _ = wait_for_deadline(sender_deadline) => return Err(UnexpectedEnd.into()),
                 response = responses.next() => {
                     let Some(annotated) = response else {
-                        return recovery.stream_ended();
+                        return self.recovery.stream_ended();
                     };
                     if let Some(error) = annotated.error { return Err(error.into()); }
                     let Some(mut event) = annotated.data else { continue; };
-                    if !recovery.reconcile(&mut event)? { continue; }
-                    let payload = serde_json::to_string(&event)?;
-                    // Bounded input buffering can hide a Close behind a text frame
-                    // while output is blocked, so every write needs a deadline.
-                    let writing = tokio::time::timeout(
-                        SOCKET_WRITE_TIMEOUT,
-                        ws_tx.send(Message::Text(payload.into())),
-                    );
-                    tokio::pin!(writing);
-                    loop {
-                        tokio::select! {
-                            _ = cancel.cancelled() => return Ok(()),
-                            _ = wait_for_deadline(recovery.deadline()) => anyhow::bail!("realtime recovery timed out"),
-                            result = &mut writing => {
-                                if !matches!(result, Ok(Ok(()))) { return Ok(()); }
-                                break;
-                            }
-                            msg = ws_rx.next(), if incoming.is_none() => {
-                                if !queue_client_message(msg, incoming, close_reason) { return Ok(()); }
-                            }
-                        }
+                    if !self.recovery.reconcile(&mut event)? { continue; }
+                    if !self.write_client_event(ws_rx, ws_tx, close_reason, &event).await? {
+                        return Ok(());
                     }
                 }
                 permit = req_tx.reserve(), if pending.is_some() && !is_sender_closed => {
@@ -338,8 +351,41 @@ impl RealtimeSession {
                         }
                     }
                 }
-                msg = ws_rx.next(), if incoming.is_none() => {
-                    if !queue_client_message(msg, incoming, close_reason) { return Ok(()); }
+                msg = ws_rx.next(), if self.incoming.is_none() => {
+                    if !queue_client_message(msg, &mut self.incoming, close_reason) { return Ok(()); }
+                }
+            }
+        }
+    }
+
+    /// Bound each client write while still observing shutdown, recovery timeout, and client input.
+    /// `Ok(false)` ends the session; a client write failure must never trigger worker recovery.
+    async fn write_client_event<S, T>(
+        &mut self,
+        ws_rx: &mut S,
+        ws_tx: &mut T,
+        close_reason: &Mutex<Option<Message>>,
+        event: &RealtimeServerEvent,
+    ) -> anyhow::Result<bool>
+    where
+        S: futures::Stream<Item = Result<Message, axum::Error>> + Unpin,
+        T: futures::Sink<Message, Error = axum::Error> + Unpin,
+    {
+        let payload = serde_json::to_string(event)?;
+        // Bounded input buffering can hide a Close behind a text frame
+        // while output is blocked, so every write needs a deadline.
+        let writing = tokio::time::timeout(
+            SOCKET_WRITE_TIMEOUT,
+            ws_tx.send(Message::Text(payload.into())),
+        );
+        tokio::pin!(writing);
+        loop {
+            tokio::select! {
+                _ = self.cancel.cancelled() => return Ok(false),
+                _ = wait_for_deadline(self.recovery.deadline()) => anyhow::bail!("realtime recovery timed out"),
+                result = &mut writing => return Ok(matches!(result, Ok(Ok(())))),
+                msg = ws_rx.next(), if self.incoming.is_none() => {
+                    if !queue_client_message(msg, &mut self.incoming, close_reason) { return Ok(false); }
                 }
             }
         }

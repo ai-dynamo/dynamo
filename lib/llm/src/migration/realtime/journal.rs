@@ -1,6 +1,60 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Replay state for one realtime transcription connection.
+//!
+//! The frontend's `RealtimeSession` drives worker streams and borrows the WebSocket
+//! halves owned by `handle_socket`.
+//! [`RealtimeRecovery`](super::RealtimeRecovery) owns retry eligibility, the attempt
+//! budget, and the recovery deadline. Its [`Journal`] stores the input and output
+//! history needed to replace a worker without duplicating client-visible output;
+//! it does not own inference state or perform I/O.
+//!
+//! # Recording unfinished turns
+//!
+//! Journaling is enabled only with a positive migration limit for PCM transcription
+//! sessions with manual commits and no server-side VAD. Recovery also requires the
+//! first worker's `session.updated` acknowledgement. Omni sessions are ineligible.
+//!
+//! [`Journal::record`] retains audio append, commit, and clear events as the frontend
+//! queues them for the worker. Turns are ordered: a commit closes the current input
+//! turn, and subsequent audio starts another. A clear discards the open turn's audio
+//! and leaves a marker until its clear acknowledgement arrives. A committed turn is
+//! retired after its terminal transcription event; completed audio is not retained.
+//! The journal keeps the original session setup, unfinished turns, and the last
+//! completed item's ID mapping, rather than the full conversation.
+//!
+//! # Replaying and reconciling
+//!
+//! On an eligible worker failure, [`Journal::start_replay`] returns the saved setup,
+//! rewinds each unfinished turn's input cursor, and resets worker-specific IDs.
+//! [`Journal::next_replay`] waits for the replacement's session acknowledgement,
+//! then supplies saved events in order. The frontend sends these before new input.
+//! `RealtimeRecovery` bounds replacement attempts and input replay with one absolute
+//! five-second deadline; replayed output can continue after input has drained.
+//!
+//! Before each client write, [`Journal::reconcile`] maps replacement item IDs back
+//! to the IDs already exposed to the client, suppresses duplicate session/commit
+//! acknowledgements, and removes transcript delta prefixes already delivered.
+//! Prefix matching tolerates different delta boundaries but rejects divergent text
+//! or out-of-order output. Final transcripts may revise interim text and are not
+//! treated as delta prefixes. A failed client write ends the session without retry.
+//!
+//! # Limits and disabling recovery
+//!
+//! Retention is limited per connection to 16 MiB of accounted bytes and 4096 events,
+//! including setup. Accounting includes serialized event size, inline structures,
+//! IDs, and transcript capacity; it is not an exact heap limit or a shared budget.
+//! Overflow, unsupported sessions/events, or worker `error` events disable further
+//! recovery while allowing the current worker session to continue.
+//!
+//! Disabling recovery releases retained input, except for unsent replay events that
+//! still belong to the current attempt. Those events move into `unsent` and drain
+//! after the frontend's pending event under the existing recovery deadline. Item
+//! mappings and unmatched transcript prefixes remain only where needed to reconcile
+//! output already in flight. Disabling retries must not discard accepted input or
+//! turn already-visible output into duplicates.
+
 use std::collections::VecDeque;
 use std::io::{self, Write};
 

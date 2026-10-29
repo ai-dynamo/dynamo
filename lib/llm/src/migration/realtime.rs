@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Recovery policy for realtime transcription, separate from frontend transport.
+//!
+//! [`RealtimeRecovery`] combines the shared migration attempt budget and error
+//! classifier with a realtime replay deadline. The [`journal`] module documents
+//! how unfinished turns are retained, replayed, and reconciled with client output.
+
 use std::time::Duration;
 
 use dynamo_protocols::types::realtime::{
