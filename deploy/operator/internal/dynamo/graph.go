@@ -1649,7 +1649,7 @@ func GenerateBasePodSpec(
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	// Validate the complete component before selecting its authored role template.
-	component, roleLaunchOwnership, nativeSidecar, err := lowerComponentForRole(component, role, backendFramework)
+	component, roleLaunchOwnership, nativeSidecar, err := lowerComponentForRole(component, role)
 	if err != nil {
 		return nil, err
 	}
@@ -1688,7 +1688,7 @@ func generateBasePodSpecWithDefaults(
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	// Stored objects must satisfy admission invariants before defaults are applied.
-	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec"), string(backendFramework)); len(errs) > 0 {
+	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec")); len(errs) > 0 {
 		return nil, errs.ToAggregate()
 	}
 	return generateBasePodSpecWithDefaultsAndOwnership(
@@ -2303,7 +2303,7 @@ func GeneratePodSpecForComponent(
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	// Validate the complete component before selecting its authored role template.
-	component, ownership, nativeSidecar, err := lowerComponentForRole(component, role, backendFramework)
+	component, ownership, nativeSidecar, err := lowerComponentForRole(component, role)
 	if err != nil {
 		return nil, err
 	}
@@ -2666,7 +2666,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 			templateRole = RoleLeader
 		}
 	}
-	effectiveComponent, roleLaunchOwnership, nativeSidecar, err := lowerComponentForRole(p.component, templateRole, p.backendFramework)
+	effectiveComponent, roleLaunchOwnership, nativeSidecar, err := lowerComponentForRole(p.component, templateRole)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve component for role %s: %w", p.r.Name, err)
 	}

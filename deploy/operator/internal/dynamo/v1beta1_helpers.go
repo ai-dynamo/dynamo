@@ -581,9 +581,9 @@ func mergeLowPriorityMetadata(dst, src map[string]string) map[string]string {
 // lowerComponentForRole validates sidecar declarations before selecting a role.
 // It preserves component-wide mode for native workers that have no runtime container.
 // component must not be nil. The returned component is an independent copy.
-func lowerComponentForRole(component *v1beta1.DynamoComponentDeploymentSharedSpec, role Role, backend BackendFramework) (*v1beta1.DynamoComponentDeploymentSharedSpec, roleLaunchOwnership, bool, error) {
+func lowerComponentForRole(component *v1beta1.DynamoComponentDeploymentSharedSpec, role Role) (*v1beta1.DynamoComponentDeploymentSharedSpec, roleLaunchOwnership, bool, error) {
 	// Validate the authored component while both role declarations are available.
-	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec"), string(backend)); len(errs) > 0 {
+	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec")); len(errs) > 0 {
 		return nil, roleLaunchOwnedByOperator, false, errs.ToAggregate()
 	}
 
