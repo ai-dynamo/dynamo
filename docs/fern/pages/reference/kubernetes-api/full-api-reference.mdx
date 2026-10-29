@@ -4811,7 +4811,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it creates neither optimizer.max_trials nor a KV-capacity-fraction search.
+Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction search. Lowering independently defaults optimizer.max_trials to 320.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4893,7 +4893,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it creates neither optimizer.max_trials nor a KV-capacity-fraction search.
+Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction search. Lowering independently defaults optimizer.max_trials to 320.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5016,7 +5016,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it creates neither optimizer.max_trials nor a KV-capacity-fraction search.
+Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction search. Lowering independently defaults optimizer.max_trials to 320.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5247,7 +5247,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it creates neither optimizer.max_trials nor a KV-capacity-fraction search.
+Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction search. Lowering independently defaults optimizer.max_trials to 320.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

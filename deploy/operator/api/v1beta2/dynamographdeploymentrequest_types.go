@@ -263,8 +263,8 @@ type NativeSearchInput struct {
 	// traffic defaults. Any other static object is completed with its missing defaults.
 	// spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
 	// every lowered traffic field it names.
-	// The default evaluates a fixed concurrency, so it creates neither optimizer.max_trials
-	// nor a KV-capacity-fraction search.
+	// The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction
+	// search. Lowering independently defaults optimizer.max_trials to 320.
 	// +optional
 	Workload *WorkloadSpec `json:"workload,omitempty"`
 
