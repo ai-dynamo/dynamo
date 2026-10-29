@@ -445,7 +445,24 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
 ## Fault tolerance
 
 <ParamField path="--migration-limit" type="integer" default="0">
-  Maximum request migrations per worker disconnect. `0` disables migration.
+  Maximum replacement worker attempts per request. `0` disables migration.
+
+  For `/v1/realtime`, this is a lifetime budget for one client WebSocket. Recovery is
+  experimental and supports acknowledged transcription sessions with PCM input,
+  `audio.input.turn_detection: null`, and explicit client commits. The frontend replays
+  unfinished audio to a compatible warm replica in the original worker group while keeping
+  the client connection open. Completed turns are not replayed. Other realtime modes,
+  server-side voice activity detection, and frontend failure are outside this scope.
+
+  Each recovery has a five-second deadline covering connection, session acknowledgement,
+  and replay submission. Normal transcription completion has no recovery deadline.
+  A subsequent session update, unsupported event, application error, or retention limit
+  disables further recovery for that socket. Retention is bounded to 16 MiB of accounted
+  session, event, and transcript data and 4,096 events per eligible socket. Exceeding a
+  limit leaves a healthy stream working. Replayed deltas that differ from text already
+  delivered terminate the session with an error; final transcripts may still revise
+  interim text. Recovery requires another warm worker and adds inference work and an
+  output gap.
 
   Environment variable: `DYN_MIGRATION_LIMIT`
 </ParamField>
@@ -454,6 +471,8 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
   Maximum prompt-plus-output sequence length that remains eligible for migration. When a request
   strictly exceeds the limit, migration and token tracking stop for that request. Must be from `1`
   through `4294967295`. Unset means no sequence-length limit.
+
+  This token limit does not control realtime audio retention.
 
   Environment variable: `DYN_MIGRATION_MAX_SEQ_LEN`
 </ParamField>
@@ -467,6 +486,8 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
 </ParamField>
 
 <ParamField path="--active-prefill-tokens-threshold" type="integer" default="null">
+  Deprecated; will be removed in v1.7. Use `--active-prefill-tokens-threshold-frac`.
+
   Absolute active-prefill-token threshold. A numeric value greater than or equal to `0` independently
   enables this check. Uses OR logic with the fractional prefill threshold.
 
@@ -867,8 +888,9 @@ accepted fields, limits, errors, and rolling upgrades.
 `POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,
 `active_prefill_tokens_threshold`, and `active_prefill_tokens_threshold_frac`. A numeric field enables
 only that check. The router reevaluates workers on the next worker-load or runtime-configuration
-update; the call does not synchronously recompute the busy set and does not change startup-only router
-options such as `--router-mode kv` or `--router-track-output-blocks`.
+update, or with `--router-mode kv` at the next worker selection; the call does not synchronously
+recompute the busy set and does not change startup-only router options such as `--router-mode kv` or
+`--router-track-output-blocks`.
 
 ### Frontend feature switches
 

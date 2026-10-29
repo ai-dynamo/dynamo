@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use dynamo_kv_router::ConcurrentRadixTreeCompressed;
 use dynamo_kv_router::identity::{
-    CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
-    StableDpSlotId,
+    CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+    RoutingScopeId, StableDpSlotId,
 };
 use dynamo_kv_router::indexer::{
     KvIndexerInterface, KvIndexerMetrics, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
@@ -43,7 +43,7 @@ pub(crate) fn cache_owner(worker_id: u64) -> CacheOwnerId {
                 CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                 RoutingScopeId::new([2; 16], IdentitySource::Explicit),
             ),
-            DcId::new(1),
+            ClusterId::new(1),
         ),
         StableDpSlotId::new(slot, IdentitySource::Explicit),
     )

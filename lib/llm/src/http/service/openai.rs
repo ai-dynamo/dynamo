@@ -70,8 +70,8 @@ use crate::protocols::common::input_trigger::{
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
-    ParsingOptions,
-    audios::{AudioDataSource, NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
+    MediaDelivery, ParsingOptions,
+    audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
         NvCreateChatCompletionStreamResponse,
@@ -3552,6 +3552,20 @@ async fn chat_completions(
         return Err(err_response);
     }
 
+    // Retain API identity here while all engine/parser paths receive functions.
+    let custom_tools =
+        crate::protocols::openai::chat_completions::custom_tools::ChatCustomToolAdapter::prepare(
+            &mut request,
+        )
+        .map_err(|error| {
+            let response = ErrorMessage::from_anyhow(
+                invalid_argument(error.to_string()).into(),
+                "Invalid custom tools",
+            );
+            inflight_guard.mark_error(extract_error_type_from_response(&response));
+            response
+        })?;
+
     // Handle unsupported fields - if Some(resp) is returned by
     // validate_chat_completion_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
@@ -3679,6 +3693,7 @@ async fn chat_completions(
         // once the response is built, so it does not bound this wait:
         // `UntilFirstEvent` ends on the first event or on the client
         // disconnecting, and on nothing else.
+        let stream = custom_tools.stream(stream);
         let stream = until_client_disconnects(
             check_for_backend_error_info(stream, state.streaming_backend_error_check()),
             &ctx,
@@ -3870,7 +3885,7 @@ async fn chat_completions(
                 error_response
             })?;
 
-        let response =
+        let mut response =
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await
                 .map_err(|e| {
@@ -3881,6 +3896,14 @@ async fn chat_completions(
                     inflight_guard.mark_error(extract_error_type_from_response(&err_response));
                     err_response
                 })?;
+
+        custom_tools
+            .project_response(&mut response)
+            .map_err(|error| {
+                let response = ErrorMessage::from_anyhow(error, "Invalid custom tool output");
+                inflight_guard.mark_error(extract_error_type_from_response(&response));
+                response
+            })?;
 
         inflight_guard.mark_ok();
         // If the engine context was killed (client disconnect), the response was
@@ -4219,10 +4242,19 @@ async fn responses(
 
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
-    let tools = crate::protocols::openai::responses::sdk_tools(request.inner.tools.as_deref());
+    let loaded_tools: Vec<_> =
+        crate::protocols::openai::responses::effective_response_tools(&request)
+            .map_err(|error| {
+                let response = responses_conversion_error_response(error);
+                inflight_guard.mark_error(extract_error_type_from_response(&response));
+                response
+            })?
+            .into_iter()
+            .map(|tool| tool.inner)
+            .collect();
     let response_params = ResponseParams {
         tool_names: Some(crate::protocols::openai::responses::ToolNameMap::new(
-            tools.as_deref().unwrap_or_default(),
+            &loaded_tools,
             Some(&request.inner.input),
         )),
         model: request.inner.model.clone(),
@@ -4232,13 +4264,14 @@ async fn responses(
         metadata: request.inner.metadata.clone(),
         parallel_tool_calls: request.inner.parallel_tool_calls,
         store: request.inner.store,
-        tools,
-        // validate_responses_fields already rejected choices with no SDK form.
-        tool_choice: crate::protocols::openai::responses::sdk_tool_choice(
-            request.inner.tool_choice.as_ref(),
-        )
-        .ok()
-        .flatten(),
+        tools: request
+            .inner
+            .tools
+            .as_ref()
+            .map(|tools| tools.iter().map(|tool| tool.inner.clone()).collect()),
+        template_tools: request.inner.tools.clone(),
+        loaded_tools,
+        tool_choice: request.inner.tool_choice.clone(),
         instructions: request.inner.instructions.clone(),
         reasoning: request.inner.reasoning.clone(),
         text: request.inner.text.clone(),
@@ -4631,7 +4664,8 @@ pub fn validate_response_unsupported_fields(
 pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), ErrorResponse> {
     use crate::protocols::openai::validate;
 
-    let map_err = |e: anyhow::Error| {
+    /// Maps any validation diagnostic to a prefixed HTTP 400 invalid-request response.
+    fn invalid_request(e: impl std::fmt::Display) -> ErrorResponse {
         ErrorMessage::from_http_error(
             ErrorClass::InvalidRequest,
             HttpError {
@@ -4639,18 +4673,16 @@ pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), Error
                 message: VALIDATION_PREFIX.to_string() + &e.to_string(),
             },
         )
-    };
+    }
 
-    validate::validate_temperature(request.inner.temperature).map_err(&map_err)?;
-    validate::validate_top_p(request.inner.top_p).map_err(&map_err)?;
-    validate::validate_max_tokens(request.inner.max_output_tokens).map_err(&map_err)?;
-    crate::protocols::openai::responses::sdk_tool_choice(request.inner.tool_choice.as_ref())
-        .map_err(&map_err)?;
+    validate::validate_temperature(request.inner.temperature).map_err(invalid_request)?;
+    validate::validate_top_p(request.inner.top_p).map_err(invalid_request)?;
+    validate::validate_max_tokens(request.inner.max_output_tokens).map_err(invalid_request)?;
 
     if let Some(text) = &request.inner.text {
         use crate::protocols::openai::responses::convert_text_format;
         if let Some(response_format) = convert_text_format(text) {
-            validate::validate_response_format(&Some(response_format)).map_err(&map_err)?;
+            validate::validate_response_format(&Some(response_format)).map_err(invalid_request)?;
         }
     }
 
@@ -5180,9 +5212,9 @@ async fn images_with_request(
     request: NvCreateImageRequest,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
-    // (per-model readiness check is deferred until after we resolve the
-    // ImageModel enum into a string; see below)
     check_ready(&state)?;
+
+    validate_request_fields_generic(&request, "images")?;
 
     let request_id = get_or_create_request_id(&headers);
     let mut request = context_from_headers(request, request_id, &headers)?;
@@ -5192,15 +5224,8 @@ async fn images_with_request(
     let streaming = false;
 
     // Get the model name from the request (diffusion model)
-    let model = request
-        .inner
-        .model
-        .as_ref()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| "diffusion".to_string());
+    let model = request.model.as_deref().unwrap_or("diffusion").to_string();
 
-    // Per-model serving readiness gate (now that we have a resolved model
-    // name string).
     check_model_serving_ready(&state, &model)?;
 
     let metric_model = state.manager().metric_model_for(&model).to_string();
@@ -5342,6 +5367,8 @@ async fn videos(
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
 
+    validate_request_fields_generic(&request, "videos")?;
+
     request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
@@ -5476,6 +5503,8 @@ async fn video_stream(
     let mut request: NvCreateVideoRequest = parse_json_request("video stream", &body)?;
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
+
+    validate_request_fields_generic(&request, "videos")?;
 
     request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
@@ -5681,13 +5710,13 @@ async fn handler_audio_speech(
 
     validate_request_fields_generic(&request, "audio speech")?;
 
-    let returns_audio_bytes = request.data_source != Some(AudioDataSource::Url);
+    let returns_audio_bytes = request.data_source != Some(MediaDelivery::Url);
     let streams_audio_chunks = returns_audio_bytes
         && matches!(
             request.response_format.as_deref().unwrap_or("wav"),
             "pcm" | "wav"
         )
-        && request.speed.is_none_or(|speed| speed == 1.0);
+        && request.speed == 1.0;
     let request_id = get_or_create_request_id(&headers);
     if streams_audio_chunks {
         // Advertise that this frontend can concatenate incremental worker
@@ -8351,21 +8380,24 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_responses_fields_rejects_tool_search_choice() {
+    fn test_validate_responses_fields_allows_configured_client_tool_search() {
         let mut request = make_base_request();
         request.inner.tool_choice =
             Some(serde_json::from_value(serde_json::json!({"type": "tool_search"})).unwrap());
-        let (code, body) = validate_responses_fields(&request)
-            .expect_err("tool_search has no Chat Completions equivalent");
-        assert_eq!(code, StatusCode::BAD_REQUEST);
-        assert!(
-            body.message
-                .contains("Unsupported Responses tool_choice type 'tool_search'")
+        request.inner.tools = Some(
+            serde_json::from_value(serde_json::json!([
+                {"type":"tool_search","execution":"client"}
+            ]))
+            .unwrap(),
         );
-
-        request.inner.tool_choice =
-            Some(serde_json::from_value(serde_json::json!("required")).unwrap());
-        assert!(validate_responses_fields(&request).is_ok());
+        // Validate the native choice before any lossy SDK projection.
+        validate_responses_fields(&request).unwrap();
+        NvCreateChatCompletionRequest::try_from(request.clone()).unwrap();
+        request.inner.tools = None;
+        let response = responses_conversion_error_response(
+            NvCreateChatCompletionRequest::try_from(request).unwrap_err(),
+        );
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -8459,6 +8491,7 @@ mod tests {
     #[test]
     fn test_validate_chat_completion_required_fields_empty_messages() {
         let request = NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![],
@@ -8489,6 +8522,7 @@ mod tests {
     #[test]
     fn test_validate_chat_completion_required_fields_with_messages() {
         let request = NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8742,6 +8776,7 @@ mod tests {
     fn test_bad_base_request_for_chatcompletion() {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8775,6 +8810,7 @@ mod tests {
 
         // Presence Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8807,6 +8843,7 @@ mod tests {
 
         // Temperature: Should be a float between 0.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8839,6 +8876,7 @@ mod tests {
 
         // Top P: Should be a float between 0.0 and 1.0
         let request = NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8871,6 +8909,7 @@ mod tests {
 
         // Repetition Penalty: Should be a float between 0.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8905,6 +8944,7 @@ mod tests {
 
         // Top Logprobs: Should be a positive integer between 0 and 20
         let request = NvCreateChatCompletionRequest {
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9011,6 +9051,7 @@ mod tests {
 
         let normal_event = Annotated {
             data: Some(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![],
@@ -9667,6 +9708,7 @@ mod tests {
         .expect("annotation construction should succeed");
         let normal_event = Annotated::<NvCreateChatCompletionStreamResponse> {
             data: Some(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![],
@@ -9759,6 +9801,7 @@ mod tests {
         // Create a normal data event
         let normal_event = Annotated::<NvCreateChatCompletionStreamResponse> {
             data: Some(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![],
@@ -10172,6 +10215,7 @@ mod tests {
         choices: Vec<ChatChoiceStream>,
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices,
@@ -10242,6 +10286,7 @@ mod tests {
         arguments: Option<&str>,
     ) -> ChatChoiceStream {
         let tool_call = ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: id.map(|s| s.to_string()),
             r#type: Some(FunctionType::Function),
@@ -10249,7 +10294,6 @@ mod tests {
                 name: name.map(|s| s.to_string()),
                 arguments: arguments.map(|s| s.to_string()),
             }),
-            custom: None,
         };
         #[allow(deprecated)]
         ChatChoiceStream {
@@ -10335,6 +10379,7 @@ mod tests {
     #[test]
     fn test_tool_dispatch_multiple_tool_calls() {
         let tc1 = ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call_1".to_string()),
             r#type: Some(FunctionType::Function),
@@ -10342,9 +10387,9 @@ mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris"}"#.to_string()),
             }),
-            custom: None,
         };
         let tc2 = ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 1,
             id: Some("call_2".to_string()),
             r#type: Some(FunctionType::Function),
@@ -10352,7 +10397,6 @@ mod tests {
                 name: Some("get_time".to_string()),
                 arguments: Some(r#"{"tz":"UTC"}"#.to_string()),
             }),
-            custom: None,
         };
         #[allow(deprecated)]
         let choice = ChatChoiceStream {
@@ -10408,6 +10452,7 @@ mod tests {
         // One complete tool call and one incomplete (missing arguments = streaming delta).
         // Only the complete one should dispatch.
         let complete = ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call_complete".to_string()),
             r#type: Some(FunctionType::Function),
@@ -10415,9 +10460,9 @@ mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris"}"#.to_string()),
             }),
-            custom: None,
         };
         let incomplete = ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 1,
             id: Some("call_partial".to_string()),
             r#type: Some(FunctionType::Function),
@@ -10425,7 +10470,6 @@ mod tests {
                 name: Some("search".to_string()),
                 arguments: None, // still streaming
             }),
-            custom: None,
         };
         #[allow(deprecated)]
         let choice = ChatChoiceStream {
@@ -10458,11 +10502,11 @@ mod tests {
     fn test_tool_dispatch_function_none() {
         // Tool call chunk with function: None — should not dispatch and should not panic.
         let tool_call = ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call_999".to_string()),
             r#type: Some(FunctionType::Function),
             function: None,
-            custom: None,
         };
         #[allow(deprecated)]
         let choice = ChatChoiceStream {
@@ -10814,6 +10858,7 @@ mod tests {
             logprobs: None,
         };
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![choice],
@@ -10829,6 +10874,22 @@ mod tests {
             llm_metrics: None,
             tool_call_completion: Vec::new(),
         }
+    }
+
+    #[test]
+    fn phase_only_chunks_are_filtered_before_chat_completions_sse() {
+        let mut chunk = make_delta(None, None, None, None, None, None, None, None);
+        chunk.message_boundary = Some(
+            crate::protocols::openai::chat_completions::MessageBoundary::Start(
+                dynamo_protocols::types::responses::MessagePhase::Commentary,
+            ),
+        );
+        assert!(is_empty_stream_response(&chunk));
+        chunk.message_boundary =
+            Some(crate::protocols::openai::chat_completions::MessageBoundary::End);
+        assert!(is_empty_stream_response(&chunk));
+        chunk.inner.choices[0].finish_reason = Some(dynamo_protocols::types::FinishReason::Stop);
+        assert!(!is_empty_stream_response(&chunk));
     }
 
     #[test]
@@ -10886,6 +10947,7 @@ mod tests {
 
         // Not empty: has tool_calls
         let tc = vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call_1".to_string()),
             r#type: Some(FunctionType::Function),
@@ -10893,7 +10955,6 @@ mod tests {
                 name: Some("f".to_string()),
                 arguments: Some("{}".to_string()),
             }),
-            custom: None,
         }];
         assert!(
             !is_empty_stream_response(&make_delta(

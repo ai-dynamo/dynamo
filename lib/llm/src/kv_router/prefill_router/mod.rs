@@ -27,7 +27,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
-    kv_router::{RoutingHost, SelectionPolicySource},
+    kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -563,11 +563,18 @@ impl
         let endpoint_id = &binding.endpoint_id;
         let mut prefill_completion = None;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
-            let (prepared, prefill_stream) = router
+            let PrefillDispatch {
+                metadata: prepared,
+                stream: prefill_stream,
+                booking,
+            } = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
                     self.prepare_prefill_dispatch(request, target, endpoint_id)
                 })
                 .await?;
+            if let (Some(state), Some(booking)) = (req.migration_state.as_ref(), booking) {
+                state.store_prefill_release(booking);
+            }
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
                 prefill_completion =
