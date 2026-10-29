@@ -7,6 +7,8 @@
 //! - `POST /pools`: a PoolRelay registers its pool. It calls this on a timer,
 //!   and each call is also the pool's heartbeat.
 //! - `GET /routers`: the Global Router replicas a PoolRelay connects to.
+//! - `POST /routers`: `RegisterRouter` from the design, not available yet.
+//!   It answers `501` with the reason.
 //! - `GET /pools`: the pools a Global Router routes to.
 //! - `GET /healthz`: OK while the service can answer from its backend. Use it
 //!   for readiness; liveness needs only the TCP port.
@@ -64,7 +66,7 @@ pub struct Tls {
 pub fn routes(backend: PoolDiscoveryBackend) -> Router {
     Router::new()
         .route("/pools", get(list_pools).post(register_pool))
-        .route("/routers", get(list_routers))
+        .route("/routers", get(list_routers).post(register_router))
         .route("/healthz", get(healthz))
         .with_state(Arc::new(backend))
 }
@@ -138,6 +140,20 @@ async fn list_routers(State(backend): State<Arc<PoolDiscoveryBackend>>) -> Respo
         .into_response(),
         Err(error) => error_response(error),
     }
+}
+
+/// `RegisterRouter` from the design. The service takes no router
+/// registrations yet, so every call answers `501`, whatever its body. With
+/// MCS, routers need not register. Without it, how a router proves it is a
+/// router, and what it sends, are not decided, and trusting every caller
+/// would let a fake router entry receive every pool's state.
+async fn register_router() -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        "router registration is not implemented yet. Router replicas come from the router \
+         Service's EndpointSlices, which MCS imports, or from the service's configuration.",
+    )
+        .into_response()
 }
 
 /// Lists what `GET /pools` and `GET /routers` would serve. With pools from
@@ -310,6 +326,35 @@ mod tests {
         assert_eq!(status, reqwest::StatusCode::UNPROCESSABLE_ENTITY);
         let (_, pools) = get_json(&base, "/pools").await;
         assert_eq!(pools["pools"], json!([]));
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn routers_cannot_register_and_the_answer_says_why() {
+        let (base, shutdown) = start(registrations_backend()).await;
+        let registration =
+            json!({"replica": "aws-west/global-router-0", "url": "http://10.43.0.5:50051"});
+        for body in [String::new(), registration.to_string()] {
+            let response = reqwest::Client::new()
+                .post(format!("{base}/routers"))
+                .body(body.clone())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::NOT_IMPLEMENTED,
+                "{body}"
+            );
+            let reason = response.text().await.unwrap();
+            // The reason names no flags: the binary's flags are not this layer's.
+            assert!(
+                reason.starts_with("router registration is not implemented yet")
+                    && reason.contains("EndpointSlices")
+                    && !reason.contains("--"),
+                "{reason}"
+            );
+        }
         shutdown.cancel();
     }
 
