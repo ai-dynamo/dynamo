@@ -195,7 +195,7 @@ spec:
     spec:
       containers:
       - args:
-        - --model-path
+        - --model
         - Qwen/Qwen3-0.6B
         command:
         - python3
@@ -408,7 +408,7 @@ spec:
     spec:
       containers:
       - args:
-        - --model-path
+        - --model
         - Qwen/Qwen3-0.6B
         command:
         - python3
@@ -478,7 +478,7 @@ spec:
       spec:
         containers:
         - args:
-          - --model-path
+          - --model
           - Qwen/Qwen3-0.6B
           command:
           - python3

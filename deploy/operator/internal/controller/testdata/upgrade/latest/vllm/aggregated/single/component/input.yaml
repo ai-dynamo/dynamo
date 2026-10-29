@@ -36,7 +36,7 @@ spec:
           - -m
           - dynamo.vllm
           args:
-          - --model-path
+          - --model
           - Qwen/Qwen3-0.6B
           resources:
             limits:

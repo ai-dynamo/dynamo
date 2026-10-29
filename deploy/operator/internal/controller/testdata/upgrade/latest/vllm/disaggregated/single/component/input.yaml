@@ -36,10 +36,12 @@ spec:
           - -m
           - dynamo.vllm
           args:
-          - --model-path
+          - --model
           - Qwen/Qwen3-0.6B
           - --disaggregation-mode
           - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           resources:
             limits:
               nvidia.com/gpu: '1'
@@ -56,10 +58,12 @@ spec:
           - -m
           - dynamo.vllm
           args:
-          - --model-path
+          - --model
           - Qwen/Qwen3-0.6B
           - --disaggregation-mode
           - decode
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
           resources:
             limits:
               nvidia.com/gpu: '1'
