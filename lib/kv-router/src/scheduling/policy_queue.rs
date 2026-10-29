@@ -1013,14 +1013,8 @@ mod tests {
     fn admission_profile() -> PolicyProfile {
         profile(
             r#"
-default_policy_family: agents
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: agents
-    policy_family: agents
-    cache_bucket: all
     queue_policy: fcfs
     quantum: 10
 "#,
@@ -1039,14 +1033,8 @@ policy_classes:
     fn per_worker_caps_scale_and_remain_pre_add() {
         let mut queue = PolicyQueue::new(&profile(
             r#"
-default_policy_family: capped
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: capped
-    policy_family: capped
-    cache_bucket: all
     quantum: 10
     request_queue_limit_per_worker: 1
     raw_isl_token_queue_limit_per_worker: 5
@@ -1354,14 +1342,8 @@ policy_classes:
     fn retain_removes_payload_and_rebuilds_queue_accounting() {
         let mut queue = PolicyQueue::new(&profile(
             r#"
-default_policy_family: default
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: default
-    policy_family: default
-    cache_bucket: all
     quantum: 10
 "#,
         ));
@@ -1642,29 +1624,18 @@ policy_classes:
     fn per_worker_token_caps_follow_capacity_without_evicting() {
         let mut queue = PolicyQueue::new(&profile(
             r#"
-default_policy_family: raw
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: raw
 policy_classes:
   - name: raw
-    policy_family: raw
-    cache_bucket: all
     quantum: 1
     raw_isl_token_queue_limit_per_worker: 10
   - name: cached
-    policy_family: cached
-    cache_bucket: all
     quantum: 1
     cached_token_queue_limit_per_worker: 5
   - name: zero
-    policy_family: zero
-    cache_bucket: all
     quantum: 1
     request_queue_limit_per_worker: 0
   - name: no-workers
-    policy_family: no-workers
-    cache_bucket: all
     quantum: 1
     request_queue_limit_per_worker: 1
 "#,
@@ -1788,14 +1759,8 @@ policy_classes:
     fn per_worker_limit_multiplication_saturates() {
         let mut queue = PolicyQueue::new(&profile(&format!(
             r#"
-default_policy_family: capped
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: capped
-    policy_family: capped
-    cache_bucket: all
     quantum: 1
     request_queue_limit_per_worker: {}
 "#,
@@ -1819,19 +1784,12 @@ policy_classes:
     fn fcfs_and_wspt_order_only_within_each_class() {
         let mut queue = PolicyQueue::new(&profile(
             r#"
-default_policy_family: fcfs
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: fcfs
 policy_classes:
   - name: fcfs
-    policy_family: fcfs
-    cache_bucket: all
     queue_policy: fcfs
     quantum: 50
   - name: wspt
-    policy_family: wspt
-    cache_bucket: all
     queue_policy: wspt
     quantum: 50
 "#,
@@ -1895,18 +1853,11 @@ policy_classes:
     fn drr_weights_progress_and_skips_blocked_classes_without_credit() {
         let mut queue = PolicyQueue::new(&profile(
             r#"
-default_policy_family: slow
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: slow
 policy_classes:
   - name: slow
-    policy_family: slow
-    cache_bucket: all
     quantum: 1
   - name: fast
-    policy_family: fast
-    cache_bucket: all
     quantum: 3
 "#,
         ));
@@ -1953,18 +1904,11 @@ policy_classes:
     fn drr_carry_uses_next_dispatchable_lane() {
         let mut queue = PolicyQueue::new(&profile(
             r#"
-default_policy_family: agents
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: agents
 policy_classes:
   - name: agents
-    policy_family: agents
-    cache_bucket: all
     quantum: 10
   - name: batch
-    policy_family: batch
-    cache_bucket: all
     quantum: 1
 "#,
         ));
@@ -2035,18 +1979,11 @@ policy_classes:
     fn drr_serves_exact_quantum_ratio_for_equal_cost_backlogs() {
         let mut queue = PolicyQueue::new(&profile(
             r#"
-default_policy_family: one
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: one
 policy_classes:
   - name: one
-    policy_family: one
-    cache_bucket: all
     quantum: 1
   - name: three
-    policy_family: three
-    cache_bucket: all
     quantum: 3
 "#,
         ));
@@ -2088,21 +2025,81 @@ policy_classes:
     }
 
     #[test]
+    fn drr_quanta_split_charged_cost_not_request_count() {
+        let mut queue = PolicyQueue::new(&profile(
+            r#"
+default_policy_class: standard
+policy_classes:
+  - name: priority
+    quantum: 800
+    queue_policy: fcfs
+    slo_ttft_ms: 1000
+  - name: standard
+    quantum: 200
+    queue_policy: fcfs
+    slo_ttft_ms: 3000
+"#,
+        ));
+        // Priority requests cost 300 and 500. Standard's first three requests cost its whole
+        // 200 quantum; its last costs 150 and leaves credit unspent when Standard empties.
+        for round in 0..5 {
+            for cost in [300, 500] {
+                queue
+                    .enqueue(
+                        0,
+                        1,
+                        QueueSnapshot::new(cost, 0),
+                        round as f64,
+                        0.0,
+                        0,
+                        WorkerPlacement::Any,
+                        (),
+                    )
+                    .unwrap();
+            }
+        }
+        for (round, cost) in [200, 200, 200, 150].into_iter().enumerate() {
+            queue
+                .enqueue(
+                    1,
+                    1,
+                    QueueSnapshot::new(cost, 0),
+                    round as f64,
+                    0.0,
+                    0,
+                    WorkerPlacement::Any,
+                    (),
+                )
+                .unwrap();
+        }
+
+        let dispatches = std::iter::from_fn(|| queue.pop_next(|_, _, _| true))
+            .map(|entry| (entry.class_index(), entry.snapshot().scheduling_cost_tokens))
+            .collect::<Vec<_>>();
+        // While both classes are backlogged, each round charges 800 to Priority for two
+        // requests and 200 to Standard for one: an 80/20 cost split at a 2:1 request count.
+        for round in dispatches[..9].chunks_exact(3) {
+            assert_eq!(round, [(0, 300), (0, 500), (1, 200)]);
+        }
+        // Standard's last request leaves 50 of its 200 credit unspent. Emptying the class
+        // resets that credit to zero, and Priority then uses the idle capacity.
+        assert_eq!(
+            dispatches[9..],
+            [(0, 300), (0, 500), (1, 150), (0, 300), (0, 500)]
+        );
+        assert_eq!(queue.classes[1].deficit, 0);
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[test]
     fn fully_blocked_ring_returns_without_accruing_deficit() {
         let mut queue = PolicyQueue::new(&profile(
             r#"
-default_policy_family: first
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: first
 policy_classes:
   - name: first
-    policy_family: first
-    cache_bucket: all
     quantum: 7
   - name: second
-    policy_family: second
-    cache_bucket: all
     quantum: 11
 "#,
         ));
@@ -2142,18 +2139,11 @@ policy_classes:
     fn oversized_heads_bulk_add_deficit_and_make_progress() {
         let mut queue = PolicyQueue::new(&profile(
             r#"
-default_policy_family: large
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: large
 policy_classes:
   - name: large
-    policy_family: large
-    cache_bucket: all
     quantum: 4
   - name: blocked
-    policy_family: blocked
-    cache_bucket: all
     quantum: 100
 "#,
         ));

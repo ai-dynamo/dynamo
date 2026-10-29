@@ -127,10 +127,6 @@ impl ClassifyRequest {
         self
     }
 
-    fn uncached_tokens(&self) -> usize {
-        QueueSnapshot::new(self.input_tokens, self.initial_cached_tokens).uncached_tokens
-    }
-
     /// Busy thresholds of the policy class this request resolves to now, including a class
     /// set with [`set_policy_class`](Self::set_policy_class). The queue holds the request
     /// while every eligible worker is past them.
@@ -140,19 +136,18 @@ impl ClassifyRequest {
             .map(|thresholds| {
                 let profile = &thresholds.profile;
                 profile
-                    .class(profile.resolve_class_index(self.policy_class(), self.uncached_tokens()))
+                    .class(profile.resolve_class_index(self.policy_class()))
                     .busy_thresholds
             })
             .unwrap_or_default()
     }
 
-    /// Busy thresholds `policy_class` would apply to this request, or `None` when the router
-    /// does not know the class. A policy family resolves to its class for this request's
-    /// uncached tokens, as [`set_policy_class`](Self::set_policy_class) would.
+    /// Busy thresholds of the policy class named `policy_class`, or `None` when the router
+    /// does not know the class.
     pub fn queue_thresholds_for(&self, policy_class: &str) -> Option<BusyThresholds> {
         let profile = &self.busy_thresholds.as_ref()?.profile;
         profile
-            .resolve_class_index_strict(policy_class, self.uncached_tokens())
+            .resolve_class_index_strict(policy_class)
             .map(|index| profile.class(index).busy_thresholds)
     }
 

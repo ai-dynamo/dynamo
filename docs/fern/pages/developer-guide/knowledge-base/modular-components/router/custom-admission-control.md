@@ -181,14 +181,8 @@ request_classifier:
   parameters:
     max_wait_ms: 2000
 
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
-  - name: standard_all
-    policy_family: standard
-    cache_bucket: all
+  - name: standard
     queue_policy: fcfs
     quantum: 1
     prefill_busy_threshold_frac: 1.0
@@ -212,7 +206,7 @@ The policy class enables queueing when every eligible worker's active prefill to
 | `scheduling_cost_tokens()` | Estimated uncached input tokens, or the classifier's override |
 | `policy_class()` | Requested policy class, or the classifier's override |
 | `queue_thresholds()` | Busy thresholds of the policy class the request resolves to now, including the classifier's override. The queue holds the request while every eligible worker is past them |
-| `queue_thresholds_for(name)` | Busy thresholds another policy family or class would apply to this request, or `None` if the router does not know it |
+| `queue_thresholds_for(name)` | Busy thresholds of the policy class with that name, or `None` if the router does not know it |
 | `reject_thresholds()` | Router-wide busy thresholds, read when classification started. Selection skips a worker past them and rejects the request when none remains |
 | `ingress_at()` | Original router ingress time |
 | `due_at()` | Queue deadline set by the classifier, if any |
@@ -283,13 +277,13 @@ Every row also returns its `WorkerInfo` from `info()` without a declaration. To 
 
 | Setter | Effect |
 |---|---|
-| `set_policy_class(name)` | Select a configured policy family or standalone class; family selection preserves uncached-input bucketing |
+| `set_policy_class(name)` | Select a configured policy class by name |
 | `set_due_at(instant)` | Set a deadline for router queue waiting |
 | `set_scheduling_cost_tokens(tokens)` | Override the cost used by queue scheduling |
 | `set_worker_selection_target(worker)` | Set a soft worker/rank preference, subject to hard pins and eligibility |
 | `clear_worker_selection_target()` | Clear the soft preference |
 
-Use a family name or standalone class from the [router policy configuration](configuration-and-tuning.md) with `set_policy_class`; generated queue names within a family are not valid overrides. Dynamo refreshes cache estimates when the admitted request enters the queue and applies the classifier's explicit overrides.
+Use a class name from the [router policy configuration](configuration-and-tuning.md) with `set_policy_class`. A name that matches no configured class fails the request; it does not fall back to the default class. Dynamo refreshes cache estimates when the admitted request enters the queue and applies the classifier's explicit overrides.
 
 ## Defer Requests and Track Their Lifecycle
 

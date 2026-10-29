@@ -305,25 +305,14 @@ mod tests {
             r#"
 models:
   queueing-model:
-    default_policy_family: standard
-    uncached_isl_buckets:
-      - min_tokens: 0
-        bucket: all
     policy_classes:
       - name: queued
-        policy_family: standard
-        cache_bucket: all
         quantum: 1
         prefill_busy_threshold: 1
   threshold-free-model:
-    default_policy_family: standard
-    uncached_isl_buckets:
-      - min_tokens: 0
-        bucket: all
+    default_policy_class: direct
     policy_classes:
       - name: direct
-        policy_family: standard
-        cache_bucket: all
         quantum: 1
       - name: express
         quantum: 1
@@ -829,9 +818,8 @@ worker_selection:
 
     /// Fallback parity with the integrated router: `policy_class` is passed
     /// through to the core's `PolicyProfile::resolve_class_index`, which never
-    /// rejects. Family names and explicit class names resolve normally;
-    /// physical (matrix) class names and unknown names silently fall back to
-    /// the default policy family and still schedule.
+    /// rejects. Configured class names resolve directly; unknown names silently
+    /// fall back to the default policy class and still schedule.
     #[tokio::test]
     async fn policy_class_falls_back_instead_of_rejecting() {
         let policy_file = model_policy_file();
@@ -849,38 +837,21 @@ worker_selection:
         reg.model_name = "threshold-free-model".to_string();
         register(&selector, vec![reg]).await;
 
-        // A policy-family name resolves to that family's bucketed class.
-        let mut family_req = select_request("res-family");
-        family_req.model_name = "threshold-free-model".to_string();
-        family_req.policy_class = Some("standard".to_string());
-        selector
-            .select_and_reserve(family_req)
-            .await
-            .expect("policy_family 'standard' should schedule");
+        // Every configured class name is honored, including the default's.
+        for class in ["express", "direct"] {
+            let mut class_req = select_request(&format!("res-{class}"));
+            class_req.model_name = "threshold-free-model".to_string();
+            class_req.policy_class = Some(class.to_string());
+            selector
+                .select_and_reserve(class_req)
+                .await
+                .unwrap_or_else(|error| panic!("class {class:?} should schedule: {error:?}"));
+        }
 
-        // An explicit class name is honored.
-        let mut explicit_req = select_request("res-explicit");
-        explicit_req.model_name = "threshold-free-model".to_string();
-        explicit_req.policy_class = Some("express".to_string());
-        selector
-            .select_and_reserve(explicit_req)
-            .await
-            .expect("explicit class 'express' should schedule");
-
-        // A physical FamilyBucket class name is not client-requestable; the
-        // core falls back to the default family instead of rejecting — the
-        // integrated router schedules this value normally, so standalone EPP
-        // must not 400 it either.
-        let mut physical_req = select_request("res-physical");
-        physical_req.model_name = "threshold-free-model".to_string();
-        physical_req.policy_class = Some("direct".to_string());
-        selector
-            .select_and_reserve(physical_req)
-            .await
-            .expect("physical class name 'direct' should fall back and schedule");
-
-        // A completely unknown name (e.g. a stale header after a config
-        // change) falls back the same way instead of erroring.
+        // An unknown name (e.g. a stale header after a config change, or a
+        // removed policy-family name) falls back to the default class instead
+        // of erroring — the integrated router schedules it normally, so
+        // standalone EPP must not 400 it either.
         let mut unknown_req = select_request("res-unknown");
         unknown_req.model_name = "threshold-free-model".to_string();
         unknown_req.policy_class = Some("unknown".to_string());

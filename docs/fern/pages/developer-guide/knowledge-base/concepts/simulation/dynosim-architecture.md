@@ -106,16 +106,14 @@ The router observes request admission, prefill completion, and sequence release.
 prompt-side load from token counts or an AIConfigurator timing model. These estimates influence
 worker selection but do not replace the engine scheduler's own queue and KV-cache behavior.
 
-Policy-class replay uses the same policy-family and cache-bucket model as the live router:
+Policy-class replay resolves classes the same way as the live router:
 
 ```mermaid
 flowchart LR
     R["Replay request"] --> C{"policy_class"}
-    C -->|Exact explicit class| Q["Physical policy queue"]
-    C -->|Known family| B["Observed uncached-ISL bucket"]
-    C -->|Missing or unknown| F["default_policy_family"]
-    F --> B
-    B --> Q
+    C -->|Configured class name| Q["Policy class queue"]
+    C -->|Missing or unknown| F["default_policy_class"]
+    F --> Q
     Q --> D["Deficit round-robin dispatch"]
 ```
 
