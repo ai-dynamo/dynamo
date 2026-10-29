@@ -366,7 +366,6 @@ func TestGenerateBasePodSpecRejectsInvalidDynamoSidecar(t *testing.T) {
 	cases := []struct {
 		name          string
 		componentType v1beta1.ComponentType
-		backend       BackendFramework
 		restartPolicy *corev1.ContainerRestartPolicy
 		multinode     *v1beta1.MultinodeSpec
 		wantErrors    field.ErrorList
@@ -389,19 +388,10 @@ func TestGenerateBasePodSpecRejectsInvalidDynamoSidecar(t *testing.T) {
 			restartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
 			wantErrors: field.ErrorList{field.Required(field.NewPath("spec", "roles"), "multinode sidecars require complete leader and worker podTemplates")},
 		},
-		{
-			name: "multinode worker with unsupported backend", componentType: v1beta1.ComponentTypeWorker, backend: BackendFrameworkNoop,
-			restartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways), multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
-			wantErrors: field.ErrorList{field.Forbidden(field.NewPath("spec", "multinode"), "Dynamo sidecar multinode support currently requires backendFramework: sglang, vllm, or trtllm")},
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Construct a stored component that has not passed current admission")
-			backend := tc.backend
-			if backend == "" {
-				backend = BackendFrameworkVLLM
-			}
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "worker", ComponentType: tc.componentType, Multinode: tc.multinode,
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
@@ -412,7 +402,7 @@ func TestGenerateBasePodSpecRejectsInvalidDynamoSidecar(t *testing.T) {
 			original := component.DeepCopy()
 
 			t.Log("Reject rendering with the same typed field errors as admission")
-			pod, err := GenerateBasePodSpec(component, backend, nil, "test", "test", RoleMain, 1, &configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+			pod, err := GenerateBasePodSpec(component, BackendFrameworkVLLM, nil, "test", "test", RoleMain, 1, &configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
 			require.Equal(t, tc.wantErrors.ToAggregate(), err)
 			require.Nil(t, pod)
 			require.Equal(t, original, component)
@@ -682,7 +672,15 @@ func TestMultinodeSidecarRendering(t *testing.T) {
 									pcs, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 									require.NoError(t, err)
 									require.Len(t, pcs.Spec.Template.Cliques, 2)
-									for _, clique := range pcs.Spec.Template.Cliques {
+
+									t.Log("Rendering the same group without backendFramework is admitted and keeps no startup order")
+									unsetDGD := dgd.DeepCopy()
+									unsetDGD.Spec.BackendFramework = ""
+									unset, err := GenerateGrovePodCliqueSet(t.Context(), unsetDGD, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+									require.NoError(t, err)
+									require.Len(t, unset.Spec.Template.Cliques, 2)
+									for i, clique := range pcs.Spec.Template.Cliques {
+										require.Empty(t, unset.Spec.Template.Cliques[i].Spec.StartsAfter)
 										if backend.leaderStartsAfterWorkers && strings.HasSuffix(clique.Name, "-"+commonconsts.GroveRoleSuffixLeader) {
 											require.Len(t, clique.Spec.StartsAfter, 1)
 											require.True(t, strings.HasSuffix(clique.Spec.StartsAfter[0], "-"+commonconsts.GroveRoleSuffixWorker), clique.Spec.StartsAfter[0])
@@ -880,13 +878,13 @@ func TestMultinodeSidecarRequiresBothRoleTemplates(t *testing.T) {
 			t.Log("Require both role templates directly in sidecar validation and when rendering without webhook admission")
 			complete := tc.omitRole == "" && tc.omitTemplate == ""
 			require.Equal(t, complete, HasCompleteMultinodeRolePodTemplates(component))
+			errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec"))
+			if complete {
+				require.Empty(t, errs)
+			} else {
+				require.Equal(t, field.ErrorList{field.Required(field.NewPath("spec", "roles"), "multinode sidecars require complete leader and worker podTemplates")}, errs)
+			}
 			for _, backend := range []BackendFramework{BackendFrameworkSGLang, BackendFrameworkVLLM, BackendFrameworkTRTLLM} {
-				errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec"), string(backend))
-				if complete {
-					require.Empty(t, errs)
-				} else {
-					require.Equal(t, field.ErrorList{field.Required(field.NewPath("spec", "roles"), "multinode sidecars require complete leader and worker podTemplates")}, errs)
-				}
 				for _, provider := range []commonconsts.MultinodeDeploymentType{commonconsts.MultinodeDeploymentTypeGrove, commonconsts.MultinodeDeploymentTypeLWS} {
 					for _, role := range []Role{RoleLeader, RoleWorker} {
 						pod, err := GenerateBasePodSpec(component, backend, nil, "graph", "ns", role, 2, &configv1alpha1.OperatorConfiguration{}, provider, "engine", nil, staticContainerGPUCount(1))

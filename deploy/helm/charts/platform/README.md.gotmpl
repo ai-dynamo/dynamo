@@ -157,8 +157,9 @@ partially scheduled.
 ##### Multinode sidecars for SGLang, vLLM, and TensorRT-LLM
 
 **Change:** Admission accepts `multinode` on a component that declares a `runtime` init
-container when `backendFramework` is `sglang`, `vllm`, or `trtllm` and the component supplies complete
-`leader` and `worker` role templates. The operator renders the authored engine commands,
+container when the component supplies complete `leader` and `worker` role templates. Set
+`backendFramework` explicitly, as the examples do; the operator does not infer a backend from
+a native engine command. The operator renders the authored engine commands,
 probes, and ports unchanged and merges Dynamo defaults into each declared `runtime`.
 
 **Affected:** New multinode DGDs that opt into sidecar mode.

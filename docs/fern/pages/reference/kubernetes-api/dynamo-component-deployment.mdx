@@ -174,7 +174,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Complete Pod template for this role. It must include a container named `main` with a non-empty `image`. Role templates do not inherit from each other or from the component-level template.
 
-    In multinode sidecar mode, the leader must declare `spec.initContainers[name=runtime]`. The worker may omit it when its engine ranks do not publish KV events or serve requests. Each declared runtime init container receives Dynamo defaults. Main container images are not used to infer Dynamo versions, including for workers without a runtime init container. Multinode sidecars require `backendFramework: sglang`, `vllm`, or `trtllm`.
+    In multinode sidecar mode, the leader must declare `spec.initContainers[name=runtime]`. The worker may omit it when its engine ranks do not publish KV events or serve requests. Each declared runtime init container receives Dynamo defaults. Main container images are not used to infer Dynamo versions, including for workers without a runtime init container. Set `backendFramework` explicitly, as the examples do; the operator does not infer a backend from a native engine command.
 
     LPX components may declare it only in the role template whose Pods host the engine: `conductor` for a hybrid build, or `agent` for an LPU-only single-model build with no conductor role; a speculative target's conductor takes none. Admission rejects it on other roles. Reconciliation rejects a build that does not match, and the DGD reports `status.state: failed`.
 
@@ -312,7 +312,7 @@ podTemplate:
         restartPolicy: Always
 ```
 
-Multinode sidecar deployments require an explicit `backendFramework` of `sglang`, `vllm`, or `trtllm` and complete `leader` and `worker` `roles[].podTemplate` definitions instead of a shared `podTemplate`. The leader must declare a runtime init container. The worker may omit it when its engine ranks do not publish KV events or serve requests. Each role's template supplies the engine command and topology arguments. The operator does not inject executor or coordination flags in sidecar mode, and it does not apply the TensorRT-LLM SSH key mount, `mpirun` wrapper, or worker probe rewrite.
+Multinode sidecar deployments require complete `leader` and `worker` `roles[].podTemplate` definitions instead of a shared `podTemplate`. Set `backendFramework` explicitly, as the examples do; without it the operator applies no backend defaults and no provider startup ordering. The leader must declare a runtime init container. The worker may omit it when its engine ranks do not publish KV events or serve requests. Each role's template supplies the engine command and topology arguments. The operator does not inject executor or coordination flags in sidecar mode, and it does not apply the TensorRT-LLM SSH key mount, `mpirun` wrapper, or worker probe rewrite.
 
 For DGDs created with operator version 1.6.0 or later, `main` and each declared `runtime` receive `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`. The operator preserves the authored engine configuration in `main` and merges Dynamo defaults into each declared runtime init container. In sidecar mode, main container images are not used to infer Dynamo versions, including for workers without a runtime init container. Deployments that run the engine and Dynamo together in `main` retain shared-template support and generated multinode arguments.
 

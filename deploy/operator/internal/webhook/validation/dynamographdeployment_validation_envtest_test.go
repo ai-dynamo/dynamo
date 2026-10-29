@@ -1733,7 +1733,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "role pod templates with a leader runtime need an explicit backend for multinode sidecar mode",
+			name: "role pod templates with a leader runtime are admitted without backendFramework",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.BackendFramework = ""
 				worker := betaWorkerComponent(dgd)
@@ -1743,7 +1743,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
 				}}
 			}),
-			wantWebhookErrs: []string{`spec.components[1].multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang, vllm, or trtllm`},
 		},
 		{
 			name: "role pod templates require a 1.6 or later Planner",

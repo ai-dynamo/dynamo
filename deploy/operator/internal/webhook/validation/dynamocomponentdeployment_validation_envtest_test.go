@@ -370,7 +370,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1alpha1 role PodTemplates with a leader runtime need an explicit backend for multinode sidecar mode",
+			name: "v1alpha1 role PodTemplates with a leader runtime are admitted without backendFramework",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.BackendFramework = ""
 				setAlphaExplicitMultinodeRoleTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec, 2)
@@ -379,7 +379,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
 				}}
 			}),
-			wantWebhookErrs: []string{`spec.multinode: Forbidden: Dynamo sidecar multinode support currently requires backendFramework: sglang, vllm, or trtllm`},
 		},
 		{
 			name: "standalone v1alpha1 canonical lpx component is rejected",

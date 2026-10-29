@@ -67,8 +67,10 @@ kubectl apply -f lib/sidecar/trtllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000
 ```
 
-Multinode deployments require `backendFramework: trtllm` and complete `leader` and
-`worker` role PodTemplates. The templates own the MPI launch, the SSH setup, the
+Multinode deployments require complete `leader` and `worker` role PodTemplates. Set
+`backendFramework: trtllm` as the examples do: the operator does not infer a backend from a
+native engine launch, and on Grove it starts the leader clique after the worker clique only
+when the backend is known. The templates own the MPI launch, the SSH setup, the
 engine probes, and the sidecar placement. In sidecar mode the operator does not apply
 its TensorRT-LLM SSH key mount, `mpirun` wrapper, or worker probe rewrite. See the
 [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/deploy/multinode_tp.yaml),
