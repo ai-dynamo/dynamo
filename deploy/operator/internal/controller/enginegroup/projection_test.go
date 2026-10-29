@@ -1,3 +1,5 @@
+//go:build !clustertest
+
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
@@ -7,6 +9,7 @@ package enginegroup
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	api "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -16,6 +19,127 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+func TestEngineGroupRetirementAvailabilityFollowsObservedServing(t *testing.T) {
+	for _, width := range []int32{1, 4} {
+		t.Run(fmt.Sprintf("members_per_replica_%d", width), func(t *testing.T) {
+			t.Log("form two complete serving allocations and persist retirement intent for the second")
+			status := healthyEngineGroupProjectionStatus(2)
+			if width == 4 {
+				for i := range status.Registry.Replicas {
+					members := packedProjectionMembers(i * 4)
+					status.Registry.Replicas[i].Current.Members = slices.Clone(members)
+					status.Capacity.Observed.Allocations[i].Incarnation.Members = slices.Clone(members)
+					status.Membership.Observed.CommittedTopology.Replicas[i].Members = members
+				}
+			}
+			base := status.Membership.Observed.CommittedTopology
+			status.Traffic.Observed.Admitted = slices.Clone(base.Replicas)
+			status.Transition = &domain.TransitionStatus{
+				Spec: domain.TransitionSpec{ID: "retire-second", BaseTopologyGeneration: base.Generation,
+					Plan: domain.ResolvedPlan{Change: domain.ResolvedChange{Kind: domain.PlanKindRetire,
+						Retire: &domain.RetireChange{Replicas: []domain.ReplicaID{"replica-1"}}}}},
+				Outcome: domain.TransitionOutcomeProgressing,
+			}
+			group := &api.DynamoGraphDeploymentEngineGroup{Spec: api.DynamoGraphDeploymentEngineGroupSpec{Replicas: 1}}
+			profile := api.EngineGroupProfileStatus{NativeMembersPerReplica: width, MinSafeServingNativeMembers: 1}
+			reconciler := &Reconciler{}
+			reconciler.projectEngineGroupStatus(group, profile, status, nil, nil)
+			assert.Equal(t, int32(2), group.Status.AvailableReplicas)
+			assert.Equal(t, api.EngineGroupReplicaMembershipRetiring, group.Status.ReplicaStates[1].NativeMembers[0].Membership)
+
+			t.Log("observed withdrawal and draining reduce availability before membership exclusion")
+			status.Traffic.Observed.Admitted = slices.Clone(base.Replicas[:1])
+			status.Traffic.Observed.Draining = slices.Clone(base.Replicas[1:])
+			reconciler.projectEngineGroupStatus(group, profile, status, nil, nil)
+			assert.Equal(t, int32(1), group.Status.AvailableReplicas)
+			assert.Equal(t, 2*width, group.Status.ActiveNativeMemberCount)
+
+			t.Log("committed exclusion leaves only the complete surviving replica available while old capacity remains")
+			status.Membership.Observed.CommittedTopology = domain.MembershipTopology{Generation: base.Generation + 1, Replicas: slices.Clone(base.Replicas[:1])}
+			status.Traffic.Observed.Draining = nil
+			status.Traffic.Observed.Drained = slices.Clone(base.Replicas[1:])
+			reconciler.projectEngineGroupStatus(group, profile, status, nil, nil)
+			assert.Equal(t, int32(1), group.Status.AvailableReplicas)
+			assert.Equal(t, width, group.Status.ActiveNativeMemberCount)
+			assert.Equal(t, int32(2), group.Status.Replicas)
+		})
+	}
+}
+
+func TestEngineGroupAvailableReplicasRequireCompleteExactServingEvidence(t *testing.T) {
+	for _, missing := range []string{"committed member", "admitted member", "allocation UID", "process incarnation"} {
+		t.Run(missing, func(t *testing.T) {
+			t.Log("form two four-member allocations with exact committed and admitted process identities")
+			status := healthyEngineGroupProjectionStatus(2)
+			for i := range status.Registry.Replicas {
+				members := packedProjectionMembers(i * 4)
+				status.Registry.Replicas[i].Current.Members = slices.Clone(members)
+				status.Capacity.Observed.Allocations[i].Incarnation.Members = slices.Clone(members)
+				status.Membership.Observed.CommittedTopology.Replicas[i].Members = slices.Clone(members)
+			}
+			status.Traffic.Observed.Admitted = []domain.ReplicaMembership{
+				{ReplicaID: "replica-0", Members: packedProjectionMembers(0)},
+				{ReplicaID: "replica-1", Members: packedProjectionMembers(4)},
+			}
+			group := &api.DynamoGraphDeploymentEngineGroup{Spec: api.DynamoGraphDeploymentEngineGroupSpec{Replicas: 2}}
+			profile := api.EngineGroupProfileStatus{NativeMembersPerReplica: 4, MinSafeServingNativeMembers: 1}
+			reconciler := &Reconciler{}
+			reconciler.projectEngineGroupStatus(group, profile, status, nil, nil)
+			require.Equal(t, int32(2), group.Status.AvailableReplicas)
+
+			t.Log("incomplete or mismatched evidence cannot make the second allocation fully available")
+			switch missing {
+			case "committed member":
+				status.Membership.Observed.CommittedTopology.Replicas[1].Members = status.Membership.Observed.CommittedTopology.Replicas[1].Members[:3]
+				status.Traffic.Observed.Admitted[1].Members = status.Traffic.Observed.Admitted[1].Members[:3]
+			case "admitted member":
+				status.Traffic.Observed.Admitted[1].Members = status.Traffic.Observed.Admitted[1].Members[:3]
+			case "allocation UID":
+				refs := slices.Clone(status.Capacity.Observed.Allocations[1].Incarnation.CapacityRefs)
+				refs[0].UID = "replacement-uid"
+				status.Capacity.Observed.Allocations[1].Incarnation.CapacityRefs = refs
+			case "process incarnation":
+				status.Membership.Observed.CommittedTopology.Replicas[1].Members[0].RuntimeIncarnation = "replacement-process"
+				status.Traffic.Observed.Admitted[1].Members[0].RuntimeIncarnation = "replacement-process"
+			}
+			reconciler.projectEngineGroupStatus(group, profile, status, nil, nil)
+			assert.Equal(t, int32(1), group.Status.AvailableReplicas)
+		})
+	}
+}
+
+func TestEngineGroupAvailableReplicasCombineAdmissionRecords(t *testing.T) {
+	t.Log("commit one complete four-member allocation and report its admission as disjoint records")
+	status := healthyEngineGroupProjectionStatus(1)
+	members := packedProjectionMembers(0)
+	status.Registry.Replicas[0].DesiredNativeMembers = []domain.NativeMemberID{"dp-0", "dp-1", "dp-2", "dp-3"}
+	status.Registry.Replicas[0].Current.Members = slices.Clone(members)
+	status.Capacity.Observed.Allocations[0].Incarnation.Members = slices.Clone(members)
+	status.Membership.Observed.CommittedTopology.Replicas[0].Members = slices.Clone(members)
+	status.Traffic.Observed.Admitted = []domain.ReplicaMembership{
+		{ReplicaID: "replica-0", Members: slices.Clone(members[2:])},
+		{ReplicaID: "replica-0", Members: slices.Clone(members[:2])},
+	}
+	require.NoError(t, domain.ValidateGroupStatus(status))
+	group := &api.DynamoGraphDeploymentEngineGroup{Spec: api.DynamoGraphDeploymentEngineGroupSpec{Replicas: 1}}
+	profile := api.EngineGroupProfileStatus{NativeMembersPerReplica: 4, MinSafeServingNativeMembers: 1}
+	reconciler := &Reconciler{}
+	reconciler.projectEngineGroupStatus(group, profile, status, nil, nil)
+	assert.Equal(t, int32(1), group.Status.AvailableReplicas)
+	assert.Equal(t, members[2:], status.Traffic.Observed.Admitted[0].Members, "comparison must not normalize the input in place")
+
+	t.Log("a missing member in either admission record leaves the packed allocation only partially available")
+	status.Traffic.Observed.Admitted[0].Members = status.Traffic.Observed.Admitted[0].Members[:1]
+	reconciler.projectEngineGroupStatus(group, profile, status, nil, nil)
+	assert.Zero(t, group.Status.AvailableReplicas)
+
+	t.Log("restoring the complete rank set with a stale process incarnation still cannot establish availability")
+	status.Traffic.Observed.Admitted[0].Members = slices.Clone(members[2:])
+	status.Traffic.Observed.Admitted[0].Members[0].RuntimeIncarnation = "stale-process"
+	reconciler.projectEngineGroupStatus(group, profile, status, nil, nil)
+	assert.Zero(t, group.Status.AvailableReplicas)
+}
 
 func TestEngineGroupPackedMemberProjectionPreservesDesiredEP8ThroughEP7Recovery(t *testing.T) {
 	t.Log("Form an EP8 world from two physically disjoint four-member allocations")

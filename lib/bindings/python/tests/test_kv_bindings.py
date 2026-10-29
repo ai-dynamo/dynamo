@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import inspect
 import json
 import subprocess
 import sys
@@ -297,20 +298,153 @@ async def test_selection_service_selects_registered_worker(monkeypatch):
         await service.shutdown_async()
 
 
+@pytest.fixture
+async def session_binding_services(monkeypatch):
+    monkeypatch.setenv("DYN_ROUTER_USE_KV_EVENTS", "false")
+    source = SelectionService(
+        indexer_threads=1,
+        session_affinity_ttl_secs=10,
+        session_replication_writer_id=11,
+    )
+    peer = SelectionService(
+        indexer_threads=1,
+        session_affinity_ttl_secs=10,
+        session_affinity_mode="soft",
+        session_replication_writer_id=22,
+    )
+    try:
+        for service in (source, peer):
+            for worker_id in (1, 2):
+                await service.upsert_worker(
+                    {
+                        "worker_id": worker_id,
+                        "model_name": "model",
+                        "routing_group": "host",
+                        "endpoint": f"http://worker-{worker_id}",
+                        "block_size": 4,
+                        "max_num_batched_tokens": 1024,
+                    }
+                )
+        yield source, peer
+    finally:
+        await source.shutdown_async()
+        await peer.shutdown_async()
+
+
 @pytest.mark.skipif(
     SelectionService is None,
     reason="SelectionService requires the select-service Cargo feature",
 )
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
-async def test_selection_service_malformed_payload_raises_value_error(monkeypatch):
+async def test_selection_service_session_binding_stream(session_binding_services):
+    source, peer = session_binding_services
+    stream = source.session_binding_updates()
+    peer_stream = peer.session_binding_updates()
+    with pytest.raises(SelectionServiceError):
+        source.session_binding_updates()
+    partition = {"model_name": "model", "routing_group": "host"}
+    selected = await source.select_and_reserve(
+        {
+            **partition,
+            "token_ids": [1, 2, 3, 4],
+            "selection_id": "origin",
+            "session_id": "s",
+            "allowed_worker_ids": [1],
+        }
+    )
+    assert "session_binding" not in selected
+    (binding,) = json.loads(json.dumps(await anext(stream)))
+    assert binding["writer_id"] == 11
+    peer.apply_session_binding(binding)
+    await source.free_reservation("origin")
+    assert await anext(stream) == [binding]  # A repeated version refreshes TTL.
+    selected = await peer.select_and_reserve(
+        {
+            **partition,
+            "token_ids": [5, 6, 7, 8],
+            "selection_id": "next",
+            "session_id": "s",
+        }
+    )
+    assert selected["worker_id"] == 1
+    assert await anext(peer_stream) == [
+        binding
+    ]  # Local commits preserve imported versions.
+    # The default hard mode rejects an excluded binding; soft mode rebinds.
+    request = {
+        **partition,
+        "token_ids": [9, 10, 11, 12],
+        "selection_id": "excluded",
+        "session_id": "s",
+        "allowed_worker_ids": [2],
+    }
+    with pytest.raises(ValueError, match="session s is bound to worker 1, not 2"):
+        await source.select_and_reserve(request)
+    assert (await peer.select_and_reserve(request))["worker_id"] == 2
+    assert (await anext(peer_stream))[0]["worker_id"] == 2
+    await source.shutdown_async()
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    with pytest.raises(SelectionServiceError):
+        source.apply_session_binding(binding)
+
+
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_selection_service_session_binding_stream_drains_queue(
+    session_binding_services,
+):
+    source, _ = session_binding_services
+    stream = source.session_binding_updates()
+    for session_id in ("a", "b", "c"):
+        await source.select_and_reserve(
+            {
+                "model_name": "model",
+                "routing_group": "host",
+                "token_ids": [1, 2, 3, 4],
+                "selection_id": session_id,
+                "session_id": session_id,
+            }
+        )
+    # Bindings queued while the consumer was away arrive as one item.
+    batch = await anext(stream)
+    assert [binding["session_id"] for binding in batch] == ["a", "b", "c"]
+
+
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
+@pytest.mark.parametrize(
+    "method,payload",
+    [
+        pytest.param("upsert_worker", {"model_name": "model"}, id="worker"),
+        pytest.param(
+            "apply_session_binding",
+            {"session_id": "s"},
+            id="session-binding",
+        ),
+    ],
+)
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_selection_service_malformed_payload_raises_value_error(
+    monkeypatch, method, payload
+):
     monkeypatch.setenv("DYN_ROUTER_USE_KV_EVENTS", "false")
     service = SelectionService(indexer_threads=1)
 
     try:
         # Malformed input surfaces as a plain ValueError, not a SelectionServiceError.
         with pytest.raises(ValueError):
-            await service.upsert_worker({"model_name": "model"})
+            result = getattr(service, method)(payload)
+            if inspect.isawaitable(result):
+                await result
         # Prompt booleans are not coerced by truthiness.
         with pytest.raises(ValueError, match="boolean"):
             await service.select({"token_ids": [1, 2, 3, 4], "is_eagle": "false"})
