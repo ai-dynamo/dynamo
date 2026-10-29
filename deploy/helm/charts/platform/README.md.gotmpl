@@ -163,8 +163,13 @@ probes, and ports unchanged and merges Dynamo defaults into each declared `runti
 
 **Affected:** New multinode DGDs that opt into sidecar mode.
 
+**Action:** None for existing workloads. To opt in, see the
+[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes)
+and [vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes)
+sidecar guides.
+
 **Existing deployments:** No existing workload rolls. Components without a `runtime` init
-container keep the combined-runtime behavior.
+container keep running the engine and Dynamo together in `main`.
 
 ### v1.6.0
 

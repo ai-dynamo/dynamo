@@ -66,21 +66,29 @@ See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/v
 which uses the multiprocessing executor with a sidecar on the leader only, and the
 [hybrid-LB DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_dp.yaml),
 where every Pod runs a sidecar for its local DP ranks. Unlike `agg.yaml`, which
-launches `vllm-rs serve`, both multinode examples launch `vllm serve --grpc-port`
-with `VLLM_USE_RUST_FRONTEND=1`. That entry point needs vLLM v0.32.0 or later. The
-examples use it because `vllm-rs serve` does not support `--data-parallel-hybrid-lb`.
+launches `vllm-rs serve`, both multinode examples launch their serving ranks with
+`vllm serve --grpc-port` and `VLLM_USE_RUST_FRONTEND=1`. The TP worker runs
+`vllm serve --headless`. That entry point needs vLLM v0.32.0 or later. The examples
+use it because `vllm-rs serve` does not support `--data-parallel-hybrid-lb`.
 Engine-failure KV recovery remains incomplete and is tracked in
 [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
+
+A multinode engine starts only when every rank has joined. If a worker Pod takes
+longer than 600 seconds to start, for example while a cold node pulls the engine
+image, the leader's `main` container exits with `engine input registration timed
+out` and restarts. The sidecar is not affected. Pre-pull the engine image on cold
+nodes to avoid the restart.
 
 The examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which exist only in
 DGDs created by operator 1.6.0 or later. For an older DGD, see
 [Use the variables in a DGD created before 1.6.0](../../../../../kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160).
 
-In sidecar mode the operator injects no engine environment. A disaggregated role
-template must set `VLLM_NIXL_SIDE_CHANNEL_HOST` from `status.podIP` on its `main`
+In sidecar mode the operator injects only the topology variables into `main`, not
+the vLLM-specific environment. A disaggregated role template must set
+`VLLM_NIXL_SIDE_CHANNEL_HOST` from `status.podIP` on its `main`
 container, as `disagg.yaml` does, so the decode engine can reach the prefill
-engine's NIXL handshake listener. vLLM offsets the side-channel port by the
-engine's data-parallel rank.
+engine's NIXL handshake listener. vLLM adds each engine's global data-parallel
+index to the side-channel port.
 
 ## Topologies
 

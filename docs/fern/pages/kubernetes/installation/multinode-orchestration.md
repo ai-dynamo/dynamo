@@ -253,10 +253,11 @@ the multinode sidecar examples, choose one of these options:
 
 > [!WARNING]
 > Before you create the replacement DGD under the same name, wait until every Pod of the old DGD
-> is gone. A worker that starts while the old leader terminates can handshake with that leader at
-> the same hostname, then fail its ZMQ connection after 30 seconds and exit.
+> is gone. The leader keeps its hostname across the two DGDs. With the vLLM hybrid-LB example, a
+> worker that starts while the old leader terminates can handshake with the old leader. The vLLM
+> frontend then fails its ZMQ connection after 30 seconds and exits.
 
-To keep the DGD on Grove, the group-wide pod index requires Grove `v0.1.0-alpha.15` or later and
+For a Grove-managed DGD, `GROVE_PCSG_POD_INDEX` requires Grove `v0.1.0-alpha.15` or later and
 matching CRDs. Replace the variables with these values:
 
 | Variable | Grove | LeaderWorkerSet |
