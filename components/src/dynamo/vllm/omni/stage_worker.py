@@ -98,6 +98,7 @@ class OmniStageWorker:
         )
 
     async def generate(self, request: dict, context) -> AsyncGenerator[dict, None]:
+        """Run the stage, raising engine errors for marked health canaries."""
         req = StageRequest.model_validate(request)
         request_id = req.request_id or context.id()
         original_prompt = req.original_prompt
