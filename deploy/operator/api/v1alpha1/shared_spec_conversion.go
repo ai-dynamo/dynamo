@@ -608,6 +608,10 @@ func saveSharedHubOnlySpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, con
 	if src == nil || save == nil {
 		return nil
 	}
+	// Engine Group creation configuration has no alpha representation; preserve it sparsely.
+	if src.EngineGroup != nil {
+		save.EngineGroup = src.EngineGroup.DeepCopy()
+	}
 	if sharedFrontendSidecarNeedsPreservation(src, converted) {
 		save.FrontendSidecar = new(*src.FrontendSidecar)
 	}
@@ -1707,6 +1711,8 @@ func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymen
 	if dst == nil || preserved == nil {
 		return nil
 	}
+	// Restore only the hub-only creation configuration, without overriding live alpha fields.
+	dst.EngineGroup = preserved.EngineGroup.DeepCopy()
 	podTemplate, err := restoreSharedPodTemplateHubOnlyFields(preserved, dst.PodTemplate, dst.CompilationCache, src)
 	if err != nil {
 		return err

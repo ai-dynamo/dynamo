@@ -84,6 +84,7 @@ type DynamoComponentDeploymentSpec struct {
 // +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx' && has(self.replicas) && self.replicas < 1)",message="replicas must be positive when type is lpx"
 // +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx' && has(self.scalingAdapter))",message="scalingAdapter is not supported when type is lpx"
 // +kubebuilder:validation:XValidation:rule="(has(self.type) && self.type == 'lpx') || !has(self.roles) || !self.roles.exists(r, has(r.podTemplate)) || (!has(self.podTemplate) && self.roles.all(r, has(r.podTemplate)))",message="use either component podTemplate or complete role podTemplates"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.engineGroup) || (has(self.engineGroup) && self.engineGroup.initialSize == oldSelf.engineGroup.initialSize)",message="engineGroup.initialSize is immutable after it is set"
 type DynamoComponentDeploymentSharedSpec struct {
 	// providerOverride configures the primary Grove unit representing this DGD
 	// component. With apiVersion `grove.io/v1alpha1`, target is
@@ -182,13 +183,22 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 
-	// replicas is the desired number of Pods for this component. When
+	// replicas is the desired number of Pods for an ordinary component. For an
+	// engineGroup component it counts independent engine worlds. When
 	// `scalingAdapter` is set on this component, this field is managed by
 	// the DynamoGraphDeploymentScalingAdapter and should not be modified
 	// directly.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// engineGroup opts a DGD component into independently resizable engine worlds.
+	// Component replicas then count worlds, not allocations inside a world. Each new
+	// group's spec.replicas is seeded from initialSize and subsequently scaled independently.
+	// Supported backends use the DGD Grove pathway to create and bind each world.
+	// Standalone DCDs cannot use this block.
+	// +optional
+	EngineGroup *ComponentEngineGroupSpec `json:"engineGroup,omitempty"`
 
 	// minAvailable maps to Grove PodCliqueScalingGroup minAvailable for
 	// components rendered as a scaling group (multi-node, inter-pod GMS, or

@@ -91,6 +91,13 @@ func TestRootMarshal_PreservesEmptyMetadata(t *testing.T) {
 			},
 		},
 		{
+			name: "DynamoGraphDeploymentEngineGroup",
+			obj: &DynamoGraphDeploymentEngineGroup{
+				APIVersion: "nvidia.com/v1beta1",
+				Kind:       "DynamoGraphDeploymentEngineGroup",
+			},
+		},
+		{
 			name: "DynamoGraphDeploymentScalingAdapter",
 			obj: &DynamoGraphDeploymentScalingAdapter{
 				APIVersion: "nvidia.com/v1beta1",
