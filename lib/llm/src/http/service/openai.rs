@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt::Display,
     sync::{Arc, LazyLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -74,7 +74,7 @@ use crate::protocols::openai::{
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
-        NvCreateChatCompletionStreamResponse,
+        NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_template,
     },
     classify::{NvCreateClassifyRequest, NvCreateClassifyResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -3373,6 +3373,136 @@ fn deduplicate_stream_roles(
     }
 }
 
+/// Streaming form of the aggregator's `parallel_tool_calls: false` cap.
+///
+/// The lowest-index call keeps the single slot while its id or name can still
+/// arrive. Fragments are buffered until a call is selected; at the choice's
+/// finish reason or at stream end, the lowest-index call with a complete
+/// identity wins. Only the selected call is forwarded, at outward index 0.
+#[derive(Default)]
+struct SingleToolCallFilter {
+    choices: HashMap<u32, SingleToolCallChoice>,
+    template: Option<NvCreateChatCompletionStreamResponse>,
+}
+
+#[derive(Default)]
+struct SingleToolCallChoice {
+    selected: Option<u32>,
+    candidates: BTreeMap<u32, SingleToolCallCandidate>,
+}
+
+#[derive(Default)]
+struct SingleToolCallCandidate {
+    has_id: bool,
+    has_name: bool,
+    fragments: Vec<ChatCompletionMessageToolCallChunk>,
+}
+
+impl SingleToolCallCandidate {
+    fn has_identity(&self) -> bool {
+        self.has_id && self.has_name
+    }
+}
+
+impl SingleToolCallChoice {
+    fn select(&self, terminal: bool) -> Option<u32> {
+        let (&first, candidate) = self.candidates.first_key_value()?;
+        if candidate.has_identity() {
+            return Some(first);
+        }
+        if !terminal {
+            return None;
+        }
+        self.candidates
+            .iter()
+            .find(|(_, candidate)| candidate.has_identity())
+            .map(|(&index, _)| index)
+    }
+}
+
+impl SingleToolCallFilter {
+    fn apply(&mut self, resp: &mut NvCreateChatCompletionStreamResponse) {
+        for choice in &mut resp.inner.choices {
+            let state = self.choices.entry(choice.index).or_default();
+            let mut forwarded = Vec::new();
+            for tool_call in choice.delta.tool_calls.take().into_iter().flatten() {
+                match state.selected {
+                    Some(selected) if selected == tool_call.index => forwarded.push(tool_call),
+                    Some(_) => {}
+                    None => {
+                        let candidate = state.candidates.entry(tool_call.index).or_default();
+                        candidate.has_id |= tool_call.id.as_ref().is_some_and(|id| !id.is_empty());
+                        candidate.has_name |= tool_call
+                            .function
+                            .as_ref()
+                            .and_then(|function| function.name.as_ref())
+                            .is_some_and(|name| !name.is_empty());
+                        candidate.fragments.push(tool_call);
+                    }
+                }
+            }
+
+            let terminal = choice.finish_reason.is_some();
+            if state.selected.is_none()
+                && let Some(selected) = state.select(terminal)
+            {
+                state.selected = Some(selected);
+                if let Some(candidate) = state.candidates.remove(&selected) {
+                    forwarded.extend(candidate.fragments);
+                }
+                state.candidates.clear();
+            }
+            if terminal {
+                state.candidates.clear();
+            }
+
+            for tool_call in &mut forwarded {
+                tool_call.index = 0;
+            }
+            choice.delta.tool_calls = (!forwarded.is_empty()).then_some(forwarded);
+        }
+
+        if self.template.is_none()
+            && self
+                .choices
+                .values()
+                .any(|state| !state.candidates.is_empty())
+        {
+            self.template = Some(resp.clone());
+        }
+    }
+
+    /// Publishes calls still buffered when the stream ends without a finish reason.
+    fn finish(&mut self) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        let Some(template) = self.template.take() else {
+            return Vec::new();
+        };
+        let mut indices: Vec<u32> = self.choices.keys().copied().collect();
+        indices.sort_unstable();
+        indices
+            .into_iter()
+            .filter_map(|choice_index| {
+                let state = self.choices.get_mut(&choice_index)?;
+                let selected = state.selected.is_none().then(|| state.select(true))??;
+                let mut fragments = state.candidates.remove(&selected)?.fragments;
+                state.selected = Some(selected);
+                state.candidates.clear();
+                for tool_call in &mut fragments {
+                    tool_call.index = 0;
+                }
+                Some(stream_choice_chunk_from_template(
+                    &template,
+                    choice_index,
+                    None,
+                    None,
+                    Some(fragments),
+                    None,
+                ))
+            })
+            .collect()
+    }
+}
+
 /// Completions variant of [`is_empty_stream_response`].
 fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> bool {
     if resp.nvext.is_some() {
@@ -3696,6 +3826,8 @@ async fn chat_completions(
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
         let mut dispatched_tool_ids: HashSet<(u32, String)> = HashSet::new();
         let mut emitted_roles: HashSet<u32> = HashSet::new();
+        let mut single_tool_call_filter =
+            enforce_single_tool_call.then(SingleToolCallFilter::default);
         // Optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
         //   - `event: reasoning_dispatch`  — complete reasoning block (emitted once)
@@ -3714,19 +3846,10 @@ async fn chat_completions(
                 // borrowed classification before it becomes an SSE error string.
                 let response_error_type = response.error.as_ref().map(stream_error_type);
 
-                // When parallel_tool_calls is false, surface only the first tool call
-                // Keep index 0 and drop any higher indexes
-                if enforce_single_tool_call
+                if let Some(filter) = single_tool_call_filter.as_mut()
                     && let Some(data) = response.data.as_mut()
                 {
-                    for choice in data.inner.choices.iter_mut() {
-                        if let Some(tool_calls) = choice.delta.tool_calls.as_mut() {
-                            tool_calls.retain(|tc| tc.index == 0);
-                            if tool_calls.is_empty() {
-                                choice.delta.tool_calls = None;
-                            }
-                        }
-                    }
+                    filter.apply(data);
                 }
 
                 if let Some(data) = response.data.as_mut() {
@@ -3795,6 +3918,33 @@ async fn chat_completions(
                 events.reverse();
                 while let Some(event) = events.pop() {
                     yield event;
+                }
+            }
+
+            if producer_error_signal.error_type().is_none()
+                && let Some(filter) = single_tool_call_filter.as_mut()
+            {
+                for response in filter.finish() {
+                    events.clear();
+                    if tool_dispatch_enabled {
+                        streaming_tool_dispatch_events(
+                            &response,
+                            &mut dispatched_tool_ids,
+                            &mut events,
+                        );
+                    }
+                    let sse_result = process_chat_response_using_event_converter_and_observe_metrics(
+                        EventConverter::from(response),
+                        &mut response_collector,
+                        &mut http_queue_guard,
+                        reasoning_field,
+                    );
+                    if let Ok(Some(ev)) = sse_result {
+                        events.push(Ok(ev));
+                    }
+                    for event in events.drain(..) {
+                        yield event;
+                    }
                 }
             }
         };
@@ -4483,8 +4633,22 @@ async fn responses(
                     producer_error_signal.mark_terminal_event_emitted();
                 }
                 yield terminal_event.map_err(axum::Error::new);
+            } else if converter.append_end_events(&mut events) {
+                // The single-call EOF fallback selected a call outside allowed_tools.
+                producer_error_signal.set(ErrorType::Internal);
+                producer_ctx.kill();
+
+                let terminal_event = events
+                    .pop()
+                    .expect("terminal failure is missing response.failed");
+                for event in events.drain(..) {
+                    yield event.map_err(axum::Error::new);
+                }
+                if terminal_event.is_ok() {
+                    producer_error_signal.mark_terminal_event_emitted();
+                }
+                yield terminal_event.map_err(axum::Error::new);
             } else {
-                converter.append_end_events(&mut events);
                 for event in events.drain(..) {
                     yield event.map_err(axum::Error::new);
                 }
@@ -10976,6 +11140,235 @@ mod tests {
             )),
             "function_call present → not empty",
         );
+    }
+
+    fn tool_call_fragment(
+        index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments: Option<&str>,
+    ) -> ChatCompletionMessageToolCallChunk {
+        ChatCompletionMessageToolCallChunk {
+            index,
+            id: id.map(str::to_string),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: name.map(str::to_string),
+                arguments: arguments.map(str::to_string),
+            }),
+        }
+    }
+
+    /// `(index, id, name, arguments)` of a forwarded tool-call fragment.
+    type ForwardedFragment = (u32, Option<String>, Option<String>, Option<String>);
+
+    fn forwarded_single_tool_calls(
+        chunks: Vec<(
+            Vec<ChatCompletionMessageToolCallChunk>,
+            Option<FinishReason>,
+        )>,
+    ) -> Vec<ForwardedFragment> {
+        let mut filter = SingleToolCallFilter::default();
+        let mut responses = Vec::new();
+        for (tool_calls, finish) in chunks {
+            let mut resp = make_delta(None, None, Some(tool_calls), finish, None, None, None, None);
+            filter.apply(&mut resp);
+            responses.push(resp);
+        }
+        responses.extend(
+            filter
+                .finish()
+                .into_iter()
+                .filter_map(|response| response.data),
+        );
+
+        let mut forwarded = Vec::new();
+        for mut resp in responses {
+            for call in resp.inner.choices[0]
+                .delta
+                .tool_calls
+                .take()
+                .into_iter()
+                .flatten()
+            {
+                let (name, arguments) = call
+                    .function
+                    .map_or((None, None), |function| (function.name, function.arguments));
+                forwarded.push((call.index, call.id, name, arguments));
+            }
+        }
+        forwarded
+    }
+
+    fn fragment(
+        index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments: Option<&str>,
+    ) -> ForwardedFragment {
+        (
+            index,
+            id.map(str::to_string),
+            name.map(str::to_string),
+            arguments.map(str::to_string),
+        )
+    }
+
+    #[test]
+    fn test_single_tool_call_filter_falls_back_to_later_complete_call() {
+        let forwarded = forwarded_single_tool_calls(vec![
+            (
+                vec![tool_call_fragment(
+                    0,
+                    None,
+                    Some("read_file"),
+                    Some("{\"path\":\"/a\"}"),
+                )],
+                None,
+            ),
+            (
+                vec![tool_call_fragment(
+                    1,
+                    Some("call_b"),
+                    Some("read_file"),
+                    Some("{\"path\":\"/b\"}"),
+                )],
+                None,
+            ),
+            (vec![], Some(FinishReason::ToolCalls)),
+        ]);
+        assert_eq!(
+            forwarded,
+            vec![fragment(
+                0,
+                Some("call_b"),
+                Some("read_file"),
+                Some("{\"path\":\"/b\"}")
+            )]
+        );
+    }
+
+    #[test]
+    fn test_single_tool_call_filter_keeps_first_call_when_identity_arrives_late() {
+        let forwarded = forwarded_single_tool_calls(vec![
+            (
+                vec![tool_call_fragment(0, None, None, Some("{\"path\":"))],
+                None,
+            ),
+            (
+                vec![tool_call_fragment(
+                    1,
+                    Some("call_b"),
+                    Some("read_file"),
+                    Some("{\"path\":\"/b\"}"),
+                )],
+                None,
+            ),
+            (
+                vec![tool_call_fragment(
+                    0,
+                    Some("call_a"),
+                    Some("read_file"),
+                    Some("\"/a\"}"),
+                )],
+                None,
+            ),
+            (vec![], Some(FinishReason::ToolCalls)),
+        ]);
+        assert_eq!(
+            forwarded,
+            vec![
+                fragment(0, None, None, Some("{\"path\":")),
+                fragment(0, Some("call_a"), Some("read_file"), Some("\"/a\"}")),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_single_tool_call_filter_forwards_first_complete_call_immediately() {
+        let mut filter = SingleToolCallFilter::default();
+        let mut first = make_delta(
+            None,
+            None,
+            Some(vec![tool_call_fragment(
+                0,
+                Some("call_a"),
+                Some("get_weather"),
+                Some("{}"),
+            )]),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        filter.apply(&mut first);
+        assert_eq!(
+            first.inner.choices[0]
+                .delta
+                .tool_calls
+                .as_ref()
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let mut second = make_delta(
+            None,
+            None,
+            Some(vec![tool_call_fragment(
+                1,
+                Some("call_b"),
+                Some("get_time"),
+                Some("{}"),
+            )]),
+            Some(FinishReason::ToolCalls),
+            None,
+            None,
+            None,
+            None,
+        );
+        filter.apply(&mut second);
+        assert!(second.inner.choices[0].delta.tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_single_tool_call_filter_falls_back_at_stream_end() {
+        let forwarded = forwarded_single_tool_calls(vec![
+            (
+                vec![tool_call_fragment(0, None, Some("read_file"), Some("{}"))],
+                None,
+            ),
+            (
+                vec![tool_call_fragment(
+                    1,
+                    Some("call_b"),
+                    Some("read_file"),
+                    Some("{\"path\":\"/b\"}"),
+                )],
+                None,
+            ),
+        ]);
+        assert_eq!(
+            forwarded,
+            vec![fragment(
+                0,
+                Some("call_b"),
+                Some("read_file"),
+                Some("{\"path\":\"/b\"}")
+            )]
+        );
+    }
+
+    #[test]
+    fn test_single_tool_call_filter_drops_calls_without_identity() {
+        let forwarded = forwarded_single_tool_calls(vec![
+            (
+                vec![tool_call_fragment(0, None, Some("read_file"), Some("{}"))],
+                None,
+            ),
+            (vec![], Some(FinishReason::ToolCalls)),
+        ]);
+        assert!(forwarded.is_empty());
     }
 
     #[test]
