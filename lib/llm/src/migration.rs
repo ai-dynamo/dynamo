@@ -147,7 +147,7 @@ fn migratable_error_in_chain<'a>(err: &'a (dyn StdError + 'static)) -> Option<&'
     migratable
 }
 
-fn worker_draining_error(err: &(dyn StdError + 'static)) -> Option<&DynamoError> {
+fn worker_draining_error<'a>(err: &'a (dyn StdError + 'static)) -> Option<&'a DynamoError> {
     let mut current = Some(err);
     let mut draining = None;
     while let Some(source) = current {
