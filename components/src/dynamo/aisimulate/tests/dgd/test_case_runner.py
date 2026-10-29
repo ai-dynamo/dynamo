@@ -105,6 +105,59 @@ def test_load_case_composes_hardware_and_derives_dgd_options(
     assert case.generated_dir == tmp_path / "output/h200-sxm-8gpu/qwen"
 
 
+def test_discovered_recipe_requirements_preserve_source_and_merge_proposals(
+    monkeypatch, tmp_path
+) -> None:
+    case_path, _ = _write_case_and_hardware(tmp_path, monkeypatch)
+    monkeypatch.setattr(run_cases, "_REPOSITORY_ROOT", tmp_path)
+    original = {
+        "source": "recipes/qwen/deploy.yaml",
+        "requirements": {
+            "h200-sxm-8gpu": {"gpus": 8},
+            "gb200-sxm-4gpu": {"gpus": 4, "notes": "Known working topology."},
+        },
+    }
+    recipe_path = case_path / "recipe.yaml"
+    original_text = "# Maintained recipe provenance.\n" + yaml.safe_dump(
+        original, sort_keys=False
+    )
+    recipe_path.write_text(original_text)
+    recipe = run_cases.load_recipe("qwen")
+    assert recipe is not None
+    proposal_path = case_path / "recipe.new.yaml"
+
+    assert (
+        run_cases.write_discovered_recipe_requirement(recipe, "h200-sxm-8gpu", 8)
+        is None
+    )
+    assert not proposal_path.exists()
+
+    assert (
+        run_cases.write_discovered_recipe_requirement(recipe, "h100-sxm-4gpu", 4)
+        == proposal_path
+    )
+    assert (
+        run_cases.write_discovered_recipe_requirement(recipe, "a100-sxm-2gpu", 2)
+        == proposal_path
+    )
+    assert yaml.safe_load(proposal_path.read_text()) == {
+        "source": original["source"],
+        "requirements": {
+            **original["requirements"],
+            "h100-sxm-4gpu": {"gpus": 4},
+            "a100-sxm-2gpu": {"gpus": 2},
+        },
+    }
+
+    proposal_text = proposal_path.read_text()
+    assert (
+        run_cases.write_discovered_recipe_requirement(recipe, "h200-sxm-8gpu", 8)
+        is None
+    )
+    assert proposal_path.read_text() == proposal_text
+    assert recipe_path.read_text() == original_text
+
+
 def test_case_environment_uses_output_cache_and_restores_process(
     monkeypatch, tmp_path
 ) -> None:

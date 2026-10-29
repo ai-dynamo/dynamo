@@ -55,7 +55,8 @@ components/src/dynamo/aisimulate/tests/dgd/comparison/
 │   └── qwen3-32b-vllm-disagg/
 │       ├── dgdr-v1beta1.yaml
 │       ├── sweeper.yaml
-│       └── recipe.yaml                  # optional provenance
+│       ├── recipe.yaml                  # optional provenance
+│       └── recipe.new.yaml              # ignored requirement proposal
 ├── hardware/
 │   └── h200-sxm-16gpu/
 │       ├── dgdr-v1beta1.patch.yaml
@@ -208,7 +209,25 @@ requirements:
 
 Recipe files retain provenance and known hardware requirements for human comparison. A missing
 recipe or requirement never prevents either generator from running. The runner does not deploy
-recipes, infer GPU requirements or discover new supported hardware combinations.
+recipes or infer GPU requirements.
+
+A future live-deployment runner may try a recipe on otherwise unknown suite hardware. Only a
+successful recipe deployment and inference request would prove the combination; a generated DGD
+alone does not establish recipe support. The existing `load_recipe` and
+`write_discovered_recipe_requirement` helpers support recording that evidence without changing
+the maintained `recipe.yaml`. They write an adjacent ignored `recipe.new.yaml` that retains the
+source and existing requirements and accumulates successive hardware proposals. A requirement
+already matching `recipe.yaml` does not create or rewrite a proposal. No live-deployment or
+hardware-discovery CLI flag is implemented by the current comparison runner.
+
+Review and accept each proposal individually:
+
+```bash
+case_dir=components/src/dynamo/aisimulate/tests/dgd/comparison/cases/qwen3-32b-vllm-disagg
+diff -u "$case_dir/recipe.yaml" "$case_dir/recipe.new.yaml"
+# After reviewing the evidence and proposed requirements for this case:
+mv "$case_dir/recipe.new.yaml" "$case_dir/recipe.yaml"
+```
 
 ## Composition
 

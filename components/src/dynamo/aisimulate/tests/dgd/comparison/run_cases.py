@@ -72,6 +72,7 @@ class Recipe:
 
     source: str
     path: Path
+    metadata_path: Path
     requirements: dict[str, dict[str, Any]]
 
 
@@ -271,8 +272,29 @@ def _load_recipe(case_path: Path) -> Recipe | None:
     return Recipe(
         source=source,
         path=source_path,
+        metadata_path=recipe_path,
         requirements=requirements,
     )
+
+
+def load_recipe(case_name: str) -> Recipe | None:
+    """Load the optional recipe provenance for one matrix row."""
+    return _load_recipe(_case_path(case_name))
+
+
+def write_discovered_recipe_requirement(
+    recipe: Recipe, hardware: str, gpus: int
+) -> Path | None:
+    """Write a proposed requirement without changing the checked-in recipe file."""
+    proposed = {"gpus": gpus}
+    original = _read_mapping(recipe.metadata_path)
+    if original.get("requirements", {}).get(hardware) == proposed:
+        return None
+    output_path = recipe.metadata_path.with_name("recipe.new.yaml")
+    value = _read_mapping(output_path) if output_path.is_file() else original
+    value.setdefault("requirements", {})[hardware] = proposed
+    replace_text(output_path, yaml.safe_dump(value, sort_keys=False))
+    return output_path
 
 
 def _single_sweeper_backend(sweeper_input: dict[str, Any]) -> str:
