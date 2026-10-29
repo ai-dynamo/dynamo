@@ -3594,7 +3594,7 @@ async fn chat_completions(
             err_response
         })?;
 
-    // Normalize legacy Beam builtin declarations before generic validation.
+    // Required/named tool validation must see legacy builtin declarations as tools.
     crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
         &mut request,
         parsing_options.tool_call_parser.as_deref(),

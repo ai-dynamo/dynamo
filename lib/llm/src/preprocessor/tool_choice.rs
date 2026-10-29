@@ -108,10 +108,8 @@ impl OpenAIPreprocessor {
                         }
                 }));
         if requires_enforcement && constraint == GuidedToolConstraint::None {
-            return Err(invalid_argument(
-                "Beam cannot enforce the requested tool constraints with this schema and prompt configuration",
-                None,
-            ));
+            const MESSAGE: &str = "Beam cannot enforce the requested tool constraints with this schema and prompt configuration";
+            return Err(invalid_argument(MESSAGE, Some(MESSAGE)));
         }
         Ok(constraint)
     }
@@ -1047,7 +1045,7 @@ mod tests {
                     "strict={strict}, choice={choice}"
                 );
                 if let Err(error) = result {
-                    assert!(error.to_string().contains("cannot enforce"));
+                    assert!(error.public_message().unwrap().contains("cannot enforce"));
                 }
             }
         }
@@ -1073,7 +1071,7 @@ mod tests {
                 "parallel=false choice={choice} tools={with_tools}"
             );
             if let Err(error) = result {
-                assert!(error.to_string().contains("cannot enforce"));
+                assert!(error.public_message().unwrap().contains("cannot enforce"));
             }
         }
     }
