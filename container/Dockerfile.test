@@ -129,10 +129,6 @@ COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/mocker/config.py /worksp
 # Give the isolated copy a unique basename so pytest cannot alias it with
 # another non-package `test_config.py` during whole-workspace collection.
 COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/mocker/tests/unit/test_config.py /workspace/components/src/dynamo/mocker/tests/unit/test_mocker_config.py
-COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/aisimulate/tests/test_hardware_catalog_sync.py /workspace/components/src/dynamo/aisimulate/tests/test_hardware_catalog_sync.py
-COPY --chmod=664 --chown=dynamo:0 deploy/operator/internal/aisimulate/hardware_skus.txt /workspace/deploy/operator/internal/aisimulate/hardware_skus.txt
-COPY --chmod=664 --chown=dynamo:0 deploy/operator/api/v1beta2/dynamographdeploymentrequest_types.go /workspace/deploy/operator/api/v1beta2/dynamographdeploymentrequest_types.go
-COPY --chmod=664 --chown=dynamo:0 container/deps/requirements.aisimulate.txt /workspace/container/deps/requirements.aisimulate.txt
 
 # BuildKit applies the file mode to parent directories it creates for these
 # single-file COPY instructions. Restore directory traversal/write access for
