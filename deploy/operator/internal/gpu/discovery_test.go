@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -979,6 +980,84 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected parse error, got nil")
 		}
+	})
+}
+
+const scrapeTestMetrics = "# TYPE DCGM_FI_DEV_GPU_TEMP gauge\n" +
+	`DCGM_FI_DEV_GPU_TEMP{gpu="0",modelName="NVIDIA A100",Hostname="test-node"} 50` + "\n"
+
+// connCountingServer starts a keep-alive server that counts the connections it
+// has accepted and the ones still open.
+func connCountingServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *atomic.Int32, *atomic.Int32) {
+	t.Helper()
+	var opened, open atomic.Int32
+	server := httptest.NewUnstartedServer(handler)
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateNew:
+			opened.Add(1)
+			open.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			open.Add(-1)
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+	return server, &opened, &open
+}
+
+func TestScrapeMetricsEndpoint_ConnectionReuse(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("repeated scrapes reuse one connection", func(t *testing.T) {
+		client := newMetricsHTTPClient(time.Minute)
+		t.Cleanup(client.CloseIdleConnections)
+		server, opened, _ := connCountingServer(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = fmt.Fprint(w, scrapeTestMetrics)
+		})
+
+		for range 3 {
+			_, err := scrapeMetricsEndpoint(ctx, client, server.URL)
+			require.NoError(t, err)
+		}
+		assert.EqualValues(t, 1, opened.Load())
+	})
+
+	t.Run("idle connections are released after the idle timeout", func(t *testing.T) {
+		client := newMetricsHTTPClient(50 * time.Millisecond)
+		t.Cleanup(client.CloseIdleConnections)
+		server, _, open := connCountingServer(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = fmt.Fprint(w, scrapeTestMetrics)
+		})
+
+		_, err := scrapeMetricsEndpoint(ctx, client, server.URL)
+		require.NoError(t, err)
+		assert.Eventually(t, func() bool { return open.Load() == 0 }, 2*time.Second, 10*time.Millisecond,
+			"idle connection still open after the idle timeout")
+	})
+
+	t.Run("a failed scrape does not break the next one", func(t *testing.T) {
+		client := newMetricsHTTPClient(time.Minute)
+		t.Cleanup(client.CloseIdleConnections)
+		var calls atomic.Int32
+		server, _, _ := connCountingServer(t, func(w http.ResponseWriter, r *http.Request) {
+			switch calls.Add(1) {
+			case 1:
+				w.WriteHeader(http.StatusServiceUnavailable)
+			case 2:
+				_, _ = fmt.Fprint(w, "not a prometheus format\n")
+			default:
+				_, _ = fmt.Fprint(w, scrapeTestMetrics)
+			}
+		})
+
+		_, err := scrapeMetricsEndpoint(ctx, client, server.URL)
+		require.ErrorContains(t, err, "returned status 503")
+		_, err = scrapeMetricsEndpoint(ctx, client, server.URL)
+		require.ErrorContains(t, err, "parse prometheus metrics")
+		info, err := scrapeMetricsEndpoint(ctx, client, server.URL)
+		require.NoError(t, err)
+		assert.Equal(t, 1, info.GPUsPerNode)
 	})
 }
 

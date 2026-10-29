@@ -180,6 +180,10 @@ func resolvedRoleRuntimeVersionsForHash(component *v1beta1.DynamoComponentDeploy
 		if err != nil {
 			continue
 		}
+		// A compute-only engine image does not select Dynamo runtime features.
+		if GetComponentDynamoSidecar(component) != nil && GetDynamoSidecar(effective) == nil {
+			continue
+		}
 		version := resolvedRuntimeVersionForHash(effective)
 		if version != "" {
 			versions[role.Name] = version

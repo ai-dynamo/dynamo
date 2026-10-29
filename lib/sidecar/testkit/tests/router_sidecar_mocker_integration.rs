@@ -149,6 +149,8 @@ async fn registration_and_errors_recover_through_worker_ingress<F: ProcessFixtur
         ),
         "{error}"
     );
+    // Checked as soon as the refusal returns, well inside `process::INHIBITED_DURATION`,
+    // so a wrongly inhibited worker is still out of rotation here.
     assert!(
         router
             .selectable_worker_ids()
