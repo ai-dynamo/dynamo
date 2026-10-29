@@ -1650,11 +1650,16 @@ impl ClientConnectionBundle {
     }
 }
 
+/// A bundle's endpoint drivers and lane tasks run on the Tokio runtime that
+/// connected it and stop with that runtime, so only callers on the same Tokio
+/// runtime may share it. This is the QUIC counterpart of
+/// `velo_response::service_key`, keyed on the runtime that runs the tasks.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct ConnectionKey {
     address: String,
     frontend_id: String,
     certificate_sha256: String,
+    runtime: tokio::runtime::Id,
 }
 
 struct ClientPoolEntry {
@@ -1730,6 +1735,8 @@ impl QuicResponseClientPool {
             address: info.address.clone(),
             frontend_id: info.frontend_id.clone(),
             certificate_sha256: info.certificate_sha256.clone(),
+            // connect() is awaited inline below, so its tasks start on this runtime.
+            runtime: tokio::runtime::Handle::current().id(),
         };
         let connection = self.connection(key).await?;
         let lane_index = xxh3_64(info.request_id.as_bytes()) as usize % connection.lanes.len();
@@ -1791,11 +1798,25 @@ impl QuicResponseClientPool {
     }
 
     async fn connection(&self, key: ConnectionKey) -> Result<Arc<ClientConnectionBundle>> {
-        let entry = self
-            .connections
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(ClientPoolEntry::new()))
-            .clone();
+        let entry = match self.connections.entry(key.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let entry = entry.insert(Arc::new(ClientPoolEntry::new())).clone();
+                // Drop entries left by stopped runtimes so their bundles do not
+                // keep UDP sockets open. Only another runtime's unhealthy bundle
+                // that nobody is reconnecting is removed.
+                self.connections.retain(|other, other_entry| {
+                    other.runtime == key.runtime
+                        || other_entry.reconnect.try_lock().is_err()
+                        || other_entry
+                            .current
+                            .load()
+                            .as_ref()
+                            .is_none_or(|bundle| bundle.is_healthy())
+                });
+                entry
+            }
+        };
         if let Some(connection) = entry.current.load_full()
             && connection.is_healthy()
         {
@@ -1927,6 +1948,7 @@ fn spawn_client_lane(
     let writer_contexts = contexts.clone();
     let writer_healthy = healthy.clone();
     tokio::spawn(async move {
+        let _unhealthy_on_exit = MarkUnhealthyOnDrop(writer_healthy.clone());
         if let Err(error) = run_client_writer(
             send,
             receiver,
@@ -1949,6 +1971,7 @@ fn spawn_client_lane(
     });
 
     tokio::spawn(async move {
+        let _unhealthy_on_exit = MarkUnhealthyOnDrop(healthy.clone());
         if let Err(error) = run_client_control_reader(recv, contexts.clone()).await {
             fail_client_connection_bundle(
                 &connections,
@@ -1960,6 +1983,18 @@ fn spawn_client_lane(
             );
         }
     });
+}
+
+/// Lane tasks only end on failure. Runtime shutdown drops them without running
+/// `fail_client_connection_bundle`, so this marks the bundle unhealthy and the
+/// pool reconnects instead of reusing it. It drops after the failure path, which
+/// still sees the bundle healthy and does the full cleanup.
+struct MarkUnhealthyOnDrop(Arc<AtomicBool>);
+
+impl Drop for MarkUnhealthyOnDrop {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 async fn run_client_writer(
@@ -3065,6 +3100,259 @@ mod tests {
         shutdown.cancel();
     }
 
+    fn worker_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn cached_bundles(pool: &QuicResponseClientPool) -> Vec<Arc<ClientConnectionBundle>> {
+        pool.connections
+            .iter()
+            .filter_map(|entry| entry.current.load_full())
+            .collect()
+    }
+
+    /// Registers a response on the frontend and opens its worker sender on
+    /// `runtime`, so the pool connects from that runtime.
+    fn sender_on(
+        runtime: &tokio::runtime::Runtime,
+        pool: &QuicResponseClientPool,
+        server: &QuicResponseServer,
+    ) -> (
+        PipelineContext<()>,
+        QuicResponseSender,
+        super::super::StreamProvider<StreamReceiver>,
+    ) {
+        runtime.block_on(async {
+            let context = PipelineContext::new(());
+            let registered = server.register_response(context.context());
+            let (info, provider) = registered.into_parts();
+            let sender =
+                tokio::time::timeout(Duration::from_secs(5), pool.sender(context.context(), info))
+                    .await
+                    .expect("opening a QUIC response sender timed out")
+                    .unwrap();
+            (context, sender, provider)
+        })
+    }
+
+    /// Two worker runtimes serve one frontend through one pool, as two
+    /// external runtimes in one process do. Stopping the first must leave the
+    /// second runtime's bundle carrying ordered responses on every lane.
+    #[test]
+    fn stopped_runtime_leaves_other_runtime_carrying_1000_ordered_responses() {
+        let frontend = worker_runtime();
+        let (shutdown, server) = frontend.block_on(async { test_server(RESPONSE_BUFFER_CAPACITY) });
+        let pool = Arc::new(test_pool());
+        let first_runtime = worker_runtime();
+        let second_runtime = worker_runtime();
+
+        let first = sender_on(&first_runtime, &pool, &server);
+        let first_bundle = only_bundle(&pool);
+        let second = sender_on(&second_runtime, &pool, &server);
+        let bundles = cached_bundles(&pool);
+        assert_eq!(bundles.len(), 2, "each Tokio runtime needs its own bundle");
+        let second_bundle = bundles
+            .into_iter()
+            .find(|bundle| !Arc::ptr_eq(bundle, &first_bundle))
+            .unwrap();
+
+        drop((first, second));
+        first_runtime.shutdown_timeout(Duration::from_secs(5));
+        assert!(second_bundle.is_healthy());
+
+        second_runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(60), async {
+                let mut lane_by_request = HashMap::new();
+                for index in 0..1_000 {
+                    let context = PipelineContext::new(());
+                    let request_id = context.id().to_string();
+                    let registered = server.register_response(context.context());
+                    let (connection_info, provider) = registered.into_parts();
+                    let mut sender = pool
+                        .sender(context.context(), connection_info)
+                        .await
+                        .unwrap();
+                    let expected_lane = xxh3_64(request_id.as_bytes()) as usize % 8;
+                    assert_eq!(sender.lane_index(), expected_lane);
+                    lane_by_request.insert(request_id, sender.lane_index());
+                    sender.send_prologue(None).await.unwrap();
+                    sender
+                        .send(Bytes::from(format!("{index}:first")))
+                        .await
+                        .unwrap();
+                    sender
+                        .send(Bytes::from(format!("{index}:second")))
+                        .await
+                        .unwrap();
+                    sender.finish().await.unwrap();
+
+                    let mut receiver = provider.await.unwrap().unwrap();
+                    assert_eq!(
+                        receiver.rx.recv().await.unwrap(),
+                        Bytes::from(format!("{index}:first"))
+                    );
+                    assert_eq!(
+                        receiver.rx.recv().await.unwrap(),
+                        Bytes::from(format!("{index}:second"))
+                    );
+                    assert!(receiver.rx.recv().await.is_none());
+                }
+                assert_eq!(lane_by_request.len(), 1_000);
+            })
+            .await
+            .expect("responses on the surviving runtime timed out");
+        });
+
+        let healthy = cached_bundles(&pool)
+            .into_iter()
+            .filter(|bundle| bundle.is_healthy())
+            .collect::<Vec<_>>();
+        assert_eq!(healthy.len(), 1);
+        assert!(Arc::ptr_eq(&healthy[0], &second_bundle));
+        assert_eq!(second_bundle.connections.len(), 9); // Eight bulk and one priority.
+        assert_eq!(second_bundle.lanes.len(), 8);
+        frontend.block_on(async { shutdown.cancel() });
+    }
+
+    /// After one runtime stops, a physical failure on the other runtime's
+    /// bundle kills only that bundle's contexts and reconnects it once.
+    #[test]
+    fn stopped_runtime_then_connection_failure_reconnects_only_survivor() {
+        let frontend = worker_runtime();
+        let (shutdown, server) = frontend.block_on(async { test_server(RESPONSE_BUFFER_CAPACITY) });
+        let pool = Arc::new(test_pool());
+        let first_runtime = worker_runtime();
+        let second_runtime = worker_runtime();
+
+        let first = sender_on(&first_runtime, &pool, &server);
+        let first_bundle = only_bundle(&pool);
+        let (second_context, mut second_sender, _second_provider) =
+            sender_on(&second_runtime, &pool, &server);
+        let bundles = cached_bundles(&pool);
+        assert_eq!(bundles.len(), 2, "each Tokio runtime needs its own bundle");
+        let second_bundle = bundles
+            .into_iter()
+            .find(|bundle| !Arc::ptr_eq(bundle, &first_bundle))
+            .unwrap();
+
+        drop(first);
+        first_runtime.shutdown_timeout(Duration::from_secs(5));
+        assert!(second_bundle.is_healthy());
+
+        second_runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                // The surviving bundle still carries a complete response.
+                let context = PipelineContext::new(());
+                let registered = server.register_response(context.context());
+                let (info, provider) = registered.into_parts();
+                let mut sender = pool.sender(context.context(), info).await.unwrap();
+                sender.send_prologue(None).await.unwrap();
+                sender.send(Bytes::from_static(b"alive")).await.unwrap();
+                sender.finish().await.unwrap();
+                let mut receiver = provider.await.unwrap().unwrap();
+                assert_eq!(
+                    receiver.rx.recv().await.unwrap(),
+                    Bytes::from_static(b"alive")
+                );
+                assert!(receiver.rx.recv().await.is_none());
+
+                second_sender.send_prologue(None).await.unwrap();
+                let old_connections = second_bundle
+                    .connections
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let old_ids = old_connections
+                    .iter()
+                    .map(quinn::Connection::stable_id)
+                    .collect::<Vec<_>>();
+                old_connections[0].close(CLOSE_CODE_INVARIANT, b"test lane failure");
+                second_context.context().killed().await;
+                while old_connections
+                    .iter()
+                    .any(|connection| connection.close_reason().is_none())
+                {
+                    tokio::task::yield_now().await;
+                }
+
+                let mut registrations = Vec::new();
+                let mut providers = Vec::new();
+                for _ in 0..16 {
+                    let context = PipelineContext::new(());
+                    let registered = server.register_response(context.context());
+                    let (connection_info, provider) = registered.into_parts();
+                    registrations.push((context, connection_info));
+                    providers.push(provider);
+                }
+                let senders =
+                    futures::future::join_all(registrations.into_iter().map(|(context, info)| {
+                        let pool = pool.clone();
+                        async move { pool.sender(context.context(), info).await }
+                    }))
+                    .await;
+                let errors = senders
+                    .iter()
+                    .filter_map(|result| result.as_ref().err().map(ToString::to_string))
+                    .collect::<Vec<_>>();
+                assert!(errors.is_empty(), "replacement sender errors: {errors:?}");
+
+                let healthy = cached_bundles(&pool)
+                    .into_iter()
+                    .filter(|bundle| bundle.is_healthy())
+                    .collect::<Vec<_>>();
+                assert_eq!(healthy.len(), 1, "the survivor reconnects exactly once");
+                let replacement = &healthy[0];
+                assert!(!Arc::ptr_eq(replacement, &second_bundle));
+                assert!(!Arc::ptr_eq(replacement, &first_bundle));
+                assert_eq!(
+                    replacement.connections.len(),
+                    BULK_CONNECTIONS + PRIORITY_CONNECTIONS
+                );
+                assert!(
+                    replacement
+                        .connections
+                        .iter()
+                        .all(|connection| !old_ids.contains(&connection.stable_id()))
+                );
+                assert_eq!(replacement.lanes.len(), 8);
+                drop(providers);
+            })
+            .await
+            .expect("failure and reconnect on the surviving runtime timed out");
+        });
+        frontend.block_on(async { shutdown.cancel() });
+    }
+
+    /// Runtime shutdown drops lane tasks without their failure path. The pool
+    /// must not keep reporting that bundle healthy, and a later connection
+    /// from another runtime releases it.
+    #[test]
+    fn runtime_shutdown_marks_its_bundle_unhealthy() {
+        let frontend = worker_runtime();
+        let (shutdown, server) = frontend.block_on(async { test_server(RESPONSE_BUFFER_CAPACITY) });
+        let pool = Arc::new(test_pool());
+        let first_runtime = worker_runtime();
+        let second_runtime = worker_runtime();
+
+        let first = sender_on(&first_runtime, &pool, &server);
+        let first_bundle = only_bundle(&pool);
+        assert!(first_bundle.is_healthy());
+        drop(first);
+        first_runtime.shutdown_timeout(Duration::from_secs(5));
+        assert!(!first_bundle.is_healthy());
+
+        let second = sender_on(&second_runtime, &pool, &server);
+        let second_bundle = only_bundle(&pool);
+        assert!(!Arc::ptr_eq(&second_bundle, &first_bundle));
+        assert!(second_bundle.is_healthy());
+        drop(second);
+        frontend.block_on(async { shutdown.cancel() });
+    }
+
     #[tokio::test]
     async fn different_connection_keys_initialize_in_parallel() {
         let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
@@ -3074,6 +3362,7 @@ mod tests {
             address: "127.0.0.1:1".to_string(),
             frontend_id: "blocked".to_string(),
             certificate_sha256: "00".repeat(32),
+            runtime: tokio::runtime::Handle::current().id(),
         };
         let blocked_entry = pool
             .connections
