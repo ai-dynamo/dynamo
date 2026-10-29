@@ -39,6 +39,11 @@ use super::{
 pub type ModelInfoPatch = Box<dyn Fn(&mut pb::GetModelInfoResponse) + Send + Sync>;
 pub type ServerInfoPatch = Box<dyn Fn(&mut pb::GetServerInfoResponse) + Send + Sync>;
 
+/// The node's listener table every listener of one fixture node reports.
+type NodeTable = Arc<Mutex<Vec<pb::NodeRustListener>>>;
+
+/// One SGLang Rust-server listener: a Mocker scheduler behind a controllable
+/// gRPC service. A node of several shares one listener table.
 pub struct Fixture {
     config: FixtureConfig,
     service: SglangMockerService,
@@ -49,7 +54,41 @@ pub struct Fixture {
     health: watch::Sender<Option<bool>>,
     health_calls: watch::Receiver<usize>,
     aborts: watch::Receiver<Vec<(String, bool)>>,
+    received: watch::Receiver<Vec<String>>,
+    table: NodeTable,
+    index: usize,
     http: Option<http::Peer>,
+}
+
+/// The listeners of one fixture node, like SGLang's Rust server with one
+/// listener per DP rank.
+#[derive(Clone)]
+pub struct NodeConfig {
+    pub listeners: u32,
+    /// The first listener's DP rank.
+    pub dp_rank: u32,
+    /// Every DP rank of the deployment; by default `dp_rank + listeners`.
+    pub dp_size: Option<u32>,
+}
+
+impl Default for NodeConfig {
+    fn default() -> Self {
+        Self {
+            listeners: 1,
+            dp_rank: 0,
+            dp_size: None,
+        }
+    }
+}
+
+impl NodeConfig {
+    /// Attention DP over `listeners` ranks on one node.
+    pub fn listeners(listeners: u32) -> Self {
+        Self {
+            listeners,
+            ..Default::default()
+        }
+    }
 }
 
 impl Fixture {
@@ -57,10 +96,7 @@ impl Fixture {
     /// reports; the peer imitates it, and Abort RPCs reach this fixture.
     pub async fn start_http(control: Controller<http::Adapter>, config: FixtureConfig) -> Self {
         let mut fixture = Self::start(Controller::default(), config).await;
-        let http = http::Peer::start(control, fixture.aborts.clone()).await;
-        let port = u32::from(http.port());
-        fixture.override_discovery(None, vec![Box::new(move |info| info.port = port)]);
-        fixture.http = Some(http);
+        fixture.serve_http(control).await;
         fixture
     }
 
@@ -104,17 +140,32 @@ impl Fixture {
         .await
         .unwrap();
     }
-}
 
-impl SidecarFixture for Fixture {
-    type Engine = SglangSidecarEngine;
-    type Protocol = Adapter;
-    const GENERATE_OPENING: GenerateOpening = GenerateOpening::OnStreamPoll;
+    /// Serve native `/generate` from an HTTP peer on this listener's
+    /// reported HTTP port; Abort RPCs still reach this listener.
+    pub async fn serve_http(&mut self, control: Controller<http::Adapter>) {
+        let http = http::Peer::start(control, self.aborts.clone()).await;
+        self.set_http_port(http.port());
+        self.http = Some(http);
+    }
 
-    async fn start(control: Controller<Adapter>, config: FixtureConfig) -> Self {
+    /// Report `port` as this listener's HTTP port, in GetServerInfo and in
+    /// the node's listener table, as SGLang's Rust server does.
+    pub fn set_http_port(&self, port: u16) {
+        self.table.lock().unwrap()[self.index].http_port = u32::from(port);
+    }
+
+    /// Start the listeners of one node, sharing `control`. Listener `k`
+    /// serves DP rank `node.dp_rank + k` with its own Mocker scheduler and
+    /// KV-event publisher, and every listener reports the node's table.
+    pub async fn start_node(
+        control: Controller<Adapter>,
+        config: FixtureConfig,
+        node: NodeConfig,
+    ) -> Vec<Self> {
         let mut args = fast_engine_args(EngineType::Sglang);
         args.speedup_ratio = config.speedup_ratio;
-        let service = SglangMockerService::new(
+        let services = SglangMockerService::node(
             MockerServerConfig {
                 model: config.model.clone(),
                 mode: match config.disaggregation_mode {
@@ -123,17 +174,56 @@ impl SidecarFixture for Fixture {
                     DisaggregationMode::Decode => ServerMode::Decode,
                     DisaggregationMode::Encode => panic!("Mocker does not support encode mode"),
                 },
+                dp_rank: node.dp_rank,
+                dp_size: node.dp_size.unwrap_or(node.dp_rank + node.listeners),
+                enable_dp_attention: node.listeners > 1,
                 ..Default::default()
             },
             args,
+            node.listeners,
         )
         .unwrap();
+        let table = NodeTable::default();
+        let mut listeners = Vec::with_capacity(services.len());
+        for (index, service) in services.into_iter().enumerate() {
+            listeners.push(
+                Self::serve(
+                    control.clone(),
+                    config.clone(),
+                    service,
+                    table.clone(),
+                    index,
+                )
+                .await,
+            );
+        }
+        *table.lock().unwrap() = listeners
+            .iter()
+            .enumerate()
+            .map(|(index, listener)| pb::NodeRustListener {
+                port_offset: index as u32,
+                dp_rank: node.dp_rank + index as u32,
+                http_port: 0,
+                grpc_port: Some(u32::from(listener.port())),
+            })
+            .collect();
+        listeners
+    }
+
+    async fn serve(
+        control: Controller<Adapter>,
+        config: FixtureConfig,
+        service: SglangMockerService,
+        table: NodeTable,
+        index: usize,
+    ) -> Self {
         let scripted = Arc::new(Mutex::new(HashMap::new()));
         let model_info = Arc::new(Mutex::new(None));
         let server_info = Arc::new(Mutex::new(VecDeque::new()));
         let (health, health_rx) = watch::channel(Some(true));
         let (health_tx, health_calls) = watch::channel(0);
         let (abort_tx, aborts) = watch::channel(Vec::new());
+        let (received_tx, received) = watch::channel(Vec::new());
         let controlled = ControlledService {
             inner: service.clone(),
             control,
@@ -143,6 +233,9 @@ impl SidecarFixture for Fixture {
             health: health_rx,
             health_calls: health_tx,
             aborts: abort_tx,
+            received: received_tx,
+            table: table.clone(),
+            index,
         };
         let server = TestServer::start(move |listener, shutdown| async move {
             tonic::transport::Server::builder()
@@ -165,8 +258,42 @@ impl SidecarFixture for Fixture {
             health,
             health_calls,
             aborts,
+            received,
+            table,
+            index,
             http: None,
         }
+    }
+
+    /// This listener's gRPC port.
+    pub fn port(&self) -> u16 {
+        self.server
+            .endpoint()
+            .rsplit_once(':')
+            .unwrap()
+            .1
+            .parse()
+            .unwrap()
+    }
+
+    /// Generate requests this listener opened, in arrival order.
+    pub fn received(&self) -> Vec<String> {
+        self.received.borrow().clone()
+    }
+}
+
+impl SidecarFixture for Fixture {
+    type Engine = SglangSidecarEngine;
+    type Protocol = Adapter;
+    const GENERATE_OPENING: GenerateOpening = GenerateOpening::OnStreamPoll;
+
+    /// One listener: a single-rank SGLang Rust server, which reports a
+    /// one-entry listener table.
+    async fn start(control: Controller<Adapter>, config: FixtureConfig) -> Self {
+        Self::start_node(control, config, NodeConfig::default())
+            .await
+            .pop()
+            .unwrap()
     }
 
     async fn engine(&self) -> Self::Engine {
@@ -400,8 +527,7 @@ impl WireFixture for Fixture {
                 .as_ref()
                 .and_then(|routing| routing.lora_name.clone())
         );
-        // The engine serves one DP rank, so the router's rank 0 is not
-        // forwarded.
+        // The rank chose the listener, so it is not forwarded.
         assert_eq!(native.routed_dp_rank, None);
 
         let native_frames = handle
@@ -513,6 +639,9 @@ struct ControlledService {
     health: watch::Receiver<Option<bool>>,
     health_calls: watch::Sender<usize>,
     aborts: watch::Sender<Vec<(String, bool)>>,
+    received: watch::Sender<Vec<String>>,
+    table: NodeTable,
+    index: usize,
 }
 
 #[tonic::async_trait]
@@ -524,6 +653,8 @@ impl SglangService for ControlledService {
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStream>, Status> {
         let opened = self.control.open(request.get_ref()).await?;
+        let rid = Adapter::request_id(request.get_ref()).to_owned();
+        self.received.send_modify(|received| received.push(rid));
         let scripted = self
             .scripted
             .lock()
@@ -571,6 +702,18 @@ impl SglangService for ControlledService {
         request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::GetServerInfoResponse>, Status> {
         let mut response = self.inner.get_server_info(request).await?.into_inner();
+        let table = self.table.lock().unwrap().clone();
+        let port = table
+            .get(self.index)
+            .map_or(0, |listener| listener.http_port);
+        response
+            .deployment_info
+            .as_mut()
+            .expect("the Mocker reports deployment_info")
+            .node_listeners = table;
+        if port != 0 {
+            response.port = port;
+        }
         let mut scripts = self.server_info.lock().unwrap();
         if let Some(patch) = scripts.front() {
             patch(&mut response);

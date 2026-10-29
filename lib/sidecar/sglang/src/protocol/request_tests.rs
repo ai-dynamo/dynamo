@@ -23,11 +23,21 @@ fn request() -> PreprocessedRequest {
         .unwrap()
 }
 
+/// A single-rank worker's target with the bootstrap address `host:port`.
+fn target<'a>(host: Option<&'a str>, port: Option<u16>) -> Target<'a> {
+    Target {
+        bootstrap_host: host,
+        bootstrap_port: port,
+        prefill_rank: None,
+        global_dp_size: 1,
+    }
+}
+
 fn build(
     request: &PreprocessedRequest,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
-    build_generate_request(request, "rid", mode, Some("prefill"), Some(5000))
+    build_generate_request(request, "rid", mode, target(Some("prefill"), Some(5000)))
         .map(|(generate, _)| generate)
 }
 
@@ -110,8 +120,13 @@ fn request_maps_native_fields_and_full_width_room() {
         bootstrap_room: i64::MAX as u64,
         handoff_id: None,
     });
-    let (mapped, handoff) =
-        build_generate_request(&request, "rid-1", DisaggregationMode::Decode, None, None).unwrap();
+    let (mapped, handoff) = build_generate_request(
+        &request,
+        "rid-1",
+        DisaggregationMode::Decode,
+        target(None, None),
+    )
+    .unwrap();
     assert_eq!(input_ids(&mapped), [1, 2, 3]);
     assert_eq!(rid(&mapped), "rid-1");
     assert_eq!(mapped.stream, Some(true));
@@ -152,8 +167,7 @@ fn prefill_handoff_round_trips_to_decode_request() {
         &request(),
         "rid-prefill",
         DisaggregationMode::Prefill,
-        Some("prefill.internal"),
-        Some(5001),
+        target(Some("prefill.internal"), Some(5001)),
     )
     .unwrap();
     let handoff = handoff.unwrap();
@@ -171,8 +185,13 @@ fn prefill_handoff_round_trips_to_decode_request() {
 
 #[test]
 fn decode_requires_rendezvous_params() {
-    let error = build_generate_request(&request(), "rid-3", DisaggregationMode::Decode, None, None)
-        .unwrap_err();
+    let error = build_generate_request(
+        &request(),
+        "rid-3",
+        DisaggregationMode::Decode,
+        target(None, None),
+    )
+    .unwrap_err();
     assert_invalid(error, "neither bootstrap_info nor prefill_result");
 }
 
@@ -630,11 +649,11 @@ fn adapter_and_cache_identity_are_forwarded_without_routed_rank() {
     let mapped = build(&request, DisaggregationMode::Aggregated).unwrap();
     assert_eq!(lora_path(&mapped), Some("adapter-a"));
     assert_eq!(mapped.routing_key.as_deref(), Some("model-cache-key"));
-    // The engine serves one DP rank, so no rank is named.
+    // The rank chose the listener, so it is not forwarded.
     assert!(mapped.routed_dp_rank.is_none());
 }
 
-/// The engine serves DP rank 0 only, so a request routed to another rank fails.
+/// A request routed to a rank this worker does not serve fails.
 #[test]
 fn nonzero_router_rank_is_invalid_argument() {
     let routed = |dp_rank: Option<u32>, prefill_dp_rank: Option<u32>| {
@@ -651,7 +670,7 @@ fn nonzero_router_rank_is_invalid_argument() {
         (DisaggregationMode::Prefill, None, Some(1)),
         (DisaggregationMode::Decode, Some(1), None),
     ] {
-        let error = validate_dp_rank(&routed(dp_rank, prefill_dp_rank), mode).unwrap_err();
+        let error = validate_dp_rank(&routed(dp_rank, prefill_dp_rank), mode, 0..1).unwrap_err();
         assert_invalid(error, "DP rank 1 was requested");
     }
     for (mode, dp_rank, prefill_dp_rank) in [
@@ -661,7 +680,7 @@ fn nonzero_router_rank_is_invalid_argument() {
         // Decode names the request's rank, not prefill's.
         (DisaggregationMode::Decode, Some(0), Some(1)),
     ] {
-        validate_dp_rank(&routed(dp_rank, prefill_dp_rank), mode).unwrap();
+        validate_dp_rank(&routed(dp_rank, prefill_dp_rank), mode, 0..1).unwrap();
     }
 }
 
@@ -694,20 +713,22 @@ fn bootstrap_info_precedes_prefill_result_and_aggregated_ignores_both() {
         prompt_tokens_details: None,
     });
     for mode in [DisaggregationMode::Decode, DisaggregationMode::Prefill] {
-        let params = resolve_disaggregated_params(&request, mode, Some("discovery"), Some(5002))
-            .unwrap()
-            .unwrap();
+        let params =
+            resolve_disaggregated_params(&request, mode, target(Some("discovery"), Some(5002)))
+                .unwrap()
+                .unwrap();
         assert_eq!(
             params,
             Rendezvous {
                 bootstrap_host: "router-prefill".to_string(),
                 bootstrap_port: 5000,
                 bootstrap_room: 23,
+                disagg_prefill_dp_rank: None,
             }
         );
     }
     assert!(
-        resolve_disaggregated_params(&request, DisaggregationMode::Aggregated, None, None)
+        resolve_disaggregated_params(&request, DisaggregationMode::Aggregated, target(None, None))
             .unwrap()
             .is_none()
     );
@@ -721,16 +742,19 @@ fn prefill_requires_discovery_address_and_generates_signed_room() {
         (Some("  "), Some(5000), "bootstrap_host"),
     ] {
         assert_invalid(
-            resolve_disaggregated_params(&request(), DisaggregationMode::Prefill, host, port)
-                .unwrap_err(),
+            resolve_disaggregated_params(
+                &request(),
+                DisaggregationMode::Prefill,
+                target(host, port),
+            )
+            .unwrap_err(),
             message,
         );
     }
     let params = resolve_disaggregated_params(
         &request(),
         DisaggregationMode::Prefill,
-        Some("prefill"),
-        Some(5000),
+        target(Some("prefill"), Some(5000)),
     )
     .unwrap()
     .unwrap();
@@ -760,9 +784,126 @@ fn decode_handoff_rejects_missing_wrong_type_and_out_of_range_fields() {
             prompt_tokens_details: None,
         });
         assert_invalid(
-            resolve_disaggregated_params(&request, DisaggregationMode::Decode, None, None)
+            resolve_disaggregated_params(&request, DisaggregationMode::Decode, target(None, None))
                 .unwrap_err(),
             field,
         );
     }
+}
+
+/// The target of a prefill dispatched to rank `rank` of a `size`-rank
+/// deployment, on that listener's bootstrap port.
+fn ranked(rank: Option<u32>, port: u16, size: u32) -> Target<'static> {
+    Target {
+        bootstrap_host: Some("prefill"),
+        bootstrap_port: Some(port),
+        prefill_rank: rank,
+        global_dp_size: size,
+    }
+}
+
+fn routed_bootstrap(prefill_dp_rank: Option<u32>) -> PreprocessedRequest {
+    let mut request = request();
+    request.bootstrap_info = Some(BootstrapInfo {
+        bootstrap_host: "router-prefill".to_string(),
+        bootstrap_port: 31_001,
+        bootstrap_room: 41,
+        handoff_id: None,
+    });
+    request.routing = Some(RoutingHints {
+        prefill_dp_rank,
+        ..Default::default()
+    });
+    request
+}
+
+/// A prefill keeps the router's rendezvous and names the router's rank, on
+/// the wire and in its handoff; decode names the router's prefill rank.
+#[test]
+fn prefill_names_dispatched_rank() {
+    let (prefill, handoff) = build_generate_request(
+        &routed_bootstrap(Some(3)),
+        "rid",
+        DisaggregationMode::Prefill,
+        ranked(Some(3), 31_003, 4),
+    )
+    .unwrap();
+    assert_eq!(prefill.disagg_prefill_dp_rank, Some(3));
+    assert!(prefill.routed_dp_rank.is_none());
+    // The router's rendezvous is kept as it is.
+    assert_eq!(
+        rendezvous(&prefill),
+        Some(("router-prefill".to_string(), 31_001, 41))
+    );
+    assert_eq!(handoff.unwrap()["disagg_prefill_dp_rank"], 3);
+
+    let decode = build(&routed_bootstrap(Some(3)), DisaggregationMode::Decode).unwrap();
+    assert_eq!(decode.disagg_prefill_dp_rank, Some(3));
+    assert!(decode.routed_dp_rank.is_none());
+    let decode = build(&routed_bootstrap(None), DisaggregationMode::Decode).unwrap();
+    assert_eq!(decode.disagg_prefill_dp_rank, None);
+}
+
+/// A rendezvous prefill builds itself has the dispatched listener's port and
+/// a room congruent to its rank modulo the DP size. Prefill and its handoff
+/// name the rank only when the router named it, and decode forwards exactly
+/// that; a malformed rank is refused.
+#[test]
+fn handoff_names_rank_only_when_prefill_named_it() {
+    for (routed, dispatched, size, named) in [
+        (Some(3), Some(3), 4, Some(3)),
+        (None, Some(3), 4, None),
+        (None, None, 1, None),
+    ] {
+        let mut prefill_request = request();
+        prefill_request.routing = Some(RoutingHints {
+            prefill_dp_rank: routed,
+            ..Default::default()
+        });
+        let (prefill, handoff) = build_generate_request(
+            &prefill_request,
+            "rid",
+            DisaggregationMode::Prefill,
+            ranked(dispatched, 31_003, size),
+        )
+        .unwrap();
+        let (_, port, room) = rendezvous(&prefill).unwrap();
+        assert_eq!(port, 31_003);
+        if let Some(rank) = dispatched {
+            assert_eq!(room % i64::from(size), i64::from(rank));
+        }
+        let named = named.map(i64::from);
+        assert_eq!(prefill.disagg_prefill_dp_rank, named);
+        let handoff = handoff.unwrap();
+        assert_eq!(
+            handoff
+                .get("disagg_prefill_dp_rank")
+                .and_then(Value::as_i64),
+            named
+        );
+        let mut decode_request = request();
+        decode_request.prefill_result = Some(PrefillResult {
+            disaggregated_params: handoff,
+            prompt_tokens_details: None,
+        });
+        let decode = build(&decode_request, DisaggregationMode::Decode).unwrap();
+        assert_eq!(rendezvous(&decode), rendezvous(&prefill));
+        assert_eq!(decode.disagg_prefill_dp_rank, named);
+    }
+    let room = room_for_rank(3, 4, i64::MAX as u64);
+    assert!(room <= i64::MAX as u64 && room % 4 == 3);
+    let mut decode_request = request();
+    decode_request.prefill_result = Some(PrefillResult {
+        disaggregated_params: json!({
+            "bootstrap_host": "prefill",
+            "bootstrap_port": 5000,
+            "bootstrap_room": 42,
+            "disagg_prefill_dp_rank": "1",
+        }),
+        prompt_tokens_details: None,
+    });
+    assert_invalid(
+        build(&decode_request, DisaggregationMode::Decode).unwrap_err(),
+        "disagg_prefill_dp_rank must be a DP rank",
+    );
 }

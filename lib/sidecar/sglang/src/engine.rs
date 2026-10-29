@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -27,28 +26,31 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, AbortRpc, Client, GRPC_SERVICE, NodeMetadata, Pool, WORKER_GROUP_KEY};
+use crate::client::{
+    self, AbortRpc, Client, GRPC_SERVICE, Pool, RETRY_LOG_INTERVAL, WORKER_GROUP_KEY,
+};
 use crate::discovery::{self, EngineInfo, sglang_eagle_enabled};
+use crate::listeners::{Listener, NodeListeners};
 use crate::native_http::{self, NativeHttp};
+use crate::node::{self, NodeInfo, NodeTable};
 use crate::proto as pb;
-use crate::protocol::{FrameOutput, ResponseConverter, build_generate_request, validate_dp_rank};
-
-const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+use crate::protocol::{FrameOutput, ResponseConverter, Target, build_generate_request};
 
 pub struct SglangSidecarEngine {
     endpoint: GrpcEndpoint,
     transport: GrpcTransportConfig,
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
-    bootstrap_port: Option<u16>,
+    /// The node's listeners, as the endpoint's listener reported them at
+    /// bootstrap.
+    table: NodeTable,
     native_http_max_event_bytes: usize,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
 }
 
 struct StartedState {
-    pool: Pool,
-    native_http: Option<NativeHttp>,
+    listeners: NodeListeners,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
 }
@@ -160,15 +162,14 @@ impl SglangSidecarEngine {
         } else {
             None
         };
-        let bootstrap_port = if disaggregation_mode.is_prefill() {
-            discovery_bootstrap_port(&discovery)?
-        } else {
-            None
-        };
+        if disaggregation_mode.is_prefill() {
+            discovery_bootstrap_port(&discovery)?;
+        }
         tracing::info!(
             %endpoint,
             mode = ?disaggregation_mode,
             model = %discovery.model_path,
+            listeners = discovery.table.len(),
             "sglang sidecar bootstrapped native gRPC discovery"
         );
 
@@ -209,7 +210,7 @@ impl SglangSidecarEngine {
                 transport,
                 disaggregation_mode,
                 bootstrap_host,
-                bootstrap_port,
+                table: discovery.table,
                 native_http_max_event_bytes,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
@@ -218,7 +219,47 @@ impl SglangSidecarEngine {
         ))
     }
 
-    async fn await_ready(&self, client: &mut Client, deadline: Instant) -> Result<(), DynamoError> {
+    /// Connect to the listener for `dp_rank` and wait until it is healthy,
+    /// then discover it. Errors name the listener.
+    async fn start_listener(
+        &self,
+        endpoint: &GrpcEndpoint,
+        dp_rank: u32,
+        deadline: Instant,
+    ) -> Result<(Pool, EngineInfo), DynamoError> {
+        async {
+            let pool = Pool::connect(endpoint, &self.transport, deadline).await?;
+            let mut control = pool.control_client();
+            self.await_ready(&mut control, deadline, dp_rank, endpoint)
+                .await?;
+            let info = discovery::engine_info(client::discover(&mut control, deadline).await?)?;
+            if info.disaggregation_mode != self.disaggregation_mode {
+                return Err(client::invalid_arg(format!(
+                    "SGLang role changed since bootstrap: registered as {:?}, now reports {:?}",
+                    self.disaggregation_mode, info.disaggregation_mode
+                )));
+            }
+            Ok((pool, info))
+        }
+        .await
+        .map_err(|error: DynamoError| {
+            DynamoError::builder()
+                .error_type(error.error_type())
+                .message(format!(
+                    "SGLang listener for DP rank {dp_rank} at {endpoint}: {}",
+                    error.message()
+                ))
+                .build()
+        })
+    }
+
+    async fn await_ready(
+        &self,
+        client: &mut Client,
+        deadline: Instant,
+        dp_rank: u32,
+        endpoint: &GrpcEndpoint,
+    ) -> Result<(), DynamoError> {
         let started = Instant::now();
         let mut attempt = 0_u64;
         let mut last_logged_at: Option<Instant> = None;
@@ -249,6 +290,8 @@ impl SglangSidecarEngine {
                 // slow startup retries every retry_interval (default 1s) and would
                 // otherwise spam hundreds of lines.
                 tracing::warn!(
+                    dp_rank = dp_rank,
+                    listener = %endpoint,
                     attempt,
                     elapsed = ?started.elapsed(),
                     remaining = ?deadline.saturating_duration_since(now),
@@ -261,6 +304,42 @@ impl SglangSidecarEngine {
             tokio::time::sleep_until((now + self.transport.retry_interval).min(deadline)).await;
         }
     }
+
+    /// Each listener's native HTTP, when every listener's is ready; native
+    /// `/generate` then reaches the request's own listener. Otherwise the
+    /// sidecar serves gRPC only and warns.
+    async fn native_http(
+        &self,
+        started: &[(Pool, EngineInfo)],
+        endpoints: &[GrpcEndpoint],
+        deadline: Instant,
+    ) -> Result<Option<Vec<NativeHttp>>, DynamoError> {
+        let mut native = Vec::with_capacity(started.len());
+        for ((pool, info), endpoint) in started.iter().zip(endpoints) {
+            let Some(http) = NativeHttp::discover(
+                endpoint,
+                info,
+                AbortRpc::new(pool.control_client()),
+                self.transport.connect_attempt_timeout,
+                self.native_http_max_event_bytes,
+            )?
+            else {
+                return Ok(None);
+            };
+            native.push(http);
+        }
+        let ready = native
+            .iter()
+            .map(|http| http.await_ready(deadline, self.transport.retry_interval));
+        if let Err(error) = futures::future::try_join_all(ready).await {
+            tracing::warn!(
+                %error,
+                "SGLang native HTTP generation is unavailable; continuing with gRPC"
+            );
+            return Ok(None);
+        }
+        Ok(Some(native))
+    }
 }
 
 #[async_trait]
@@ -269,62 +348,63 @@ impl LLMEngine for SglangSidecarEngine {
         if self.state.initialized() {
             return Err(client::engine_shutdown("sglang sidecar already started"));
         }
+        let mode = self.disaggregation_mode;
+        let table = &self.table;
 
+        // Every listener, concurrently, under one startup deadline: a node
+        // registers only when all of its ranks can serve.
         let deadline = Instant::now() + self.transport.startup_deadline;
-        let pool = Pool::connect(&self.endpoint, &self.transport, deadline).await?;
-        let mut control = pool.control_client();
-        self.await_ready(&mut control, deadline).await?;
-        let discovery = discovery::engine_info(client::discover(&mut control, deadline).await?)?;
-        let observed_mode = discovery.disaggregation_mode;
-        if observed_mode != self.disaggregation_mode {
-            return Err(client::invalid_arg(format!(
-                "SGLang role changed since bootstrap: registered as {:?}, now reports {:?}",
-                self.disaggregation_mode, observed_mode
-            )));
-        }
+        let endpoints = (0..table.len())
+            .map(|index| node::listener_endpoint(&self.endpoint, table, index))
+            .collect::<Result<Vec<_>, _>>()?;
+        let started = futures::future::try_join_all(
+            table
+                .listeners
+                .iter()
+                .zip(&endpoints)
+                .map(|(entry, endpoint)| self.start_listener(endpoint, entry.dp_rank, deadline)),
+        )
+        .await?;
+        let infos: Vec<_> = started.iter().map(|(_, info)| info).collect();
+        let node = NodeInfo::from_listeners(table, &infos, mode)?;
 
         let mut config = build_engine_config(
-            &discovery,
-            self.disaggregation_mode,
+            &node,
+            mode,
             self.bootstrap_host.clone(),
-            self.bootstrap_port,
+            node.bootstrap_ports[0],
         )?;
         // Before native HTTP readiness, which may spend the rest of the
         // startup deadline: the worker group's DNS lookup needs some of it.
-        let kv_event_sources = discover_kv_event_sources(&discovery, &mut config, deadline).await?;
-        let native_http = match NativeHttp::discover(
-            &self.endpoint,
-            &discovery,
-            AbortRpc::new(control),
-            self.transport.connect_attempt_timeout,
-            self.native_http_max_event_bytes,
-        )? {
-            Some(native_http) => {
-                match native_http
-                    .await_ready(deadline, self.transport.retry_interval)
-                    .await
-                {
-                    Ok(()) => Some(native_http),
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            "SGLang native HTTP generation is unavailable; continuing with gRPC"
-                        );
-                        None
-                    }
-                }
-            }
-            None => None,
-        };
+        let kv_event_sources = discover_kv_event_sources(&node, &mut config, deadline).await?;
+        let native_http = self.native_http(&started, &endpoints, deadline).await?;
         if native_http.is_some() {
             config
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
         }
-        let connection_count = pool.len();
+        let mut native_http = native_http.map(Vec::into_iter);
+        let listeners = started
+            .into_iter()
+            .zip(endpoints)
+            .zip(&node.bootstrap_ports)
+            .map(|(((pool, info), endpoint), bootstrap_port)| {
+                let native_http = native_http.as_mut().and_then(Iterator::next);
+                Listener {
+                    dp_rank: info.dp_rank,
+                    endpoint,
+                    pool,
+                    native_http,
+                    bootstrap_port: *bootstrap_port,
+                }
+            })
+            .collect::<Vec<_>>();
+        let connection_count: usize = listeners.iter().map(|listener| listener.pool.len()).sum();
+        let listeners = NodeListeners::new(node.start_rank, node.global_dp_size, listeners);
+
         let kv_event_source_count = kv_event_sources.len();
-        let combined_token_limit = combined_token_limit(&discovery);
-        if lacks_draft_reserve(&discovery) {
+        let combined_token_limit = combined_token_limit(&node.engine);
+        if lacks_draft_reserve(&node.engine) {
             tracing::warn!(
                 "SGLang runs EAGLE speculative decoding but reports no draft-token reserve \
                  (GetServerInfo.num_reserved_tokens); it predates the api.v1 discovery fields \
@@ -336,15 +416,18 @@ impl LLMEngine for SglangSidecarEngine {
         }
         self.state
             .set(StartedState {
-                pool,
-                native_http,
+                listeners,
                 kv_event_sources,
                 combined_token_limit,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
             model = %config.model,
-            mode = ?self.disaggregation_mode,
+            mode = ?mode,
+            dp_ranks = ?(node.start_rank..node.start_rank + node.size),
+            dp_size = node.global_dp_size,
+            listeners = ?table.listeners,
+            bootstrap_ports = ?node.bootstrap_ports,
             connections = connection_count,
             kv_event_sources = kv_event_source_count,
             "sglang sidecar started"
@@ -361,15 +444,24 @@ impl LLMEngine for SglangSidecarEngine {
             .state
             .get()
             .ok_or_else(|| client::engine_shutdown("generate called before start"))?;
-        validate_dp_rank(&request, self.disaggregation_mode)?;
-        if let Some(native_request) = native_http::request(
-            &request,
-            ctx.id(),
-            self.disaggregation_mode,
-            self.bootstrap_host.as_deref(),
-            self.bootstrap_port,
-        )? {
-            let native_http = state.native_http.clone().ok_or_else(|| {
+        let mode = self.disaggregation_mode;
+        let listeners = &state.listeners;
+        let dispatch = listeners.select(&request, mode)?;
+        let listener = &listeners.listeners[dispatch.index];
+        tracing::debug!(
+            request_id = %ctx.id(),
+            dp_rank = listener.dp_rank,
+            listener = %listener.endpoint,
+            "dispatching to SGLang listener"
+        );
+        let target = Target {
+            bootstrap_host: self.bootstrap_host.as_deref(),
+            bootstrap_port: listener.bootstrap_port,
+            prefill_rank: dispatch.prefill_rank,
+            global_dp_size: listeners.global_dp_size,
+        };
+        if let Some(native_request) = native_http::request(&request, ctx.id(), mode, target)? {
+            let native_http = listener.native_http.clone().ok_or_else(|| {
                 client::invalid_arg(
                     "native SGLang Generate is unavailable because no ready incremental HTTP endpoint was discovered",
                 )
@@ -383,21 +475,15 @@ impl LLMEngine for SglangSidecarEngine {
                 request.stop_conditions.min_tokens,
             );
         }
-        let mut grpc_client = state.pool.stream_client();
+        let mut grpc_client = listener.pool.stream_client();
 
         let prompt_tokens = request.token_ids.len() as u32;
         let return_tokens_as_ids = request
             .output_options
             .return_tokens_as_token_ids
             .unwrap_or(false);
-        let (grpc_request, rendezvous) = build_generate_request(
-            &request,
-            ctx.id(),
-            self.disaggregation_mode,
-            self.bootstrap_host.as_deref(),
-            self.bootstrap_port,
-        )?;
-        let is_prefill = self.disaggregation_mode.is_prefill();
+        let (grpc_request, rendezvous) = build_generate_request(&request, ctx.id(), mode, target)?;
+        let is_prefill = mode.is_prefill();
         let mut prefill_handoff = if is_prefill { rendezvous } else { None };
         let cancel = self.cancel.child_token();
         let mut converter = ResponseConverter::new(
@@ -509,12 +595,14 @@ impl LLMEngine for SglangSidecarEngine {
         }))
     }
 
-    /// The Abort RPC also cancels requests opened through native HTTP.
+    /// The request runs on one listener, so the Abort RPC goes to every
+    /// listener; it also cancels requests opened through native HTTP.
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
         let Some(state) = self.state.get() else {
             return;
         };
-        AbortRpc::new(state.pool.control_client())
+        state
+            .listeners
             .abort(ctx.id(), self.transport.connect_attempt_timeout)
             .await;
     }
@@ -544,7 +632,7 @@ impl LLMEngine for SglangSidecarEngine {
     }
 }
 
-fn discovery_bootstrap_port(discovery: &EngineInfo) -> Result<Option<u16>, DynamoError> {
+pub(crate) fn discovery_bootstrap_port(discovery: &EngineInfo) -> Result<Option<u16>, DynamoError> {
     discovery
         .disaggregation_bootstrap_port
         .map(|port| {
@@ -638,14 +726,15 @@ fn is_routable_host(host: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// The engine's own KV-event publishers. Each must publish at the registered
-/// block size; the worker group is published for multi-node deployments.
+/// The KV-event publishers of every listener of the node. Each must publish
+/// at the registered block size; the worker group is published for
+/// multi-node deployments.
 async fn discover_kv_event_sources(
-    discovery: &EngineInfo,
+    node: &NodeInfo,
     config: &mut EngineConfig,
     deadline: Instant,
 ) -> Result<Vec<DiscoveredKvEventSource>, DynamoError> {
-    let metadata: &NodeMetadata = discovery.kv_events.as_ref().map_err(Clone::clone)?;
+    let metadata = &node.kv_events;
     let llm = config
         .llm
         .as_ref()
@@ -724,12 +813,16 @@ fn omitted_max_tokens_default(
         .filter(|remaining| *remaining >= min_tokens.unwrap_or(0).max(1))
 }
 
+/// The node's one worker registration: the start listener's identity and
+/// limits, the least KV capacity of any listener, and DP ranks
+/// `[start_rank, start_rank + size)`.
 fn build_engine_config(
-    discovery: &EngineInfo,
+    node: &NodeInfo,
     mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
 ) -> Result<EngineConfig, DynamoError> {
+    let discovery = &node.engine;
     let page_size = discovery.page_size;
     let kv_cache_block_size = page_size.map(|size| size.saturating_mul(discovery.dcp_size));
     let max_total_tokens = discovery.max_total_num_tokens;
@@ -786,12 +879,15 @@ fn build_engine_config(
             max_num_seqs,
             max_num_batched_tokens,
             max_gpu_lora_count: None,
-            // Discovery rejects deployments with more than one DP rank.
-            data_parallel_size: Some(1),
-            data_parallel_start_rank: Some(0),
+            data_parallel_size: Some(node.size),
+            data_parallel_start_rank: Some(node.start_rank),
             enable_eagle,
             bootstrap_host: mode.is_prefill().then_some(bootstrap_host).flatten(),
-            bootstrap_port: mode.is_prefill().then_some(bootstrap_port).flatten(),
+            // With several DP ranks, register no port: the frontend then takes
+            // the bootstrap address from the prefill's first response.
+            bootstrap_port: (mode.is_prefill() && node.global_dp_size <= 1)
+                .then_some(bootstrap_port)
+                .flatten(),
         }),
     })
 }
@@ -807,12 +903,41 @@ mod tests {
 
     use super::{
         Args, DisaggregationMode, DiscoveredKvEventSource, EngineConfig, EngineInfo,
-        SglangSidecarEngine, WORKER_GROUP_KEY, build_engine_config, combined_token_limit,
-        discover_kv_event_sources, discovery_bootstrap_port, lacks_draft_reserve,
-        omitted_max_tokens_default, resolve_bootstrap_host_with_local, sglang_eagle_enabled,
+        SglangSidecarEngine, WORKER_GROUP_KEY, combined_token_limit, discovery_bootstrap_port,
+        lacks_draft_reserve, omitted_max_tokens_default, resolve_bootstrap_host_with_local,
+        sglang_eagle_enabled,
     };
     use crate::discovery;
+    use crate::node::node_of;
     use crate::proto as pb;
+
+    /// The registration of one listener's node.
+    fn build_engine_config(
+        info: &EngineInfo,
+        mode: DisaggregationMode,
+        bootstrap_host: Option<String>,
+        bootstrap_port: Option<u16>,
+    ) -> Result<EngineConfig, DynamoError> {
+        super::build_engine_config(
+            &node_of(std::slice::from_ref(info), DisaggregationMode::Aggregated)?,
+            mode,
+            bootstrap_host,
+            bootstrap_port,
+        )
+    }
+
+    async fn discover_kv_event_sources(
+        info: &EngineInfo,
+        config: &mut EngineConfig,
+        deadline: Instant,
+    ) -> Result<Vec<DiscoveredKvEventSource>, DynamoError> {
+        super::discover_kv_event_sources(
+            &node_of(std::slice::from_ref(info), DisaggregationMode::Aggregated)?,
+            config,
+            deadline,
+        )
+        .await
+    }
 
     /// The discovery RPC responses of one engine.
     struct Reported {
@@ -924,7 +1049,7 @@ mod tests {
             assert_eq!(engine.transport.retry_interval.as_secs(), 2);
             assert_eq!(engine.transport.startup_deadline.as_secs(), 11);
             assert!(engine.bootstrap_host.is_none());
-            assert!(engine.bootstrap_port.is_none());
+            assert_eq!(engine.table.len(), 1);
             assert!(!engine.state.initialized());
         }
     }
@@ -996,7 +1121,6 @@ mod tests {
             reported.deployment.nnodes = 2;
         });
         SglangSidecarEngine::from_discovered(args(), info.clone()).unwrap();
-        build_engine_config(&info, DisaggregationMode::Aggregated, None, None).unwrap();
         let port_error = info.http_port.as_ref().unwrap().as_ref().unwrap_err();
         assert!(port_error.to_string().contains("GetServerInfo.port"));
         let kv_error = info.kv_events.as_ref().unwrap_err();
@@ -1005,6 +1129,58 @@ mod tests {
                 .to_string()
                 .contains("multinode deployments require dist_init_addr")
         );
+        // start() reports the KV error when it joins the node's listeners.
+        assert!(node_of(&[info], DisaggregationMode::Aggregated).is_err());
+    }
+
+    /// One worker covers every listener of the node: their contiguous DP
+    /// ranks and the least KV capacity; a prefill with several DP ranks
+    /// registers no bootstrap port.
+    #[test]
+    fn node_registration_covers_every_listener() {
+        let listener = |rank: u32| {
+            discovery(|reported| {
+                let offset = rank - 2;
+                reported.server.port = 30_000 + offset;
+                reported.server.max_total_num_tokens = Some(1024 - u64::from(offset) * 64);
+                reported.server.disaggregation_mode = "prefill".into();
+                reported.deployment.dp_size = 4;
+                reported.deployment.dp_rank = Some(rank);
+                reported.deployment.page_size = Some(64);
+                reported.deployment.enable_dp_attention = true;
+                reported.deployment.max_running_requests = Some(256);
+                reported.deployment.disaggregation_bootstrap_port = Some(30_000 + offset);
+                reported.deployment.node_listeners = (0..2)
+                    .map(|offset| pb::NodeRustListener {
+                        port_offset: offset,
+                        dp_rank: 2 + offset,
+                        http_port: 30_000 + offset,
+                        grpc_port: Some(30_010 + offset),
+                    })
+                    .collect();
+            })
+        };
+        let node = node_of(&[listener(2), listener(3)], DisaggregationMode::Prefill).unwrap();
+        assert_eq!(node.global_dp_size, 4);
+        let config = super::build_engine_config(
+            &node,
+            DisaggregationMode::Prefill,
+            Some("prefill.example".into()),
+            node.bootstrap_ports[0],
+        )
+        .unwrap();
+        let llm = config.llm.unwrap();
+        assert_eq!(
+            (llm.data_parallel_start_rank, llm.data_parallel_size),
+            (Some(2), Some(2))
+        );
+        // ceil(960 / 64): the smaller listener's capacity.
+        assert_eq!(llm.total_kv_blocks, Some(15));
+        // 256 launch-wide over four attention-DP ranks.
+        assert_eq!(llm.max_num_seqs, Some(64));
+        // Several DP ranks: no registered port, so the frontend takes each
+        // prefill's own.
+        assert_eq!(llm.bootstrap_port, None);
     }
 
     #[test]

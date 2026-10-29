@@ -83,6 +83,15 @@ impl Environment {
     }
 
     pub async fn cards(&self) -> Vec<ModelDeploymentCard> {
+        self.worker_cards()
+            .await
+            .into_iter()
+            .map(|(_, card)| card)
+            .collect()
+    }
+
+    /// This namespace's model cards, each with the worker that published it.
+    pub async fn worker_cards(&self) -> Vec<(u64, ModelDeploymentCard)> {
         self.runtime
             .discovery()
             .list(DiscoveryQuery::AllModels)
@@ -90,8 +99,12 @@ impl Environment {
             .unwrap()
             .into_iter()
             .filter_map(|instance| match &instance {
-                DiscoveryInstance::Model { namespace, .. } if namespace == &self.namespace => {
-                    Some(instance.deserialize_model().unwrap())
+                DiscoveryInstance::Model {
+                    namespace,
+                    instance_id,
+                    ..
+                } if namespace == &self.namespace => {
+                    Some((*instance_id, instance.deserialize_model().unwrap()))
                 }
                 _ => None,
             })
@@ -290,8 +303,11 @@ impl Process {
             DisaggregationMode::Decode => "decode",
             DisaggregationMode::Encode => "encode",
         };
-        let stdout = env.root.path().join(format!("{role}.stdout"));
-        let stderr = env.root.path().join(format!("{role}.stderr"));
+        // Several children can share a role, so number their logs.
+        static SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let index = SPAWNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stdout = env.root.path().join(format!("{role}-{index}.stdout"));
+        let stderr = env.root.path().join(format!("{role}-{index}.stderr"));
         let mut command = F::command(&env.model);
         for (key, _) in std::env::vars_os() {
             let key_text = key.to_string_lossy();
