@@ -44,6 +44,8 @@ _gpu_parallel_gpus_key: pytest.StashKey[list[dict]] = pytest.StashKey()
 _gpu_indices_key: pytest.StashKey[list[int] | None] = pytest.StashKey()
 _gpu_slots_key: pytest.StashKey[int | None] = pytest.StashKey()
 _collection_env_snapshot_key: pytest.StashKey[dict[str, str]] = pytest.StashKey()
+# Executions per test output directory in this session; see the logger fixture.
+_output_attempts_key: pytest.StashKey[dict[str, int]] = pytest.StashKey()
 # Controller-side accumulator for collection-env changes reported by xdist workers.
 _collection_env_changes_key: pytest.StashKey[dict] = pytest.StashKey()
 
@@ -624,7 +626,8 @@ def logger(request):
     log_dir = resolve_test_output_path(request.node.name)
     log_path = os.path.join(log_dir, "test.log.txt")
     logger = logging.getLogger()
-    prepare_test_output_dir(log_dir, request.node.nodeid)
+    attempts = request.session.stash.setdefault(_output_attempts_key, {})
+    prepare_test_output_dir(log_dir, attempts)
     handler = logging.FileHandler(log_path, mode="w")
     formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
     handler.setFormatter(formatter)

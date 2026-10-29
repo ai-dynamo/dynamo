@@ -63,21 +63,21 @@ def resolve_test_output_path(path: Union[str, Path]) -> str:
     return os.path.join(log_root, path_str)
 
 
-# Executions seen per test in this process. Retries (Datadog, pytest-rerunfailures)
-# run again in the same process, including under xdist.
-_output_dir_attempts: dict[str, int] = {}
-
-
-def prepare_test_output_dir(log_dir: str, test_id: str) -> None:
+def prepare_test_output_dir(log_dir: str, attempts: dict[str, int]) -> None:
     """Create an empty output directory for one execution of a test.
 
-    The first execution of ``test_id`` in this process removes stale output
-    left by earlier sessions. A repeat execution moves the previous attempt's
-    output to ``<log_dir>.attempt<N>`` instead of deleting it, so a failed
-    attempt's logs survive a passing retry and are uploaded with it.
+    ``attempts`` counts executions per output directory for one pytest session;
+    retries (Datadog, pytest-rerunfailures) run again in the same session. It is
+    keyed by ``log_dir`` because tests with the same name in different files
+    share that directory.
+
+    The first execution in the session removes stale output left by earlier
+    sessions. A repeat execution moves the previous attempt's output to
+    ``<log_dir>.attempt<N>`` instead of deleting it, so a failed attempt's logs
+    survive a passing retry and are uploaded with it.
     """
-    attempt = _output_dir_attempts.get(test_id, 0) + 1
-    _output_dir_attempts[test_id] = attempt
+    attempt = attempts.get(log_dir, 0) + 1
+    attempts[log_dir] = attempt
     if attempt == 1:
         shutil.rmtree(log_dir, ignore_errors=True)
         for stale in glob.glob(f"{glob.escape(log_dir)}.attempt*"):

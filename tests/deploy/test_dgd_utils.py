@@ -353,9 +353,9 @@ async def test_discovery_capture_and_cleanup(
 class _FakeHttpResponse:
     """The parts of an aiohttp response that kubernetes_asyncio reads."""
 
-    def __init__(self, payload):
-        self.status = 200
-        self.reason = "OK"
+    def __init__(self, payload, status=200, reason="OK"):
+        self.status = status
+        self.reason = reason
         self.headers = {"Content-Type": "application/json"}
         self._body = json.dumps(payload).encode()
         self.released = False
@@ -363,11 +363,8 @@ class _FakeHttpResponse:
     async def read(self):
         return self._body
 
-    async def json(self):
-        return json.loads(self._body)
-
-    def raise_for_status(self):
-        pass
+    async def text(self):
+        return self._body.decode()
 
     def release(self):
         self.released = True
@@ -380,7 +377,7 @@ class _FakeHttpSession:
 
     async def request(self, method, url, **kwargs):
         resource = url.rsplit("/", 1)[-1].split("?", 1)[0]
-        response = _FakeHttpResponse(self.payloads[resource])
+        response = _FakeHttpResponse(*self.payloads[resource])
         self.responses.append(response)
         return response
 
@@ -388,35 +385,11 @@ class _FakeHttpSession:
         pass
 
 
-async def test_discovery_capture_records_endpointslice_without_endpoints(
-    tmp_path,
-):
+async def _capture_discovery(tmp_path, payloads):
     deployment = managed_deployment(tmp_path)
     api_client = client.ApiClient(client.Configuration(host="http://kubernetes.test"))
     await api_client.rest_client.pool_manager.close()
-    empty = {"apiVersion": "v1", "metadata": {}, "items": []}
-    endpoint_slice = {
-        "metadata": {
-            "name": "frontend-abc12",
-            "labels": {"kubernetes.io/service-name": "frontend"},
-        },
-        "addressType": "IPv4",
-        "endpoints": None,
-    }
-    session = _FakeHttpSession(
-        {
-            "dynamographdeployments": empty,
-            "dynamoworkermetadatas": empty,
-            "pods": empty,
-            "services": empty,
-            "endpointslices": {
-                "apiVersion": "discovery.k8s.io/v1",
-                "kind": "EndpointSliceList",
-                "metadata": {},
-                "items": [endpoint_slice],
-            },
-        }
-    )
+    session = _FakeHttpSession(payloads)
     api_client.rest_client.pool_manager = session
     deployment._custom_api = client.CustomObjectsApi(api_client)
     deployment._core_api = client.CoreV1Api(api_client)
@@ -426,8 +399,67 @@ async def test_discovery_capture_records_endpointslice_without_endpoints(
     finally:
         await api_client.close()
 
+    assert len(session.responses) == 5
+    assert all(response.released for response in session.responses)
+
+
+_EMPTY_LIST = ({"apiVersion": "v1", "metadata": {}, "items": []},)
+
+
+async def test_discovery_capture_records_endpointslice_without_endpoints(
+    tmp_path,
+):
+    endpoint_slice = {
+        "metadata": {
+            "name": "frontend-abc12",
+            "labels": {"kubernetes.io/service-name": "frontend"},
+        },
+        "addressType": "IPv4",
+        "endpoints": None,
+    }
+    await _capture_discovery(
+        tmp_path,
+        {
+            "dynamographdeployments": _EMPTY_LIST,
+            "dynamoworkermetadatas": _EMPTY_LIST,
+            "pods": _EMPTY_LIST,
+            "services": _EMPTY_LIST,
+            "endpointslices": (
+                {
+                    "apiVersion": "discovery.k8s.io/v1",
+                    "kind": "EndpointSliceList",
+                    "metadata": {},
+                    "items": [endpoint_slice],
+                },
+            ),
+        },
+    )
+
     record = json.loads((tmp_path / "discovery" / "endpointslices.json").read_text())
     assert "error" not in record, record
     assert record["response"]["items"] == [endpoint_slice]
-    assert len(session.responses) == 5
-    assert all(response.released for response in session.responses)
+
+
+async def test_discovery_capture_records_api_error_body(tmp_path):
+    forbidden = {
+        "kind": "Status",
+        "status": "Failure",
+        "message": "pods is forbidden: cannot list resource pods",
+        "code": 403,
+    }
+
+    await _capture_discovery(
+        tmp_path,
+        {
+            "dynamographdeployments": _EMPTY_LIST,
+            "dynamoworkermetadatas": _EMPTY_LIST,
+            "pods": (forbidden, 403, "Forbidden"),
+            "services": _EMPTY_LIST,
+            "endpointslices": _EMPTY_LIST,
+        },
+    )
+
+    record = json.loads((tmp_path / "discovery" / "pods.json").read_text())
+    assert "response" not in record, record
+    assert "403" in record["error"]
+    assert forbidden["message"] in record["error"]

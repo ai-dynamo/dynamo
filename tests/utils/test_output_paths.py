@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.utils import output_paths
 from tests.utils.output_paths import prepare_test_output_dir, resolve_test_output_path
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
@@ -49,32 +48,43 @@ def test_absolute_output_paths_are_unchanged(
     assert resolve_test_output_path(path) == str(absolute)
 
 
-def test_repeat_execution_keeps_previous_attempt_output(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(output_paths, "_output_dir_attempts", {})
+def test_repeat_execution_keeps_previous_attempt_output(tmp_path: Path) -> None:
+    attempts: dict[str, int] = {}
     log_dir = tmp_path / "test_deployment[sglang-agg_embed-normal]"
-    test_id = "tests/deploy/test_dgd.py::test_deployment[sglang-agg_embed-normal]"
     log_dir.mkdir()
     (log_dir / "stale.txt").write_text("earlier session")
     stale_attempt = tmp_path / f"{log_dir.name}.attempt1"
     stale_attempt.mkdir()
 
-    prepare_test_output_dir(str(log_dir), test_id)
+    prepare_test_output_dir(str(log_dir), attempts)
 
     assert list(log_dir.iterdir()) == []
     assert not stale_attempt.exists()
 
     (log_dir / "test.log.txt").write_text("first attempt")
-    prepare_test_output_dir(str(log_dir), test_id)
+    prepare_test_output_dir(str(log_dir), attempts)
 
     assert list(log_dir.iterdir()) == []
     assert (stale_attempt / "test.log.txt").read_text() == "first attempt"
 
     (log_dir / "test.log.txt").write_text("second attempt")
-    prepare_test_output_dir(str(log_dir), test_id)
+    prepare_test_output_dir(str(log_dir), attempts)
 
     assert (stale_attempt / "test.log.txt").read_text() == "first attempt"
     second_attempt = tmp_path / f"{log_dir.name}.attempt2"
     assert (second_attempt / "test.log.txt").read_text() == "second attempt"
+    assert list(log_dir.iterdir()) == []
+
+
+def test_same_output_dir_shares_attempt_count(tmp_path: Path) -> None:
+    # Same-named tests in different files resolve to one output directory.
+    attempts: dict[str, int] = {}
+    log_dir = tmp_path / "test_deployment"
+
+    prepare_test_output_dir(str(log_dir), attempts)
+    (log_dir / "test.log.txt").write_text("tests/a/test_x.py")
+    prepare_test_output_dir(str(log_dir), attempts)
+
+    archived = tmp_path / f"{log_dir.name}.attempt1"
+    assert (archived / "test.log.txt").read_text() == "tests/a/test_x.py"
     assert list(log_dir.iterdir()) == []

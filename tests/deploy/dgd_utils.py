@@ -1072,6 +1072,8 @@ class ManagedDeployment:
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self._deployment_name,
+                    # A stalled request must not outlive the readiness deadline.
+                    _request_timeout=max(1.0, timeout - (time.time() - start_time)),
                 )
                 if self.fail_fast_startup and desired_ready_condition_val:
                     details = await self._get_pod_status_details()
@@ -1956,10 +1958,14 @@ class ManagedDeployment:
                         _preload_content=False,
                     )
                     try:
-                        response.raise_for_status()
-                        record["response"] = await response.json()
+                        body = await response.text()
                     finally:
                         response.release()
+                if not 200 <= response.status <= 299:
+                    raise exceptions.ApiException(
+                        status=response.status, reason=f"{response.reason}: {body}"
+                    )
+                record["response"] = json.loads(body)
             except Exception as error:
                 record["error"] = f"{type(error).__name__}: {error}"
                 self._logger.warning(
