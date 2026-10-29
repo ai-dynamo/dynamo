@@ -12,6 +12,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+dynamo-global-common = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

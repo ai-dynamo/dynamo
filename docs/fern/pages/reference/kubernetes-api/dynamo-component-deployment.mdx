@@ -105,7 +105,11 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </Indent>
 
 <ParamField path="runtimeVersionOverride" type="string">
-  Declares the Dynamo runtime version in `spec.podTemplate.spec.containers[name=main].image` by default, or `spec.podTemplate.spec.initContainers[name=runtime].image` when the dynamo sidecar is present, taking precedence over the image tag. Use canonical `MAJOR.MINOR.PATCH`, for example `"1.4.0"`, with each part between `0` and `9999` and no leading zeros, `v` prefix, prerelease suffix, or build metadata. This field does not change the image. See [Runtime Version Compatibility](#runtime-version-compatibility) for admission requirements and rollout behavior.
+  Overrides the Dynamo runtime compatibility version inferred from `spec.podTemplate.spec.containers[name=main].image`. In sidecar mode, it instead overrides the version inferred from `spec.podTemplate.spec.initContainers[name=runtime].image`. The same rules apply to `spec.roles[].podTemplate`.
+
+  For non-LPX components in sidecar mode, main container images are not used to infer Dynamo versions, including for roles without a runtime init container. The override must match the Dynamo version in every affected runtime container. It does not change container images.
+
+  The value uses canonical `MAJOR.MINOR.PATCH` format, for example `"1.4.0"`, with each part between `0` and `9999` and no leading zeros, `v` prefix, prerelease suffix, or build metadata. See [Runtime Version Compatibility](#runtime-version-compatibility) for admission requirements and rollout behavior.
 </ParamField>
 
 <ParamField path="replicas" type="integer">
@@ -125,7 +129,11 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
-  Complete Pod template shared by all roles of the component. It is mutually exclusive with `roles[*].podTemplate`. Every component must include `spec.podTemplate.spec.containers[name=main]` with a non-empty `image`. By default the operator injects command, environment, port, probe, resource, and volume-mount defaults into `spec.podTemplate.spec.containers[name=main]`, merging your overrides by name. Declaring `spec.podTemplate.spec.initContainers[name=runtime]` activates [Dynamo Sidecar Mode](#dynamo-sidecar-mode). Existing standard-mode components created without `spec.podTemplate.spec.containers[name=main].image` may retain that omission on unrelated updates. For DGD components whose runtime image has no parseable semantic-version tag, set `runtimeVersionOverride`. Other containers are user-managed and must specify their required fields, including `image`; `frontendSidecar` can explicitly select a regular container for frontend defaults. Replaces the ten separate per-component fields (`resources`, `envs`, `livenessProbe`, and so on) that existed in `v1alpha1`.
+  Complete Pod template shared by all roles of the component. It is mutually exclusive with `roles[].podTemplate`. New components using this template must include `spec.podTemplate.spec.containers[name=main]` with a non-empty `image`. Existing components without a `podTemplate` may retain that omission on update. Existing standard-mode components without a main container image may retain that omission on unrelated updates.
+
+  By default, the operator merges Dynamo command, environment, port, probe, resource, and volume-mount defaults into `spec.podTemplate.spec.containers[name=main]`. Declaring `spec.podTemplate.spec.initContainers[name=runtime]` enables [Dynamo Sidecar Mode](#dynamo-sidecar-mode). The main container runs the inference engine, and the runtime init container receives Dynamo environment, identity, system port, and probe defaults. The operator does not create the runtime init container. Its declaration must include a non-empty `image` and `restartPolicy: Always`.
+
+  Other containers require their own configuration, including an `image`. The `frontendSidecar` field can select a regular container to receive frontend defaults. See [Runtime Version Compatibility](#runtime-version-compatibility) for runtime image version requirements. This field replaces the separate per-component fields (`resources`, `envs`, `livenessProbe`, and others) from `v1alpha1`.
 
   For `type: frontend`, a non-empty `main.command` replaces the default frontend invocation. Only the supplied `main.args` are passed to that command; omitted or empty `args` produce no arguments. The same rule applies to the container selected by `frontendSidecar`. Other component types retain their generated arguments when an authored command omits `args` or sets `args: []`, including legacy Go EPP components with `eppConfig`.
 
@@ -166,9 +174,11 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Complete Pod template for this role. It must include a container named `main` with a non-empty `image`. Role templates do not inherit from each other or from the component-level template.
 
-    An init container named `runtime` is rejected in multinode role templates because Dynamo sidecar mode does not yet support multinode components. LPX components may declare it only in the role template whose Pods host the engine: `conductor` for a hybrid build, or `agent` for an LPU-only single-model build with no conductor role; a speculative target's conductor takes none. Admission rejects it on other roles. Reconciliation rejects a build that does not match, and the DGD reports `status.state: failed`.
+    In multinode sidecar mode, the leader must declare `spec.initContainers[name=runtime]`. The worker may omit it when its engine ranks do not publish KV events or serve requests. Each declared runtime init container receives Dynamo defaults. Main container images are not used to infer Dynamo versions, including for workers without a runtime init container. Multinode sidecars currently require `backendFramework: sglang` or `backendFramework: vllm`. Multinode support for TensorRT-LLM is planned.
 
-    For multinode components, supplying complete role templates transfers ownership of backend-specific leader and worker commands and topology arguments to the user; Dynamo skips its vLLM, SGLang, and TensorRT-LLM role-dependent launch rewrites. Common Pod and workload wiring remains operator-owned. For vLLM multiprocessing, Dynamo still injects the shared coordination port `29500`. Multinode role templates cannot currently be combined with GMS or failover. The component remains the lifecycle, rollout, scaling, service, and status boundary.
+    LPX components may declare it only in the role template whose Pods host the engine: `conductor` for a hybrid build, or `agent` for an LPU-only single-model build with no conductor role; a speculative target's conductor takes none. Admission rejects it on other roles. Reconciliation rejects a build that does not match, and the DGD reports `status.state: failed`.
+
+    For multinode components, supplying complete role templates transfers ownership of backend-specific leader and worker commands and topology arguments to the user; Dynamo skips its vLLM, SGLang, and TensorRT-LLM role-dependent launch rewrites. Common Pod and workload wiring remains operator-owned. When the engine and Dynamo run together in `main`, Dynamo still injects the shared vLLM multiprocessing coordination port `29500`. In sidecar mode the role templates own every launch flag, including `--master-port`. Multinode role templates cannot currently be combined with GMS or failover. The component remains the lifecycle, rollout, scaling, service, and status boundary.
 
     For LPX components, every declared role requires its own template. Agent and conductor templates are independent.
 
@@ -284,7 +294,9 @@ The operator leaves native sidecar `servedModelName` and `runtimeComponentName` 
 Upgrading the operator can roll existing sidecar workers whose backend was previously undetected. Review the [platform upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#native-sidecar-backend-inference) before upgrading.
 </Warning>
 
-This mode supports `worker`, `prefill`, and `decode` components. Multinode, enabled checkpoint, GPU memory service, and failover are rejected because they are not currently supported in this mode. Support for these features is planned for a future release. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`. LPX components may declare it in a role template instead, as described under `roles[].podTemplate`.
+This mode supports `worker`, `prefill`, and `decode` components. Multinode sidecars currently support SGLang and vLLM. Multinode support for TensorRT-LLM is planned. Checkpoint, GPU memory service, and failover cannot be enabled in sidecar mode. Other component types cannot declare `spec.podTemplate.spec.initContainers[name=runtime]`.
+
+LPX components may declare it in a role template instead, as described under `roles[].podTemplate`.
 
 The same convention applies to `v1alpha1` through `spec.extraPodSpec.initContainers[name=runtime]`. Conversion preserves the live init-container list. Adding, renaming, or removing `spec.podTemplate.spec.initContainers[name=runtime]` changes the mode and can trigger a worker rollout. Reserve this name for the Dynamo runtime; rename unrelated init containers before upgrading the operator.
 
@@ -300,11 +312,17 @@ podTemplate:
         restartPolicy: Always
 ```
 
-Set the engine launch configuration and sidecar command for your backend. See the [vLLM sidecar manifests](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy) for complete examples.
+SGLang and vLLM multinode sidecar deployments require an explicit `backendFramework` of `sglang` or `vllm` and complete `leader` and `worker` `roles[].podTemplate` definitions instead of a shared `podTemplate`. The leader must declare a runtime init container. The worker may omit it when its engine ranks do not publish KV events or serve requests. Each role's template supplies the engine command and topology arguments. The operator does not inject executor or coordination flags in sidecar mode.
+
+For DGDs created with operator version 1.6.0 or later, `main` and each declared `runtime` receive `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`. The operator preserves the authored engine configuration in `main` and merges Dynamo defaults into each declared runtime init container. In sidecar mode, main container images are not used to infer Dynamo versions, including for workers without a runtime init container. Deployments that run the engine and Dynamo together in `main` retain shared-template support and generated multinode arguments.
+
+Shared memory, compilation cache, provider startup ordering, and group management retain their existing behavior. See the [SGLang sidecar guide](../../developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md) and the [vLLM sidecar guide](../../developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md) for topology requirements and examples.
+
+Set the engine launch configuration and sidecar command for your backend. See the [vLLM sidecar manifests](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm/deploy) for complete examples, including `multinode_tp.yaml` and `multinode_dp.yaml`.
 
 ## Runtime Version Compatibility
 
-DGD admission requires `runtimeVersionOverride` for non-LPX components when the runtime image has no parseable semantic-version tag. The runtime image is `spec.components[*].podTemplate.spec.initContainers[name=runtime].image` in Dynamo sidecar mode, or `spec.components[*].podTemplate.spec.containers[name=main].image` otherwise. Also set it when a parseable tag does not represent the Dynamo runtime version in the image. The override must describe the Dynamo runtime actually contained in the image.
+DGD admission requires `runtimeVersionOverride` for non-LPX components when any runtime image tag lacks a parseable semantic version. Controller-generated DCDs may omit it. An override is also needed when the parsed tag differs from the Dynamo runtime version. The `runtimeVersionOverride` image selection rules apply to both the shared `podTemplate` and `roles[].podTemplate`. The override must match the Dynamo version in every affected runtime container.
 
 When updating an image to a different Dynamo runtime version, update any configured `runtimeVersionOverride` in the same change, or remove it if the new image tag correctly identifies the runtime version. The operator uses the resolved runtime version to select feature gates that control how it renders the component's PodSpec, including flags, environment variables, and probes. For Dynamo 1.5.0 and later, changing the override alone may change the rendered PodSpec or worker revision and trigger a rollout, even when the image reference is unchanged. Keep the override aligned with the Dynamo runtime actually contained in the image.
 
