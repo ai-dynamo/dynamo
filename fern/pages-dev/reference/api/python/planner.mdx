@@ -1424,7 +1424,7 @@ Builtin orchestrator plugins use this class directly as their private
 shared core while the remaining cross-plugin state is being split into
 explicit pipeline artifacts.
 
-[`components/src/dynamo/planner/core/state_machine.py#L51`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L51)
+[`components/src/dynamo/planner/core/state_machine.py#L74`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L74)
 
 **Public methods**
 
@@ -1436,7 +1436,7 @@ __init__(config: PlannerConfig, capabilities: Optional[WorkerCapabilities] = Non
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L64)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L87)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-update-capabilities">update_capabilities</h4>
 
@@ -1446,7 +1446,7 @@ update_capabilities(capabilities: WorkerCapabilities) -> None
 
 Replace the current worker capabilities.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L141)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L164)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-load-benchmark-fpms">load_benchmark_fpms</h4>
 
@@ -1456,7 +1456,7 @@ load_benchmark_fpms(prefill_fpms: Optional[list[ForwardPassMetrics]] = None, dec
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L162)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L187)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-begin-tick">begin_tick</h4>
 
@@ -1466,7 +1466,7 @@ begin_tick() -> None
 
 Reset per-tick diagnostics before builtin plugins run.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L183)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L208)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-observe-worker-counts">observe_worker_counts</h4>
 
@@ -1476,7 +1476,7 @@ observe_worker_counts(counts: WorkerCounts) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L187)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L212)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-observe-fpm">observe_fpm</h4>
 
@@ -1486,7 +1486,7 @@ observe_fpm(obs: FpmObservations) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L190)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L215)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-observe-runtime-metadata">observe_runtime_metadata</h4>
 
@@ -1496,7 +1496,7 @@ observe_runtime_metadata(*, kv_hit_rate: Optional[float] = None, accept_length: 
 
 Update last-value runtime metadata without touching prediction history.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L195)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L220)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-install-regressions">install_regressions</h4>
 
@@ -1506,7 +1506,7 @@ install_regressions(*, prefill: Optional[PlannerEnginePerfModel] = None, decode:
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L206)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L231)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-advance-load">advance_load</h4>
 
@@ -1516,7 +1516,7 @@ advance_load(obs: FpmObservations, *, predicted_kv_hit_rate: Optional[float] = N
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L220)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L245)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-advance-throughput-from-prediction">advance_throughput_from_prediction</h4>
 
@@ -1530,7 +1530,7 @@ The PREDICT plugin owns load prediction history. This method consumes
 only explicit prediction output so PROPOSE never re-runs prediction or
 depends on hidden predictor state.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L318)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L343)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-diagnostics">diagnostics</h4>
 
@@ -1540,7 +1540,7 @@ diagnostics() -> TickDiagnostics
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L373)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L398)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-core-types-pooltrafficdemand" title="PoolTrafficDemand (class)">
