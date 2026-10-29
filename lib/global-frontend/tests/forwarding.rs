@@ -21,6 +21,7 @@ use dynamo_llm::http::service::service_v2::HttpService;
 use futures::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -445,6 +446,78 @@ async fn unreachable_pools_are_unavailable() {
         sample(metrics, requests, &no_response) == Some(1.0)
     })
     .await;
+}
+
+#[tokio::test]
+async fn a_request_goes_to_another_pool_when_its_pool_cannot_be_reached() {
+    let (_socket, closed) = closed();
+    let green = echo_pool_frontend().await;
+    let blue = pool("blue", MODEL, &closed);
+    let green = pool("green", MODEL, &green.url);
+    let (blue_id, green_id) = (blue.id.clone(), green.id.clone());
+    let in_flight = Arc::new(InFlightTracker::new());
+    let selector = Arc::new(RoundRobinSelector::new());
+    let global = global_frontend_with(vec![blue, green], selector, in_flight.clone()).await;
+
+    // Round robin starts every request at the closed pool.
+    for _ in 0..2 {
+        let response = post(
+            &global.server.url,
+            "v1/chat/completions",
+            &chat(MODEL, "hello", false),
+        )
+        .await;
+        let body = ok_json(response).await;
+        assert_eq!(body["choices"][0]["message"]["content"], "hello", "{body}");
+    }
+    assert_eq!((in_flight.get(&blue_id), in_flight.get(&green_id)), (0, 0));
+
+    // Each send counts at its own pool.
+    let requests = "dynamo_global_frontend_requests_total";
+    let green = [("pool", "ohio/dynamo/green"), ("status", "200")];
+    let metrics = metrics_when(&global.server.url, |metrics| {
+        sample(metrics, requests, &green) == Some(2.0)
+    })
+    .await;
+    let blue = [("pool", "ohio/dynamo/blue"), ("status", "no_response")];
+    assert_eq!(sample(&metrics, requests, &blue), Some(2.0), "{metrics}");
+}
+
+/// A pool frontend that reads each request until its JSON body ends, then
+/// closes the connection without answering.
+async fn swallowing_pool_frontend() -> Url {
+    let (listener, url) = bind().await;
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut received = Vec::new();
+            let mut buffer = [0; 4096];
+            while !received.ends_with(b"}") {
+                match stream.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => received.extend_from_slice(&buffer[..read]),
+                }
+            }
+        }
+    });
+    url
+}
+
+#[tokio::test]
+async fn a_request_the_pool_may_have_is_not_sent_again() {
+    let blue = pool("blue", MODEL, &swallowing_pool_frontend().await);
+    let (green, seen) = scripted_pool_frontend("data: [DONE]\n\n").await;
+    let green = pool("green", MODEL, &green.url);
+    let global = global_frontend(vec![blue, green]).await;
+
+    // The pool may be running it, so it fails rather than run twice.
+    let response = post(
+        &global.server.url,
+        "v1/chat/completions",
+        &chat(MODEL, "hi", true),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(seen.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

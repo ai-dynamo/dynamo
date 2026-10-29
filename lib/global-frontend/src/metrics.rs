@@ -59,7 +59,7 @@ impl Metrics {
             IntCounterVec::new(
                 Opts::new(
                     name("requests_total"),
-                    "Requests forwarded to each pool, by the pool's response status, \
+                    "Requests sent to each pool, by the pool's response status, \
                      no_response, or cancelled if the client left first",
                 ),
                 &["pool", "region", "local", "status"],
