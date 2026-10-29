@@ -90,6 +90,9 @@ def get_local_model_weight_size(
 HUB_WEIGHT_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth")
 # Sharded checkpoints are named like "model-00001-of-00004.safetensors".
 SHARD_SUFFIX_PATTERN = re.compile(r"-\d+-of-\d+$")
+# transformers' default checkpoint names; training state such as
+# optimizer.bin can sit next to them and be larger.
+DEFAULT_CHECKPOINT_STEMS = ("model", "pytorch_model")
 
 
 def _select_hub_checkpoint_files(siblings: list) -> list:
@@ -99,7 +102,8 @@ def _select_hub_checkpoint_files(siblings: list) -> list:
     as a second file set (Mistral's consolidated weights), or under folders
     such as ``original/`` (Llama, gpt-oss). Only repo-root files other than
     PEFT adapters are considered, the first format present wins, and within it
-    the largest checkpoint (one file or one shard set) is used.
+    the checkpoint (one file or one shard set) with a transformers default name
+    is used, or the largest one when there is none.
     """
     root_files = [
         sibling
@@ -114,6 +118,9 @@ def _select_hub_checkpoint_files(siblings: list) -> list:
                 stem = SHARD_SUFFIX_PATTERN.sub("", sibling.rfilename[: -len(ext)])
                 checkpoints.setdefault(stem, []).append(sibling)
         if checkpoints:
+            for stem in DEFAULT_CHECKPOINT_STEMS:
+                if stem in checkpoints:
+                    return checkpoints[stem]
             return max(
                 checkpoints.values(),
                 key=lambda files: sum(sibling.size or 0 for sibling in files),

@@ -242,6 +242,15 @@ def test_model_weight_size_from_hub_uses_checkpoint_file_sizes(monkeypatch) -> N
             ],
             10,
         ),
+        # An Accelerate checkpoint: optimizer state is larger than the model.
+        (
+            [
+                ("optimizer.bin", 4 * MIB),
+                ("pytorch_model.bin", 2 * MIB),
+                ("scheduler.bin", 1),
+            ],
+            2,
+        ),
         # A PEFT adapter next to full PyTorch shards.
         (
             [
