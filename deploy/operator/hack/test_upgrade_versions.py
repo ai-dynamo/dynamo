@@ -265,6 +265,22 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
             )
 
         oldest = self.tree / "history/1.4.0/sglang-1.4/input.yaml"
+        # Model a legacy missing-origin input at the mocked capture boundary;
+        # the clustertest separately replays the production-captured legacy graph.
+        objects = list(yaml.safe_load_all(oldest.read_text()))
+        for obj in objects:
+            if obj["kind"] == "DynamoGraphDeployment":
+                del obj["metadata"]["annotations"][
+                    "nvidia.com/dynamo-operator-origin-version"
+                ]
+        oldest.write_text(yaml.safe_dump_all(objects))
+        for name in ("bootstrap.json", "history.lock.json"):
+            path = self.tree / name
+            provenance = json.loads(path.read_text())
+            provenance["inputs"][
+                oldest.relative_to(self.tree).as_posix()
+            ] = fixtures.digest(oldest)
+            path.write_text(json.dumps(provenance))
         original = next(
             obj
             for obj in yaml.safe_load_all(oldest.read_text())
@@ -314,6 +330,10 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                         f"reconciled by {version}",
                     )
                     self.assertEqual(after["spec"], original["spec"])
+                    self.assertNotIn(
+                        "nvidia.com/dynamo-operator-origin-version",
+                        after["metadata"]["annotations"],
+                    )
                     self.assertEqual(
                         after["metadata"]["annotations"],
                         original["metadata"]["annotations"],

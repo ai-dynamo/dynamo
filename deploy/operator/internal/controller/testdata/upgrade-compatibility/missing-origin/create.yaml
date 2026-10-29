@@ -1,0 +1,43 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: workers
+  namespace: upgrade-compatibility-missing-origin
+  annotations:
+    nvidia.com/enable-grove: 'true'
+spec:
+  backendFramework: sglang
+  components:
+  - name: frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.0
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+    minAvailable: 1
+  - name: worker
+    type: worker
+    replicas: 2
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+    minAvailable: 1

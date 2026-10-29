@@ -1,0 +1,35 @@
+{
+  "captureSources": {
+    "hack/capture_missing_origin.py": "2b0a94224b4a31d4f34f2f9cf5d879ec9323e74017e13e552fd4884cfe087569",
+    "hack/upgrade_capture_test.go.tmpl": "6d2e0b9bcb266ad0b72d719434f06b3686d230423486491493fb52c78e242206",
+    "internal/testing/golden/capture.go": "73425c5e21c3f3da45cb79549f0e1d23ef43eee21a85981c0b4f3703b5d845cd"
+  },
+  "creation": "1.4.0 CREATE before mutating admission is enabled",
+  "harness": {
+    "1.4.0": "14feff4cde9d86596feaf159b735c84762526c6362460821f69e4ed76ac890de",
+    "1.5.0": "ae270b7978a5eadfe7d6aa623de4b53af3ac6c7e7e087222aedd78dfcc1ecd6e",
+    "1.6.0": "c545971a751d5803a5129454831836887d67ad862669308322272d54fecca0b9"
+  },
+  "inputSHA256": "1f493b3711f8389dcdbf7ce5bf82978d87077e409a9def926601336aad13d7ea",
+  "observations": {
+    "1.4.0": {
+      "sha256": "a312699b7e95ed4f02ab3901c61aa2650c3c34f5b2f24d1d084814dec05c5585",
+      "workerHash": "7df86e24"
+    },
+    "1.5.0": {
+      "sha256": "17b18ef839368342419d449bc81684ee4305ba541a41a82b5288d78aa548bff1",
+      "workerHash": "7df86e24"
+    },
+    "1.6.0": {
+      "sha256": "13489e53e9669fd929a17262ebc563149f1b401415e91fd07aa39b1470eab247",
+      "workerHash": "7df86e24"
+    }
+  },
+  "reconcileBarrierSHA256": "5a2ce05158262546c9950a9a35cdf64b19131dfc7187f29c52c59361efbb6183",
+  "releases": {
+    "1.4.0": "03014943323e78feb5bd672ef08b72caea0918ac",
+    "1.5.0": "b83b1d9304ebfc624709ac46db32b1b6f1ff1615",
+    "1.6.0": "701da25292ecca8f64d770cc0b17d389200019a1"
+  },
+  "scope": "installation-level missing origin; not pre-0.7.1 ancestry"
+}
