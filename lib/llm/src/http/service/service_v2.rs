@@ -2659,8 +2659,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_admin_routes_only_on_admin_listener() {
-        // Off by default.
+        // Off by default, and bound to loopback when enabled.
         assert!(HttpService::builder().build().unwrap().admin.is_none());
+        let enabled = HttpService::builder()
+            .enable_admin_api(true)
+            .build()
+            .unwrap();
+        assert!(enabled.admin.unwrap().addr.ip().is_loopback());
 
         let admin_port = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -2708,12 +2713,13 @@ mod tests {
             .admin_port(taken_port)
             .build()
             .unwrap();
-        assert!(
-            service
-                .run_with_listener(CancellationToken::new(), listener)
-                .await
-                .is_err()
-        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            service.run_with_listener(CancellationToken::new(), listener),
+        )
+        .await
+        .expect("startup did not abort");
+        assert!(result.is_err());
     }
 
     /// Starts an `HttpService` on an ephemeral local port.
