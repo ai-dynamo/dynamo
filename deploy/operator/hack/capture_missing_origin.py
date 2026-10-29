@@ -222,7 +222,6 @@ def capture(destination):
             ],
         }
     dump(destination / "input.yaml", objects)
-    # Use this command's name in the generated artifact, rather than the shared writer's bootstrap name.
     path = destination / "input.yaml"
     path.write_text(
         path.read_text().replace(

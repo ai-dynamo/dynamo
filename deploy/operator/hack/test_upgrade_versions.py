@@ -330,10 +330,6 @@ class UpgradeFixtureLifecycleTest(unittest.TestCase):
                         f"reconciled by {version}",
                     )
                     self.assertEqual(after["spec"], original["spec"])
-                    self.assertNotIn(
-                        "nvidia.com/dynamo-operator-origin-version",
-                        after["metadata"]["annotations"],
-                    )
                     self.assertEqual(
                         after["metadata"]["annotations"],
                         original["metadata"]["annotations"],

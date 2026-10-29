@@ -24,7 +24,6 @@ import (
 
 const upgradeMissingOriginInput = "testdata/upgrade-compatibility/missing-origin/input.yaml"
 
-// This installation-level legacy case is separate from the rolling release inventory.
 func testUpgradeMissingOrigin(t *testing.T) {
 	t.Log("Read the released snapshot seeded before current schema and admission")
 	objects, err := golden.ReadManifests(upgradeMissingOriginInput)
