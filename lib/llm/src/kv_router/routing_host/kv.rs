@@ -296,6 +296,18 @@ impl RoutingHost {
         })
     }
 
+    /// Plan a KV route that no preview opened, for a stage router that books
+    /// before it dispatches. This is the route's first stage, so it starts the
+    /// cleanup budget.
+    pub(crate) async fn plan_kv_route_without_preview(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+    ) -> Result<RoutePlan, Error> {
+        self.plan_kv_route(request, phase, None, CleanupBudget::default())
+            .await
+    }
+
     pub(crate) async fn plan_kv_route_from_preview(
         &self,
         request: &SingleIn<PreprocessedRequest>,

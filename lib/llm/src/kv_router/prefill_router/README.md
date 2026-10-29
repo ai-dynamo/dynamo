@@ -37,6 +37,9 @@ and the router knowledge-base pages).
 - `handoff.rs`: keeps consuming prefill while decode runs and merges prefill
   failures into the decode stream.
 - `query.rs`: `reserve_prefill_worker` and `PrefillReservation`.
+- `stage.rs`: `PrefillRouter` as a `StageRouter` (`schedule`, `preview`,
+  `dispatch`) and `generate_v2`, the request path composed from them. Not
+  wired into the pipeline yet.
 
 ## Core: Target, Binding, and Activation
 
