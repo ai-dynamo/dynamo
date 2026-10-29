@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! In-memory store: one process keeps every registration. It needs no
-//! Kubernetes, so it suits tests and a first deployment. The MCS store keeps
+//! The memory backend: one process keeps every registration. It needs no
+//! Kubernetes, so it suits tests and a first deployment. The MCS backend keeps
 //! its registrations here too, with copies of the ones other service
 //! instances received (see `crate::peers`). A restarted process starts empty
 //! and fills as PoolRelays register again, so its lists are `Estimated` until
@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 use super::stream::{EVENT_BUFFER, wake_at, watch_stream};
 
 /// The longest an expired registration waits for the sweep. Watchers, such
-/// as the MCS store's join, drop a pool only when the sweep removes it.
+/// as the MCS backend's join, drop a pool only when the sweep removes it.
 pub const SWEEP_EVERY: Duration = Duration::from_secs(1);
 
 /// Pool registrations in memory. A pool expires the lease duration after its

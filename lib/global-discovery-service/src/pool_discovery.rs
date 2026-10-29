@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The contract between the Global Discovery Service and its stores. Design:
-//! <https://github.com/ai-dynamo/enhancements/pull/103>.
+//! The contract between the Global Discovery Service and its backends.
+//! Design: <https://github.com/ai-dynamo/enhancements/pull/103>.
 //!
-//! The service reads and writes only through this contract, so a store can
-//! change without changing PoolRelays or routers:
+//! The service reads and writes only through this contract, so a backend
+//! can change without changing PoolRelays or routers:
 //! - [`PoolDirectory`]: which pools exist.
 //! - [`PoolRegistrar`]: a PoolRelay registers its pool. Each registration is
 //!   also the pool's heartbeat.
@@ -28,7 +28,7 @@ pub use watch::{Completeness, Directory, Snapshot, WatchEvent, WatchStream};
 
 use thiserror::Error;
 
-/// Shared by every store, so the service maps each case to one status code.
+/// Shared by every backend, so the service maps each case to one status code.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum DiscoveryError {

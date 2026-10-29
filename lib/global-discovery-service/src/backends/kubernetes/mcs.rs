@@ -8,7 +8,7 @@
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 
 /// How the MCS implementation names imported EndpointSlices. Not
-/// `non_exhaustive`: the MCS store handles every variant.
+/// `non_exhaustive`: the MCS backend handles every variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum McsImplementation {
     /// The `multicluster.kubernetes.io` labels (Submariner, Cilium, GKE).

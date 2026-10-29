@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The MCS store with registrations. A pool is listed only while both
+//! The MCS backend with registrations. A pool is listed only while both
 //! sources agree: MCS imports a Ready PoolRelay endpoint for it, and its
 //! PoolRelay has registered within the lease (`POST /pools`).
 //!
@@ -177,7 +177,7 @@ async fn join_sources(
     let (mut from_mcs, mut from_registrations) = match watches {
         Ok(watches) => watches,
         Err(error) => {
-            // The stores in this crate subscribe without contacting anything.
+            // The backends in this crate subscribe without contacting anything.
             tracing::error!(
                 ?error,
                 "cannot watch the pool sources; joining on each read"
@@ -444,7 +444,7 @@ mod tests {
         PoolKey::new("west", "dynamo", dgd).unwrap()
     }
 
-    /// What the MCS store lists: addresses, and nothing about the model.
+    /// What the MCS backend lists: addresses, and nothing about the model.
     fn from_mcs(dgd: &str) -> PoolListing {
         PoolListing {
             key: key(dgd),
@@ -494,7 +494,7 @@ mod tests {
         }
     }
 
-    /// Stands in for the MCS store: pools stay until removed.
+    /// Stands in for the MCS backend: pools stay until removed.
     struct FakeMcs {
         listings: Arc<Mutex<HashMap<PoolKey, PoolListing>>>,
         events: broadcast::Sender<PoolEvent>,
@@ -514,7 +514,7 @@ mod tests {
             let _ = self.events.send(WatchEvent::Upserted(listing));
         }
 
-        /// Lists every pool again, with `completeness`, as the MCS store
+        /// Lists every pool again, with `completeness`, as the MCS backend
         /// does when its watch keeps failing and when it recovers.
         fn relist(&self, completeness: Completeness) {
             let mut snapshot = exact(&self.listings.lock().unwrap());

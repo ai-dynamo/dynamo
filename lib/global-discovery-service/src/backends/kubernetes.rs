@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The MCS store, using SIG Multicluster: pools ([`McsPoolDirectory`]) and
+//! The MCS backend, using SIG Multicluster: pools ([`McsPoolDirectory`]) and
 //! Global Router replicas ([`McsReplicaDirectory`]) from the EndpointSlices
 //! that MCS imports, named as [`McsImplementation`] describes.
 //!
@@ -22,7 +22,7 @@
 //! With Karmada, a Service name may have at most 55 characters: DGD names up
 //! to 44 with the default `-pool-relay` suffix. Karmada imports a Service as
 //! `derived-<name>`, and that name may have at most 63 characters, so
-//! Karmada imports nothing for a longer name, and the store never sees that
+//! Karmada imports nothing for a longer name, and the backend never sees that
 //! Service's endpoints. [`McsReplicaDirectory::new`] logs an error for a
 //! Service whose name is too long.
 //!

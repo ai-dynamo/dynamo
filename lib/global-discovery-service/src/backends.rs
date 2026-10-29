@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Implementations of [`crate::pool_discovery`], one module per
-//! store.
+//! backend.
 
 pub mod kubernetes;
 pub mod memory;
