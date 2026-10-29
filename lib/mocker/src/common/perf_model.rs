@@ -12,8 +12,12 @@ use ndarray::{Array1, Array2};
 use ndarray_interp::InterpolateError;
 use ndarray_interp::interp1d::{Interp1DBuilder, Linear};
 use ndarray_interp::interp2d::{Bilinear, Interp2DBuilder};
+use ndarray_npy::ReadNpyExt;
+use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
+use zip::ZipArchive;
+use zip::result::ZipError;
 
 /// Trait to abstract over 1D interpolation for prefill timing
 pub trait PrefillInterpolator: Send + Sync {
@@ -136,6 +140,26 @@ impl std::fmt::Debug for PerfModel {
     }
 }
 
+/// Reads arrays from a NumPy `.npz` archive. `ndarray_npy::NpzReader` needs zip 2.x, so this
+/// opens the archive with `zip` and parses each entry with `ReadNpyExt`.
+struct NpzReader<R>(ZipArchive<R>);
+
+impl<R: Read + Seek> NpzReader<R> {
+    fn new(reader: R) -> Result<Self> {
+        Ok(Self(ZipArchive::new(reader)?))
+    }
+
+    /// Reads entry `name`, else `{name}.npy`, the name that `numpy.savez` writes.
+    fn by_name<A: ReadNpyExt>(&mut self, name: &str) -> Result<A> {
+        match self.0.by_name(name) {
+            Ok(file) => return Ok(A::read_npy(file)?),
+            Err(ZipError::FileNotFound) => {}
+            Err(err) => return Err(err.into()),
+        }
+        Ok(A::read_npy(self.0.by_name(&format!("{name}.npy"))?)?)
+    }
+}
+
 impl PerfModel {
     /// Load performance model from NPZ file
     ///
@@ -146,7 +170,6 @@ impl PerfModel {
     /// - decode_context_length: 1D array of context lengths
     /// - decode_itl: 2D array of inter-token latencies in milliseconds
     pub fn from_npz(path: &Path) -> Result<Self> {
-        use ndarray_npy::NpzReader;
         use std::fs::File;
 
         tracing::info!("Loading performance model from NPZ file: {:?}", path);
@@ -308,8 +331,37 @@ impl PerfModel {
 
 #[cfg(test)]
 mod tests {
-    use super::{AisCallback, PerfModel};
+    use super::{AisCallback, NpzReader, PerfModel};
+    use ndarray::{Array1, array};
+    use ndarray_npy::WriteNpyExt;
+    use rstest::rstest;
+    use std::io::{Cursor, Seek, Write};
     use std::sync::Arc;
+    use zip::CompressionMethod;
+    use zip::result::ZipError;
+    use zip::write::SimpleFileOptions;
+
+    fn npy(array: &impl WriteNpyExt) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        array.write_npy(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// Writes entries with the compression of `numpy.savez` (stored) or `numpy.savez_compressed`
+    /// (deflated).
+    fn write_npz(
+        writer: impl Write + Seek,
+        method: CompressionMethod,
+        entries: &[(&str, Vec<u8>)],
+    ) {
+        let mut npz = zip::ZipWriter::new(writer);
+        let options = SimpleFileOptions::default().compression_method(method);
+        for (name, bytes) in entries {
+            npz.start_file(*name, options).unwrap();
+            npz.write_all(bytes).unwrap();
+        }
+        npz.finish().unwrap();
+    }
 
     struct EchoBatchCallback;
 
@@ -389,5 +441,53 @@ mod tests {
 
         assert_eq!(error.to_string(), "AIS decode prediction failed");
         assert_eq!(error.root_cause().to_string(), "missing AIS decode point");
+    }
+
+    #[rstest]
+    #[case::stored(CompressionMethod::Stored)]
+    #[case::deflated(CompressionMethod::Deflated)]
+    fn npz_profile_loads_numpy_entry_names(#[case] method: CompressionMethod) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.npz");
+        write_npz(
+            std::fs::File::create(&path).unwrap(),
+            method,
+            &[
+                ("prefill_isl.npy", npy(&array![0.0, 128.0])),
+                ("prefill_ttft_ms.npy", npy(&array![0.0, 64.0])),
+                ("decode_active_kv_tokens.npy", npy(&array![0.0, 128.0])),
+                ("decode_context_length.npy", npy(&array![0.0, 128.0])),
+                ("decode_itl.npy", npy(&array![[2.0, 4.0], [6.0, 8.0]])),
+            ],
+        );
+
+        let model = PerfModel::from_npz(&path).unwrap();
+        assert_eq!(model.predict_prefill_time(1, 100, 0).unwrap(), 50.0);
+        assert_eq!(model.predict_decode_time(1, 128, 0, 0).unwrap(), 6.0);
+        assert_eq!(model.predict_decode_time(1, 0, 128, 0).unwrap(), 4.0);
+        assert_eq!(model.predict_decode_time(1, 64, 64, 0).unwrap(), 5.0);
+    }
+
+    #[test]
+    fn npz_lookup_prefers_the_exact_name_over_the_npy_suffix() {
+        let mut bytes = Cursor::new(Vec::new());
+        write_npz(
+            &mut bytes,
+            CompressionMethod::Stored,
+            &[
+                ("a", npy(&array![1.0])),
+                ("a.npy", npy(&array![2.0])),
+                ("b.npy", npy(&array![3.0])),
+            ],
+        );
+
+        let mut npz = NpzReader::new(bytes).unwrap();
+        assert_eq!(npz.by_name::<Array1<f64>>("a").unwrap(), array![1.0]);
+        assert_eq!(npz.by_name::<Array1<f64>>("b").unwrap(), array![3.0]);
+        let missing = npz.by_name::<Array1<f64>>("c").unwrap_err();
+        assert!(matches!(
+            missing.downcast_ref(),
+            Some(ZipError::FileNotFound)
+        ));
     }
 }
