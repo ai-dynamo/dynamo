@@ -553,7 +553,7 @@ func multinodeSidecarBackends() []multinodeSidecarBackend {
 			framework:        BackendFrameworkVLLM,
 			engineImage:      "vllm/vllm-openai:custom",
 			command:          []string{"vllm"},
-			engineEnv:        []corev1.EnvVar{{Name: "VLLM_USE_RUST_FRONTEND", Value: "1"}},
+			engineEnv:        []corev1.EnvVar{{Name: "VLLM_USE_RUST_FRONTEND", Value: "1"}, {Name: "VLLM_ENGINE_READY_TIMEOUT_S", Value: "1800"}},
 			sidecarCommand:   []string{"dynamo-vllm-sidecar"},
 			compilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: "/cache"},
 			args: func(role Role, workerRuntime bool) []string {
@@ -567,7 +567,7 @@ func multinodeSidecarBackends() []multinodeSidecarBackend {
 				if role == RoleWorker {
 					args = []string{"serve", "model", "--headless"}
 				}
-				return append(args, "--tensor-parallel-size", "2", "--distributed-executor-backend", "mp", "--nnodes", "2", "--node-rank", "$(DYNAMO_RANK)", "--master-addr", "$(DYNAMO_LEADER_ADDRESS)", "--master-port", "29500")
+				return append(args, "--tensor-parallel-size", "2", "--distributed-executor-backend", "mp", "--nnodes", "2", "--node-rank", "$(DYNAMO_RANK)", "--master-addr", "$(DYNAMO_LEADER_ADDRESS)", "--master-port", "29500", "--distributed-timeout-seconds", "1800")
 			},
 		},
 	}

@@ -73,11 +73,17 @@ use it because `vllm-rs serve` does not support `--data-parallel-hybrid-lb`.
 Engine-failure KV recovery remains incomplete and is tracked in
 [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
 
-A multinode engine starts only when every rank has joined. If a worker Pod takes
-longer than 600 seconds to start, for example while a cold node pulls the engine
-image, the leader's `main` container exits with `engine input registration timed
-out` and restarts. The sidecar is not affected. Pre-pull the engine image on cold
-nodes to avoid the restart.
+A multinode engine starts only when every rank has joined, and vLLM gives a late
+rank 600 seconds by default. Two timeouts set that budget. The Rust frontend waits
+`VLLM_ENGINE_READY_TIMEOUT_S` for its engine cores to register, and torch waits
+`--distributed-timeout-seconds` for the cross-node rendezvous on both the leader
+and the worker. When either expires, the leader's `main` container exits with
+`engine input registration timed out` or a store timeout and restarts. The sidecar
+is not affected. The TP example sets both to 1800 seconds, which matches the
+sidecar's startup deadline and the example's startup probe, so a worker Pod that
+pulls the engine image on a cold node still joins the first attempt. The torch
+timeout also bounds collectives at run time, so a wedged NCCL call surfaces after
+30 minutes instead of 10.
 
 The examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which exist only in
 DGDs created by operator 1.6.0 or later. For an older DGD, see

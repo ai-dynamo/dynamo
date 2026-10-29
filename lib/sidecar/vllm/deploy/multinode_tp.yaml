@@ -5,6 +5,9 @@
 # Each engine group spans two Pods with the multiprocessing executor. Only the
 # leader runs the Dynamo sidecar. The worker runs a headless engine that holds
 # the remaining TP ranks.
+# VLLM_ENGINE_READY_TIMEOUT_S and --distributed-timeout-seconds give a late
+# worker 1800 seconds to join before the leader's engine exits, matching the
+# sidecar startup deadline and the startup probe below.
 # For a DGD created before operator 1.6.0, see docs/fern/pages/kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160.
 
 apiVersion: nvidia.com/v1beta1
@@ -49,6 +52,8 @@ spec:
             env:
             - name: VLLM_USE_RUST_FRONTEND
               value: '1'
+            - name: VLLM_ENGINE_READY_TIMEOUT_S
+              value: '1800'
             startupProbe:
               grpc:
                 port: 30001
@@ -94,6 +99,8 @@ spec:
             - $(DYNAMO_LEADER_ADDRESS)
             - --master-port
             - '29500'
+            - --distributed-timeout-seconds
+            - '1800'
             - --kv-events-config
             - '{"publisher":"zmq","endpoint":"tcp://*:20080","replay_endpoint":"tcp://*:20180","topic":"kv-events","enable_kv_cache_events":true}'
     - name: worker
@@ -102,6 +109,9 @@ spec:
           containers:
           - name: main
             image: vllm/vllm-openai:v0.32.0
+            env:
+            - name: VLLM_ENGINE_READY_TIMEOUT_S
+              value: '1800'
             resources:
               limits:
                 nvidia.com/gpu: '1'
@@ -123,4 +133,6 @@ spec:
             - $(DYNAMO_LEADER_ADDRESS)
             - --master-port
             - '29500'
+            - --distributed-timeout-seconds
+            - '1800'
   backendFramework: vllm
