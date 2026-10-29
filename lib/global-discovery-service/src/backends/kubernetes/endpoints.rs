@@ -42,8 +42,17 @@ pub struct McsReplicaDirectory(SliceDirectory<ReplicaIndex>);
 impl McsReplicaDirectory {
     /// The Service's slices as MCS imports them into the cluster `client`
     /// reaches. The client's connect and read timeouts should add up to under
-    /// 90 s, so a server that stops answering shows up as failures.
+    /// 90 s, so a server that stops answering shows up as failures. Logs an
+    /// error for a Service that `mcs` cannot import, since none of its
+    /// replicas would be listed.
     pub fn new(client: Client, service: &ExportedService, mcs: McsImplementation) -> Self {
+        if !mcs::can_import(mcs, &service.name) {
+            tracing::error!(
+                service = %service.name,
+                karmada_max_service_name = mcs::KARMADA_MAX_SERVICE_NAME,
+                "the router Service's name is too long for Karmada to import it, so no router replicas will be listed"
+            );
+        }
         Self(SliceDirectory::new(
             Api::namespaced(client, &service.namespace),
             mcs::service_selector(mcs, &service.name),
