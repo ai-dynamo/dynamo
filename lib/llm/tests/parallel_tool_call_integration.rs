@@ -44,7 +44,9 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
 
     let tools = vec![
         dynamo_protocols::types::ChatCompletionTool {
+            custom: None,
             r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+            defer_loading: None,
             function: dynamo_protocols::types::FunctionObject {
                 name: "get_current_weather".to_string(),
                 description: Some("Get weather for a city/state in specified units".to_string()),
@@ -59,10 +61,13 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
                     "additionalProperties": false
                 })),
                 strict: None,
+                defer_loading: None,
             },
         },
         dynamo_protocols::types::ChatCompletionTool {
+            custom: None,
             r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+            defer_loading: None,
             function: dynamo_protocols::types::FunctionObject {
                 name: "is_holiday_today".to_string(),
                 description: Some("Return whether today is a public holiday".to_string()),
@@ -72,6 +77,7 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
                     "additionalProperties": false
                 })),
                 strict: None,
+                defer_loading: None,
             },
         },
     ];
@@ -88,6 +94,7 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
         .expect("Failed to build chat completion request");
 
     NvCreateChatCompletionRequest {
+        responses_tools: None,
         inner,
         common: CommonExt::default(),
         nvext: None,

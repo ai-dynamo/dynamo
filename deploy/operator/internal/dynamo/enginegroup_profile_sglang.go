@@ -261,6 +261,11 @@ func ResolveSGLangElasticEPProfile(source SGLangProfileGeometrySource) (Resolved
 		initialReplicas /= gpusPerReplica
 		maximumReplicas /= gpusPerReplica
 	}
+
+	// Check the resolved seed directly before narrowing it to the API's replica type.
+	if initialReplicas > math.MaxInt32 {
+		return ResolvedSGLangElasticEPProfile{}, fmt.Errorf("SGLang initial replica count %d exceeds the Engine Group replica range", initialReplicas)
+	}
 	resolved, err := enginegroup.ResolveProfileGeometry(enginegroup.ProfileGeometryInput{
 		Backend:        sglangEngineGroupBackend,
 		GPUsPerReplica: gpusPerReplica,

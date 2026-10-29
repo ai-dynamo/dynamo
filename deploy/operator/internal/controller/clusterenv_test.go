@@ -58,7 +58,7 @@ func runClusterTests(m *testing.M, prepare func(context.Context, client.Client) 
 	operatorConfig := &configv1alpha1.OperatorConfiguration{}
 	configv1alpha1.SetDefaultsOperatorConfiguration(operatorConfig)
 	operatorConfig.GPU.DiscoveryEnabled = ptr.To(false)
-	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}
+	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true, DisaggregatedSet: true}}
 	additionalAdmission := lwsmock.Configurations()
 	groveAdmission := grovemock.Configurations()
 	additionalAdmission.Mutating = append(additionalAdmission.Mutating, groveAdmission.Mutating...)

@@ -31,6 +31,7 @@ from tests.utils.payload_builder import (
     http_cancellation_payloads,
     kv_routing_payload,
     sglang_generate_cancellation_payloads,
+    stop_string_payloads,
 )
 from tests.utils.payloads import KvTransferPayload, OmittedMaxTokensChatPayload
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
@@ -179,9 +180,15 @@ sidecar_configs = {
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "VLLM_DATA_PARALLEL_SIZE": "1",
         },
-        request_payloads=_aggregated_payloads(
-            VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
-        ),
+        request_payloads=[
+            *_aggregated_payloads(
+                VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            ),
+            # The frontend matches stop strings; vLLM never receives them.
+            *stop_string_payloads(
+                VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            ),
+        ],
     ),
     "sglang_aggregated": SidecarConfig(
         name="sglang_aggregated",
