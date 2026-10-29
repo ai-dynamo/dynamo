@@ -21,6 +21,7 @@ from dynamo.aisimulate.output.dgd.renderers import render_dgd
 from dynamo.aisimulate.output.dgd.renderers.aic import renderer as aic_renderer
 from dynamo.aisimulate.output.dgd.renderers.direct import renderer as direct_renderer
 from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
+from dynamo.profiler.utils.config_modifiers import vllm
 
 pytestmark = [
     pytest.mark.unit,
@@ -197,8 +198,6 @@ def test_installed_aic_renders_real_disaggregated_candidate(monkeypatch) -> None
     pytest.importorskip("aisimulate.generator")
     from aisimulate.generator.request.schema import ModelFacts
 
-    from dynamo.profiler.utils.config_modifiers import vllm
-
     # Keep this package-boundary test deterministic and offline. Model facts
     # are part of the request; the runtime finalizer is covered separately.
     monkeypatch.setattr(vllm, "get_model_context_length", lambda _model: None)
@@ -269,9 +268,8 @@ def test_installed_aic_renders_real_disaggregated_candidate(monkeypatch) -> None
 def test_installed_aic_renders_candidate_without_explicit_block_size(
     monkeypatch, include_null_block_size
 ) -> None:
+    # Marker collection stubs AISimulate without its generator request types.
     from aisimulate.generator.request.schema import ModelFacts
-
-    from dynamo.profiler.utils.config_modifiers import vllm
 
     monkeypatch.setattr(vllm, "get_model_context_length", lambda _model: None)
     monkeypatch.setattr(vllm, "get_mamba_cache_align_block_size", lambda _model: None)
@@ -447,8 +445,6 @@ def test_installed_aic_renders_trace_workloads_like_synthetic_ones(
     pytest.importorskip("aisimulate.generator")
     from aisimulate.generator.request.schema import ModelFacts
     from aisimulate.sweeper.config import Workload
-
-    from dynamo.profiler.utils.config_modifiers import vllm
 
     # Keep the renders offline: model facts come from the request below.
     monkeypatch.setattr(vllm, "get_model_context_length", lambda _model: None)
