@@ -2399,10 +2399,8 @@ impl KvRouter {
                 let kv_router = managed_router.router().clone();
                 let affinity = session_affinity_ttl_secs
                     .map(|ttl| {
-                        kv_router.affinity_coordinator(
-                            Duration::from_secs(ttl),
-                            session_affinity_mode,
-                        )
+                        kv_router
+                            .affinity_coordinator(Duration::from_secs(ttl), session_affinity_mode)
                     })
                     .transpose()
                     .map_err(to_pyerr)?;
