@@ -231,14 +231,26 @@ def test_model_weight_size_from_hub_uses_checkpoint_file_sizes(monkeypatch) -> N
             ],
             15,
         ),
-        # Only PyTorch shards.
+        # Devstral: two shard sets with their own indexes.
         (
             [
-                ("pytorch_model-00001-of-00002.bin", 2 * MIB),
-                ("pytorch_model-00002-of-00002.bin", 1 * MIB),
-                ("training_args.bin", 0),
+                ("consolidated-00001-of-00002.safetensors", 7 * MIB),
+                ("consolidated-00002-of-00002.safetensors", 3 * MIB),
+                ("model-00001-of-00003.safetensors", 4 * MIB),
+                ("model-00002-of-00003.safetensors", 4 * MIB),
+                ("model-00003-of-00003.safetensors", 2 * MIB),
             ],
-            3,
+            10,
+        ),
+        # A PEFT adapter next to full PyTorch shards.
+        (
+            [
+                ("adapter_model.safetensors", 1 * MIB),
+                ("pytorch_model-00001-of-00002.bin", 9 * MIB),
+                ("pytorch_model-00002-of-00002.bin", 3 * MIB),
+                ("training_args.bin", 1),
+            ],
+            12,
         ),
     ],
 )

@@ -89,27 +89,35 @@ def get_local_model_weight_size(
 # Checkpoint formats in the order loaders prefer them.
 HUB_WEIGHT_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth")
 # Sharded checkpoints are named like "model-00001-of-00004.safetensors".
-SHARD_STEM_PATTERN = re.compile(r"-\d+-of-\d+$")
+SHARD_SUFFIX_PATTERN = re.compile(r"-\d+-of-\d+$")
 
 
 def _select_hub_checkpoint_files(siblings: list) -> list:
-    """Return the Hub repo files that make up one copy of the weights.
+    """Return the Hub repo files that make up one copy of the model weights.
 
     Repos often ship the weights more than once: in a second format (gpt2),
-    as a consolidated file next to the shards (Mistral), or under folders such
-    as ``original/`` (Llama, gpt-oss). Only the repo root is considered, the
-    first format present wins, and its shards are used when it has any.
+    as a second file set (Mistral's consolidated weights), or under folders
+    such as ``original/`` (Llama, gpt-oss). Only repo-root files other than
+    PEFT adapters are considered, the first format present wins, and within it
+    the largest checkpoint (one file or one shard set) is used.
     """
-    root_files = [sibling for sibling in siblings if "/" not in sibling.rfilename]
+    root_files = [
+        sibling
+        for sibling in siblings
+        if "/" not in sibling.rfilename
+        and not sibling.rfilename.startswith("adapter_model.")
+    ]
     for ext in HUB_WEIGHT_EXTENSIONS:
-        files = [sibling for sibling in root_files if sibling.rfilename.endswith(ext)]
-        if files:
-            shards = [
-                sibling
-                for sibling in files
-                if SHARD_STEM_PATTERN.search(sibling.rfilename[: -len(ext)])
-            ]
-            return shards or files
+        checkpoints: dict[str, list] = {}
+        for sibling in root_files:
+            if sibling.rfilename.endswith(ext):
+                stem = SHARD_SUFFIX_PATTERN.sub("", sibling.rfilename[: -len(ext)])
+                checkpoints.setdefault(stem, []).append(sibling)
+        if checkpoints:
+            return max(
+                checkpoints.values(),
+                key=lambda files: sum(sibling.size or 0 for sibling in files),
+            )
     return []
 
 
