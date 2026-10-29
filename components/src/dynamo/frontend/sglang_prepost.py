@@ -33,6 +33,7 @@ from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
+from .reasoning import normalize_reasoning_content
 from .structural_tag_policy import (
     ToolChoiceKind,
     effective_tool_strict,
@@ -528,6 +529,8 @@ def _render_deepseek_v4_prompt_token_ids(
         ) from exc
 
     encoding_messages = copy.deepcopy(messages)
+    # The native encoder formats reasoning_content as a string, without Jinja.
+    normalize_reasoning_content(encoding_messages, string_only=True)
     for msg in encoding_messages:
         content = msg.get("content")
         if content is None:
@@ -969,6 +972,11 @@ def preprocess_chat_request(
         if (reasoning_effort := request.get("reasoning_effort")) is not None:
             template_kwargs["reasoning_effort"] = reasoning_effort
 
+        normalize_reasoning_content(
+            messages,
+            chat_template=getattr(tokenizer, "chat_template", None),
+            has_tools=bool(template_tools),
+        )
         template_messages = _normalize_messages_for_template(messages, tokenizer)
 
         try:

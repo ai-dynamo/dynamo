@@ -95,6 +95,8 @@ STUB_MODULES = [
     "transformers.models",
     "transformers.models.qwen2_vl",
     "transformers.models.qwen2_vl.image_processing_qwen2_vl",
+    "transformers.utils",
+    "transformers.utils.chat_template_utils",
     "pandas",
     "matplotlib",
     "matplotlib.pyplot",

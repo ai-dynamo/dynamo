@@ -29,6 +29,7 @@ from _tool_guidance_parity import (
     parity_tool,
     tool_choice_value,
 )
+from jinja2 import Environment
 from jinja2.exceptions import TemplateError, UndefinedError
 from sglang.srt.constrained.reasoner_grammar_backend import ReasonerGrammarObject
 from sglang.srt.constrained.xgrammar_backend import (
@@ -3792,6 +3793,72 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         # round-tripping to the original arguments.
         assert isinstance(args, str)
         assert json.loads(args) == tool_args
+
+    @pytest.mark.parametrize("native_encoder", [False, True])
+    def test_reasoning_segments_render_as_text_without_mutating_request(
+        self, native_encoder
+    ):
+        class Tokenizer:
+            chat_template = (
+                None
+                if native_encoder
+                else "{% for message in messages if message.role == 'assistant' %}"
+                "{{ '<think>' ~ message.reasoning_content ~ '</think>' }}"
+                "{% endfor %}"
+            )
+
+            def apply_chat_template(self, messages, **kwargs):
+                prompt = (
+                    Environment()
+                    .from_string(self.chat_template)
+                    .render(messages=messages, **kwargs)
+                )
+                return list(map(ord, prompt))
+
+            def encode(self, prompt):
+                return list(map(ord, prompt))
+
+        segments = ["Check 'quotes' and \\slashes.\n", "Then add. 中文", ""]
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Flash",
+            "chat_template_kwargs": {"thinking": True},
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "calc",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            "messages": [
+                {"role": "user", "content": "Compute 1+1."},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": segments,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "calc", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "2"},
+            ],
+        }
+        original = copy.deepcopy(request)
+        result = preprocess_chat_request(
+            request,
+            tokenizer=Tokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+        prompt = "".join(map(chr, result.prompt_token_ids))
+        assert "<think>Check 'quotes' and \\slashes.\n\nThen add. 中文</think>" in prompt
+        assert str(segments) not in prompt
+        assert request == original
 
     def test_deepseek_v4_accepts_openai_thinking_payload(self, monkeypatch):
         """OpenAI-style thinking payload maps to DS-V4 thinking."""
