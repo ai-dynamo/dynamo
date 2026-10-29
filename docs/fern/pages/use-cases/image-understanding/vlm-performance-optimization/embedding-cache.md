@@ -9,8 +9,9 @@ subtitle: Skip the vision encoder for images and clips it has already encoded
 
 The embedding cache (or encoder cache) is a CPU-side LRU cache that stores vision encoder outputs. When the same multimodal content, such as an image or video, appears in multiple requests, the cached embedding is reused instead of running the vision encoder again. This reduces GPU load on the encoder and lowers latency for repeated content.
 
-> [!IMPORTANT]
-> Embedding cache is separate from the KV cache, which reuses attention key/value state after prefill to skip prefill and go straight to decode. For KV cache reuse and routing, see [Multimodal KV Routing](./multimodal-kv-routing.md).
+<Info>
+Embedding cache is separate from the KV cache, which reuses attention key/value state after prefill to skip prefill and go straight to decode. For KV cache reuse and routing, see [Multimodal KV Routing](./multimodal-kv-routing.md).
+</Info>
 
 ## When to Use
 
@@ -59,11 +60,12 @@ If your workload consists entirely of unique multimodal content, the cache provi
 
 Set `--multimodal-embedding-cache-capacity-gb` based on your expected working set of unique multimodal content. A larger cache holds more embeddings but consumes more host memory.
 
-> [!NOTE]
-> If one image URL can return different content for different sessions, enable
-> session-scoped caching as described in [Shared image cache](./shared-image-cache.md).
-> Dynamo then partitions its image embedding caches by affinity scope and
-> bypasses them when a request has no valid scope.
+<Note>
+If one image URL can return different content for different sessions, enable
+session-scoped caching as described in [Shared image cache](./shared-image-cache.md).
+Dynamo then partitions its image embedding caches by affinity scope and
+bypasses them when a request has no valid scope.
+</Note>
 
 See the backend-specific documentation ([vLLM](../../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#embedding-cache), [TRT-LLM](../../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md#embedding-cache)) for more details.
 

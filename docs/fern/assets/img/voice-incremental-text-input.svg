@@ -3,8 +3,8 @@
   <desc id="desc">With incremental text input, the worker prefills the text it has received so far while the user is still speaking, in full cache blocks, so less prefill remains after the user stops and the first token arrives earlier. Without it, prefill starts only after the final transcript, so the first token arrives later. Illustrative timings.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
   <rect x="36" y="12" width="1328" height="470" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="15.6" font-weight="700" letter-spacing="1.6" fill="#5A8F00">INCREMENTAL TEXT INPUT</text>
-  <text x="50" y="68" font-size="26.4" font-weight="700" fill="#1A1A1A">Prefill the transcript as it arrives, not after it is final</text>
+  <text x="50" y="40" font-size="19.4" font-weight="700" letter-spacing="1.6" fill="#5A8F00">INCREMENTAL TEXT INPUT</text>
+  <text x="50" y="68" font-size="32.8" font-weight="700" fill="#1A1A1A">Prefill the transcript as it arrives, not after it is final</text>
   <rect x="50" y="96" width="640" height="340" rx="14" fill="#FFFFFF" stroke="#76B900" stroke-width="1.8"/>
   <text x="70" y="128" font-size="19.2" font-weight="700" fill="#4C7A00">With incremental text input</text>
   <text x="70" y="196" font-size="15.6" font-weight="700" fill="#1A1A1A">User speech</text>

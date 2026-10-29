@@ -3,8 +3,8 @@
   <desc id="desc">A voice application, such as Pipecat, can use a cascaded pipeline of streaming ASR, an LLM, and text to speech, or one full-duplex audio-in, audio-out model.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
   <rect x="36" y="9" width="1248" height="379" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="17.6" font-weight="700" letter-spacing="1.6" fill="#5A8F00">VOICE PIPELINES</text>
-  <text x="50" y="68" font-size="29.7" font-weight="700" fill="#1A1A1A">Cascaded or full-duplex: pick the path for your voice agent</text>
+  <text x="50" y="40" font-size="18.2" font-weight="700" letter-spacing="1.6" fill="#5A8F00">VOICE PIPELINES</text>
+  <text x="50" y="68" font-size="30.8" font-weight="700" fill="#1A1A1A">Cascaded or full-duplex: pick the path for your voice agent</text>
   <rect x="50.0" y="165.0" width="200" height="110" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
   <rect x="141.6" y="185.0" width="11.200000000000001" height="16.8" rx="5.6000000000000005" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
   <path d="M137.39999999999998,197.6 A9.799999999999999,9.799999999999999 0 0 0 157.0,197.6" fill="none" stroke="#234CDA" stroke-width="2"/>

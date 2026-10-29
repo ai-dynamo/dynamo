@@ -9,10 +9,11 @@ Image-to-video animates a source image from a text prompt through the
 same `/v1/videos` endpoint as [Text to Video](text-to-video.md), with an extra
 `input_reference` field that points at the source image.
 
-> [!NOTE]
-> Before you begin, set up vLLM-Omni or SGLang as described in
-> [Text to Video › Set up the backend](text-to-video.md#set-up-the-backend).
-> TensorRT-LLM does not support image-to-video.
+<Note>
+Before you begin, set up vLLM-Omni or SGLang as described in
+[Text to Video › Set up the backend](text-to-video.md#set-up-the-backend).
+TensorRT-LLM does not support image-to-video.
+</Note>
 
 ## Generate Videos from Images
 

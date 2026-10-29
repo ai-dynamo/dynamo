@@ -3,8 +3,8 @@
   <desc id="desc">In the RL loop, prompts go to rollout serving, which Dynamo provides: the router sends them to workers, and fault tolerance keeps them running. Samples go to rewards and then to the trainer, which belong to the RL framework and harness. Updated policy weights return to the workers through ModelExpress and NIXL. Request traces and DynoSim profile and replay the serving workload.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
   <rect x="36" y="9" width="1253" height="547" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="17.6" font-weight="700" letter-spacing="1.6" fill="#5A8F00">REINFORCEMENT LEARNING</text>
-  <text x="50" y="68" font-size="29.7" font-weight="700" fill="#1A1A1A">Dynamo serves the rollouts. Your framework owns the rest</text>
+  <text x="50" y="40" font-size="18.3" font-weight="700" letter-spacing="1.6" fill="#5A8F00">REINFORCEMENT LEARNING</text>
+  <text x="50" y="68" font-size="30.9" font-weight="700" fill="#1A1A1A">Dynamo serves the rollouts. Your framework owns the rest</text>
   <rect x="900" y="86" width="16" height="16" rx="4" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
   <text x="924" y="99" font-size="17.6" font-weight="700" fill="#4C7A00">Dynamo</text>
   <rect x="1010" y="86" width="16" height="16" rx="4" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2"/>

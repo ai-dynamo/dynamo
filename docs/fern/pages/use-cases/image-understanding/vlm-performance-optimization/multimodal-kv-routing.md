@@ -11,8 +11,9 @@ Multimodal KV routing extends Dynamo's KV-aware router to account for image or v
 
 When media appears again, its identity contributes to each worker's KV overlap. The router balances that cache credit against projected prefill and decode load, so the worker with the largest overlap does not necessarily win when it is busy. Cache-aware placement increases prefix reuse without abandoning load balancing.
 
-> [!IMPORTANT]
-> The KV cache stores attention key/value state so a worker can skip repeated prefill work. The embedding cache stores vision encoder outputs so the encoder can skip repeated image processing. You can use both features together. See [Embedding Cache](./embedding-cache.md).
+<Info>
+The KV cache stores attention key/value state so a worker can skip repeated prefill work. The embedding cache stores vision encoder outputs so the encoder can skip repeated image processing. You can use both features together. See [Embedding Cache](./embedding-cache.md).
+</Info>
 
 ## When to Use
 
@@ -24,8 +25,9 @@ Use multimodal KV routing when:
 
 Single-worker deployments do not need routing, and workloads with entirely unique media receive little media-specific cache benefit.
 
-> [!NOTE]
-> This section covers image routing. For video, see [Exact Video KV Routing](../../video-understanding/exact-video-kv-routing.md).
+<Note>
+This section covers image routing. For video, see [Exact Video KV Routing](../../video-understanding/exact-video-kv-routing.md).
+</Note>
 
 ## How It Works
 

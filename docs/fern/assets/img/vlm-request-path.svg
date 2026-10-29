@@ -3,8 +3,8 @@
   <desc id="desc">A VLM request has six steps: the frontend receives it, the router picks a worker, the worker loads the image, runs the vision encoder, prefills, and decodes. Multimodal KV routing helps at the router. Frontend media decoding and the shared image cache help when loading. The embedding cache and encoder disaggregation help at the encoder.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
   <rect x="24" y="13" width="1252" height="368" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="14.9" font-weight="700" letter-spacing="1.6" fill="#5A8F00">VLM REQUEST PATH</text>
-  <text x="50" y="68" font-size="25.3" font-weight="700" fill="#1A1A1A">Where is the bottleneck in your pipeline?</text>
+  <text x="50" y="40" font-size="18.3" font-weight="700" letter-spacing="1.6" fill="#5A8F00">VLM REQUEST PATH</text>
+  <text x="50" y="68" font-size="30.9" font-weight="700" fill="#1A1A1A">Where is the bottleneck in your pipeline?</text>
   <rect x="38" y="96" width="1224" height="130" rx="12" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
   <rect x="50.0" y="112.0" width="164" height="96" rx="10" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
   <rect x="115.2" y="133.0" width="35.0" height="28" rx="4" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2"/>

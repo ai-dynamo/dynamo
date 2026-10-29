@@ -91,5 +91,6 @@ The current integration has these restrictions:
 
 The Qwen3.5 example, reusable Qwen-family base, and semantic test backend are under [`examples/custom_encoder`](https://github.com/ai-dynamo/dynamo/tree/main/examples/custom_encoder).
 
-> [!WARNING]
-> The backend owns any media retrieval performed by `preprocess()`. Apply Dynamo's [media URL policy](overview.md#media-url-policy), finite network timeouts, response-size limits, and image decode limits rather than fetching arbitrary request URLs directly.
+<Warning>
+The backend owns any media retrieval performed by `preprocess()`. Apply Dynamo's [media URL policy](overview.md#media-url-policy), finite network timeouts, response-size limits, and image decode limits rather than fetching arbitrary request URLs directly.
+</Warning>

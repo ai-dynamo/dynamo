@@ -11,9 +11,10 @@ starts a `transcription` session, streams audio, and receives transcript events
 while it is still sending. Dynamo does not expose a REST
 `/v1/audio/transcriptions` endpoint.
 
-> [!WARNING]
-> Realtime transcription is experimental. The vLLM path was validated with
-> English audio.
+<Warning>
+Realtime transcription is experimental. The vLLM path was validated with
+English audio.
+</Warning>
 
 ## Choose a Backend
 

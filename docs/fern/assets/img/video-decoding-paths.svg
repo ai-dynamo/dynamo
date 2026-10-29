@@ -3,8 +3,8 @@
   <desc id="desc">H.264 and H.265 decode on the GPU with NVDEC. VP8 and VP9 decode on the CPU in the Rust frontend when frontend decoding is on. Without frontend decoding, the backend decodes with a Python library.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
   <rect x="36" y="10" width="978" height="381" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="16.9" font-weight="700" letter-spacing="1.6" fill="#5A8F00">VIDEO DECODING</text>
-  <text x="50" y="68" font-size="28.6" font-weight="700" fill="#1A1A1A">Each codec has its own decoder</text>
+  <text x="50" y="40" font-size="14.3" font-weight="700" letter-spacing="1.6" fill="#5A8F00">VIDEO DECODING</text>
+  <text x="50" y="68" font-size="24.2" font-weight="700" fill="#1A1A1A">Each codec has its own decoder</text>
   <rect x="70" y="170" width="57.2" height="44" rx="4" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
   <polygon points="92.88,182.32 92.88,201.68 110.03999999999999,192.0" fill="#234CDA"/>
   <rect x="74.576" y="178.8" width="5.720000000000001" height="5.279999999999999" fill="#234CDA"/>

@@ -10,10 +10,11 @@ Dynamo serves text-to-image models through the OpenAI-compatible
 and observability as LLM serving. To answer questions *about* images instead,
 see [Image Understanding](../image-understanding/overview.md).
 
-> [!IMPORTANT]
-> Image generation backends run from Dynamo CLI launch scripts and
-> `python -m dynamo.*` entrypoints. Dynamo does not yet ship Kubernetes recipes
-> for them.
+<Info>
+Image generation backends run from Dynamo CLI launch scripts and
+`python -m dynamo.*` entrypoints. Dynamo does not yet ship Kubernetes recipes
+for them.
+</Info>
 
 ## Which Backend?
 
@@ -128,10 +129,11 @@ to `/v1/images/edits`. Use a model that supports image conditioning; text-to-ima
 alone does not establish editing support. This example uses `black-forest-labs/FLUX.2-klein-4B`
 with vLLM 0.31.0 and vLLM-Omni 0.31.0rc1.
 
-> [!IMPORTANT]
-> Use a Dynamo build containing the [image-reference forwarding fix](https://github.com/ai-dynamo/dynamo/pull/15390).
-> Dynamo 1.5.1 ignores edit references. See [Image API Compatibility](../../reference/components/frontend-configuration.mdx#image-api-compatibility)
-> for the JSON request contract and the remaining multipart-upload limitation.
+<Info>
+Use a Dynamo build containing the [image-reference forwarding fix](https://github.com/ai-dynamo/dynamo/pull/15390).
+Dynamo 1.5.1 ignores edit references. See [Image API Compatibility](../../reference/components/frontend-configuration.mdx#image-api-compatibility)
+for the JSON request contract and the remaining multipart-upload limitation.
+</Info>
 
 Launch the reference-capable model from the repository root:
 
@@ -223,8 +225,9 @@ curl http://localhost:8000/v1/images/generations \
   }'
 ```
 
-> [!NOTE]
-> If the worker fails at startup with a missing `config.json`, you are launching a diffusers model (FLUX.1-dev, Wan2.1, and similar) in LLM mode. Diffusers models ship `model_index.json` instead. Add `--image-diffusion-worker`, which registers the model through a path that does not need `config.json`.
+<Note>
+If the worker fails at startup with a missing `config.json`, you are launching a diffusers model (FLUX.1-dev, Wan2.1, and similar) in LLM mode. Diffusers models ship `model_index.json` instead. Add `--image-diffusion-worker`, which registers the model through a path that does not need `config.json`.
+</Note>
 
 ### See Also
 

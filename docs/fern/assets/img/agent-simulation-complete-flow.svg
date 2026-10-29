@@ -4,7 +4,7 @@
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
   <rect x="22" y="9" width="1018" height="381" fill="#FFFFFF"/>
   <text x="36" y="36" font-size="14.9" font-weight="700" letter-spacing="1.6" fill="#5A8F00">AGENT SIMULATION</text>
-  <text x="36" y="66" font-size="25.3" font-weight="700" fill="#1A1A1A">Capture once, replay live or offline</text>
+  <text x="36" y="66" font-size="25.1" font-weight="700" fill="#1A1A1A">Capture once, replay live or offline</text>
   <rect x="36" y="110" width="150" height="100" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2"/>
   <rect x="94.0" y="133.0" width="34" height="23" rx="4" fill="#FFFFFF" stroke="#6B7280" stroke-width="2"/><line x1="103.0" y1="161.0" x2="119.0" y2="161.0" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
   <text x="111.0" y="194" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Agent harness</text>

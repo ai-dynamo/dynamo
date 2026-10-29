@@ -23,8 +23,7 @@ additional decoder package also covers:
 
 Each backend decodes such input through a specific Python package whose wheel bundles its own FFmpeg, so the support is added with a plain `pip install` — no image rebuild. **Nothing installs automatically.** There is no environment switch and no startup hook: an operator runs the install as a deliberate, visible step, so a deployment that broadens the image's codec surface says so in its Dockerfile, pod spec, or runbook.
 
-> [!NOTE]
-> This affects **input decoding** only. Generated video **output** is unaffected and always uses VP9.
+<Note>This affects **input decoding** only. Generated video **output** is unaffected and always uses VP9.</Note>
 
 ## What each backend needs
 

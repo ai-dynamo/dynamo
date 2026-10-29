@@ -43,8 +43,9 @@ Some models emit reasoning separately from their final response. Dynamo can spli
     - MiniMax M2 style outputs: `--dyn-tool-call-parser minimax_m2 --dyn-reasoning-parser minimax_m2`
     - MiniMax M3 style outputs: `--dyn-tool-call-parser minimax_m3 --dyn-reasoning-parser minimax_m3`
 
-    > [!WARNING]
-    > `minimax_append_think` is deprecated for MiniMax M2 tool-calling deployments. Use `--dyn-reasoning-parser minimax_m2` with `--dyn-tool-call-parser minimax_m2` so Dynamo can separate reasoning and pass MiniMax XML tool calls to the tool parser.
+    <Warning>
+`minimax_append_think` is deprecated for MiniMax M2 tool-calling deployments. Use `--dyn-reasoning-parser minimax_m2` with `--dyn-tool-call-parser minimax_m2` so Dynamo can separate reasoning and pass MiniMax XML tool calls to the tool parser.
+    </Warning>
 
     </details>
 
@@ -164,10 +165,11 @@ Dynamo normalizes this request to `thinking_mode=adaptive` and removes any
 explicit request control, it takes precedence over an `enabled` or `disabled`
 deployment default.
 
-> [!NOTE]
-> This option controls chat-template rendering. It does not force the inference
-> engine or model to follow the requested mode. Models that ignore their
-> template's thinking control may still emit reasoning.
+<Note>
+This option controls chat-template rendering. It does not force the inference
+engine or model to follow the requested mode. Models that ignore their
+template's thinking control may still emit reasoning.
+</Note>
 
 ## Supported Reasoning Parsers
 
@@ -201,8 +203,9 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
       </Accordion>
     </AccordionGroup>
 
-    > [!WARNING]
-    > Kimi K2.7 may ignore `chat_template_kwargs.thinking=false` and continue to generate reasoning. Dynamo can separate emitted reasoning when a compatible parser is configured, but it cannot force the model to disable reasoning. Treat the request flag as best-effort for Kimi K2.7.
+    <Warning>
+Kimi K2.7 may ignore `chat_template_kwargs.thinking=false` and continue to generate reasoning. Dynamo can separate emitted reasoning when a compatible parser is configured, but it cannot force the model to disable reasoning. Treat the request flag as best-effort for Kimi K2.7.
+    </Warning>
   </Accordion>
 
   <Accordion title="MiniMax">

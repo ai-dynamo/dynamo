@@ -11,9 +11,10 @@ pipeline. Clients stream audio over the `/v1/realtime` WebSocket with
 `session.type="realtime"` and receive both the response transcript and the
 response audio.
 
-> [!NOTE]
-> Before you begin, set up vLLM-Omni as described in
-> [Voice Pipelines › Set up the backend](voice-pipelines.md#set-up-the-backend).
+<Note>
+Before you begin, set up vLLM-Omni as described in
+[Voice Pipelines › Set up the backend](voice-pipelines.md#set-up-the-backend).
+</Note>
 
 ## Launch
 

@@ -11,8 +11,9 @@ subtitle: Deploy FastVideo text-to-video generation on Dynamo with a custom work
 
 On Dynamo, you run FastVideo as a custom worker behind the `/v1/videos` endpoint, scale it with more workers, and deploy it on Kubernetes. This guide covers that deployment.
 
-> [!NOTE]
-> FastVideo is a custom example worker with its own runtime image, not one of Dynamo's built-in backends. Its image encodes H.264 (`libx264`), unlike the standard Dynamo images, which encode VP9. For the built-in backends (vLLM-Omni, SGLang, TensorRT-LLM), see [Text to Video](text-to-video.md).
+<Note>
+FastVideo is a custom example worker with its own runtime image, not one of Dynamo's built-in backends. Its image encodes H.264 (`libx264`), unlike the standard Dynamo images, which encode VP9. For the built-in backends (vLLM-Omni, SGLang, TensorRT-LLM), see [Text to Video](text-to-video.md).
+</Note>
 
 ## Overview
 
@@ -22,8 +23,9 @@ On Dynamo, you run FastVideo as a custom worker behind the `/v1/videos` endpoint
 - **Response format:** Returns one complete MP4 payload per request as `data[0].b64_json` (non-streaming).
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
 
-> [!IMPORTANT]
-> `worker.py` defaults to `--attention-backend VIDEO_SPARSE_ATTN` and routes `VSA_sparsity=0.8` through FastVideo's typed `PipelineSelection.experimental` config. Keep this backend for FastWan 2.1 models; forcing `TORCH_SDPA` can instantiate a non-VSA Wan block and fail checkpoint loading. Use `--attention-backend TORCH_SDPA` for the LTX-2 compatibility path validated by the B300 smoke test.
+<Info>
+`worker.py` defaults to `--attention-backend VIDEO_SPARSE_ATTN` and routes `VSA_sparsity=0.8` through FastVideo's typed `PipelineSelection.experimental` config. Keep this backend for FastWan 2.1 models; forcing `TORCH_SDPA` can instantiate a non-VSA Wan block and fail checkpoint loading. Use `--attention-backend TORCH_SDPA` for the LTX-2 compatibility path validated by the B300 smoke test.
+</Info>
 
 ## Kubernetes Deployment
 
@@ -62,8 +64,9 @@ docker build examples/diffusers/ -t <my-registry/fastvideo-runtime:my-tag>
 docker push <my-registry/fastvideo-runtime:my-tag>
 ```
 
-> [!NOTE]
-> A from-source [flash-attention](https://github.com/RandNMR73/flash-attention) (FA4) build is deferred. The worker runs on FastVideo's default attention backends without it.
+<Note>
+A from-source [flash-attention](https://github.com/RandNMR73/flash-attention) (FA4) build is deferred. The worker runs on FastVideo's default attention backends without it.
+</Note>
 
 </Step>
 
@@ -132,8 +135,9 @@ kubectl port-forward -n ${NAMESPACE} svc/fastvideo-agg-frontend 8000:8000
 
 <Step title="Send a test request">
 
-> [!NOTE]
-> If this is the first request after startup, expect it to take longer while warmup completes. See [Warmup Time](#warmup-time) for details.
+<Note>
+If this is the first request after startup, expect it to take longer while warmup completes. See [Warmup Time](#warmup-time) for details.
+</Note>
 
 ```bash
 curl -s -X POST http://localhost:8000/v1/videos \
@@ -195,8 +199,9 @@ curl -s -X POST http://localhost:8000/v1/videos \
 
 FastVideo exposes generated audio and `audio_sample_rate` on its Python result object. This Dynamo worker returns the saved MP4 in `data[0].b64_json`, with FastVideo muxing the generated 24 kHz audio into the MP4 output.
 
-> [!NOTE]
-> LTX-2 refine pipeline flags such as `ltx2_refine_enabled`, `ltx2_refine_upsampler_path`, and per-component compile settings are not yet exposed through FastVideo's typed API config.
+<Note>
+LTX-2 refine pipeline flags such as `ltx2_refine_enabled`, `ltx2_refine_upsampler_path`, and per-component compile settings are not yet exposed through FastVideo's typed API config.
+</Note>
 
 </Step>
 
@@ -206,8 +211,9 @@ FastVideo exposes generated audio and `audio_sample_rate` on its Python result o
 
 On first start, workers download model weights. When `--torch-compile` is enabled, compile/warmup steps can push the first ready time to roughly **10–20 minutes** (hardware-dependent). After the first successful compiled response, the second request can still take around **35 seconds** while runtime caches finish warming up; steady-state performance is typically reached from the third request onward.
 
-> [!TIP]
-> The shared Hugging Face cache PVC applied in the [Kubernetes Deployment](#kubernetes-deployment) steps means weights are downloaded once and reused across pod restarts, so warmup is only paid in full on the very first start.
+<Tip>
+The shared Hugging Face cache PVC applied in the [Kubernetes Deployment](#kubernetes-deployment) steps means weights are downloaded once and reused across pod restarts, so warmup is only paid in full on the very first start.
+</Tip>
 
 ## Worker Configuration Reference
 
@@ -435,8 +441,9 @@ WORKER_EXTRA_ARGS="--attention-backend VIDEO_SPARSE_ATTN --vsa-sparsity 0.8" \
 ./run_local.sh
 ```
 
-> [!NOTE]
-> FastVideo worker flags are not `dynamo.frontend` flags, so pass non-default worker configuration through `WORKER_EXTRA_ARGS`.
+<Note>
+FastVideo worker flags are not `dynamo.frontend` flags, so pass non-default worker configuration through `WORKER_EXTRA_ARGS`.
+</Note>
 
 Validated B300 smoke-test worker configurations:
 
@@ -445,8 +452,9 @@ Validated B300 smoke-test worker configurations:
 | `FastVideo/FastWan2.1-T2V-1.3B-Diffusers` | `--attention-backend VIDEO_SPARSE_ATTN --vsa-sparsity 0.8` | `--attention-backend VIDEO_SPARSE_ATTN --vsa-sparsity 0.8 --fp4-quantization` |
 | `FastVideo/LTX2-Distilled-Diffusers` | `--attention-backend TORCH_SDPA` | `--attention-backend TORCH_SDPA --fp4-quantization` |
 
-> [!NOTE]
-> The FastWan FP4 configuration completed the smoke request, but the worker log did not show the NVFP4 weight-conversion marker. Treat `--fp4-quantization` as requested, not independently confirmed, for FastWan until the FastVideo logs expose that confirmation.
+<Note>
+The FastWan FP4 configuration completed the smoke request, but the worker log did not show the NVFP4 weight-conversion marker. Treat `--fp4-quantization` as requested, not independently confirmed, for FastWan until the FastVideo logs expose that confirmation.
+</Note>
 
 The script writes logs to:
 

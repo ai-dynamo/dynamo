@@ -48,10 +48,11 @@ input works across the lineup. Hopper's NVDEC matches Turing's feature set and
 does **not** decode AV1; Blackwell adds AV1 decode. The Ada parts (L4, L40S, RTX 6000 Ada)
 decode AV1 as well, and unlike A100, H100, H200, B200, and GB200 they also carry NVENC.
 
-> [!NOTE]
-> Under Multi-Instance GPU (MIG), NVDEC engines are divided across instances. A given MIG
-> profile may expose fewer decoders than the full GPU, and some profiles expose none.
-> Verify decode works in the exact profile you deploy.
+<Note>
+Under Multi-Instance GPU (MIG), NVDEC engines are divided across instances. A given MIG
+profile may expose fewer decoders than the full GPU, and some profiles expose none.
+Verify decode works in the exact profile you deploy.
+</Note>
 
 
 ## Container requirements
@@ -75,10 +76,11 @@ docker run --gpus all -e NVIDIA_DRIVER_CAPABILITIES=video,compute,utility ...
 
 ### Kubernetes
 
-> [!IMPORTANT]
-> On Kubernetes the image's `ENV` is **not** reliably sufficient. Set the variable on the
-> container spec as well. Dynamo's own GPU test runners shipped images carrying the `ENV`
-> and still had no hardware decode until the pod spec set it explicitly.
+<Info>
+On Kubernetes the image's `ENV` is **not** reliably sufficient. Set the variable on the
+container spec as well. Dynamo's own GPU test runners shipped images carrying the `ENV`
+and still had no hardware decode until the pod spec set it explicitly.
+</Info>
 
 Add it to the container that runs the worker:
 
@@ -100,10 +102,11 @@ node, and — if the cluster runs in CDI mode — whether the generated device s
 the video libraries, since in that mode capabilities come from the spec rather than the
 environment variable.
 
-> [!WARNING]
-> Missing the `video` capability is the most common cause of hardware decode being
-> silently unavailable. The GPU itself is fine; the container simply cannot see the
-> decoder.
+<Warning>
+Missing the `video` capability is the most common cause of hardware decode being
+silently unavailable. The GPU itself is fine; the container simply cannot see the
+decoder.
+</Warning>
 
 ## Verifying hardware decode
 
@@ -137,17 +140,18 @@ Hardware decode is additive and never blocks a request on its own: routing falls
 to a software decode path where one exists. VP8 and VP9 frontend decoding on vLLM, or
 SGLang on CUDA, does not depend on NVDEC.
 
-> [!IMPORTANT]
-> The shipped images do not include a software H.264, H.265, or AV1 decoder.
-> Therefore, if NVDEC is unavailable, H.264 and H.265 fail with an
-> unsupported-codec error unless the backend's wider Python decode carrier is
-> installed. AV1 also requires an additional carrier because Dynamo does not
-> route it through NVDEC and the in-tree FFmpeg excludes it.
->
-> Grant the container the `video` driver capability so NVDEC can serve H.264 and H.265.
-> For VP8 and VP9, use frontend decoding on vLLM, or SGLang on CUDA. For
-> other software-decoded cases, [install an additional decoder](#install-additional-decoders)
-> or transcode the input before sending it.
+<Info>
+The shipped images do not include a software H.264, H.265, or AV1 decoder.
+Therefore, if NVDEC is unavailable, H.264 and H.265 fail with an
+unsupported-codec error unless the backend's wider Python decode carrier is
+installed. AV1 also requires an additional carrier because Dynamo does not
+route it through NVDEC and the in-tree FFmpeg excludes it.
+
+Grant the container the `video` driver capability so NVDEC can serve H.264 and H.265.
+For VP8 and VP9, use frontend decoding on vLLM, or SGLang on CUDA. For
+other software-decoded cases, [install an additional decoder](#install-additional-decoders)
+or transcode the input before sending it.
+</Info>
 
 
 ## Install Additional Decoders

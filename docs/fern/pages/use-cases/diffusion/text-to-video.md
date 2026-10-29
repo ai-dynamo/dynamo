@@ -5,9 +5,10 @@ title: Text to Video
 subtitle: Generate video from text prompts, with or without a synchronized audio track
 ---
 
-> [!TIP]
-> To serve FastVideo models, see [FastVideo](fastvideo.md). It runs a custom
-> worker behind the same `/v1/videos` endpoint and has its own Kubernetes deployment path.
+<Tip>
+To serve FastVideo models, see [FastVideo](fastvideo.md). It runs a custom
+worker behind the same `/v1/videos` endpoint and has its own Kubernetes deployment path.
+</Tip>
 
 Dynamo serves text-to-video models through the `/v1/videos` endpoint. To
 animate a source image, see [Image to Video](image-to-video.md). To answer
@@ -22,20 +23,22 @@ questions *about* a video instead, see [Video Understanding](../video-understand
 
 Both tutorials use the backend setup in [Set up the backend](#set-up-the-backend).
 
-> [!IMPORTANT]
-> **Generated video is VP9.** Dynamo's runtime images encode video output as
-> VP9, including `output_format: "mp4"` (VP9 in an MP4 container). Earlier
-> releases returned H.264 for MP4 output. VP9-in-MP4 plays in Chrome, Firefox,
-> and ffmpeg, but not in Safari or QuickTime. To get H.264, transcode on the
-> client: `ffmpeg -i output.mp4 -c:v libx264 output-h264.mp4`. Dynamo uses a CPU
-> VP9 encoder because A100, H100, H200, B200, and GB200 have no hardware video
-> encoder (NVENC).
+<Info>
+**Generated video is VP9.** Dynamo's runtime images encode video output as
+VP9, including `output_format: "mp4"` (VP9 in an MP4 container). Earlier
+releases returned H.264 for MP4 output. VP9-in-MP4 plays in Chrome, Firefox,
+and ffmpeg, but not in Safari or QuickTime. To get H.264, transcode on the
+client: `ffmpeg -i output.mp4 -c:v libx264 output-h264.mp4`. Dynamo uses a CPU
+VP9 encoder because A100, H100, H200, B200, and GB200 have no hardware video
+encoder (NVENC).
+</Info>
 
-> [!NOTE]
-> Video generation backends run from Dynamo CLI launch scripts and
-> `python -m dynamo.*` entrypoints. Dynamo does not yet ship Kubernetes recipes
-> for them. [FastVideo](fastvideo.md), a custom example worker, has its own
-> Kubernetes deployment path.
+<Note>
+Video generation backends run from Dynamo CLI launch scripts and
+`python -m dynamo.*` entrypoints. Dynamo does not yet ship Kubernetes recipes
+for them. [FastVideo](fastvideo.md), a custom example worker, has its own
+Kubernetes deployment path.
+</Note>
 
 ## MiniMax-H3: Video with Audio
 
@@ -289,8 +292,9 @@ The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field f
   Random seed for reproducibility.
 </ParamField>
 
-> [!NOTE]
-> The `nvext.boundary_ratio` and `nvext.guidance_scale_2` fields apply to the dual-expert MoE schedule used in image-to-video. See [Image-to-Video with vLLM-Omni](image-to-video.md#vllm-omni).
+<Note>
+The `nvext.boundary_ratio` and `nvext.guidance_scale_2` fields apply to the dual-expert MoE schedule used in image-to-video. See [Image-to-Video with vLLM-Omni](image-to-video.md#vllm-omni).
+</Note>
 
 ### See Also
 

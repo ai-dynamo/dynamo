@@ -81,8 +81,9 @@ The Perfetto converter infers a tool span from the end of a tool-call response t
 tool_wait(turn N) ~= next.request_received_ms - this.event_time_unix_ms
 ```
 
-> [!IMPORTANT]
-> This interval includes tool execution and agent overhead. It cannot separate parallel tools or attribute time to one tool.
+<Info>
+This interval includes tool execution and agent overhead. It cannot separate parallel tools or attribute time to one tool.
+</Info>
 
 ### Record Precise Tool Timing
 
@@ -175,15 +176,17 @@ Dynamo emits `request_end` after an eligible response stream finishes or is drop
 
 </details>
 
-> [!IMPORTANT]
-> Default request traces do not capture prompt, response, or tool-call argument bodies. However, `agent_context.agent_headers` contains unredacted, client-supplied values and can include arbitrary data. These headers appear on `request_end` rows independently of `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST`, which applies only to optional `request_payload` rows. Do not send secrets or prompt content in agent metadata headers. See the [Request Trace Reference](../../reference/observability/request-traces.mdx#request_end) for the capture boundary.
+<Info>
+Default request traces do not capture prompt, response, or tool-call argument bodies. However, `agent_context.agent_headers` contains unredacted, client-supplied values and can include arbitrary data. These headers appear on `request_end` rows independently of `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST`, which applies only to optional `request_payload` rows. Do not send secrets or prompt content in agent metadata headers. See the [Request Trace Reference](../../reference/observability/request-traces.mdx#request_end) for the capture boundary.
+</Info>
 
 Requests with recognized session identity can include opaque strings in `agent_context.agent_headers`. Trace consumers decide how to interpret them and must tolerate unknown names, values, and embedded JSON. Captured headers do not change request placement or evict cached blocks. See [Captured agent headers](session-ids.mdx#agent-headers) for capture rules and limits. Older frontends cannot supply the map during a rolling upgrade.
 
 For chat streams, Dynamo records finish metadata after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason.
 
-> [!WARNING]
-> Request tracing currently covers eligible Rust OpenAI chat-completions and completions requests. It skips unsupported replay shapes, including `n > 1`, `best_of > 1`, `prompt_embeds`, multimodal inputs, and requests without a tracker or usable KV cache block size. Sinks use best-effort delivery and can drop records when they lag, so check warnings and validate row counts before treating a capture as complete.
+<Warning>
+Request tracing currently covers eligible Rust OpenAI chat-completions and completions requests. It skips unsupported replay shapes, including `n > 1`, `best_of > 1`, `prompt_embeds`, multimodal inputs, and requests without a tracker or usable KV cache block size. Sinks use best-effort delivery and can drop records when they lag, so check warnings and validate row counts before treating a capture as complete.
+</Warning>
 
 ## Next
 

@@ -55,11 +55,12 @@ env:
     value: "1"
 ```
 
-> [!WARNING]
-> Use a `rediss://` URL unless Redis traffic is protected by equivalent
-> transport encryption, such as an encrypted service mesh. A `redis://` URL
-> sends cache data and any URL credentials without TLS and should be used only
-> on an appropriately secured in-cluster network.
+<Warning>
+Use a `rediss://` URL unless Redis traffic is protected by equivalent
+transport encryption, such as an encrypted service mesh. A `redis://` URL
+sends cache data and any URL credentials without TLS and should be used only
+on an appropriately secured in-cluster network.
+</Warning>
 
 Cache reads and fills run on the request path. A miss waits for Redis `SET` so
 the fill completes before the request returns. Redis errors fail open, and each
@@ -127,13 +128,14 @@ Dynamo normalizes it and the recognized agent headers into both an
 `AgentContext` and the session affinity used for routing and image-cache
 scoping.
 
-> [!WARNING]
-> Session scoping partitions cache entries; it is not an authentication
-> boundary. Unless a trusted proxy sets or overwrites `x-dynamo-session-id`,
-> the caller controls the scope. Configure the proxy to derive this header
-> from the authenticated identity on every request, and treat scope identifiers
-> as secrets. A caller that learns another identifier can reuse cached content
-> stored under that scope for the same URL.
+<Warning>
+Session scoping partitions cache entries; it is not an authentication
+boundary. Unless a trusted proxy sets or overwrites `x-dynamo-session-id`,
+the caller controls the scope. Configure the proxy to derive this header
+from the authenticated identity on every request, and treat scope identifiers
+as secrets. A caller that learns another identifier can reuse cached content
+stored under that scope for the same URL.
+</Warning>
 
 When session scoping is enabled, a missing or blank scope bypasses the local
 decoded-image cache, in-flight request deduplication, the shared encoded-image

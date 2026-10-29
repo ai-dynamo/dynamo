@@ -7,8 +7,9 @@ subtitle: Schedule whole agent runs, and pause idle ones at tool boundaries, to 
 
 By the end of this guide, the frontend schedules each agent session as one program. It pauses sessions that are waiting on tools when KV cache is under pressure, and resumes them when there is room.
 
-> [!NOTE]
-> ThunderAgent is experimental. Dynamo includes a native plugin that ports the scheduler from the [ThunderAgent](https://arxiv.org/abs/2602.13692) paper (Kang et al., 2026). It runs inside the frontend and is enabled through router-policy YAML.
+<Note>
+ThunderAgent is experimental. Dynamo includes a native plugin that ports the scheduler from the [ThunderAgent](https://arxiv.org/abs/2602.13692) paper (Kang et al., 2026). It runs inside the frontend and is enabled through router-policy YAML.
+</Note>
 
 ![Agent sessions feed the ThunderAgent program scheduler in the frontend. Under KV cache pressure it defers the next turn of sessions waiting on tools and resumes them when there is room.](../../../assets/img/thunderagent-scheduling.svg)
 

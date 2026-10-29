@@ -7,9 +7,10 @@ subtitle: Synthesize speech with vLLM-Omni through the /v1/audio/speech endpoint
 
 Text-to-speech (TTS) runs a vLLM-Omni worker with `--output-modalities audio` and serves the OpenAI-compatible `/v1/audio/speech` endpoint. To use TTS as the last stage of a voice agent, see [Voice Pipelines](voice-pipelines.md).
 
-> [!NOTE]
-> Before you begin, set up vLLM-Omni as described in
-> [Voice Pipelines › Set up the backend](voice-pipelines.md#set-up-the-backend).
+<Note>
+Before you begin, set up vLLM-Omni as described in
+[Voice Pipelines › Set up the backend](voice-pipelines.md#set-up-the-backend).
+</Note>
 
 ## Tested Models
 

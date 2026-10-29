@@ -112,9 +112,10 @@ Workers fetch media URLs under a default-deny policy:
 - Each remote download is capped at `DYN_MM_MAX_FILE_SIZE_MB` (default `64`).
   TensorRT-LLM uses its own `--max-file-size-mb` option instead.
 
-> [!WARNING]
-> `DYN_MM_ALLOW_INTERNAL=1` lets request authors make the worker fetch internal
-> URLs. Enable it only when requests come from trusted clients.
+<Warning>
+`DYN_MM_ALLOW_INTERNAL=1` lets request authors make the worker fetch internal
+URLs. Enable it only when requests come from trusted clients.
+</Warning>
 
 ## Next Steps
 

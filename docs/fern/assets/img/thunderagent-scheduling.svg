@@ -3,8 +3,8 @@
   <desc id="desc">Agent sessions feed the ThunderAgent scheduler in the frontend. A session in an LLM turn keeps running. A session waiting on a tool is paused while KV cache is under pressure, and it resumes when there is room.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
   <rect x="36" y="8" width="1028" height="374" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="19.5" font-weight="700" letter-spacing="1.6" fill="#5A8F00">THUNDERAGENT</text>
-  <text x="50" y="68" font-size="33.0" font-weight="700" fill="#1A1A1A">Pause sessions that wait on tools to protect KV cache</text>
+  <text x="50" y="40" font-size="15.0" font-weight="700" letter-spacing="1.6" fill="#5A8F00">THUNDERAGENT</text>
+  <text x="50" y="68" font-size="25.4" font-weight="700" fill="#1A1A1A">Pause sessions that wait on tools to protect KV cache</text>
   <rect x="50" y="120" width="290" height="68" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
   <text x="66" y="148" font-size="21.0" font-weight="700" fill="#1A1A1A">Session A</text>
   <text x="66" y="170" font-size="19.5" fill="#4C7A00">running</text>
