@@ -38,19 +38,20 @@ import (
 // dgdServiceExportReconciler exports the PoolRelay and frontend Services of a DGD
 // marked as a Global Router pool through the configured Multi-Cluster Services
 // implementation, and withdraws the exports when the mark is removed. It creates
-// and deletes only ServiceExports that the DGD controls.
+// and deletes only ServiceExports that the DGD controls, at the
+// multicluster.x-k8s.io version that the gates resolved.
 type dgdServiceExportReconciler struct {
 	dgdResourceSyncer
 	config *configv1alpha1.OperatorConfiguration
-	gate   features.Gate
+	gates  features.Gates
 }
 
 func newDGDServiceExportReconciler(
 	syncer dgdResourceSyncer,
 	config *configv1alpha1.OperatorConfiguration,
-	gate features.Gate,
+	gates features.Gates,
 ) *dgdServiceExportReconciler {
-	return &dgdServiceExportReconciler{dgdResourceSyncer: syncer, config: config, gate: gate}
+	return &dgdServiceExportReconciler{dgdResourceSyncer: syncer, config: config, gates: gates}
 }
 
 // Reconcile converges the DGD's ServiceExports on its pool mark. Without a
@@ -60,7 +61,7 @@ func (r *dgdServiceExportReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
-	if !r.gate.Enabled(features.MultiClusterExport) {
+	if !r.gates.Enabled(features.MultiClusterExport) {
 		return nil
 	}
 
@@ -98,7 +99,8 @@ func (r *dgdServiceExportReconciler) export(
 	name string,
 ) error {
 	// An existing export, the DGD's or a user's, needs nothing.
-	err := r.Get(ctx, types.NamespacedName{Namespace: dgd.Namespace, Name: name}, multicluster.ServiceExportMetadata())
+	err := r.Get(ctx, types.NamespacedName{Namespace: dgd.Namespace, Name: name},
+		multicluster.ServiceExportMetadata(r.gates.ServiceExportVersion))
 	if err == nil {
 		return nil
 	}
@@ -107,7 +109,7 @@ func (r *dgdServiceExportReconciler) export(
 	}
 
 	// Owned by the DGD, the export is deleted with it.
-	serviceExport := multicluster.RenderServiceExport(dgd.Namespace, name, dgd.Name)
+	serviceExport := multicluster.RenderServiceExport(r.gates.ServiceExportVersion, dgd.Namespace, name, dgd.Name)
 	if err := ctrl.SetControllerReference(dgd, serviceExport, r.Scheme()); err != nil {
 		return fmt.Errorf("failed to set the owner of ServiceExport %s: %w", name, err)
 	}
@@ -132,7 +134,7 @@ func (r *dgdServiceExportReconciler) withdraw(
 	name string,
 ) error {
 	// Only an export the DGD controls is withdrawn.
-	existing := multicluster.ServiceExportMetadata()
+	existing := multicluster.ServiceExportMetadata(r.gates.ServiceExportVersion)
 	err := r.Get(ctx, types.NamespacedName{Namespace: dgd.Namespace, Name: name}, existing)
 	if apierrors.IsNotFound(err) {
 		return nil

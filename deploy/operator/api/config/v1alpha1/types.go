@@ -404,12 +404,14 @@ type DiscoveryConfiguration struct {
 // pools through the Kubernetes Multi-Cluster Services (MCS) API, for the Global
 // Discovery Service's Kubernetes stores. The operator exports a pool only when
 // MCSImplementation is set and its DGD has the nvidia.com/global-router-pool
-// annotation.
+// annotation. Each export is a multicluster.x-k8s.io ServiceExport at v1alpha1,
+// or at v1beta1 in a cluster that serves only v1beta1.
 type MultiClusterConfiguration struct {
 	// MCSImplementation is the MCS implementation that imports the exports. Empty,
 	// the default, exports nothing: Global Router pools are then discovered without
-	// Kubernetes. Clearing it leaves earlier exports in place until their DGDs are
-	// deleted.
+	// Kubernetes. Set, it needs the multicluster.x-k8s.io ServiceExport API at
+	// v1alpha1 or v1beta1 in this cluster. Clearing it leaves earlier exports in
+	// place until their DGDs are deleted.
 	MCSImplementation MCSImplementation `json:"mcsImplementation,omitempty"`
 }
 

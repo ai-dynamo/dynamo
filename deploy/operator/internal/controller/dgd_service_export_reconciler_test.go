@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/tools/events"
@@ -44,9 +45,11 @@ import (
 )
 
 // newServiceExportTestClient returns a fake client that also serves the
-// ServiceExport kind, which the operator's scheme does not register.
+// ServiceExport kind, which the operator's scheme does not register, at
+// serviceExportVersion only.
 func newServiceExportTestClient(
 	scheme *runtime.Scheme,
+	serviceExportVersion string,
 	funcs interceptor.Funcs,
 	objects ...client.Object,
 ) client.WithWatch {
@@ -54,7 +57,7 @@ func newServiceExportTestClient(
 	for gvk := range scheme.AllKnownTypes() {
 		mapper.Add(gvk, meta.RESTScopeNamespace)
 	}
-	mapper.Add(multicluster.ServiceExportGVK, meta.RESTScopeNamespace)
+	mapper.Add(multicluster.ServiceExportGroupKind.WithVersion(serviceExportVersion), meta.RESTScopeNamespace)
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithRESTMapper(mapper).
@@ -74,6 +77,7 @@ func TestDGDServiceExportReconciler(t *testing.T) {
 		dgdName        string
 		pool           bool
 		implementation configv1alpha1.MCSImplementation
+		servedVersion  string
 		ownedBefore    []string
 		terminating    bool
 		foreign        []string
@@ -85,6 +89,7 @@ func TestDGDServiceExportReconciler(t *testing.T) {
 			dgdName:        "qwen",
 			pool:           true,
 			implementation: configv1alpha1.MCSImplementationStandard,
+			servedVersion:  "v1alpha1",
 			wantOwned:      []string{"qwen-pool-relay", "qwen-frontend"},
 			wantEvents:     2,
 		},
@@ -93,13 +98,32 @@ func TestDGDServiceExportReconciler(t *testing.T) {
 			dgdName:        "qwen3-0.6b",
 			pool:           true,
 			implementation: configv1alpha1.MCSImplementationKarmada,
+			servedVersion:  "v1alpha1",
 			wantOwned:      []string{"qwen3-0-6b-pool-relay", "qwen3-0-6b-frontend"},
+			wantEvents:     2,
+		},
+		{
+			name:           "a cluster serving only v1beta1 gets v1beta1 exports",
+			dgdName:        "qwen",
+			pool:           true,
+			implementation: configv1alpha1.MCSImplementationStandard,
+			servedVersion:  "v1beta1",
+			wantOwned:      []string{"qwen-pool-relay", "qwen-frontend"},
+			wantEvents:     2,
+		},
+		{
+			name:           "removing the pool mark withdraws v1beta1 exports",
+			dgdName:        "qwen",
+			implementation: configv1alpha1.MCSImplementationStandard,
+			servedVersion:  "v1beta1",
+			ownedBefore:    []string{"qwen-pool-relay", "qwen-frontend"},
 			wantEvents:     2,
 		},
 		{
 			name:           "removing the pool mark withdraws the exports",
 			dgdName:        "qwen",
 			implementation: configv1alpha1.MCSImplementationKarmada,
+			servedVersion:  "v1alpha1",
 			ownedBefore:    []string{"qwen-pool-relay", "qwen-frontend"},
 			wantEvents:     2,
 		},
@@ -107,6 +131,7 @@ func TestDGDServiceExportReconciler(t *testing.T) {
 			name:           "an export already being deleted is not deleted again",
 			dgdName:        "qwen",
 			implementation: configv1alpha1.MCSImplementationStandard,
+			servedVersion:  "v1alpha1",
 			ownedBefore:    []string{"qwen-pool-relay"},
 			terminating:    true,
 			wantOwned:      []string{"qwen-pool-relay"},
@@ -116,6 +141,7 @@ func TestDGDServiceExportReconciler(t *testing.T) {
 			dgdName:        "qwen",
 			pool:           true,
 			implementation: configv1alpha1.MCSImplementationStandard,
+			servedVersion:  "v1alpha1",
 			foreign:        []string{"qwen-frontend"},
 			wantOwned:      []string{"qwen-pool-relay"},
 			wantEvents:     1,
@@ -124,6 +150,7 @@ func TestDGDServiceExportReconciler(t *testing.T) {
 			name:           "a DGD that is not a pool leaves a user's export alone",
 			dgdName:        "qwen",
 			implementation: configv1alpha1.MCSImplementationStandard,
+			servedVersion:  "v1alpha1",
 			foreign:        []string{"qwen-pool-relay"},
 		},
 		{
@@ -131,12 +158,14 @@ func TestDGDServiceExportReconciler(t *testing.T) {
 			dgdName:        "qwen",
 			pool:           true,
 			implementation: configv1alpha1.MCSImplementationNone,
+			servedVersion:  "v1alpha1",
 		},
 		{
 			name:           "Karmada skips a Service name it cannot import",
 			dgdName:        longName,
 			pool:           true,
 			implementation: configv1alpha1.MCSImplementationKarmada,
+			servedVersion:  "v1alpha1",
 			wantOwned:      []string{longName + "-frontend"},
 			wantEvents:     1,
 		},
@@ -145,6 +174,7 @@ func TestDGDServiceExportReconciler(t *testing.T) {
 			dgdName:        longName,
 			pool:           true,
 			implementation: configv1alpha1.MCSImplementationStandard,
+			servedVersion:  "v1alpha1",
 			wantOwned:      []string{longName + "-pool-relay", longName + "-frontend"},
 			wantEvents:     2,
 		},
@@ -163,7 +193,7 @@ func TestDGDServiceExportReconciler(t *testing.T) {
 			}
 			objects := []client.Object{dgd}
 			for _, name := range tc.ownedBefore {
-				owned := multicluster.RenderServiceExport(namespace, name, dgd.Name)
+				owned := multicluster.RenderServiceExport(tc.servedVersion, namespace, name, dgd.Name)
 				g.Expect(controllerutil.SetControllerReference(dgd, owned, scheme)).To(gomega.Succeed())
 				if tc.terminating {
 					owned.SetFinalizers([]string{"example.com/hold"})
@@ -172,16 +202,17 @@ func TestDGDServiceExportReconciler(t *testing.T) {
 				objects = append(objects, owned)
 			}
 			for _, name := range tc.foreign {
-				objects = append(objects, multicluster.RenderServiceExport(namespace, name, dgd.Name))
+				objects = append(objects, multicluster.RenderServiceExport(tc.servedVersion, namespace, name, dgd.Name))
 			}
-			fakeClient := newServiceExportTestClient(scheme, interceptor.Funcs{}, objects...)
+			fakeClient := newServiceExportTestClient(scheme, tc.servedVersion, interceptor.Funcs{}, objects...)
 
-			t.Log("Reconcile the exports, with the gate the configured implementation resolves to")
+			t.Log("Reconcile the exports, with the gate and version the configured implementation resolves to")
 			config := &configv1alpha1.OperatorConfiguration{
 				MultiCluster: configv1alpha1.MultiClusterConfiguration{MCSImplementation: tc.implementation},
 			}
 			gates := features.Gates{
-				MultiClusterExport: tc.implementation != configv1alpha1.MCSImplementationNone,
+				MultiClusterExport:   tc.implementation != configv1alpha1.MCSImplementationNone,
+				ServiceExportVersion: tc.servedVersion,
 			}
 			recorder := events.NewFakeRecorder(10)
 			reconciler := newDGDServiceExportReconciler(newDGDResourceSyncer(fakeClient, recorder), config, gates)
@@ -194,7 +225,7 @@ func TestDGDServiceExportReconciler(t *testing.T) {
 
 			t.Log("Check which exports the DGD controls, and that a user's export is untouched")
 			for _, name := range multicluster.ServiceNames(dgd.Name) {
-				export := multicluster.ServiceExportMetadata()
+				export := multicluster.ServiceExportMetadata(tc.servedVersion)
 				err := fakeClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, export)
 				switch {
 				case slices.Contains(tc.wantOwned, name):
@@ -222,9 +253,10 @@ func TestDGDServiceExportReconcilerToleratesAStaleCache(t *testing.T) {
 		Name: "qwen", Namespace: "dynamo", UID: uuid.NewUUID(),
 		Annotations: map[string]string{consts.KubeAnnotationGlobalRouterPool: "true"},
 	}
-	fakeClient := newServiceExportTestClient(scheme, interceptor.Funcs{
+	fakeClient := newServiceExportTestClient(scheme, "v1alpha1", interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-			return apierrors.NewAlreadyExists(multicluster.ServiceExportGVK.GroupVersion().WithResource("serviceexports").GroupResource(), obj.GetName())
+			serviceExports := schema.GroupResource{Group: multicluster.ServiceExportGroupKind.Group, Resource: "serviceexports"}
+			return apierrors.NewAlreadyExists(serviceExports, obj.GetName())
 		},
 	}, dgd)
 
@@ -236,7 +268,7 @@ func TestDGDServiceExportReconcilerToleratesAStaleCache(t *testing.T) {
 	reconciler := newDGDServiceExportReconciler(
 		newDGDResourceSyncer(fakeClient, recorder),
 		config,
-		features.Gates{MultiClusterExport: true},
+		features.Gates{MultiClusterExport: true, ServiceExportVersion: "v1alpha1"},
 	)
 	g.Expect(reconciler.Reconcile(ctx, dgd)).To(gomega.Succeed())
 	g.Expect(recorder.Events).To(gomega.BeEmpty())
@@ -252,7 +284,7 @@ func TestMapServiceExportToDGDRequests(t *testing.T) {
 	llama := &v1beta1.DynamoGraphDeployment{Name: "llama", Namespace: "dynamo"}
 	elsewhere := &v1beta1.DynamoGraphDeployment{Name: "llama", Namespace: "other"}
 	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: newServiceExportTestClient(scheme, interceptor.Funcs{}, dotted, llama, elsewhere),
+		Client: newServiceExportTestClient(scheme, "v1alpha1", interceptor.Funcs{}, dotted, llama, elsewhere),
 	}
 
 	for _, tc := range []struct {
@@ -264,7 +296,7 @@ func TestMapServiceExportToDGDRequests(t *testing.T) {
 		{export: "llama", want: []ctrl.Request{}},
 	} {
 		t.Log("Map an event for export " + tc.export + " in namespace dynamo to the DGDs that export it")
-		export := multicluster.ServiceExportMetadata()
+		export := multicluster.ServiceExportMetadata("v1alpha1")
 		export.Namespace = "dynamo"
 		export.Name = tc.export
 		g.Expect(reconciler.mapServiceExportToDGDRequests(ctx, export)).To(gomega.Equal(tc.want), tc.export)
