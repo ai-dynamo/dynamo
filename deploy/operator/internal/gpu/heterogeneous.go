@@ -22,28 +22,38 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
-// collectOtherModels returns, sorted and without repeats, the models of the nodes whose SKU
-// differs from the selected one. A filtered discovery asked for one SKU and returns nothing:
-// the nodes of other SKUs were never candidates. at yields the SKU and the model of node i.
+// collectOtherModels returns, sorted and without repeats, the models of nodes whose GPU identity
+// differs from the selected one. It uses the same identity rule as capacity aggregation: known
+// GPUs are grouped by SKU and unknown GPUs by normalized model name. A filtered discovery asked
+// for one SKU and returns nothing because nodes of other SKUs were never candidates.
 func collectOtherModels(
-	filterSKU, selected nvidiacomv1beta1.GPUSKUType,
+	filterSKU, selectedSKU nvidiacomv1beta1.GPUSKUType,
+	selectedModel string,
 	nodes int,
 	at func(i int) (nvidiacomv1beta1.GPUSKUType, string),
 ) []string {
 	if filterSKU != "" {
 		return nil
 	}
-	seen := map[string]struct{}{}
-	for i := range nodes {
-		if sku, model := at(i); sku != selected {
-			seen[model] = struct{}{}
+	seen := map[string]string{}
+	for i := 0; i < nodes; i++ {
+		sku, model := at(i)
+		if matchesSelectedGPUType(sku, selectedSKU, model, selectedModel) {
+			continue
+		}
+		identity := "sku:" + string(sku)
+		if sku == "" {
+			identity = "model:" + normalize(model)
+		}
+		if existing, exists := seen[identity]; !exists || model < existing {
+			seen[identity] = model
 		}
 	}
 	if len(seen) == 0 {
 		return nil
 	}
 	models := make([]string, 0, len(seen))
-	for model := range seen {
+	for _, model := range seen {
 		models = append(models, model)
 	}
 	sort.Strings(models)

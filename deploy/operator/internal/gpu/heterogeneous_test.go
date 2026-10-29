@@ -29,24 +29,33 @@ func TestCollectOtherModels(t *testing.T) {
 		model string
 	}
 	tests := []struct {
-		name     string
-		filter   nvidiacomv1beta1.GPUSKUType
-		selected nvidiacomv1beta1.GPUSKUType
-		nodes    []node
-		want     []string
+		name          string
+		filter        nvidiacomv1beta1.GPUSKUType
+		selectedSKU   nvidiacomv1beta1.GPUSKUType
+		selectedModel string
+		nodes         []node
+		want          []string
 	}{
-		{"a cluster of one SKU", "", "h200_sxm", []node{{"h200_sxm", "H200"}, {"h200_sxm", "H200"}}, nil},
-		{"a second SKU is reported once, sorted", "", "h200_sxm",
+		{"a cluster of one SKU", "", "h200_sxm", "H200", []node{{"h200_sxm", "H200"}, {"h200_sxm", "H200"}}, nil},
+		{"a second SKU is reported once, sorted", "", "h200_sxm", "H200",
 			[]node{{"h200_sxm", "H200"}, {"h100_sxm", "H100"}, {"b200_sxm", "B200"}, {"h100_sxm", "H100"}},
 			[]string{"B200", "H100"}},
-		{"a model the catalog does not know still counts", "", "h200_sxm",
+		{"a model the catalog does not know still counts", "", "h200_sxm", "H200",
 			[]node{{"h200_sxm", "H200"}, {"", "Mystery GPU"}}, []string{"Mystery GPU"}},
-		{"a filtered discovery never reports", "h200_sxm", "h200_sxm",
+		{"distinct models unknown to the catalog remain distinct", "", "", "Mystery Alpha",
+			[]node{{"", "Mystery Alpha"}, {"", "Mystery Beta"}}, []string{"Mystery Beta"}},
+		{"normalized spellings of an unknown selected model share its identity", "", "", "Mystery GPU",
+			[]node{{"", "Mystery GPU"}, {"", "mystery-gpu"}}, nil},
+		{"normalized spellings of another unknown model are reported once", "", "", "Mystery Alpha",
+			[]node{{"", "Mystery Alpha"}, {"", "mystery-beta"}, {"", "Mystery Beta"}}, []string{"Mystery Beta"}},
+		{"known models with the same SKU are reported once", "", "h200_sxm", "H200",
+			[]node{{"h200_sxm", "H200"}, {"h100_sxm", "NVIDIA H100"}, {"h100_sxm", "H100 SXM"}}, []string{"H100 SXM"}},
+		{"a filtered discovery never reports", "h200_sxm", "h200_sxm", "H200",
 			[]node{{"h200_sxm", "H200"}, {"h100_sxm", "H100"}}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := collectOtherModels(tt.filter, tt.selected, len(tt.nodes),
+			got := collectOtherModels(tt.filter, tt.selectedSKU, tt.selectedModel, len(tt.nodes),
 				func(i int) (nvidiacomv1beta1.GPUSKUType, string) { return tt.nodes[i].sku, tt.nodes[i].model })
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("got %v, want %v", got, tt.want)

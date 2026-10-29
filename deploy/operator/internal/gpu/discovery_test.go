@@ -50,6 +50,53 @@ func newFakeClient(objs ...client.Object) client.Reader {
 		Build()
 }
 
+func TestGPUDiscoverySelectedShapeCapacity(t *testing.T) {
+	for _, source := range []string{"node labels", "DCGM"} {
+		t.Run(source, func(t *testing.T) {
+			objects := []client.Object{
+				&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "large", Labels: map[string]string{
+					LabelGPUCount: "8", LabelGPUProduct: "H100-SXM5-80GB", LabelGPUMemory: "81920",
+				}}},
+				&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "small", Labels: map[string]string{
+					LabelGPUCount: "4", LabelGPUProduct: "H100-SXM5-80GB", LabelGPUMemory: "81920",
+				}}},
+			}
+			metrics := map[string]GPUInfo{}
+			for index, node := range []string{"large", "small"} {
+				ip := fmt.Sprintf("10.0.0.%d", index+1)
+				count := 8 - 4*index
+				objects = append(objects, &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Name: "dcgm-" + node, Namespace: "gpu-operator", Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter}},
+					Spec:       corev1.PodSpec{NodeName: node},
+					Status:     corev1.PodStatus{Phase: corev1.PodRunning, PodIP: ip},
+				})
+				metrics[buildDCGMEndpoint(ip)] = GPUInfo{GPUsPerNode: count, Model: "H100-SXM5-80GB", VRAMPerGPU: 81920}
+			}
+
+			var info *GPUInfo
+			var err error
+			k8sClient := newFakeClient(objects...)
+			if source == "DCGM" {
+				discovery := NewGPUDiscovery(func(_ context.Context, endpoint string) (*GPUInfo, error) {
+					metric, ok := metrics[endpoint]
+					if !ok {
+						return nil, fmt.Errorf("unexpected endpoint %q", endpoint)
+					}
+					return &metric, nil
+				})
+				info, err = discovery.DiscoverGPUsFromDCGM(t.Context(), k8sClient, nil)
+			} else {
+				info, err = DiscoverGPUs(t.Context(), k8sClient)
+			}
+			require.NoError(t, err)
+			assert.Equal(t, 8, info.GPUsPerNode)
+			assert.Equal(t, 2, info.NodesWithGPUs)
+			assert.Equal(t, 12, info.TotalGPUs)
+			assert.Equal(t, 8, info.SelectedShapeGPUs)
+		})
+	}
+}
+
 func TestDiscoverGPUs_SingleNode(t *testing.T) {
 	ctx := context.Background()
 
