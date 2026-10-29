@@ -12,20 +12,21 @@ TOOL_CHOICE_MODES = ("auto", "none", "required")
 REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 #: Chat completion request fields a session may set through the
-#: ``chat_completion_options`` extension, mapped to their JSON types.
-CHAT_COMPLETION_OPTIONS: dict[str, type] = {
-    "temperature": float,
-    "top_p": float,
-    "top_k": int,
-    "min_p": float,
-    "seed": int,
-    "repetition_penalty": float,
-    "presence_penalty": float,
-    "frequency_penalty": float,
-    "thinking_token_budget": int,
-    "chat_template_kwargs": dict,
-}
-_JSON_TYPES = {int: "an integer", float: "a number", dict: "an object"}
+#: ``chat_completion_options`` extension. vLLM validates their values.
+CHAT_COMPLETION_OPTIONS = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "seed",
+        "repetition_penalty",
+        "presence_penalty",
+        "frequency_penalty",
+        "thinking_token_budget",
+        "chat_template_kwargs",
+    }
+)
 
 
 def _max_output_tokens(value: Any) -> tuple[int | None, int | str]:
@@ -72,7 +73,7 @@ def _validate_text_options(options: dict[str, Any], name: str) -> None:
     _validate_tool_choice(options.get("tool_choice"))
     if not isinstance(options.get("parallel_tool_calls", False), bool):
         raise ValueError(f"{name}.parallel_tool_calls must be a boolean")
-    _reasoning_options(options.get("reasoning"))
+    _reasoning_effort(options.get("reasoning"))
     if options.get("prompt") is not None:
         raise ValueError("prompt configuration is not supported")
     if not isinstance(options.get("instructions", ""), str):
@@ -199,38 +200,36 @@ def _text_prompt(
     return messages
 
 
-def _reasoning_options(value: Any) -> dict[str, Any]:
-    """Map Realtime ``reasoning.effort`` to the chat template ``enable_thinking`` switch.
-
-    Chat templates turn thinking on or off, and Realtime has no ``none`` effort,
-    so ``minimal`` turns it off and every other effort turns it on.
-    """
+def _reasoning_effort(value: Any) -> str | None:
     if value is None:
-        return {}
+        return None
     if not isinstance(value, dict):
         raise ValueError("reasoning must be an object")
     effort = value.get("effort")
-    if effort is None:
-        return {}
-    if effort not in REASONING_EFFORTS:
+    if effort is not None and effort not in REASONING_EFFORTS:
         raise ValueError(
             f"reasoning.effort must be one of {', '.join(REASONING_EFFORTS)}"
         )
-    return {"enable_thinking": effort != "minimal"}
+    return effort
 
 
 def _chat_options(
     session: dict[str, Any], response: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Map session options, overridden by ``response`` ones, to chat completion fields."""
+    """Map session options, overridden by ``response`` ones, to chat completion fields.
+
+    ``reasoning.effort`` becomes ``reasoning_effort`` and the chat template
+    ``enable_thinking`` switch. Realtime has no ``none`` effort, so ``minimal``
+    turns thinking off and every other effort turns it on.
+    """
     response = response or {}
     options = _chat_completion_options(session.get("chat_completion_options"))
-    if thinking := _reasoning_options(
-        response.get("reasoning", session.get("reasoning"))
-    ):
+    effort = _reasoning_effort(response.get("reasoning", session.get("reasoning")))
+    if effort is not None:
+        options["reasoning_effort"] = effort
         options["chat_template_kwargs"] = {
             **options.get("chat_template_kwargs", {}),
-            **thinking,
+            "enable_thinking": effort != "minimal",
         }
     options.update(
         _chat_tool_options(
@@ -256,24 +255,14 @@ def _chat_completion_options(value: Any) -> dict[str, Any]:
         return {}
     if not isinstance(value, dict):
         raise ValueError("chat_completion_options must be an object")
-    options = {}
-    for key, option in value.items():
-        kind = CHAT_COMPLETION_OPTIONS.get(key)
-        if kind is None:
+    for key in value:
+        if key not in CHAT_COMPLETION_OPTIONS:
             raise ValueError(f"chat_completion_options.{key} is not supported")
-        if option is None:
-            continue
-        if kind is dict:
-            valid = isinstance(option, dict)
-        else:
-            valid = not isinstance(option, bool) and isinstance(
-                option, int if kind is int else (int, float)
-            )
-        if not valid:
-            raise ValueError(
-                f"chat_completion_options.{key} must be {_JSON_TYPES[kind]}"
-            )
-        options[key] = option
+    options = {key: option for key, option in value.items() if option is not None}
+    if not isinstance(options.get("chat_template_kwargs", {}), dict):
+        raise ValueError(
+            "chat_completion_options.chat_template_kwargs must be an object"
+        )
     return options
 
 

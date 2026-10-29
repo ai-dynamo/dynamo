@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 from dynamo._core import Context
@@ -34,6 +34,7 @@ from ..factories import (
     HeldTextRequest,
     TextPrefillFactory,
     build_realtime_text_factories,
+    validate_chat_options,
     validate_vllm_parsers,
 )
 from .text_utils import (
@@ -325,11 +326,13 @@ class RealtimeTextHandler:
         chat_completion_factory: ChatCompletionFactory,
         text_prefill_factory: TextPrefillFactory | None = None,
         auto_tool_choice: bool = True,
+        chat_options_validator: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.model_name = model_name
         self._chat_completion_factory = chat_completion_factory
         self._text_prefill_factory = text_prefill_factory
         self._auto_tool_choice = auto_tool_choice
+        self._chat_options_validator = chat_options_validator
 
     @classmethod
     def from_engine(
@@ -358,6 +361,7 @@ class RealtimeTextHandler:
             chat_completion_factory=chat_completion,
             text_prefill_factory=text_prefill,
             auto_tool_choice=bool(tool_parser),
+            chat_options_validator=validate_chat_options,
         )
 
     def _checked_chat_options(
@@ -373,6 +377,8 @@ class RealtimeTextHandler:
                 "tool_choice 'auto' needs a vLLM tool call parser on this worker; "
                 "use tool_choice 'required', 'none', or a named function"
             )
+        if self._chat_options_validator is not None:
+            self._chat_options_validator(options)
         return options
 
     def _validate_session(self, session: Any) -> str | None:
@@ -590,7 +596,6 @@ class RealtimeTextHandler:
                         "session cannot change while the text buffer is active",
                     )
                     return
-                # Dynamo's extension event sets what OpenAI session fields cannot carry.
                 update = (
                     event.get("session")
                     if event_type == "session.update"

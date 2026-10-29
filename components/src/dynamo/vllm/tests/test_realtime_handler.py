@@ -2212,25 +2212,27 @@ def test_chat_completion_options_event_reaches_prefill_and_generation():
         ([], "chat_completion_options must be an object"),
         ({"logprobs": True}, "chat_completion_options.logprobs is not supported"),
         (
-            {"temperature": "hot"},
-            "chat_completion_options.temperature must be a number",
-        ),
-        ({"seed": 1.5}, "chat_completion_options.seed must be an integer"),
-        ({"top_k": True}, "chat_completion_options.top_k must be an integer"),
-        (
             {"chat_template_kwargs": []},
             "chat_completion_options.chat_template_kwargs must be an object",
         ),
+        ({"temperature": "hot"}, "temperature: Input should be a valid number"),
+        ({"seed": 1.5}, "seed: Input should be a valid integer"),
+        ({"temperature": -1}, "temperature must be non-negative"),
+        ({"top_p": 0}, "top_p must be in (0, 1]"),
     ],
 )
 def test_chat_completion_options_event_rejects_invalid_options(options, message):
+    from dynamo.vllm.realtime.factories import validate_chat_options
+
     async def chat_completion(messages, max_output_tokens, tool_options, prefill):
         raise AssertionError("invalid session must not generate")
 
     result = asyncio.run(
         _drive(
             RealtimeTextHandler(
-                model_name=TEXT_MODEL, chat_completion_factory=chat_completion
+                model_name=TEXT_MODEL,
+                chat_completion_factory=chat_completion,
+                chat_options_validator=validate_chat_options,
             ),
             [
                 {"type": "session.update", "session": _text_session()},
@@ -2242,8 +2244,9 @@ def test_chat_completion_options_event_rejects_invalid_options(options, message)
         )
     )
 
-    errors = [event for event in result if event["type"] == "error"]
-    assert [error["error"]["message"] for error in errors] == [message]
+    errors = [event["error"]["message"] for event in result if event["type"] == "error"]
+    assert len(errors) == 1 and errors[0].startswith(message)
+    assert [event["type"] for event in result].count("session.updated") == 1
 
 
 @pytest.mark.parametrize(
@@ -2299,10 +2302,16 @@ def test_text_reasoning_effort_switches_chat_template_thinking(
     )
 
     assert prefill_options == [
-        {"chat_template_kwargs": {"custom": 1, "enable_thinking": prefill_thinking}}
+        {
+            "reasoning_effort": session_effort,
+            "chat_template_kwargs": {"custom": 1, "enable_thinking": prefill_thinking},
+        }
     ]
     assert generation_options == [
-        {"chat_template_kwargs": {"custom": 1, "enable_thinking": answer_thinking}}
+        {
+            "reasoning_effort": response_effort or session_effort,
+            "chat_template_kwargs": {"custom": 1, "enable_thinking": answer_thinking},
+        }
     ]
 
 

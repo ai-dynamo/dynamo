@@ -76,6 +76,23 @@ def validate_vllm_parsers(
             ) from exc
 
 
+def validate_chat_options(options: dict[str, Any]) -> None:
+    """Check chat completion options with vLLM's request and sampling validation."""
+    from pydantic import ValidationError
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.exceptions import VLLMValidationError
+
+    try:
+        request = ChatCompletionRequest(messages=[], model="", **options)
+        request.to_sampling_params(1, {})
+    except ValidationError as exc:
+        error = exc.errors()[0]
+        location = ".".join(str(part) for part in error["loc"])
+        raise ValueError(f"{location}: {error['msg']}") from exc
+    except VLLMValidationError as exc:
+        raise ValueError(str(exc)) from exc
+
+
 class HeldTextRequest:
     """One StreamingInput engine request that prefills a turn and then generates its answer.
 
