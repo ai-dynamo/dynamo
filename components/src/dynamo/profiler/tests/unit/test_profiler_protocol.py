@@ -431,11 +431,20 @@ def test_build_dgd_config_sglang_disagg_restores_runtime_args() -> None:
     prefill_args = _main_container(_component_by_type(dgd_config, "prefill"))["args"]
     decode_args = _main_container(_component_by_type(dgd_config, "decode"))["args"]
 
+    blueprint_args = _main_container(
+        _component_by_type(modifier.load_default_config(mode="disagg"), "prefill")
+    )["args"]
+    blueprint_port = blueprint_args[
+        blueprint_args.index("--disaggregation-bootstrap-port") + 1
+    ]
+
     assert prefill_args[prefill_args.index("--tensor-parallel-size") + 1] == "1"
     assert decode_args[decode_args.index("--tensor-parallel-size") + 1] == "2"
     for args, expected_mode in ((prefill_args, "prefill"), (decode_args, "decode")):
         assert args[args.index("--disaggregation-mode") + 1] == expected_mode
         assert args[args.index("--disaggregation-transfer-backend") + 1] == "nixl"
+        assert args.count("--disaggregation-bootstrap-port") == 1
+        assert args[args.index("--disaggregation-bootstrap-port") + 1] == blueprint_port
         assert args[args.index("--host") + 1] == "0.0.0.0"
 
 
@@ -445,8 +454,17 @@ def test_build_dgd_config_sglang_disagg_preserves_explicit_runtime_args() -> Non
         mode="disagg",
         model_name="test/model",
         image="example/sglang:test",
-        prefill_cli_args=["--disaggregation-transfer-backend=mooncake", "--host=::"],
-        decode_cli_args=["--disaggregation-transfer-backend", "mooncake"],
+        prefill_cli_args=[
+            "--disaggregation-transfer-backend=mooncake",
+            "--disaggregation-bootstrap-port=30001",
+            "--host=::",
+        ],
+        decode_cli_args=[
+            "--disaggregation-transfer-backend",
+            "mooncake",
+            "--disaggregation-bootstrap-port",
+            "30001",
+        ],
     )
 
     prefill_args = _main_container(_component_by_type(dgd_config, "prefill"))["args"]
@@ -454,12 +472,18 @@ def test_build_dgd_config_sglang_disagg_preserves_explicit_runtime_args() -> Non
 
     assert "--disaggregation-transfer-backend" not in prefill_args
     assert "--disaggregation-transfer-backend=mooncake" in prefill_args
+    assert "--disaggregation-bootstrap-port" not in prefill_args
+    assert "--disaggregation-bootstrap-port=30001" in prefill_args
     assert "--host" not in prefill_args
     assert "--host=::" in prefill_args
     assert decode_args.count("--disaggregation-transfer-backend") == 1
     assert (
         decode_args[decode_args.index("--disaggregation-transfer-backend") + 1]
         == "mooncake"
+    )
+    assert decode_args.count("--disaggregation-bootstrap-port") == 1
+    assert (
+        decode_args[decode_args.index("--disaggregation-bootstrap-port") + 1] == "30001"
     )
 
 

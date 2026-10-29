@@ -176,9 +176,12 @@ def _normalize_prefill_dp_limits(args: list[str]) -> list[str]:
 
 # Disagg blueprint defaults that AIC engine tuning may omit. SGLang binds the
 # prefill bootstrap server to --host, whose default (127.0.0.1) decode workers
-# in other pods cannot reach. dynamo.sglang reserves a bootstrap port itself.
+# in other pods cannot reach. Without a fixed bootstrap port, dynamo.sglang
+# reserves a free one per process, and SGLang before 0.5.12 does not sync rank
+# 0's port to the other ranks of a multinode prefill worker.
 _DISAGG_DEFAULT_ARGS = (
     ("--disaggregation-transfer-backend", "nixl"),
+    ("--disaggregation-bootstrap-port", "12345"),
     ("--host", "0.0.0.0"),
 )
 
