@@ -76,11 +76,6 @@ pub(crate) struct PrefillDispatch<M> {
     pub(crate) booking: Option<RequestAttemptRelease>,
 }
 
-// Keep router-origin placement failures distinguishable from engine refusals.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub(crate) struct UnknownWorkerTarget(#[source] pub(crate) DynamoError);
-
 pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
 }
@@ -675,15 +670,9 @@ impl RoutingHost {
         if let Some((worker_id, field)) = target
             && !self.inner.client.is_instance_discovered(worker_id)
         {
-            return Err(UnknownWorkerTarget(
-                DynamoError::builder()
-                    .error_type(ErrorType::InvalidArgument)
-                    .message(format!(
-                        "nvext.{field}={worker_id} does not identify a known worker"
-                    ))
-                    .build(),
-            )
-            .into());
+            return Err(invalid_argument(format!(
+                "nvext.{field}={worker_id} does not identify a known worker"
+            )));
         }
         Ok(())
     }

@@ -81,7 +81,6 @@ pub use plugins::{
 };
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
-pub(crate) use routing_host::UnknownWorkerTarget;
 pub use routing_host::{KvPushRouter, RoutingHost};
 pub use routing_load::{
     ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,

@@ -70,22 +70,6 @@ async fn deterministic_worker_rejections_match_for_first_and_pinned_branches() {
 }
 
 #[tokio::test]
-async fn pinned_worker_routing_races_are_unavailable_not_client_errors() {
-    let (response, parent, admission) = dispatch_request(
-        TestEngine::new(EngineBehavior::RejectStalePlacement),
-        2,
-        "pinned-race",
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body = response_body(response).await;
-    assert!(body.get("answers").is_none());
-    assert!(!body.to_string().contains("private pinned worker detail"));
-    assert!(parent.is_killed());
-    assert_eq!(admission.available_permits(), 2);
-}
-
-#[tokio::test]
 async fn unclassified_transport_stream_failure_is_unavailable() {
     let (response, parent, admission) = dispatch_request(
         TestEngine::new(EngineBehavior::TransportFailure),
@@ -138,37 +122,21 @@ async fn admitted_worker_removal_during_fanout_does_not_reroute_siblings() {
 }
 
 #[test]
-fn only_router_origin_pinned_rejections_change_client_error_classification() {
+fn canonical_backend_errors_preserve_client_error_classification() {
     use dynamo_runtime::error::{DynamoError, ErrorClass};
     for (class, expected) in [
         (ErrorClass::InvalidRequest, StatusCode::BAD_REQUEST),
         (ErrorClass::NotFound, StatusCode::NOT_FOUND),
     ] {
         let cause = DynamoError::builder().class(class).build();
-        for is_pinned in [false, true] {
-            assert_eq!(
-                super::super::backend_error::classify(&cause, is_pinned).status,
-                expected
-            );
-        }
+        assert_eq!(
+            super::super::backend_error::classify(&cause).status,
+            expected
+        );
     }
-    let cause = anyhow::Error::new(crate::kv_router::UnknownWorkerTarget(
-        DynamoError::builder()
-            .class(ErrorClass::InvalidRequest)
-            .build(),
-    ))
-    .context("router dispatch");
-    assert_eq!(
-        super::super::backend_error::classify(cause.as_ref(), false).status,
-        StatusCode::BAD_REQUEST
-    );
-    assert_eq!(
-        super::super::backend_error::classify(cause.as_ref(), true).status,
-        StatusCode::SERVICE_UNAVAILABLE
-    );
     let cause = DynamoError::builder().class(ErrorClass::Internal).build();
     assert_eq!(
-        super::super::backend_error::classify(&cause, true).status,
+        super::super::backend_error::classify(&cause).status,
         StatusCode::INTERNAL_SERVER_ERROR
     );
 }
