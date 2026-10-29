@@ -359,8 +359,8 @@ async def test_engine_error_yields_error_chunk():
 
 
 @pytest.mark.asyncio
+@pytest.mark.fault_tolerance
 async def test_probe_engine_error_propagates_failure():
-    """Marked health canary: engine error raises instead of yielding an error dict."""
     worker = _make_worker(engine=_ErrorEngine())
     request = {HEALTH_CHECK_KEY: True, "token_ids": [1]}
 
