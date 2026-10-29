@@ -7,14 +7,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use dynamo_tokens::SequenceHash;
 use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -25,12 +24,13 @@ use crate::indexer::{
 use crate::kv_hints::{
     KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
 };
+use crate::plugins::worker_selection::WorkerInputs;
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
     WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::queue::SchedulerBookingDescriptor;
-use crate::scheduling::selector::WorkerSelectionPolicy;
+use crate::scheduling::selector::{WorkerSelectionPolicy, WorkerSelector};
 use crate::scheduling::{
     KvSchedulerError, LocalScheduler, LoraWorkerFilter, OverlapAnalysis, OverlapSignals,
     OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, ScheduleMode, ScheduleRequest,
@@ -42,8 +42,9 @@ use crate::sequences::{
     ReplicaWorkerPolicy, SequenceRequest, SequenceTrackerOptions, active_request_expiry_duration,
 };
 use crate::services::common::replica_sync::{
-    HostReplicaSyncFactory, ReplicaInbox, ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent,
-    ScopedSequencePublisher, setup_scoped_replica_sync,
+    AFFINITY_EVENT_CHANNEL_CAPACITY, AffinityMeshSink, HostReplicaSyncFactory, ReplicaInbox,
+    ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent, ScopedSequencePublisher,
+    setup_scoped_replica_sync,
 };
 use crate::services::indexer::backend::{Indexer, IndexerPolicy};
 use crate::services::indexer::recovery;
@@ -125,10 +126,15 @@ struct SelectionEntry {
     is_eagle: bool,
     indexer: Indexer,
     workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
+    /// Whether a worker in `workers_tx` consumes router hints, set on publish.
+    hint_capable_workers: AtomicBool,
+    /// Whether the selection policy scores fetchable prefixes (`KV_TRANSFER`).
+    scores_kv_transfer: bool,
     scheduler: SelectionScheduler,
     replica_inbox: Option<ReplicaInbox>,
     affinity: OnceCell<SessionAffinity>,
     replica_config: Option<ReplicaSyncConfig>,
+    affinity_replication: Option<(u64, Arc<dyn super::affinity::AffinityReplicaSink>)>,
 }
 
 impl SelectionEntry {
@@ -144,6 +150,8 @@ impl SelectionEntry {
                     && let Some(sink) = config.affinity_sink(&self.key)
                 {
                     table.enable_replication(config.process_id(), sink);
+                } else if let Some((writer_id, sink)) = &self.affinity_replication {
+                    table.enable_replication(*writer_id, sink.clone());
                 }
                 Ok(table)
             })?;
@@ -286,6 +294,8 @@ pub struct SelectionCore {
     selection_cache: SelectionCache,
     tracking_hash: Arc<TrackingHashContext>,
     session_affinity: Option<SessionAffinityConfig>,
+    /// Writer id and publisher for session bindings the host carries to its peers.
+    session_binding_tx: Option<(u64, mpsc::Sender<AffinityBindingEvent>)>,
     /// Worker ids whose upsert fails with `Internal` before any catalog
     /// mutation, so membership tests can exercise per-worker error paths.
     #[cfg(test)]
@@ -399,6 +409,7 @@ impl SelectionCore {
             selection_cache: SelectionCache::new(&cache_config),
             tracking_hash,
             session_affinity,
+            session_binding_tx: None,
             #[cfg(test)]
             fail_upsert_for: parking_lot::Mutex::default(),
             #[cfg(test)]
@@ -406,6 +417,30 @@ impl SelectionCore {
             #[cfg(test)]
             after_affinity_invalidation: None,
         }
+    }
+
+    /// Export session bindings through a bounded channel for the host to carry.
+    pub(super) fn with_session_binding_publisher(
+        mut self,
+        writer_id: u64,
+    ) -> (Self, mpsc::Receiver<AffinityBindingEvent>) {
+        let (tx, rx) = mpsc::channel(AFFINITY_EVENT_CHANNEL_CAPACITY);
+        self.session_binding_tx = Some((writer_id, tx));
+        (self, rx)
+    }
+
+    fn session_binding_sink(
+        &self,
+        partition: &RoutingPartitionId,
+    ) -> Option<(u64, Arc<dyn super::affinity::AffinityReplicaSink>)> {
+        self.session_binding_tx.as_ref().map(|(writer_id, tx)| {
+            let sink =
+                AffinityMeshSink::new(partition.clone(), tx.clone(), self.cancel_token.clone());
+            (
+                *writer_id,
+                Arc::new(sink) as Arc<dyn super::affinity::AffinityReplicaSink>,
+            )
+        })
     }
 
     /// Cancel core-scoped tasks (KV-event listeners, scheduling, replica sync,
@@ -418,7 +453,7 @@ impl SelectionCore {
         self.cancel_token.cancel();
     }
 
-    fn ensure_running(&self) -> Result<(), SelectionError> {
+    pub(super) fn ensure_running(&self) -> Result<(), SelectionError> {
         if self.cancel_token.is_cancelled() {
             return Err(SelectionError::NotReady(
                 "selection service is shutting down".to_string(),

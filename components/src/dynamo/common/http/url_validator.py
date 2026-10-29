@@ -21,6 +21,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import re
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,10 @@ logger = logging.getLogger(__name__)
 
 class UrlValidationError(ValueError):
     """Raised when a URL or filesystem path fails the configured policy."""
+
+
+class MediaSizeError(UrlValidationError):
+    """A media reference exceeds a byte budget, rather than failing URL policy."""
 
 
 # Size cap for a ``data:`` URL, which carries its whole payload inline.
@@ -160,6 +165,20 @@ def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     return source
 
 
+# A URL embedded in free text: a scheme, then everything up to whitespace, a
+# double quote or an angle bracket (how exception messages delimit a URL).
+# Apostrophes, square brackets and parentheses are part of the match: an IPv6
+# host is bracketed and a path or query can contain any of them, so stopping
+# there would leave the rest of the URL, query included, unredacted. Anything
+# the match over-captures (a closing quote, say) only ends up in a bounded label.
+_URL_IN_TEXT: Final = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s\"<>]+")
+
+
+def mentions_url(text: str) -> bool:
+    """Whether ``text`` contains a URL that :func:`describe_error_detail` would bound."""
+    return isinstance(text, str) and _URL_IN_TEXT.search(text) is not None
+
+
 def describe_error_detail(detail: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     """Bound a backend exception's text, keeping both ends.
 
@@ -167,9 +186,15 @@ def describe_error_detail(detail: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     end: aiohttp renders the client-supplied host *before* the errno, so a
     head-only truncation would keep the attacker's string and drop the
     diagnosis.
+
+    Any URL inside the text is first rendered with :func:`describe_media_source`.
+    Some exceptions (an invalid URL, for one) quote the full request URL, and
+    keeping the end of the text would otherwise keep the end of a presigned
+    URL: its signature.
     """
     if not isinstance(detail, str):
         return "<non-string error detail>"
+    detail = _URL_IN_TEXT.sub(lambda match: describe_media_source(match[0]), detail)
     if len(detail) <= limit:
         return detail
     # The marker comes out of the budget, not on top of it: a caller that sizes
@@ -267,7 +292,7 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
         else:
             size = len(url.encode("utf-8", "surrogatepass"))
         if size > limit:
-            raise UrlValidationError(
+            raise MediaSizeError(
                 f"data: URL is {size} bytes, exceeds the {limit}-byte limit. "
                 f"To raise the limit, set {DYN_MM_MAX_DATA_URL_MB} (in megabytes) "
                 "on both the frontend and the workers."

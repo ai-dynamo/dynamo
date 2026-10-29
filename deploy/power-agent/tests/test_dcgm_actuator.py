@@ -1199,7 +1199,8 @@ class TestApplyCap(unittest.TestCase):
         ):
             result = actuator.apply_cap(0, 300)
 
-        self.assertEqual(result, 300)
+        self.assertEqual(result.effective_w, 300)
+        self.assertIs(result.ok, True)
         # A DcgmGroup was created and the GPU added to it.
         modules["pydcgm"].DcgmGroup.assert_called_once()
         group = modules["pydcgm"].DcgmGroup.return_value
@@ -1277,7 +1278,8 @@ class TestApplyCap(unittest.TestCase):
                 result = actuator.apply_cap(0, 300)
 
         # Effective watts still returned (per the Actuator Protocol), but NO cap write.
-        self.assertEqual(result, 300)
+        self.assertEqual(result.effective_w, 300)
+        self.assertIs(result.ok, False)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
         metrics.apply_failures_total.inc.assert_called_once()
         # Nothing tracked as managed — we refused to write, so there is no
@@ -1315,7 +1317,8 @@ class TestApplyCap(unittest.TestCase):
 
         # Effective watts still returned (Actuator Protocol), but NO write and
         # NO tracking of any kind.
-        self.assertEqual(result, 300)
+        self.assertEqual(result.effective_w, 300)
+        self.assertIs(result.ok, False)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
         metrics.apply_failures_total.inc.assert_called_once()
         self.assertEqual(actuator.managed_uuids(), set())
@@ -1368,7 +1371,8 @@ class TestApplyCap(unittest.TestCase):
         # GPU-B; the constraints-provenance check sees GPU-B -> mismatch ->
         # refuse. Effective watts still returned per the Protocol; no Set, no
         # tracking.
-        self.assertEqual(result, 300)
+        self.assertEqual(result.effective_w, 300)
+        self.assertIs(result.ok, False)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
         metrics.apply_failures_total.inc.assert_called_once()
         self.assertEqual(actuator.managed_uuids(), set())
@@ -1396,7 +1400,8 @@ class TestApplyCap(unittest.TestCase):
             ):
                 result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
 
-        self.assertEqual(result, 300)
+        self.assertEqual(result.effective_w, 300)
+        self.assertIs(result.ok, False)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
         metrics.apply_failures_total.inc.assert_called_once()
         self.assertEqual(actuator.managed_uuids(), set())
@@ -1452,7 +1457,8 @@ class TestApplyCap(unittest.TestCase):
             ):
                 result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
 
-        self.assertEqual(result, 300)
+        self.assertEqual(result.effective_w, 300)
+        self.assertIs(result.ok, True)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_called_once()
         metrics.apply_failures_total.inc.assert_not_called()
         self.assertEqual(actuator.managed_uuids(), {"GPU-A"})
@@ -1482,7 +1488,8 @@ class TestApplyCap(unittest.TestCase):
             ):
                 result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
 
-        self.assertEqual(result, 300)
+        self.assertEqual(result.effective_w, 300)
+        self.assertIs(result.ok, False)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
         metrics.apply_failures_total.inc.assert_called_once()
         self.assertEqual(actuator.managed_uuids(), set())
@@ -1516,7 +1523,8 @@ class TestApplyCap(unittest.TestCase):
             ):
                 result = actuator.apply_cap(0, 300)
 
-        self.assertEqual(result, 300)
+        self.assertEqual(result.effective_w, 300)
+        self.assertIs(result.ok, False)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
         metrics.apply_failures_total.inc.assert_called_once()
         self.assertNotIn(0, power_agent._managed_gpu_indices)
@@ -1548,7 +1556,8 @@ class TestApplyCap(unittest.TestCase):
             ):
                 result = actuator.apply_cap(0, 300)
 
-        self.assertEqual(result, 300)
+        self.assertEqual(result.effective_w, 300)
+        self.assertIs(result.ok, True)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_called_once()
         # Bookkeeping recorded the transaction-verified GPU-A, not the
         # re-enumerated GPU-B a post-Set get_uuid re-read would have returned.
@@ -1565,7 +1574,8 @@ class TestApplyCap(unittest.TestCase):
         ):
             result = actuator.apply_cap(0, 900)
 
-        self.assertEqual(result, 700)
+        self.assertEqual(result.effective_w, 700)
+        self.assertIs(result.ok, True)
         cfg = modules["pydcgm"].DcgmGroup.return_value.config.Set.call_args.args[0]
         self.assertEqual(cfg.mPowerLimit.val, 700)
         metrics.cap_clamped_total.labels.assert_called_with(direction="max")
@@ -1580,7 +1590,8 @@ class TestApplyCap(unittest.TestCase):
         ):
             result = actuator.apply_cap(0, 50)
 
-        self.assertEqual(result, 100)
+        self.assertEqual(result.effective_w, 100)
+        self.assertIs(result.ok, True)
         metrics.cap_clamped_total.labels.assert_called_with(direction="min")
 
     def test_apply_cap_never_calls_enforce(self):
@@ -1619,7 +1630,8 @@ class TestApplyCap(unittest.TestCase):
 
         # Returns the *requested* (effective) watts even on failure
         # because downstream callers / Prometheus need a number.
-        self.assertEqual(result, 300)
+        self.assertEqual(result.effective_w, 300)
+        self.assertIs(result.ok, False)
         metrics.apply_failures_total.inc.assert_called_once()
         # GPU is NOT recorded as managed — we don't track an unsuccessful
         # write, otherwise restore-on-shutdown would touch GPUs we never

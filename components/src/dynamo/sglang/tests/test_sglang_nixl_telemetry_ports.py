@@ -21,8 +21,9 @@ import dynamo.sglang._compat as sglang_compat
 from dynamo.common.utils.nixl_telemetry import NIXL_TELEMETRY_PROMETHEUS_PORT_ENV
 from dynamo.sglang.nixl_telemetry import (
     _assign_nixl_prometheus_port,
-    install_per_rank_nixl_prometheus_ports,
-    run_scheduler_process_with_nixl_port,
+    install_scheduler_process_wrapper,
+    run_scheduler_process_with_rank_fixups,
+    scheduler_metrics_ipc_name,
 )
 
 pytestmark = [
@@ -307,9 +308,30 @@ class TestResolvedLaunchConfiguration:
 
 class TestInstall:
     def test_install_is_a_no_op_when_telemetry_is_disabled(self, telemetry_env):
-        """No SGLang import, so a non-telemetry deployment cannot regress on it."""
+        """An SGLang without the override point still serves when telemetry is off."""
         telemetry_env.setenv("NIXL_TELEMETRY_ENABLE", "n")
-        install_per_rank_nixl_prometheus_ports()
+        telemetry_env.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.engine",
+            SimpleNamespace(Engine=type("Engine", (), {})),
+        )
+        install_scheduler_process_wrapper()
+
+    def test_install_points_sglang_at_the_wrapper_without_telemetry(
+        self, telemetry_env
+    ):
+        """Pure-DP schedulers need the metrics address fix-up with telemetry off."""
+        telemetry_env.setenv("NIXL_TELEMETRY_ENABLE", "n")
+        engine = type("Engine", (), {"run_scheduler_process_func": None})
+        telemetry_env.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.engine",
+            SimpleNamespace(Engine=engine),
+        )
+        install_scheduler_process_wrapper()
+        assert (
+            engine.run_scheduler_process_func is run_scheduler_process_with_rank_fixups
+        )
 
     @pytest.mark.parametrize(
         ("env_name", "value"),
@@ -325,7 +347,7 @@ class TestInstall:
         telemetry_env.setitem(sys.modules, "sglang", _LazyProxyModule())
 
         with pytest.raises(ValueError, match=env_name):
-            install_per_rank_nixl_prometheus_ports()
+            install_scheduler_process_wrapper()
 
     def test_install_points_sglang_at_the_wrapper(self, telemetry_env):
         """The override has to land on the class, not on the ``sglang`` proxy."""
@@ -336,8 +358,10 @@ class TestInstall:
             "sglang.srt.entrypoints.engine",
             SimpleNamespace(Engine=engine),
         )
-        install_per_rank_nixl_prometheus_ports()
-        assert engine.run_scheduler_process_func is run_scheduler_process_with_nixl_port
+        install_scheduler_process_wrapper()
+        assert (
+            engine.run_scheduler_process_func is run_scheduler_process_with_rank_fixups
+        )
 
     def test_missing_override_point_is_rejected(self, telemetry_env):
         """Serving on would leave every rank one port and all but one rank dead."""
@@ -347,4 +371,40 @@ class TestInstall:
             SimpleNamespace(Engine=type("Engine", (), {})),
         )
         with pytest.raises(RuntimeError, match="run_scheduler_process_func"):
-            install_per_rank_nixl_prometheus_ports()
+            install_scheduler_process_wrapper()
+
+
+class TestSchedulerMetricsIpcName:
+    @pytest.mark.parametrize("dp_size", [1, 2])
+    def test_legacy_port_args_keep_the_original_address(self, dp_size):
+        """XPU's SGLang 0.5.11 has no shared identity for the pure-DP rewrite."""
+        port_args = SimpleNamespace(metrics_ipc_name="ipc:///tmp/m")
+        assert (
+            scheduler_metrics_ipc_name(_server_args(dp_size=dp_size), port_args)
+            == port_args.metrics_ipc_name
+        )
+
+    @pytest.mark.parametrize(
+        "server_args",
+        [
+            _server_args(),
+            _server_args(tp_size=2, dp_size=2, enable_dp_attention=True),
+            _server_args(tp_size=2, attn_dp_size=2),
+        ],
+        ids=["single rank", "attention dp", "attention dp width"],
+    )
+    def test_address_is_unchanged_outside_pure_dp(self, server_args):
+        port_args = SimpleNamespace(metrics_ipc_name="ipc:///tmp/m", instance_id="abc")
+        assert scheduler_metrics_ipc_name(server_args, port_args) == "ipc:///tmp/m"
+
+    def test_pure_dp_ranks_share_one_address_per_instance(self):
+        server_args = _server_args(dp_size=2)
+        first, second, other = (
+            scheduler_metrics_ipc_name(
+                server_args,
+                SimpleNamespace(metrics_ipc_name=f"ipc:///tmp/{n}", instance_id=i),
+            )
+            for n, i in (("a", "abc"), ("b", "abc"), ("c", "def"))
+        )
+        assert first == second != other
+        assert first.startswith("ipc://") and first.endswith("abc")

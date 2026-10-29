@@ -18,6 +18,7 @@ use crate::protocols::openai::tools::{ToolChoiceValidation, validate_tool_choice
 
 use dynamo_parsers::tool_calling::{StructuralTagSchemaMode, ToolChoice, ToolDefinition};
 use dynamo_protocols::types::ResponseFormat;
+#[cfg(test)]
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
@@ -63,14 +64,23 @@ pub(crate) enum SelectedStructuralTagBuilder {
 }
 
 impl SelectedStructuralTagBuilder {
-    fn for_parser(parser_name: &str) -> Option<Self> {
-        if v2::enabled()
-            && let Some(builder) = v2::StructuralTagBuilder::for_parser(parser_name)
-        {
-            return Some(Self::V2(builder));
+    fn for_parser(parser_name: &str, reasoning_parser: Option<&str>) -> Option<Self> {
+        if let Some((_, builder)) = Self::for_unified_parser(Some(parser_name), reasoning_parser) {
+            return Some(builder);
         }
 
         v1::StructuralTagBuilder::for_parser(parser_name).map(Self::V1)
+    }
+
+    pub(super) fn for_unified_parser(
+        tool_call_parser: Option<&str>,
+        reasoning_parser: Option<&str>,
+    ) -> Option<(&'static str, Self)> {
+        let family = crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            tool_call_parser,
+            reasoning_parser,
+        )?;
+        v2::StructuralTagBuilder::for_parser(family).map(|builder| (family, Self::V2(builder)))
     }
 
     fn build(
@@ -145,8 +155,22 @@ fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolCh
     exclude_tools_when_none && matches!(tool_choice, ToolChoice::None)
 }
 
-/// Whether a request is entitled to use a structural tag, bundled with proof the
-/// parser registry can actually build one.
+pub(super) fn uses_gpt_oss_required_array(
+    (parser_name, reasoning_parser): (Option<&str>, Option<&str>),
+    tool_choice: &ToolChoice,
+    parallel_tool_calls: Option<bool>,
+) -> bool {
+    crate::protocols::openai::chat_completions::unified_parser::selected_family(
+        parser_name,
+        reasoning_parser,
+    ) == Some("gpt_oss")
+        && matches!(tool_choice, ToolChoice::Required)
+        && parallel_tool_calls != Some(false)
+}
+
+/// Whether a request uses a native tool-call structural tag, bundled with proof
+/// the parser registry can actually build one. Required GPT-OSS arrays keep their
+/// guided-JSON parser mode even when their JSON payload has a structural envelope.
 ///
 /// This is the single owner of "is a structural tag applicable and available" —
 /// covering model-family/tool-choice intrinsic eligibility, the configured
@@ -183,7 +207,7 @@ impl StructuralTagDecision {
 /// this error rather than falling back to `NotApplicable`, or an invalid forced
 /// choice would silently install a structural tag anyway.
 pub(crate) fn structural_tag_decision(
-    parser_name: Option<&str>,
+    (parser_name, reasoning_parser): (Option<&str>, Option<&str>),
     tool_choice: &ToolChoice,
     tools: &[ToolDefinition],
     parallel_tool_calls: Option<bool>,
@@ -194,6 +218,16 @@ pub(crate) fn structural_tag_decision(
     // Validate before any mode or family gate. Kimi K3 required requests use a
     // prompt-level XTML path, but they still need an actual tool to require.
     validate_forced_tool_choice(tool_choice, tools)?;
+
+    // A native Harmony handoff stops vLLM after the first call. Required parallel
+    // calls instead share one guided JSON array, parsed as GuidedJsonRequired.
+    if uses_gpt_oss_required_array(
+        (parser_name, reasoning_parser),
+        tool_choice,
+        parallel_tool_calls,
+    ) {
+        return Ok(StructuralTagDecision::NotApplicable);
+    }
 
     if config.is_none() && !requires_intrinsic_structural_tag(parser_name, tool_choice) {
         return Ok(StructuralTagDecision::NotApplicable);
@@ -232,7 +266,8 @@ pub(crate) fn structural_tag_decision(
         return Ok(StructuralTagDecision::NotApplicable);
     };
 
-    let Some(builder) = SelectedStructuralTagBuilder::for_parser(parser_name) else {
+    let Some(builder) = SelectedStructuralTagBuilder::for_parser(parser_name, reasoning_parser)
+    else {
         return Ok(StructuralTagDecision::NotApplicable);
     };
 
@@ -262,6 +297,44 @@ pub(crate) fn structural_tag_decision(
 }
 
 impl OpenAIPreprocessor {
+    pub(super) fn apply_structured_output_tag(
+        &self,
+        parser_name: &str,
+        builder: SelectedStructuralTagBuilder,
+        schema: &serde_json::Value,
+        starts_in_reasoning: bool,
+        request: &mut PreprocessedRequest,
+    ) -> Result<bool, DynamoError> {
+        let config = self
+            .runtime_config
+            .structural_tag
+            .clone()
+            .unwrap_or_default();
+        let applied = apply_structural_tag(
+            parser_name,
+            builder.build(&StructuralTagBuildRequest {
+                tool_choice: &ToolChoice::None,
+                tools: &[],
+                parallel_tool_calls: None,
+                schema_mode: config.schema,
+                exclude_special_tokens: config.exclude_special_tokens,
+                reasoning_boundary: ResolvedReasoningBoundary::StructuralTag,
+                tool_arguments_any_order: false,
+                starts_in_reasoning,
+                structured_output_schema: Some(schema),
+            }),
+            request,
+        )?;
+        if applied {
+            request
+                .sampling_options
+                .guided_decoding
+                .get_or_insert_default()
+                .json = None;
+        }
+        Ok(applied)
+    }
+
     /// Apply structural tag guided decoding when enabled for this request.
     pub(super) fn apply_tool_choice_structural_tag(
         &self,
@@ -288,7 +361,7 @@ impl OpenAIPreprocessor {
             self.structural_tag_reasoning_boundary
         };
         let StructuralTagDecision::Required(builder) = structural_tag_decision(
-            parser_name,
+            (parser_name, self.runtime_config.reasoning_parser.as_deref()),
             tool_choice,
             tools,
             parallel_tool_calls,
@@ -431,6 +504,15 @@ pub(super) fn validate_runtime_config(
     let backend_excludes_reasoning = match runtime_config
         .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
     {
+        // GPT-OSS's native reasoner is a Harmony stub, not a delayed grammar gate.
+        Ok(_)
+            if crate::protocols::openai::chat_completions::unified_parser::selected_family(
+                runtime_config.tool_call_parser.as_deref(),
+                runtime_config.reasoning_parser.as_deref(),
+            ) == Some("gpt_oss") =>
+        {
+            false
+        }
         Ok(value) => value.unwrap_or(false),
         Err(error) if runtime_config.structural_tag.is_none() => {
             tracing::warn!(
@@ -482,9 +564,12 @@ pub(super) fn validate_runtime_config(
     };
 
     anyhow::ensure!(
-        v2::enabled(),
-        "structural_tag.{v2_only_option} requires {}=2",
-        env_llm::DYN_PARSER_VERSION,
+        crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            runtime_config.tool_call_parser.as_deref(),
+            runtime_config.reasoning_parser.as_deref(),
+        )
+        .is_some(),
+        "structural_tag.{v2_only_option} requires a compatible V2 parser route",
     );
     let parser_name = runtime_config.tool_call_parser.as_deref().ok_or_else(|| {
         anyhow::anyhow!("structural_tag.{v2_only_option} requires a tool-call parser")
@@ -598,12 +683,20 @@ mod tests {
         }
 
         let format = kimi_k2_required_format(Some(true));
-        assert_eq!(format["type"], "sequence");
-        assert_eq!(format["elements"][0]["type"], "const_string");
-        assert_eq!(
-            format["elements"][0]["value"],
-            "<|tool_calls_section_begin|>"
-        );
+        if matches!(
+            SelectedStructuralTagBuilder::for_parser("kimi_k2", None),
+            Some(SelectedStructuralTagBuilder::V2(_))
+        ) {
+            assert_eq!(format["type"], "triggered_tags");
+            assert_eq!(format["tags"][0]["begin"], "<|tool_calls_section_begin|>");
+        } else {
+            assert_eq!(format["type"], "sequence");
+            assert_eq!(format["elements"][0]["type"], "const_string");
+            assert_eq!(
+                format["elements"][0]["value"],
+                "<|tool_calls_section_begin|>"
+            );
+        }
     }
 
     #[test]
@@ -703,7 +796,7 @@ mod tests {
                 "test fixture drifted: '{parser}' + {choice:?} is no longer intrinsic"
             );
             assert!(
-                SelectedStructuralTagBuilder::for_parser(parser).is_some(),
+                SelectedStructuralTagBuilder::for_parser(parser, None).is_some(),
                 "'{parser}' is intrinsic per the predicate but the parser registry has \
                  no structural-tag builder for it — the predicate and the registry have \
                  drifted apart"
@@ -741,7 +834,7 @@ mod tests {
         };
 
         let decision = structural_tag_decision(
-            Some("qwen3_coder"),
+            (Some("qwen3_coder"), None),
             &ToolChoice::Auto,
             &tools,
             None,
@@ -769,7 +862,7 @@ mod tests {
                 ..Default::default()
             };
             let decision = structural_tag_decision(
-                Some("qwen3_coder"),
+                (Some("qwen3_coder"), None),
                 &ToolChoice::Auto,
                 &tools,
                 None,
@@ -788,7 +881,7 @@ mod tests {
             ..Default::default()
         };
         let decision = structural_tag_decision(
-            Some("qwen3_coder"),
+            (Some("qwen3_coder"), None),
             &ToolChoice::Auto,
             &tools,
             None,
@@ -811,7 +904,7 @@ mod tests {
         let config = StructuralTagConfig::default();
 
         let decision = structural_tag_decision(
-            Some("qwen3_coder"),
+            (Some("qwen3_coder"), None),
             &ToolChoice::None,
             &tools,
             None,
@@ -862,18 +955,34 @@ mod tests {
             .structural_tag
             .as_ref()
             .unwrap()["format"];
-        assert_eq!(format["type"], "sequence");
+        let calls = if matches!(
+            SelectedStructuralTagBuilder::for_parser("kimi_k2", None),
+            Some(SelectedStructuralTagBuilder::V2(_))
+        ) {
+            assert_eq!(format["type"], "triggered_tags");
+            assert_eq!(
+                format["triggers"],
+                serde_json::json!(["<|tool_calls_section_begin|>"])
+            );
+            assert_eq!(format["at_least_one"], true);
+            assert_eq!(format["tags"][0]["begin"], "<|tool_calls_section_begin|>");
+            assert_eq!(format["tags"][0]["end"], "<|tool_calls_section_end|>");
+            &format["tags"][0]["content"]
+        } else {
+            assert_eq!(format["type"], "sequence");
+            assert_eq!(
+                format["elements"][0]["value"],
+                "<|tool_calls_section_begin|>"
+            );
+            assert_eq!(format["elements"][2]["value"], "<|tool_calls_section_end|>");
+            &format["elements"][1]
+        };
+        assert_eq!(calls["type"], "tags_with_separator");
+        assert_eq!(calls["at_least_one"], true);
         assert_eq!(
-            format["elements"][0]["value"],
-            "<|tool_calls_section_begin|>"
-        );
-        assert_eq!(format["elements"][1]["type"], "tags_with_separator");
-        assert_eq!(format["elements"][1]["at_least_one"], true);
-        assert_eq!(
-            format["elements"][1]["tags"][0]["begin"],
+            calls["tags"][0]["begin"],
             "<|tool_call_begin|>functions.get_weather:"
         );
-        assert_eq!(format["elements"][2]["value"], "<|tool_calls_section_end|>");
     }
 
     #[test]
@@ -1060,6 +1169,58 @@ mod tests {
     }
 
     #[test]
+    fn structural_tag_generation_follows_model_pair_in_isolated_processes() {
+        const CHILD: &str = "DYNAMO_STRUCTURAL_TAG_PAIR_CHILD";
+        let Ok(version) = std::env::var(CHILD) else {
+            for version in ["auto", "1", "2"] {
+                let output = crate::test_utils::isolated_command(
+                    "preprocessor::structural_tag::tests::structural_tag_generation_follows_model_pair_in_isolated_processes",
+                ).env(CHILD, version).env(env_llm::DYN_PARSER_VERSION, version).output().unwrap();
+                crate::test_utils::assert_isolated_success(&output);
+            }
+            return;
+        };
+        for (tool, reasoning) in [
+            ("qwen3_coder", Some("qwen3")),
+            ("qwen3_coder", None),
+            ("glm47", Some("glm45")),
+            ("qwen3_coder", Some("deepseek_r1")),
+            ("harmony", Some("gpt_oss")),
+            ("gpt_oss", None),
+            ("harmony", Some("deepseek_r1")),
+        ] {
+            let compatible = reasoning != Some("deepseek_r1");
+            let uses_v2 = version != "1" && compatible;
+            assert_eq!(
+                uses_gpt_oss_required_array((Some(tool), reasoning), &ToolChoice::Required, None),
+                uses_v2 && matches!(tool, "harmony" | "gpt_oss")
+            );
+            assert!(!uses_gpt_oss_required_array(
+                (Some(tool), reasoning),
+                &ToolChoice::Required,
+                Some(false),
+            ));
+            assert_eq!(
+                matches!(
+                    SelectedStructuralTagBuilder::for_parser(tool, reasoning),
+                    Some(SelectedStructuralTagBuilder::V2(_))
+                ),
+                uses_v2
+            );
+            let config = ModelRuntimeConfig {
+                tool_call_parser: Some(tool.into()),
+                reasoning_parser: reasoning.map(str::to_string),
+                structural_tag: Some(StructuralTagConfig {
+                    tool_arguments_any_order: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert_eq!(validate_runtime_config(&config).is_ok(), uses_v2);
+        }
+    }
+
+    #[test]
     fn tool_choice_none_skips_ban_only_when_prompt_excludes_tools() {
         const CHILD: &str = "DYNAMO_STRUCTURAL_TAG_NONE_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
@@ -1128,7 +1289,10 @@ mod tests {
             .as_ref()
             .and_then(|guided| guided.structural_tag.as_ref())
             .expect("tool-call ban should be installed");
-        let expected_content = if v2::enabled() {
+        let expected_content = if matches!(
+            SelectedStructuralTagBuilder::for_parser("qwen3_coder", None),
+            Some(SelectedStructuralTagBuilder::V2(_))
+        ) {
             serde_json::json!({
                 "type": "any_text",
                 "excludes": ["<tool_call>", "<function="]

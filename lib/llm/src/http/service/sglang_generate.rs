@@ -30,12 +30,13 @@ use super::disconnect::{
 use super::error::SanitizedError;
 use super::metrics::{CancellationLabels, ErrorType};
 use super::openai::{
-    check_model_serving_ready, check_ready, context_from_headers, find_invalid_argument_in_chain,
-    get_body_limit, get_or_create_request_id,
+    check_model_serving_ready, check_ready, find_invalid_argument_in_chain, get_body_limit,
+    get_or_create_request_id, preprocessed_context_from_headers,
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
+use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::response_merge::{
     PREFILL_OUTPUT_ANNOTATION, PREFILL_OUTPUT_FIRST_ANNOTATION, PrefillNeed,
@@ -208,6 +209,9 @@ fn preprocessed_request(
     let cache_namespace = request.cache_namespace().map(str::to_owned);
     let streaming = request.stream;
     let (input_ids, worker_envelope) = request.into_worker_envelope(request_id);
+    // The router records TTFT and ITL into the request's tracker.
+    let tracker = Arc::new(RequestTracker::new());
+    tracker.record_isl(input_ids.len(), None);
     // Hold decode output for prefill only when every streamed chunk needs it.
     let annotations = match merger().prefill_need(&worker_envelope) {
         PrefillNeed::None => vec![],
@@ -239,7 +243,6 @@ fn preprocessed_request(
         })
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
-            expected_output_tokens: max_tokens,
             priority_jump: Some(routing_priority.max(0) as f64),
             priority: Some(routing_priority),
             cache_namespace,
@@ -247,6 +250,7 @@ fn preprocessed_request(
         }))
         .extra_args(Some(serde_json::Value::Object(extra_args)))
         .annotations(annotations)
+        .tracker(Some(tracker))
         .build()
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
 }
@@ -336,7 +340,7 @@ async fn handler(
 
     let request_id = request_context.request_id;
     let context: Context<PreprocessedRequest> =
-        match context_from_headers(preprocessed, request_id.clone(), &headers) {
+        match preprocessed_context_from_headers(preprocessed, request_id.clone(), &headers) {
             Ok(context) => context,
             Err(response) => return adapt_openai_error(response),
         };
@@ -398,6 +402,8 @@ async fn dispatch(
         streaming,
         &request_id,
     );
+    let tracked = inflight_guard.request_metrics().clone();
+    tracked.add_input_tokens(context.content().token_ids.len());
     let request_context = context.context();
     let generate_result =
         match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
@@ -469,6 +475,11 @@ async fn dispatch(
     };
 
     let engine_context = stream.context();
+    let stream = stream.inspect(move |delta| {
+        if let Some(output) = &delta.data {
+            tracked.add_output_tokens(output.token_ids.len());
+        }
+    });
     if !streaming {
         let fold = SglangGenerateStream::fold(stream, merger());
         return match run_until_killed(request_context.as_ref(), fold).await {
@@ -541,6 +552,7 @@ mod tests {
             }))
             .unwrap();
             let request = preprocessed_request(request, "test-model", None, "request-id").unwrap();
+            assert_eq!(request.tracker.unwrap().isl_tokens(), Some(2));
             let expected = salt.filter(|salt| !salt.is_empty());
             assert_eq!(
                 request.routing.unwrap().cache_namespace.as_deref(),
@@ -803,6 +815,40 @@ mod tests {
                 request.context(),
             ))
         }
+    }
+
+    #[tokio::test]
+    async fn streaming_dispatch_preserves_native_json() {
+        let native = serde_json::json!({
+            "text": "Unicode: λ\nCR: \r",
+            "meta_info": {"routed_experts": "AQID".repeat(16384)},
+            "unknown_field": {"value": true}
+        });
+        let outputs = vec![crate::protocols::Annotated::from_data(LLMEngineOutput {
+            engine_data: Some(serde_json::json!({"sglang_response": native})),
+            ..Default::default()
+        })];
+        let state = service_v2::HttpService::builder()
+            .build()
+            .unwrap()
+            .state_clone();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let response = dispatch(
+            Arc::new(ReplayEngine(outputs)),
+            dispatch_test_context(),
+            "req-stream".to_string(),
+            "test-model".to_string(),
+            state,
+            ConnectionHandle::create_disabled(tx),
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert_eq!(body, format!("data: {native}\n\ndata: [DONE]\n\n"));
     }
 
     #[tokio::test]

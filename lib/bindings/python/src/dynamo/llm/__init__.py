@@ -13,13 +13,13 @@ from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import FpmDirectPublisher as FpmDirectPublisher
 from dynamo._core import FpmEventRelay as FpmEventRelay
 from dynamo._core import FpmEventSubscriber as FpmEventSubscriber
+from dynamo._core import FpmHealthSnapshot as FpmHealthSnapshot
 from dynamo._core import FrontendExtensionContext as FrontendExtensionContext
 from dynamo._core import FrontendResponse as FrontendResponse
 from dynamo._core import FrontendRoute as FrontendRoute
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpService as HttpService
 from dynamo._core import KserveGrpcService as KserveGrpcService
-from dynamo._core import KvDcRelay as KvDcRelay
 from dynamo._core import KvEventPublisher as KvEventPublisher
 from dynamo._core import KvRouter as KvRouter
 from dynamo._core import KvRouterConfig as KvRouterConfig
@@ -37,6 +37,7 @@ from dynamo._core import (
     MultimodalEmbeddingCachePublisher as MultimodalEmbeddingCachePublisher,
 )
 from dynamo._core import OverlapScores as OverlapScores
+from dynamo._core import PoolRelay as PoolRelay
 from dynamo._core import PythonAsyncEngine as PythonAsyncEngine
 from dynamo._core import RadixTree as RadixTree
 from dynamo._core import RouterConfig as RouterConfig
@@ -66,6 +67,7 @@ from ._unary import UnaryChatModel as UnaryChatModel
 from ._unary import with_engine_data as with_engine_data
 from .exceptions import HttpError
 from .exceptions import RouterQueueLimitExceeded as RouterQueueLimitExceeded
+from .exceptions import WorkerOverloaded as WorkerOverloaded
 
 
 class RoutedEngine(Protocol):

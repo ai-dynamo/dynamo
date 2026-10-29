@@ -84,10 +84,6 @@ func buildFromGbuildDeploymentV1(buildRef string, manifest deploymentcapnpv1.Dep
 	if err != nil {
 		return nil, fmt.Errorf("reading %s config: %w", gbuildDeploymentV1CapnpFile, err)
 	}
-	compilationMode, err := buildCompilationMode(gbuildDeploymentV1CapnpFile, deployment.CompilationMode().String())
-	if err != nil {
-		return nil, err
-	}
 	if !deployment.HasProgram() {
 		return nil, fmt.Errorf("%s config.program is missing", gbuildDeploymentV1CapnpFile)
 	}
@@ -104,14 +100,17 @@ func buildFromGbuildDeploymentV1(buildRef string, manifest deploymentcapnpv1.Dep
 		return nil, err
 	}
 
+	checkpoint, checkpointErr := checkpointFromDeploymentV1(manifest)
+
 	build := &Build{
-		Path:                      buildRef,
-		CompilationMode:           compilationMode,
-		SelectedPropSyncChains:    chains,
-		StandaloneTokenEmbeddings: program.StandaloneTokenEmbeddings(),
-		SupportsCPUEmbeddings:     program.SupportsCpuEmbeddings(),
-		IOFPGACount:               ioFPGACount,
-		IOFanoutFactor:            ioFanoutFactor,
+		path:                      buildRef,
+		selectedPropSyncChains:    chains,
+		standaloneTokenEmbeddings: program.StandaloneTokenEmbeddings(),
+		supportsCPUEmbeddings:     program.SupportsCpuEmbeddings(),
+		ioFPGACount:               ioFPGACount,
+		ioFanoutFactor:            ioFanoutFactor,
+		checkpoint:                checkpoint,
+		checkpointErr:             checkpointErr,
 	}
 
 	// Complete the normalized build with scheduler-facing LPU artifacts.
@@ -179,23 +178,22 @@ func addLPUArtifactsFromDeploymentV1(
 	if err != nil {
 		return fmt.Errorf("reading %s partitions: %w", gbuildDeploymentV1CapnpFile, err)
 	}
-	partitions := make([]BuildPartition, 0, rawPartitions.Len())
+	partitions := make([]buildPartition, 0, rawPartitions.Len())
 	for index := 0; index < rawPartitions.Len(); index++ {
 		partition, err := buildPartitionFromDeploymentV1(rawPartitions.At(index))
 		if err != nil {
 			return err
 		}
-		// Nonempty paths mark LPU artifacts.
-		if partition.PartPath != "" {
+		// Project LPU artifacts while retaining whether the build also requires CUDA.
+		if partition.partPath != "" {
 			partitions = append(partitions, partition)
+		} else {
+			ref, err := rawPartitions.At(index).Partition()
+			if err != nil {
+				return fmt.Errorf("reading %s artifact partition ref: %w", gbuildDeploymentV1CapnpFile, err)
+			}
+			build.hasCUDAPartitions = build.hasCUDAPartitions || ref.DeviceType() == commoncapnpv1.DeviceType_cuda
 		}
-	}
-	// An LPU-only build cannot silently discard packaged CUDA or CPU partitions.
-	if build.CompilationMode == BuildCompilationModeLPUOnly && len(partitions) != rawPartitions.Len() {
-		return fmt.Errorf(
-			"%s config.compilationMode lpuOnly requires every artifact partition to use deviceType lpu",
-			gbuildDeploymentV1CapnpFile,
-		)
 	}
 	if len(partitions) == 0 {
 		return fmt.Errorf("%s artifacts contain no LPU partitions", gbuildDeploymentV1CapnpFile)
@@ -207,33 +205,33 @@ func addLPUArtifactsFromDeploymentV1(
 	}
 
 	// Publish the scheduler-facing artifact projection.
-	build.Partitions = partitions
-	build.Family = family
+	build.partitions = partitions
+	build.family = family
 
 	return nil
 }
 
-func buildPartitionFromDeploymentV1(raw deploymentcapnpv1.PartitionDeployment) (BuildPartition, error) {
+func buildPartitionFromDeploymentV1(raw deploymentcapnpv1.PartitionDeployment) (buildPartition, error) {
 	if !raw.HasPartition() {
-		return BuildPartition{}, fmt.Errorf("%s artifact partition is missing partition ref", gbuildDeploymentV1CapnpFile)
+		return buildPartition{}, fmt.Errorf("%s artifact partition is missing partition ref", gbuildDeploymentV1CapnpFile)
 	}
 	ref, err := raw.Partition()
 	if err != nil {
-		return BuildPartition{}, fmt.Errorf("reading %s artifact partition ref: %w", gbuildDeploymentV1CapnpFile, err)
+		return buildPartition{}, fmt.Errorf("reading %s artifact partition ref: %w", gbuildDeploymentV1CapnpFile, err)
 	}
 	switch ref.DeviceType() {
 	case commoncapnpv1.DeviceType_cuda, commoncapnpv1.DeviceType_cpu:
-		return BuildPartition{}, nil
+		return buildPartition{}, nil
 	case commoncapnpv1.DeviceType_lpu:
 		if raw.Detail().Which() != deploymentcapnpv1.PartitionDeployment_detail_Which_lpu || !raw.Detail().HasLpu() {
-			return BuildPartition{}, fmt.Errorf("LPU partition %d has mismatched detail", ref.PartitionId())
+			return buildPartition{}, fmt.Errorf("LPU partition %d has mismatched detail", ref.PartitionId())
 		}
 	default:
-		return BuildPartition{}, fmt.Errorf("partition %d has unsupported deviceType %d", ref.PartitionId(), ref.DeviceType())
+		return buildPartition{}, fmt.Errorf("partition %d has unsupported deviceType %d", ref.PartitionId(), ref.DeviceType())
 	}
 	detail, err := raw.Detail().Lpu()
 	if err != nil {
-		return BuildPartition{}, fmt.Errorf("reading %s LPU partition %d detail: %w", gbuildDeploymentV1CapnpFile, ref.PartitionId(), err)
+		return buildPartition{}, fmt.Errorf("reading %s LPU partition %d detail: %w", gbuildDeploymentV1CapnpFile, ref.PartitionId(), err)
 	}
 	switch detail.Architecture() {
 	case deploymentcapnpv1.LpuArchitecture_lp20:
@@ -241,6 +239,6 @@ func buildPartitionFromDeploymentV1(raw deploymentcapnpv1.PartitionDeployment) (
 	case deploymentcapnpv1.LpuArchitecture_lp30:
 		return buildLPUArtifact(gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail, BuildFamilyHX)
 	default:
-		return BuildPartition{}, fmt.Errorf("%s LPU partition %d unsupported chip architecture %d", gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail.Architecture())
+		return buildPartition{}, fmt.Errorf("%s LPU partition %d unsupported chip architecture %d", gbuildDeploymentV1CapnpFile, ref.PartitionId(), detail.Architecture())
 	}
 }
