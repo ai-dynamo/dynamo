@@ -79,6 +79,7 @@ pub use plugins::{
     router_plugin_registry as worker_selection_policy_registry,
 };
 pub use prefill_router::PrefillRouter;
+pub(crate) use request_lease::RequestAttemptRelease;
 pub use routing_host::{KvPushRouter, RoutingHost};
 pub use routing_load::{
     ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,
@@ -526,7 +527,7 @@ fn cache_hit_for_worker(
 
 // for metric publishing (push-based)
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
-/// Router scheduler views of per-worker load, consumed by the KV DC Relay.
+/// Router scheduler views of per-worker load, consumed by the Pool Relay.
 ///
 /// Kept separate from [`KV_METRICS_SUBJECT`] so one router's view never
 /// overwrites another router's worker-overload state.

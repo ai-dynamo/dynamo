@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0-dev.202610240000000082"
+version = "0.13.0-dev.202610280000000086"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa3e351f2964f97c386e270dc1ef46e771b72542d5015d638a25f3b4eef34ccd"
+checksum = "2149f65333729153bc6f89b30b2adca4cd58c7ddcc6f9ed6ce0a07cdf66f1cba"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -2484,6 +2484,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "bincode 1.3.3",
  "blake3",
  "bytes",
@@ -2549,6 +2550,7 @@ dependencies = [
  "url",
  "uuid",
  "validator",
+ "velo",
  "xxhash-rust",
 ]
 
@@ -5367,6 +5369,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset 0.9.1",
 ]
 
 [[package]]
@@ -8568,6 +8571,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9406,6 +9420,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
 
 [[package]]
+name = "ucx-rs"
+version = "0.1.0+ucx.1.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0f69840ad9bf0a2dddb056c1fcc847ea8de16cce0d29dee6a4d164049598b45"
+dependencies = [
+ "flate2",
+ "sha2 0.10.9",
+ "tar",
+]
+
+[[package]]
 name = "uncased"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9714,6 +9739,61 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "velo"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "453d58e5ca96c625d763468579fc1088e406abbb02e616714bf12433d109651f"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "bs58",
+ "bytes",
+ "dashmap",
+ "derive-getters",
+ "derive_builder",
+ "flume",
+ "futures",
+ "nix 0.31.3",
+ "offset-allocator",
+ "parking_lot",
+ "prometheus",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "socket2 0.6.4",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "ucx-rs",
+ "uuid",
+ "velo-ext",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "velo-ext"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c340505e9a3330467664d4ca09ff74b41365d6be3ddca4d6f4046a7c526edfaa"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "flume",
+ "futures",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "xxhash-rust",
+]
 
 [[package]]
 name = "version-compare"
@@ -10481,6 +10561,16 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.4",
+]
 
 [[package]]
 name = "xmlparser"
