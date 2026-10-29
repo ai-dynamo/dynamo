@@ -55,6 +55,8 @@ const DEFAULT_DRAIN_TIMEOUT_S: f64 = 30.0;
 const DRAIN_TIMEOUT_ENV: &str = "DYN_PREFILL_DRAIN_TIMEOUT_S";
 /// Interval between `engine.is_quiescent()` polls during drain.
 const DRAIN_POLL_INTERVAL_S: f64 = 0.5;
+/// Pause before retrying serving recovery when the engine is not ready to register.
+const RECOVERY_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 /// Cadence at which the drain loop emits a progress log.
 const DRAIN_HEARTBEAT_INTERVAL_S: f64 = 5.0;
 /// Budget reserved for `cleanup()` so the drain loop can't consume the whole
@@ -299,9 +301,21 @@ enum EngineRouteLifecycle {
 }
 
 struct EngineRouteRecovery {
+    /// Cancelled when recovery begins, ending routes from the previous engine lifetime.
     generation: tokio::sync::watch::Sender<CancellationToken>,
+    /// Cancelled when recovery finishes, so it never waits behind a resume still running.
     resumes: tokio::sync::watch::Sender<CancellationToken>,
+    /// False while an operator pause is in effect; recovery then leaves the worker unregistered.
     is_routing_enabled: AtomicBool,
+}
+
+/// Shared state that serializes engine control routes with recovery and shutdown.
+#[derive(Clone)]
+struct EngineRouteState {
+    lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
+    mutation: Arc<tokio::sync::Mutex<()>>,
+    shutdown: CancellationToken,
+    recovery: Arc<EngineRouteRecovery>,
 }
 
 impl Default for EngineRouteRecovery {
@@ -404,7 +418,10 @@ impl EngineKind {
     async fn recover_serving(&self) -> Result<EngineRecovery, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.recover_serving().await,
-            EngineKind::Raw(_) => unreachable!("raw engines do not opt into serving recovery"),
+            EngineKind::Raw(_) => Err(err(
+                ErrorType::Backend(BackendError::EngineShutdown),
+                "engine does not support serving recovery",
+            )),
         }
     }
 
@@ -908,6 +925,15 @@ impl Worker {
         Ok(())
     }
 
+    fn engine_route_state(&self) -> EngineRouteState {
+        EngineRouteState {
+            lifecycle: self.engine_route_lifecycle.clone(),
+            mutation: self.engine_route_mutation.clone(),
+            shutdown: self.engine_route_shutdown.clone(),
+            recovery: self.engine_route_recovery.clone(),
+        }
+    }
+
     /// Register advertised engine controls on the runtime system server.
     async fn register_engine_controls(
         &self,
@@ -928,10 +954,7 @@ impl Worker {
                 callback,
                 self.engine.clone(),
                 endpoint.clone(),
-                self.engine_route_lifecycle.clone(),
-                self.engine_route_mutation.clone(),
-                self.engine_route_shutdown.clone(),
-                self.engine_route_recovery.clone(),
+                self.engine_route_state(),
             );
             // Namespace control routes under `/engine/control/<name>` so they
             // share the `/engine/{*path}` route without colliding with updates.
@@ -1034,7 +1057,6 @@ impl Worker {
                     format!("register recovered engine: {e}"),
                 )
             })?;
-            set_worker_health(endpoint, HealthStatus::Ready);
         }
         *lifecycle = EngineRouteLifecycle::Running;
         self.engine_route_recovery
@@ -1137,11 +1159,15 @@ impl Worker {
                         format!("attach replacement engine: {e}"),
                     )
                 })?;
+                self.admission_gate
+                    .get_or_create(endpoint.component())
+                    .record_model_card(model.card());
             }
             match self.engine.on_recovery_complete().await {
                 Ok(()) => break,
                 Err(error) => {
-                    tracing::warn!(%error, "Engine changed before registration; retrying recovery")
+                    tracing::warn!(%error, "Engine not ready to register after recovery; retrying");
+                    tokio::time::sleep(RECOVERY_RETRY_BACKOFF).await;
                 }
             }
         }
@@ -1256,8 +1282,7 @@ impl Worker {
         endpoint: dynamo_runtime::component::Endpoint,
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
-        // Initial serving remains gated across failed startup, engine shutdown,
-        // and reconnect. Every retry attaches fresh listeners and local indexes.
+        // Held through the startup gate and until every endpoint, including RL, is registered.
         let readiness_hold = ReadinessHold::take(endpoint.drt().system_health(), endpoint.name());
         let engine_config = tokio::select! {
             biased;
@@ -2086,29 +2111,22 @@ fn engine_update_callback(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn wrap_engine_control_callback(
     control_name: String,
     callback: EngineRouteCallback,
     engine: EngineKind,
     endpoint: dynamo_runtime::component::Endpoint,
-    route_lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
-    route_mutation: Arc<tokio::sync::Mutex<()>>,
-    route_shutdown: CancellationToken,
-    route_recovery: Arc<EngineRouteRecovery>,
+    routes: EngineRouteState,
 ) -> EngineRouteCallback {
     let policy = engine_control_policy(&control_name);
-    let recovery = route_recovery.clone();
+    let recovery = routes.recovery.clone();
     let recovery_resume =
         matches!(control_name.as_str(), "resume_generation" | "wake_up").then(|| {
             recovery_resume_callback(
                 control_name.clone(),
                 callback.clone(),
                 engine.clone(),
-                route_lifecycle.clone(),
-                route_mutation.clone(),
-                route_shutdown.clone(),
-                route_recovery.clone(),
+                routes.clone(),
             )
         });
     let callback: EngineRouteCallback = Arc::new(move |body| {
@@ -2116,10 +2134,12 @@ fn wrap_engine_control_callback(
         let engine = engine.clone();
         let endpoint = endpoint.clone();
         let control_name = control_name.clone();
-        let route_lifecycle = route_lifecycle.clone();
-        let route_mutation = route_mutation.clone();
-        let route_shutdown = route_shutdown.clone();
-        let route_recovery = route_recovery.clone();
+        let EngineRouteState {
+            lifecycle: route_lifecycle,
+            mutation: route_mutation,
+            shutdown: route_shutdown,
+            recovery: route_recovery,
+        } = routes.clone();
         Box::pin(async move {
             if let Some(response) = control_request_body_error(&body) {
                 return Ok(response);
@@ -2275,19 +2295,18 @@ fn recovery_resume_callback(
     control_name: String,
     callback: EngineRouteCallback,
     engine: EngineKind,
-    route_lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
-    route_mutation: Arc<tokio::sync::Mutex<()>>,
-    route_shutdown: CancellationToken,
-    route_recovery: Arc<EngineRouteRecovery>,
+    routes: EngineRouteState,
 ) -> EngineRouteCallback {
     Arc::new(move |body| {
         let control_name = control_name.clone();
         let callback = callback.clone();
         let engine = engine.clone();
-        let route_lifecycle = route_lifecycle.clone();
-        let route_mutation = route_mutation.clone();
-        let route_shutdown = route_shutdown.clone();
-        let route_recovery = route_recovery.clone();
+        let EngineRouteState {
+            lifecycle: route_lifecycle,
+            mutation: route_mutation,
+            shutdown: route_shutdown,
+            recovery: route_recovery,
+        } = routes.clone();
         let resume = route_recovery.resumes.borrow().clone();
         Box::pin(async move {
             if let Some(response) = control_request_body_error(&body) {
@@ -4374,10 +4393,7 @@ mod handoff_and_lifecycle_tests {
             callback,
             EngineKind::Llm(Arc::new(DefaultsEngine)),
             endpoint.clone(),
-            worker.engine_route_lifecycle.clone(),
-            worker.engine_route_mutation.clone(),
-            worker.engine_route_shutdown.clone(),
-            worker.engine_route_recovery.clone(),
+            worker.engine_route_state(),
         );
         let request = tokio::spawn(async move { callback(serde_json::json!({})).await.unwrap() });
         entered.notified().await;
@@ -4433,10 +4449,7 @@ mod handoff_and_lifecycle_tests {
             resume_callback,
             EngineKind::Llm(Arc::new(DefaultsEngine)),
             endpoint.clone(),
-            worker.engine_route_lifecycle.clone(),
-            worker.engine_route_mutation.clone(),
-            worker.engine_route_shutdown.clone(),
-            worker.engine_route_recovery.clone(),
+            worker.engine_route_state(),
         );
         let resume_request =
             tokio::spawn(async move { resume_callback(serde_json::json!({})).await.unwrap() });
@@ -4449,10 +4462,7 @@ mod handoff_and_lifecycle_tests {
             direct_callback,
             EngineKind::Llm(Arc::new(DefaultsEngine)),
             endpoint,
-            worker.engine_route_lifecycle.clone(),
-            worker.engine_route_mutation.clone(),
-            worker.engine_route_shutdown.clone(),
-            worker.engine_route_recovery.clone(),
+            worker.engine_route_state(),
         );
         let response = tokio::time::timeout(
             Duration::from_secs(1),
@@ -4928,10 +4938,7 @@ mod handoff_and_lifecycle_tests {
             callback,
             worker.engine.clone(),
             endpoint.clone(),
-            worker.engine_route_lifecycle.clone(),
-            worker.engine_route_mutation.clone(),
-            worker.engine_route_shutdown.clone(),
-            worker.engine_route_recovery.clone(),
+            worker.engine_route_state(),
         );
         let request = tokio::spawn({
             let callback = callback.clone();

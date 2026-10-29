@@ -184,10 +184,13 @@ pub struct EngineConfig {
     pub llm: Option<LlmRegistration>,
 }
 
-/// Result of recovering an engine while its serving endpoint is withdrawn.
+/// Result of recovering an engine at startup or while serving.
 #[derive(Clone, Debug)]
 pub enum EngineRecovery {
+    /// The same engine instance; the worker keeps its KV publishers.
     SameInstance,
+    /// A different engine instance; the worker attaches fresh KV publishers and
+    /// registers this metadata.
     Replacement(Box<EngineConfig>),
 }
 
@@ -344,29 +347,28 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(MetricsBindings::default())
     }
 
-    /// Complete one-time initialization after KV publishers are attached and
-    /// before registering serving endpoints. Failure must not permit serving.
+    /// Startup gate, run after KV publishers are attached and before any endpoint
+    /// registers, and again after each startup recovery. Failure must not permit serving.
     async fn wait_for_startup(&self) -> Result<(), DynamoError> {
         Ok(())
     }
 
-    /// Optionally recover a failed startup gate before registration.
-    /// Same-instance recovery keeps the publishers and retries the startup gate;
-    /// replacement metadata causes fresh KV publishers and another startup gate.
+    /// Recover a failed startup gate. `None` fails startup with the gate's error.
+    /// The worker retries without a limit, so the engine must bound startup recovery.
     /// The default preserves fail-fast startup for other engines.
     async fn recover_startup(&self) -> Result<Option<EngineRecovery>, DynamoError> {
         Ok(None)
     }
 
-    /// Wait until serving or the local KV index is no longer safe. The engine
-    /// must also reject inference while unavailable, including stale routing.
+    /// Wait until serving or the local KV index is no longer safe, judged from current
+    /// state because the worker calls this again right after recovery. An error also
+    /// withdraws the worker. The engine must reject inference while unavailable.
     async fn wait_for_unavailable(&self) -> Result<(), DynamoError> {
         std::future::pending().await
     }
 
-    /// Recover while the worker is withdrawn from discovery. Same-instance
-    /// recovery retains the existing publishers and must restore KV continuity first.
-    /// Replacement metadata causes fresh KV publishers and another startup gate.
+    /// Recover while the worker is withdrawn from discovery. `SameInstance` must restore
+    /// KV continuity first. An error stops the worker, and the engine must bound recovery.
     async fn recover_serving(&self) -> Result<EngineRecovery, DynamoError> {
         Err(DynamoError::builder()
             .error_type(ErrorType::Backend(BackendError::EngineShutdown))
@@ -374,8 +376,9 @@ pub trait LLMEngine: Send + Sync + 'static {
             .build())
     }
 
-    /// Finalize engine-owned records after initial or replacement model metadata
-    /// is attached, before the worker becomes routable.
+    /// Finalize engine-owned state before the worker becomes routable: after model
+    /// metadata is attached and `on_endpoint_ready` has run, at first registration and
+    /// after every recovery. An error stops startup; while serving, recovery retries.
     async fn on_recovery_complete(&self) -> Result<(), DynamoError> {
         Ok(())
     }

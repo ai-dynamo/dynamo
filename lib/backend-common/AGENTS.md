@@ -29,7 +29,7 @@ parse args,    start engine,    wire Prometheus    serve requests drain-poll  sh
 return engine  return metadata  (optional)         (concurrent)   predicate   release
 ```
 
-The trait has twelve methods. `from_args` is NOT on the trait — each
+The trait has nineteen methods. `from_args` is NOT on the trait — each
 backend exposes a backend-specific constructor (typically a sync
 `from_args(argv) -> Result<(Self, WorkerConfig)>` inherent method).
 This keeps the trait fully object-safe without a `where Self: Sized`
@@ -123,6 +123,27 @@ opt-out and lets `run.rs` stay non-generic.
   startup**. Engines that publish their own discovery records stash it
   (e.g. vLLM dynamic LoRA via `register_model` / `unregister_model`).
   Mirrors the `on_publisher_ready` handoff idiom.
+- Recovery hooks — optional. The defaults keep fail-fast startup and never
+  withdraw a serving worker.
+  - `wait_for_startup()` — gate after KV publishers attach and before any
+    endpoint registers; rerun after each startup recovery.
+  - `recover_startup() -> Option<EngineRecovery>` — called when the gate
+    fails; `None` fails startup.
+  - `wait_for_unavailable()` — resolves (or errors) once serving or the
+    local KV index is no longer safe. The Worker then withdraws the
+    endpoint, holds readiness, and cancels in-flight `/engine/*` routes.
+  - `recover_serving() -> EngineRecovery` — recovers while withdrawn; an
+    error stops the worker.
+  - `on_recovery_complete()` — last check before the worker is routable,
+    at first registration and after every recovery. An error stops
+    startup; while serving, the Worker retries recovery.
+
+  `EngineRecovery::SameInstance` keeps the KV publishers. `Replacement`
+  stops them, attaches fresh ones from a new `kv_event_sources()` call,
+  reruns the startup gate, and re-registers the model card with the
+  operator's taints. The Worker retries without a time limit, so the
+  engine bounds recovery. An operator pause stays in effect: recovery
+  re-registers only after a resume.
 
 ## Contract for `generate`
 
@@ -357,7 +378,8 @@ poll task, no snapshot-fn latency ceiling, no GIL on the framework side.
 
 `Worker` calls both once after `start()` succeeds, constructs the
 publishers itself, and hands them back via the engine's `on_ready`
-closures. Engines never instantiate publishers. On shutdown, `Worker`
+closures; a recovery `Replacement` rebuilds only the KV publishers.
+Engines never instantiate publishers. On shutdown, `Worker`
 drops the handles while NATS is still alive; engines stop their
 producer threads in `cleanup()`.
 

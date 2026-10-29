@@ -73,21 +73,13 @@ impl PublisherHandles {
         enable_local_indexer: bool,
     ) -> Result<(), DynamoError> {
         debug_assert!(self.kv_publishers.is_empty());
-        self.kv_publishers = match block_size {
-            Some(block_size) => setup_kv_publishers(
-                endpoint,
-                kv_state_endpoint,
-                sources,
-                block_size,
-                enable_local_indexer,
-            )?,
-            None if sources.is_empty() => Vec::new(),
-            None => {
-                return Err(publisher_err(
-                    "replacement engine has KV sources without a block size".into(),
-                ));
-            }
-        };
+        self.kv_publishers = setup_kv_publishers(
+            endpoint,
+            kv_state_endpoint,
+            sources,
+            block_size,
+            enable_local_indexer,
+        )?;
         Ok(())
     }
 
@@ -111,9 +103,19 @@ fn setup_kv_publishers(
     endpoint: &Endpoint,
     kv_state_endpoint: &EndpointId,
     sources: Vec<KvEventSource>,
-    kv_cache_block_size: u32,
+    kv_cache_block_size: Option<u32>,
     enable_local_indexer: bool,
 ) -> Result<Vec<Arc<KvEventPublisher>>, DynamoError> {
+    // Without the engine's block size the router can't translate token IDs into cache blocks.
+    let Some(kv_cache_block_size) = kv_cache_block_size else {
+        if !sources.is_empty() {
+            tracing::warn!(
+                "engine declared {} kv_event_sources but kv_cache_block_size is None; skipping KV event publishers",
+                sources.len()
+            );
+        }
+        return Ok(Vec::new());
+    };
     let mut publishers = Vec::with_capacity(sources.len());
     for source in sources {
         let dp_rank = source.dp_rank();
@@ -209,26 +211,14 @@ pub(crate) async fn setup_publishers(
     enable_local_indexer: bool,
     first_token_source: Option<FirstTokenSource>,
 ) -> Result<PublisherHandles, DynamoError> {
-    // KV event publishers require the engine's block size; without it, the
-    // router can't translate token IDs into cache blocks. Snapshot publisher
-    // is independent — load reporting works regardless of cache structure.
-    let kv_publishers = if let Some(block_size) = kv_cache_block_size {
-        setup_kv_publishers(
-            endpoint,
-            kv_state_endpoint,
-            kv_sources,
-            block_size,
-            enable_local_indexer,
-        )?
-    } else {
-        if !kv_sources.is_empty() {
-            tracing::warn!(
-                "engine declared {} kv_event_sources but kv_cache_block_size is None; skipping KV event publishers",
-                kv_sources.len()
-            );
-        }
-        Vec::new()
-    };
+    // Snapshot publisher is independent — load reporting works regardless of cache structure.
+    let kv_publishers = setup_kv_publishers(
+        endpoint,
+        kv_state_endpoint,
+        kv_sources,
+        kv_cache_block_size,
+        enable_local_indexer,
+    )?;
 
     let snapshot_publisher = if dp_ranks.is_empty() {
         None
