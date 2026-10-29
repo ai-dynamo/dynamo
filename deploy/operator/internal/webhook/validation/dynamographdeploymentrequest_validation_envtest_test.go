@@ -827,6 +827,43 @@ func TestDynamoGraphDeploymentRunSpecIsImmutable(t *testing.T) {
 			run:        v1beta2ModelOnlyRunForAdmission(v1beta2AdmissionModel),
 			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
 		},
+		{
+			name: "empty hardware is an accepted resolved opt-out",
+			run: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+				run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+				run.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{}
+				return run
+			}(),
+		},
+		{
+			name: "partial hardware is rejected",
+			run: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+				run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+				run.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{
+					SKU: new("h200_sxm"), Budget: new(int32(8)),
+				}}
+				return run
+			}(),
+			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+		},
+		{
+			name: "partial static workload is rejected",
+			run: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+				run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+				run.Spec.Workload.Static.InputTokens = new(int32(1024))
+				return run
+			}(),
+			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+		},
+		{
+			name: "missing SLA snapshot is rejected",
+			run: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+				run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+				run.Spec.Objective.SLA = nil
+				return run
+			}(),
+			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1124,8 +1161,9 @@ func setV1beta2InputOverrides(spec map[string]any, overrides map[string]any) {
 
 // setBeta2AdmissionHardware names the hardware, so fixtures do not depend on GPU discovery.
 func setBeta2AdmissionHardware(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
-	sku, budget := "h100_sxm", int32(4)
+	sku, budget, numGPUsPerNode := "h100_sxm", int32(4), int32(4)
 	request.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{
-		GPU: &nvidiacomv1beta2.GPUHardwareSpec{SKU: &sku, Budget: &budget},
+		GPU:            &nvidiacomv1beta2.GPUHardwareSpec{SKU: &sku, Budget: &budget},
+		NumGPUsPerNode: &numGPUsPerNode,
 	}
 }
