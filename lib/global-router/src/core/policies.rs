@@ -33,7 +33,7 @@ use dynamo_kv_router::{RoutingPartitionRef, WorkerId, WorkerType};
 
 use super::directory::PoolDirectory;
 use super::{AffinityConfig, CorePolicy};
-use crate::signals::PoolSignals;
+use crate::signals::{PoolOccupancy, PoolSignals};
 
 impl CorePolicy {
     /// The name the policy is registered and selected under.
@@ -204,10 +204,33 @@ pub struct HeadroomPicker {
 struct Candidate {
     row: usize,
     worker: WorkerId,
+    /// The pool's region, if the directory knows the worker.
+    region: Option<String>,
+    /// How full the pool is; `None` without a fresh report.
+    occupancy: Option<PoolOccupancy>,
     /// Occupancy, 1 being full; `None` without a fresh report.
     load: Option<f64>,
     /// Round trip to the pool's region; zero for this region.
     distance: Option<Duration>,
+}
+
+impl Candidate {
+    /// The candidate in one word for the pick log: region, slots and KV
+    /// occupancy, and the round trip in milliseconds; `?` when unknown.
+    fn describe(&self) -> String {
+        let region = self.region.as_deref().unwrap_or("?");
+        let (slots, kv) = match self.occupancy {
+            Some(occupancy) => (
+                format!("{:.2}", occupancy.slots),
+                occupancy.kv.map_or("?".to_owned(), |kv| format!("{kv:.2}")),
+            ),
+            None => ("?".to_owned(), "?".to_owned()),
+        };
+        let rtt = self
+            .distance
+            .map_or("?".to_owned(), |rtt| rtt.as_millis().to_string());
+        format!("{region}:slots={slots},kv={kv},rtt={rtt}ms")
+    }
 }
 
 impl HeadroomPicker {
@@ -230,12 +253,13 @@ impl HeadroomPicker {
             .map(|(row, candidate)| {
                 let worker = candidate.worker().worker_id;
                 let entry = pools.get(&worker);
+                let occupancy = entry.and_then(|entry| self.signals.occupancy(&entry.id));
                 Candidate {
                     row,
                     worker,
-                    load: entry
-                        .and_then(|entry| self.signals.occupancy(&entry.id))
-                        .map(|occupancy| occupancy.load),
+                    region: entry.map(|entry| entry.region.clone()),
+                    occupancy,
+                    load: occupancy.map(|occupancy| occupancy.load),
                     distance: entry.and_then(|entry| {
                         if entry.region == self.region {
                             Some(Duration::ZERO)
@@ -277,6 +301,14 @@ impl WorkerPicker for HeadroomPicker {
             .filter(|candidate| candidate.worker != default.worker)
             .find(|candidate| candidate.load.is_some_and(|load| 1.0 - load > need))
             .unwrap_or(default);
+        tracing::debug!(
+            candidates = ?placed.iter().map(Candidate::describe).collect::<Vec<_>>(),
+            default = default.describe(),
+            bound = bound.is_some(),
+            need,
+            choice = choice.describe(),
+            "the affinity picker placed the pools"
+        );
         Ok(choice.row)
     }
 }
