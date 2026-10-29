@@ -463,3 +463,21 @@ async def test_discovery_capture_records_api_error_body(tmp_path):
     assert "response" not in record, record
     assert "403" in record["error"]
     assert forbidden["message"] in record["error"]
+
+
+async def test_readiness_wait_deadline_covers_stalled_request(tmp_path, monkeypatch):
+    deployment = managed_deployment(tmp_path)
+
+    async def stalled_status(**kwargs):
+        await asyncio.sleep(60)
+
+    deployment._custom_api = SimpleNamespace(
+        get_namespaced_custom_object=stalled_status
+    )
+    monkeypatch.setattr(
+        deployment, "_get_pod_status_details", AsyncMock(return_value=[])
+    )
+
+    with pytest.raises(TimeoutError, match="failed to reach Ready=True"):
+        async with asyncio.timeout(10):
+            await deployment._wait_for_ready(timeout=1)

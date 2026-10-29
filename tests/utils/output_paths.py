@@ -63,27 +63,32 @@ def resolve_test_output_path(path: Union[str, Path]) -> str:
     return os.path.join(log_root, path_str)
 
 
-def prepare_test_output_dir(log_dir: str, attempts: dict[str, int]) -> None:
+# File timestamps use a coarse kernel clock that can trail time.time() by a
+# few milliseconds, so output just created this session must not look stale.
+_STALE_OUTPUT_MARGIN_S = 1.0
+
+
+def prepare_test_output_dir(log_dir: str, session_start: float) -> None:
     """Create an empty output directory for one execution of a test.
 
-    ``attempts`` counts executions per output directory for one pytest session;
-    retries (Datadog, pytest-rerunfailures) run again in the same session. It is
-    keyed by ``log_dir`` because tests with the same name in different files
-    share that directory.
-
-    The first execution in the session removes stale output left by earlier
-    sessions. A repeat execution moves the previous attempt's output to
-    ``<log_dir>.attempt<N>`` instead of deleting it, so a failed attempt's logs
-    survive a passing retry and are uploaded with it.
+    Output last modified before ``session_start`` is left from an earlier
+    session and is removed. Output written during this session belongs to an
+    earlier attempt of this test, retried by Datadog or pytest-rerunfailures,
+    or to a same-named test in another file or xdist worker; it is moved to the
+    first free ``<log_dir>.attempt<N>`` so it is uploaded too. Checking the
+    time instead of counting attempts gives the same answer in every xdist
+    worker, because the workers share the output directory.
     """
-    attempt = attempts.get(log_dir, 0) + 1
-    attempts[log_dir] = attempt
-    if attempt == 1:
-        shutil.rmtree(log_dir, ignore_errors=True)
-        for stale in glob.glob(f"{glob.escape(log_dir)}.attempt*"):
-            shutil.rmtree(stale, ignore_errors=True)
-    elif os.path.exists(log_dir):
-        previous = f"{log_dir}.attempt{attempt - 1}"
-        shutil.rmtree(previous, ignore_errors=True)
-        os.rename(log_dir, previous)
+    for path in [log_dir, *glob.glob(f"{glob.escape(log_dir)}.attempt*")]:
+        try:
+            stale = os.path.getmtime(path) < session_start - _STALE_OUTPUT_MARGIN_S
+        except OSError:
+            continue
+        if stale:
+            shutil.rmtree(path, ignore_errors=True)
+    if os.path.exists(log_dir):
+        attempt = 1
+        while os.path.exists(f"{log_dir}.attempt{attempt}"):
+            attempt += 1
+        os.rename(log_dir, f"{log_dir}.attempt{attempt}")
     os.makedirs(log_dir, exist_ok=True)
