@@ -9,7 +9,7 @@ use super::DiscoveryError;
 /// The write side. A PoolRelay registers its pool on a timer, and each call
 /// is also the pool's heartbeat: registering an unchanged pool again only
 /// renews it. The [`Lease`] says when to register again, and how long the
-/// pool stays listed after its last registration, measured on the store's
+/// pool stays listed after its last registration, measured on the backend's
 /// clock. PoolRelays get router replicas from a [`super::ReplicaDirectory`],
 /// not from this reply.
 ///
