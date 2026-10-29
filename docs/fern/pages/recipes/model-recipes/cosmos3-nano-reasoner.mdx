@@ -224,9 +224,9 @@ The [AIPerf workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/cosm
 generates 200 synthetic 30-second, 2 FPS videos with FFmpeg before the
 measured sweep, so no external dataset or credentials are needed. It then sends
 20 questions for each video at every concurrency level: 4,000 requests with
-exactly 128 output tokens each. For session affinity, AIPerf sends
-`X-Dynamo-Session-ID: synthetic-2fps-30s:<video-filename>` on all 20
-questions; pure round robin sends no session-affinity header.
+exactly 128 output tokens each. For session affinity, AIPerf sends one
+`X-Dynamo-Session-ID` value, generated per video, on all 20 questions about
+that video; pure round robin sends no session-affinity header.
 
 ```bash
 kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
