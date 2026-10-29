@@ -41,6 +41,10 @@ Inspect SLO-qualified goodput per average GPU together with latency,
 good-request rate, GPU-hours, and scaling activity. The online backend uses
 AIPerf to compare existing endpoints; deployment cost telemetry is not collected.
 
+To replay a trace through one Planner configuration and inspect each scaling
+or retune decision, see
+[Simulate Planner Decisions with AISimulate](aisimulate-planner-replay.mdx).
+
 ## Custom Load Predictors
 
 Each YAML block in this section is a standalone `PlannerConfig`. Save the block

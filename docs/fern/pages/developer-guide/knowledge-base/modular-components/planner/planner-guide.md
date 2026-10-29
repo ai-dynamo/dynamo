@@ -69,7 +69,7 @@ spec:
       advisory: true
 ```
 
-Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment.
+Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment. Planner-in-the-loop replay honors it too: the replay keeps the simulated deployment fixed, reports the recommendations, and records [retune](#periodic-retune-experimental) decisions, which run only in simulation, without applying them; see [Replay in Advisory Mode](aisimulate-planner-replay.mdx#replay-in-advisory-mode).
 
 ### Optimization Target
 
@@ -184,7 +184,7 @@ spec:
 | `backend` | string | `vllm` | Backend: `vllm`, `sglang`, `trtllm`, or `mocker`. |
 | `environment` | string | `kubernetes` | Runtime environment: `kubernetes`, `virtual`, or `global-planner`. |
 | `namespace` | string | env `DYN_NAMESPACE` | Dynamo logical/runtime namespace for the deployment. |
-| `advisory` | bool | `false` | Suggestion-only mode. Compute, log, export, and report recommended replica counts without executing scaling actions or changing the deployment. |
+| `advisory` | bool | `false` | Suggestion-only mode. Compute, log, export, and report recommended replica counts without executing scaling actions or changing the deployment. Planner-in-the-loop replay honors it too and records retune decisions without applying them. |
 
 ### Traffic Prediction Settings
 
@@ -292,8 +292,8 @@ plugin registration, transport, and auth settings live under
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `scheduling.scale_interval_seconds` | float | gcd of enabled builtin intervals | Base pipeline cadence. The pipeline wakes once per interval; each plugin's `execution_interval_seconds` decides whether that plugin fires on the tick. By default, the cadence is the gcd of `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`, preserving existing config fire times. |
-| `scheduling.tick_max_duration_seconds` | float | `30.0` | Outer deadline wrapping the full plugin pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. |
-| `plugin_registration.transport.request_timeout_seconds` | float | `5.0` | Per-plugin RPC timeout. Plugins exceeding this raise `PluginTimeoutError`; the stage continues with the remaining plugins. |
+| `scheduling.tick_max_duration_seconds` | float | `30.0` | Outer wall-clock deadline wrapping the full plugin pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. Replay does not apply it. |
+| `plugin_registration.transport.request_timeout_seconds` | float | `5.0` | Per-plugin RPC timeout. Plugins exceeding this raise `PluginTimeoutError`; the stage continues with the remaining plugins. Replay does not apply it to in-process plugins. |
 
 Existing planner fields still drive the builtin plugins:
 
@@ -325,6 +325,76 @@ spec:
           request_timeout_seconds: 5.0
 ```
 
+## Periodic Retune (Experimental)
+
+> [!WARNING]
+> **Experimental.** In this release, retune runs only in offline simulation:
+> `aisimulate predict --stack dynamo` and `dynamo.replay.run_trace_replay`. A live Planner rejects a
+> configuration that sets `retune` at startup.
+
+Retune lets the Planner tune its own runtime parameters from the traffic it served. Every
+`retune.interval_seconds`, it takes the window of the request trace that just ended and replays it
+once per candidate parameter point, on the deployment's engine configuration and from the replica
+counts at the window start. It scores each candidate on `retune.objective`, by default SLA goodput
+per GPU: SLA-good output tokens per second of the window, divided by the GPUs provisioned. The
+objective takes the DGDR v1beta2 `spec.objective.metric` values, such as `ThroughputPerGPU` or
+`TTFT`; see [Objectives](../../../../reference/components/planner-configuration.mdx#objectives).
+When the best candidate beats the current point on the same window by more than
+`min_improvement_percentage`, the Planner switches to it.
+
+Retune searches parameters a running deployment can change without a restart:
+
+- **Router parameters** of the KV router, in `retune.router`: `overlap_score_credit`,
+  `prefill_load_scale`, `temperature`, and four more `/router_policy` parameters.
+- **Planner runtime fields**, in `retune.planner`: load-scaling sensitivity, the load predictor,
+  minimum worker counts, GPU budgets, `max_throughput_scaling_replicas`, and the thresholds of
+  `optimization_target: load`.
+
+The engine, the topology, the router mode, and Planner settings fixed at startup, such as the
+scaling intervals and `ttft_ms` / `itl_ms`, stay as configured.
+
+Retune supports two scenarios:
+
+| Scenario | Planner | Searched | Each candidate replay |
+|---|---|---|---|
+| Fixed replicas | Retune-only mode: `retune` set with both `enable_load_scaling: false` and `enable_throughput_scaling: false`. The Planner never scales | Router parameters | Keeps the replica counts fixed |
+| Autoscaling | Load-based or throughput-based scaling, or both. `retune.objective` must be `GoodputPerGPU` or `ThroughputPerGPU`, because the candidates' GPU counts differ | Router parameters, Planner fields, or both | Runs the current Planner with the candidate's fields |
+
+With `advisory: true`, the Planner still runs every sweep but only records the decision it would
+apply, with outcome `advisory`; the router and Planner parameters keep their starting values.
+
+A sweep takes time, so the decision lands at least one Planner tick after the sweep launches, and
+later when `decision_latency_seconds` models the sweep's duration. The old parameters serve traffic
+until then. Each candidate is replayed once, and all candidates of a window share one random seed,
+so a candidate that changes no routing or scaling decision ties the current point and is kept; see
+[Candidates and the Sweep](planner-design.md#candidates-and-the-sweep).
+A candidate that changes decisions is judged on one replay of one window, so
+`min_improvement_percentage` sets the margin it must clear; see
+[Measure the Gain](aisimulate-planner-replay.mdx#measure-the-gain).
+
+This minimal fixed-replica configuration searches the 108-point default router domain every six
+hours. It is a `PlannerConfig` for the `planner_config` argument of `dynamo.replay.run_trace_replay`
+(see [Run Retune from Python](aisimulate-planner-replay.mdx#run-retune-from-python)), not a DGDR
+`spec.features.planner` fragment: a live Planner rejects it. In `aisimulate predict`, the `planner`
+section takes `retune` and the two scaling flags, and `mode` comes from `engine.mode`; see
+[Scenario 1](aisimulate-planner-replay.mdx#scenario-1-fixed-replicas-router-only).
+
+```yaml
+mode: disagg
+enable_load_scaling: false
+enable_throughput_scaling: false
+retune:
+  interval_seconds: 21600
+  router: default
+```
+
+To run retune and read its decisions, see
+[Simulate Retune](aisimulate-planner-replay.mdx#simulate-retune-experimental). For windows,
+candidates, scoring, and decision timing, see
+[Planner Design](planner-design.md#retune-experimental-simulation-only). For every field and the
+search-domain syntax, see the
+[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only).
+
 ## Integration with Profiler
 
 When the profiler runs with planner enabled, it:
@@ -353,6 +423,7 @@ In the current workflow, run profiling independently for each intended pool, the
 - [Planner overview](overview.md) — Why LLM inference needs a different autoscaler
 - [Planner Design](planner-design.md) — Architecture and algorithm internals
 - [Planner Examples](planner-examples.md) — Planner-specific configuration examples
+- [Simulate Planner Decisions with AISimulate](aisimulate-planner-replay.mdx) — Replay a trace through the Planner offline, including retune
 - [DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx) — DGDR YAML examples, sample configurations, advanced patterns
 - [Global Planner Guide](global-planner-guide.md) — Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments
 - [Profiler Guide](../profiler/profiler-guide.md) — How profiling data is generated

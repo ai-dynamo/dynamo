@@ -4,7 +4,7 @@ IMG ?= controller:latest
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.30.0
-ENVTEST_PACKAGES ?= ./internal/controller/... ./internal/webhook/validation ./cmd/crd-apply
+ENVTEST_PACKAGES ?= ./internal/controller/... ./internal/webhook/defaulting ./internal/webhook/validation ./cmd/crd-apply ./internal/dgdrrunpublisher
 ENVTEST_ASSETS_CMD = $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path
 
 CLUSTERTEST_PACKAGES ?= ./internal/testing/clusterenv ./internal/controller/...
@@ -715,7 +715,7 @@ clustertest-upgrade-contract-in-cluster: ## Replay in an explicitly selected, ex
 
 .PHONY: clustertest-upgrade-fixtures-regen clustertest-upgrade-fixtures-regen-in-cluster
 clustertest-upgrade-fixtures-regen: kind kubectl ## Capture a pinned release tree in a fresh exclusive Kind cluster.
-	python3 hack/generate_upgrade_fixtures.py --check-release-matrix
+	python3 hack/generate_upgrade_fixtures.py --check-release-matrix $(if $(UPGRADE_RELEASE_TAG),--release-tag "$(UPGRADE_RELEASE_TAG)")
 	KIND_BIN='$(KIND)' bash hack/run_upgrade_clustertest.sh clustertest-upgrade-fixtures-regen-in-cluster
 
 clustertest-upgrade-fixtures-regen-in-cluster: ## Capture the selected released tag, or save provisional candidate evidence.
