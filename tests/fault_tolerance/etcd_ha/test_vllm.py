@@ -355,9 +355,7 @@ def test_etcd_ha_failover_vllm_disaggregated(
 @pytest.mark.gpu_1
 @pytest.mark.xpu_1
 @pytest.mark.e2e
-# TODO: revert to pytest.mark.nightly after pre_merge validation
-# on this PR (see .ai/ci-guidelines.md).
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(600)
 def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
