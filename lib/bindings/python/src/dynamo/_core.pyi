@@ -3350,6 +3350,11 @@ class WorkerUnavailable(DynamoException):
 
     ...
 
+class WorkerDraining(WorkerUnavailable):
+    """The selected worker closed admission for a reversible drain (HTTP 503)."""
+
+    ...
+
 class SelectionServiceError(DynamoException):
     """
     Raised by `SelectionService` for selector failures that are not malformed

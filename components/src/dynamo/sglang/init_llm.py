@@ -16,6 +16,7 @@ from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
+from dynamo.sglang.drain_controls import configure_worker_drain
 from dynamo.sglang.gateway import (
     attached_engine_load_time,
     gateway_worker_count,
@@ -78,6 +79,7 @@ async def init_decode(
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
     snapshot_engine: Optional[sgl.Engine] = None,
     attached_engine: Optional[object] = None,
+    terminal_event: Optional[asyncio.Event] = None,
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -203,11 +205,19 @@ async def init_decode(
 
     body_failed = True
     state_agent = StateAgentLifecycle()
+    drain = None
     try:
+        drain = configure_worker_drain(
+            handler,
+            runtime,
+            ready_event,
+            shutdown_event,
+            terminal_event or shutdown_event,
+        )
         await state_agent.start(engine, config, generate_endpoint)
         gather_tasks = [
             generate_endpoint.serve_endpoint(
-                handler.generate,
+                drain.wrap(handler.generate) if drain else handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
@@ -250,14 +260,19 @@ async def init_decode(
         body_failed = False
     finally:
         try:
-            await state_agent.close()
+            if drain is not None:
+                runtime.unregister_engine_http_handler("worker_lifecycle")
+                await drain.close()
         finally:
-            await finish_worker_teardown(
-                metrics_task,
-                handler.cleanup,
-                run_deferred_handlers,
-                body_failed=body_failed,
-            )
+            try:
+                await state_agent.close()
+            finally:
+                await finish_worker_teardown(
+                    metrics_task,
+                    handler.cleanup,
+                    run_deferred_handlers,
+                    body_failed=body_failed,
+                )
 
 
 async def init_prefill(
@@ -268,6 +283,7 @@ async def init_prefill(
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
     snapshot_engine: Optional[sgl.Engine] = None,
     attached_engine: Optional[object] = None,
+    terminal_event: Optional[asyncio.Event] = None,
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -348,6 +364,8 @@ async def init_prefill(
 
     await _warmup_prefill_engine(engine, server_args, metrics_task)
 
+    ready_event = asyncio.Event()
+
     handler = PrefillWorkerHandler(
         engine, config, publisher, generate_endpoint, shutdown_event
     )
@@ -357,15 +375,21 @@ async def init_prefill(
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
-    ready_event = asyncio.Event()
-
     body_failed = True
     state_agent = StateAgentLifecycle()
+    drain = None
     try:
+        drain = configure_worker_drain(
+            handler,
+            runtime,
+            ready_event,
+            shutdown_event,
+            terminal_event or shutdown_event,
+        )
         await state_agent.start(engine, config, generate_endpoint)
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
-                handler.generate,
+                drain.wrap(handler.generate) if drain else handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
@@ -415,11 +439,16 @@ async def init_prefill(
         body_failed = False
     finally:
         try:
-            await state_agent.close()
+            if drain is not None:
+                runtime.unregister_engine_http_handler("worker_lifecycle")
+                await drain.close()
         finally:
-            await finish_worker_teardown(
-                metrics_task,
-                handler.cleanup,
-                run_deferred_handlers,
-                body_failed=body_failed,
-            )
+            try:
+                await state_agent.close()
+            finally:
+                await finish_worker_teardown(
+                    metrics_task,
+                    handler.cleanup,
+                    run_deferred_handlers,
+                    body_failed=body_failed,
+                )

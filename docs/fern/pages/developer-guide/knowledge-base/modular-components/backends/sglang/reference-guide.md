@@ -180,3 +180,63 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 - **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer
 - **[Diffusion](../../../../../use-cases/diffusion/overview.md)**: LLM, image, and video diffusion models
 - **[Configuration and Tuning](../../router/configuration-and-tuning.md)**: KV-aware routing configuration
+
+
+## Experimental worker withdrawal
+
+Set `DYN_EXPERIMENTAL_SGLANG_WORKER_DRAIN=1` and enable `DYN_SYSTEM_PORT` on
+`python -m dynamo.sglang` LLM workers to expose reversible, pre-delete withdrawal.
+This applies to aggregated, decode, and prefill handlers. It does not use
+SGLang's `pause_generation`, abort requests, or stop the engine.
+
+Upgrade frontends and workers to a revision supporting the `backend.worker_draining`
+error reason before enabling this experimental feature. Older frontends may reject
+that reason or lack the independent, bounded reselection behavior.
+
+Use the selected worker's system listener directly, rather than a load-balanced
+Service. The listener follows the existing engine-control network boundary; keep
+it accessible only to trusted administrators.
+
+| Method | Worker system path | Behavior |
+| --- | --- | --- |
+| `POST` | `/engine/worker_lifecycle/drain` | Withdraw from discovery, allow routing convergence, then close new request admission |
+| `GET` | `/engine/worker_lifecycle/status` | Report local lifecycle, admission, background work, and completion capability |
+| `POST` | `/engine/worker_lifecycle/resume` | Reopen admission and restore discovery registration |
+
+Requests must have no body or an empty JSON object. Invalid methods return 405;
+invalid bodies return 400. Startup and terminal-shutdown conflicts return 409;
+discovery failures return 503. Controls become available only after model readiness
+and observation of this exact endpoint instance's initial registration.
+
+```bash
+curl --fail-with-body -X POST "$WORKER_SYSTEM_URL/engine/worker_lifecycle/drain"
+curl --fail-with-body "$WORKER_SYSTEM_URL/engine/worker_lifecycle/status"
+curl --fail-with-body -X POST "$WORKER_SYSTEM_URL/engine/worker_lifecycle/resume"
+```
+
+The routing-convergence window uses `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`
+(default: 5 seconds). Previously admitted responses keep running. After admission
+closes, a late request receives a typed worker-draining rejection. A supporting
+frontend may reselect up to three times independently of its ordinary migration
+budget, before response data and subject to explicit routing constraints.
+Internal worker health probes remain callable during manual withdrawal.
+
+Manual withdrawal remains in force across native engine controls. Resume is
+rejected while SGLang generation is paused; continue the engine first, then
+resume the worker. SIGTERM fences resume immediately but preserves the existing
+discovery-first shutdown grace before admission closes.
+
+> [!WARNING]
+> This increment provides routing withdrawal and observation, not permission to
+> delete a Pod. It does not expose an authoritative engine-idle/KV-transfer query:
+> `completion_supported` is `false`, `engine_quiescent` is `null`, and a withdrawn
+> worker stays `draining` even when `inflight_requests` and `background_tasks` are
+> zero. Generator completion and fixed delays do not prove scheduler or remote KV
+> work has finished. Do not use these values as a safe-to-delete signal.
+
+Worker state is process-local. A restart creates a new worker identity; confirm
+Pod UID and instance identity before any maintenance action. WorkerSet batching,
+automatic Pod deletion, and replacement inference-admission gating are separate
+increments in the [manual Grove OnDelete release proposal](https://github.com/ai-dynamo/dynamo/issues/17568).
+The complete workflow requires authoritative drain completion before deletion and
+real targeted inference validation before the replacement enters business traffic.

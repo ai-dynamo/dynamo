@@ -883,7 +883,8 @@ class BaseWorkerHandler(
         ):
             return
 
-        if tokenizer_manager.is_pause:
+        drain = getattr(self, "_worker_drain", None)
+        if tokenizer_manager.is_pause or (drain is not None and drain.withdrawn):
             await self.generate_endpoint.unregister_endpoint_instance()
         else:
             await self.generate_endpoint.register_endpoint_instance()
