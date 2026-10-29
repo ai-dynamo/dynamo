@@ -46,7 +46,7 @@ Use this skill when making a pull request to Dynamo or reviewing one. Work throu
 
 Exclude tests, documentation, comments, and whitespace from this count, as they typically do not contribute significantly to the complexity of the main change.
 
-**Modularity.** Dynamo is moving toward smaller, modular crates. Put new functionality in a focused crate rather than growing a large one such as `lib/llm`. Add as few dependencies as possible, and justify every new package, such as an added Rust crate, in the PR description.
+**Modularity.** Dynamo is moving toward smaller, modular crates. Add as few dependencies as possible, and justify every new package, such as an added Rust crate, in the PR description.
 
 **Correctness and compatibility.** The change must stay correct for every path that shares the changed code: each backend (vLLM, SGLang, TensorRT-LLM), aggregated and disaggregated serving, and Python callers through the bindings. State what the change makes worse, such as performance on another configuration or a feature it no longer supports, and justify any breaking change to a user-facing contract (request fields, CLI flags, environment variables, metrics, CRD fields) in the PR description.
 
@@ -96,4 +96,4 @@ Fill in every section of `.github/pull_request_template.md`, and title the PR pe
 
 **Issues and Ongoing Work.** Reference the GitHub or Linear issue the PR implements, for example `Closes #8480` or `Closes DYN-1234`. List any similar PRs, issues, or code on `main` that the Existing work check found, each with one line on how this PR differs; if the search found nothing, say so. As the final step, run the `dynamo-issue-first` skill to validate the issue and its reference.
 
-**Authorship.** If an AI agent wrote or opened the PR, end the description with its model and harness, for example `Written by Claude Opus 5.5 in Claude Code`.
+**Authorship.** If an AI agent wrote or opened the PR, end the description with its model and harness, for example `Written by [Model Name] in [Harness]`.
