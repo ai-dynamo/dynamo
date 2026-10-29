@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -230,6 +231,13 @@ func (o DGDRV1beta2Options) hardwareDefaultsFromDiscoveryV1beta2(
 	// the GPU model (empty when the catalog does not know it) and the selected node-shape capacity.
 	var defaults hardwareDefaultsV1beta2
 	if !intent.hasNumGPUsPerNode && found != nil && found.GPUsPerNode > 0 {
+		if found.GPUsPerNode > math.MaxInt32 {
+			return hardwareDefaultsV1beta2{}, rejectHardwareV1beta2(field.Invalid(
+				hardwarePath.Child("numGpusPerNode"),
+				found.GPUsPerNode,
+				fmt.Sprintf("discovered node width exceeds the API maximum of %d", math.MaxInt32),
+			))
+		}
 		defaults.numGPUsPerNode = int32(found.GPUsPerNode)
 	}
 	if sku == "" {

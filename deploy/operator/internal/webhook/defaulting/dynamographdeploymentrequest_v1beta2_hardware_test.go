@@ -20,6 +20,8 @@ package defaulting
 import (
 	"context"
 	"errors"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -66,7 +68,7 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 	h200x8 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 1, TotalGPUs: 8, SelectedShapeGPUs: 8}
 	h200x64 := gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: 8, NodesWithGPUs: 8, TotalGPUs: 64, SelectedShapeGPUs: 64}
 	completeH100 := hardwareOfV1beta2(str("h100_sxm"), num(4), num(8))
-	tests := []struct {
+	type testCase struct {
 		name              string
 		op                admissionv1.Operation
 		oldHardware       *nvidiacomv1beta2.HardwareSpec
@@ -84,7 +86,8 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 		wantErr           string
 		wantMinTimeout    time.Duration
 		wantMaxTimeout    time.Duration
-	}{
+	}
+	tests := []testCase{
 		{name: "no discoverer leaves omitted hardware unresolved", op: admissionv1.Create, withoutDiscoverer: true},
 		{name: "omitted hardware discovers the SKU budget and node width", op: admissionv1.Create, found: h200x8, wantSKU: "h200_sxm", wantBudget: 8, wantGPUsPerNode: 8, wantCalls: 1, wantMinTimeout: time.Millisecond, wantMaxTimeout: defaultHardwareDiscoveryTimeout},
 		{name: "an empty hardware object opts out of discovery", op: admissionv1.Create, hardware: &nvidiacomv1beta2.HardwareSpec{}, discoveryErr: errors.New("discovery must not run")},
@@ -198,6 +201,16 @@ func TestResolveHardwareV1beta2(t *testing.T) {
 		{name: "delete never discovers", op: admissionv1.Delete, oldHardware: completeH100, found: h200x8},
 		{name: "connect never discovers", op: admissionv1.Connect, oldHardware: completeH100, found: h200x8},
 		{name: "an unknown operation never discovers", oldHardware: completeH100, found: h200x8},
+	}
+	if strconv.IntSize > 32 {
+		tooManyGPUs := int64(math.MaxInt32) + 1
+		tests = append(tests, testCase{
+			name:      "a discovered node width must fit the API integer",
+			op:        admissionv1.Create,
+			found:     gpu.GPUInfo{System: "h200_sxm", GPUsPerNode: int(tooManyGPUs), SelectedShapeGPUs: 8},
+			wantCalls: 1,
+			wantErr:   "spec.hardware.numGpusPerNode: Invalid value: 2147483648: discovered node width exceeds the API maximum of 2147483647",
+		})
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
