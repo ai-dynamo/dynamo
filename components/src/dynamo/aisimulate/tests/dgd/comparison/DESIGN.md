@@ -288,8 +288,8 @@ CI must distinguish deterministic renderer checks from end-to-end search evidenc
 a stochastic search an exact-diff gate.
 
 The comparison runner is a manual corpus-generation tool. Its unit tests cover composition and
-failure isolation. The automatic public Recommend-to-DGD coverage lives in the existing
-[CLI E2E table](../../../../replay/tests/e2e/test_unified_cli_dynamo.py), using small fixed searches.
+failure isolation. The automatic public Recommend-to-DGD coverage lives in the
+[DGD CLI E2E table](../e2e/test_dgd_cli.py), using small fixed searches.
 
 ## Non-goals
 

@@ -29,9 +29,3 @@ optimization:
   target: throughput
   constraints: {max_candidate_gpus: 2}
 optimizer: {algorithm: random, max_trials: 4, parallelism: 1, candidate_timeout_seconds: 30.0, seed: 22}
-dgd:
-  name: cli-router
-  format: kustomize
-  output_dir: deployment
-  runtime_image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
-  num_gpus_per_node: 8

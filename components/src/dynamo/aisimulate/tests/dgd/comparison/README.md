@@ -15,8 +15,8 @@ optional evidence links. Only an explicit `match` regex accepts a known failure;
 historical entries remain diagnostic and fail closed. A missing generated variant has no placeholder
 golden.
 
-This is a manual corpus-generation tool. Automatic Recommend-to-DGD coverage runs in the existing
-[CLI E2E table](../../../../replay/tests/e2e/test_unified_cli_dynamo.py) with small deterministic
+This is a manual corpus-generation tool. Automatic Recommend-to-DGD coverage runs in the
+[DGD CLI E2E table](../e2e/test_dgd_cli.py) with small deterministic
 searches. The runner does not deploy generated manifests or recipes.
 
 The portable runner and comparison-corpus direction build on Ashna Mehrotra's work in

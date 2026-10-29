@@ -3,11 +3,11 @@
 
 traffic:
   source: {type: synthetic, input_tokens: 32, output_tokens: 4}
-  load: {type: concurrency, concurrency: {choices: [1, 4]}}
+  load: {type: concurrency, concurrency: 2}
   stop: {requests: 6}
 engine:
   mode: aggregated
-  model: components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/tiny-model
+  model: components/src/dynamo/aisimulate/tests/dgd/e2e/fixtures/tiny-model
   hardware: h200_sxm
   backend: vllm
   context_length: 2048
@@ -16,16 +16,16 @@ engine:
       parallelism:
         preset:
           - {replicas: 1, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
-      scheduler: {max_batched_tokens: 32, max_sequences: {choices: [1, 4]}}
+      scheduler: {max_batched_tokens: 8192, max_sequences: 4}
       kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: fixed, blocks: 256}}
       timing: {type: fixed, prefill_ms: 1, decode_ms: 1}
 optimization:
-  target: pareto
+  target: throughput
   constraints: {max_candidate_gpus: 1}
-optimizer: {algorithm: random, max_trials: 8, parallelism: 1, candidate_timeout_seconds: 30.0, seed: 21}
+optimizer: {algorithm: random, max_trials: 1, parallelism: 1, candidate_timeout_seconds: 30.0, seed: 21}
 dgd:
-  name: cli-pareto-{index}
-  format: kustomize
-  output_dir: candidate-{index}
+  name: cli-aggregated
+  namespace: cli-e2e
+  output_file: deployment.yaml
   runtime_image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
   num_gpus_per_node: 8

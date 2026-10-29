@@ -58,9 +58,9 @@ spec:
           - '3'
           - '4'
           - --model
-          - components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/tiny-model
+          - components/src/dynamo/aisimulate/tests/dgd/e2e/fixtures/tiny-model
           - --served-model-name
-          - components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/tiny-model
+          - components/src/dynamo/aisimulate/tests/dgd/e2e/fixtures/tiny-model
           - --max-model-len
           - '2048'
           resources:

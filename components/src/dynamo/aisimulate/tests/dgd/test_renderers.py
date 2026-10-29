@@ -297,8 +297,7 @@ def test_dropping_transfer_buffer_size_keeps_other_arguments() -> None:
 def test_direct_renderer_preserves_evaluation_context() -> None:
     candidate = _disagg_candidate("vllm", "0.20.1")
     candidate.config["model_name"] = str(
-        Path(__file__).resolve().parents[3]
-        / "replay/tests/e2e/configs/unified_cli/fixtures/tiny-model"
+        Path(__file__).resolve().parent / "e2e/fixtures/tiny-model"
     )
     candidate.config["concurrency"] = 64
     rendered = render_dgd(
