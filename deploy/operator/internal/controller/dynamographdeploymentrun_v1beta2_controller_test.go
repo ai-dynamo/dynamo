@@ -14,11 +14,9 @@ import (
 	"testing"
 	"time"
 
-	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrrunpublisher"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -40,12 +38,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-type fixedRunHardware struct {
-	info  gpu.GPUInfo
-	err   error
-	calls []nvidiacomv1beta1.GPUSKUType
-}
-
 type fixedRunSecrets struct {
 	byImage map[string][]string
 	err     error
@@ -58,28 +50,36 @@ func (f *fixedRunSecrets) GetSecrets(_ string, image string) ([]string, error) {
 	return append([]string(nil), f.byImage[image]...), nil
 }
 
-func (f *fixedRunHardware) Discover(_ context.Context, sku nvidiacomv1beta1.GPUSKUType) (*gpu.GPUInfo, error) {
-	f.calls = append(f.calls, sku)
-	if f.err != nil {
-		return nil, f.err
-	}
-	return &f.info, nil
-}
-
 type dgdrRunFixture struct {
 	t          *testing.T
 	client     client.Client
 	reconciler *DynamoGraphDeploymentRunV1beta2Reconciler
 }
 
-func newDGDRRunFixture(t *testing.T, hardware dgdrRunHardwareDiscoverer, objects ...client.Object) *dgdrRunFixture {
+type staleJobListOnceClient struct {
+	client.Client
+	hide bool
+}
+
+func (c *staleJobListOnceClient) List(
+	ctx context.Context,
+	list client.ObjectList,
+	opts ...client.ListOption,
+) error {
+	if _, ok := list.(*batchv1.JobList); ok && c.hide {
+		c.hide = false
+		return nil
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+func newDGDRRunFixture(t *testing.T, objects ...client.Object) *dgdrRunFixture {
 	t.Helper()
-	return newDGDRRunFixtureWithInterceptor(t, hardware, interceptor.Funcs{}, objects...)
+	return newDGDRRunFixtureWithInterceptor(t, interceptor.Funcs{}, objects...)
 }
 
 func newDGDRRunFixtureWithInterceptor(
 	t *testing.T,
-	hardware dgdrRunHardwareDiscoverer,
 	funcs interceptor.Funcs,
 	objects ...client.Object,
 ) *dgdrRunFixture {
@@ -104,7 +104,6 @@ func newDGDRRunFixtureWithInterceptor(
 		reconciler: &DynamoGraphDeploymentRunV1beta2Reconciler{
 			Client:                  c,
 			APIReader:               c,
-			Hardware:                hardware,
 			PlannerImage:            "example.com/dynamo-planner:1.2.3",
 			OperatorImage:           "example.com/dynamo-operator:1.2.3",
 			OperatorImagePullPolicy: corev1.PullAlways,
@@ -160,9 +159,12 @@ func dgdrRunForTest(t *testing.T, inputOverrides map[string]any) *nvidiacomv1bet
 		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRunSpec{NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
 			Model:    &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"},
 			Backends: []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM},
-			Hardware: &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{
-				SKU: new("h200_sxm"), Budget: ptr.To[int32](16),
-			}},
+			Hardware: &nvidiacomv1beta2.HardwareSpec{
+				GPU: &nvidiacomv1beta2.GPUHardwareSpec{
+					SKU: new("h200_sxm"), Budget: ptr.To[int32](16),
+				},
+				NumGPUsPerNode: ptr.To[int32](8),
+			},
 			Workload: &nvidiacomv1beta2.WorkloadSpec{Static: &nvidiacomv1beta2.StaticWorkloadSpec{}},
 			Objective: &nvidiacomv1beta2.ObjectiveSpec{
 				Mode: nvidiacomv1beta2.ObjectiveModeOptimize, Metric: &metric, SLA: &nvidiacomv1beta2.ObjectiveSLASpec{},
@@ -174,7 +176,6 @@ func dgdrRunForTest(t *testing.T, inputOverrides map[string]any) *nvidiacomv1bet
 }
 
 func TestV1beta2RunControllerCreatesOneIsolatedAISimulateJob(t *testing.T) {
-	hardware := &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}
 	run := dgdrRunForTest(t, map[string]any{
 		"engine":       map[string]any{"hardware": "h100_sxm"},
 		"optimization": map[string]any{"constraints": map[string]any{"max_candidate_gpus": 12}},
@@ -186,14 +187,14 @@ func TestV1beta2RunControllerCreatesOneIsolatedAISimulateJob(t *testing.T) {
 			"namespace":      "another-namespace",
 		},
 	})
-	f := newDGDRRunFixture(t, hardware, run)
+	f := newDGDRRunFixture(t, run)
 
 	f.reconcile()
 	f.reconcile()
 
 	job := f.job()
 	assertDGDRRunJobIsolation(t, job, run, f.reconciler.PlannerImage, f.reconciler.OperatorImage)
-	assertDGDRRunInput(t, f.client, job, hardware)
+	assertDGDRRunInput(t, f.client, job)
 	assertDGDRRunSupportResources(t, f.client, job, run)
 	stored := f.run()
 	assertDGDRRunPendingStatus(t, stored, job.Name)
@@ -201,8 +202,7 @@ func TestV1beta2RunControllerCreatesOneIsolatedAISimulateJob(t *testing.T) {
 }
 
 func TestV1beta2RunControllerRetainsAndTerminalizesASupersededRun(t *testing.T) {
-	hardware := &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}
-	f := newDGDRRunFixture(t, hardware, dgdrRunForTest(t, map[string]any{}))
+	f := newDGDRRunFixture(t, dgdrRunForTest(t, map[string]any{}))
 	f.reconcile()
 	f.reconcile()
 
@@ -267,10 +267,9 @@ func TestV1beta2RunControllerRetainsAndTerminalizesASupersededRun(t *testing.T) 
 }
 
 func TestV1beta2RunControllerCancelsBeforeCreatingExecutionResources(t *testing.T) {
-	hardware := &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}
 	run := dgdrRunForTest(t, map[string]any{})
 	run.Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation] = "2"
-	f := newDGDRRunFixture(t, hardware, run)
+	f := newDGDRRunFixture(t, run)
 
 	f.reconcile()
 	stored := f.run()
@@ -280,9 +279,6 @@ func TestV1beta2RunControllerCancelsBeforeCreatingExecutionResources(t *testing.
 	}
 	if jobs := f.jobs(); len(jobs) != 0 {
 		t.Fatalf("Jobs = %d, want none", len(jobs))
-	}
-	if len(hardware.calls) != 0 {
-		t.Fatalf("hardware discovery calls = %v, want none for a canceled Run", hardware.calls)
 	}
 }
 
@@ -304,11 +300,10 @@ func TestV1beta2RunControllerRequiresANewerCancellationGeneration(t *testing.T) 
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hardware := &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}
 			run := dgdrRunForTest(t, map[string]any{})
 			run.Annotations[dgdrV1beta2GenerationAnnotation] = tt.runGeneration
 			run.Annotations[dgdrV1beta2CancelRequestedByGenerationAnnotation] = tt.cancelGeneration
-			f := newDGDRRunFixture(t, hardware, run)
+			f := newDGDRRunFixture(t, run)
 
 			t.Log("Reconcile the Run with the cancellation marker")
 			f.reconcile()
@@ -321,19 +316,14 @@ func TestV1beta2RunControllerRequiresANewerCancellationGeneration(t *testing.T) 
 				if jobs := f.jobs(); len(jobs) != 0 {
 					t.Fatalf("Jobs = %d, want no execution for a superseded Run", len(jobs))
 				}
-				if len(hardware.calls) != 0 {
-					t.Fatalf("hardware discovery calls = %v, want none", hardware.calls)
-				}
 				return
 			}
 			if jobs := f.jobs(); len(jobs) != 1 {
 				t.Fatalf("Jobs = %d, want normal execution", len(jobs))
 			}
-			if len(hardware.calls) != 1 {
-				t.Fatalf("hardware discovery calls = %v, want normal execution", hardware.calls)
-			}
 		})
 	}
+
 }
 
 func TestV1beta2RunControllerRejectsSupportResourceOwnershipCollisionsWithoutMutation(t *testing.T) {
@@ -392,18 +382,19 @@ func TestV1beta2RunControllerRejectsSupportResourceOwnershipCollisionsWithoutMut
 				if owner.ref != nil {
 					collision.SetOwnerReferences([]metav1.OwnerReference{*owner.ref})
 				}
-				f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, run, collision)
+				f := newDGDRRunFixture(t, run, collision)
 
 				before := collision.DeepCopyObject().(client.Object)
 				if err := f.client.Get(t.Context(), client.ObjectKeyFromObject(collision), before); err != nil {
 					t.Fatalf("get collision before reconcile: %v", err)
 				}
-				_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+				result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+				if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+					t.Fatalf("marker result/error = %+v/%v, want durable ownership-failure marker", result, err)
+				}
+				_, err = f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
 				if !errors.Is(err, reconcile.TerminalError(nil)) {
 					t.Fatalf("reconcile error = %v, want terminal ownership conflict", err)
-				}
-				if _, ok := errors.AsType[*commoncontroller.OwnershipConflictError](err); !ok {
-					t.Fatalf("reconcile error = %T %v, want OwnershipConflictError", err, err)
 				}
 
 				after := collision.DeepCopyObject().(client.Object)
@@ -435,19 +426,19 @@ func TestV1beta2RunControllerClassifiesPermanentAndRetryableFailures(t *testing.
 			name: "immutable lowering error is terminal",
 			newFixture: func(t *testing.T) *dgdrRunFixture {
 				run := dgdrRunForTest(t, map[string]any{})
-				f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, run)
-				f.reconciler.PlannerImage = "example.com/dynamo-planner@sha256:0123"
+				f := newDGDRRunFixture(t, run)
+				f.reconciler.PlannerImage = "example.com/dynamo-planner"
 				f.reconciler.DynamoVersion = "1.7.0"
 				return f
 			},
 			wantTerminal: true, wantReason: dgdrRunReasonInvalidExecution,
-			wantErrMessage: "digest-only planner image",
+			wantErrMessage: "shared release tag is required",
 		},
 		{
 			name: "invalid Kubernetes resource is terminal",
 			newFixture: func(t *testing.T) *dgdrRunFixture {
 				run := dgdrRunForTest(t, map[string]any{})
-				return newDGDRRunFixtureWithInterceptor(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, interceptor.Funcs{
+				return newDGDRRunFixtureWithInterceptor(t, interceptor.Funcs{
 					Create: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.CreateOption) error {
 						if _, isConfigMap := object.(*corev1.ConfigMap); isConfigMap {
 							return apierrors.NewInvalid(schema.GroupKind{Kind: "ConfigMap"}, object.GetName(),
@@ -461,18 +452,9 @@ func TestV1beta2RunControllerClassifiesPermanentAndRetryableFailures(t *testing.
 			wantErrMessage: "invalid execution",
 		},
 		{
-			name: "hardware discovery error is retryable",
-			newFixture: func(t *testing.T) *dgdrRunFixture {
-				return newDGDRRunFixture(t, &fixedRunHardware{err: errors.New("node inventory unavailable")},
-					dgdrRunForTest(t, map[string]any{}))
-			},
-			wantErrMessage: "node inventory unavailable",
-		},
-		{
 			name: "registry secret error is retryable",
 			newFixture: func(t *testing.T) *dgdrRunFixture {
-				f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}},
-					dgdrRunForTest(t, map[string]any{}))
+				f := newDGDRRunFixture(t, dgdrRunForTest(t, map[string]any{}))
 				f.reconciler.DockerSecretRetriever = &fixedRunSecrets{err: errors.New("registry index unavailable")}
 				return f
 			},
@@ -482,7 +464,7 @@ func TestV1beta2RunControllerClassifiesPermanentAndRetryableFailures(t *testing.
 			name: "terminal status write failure remains retryable",
 			newFixture: func(t *testing.T) *dgdrRunFixture {
 				run := dgdrRunForTest(t, map[string]any{})
-				f := newDGDRRunFixtureWithInterceptor(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, interceptor.Funcs{
+				f := newDGDRRunFixtureWithInterceptor(t, interceptor.Funcs{
 					SubResourcePatch: func(
 						_ context.Context, _ client.Client, _ string, _ client.Object,
 						_ client.Patch, _ ...client.SubResourcePatchOption,
@@ -490,7 +472,7 @@ func TestV1beta2RunControllerClassifiesPermanentAndRetryableFailures(t *testing.
 						return errors.New("status writer unavailable")
 					},
 				}, run)
-				f.reconciler.PlannerImage = "example.com/dynamo-planner@sha256:0123"
+				f.reconciler.PlannerImage = "example.com/dynamo-planner"
 				f.reconciler.DynamoVersion = "1.7.0"
 				return f
 			},
@@ -501,7 +483,17 @@ func TestV1beta2RunControllerClassifiesPermanentAndRetryableFailures(t *testing.
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := tt.newFixture(t)
-			_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+			result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+			if tt.wantTerminal {
+				if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+					t.Fatalf("marker result/error = %+v/%v, want durable state retry", result, err)
+				}
+				condition := meta.FindStatusCondition(f.run().Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+				if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != tt.wantReason {
+					t.Fatalf("marker condition = %+v, want False/%s", condition, tt.wantReason)
+				}
+				_, err = f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+			}
 			if err == nil || !strings.Contains(err.Error(), tt.wantErrMessage) {
 				t.Fatalf("reconcile error = %v, want %q", err, tt.wantErrMessage)
 			}
@@ -518,6 +510,7 @@ func TestV1beta2RunControllerClassifiesPermanentAndRetryableFailures(t *testing.
 			}
 		})
 	}
+
 }
 
 func TestDGDRRunPermanentErrorClassification(t *testing.T) {
@@ -535,7 +528,7 @@ func TestDGDRRunPermanentErrorClassification(t *testing.T) {
 		{name: "forbidden", err: apierrors.NewForbidden(schema.GroupResource{Group: "batch", Resource: "jobs"}, "search-1", errors.New("denied"))},
 		{name: "conflict", err: apierrors.NewConflict(schema.GroupResource{Group: "batch", Resource: "jobs"}, "search-1", errors.New("changed"))},
 		{name: "timeout", err: apierrors.NewTimeoutError("timed out", 1)},
-		{name: "retryable invalid discovery error", err: &dgdrRunRetryableError{cause: invalid}},
+		{name: "explicitly retryable invalid error", err: &dgdrRunRetryableError{cause: invalid}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -546,40 +539,45 @@ func TestDGDRRunPermanentErrorClassification(t *testing.T) {
 	}
 }
 
-func TestV1beta2RunControllerUsesUnfilteredTopologyForAnExternalHardwareSKU(t *testing.T) {
-	hardware := &fixedRunHardware{info: gpu.GPUInfo{Model: "Future Accelerator", GPUsPerNode: 8}}
+func TestV1beta2RunControllerOmitsUnspecifiedGPUsPerNode(t *testing.T) {
 	run := dgdrRunForTest(t, map[string]any{})
-	*run.Spec.Hardware.GPU.SKU = "future_accelerator"
-	f := newDGDRRunFixture(t, hardware, run)
+	run.Spec.Hardware.NumGPUsPerNode = nil
+	f := newDGDRRunFixture(t, run)
 
 	f.reconcile()
 
-	if len(hardware.calls) != 1 || hardware.calls[0] != "" {
-		t.Fatalf("hardware discovery filters = %v, want one unfiltered topology lookup", hardware.calls)
-	}
-	if got := f.job().Spec.Template.Spec.Containers[0].Image; got != f.reconciler.PlannerImage {
-		t.Fatalf("sweeper image = %q, want %q", got, f.reconciler.PlannerImage)
+	input := dgdrRunInputFromConfigMap(t, f.client, f.job())
+	output := input["dgdr_run"].(map[string]any)
+	if _, found := output["num_gpus_per_node"]; found {
+		t.Fatalf("dgdr_run.num_gpus_per_node = %v, want adapter-derived node width", output["num_gpus_per_node"])
 	}
 }
 
-func TestV1beta2RunControllerRejectsAmbiguousTopologyForAnExternalHardwareSKU(t *testing.T) {
-	hardware := &fixedRunHardware{info: gpu.GPUInfo{
-		Model: "Future Accelerator", GPUsPerNode: 8, OtherModels: []string{"Another Accelerator"},
-	}}
-	run := dgdrRunForTest(t, map[string]any{})
-	*run.Spec.Hardware.GPU.SKU = "future_accelerator"
-	f := newDGDRRunFixture(t, hardware, run)
+func TestV1beta2RunControllerLowersHardwareOptOutFromInputOverrides(t *testing.T) {
+	run := dgdrRunForTest(t, map[string]any{
+		"engine": map[string]any{"hardware": "future_accelerator"},
+		"optimization": map[string]any{
+			"constraints": map[string]any{"max_candidate_gpus": int64(24)},
+		},
+	})
+	run.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{}
+	f := newDGDRRunFixture(t, run)
 
-	_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
-	if err == nil || !strings.Contains(err.Error(), "among multiple GPU models") {
-		t.Fatalf("reconcile error = %v, want ambiguous external-SKU topology failure", err)
+	f.reconcile()
+
+	input := dgdrRunInputFromConfigMap(t, f.client, f.job())
+	output := input["dgdr_run"].(map[string]any)
+	if _, found := output["num_gpus_per_node"]; found {
+		t.Fatalf("dgdr_run.num_gpus_per_node = %v, want AISimulate system-spec resolution", output["num_gpus_per_node"])
+	}
+	if got := input["engine"].(map[string]any)["hardware"]; got != "future_accelerator" {
+		t.Fatalf("engine.hardware = %v, want authoritative input override", got)
 	}
 }
 
 func TestV1beta2RunControllerFreezesExecutionBeforeCreatingTheJob(t *testing.T) {
-	hardware := &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}
 	run := dgdrRunForTest(t, map[string]any{})
-	f := newDGDRRunFixture(t, hardware, run)
+	f := newDGDRRunFixture(t, run)
 	f.reconciler.DockerSecretRetriever = &fixedRunSecrets{byImage: map[string][]string{
 		"example.com/dynamo-planner:1.2.3":  {"planner-secret", "shared-secret"},
 		"example.com/dynamo-operator:1.2.3": {"shared-secret", "publisher-secret"},
@@ -617,7 +615,7 @@ func TestV1beta2RunControllerFreezesExecutionBeforeCreatingTheJob(t *testing.T) 
 }
 
 func TestV1beta2RunControllerFailsClosedWithoutExecutionConfig(t *testing.T) {
-	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
+	f := newDGDRRunFixture(t, dgdrRunForTest(t, map[string]any{}))
 	f.reconcile()
 
 	t.Log("Delete the immutable execution artifact while retaining the Job")
@@ -630,15 +628,37 @@ func TestV1beta2RunControllerFailsClosedWithoutExecutionConfig(t *testing.T) {
 		t.Fatalf("delete ConfigMap: %v", err)
 	}
 
-	t.Log("Verify a real deletion fails closed instead of reconstructing or hot-looping")
-	_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+	t.Log("Persist the permanent failure marker before taking cleanup action")
+	result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+	if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+		t.Fatalf("marker result/error = %+v/%v, want durable state retry", result, err)
+	}
+	if jobs := f.jobs(); len(jobs) != 1 {
+		t.Fatalf("Jobs = %d, want no deletion in the marker-writing reconciliation", len(jobs))
+	}
+	condition := meta.FindStatusCondition(f.run().Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != dgdrRunReasonInvalidExecution {
+		t.Fatalf("cleanup condition = %+v, want False/%s", condition, dgdrRunReasonInvalidExecution)
+	}
+
+	t.Log("A later reconciliation observes the marker and stops the Job")
+	result, err = f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+	if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+		t.Fatalf("cleanup result/error = %+v/%v, want deletion-observation retry", result, err)
+	}
+	if jobs := f.jobs(); len(jobs) != 0 {
+		t.Fatalf("Jobs = %d, want the invalid execution stopped", len(jobs))
+	}
+
+	t.Log("Publish Completed only after Job absence is observed")
+	_, err = f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
 	if err == nil || !strings.Contains(err.Error(), "immutable execution ConfigMap") {
 		t.Fatalf("reconcile error = %v, want missing immutable execution ConfigMap", err)
 	}
 }
 
 func TestV1beta2RunControllerWaitsForExecutionConfigCacheLag(t *testing.T) {
-	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
+	f := newDGDRRunFixture(t, dgdrRunForTest(t, map[string]any{}))
 	f.reconcile()
 
 	job := f.job()
@@ -659,8 +679,25 @@ func TestV1beta2RunControllerWaitsForExecutionConfigCacheLag(t *testing.T) {
 	}
 }
 
+func TestV1beta2RunControllerRejectsMutableExecutionConfig(t *testing.T) {
+	run := dgdrRunForTest(t, map[string]any{})
+	f := newDGDRRunFixture(t, run)
+	f.reconcile()
+	job := f.job()
+	configMap := &corev1.ConfigMap{}
+	if err := f.client.Get(t.Context(), client.ObjectKeyFromObject(job), configMap); err != nil {
+		t.Fatalf("get execution ConfigMap: %v", err)
+	}
+	configMap.Immutable = new(false)
+
+	_, err := f.reconciler.existingRunExecution(configMap, run, job)
+	if err == nil || !strings.Contains(err.Error(), "must be immutable") {
+		t.Fatalf("existing execution error = %v, want mutable ConfigMap rejection", err)
+	}
+}
+
 func TestV1beta2RunControllerRejectsJobExecutionSkew(t *testing.T) {
-	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
+	f := newDGDRRunFixture(t, dgdrRunForTest(t, map[string]any{}))
 	f.reconcile()
 
 	t.Log("Mutate the observed Job away from the immutable execution identity")
@@ -671,15 +708,458 @@ func TestV1beta2RunControllerRejectsJobExecutionSkew(t *testing.T) {
 		t.Fatalf("update Job: %v", err)
 	}
 
-	t.Log("Verify reconciliation detects the inconsistency instead of accepting skew")
-	_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+	t.Log("Persist the failure marker without deleting the skewed Job")
+	result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+	if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+		t.Fatalf("marker result/error = %+v/%v, want durable state retry", result, err)
+	}
+	if jobs := f.jobs(); len(jobs) != 1 {
+		t.Fatalf("Jobs = %d, want no deletion in the marker-writing reconciliation", len(jobs))
+	}
+
+	t.Log("Observe the marker and stop the skewed Job")
+	result, err = f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
+	if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+		t.Fatalf("cleanup result/error = %+v/%v, want deletion-observation retry", result, err)
+	}
+	if jobs := f.jobs(); len(jobs) != 0 {
+		t.Fatalf("Jobs = %d, want the skewed execution stopped", len(jobs))
+	}
+
+	_, err = f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
 	if err == nil || !strings.Contains(err.Error(), "planner image identities differ") {
-		t.Fatalf("reconcile error = %v, want planner identity mismatch", err)
+		t.Fatalf("terminal reconcile error = %v, want planner identity mismatch", err)
+	}
+}
+
+func TestValidateDGDRRunJobExecutionRejectsImmutableBindingSkew(t *testing.T) {
+	run := dgdrRunForTest(t, map[string]any{})
+	f := newDGDRRunFixture(t, run)
+	f.reconcile()
+	job := f.job()
+	configMap := &corev1.ConfigMap{}
+	if err := f.client.Get(t.Context(), client.ObjectKeyFromObject(job), configMap); err != nil {
+		t.Fatalf("get execution ConfigMap: %v", err)
+	}
+	execution, err := dgdrRunExecutionFromConfigMap(configMap)
+	if err != nil {
+		t.Fatalf("decode execution: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*batchv1.Job)
+		wantErr string
+	}{
+		{
+			name: "backoff limit",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.BackoffLimit = ptr.To[int32](1)
+			},
+			wantErr: "Job backoff limit differs",
+		},
+		{
+			name: "parallel sweeps",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Parallelism = ptr.To[int32](2)
+			},
+			wantErr: "Job cardinality differs",
+		},
+		{
+			name: "multiple completions",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Completions = ptr.To[int32](2)
+			},
+			wantErr: "Job cardinality differs",
+		},
+		{
+			name: "indexed completion mode",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.CompletionMode = ptr.To(batchv1.IndexedCompletion)
+			},
+			wantErr: "Job completion mode differs",
+		},
+		{
+			name: "suspended execution",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Suspend = new(true)
+			},
+			wantErr: "Job execution policy differs",
+		},
+		{
+			name: "active deadline",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.ActiveDeadlineSeconds = ptr.To[int64](1)
+			},
+			wantErr: "Job execution policy differs",
+		},
+		{
+			name: "nondefault pod replacement policy",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.PodReplacementPolicy = ptr.To(batchv1.Failed)
+			},
+			wantErr: "Job execution policy differs",
+		},
+		{
+			name: "restart policy",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyAlways
+			},
+			wantErr: "pod restart policy differs",
+		},
+		{
+			name: "host PID namespace",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.HostPID = true
+			},
+			wantErr: "pod namespace isolation differs",
+		},
+		{
+			name: "host IPC namespace",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.HostIPC = true
+			},
+			wantErr: "pod namespace isolation differs",
+		},
+		{
+			name: "host network namespace",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.HostNetwork = true
+			},
+			wantErr: "pod namespace isolation differs",
+		},
+		{
+			name: "shared process namespace",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.ShareProcessNamespace = new(true)
+			},
+			wantErr: "pod namespace isolation differs",
+		},
+		{
+			name: "init container",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.InitContainers = []corev1.Container{{Name: "unexpected", Image: "example.invalid/init"}}
+			},
+			wantErr: "init containers are not allowed",
+		},
+		{
+			name: "pod runAsNonRoot",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.SecurityContext.RunAsNonRoot = new(false)
+			},
+			wantErr: "pod runAsNonRoot differs",
+		},
+		{
+			name: "pod seccomp",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.SecurityContext.SeccompProfile.Type = corev1.SeccompProfileTypeUnconfined
+			},
+			wantErr: "pod seccomp profile differs",
+		},
+		{
+			name: "planner privilege escalation",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation = new(true)
+			},
+			wantErr: "planner security context differs",
+		},
+		{
+			name: "planner capabilities",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[0].SecurityContext.Capabilities.Add = []corev1.Capability{"NET_ADMIN"}
+			},
+			wantErr: "planner security context differs",
+		},
+		{
+			name: "planner user",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[0].SecurityContext.RunAsUser = ptr.To[int64](0)
+			},
+			wantErr: "planner security context differs",
+		},
+		{
+			name: "planner unmasked proc mount",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[0].SecurityContext.ProcMount = ptr.To(corev1.UnmaskedProcMount)
+			},
+			wantErr: "planner security context differs",
+		},
+		{
+			name: "publisher security",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[1].SecurityContext.Privileged = new(true)
+			},
+			wantErr: "publisher security context differs",
+		},
+		{
+			name: "publisher seccomp override",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[1].SecurityContext.SeccompProfile = &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeUnconfined,
+				}
+			},
+			wantErr: "publisher security context differs",
+		},
+		{
+			name: "publisher unmasked proc mount",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[1].SecurityContext.ProcMount = ptr.To(corev1.UnmaskedProcMount)
+			},
+			wantErr: "publisher security context differs",
+		},
+		{
+			name: "automatic service account token",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.AutomountServiceAccountToken = new(true)
+			},
+			wantErr: "publisher service-account identities differ",
+		},
+		{
+			name: "publisher token exposed to planner",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[0].VolumeMounts = append(
+					job.Spec.Template.Spec.Containers[0].VolumeMounts,
+					corev1.VolumeMount{Name: dgdrRunServiceAccountVolume, MountPath: dgdrRunServiceAccountMountPath},
+				)
+			},
+			wantErr: "planner volume mounts differ",
+		},
+		{
+			name: "planner command",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[0].Command = []string{"python"}
+			},
+			wantErr: "planner command or arguments differ",
+		},
+		{
+			name: "planner environment secret",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[0].EnvFrom = []corev1.EnvFromSource{{
+					SecretRef: &corev1.SecretEnvSource{},
+				}}
+			},
+			wantErr: "planner environment differs",
+		},
+		{
+			name: "planner lifecycle hook",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[0].Lifecycle = &corev1.Lifecycle{
+					PostStart: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"unexpected"}}},
+				}
+			},
+			wantErr: "planner lifecycle differs",
+		},
+		{
+			name: "publisher Run UID",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[1].Args[5] = "other-uid"
+			},
+			wantErr: "publisher command, arguments or identity differ",
+		},
+		{
+			name: "publisher environment secret",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[1].EnvFrom = []corev1.EnvFromSource{{
+					ConfigMapRef: &corev1.ConfigMapEnvSource{},
+				}}
+			},
+			wantErr: "publisher environment differs",
+		},
+		{
+			name: "publisher lifecycle hook",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[1].Lifecycle = &corev1.Lifecycle{
+					PreStop: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"unexpected"}}},
+				}
+			},
+			wantErr: "publisher lifecycle differs",
+		},
+		{
+			name: "input ConfigMap source",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Volumes[0].ConfigMap.Name = "other-input"
+			},
+			wantErr: "input, snapshot or publisher credential volumes differ",
+		},
+		{
+			name: "snapshot mount",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[0].VolumeMounts[1].MountPath = "/other-output"
+			},
+			wantErr: "planner volume mounts differ",
+		},
+		{
+			name: "publisher token mount",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.Containers[1].VolumeMounts[1].Name = "other-token"
+			},
+			wantErr: "publisher volume mounts differ",
+		},
+		{
+			name: "service account",
+			mutate: func(job *batchv1.Job) {
+				job.Spec.Template.Spec.ServiceAccountName = "other-publisher"
+			},
+			wantErr: "publisher service-account identities differ",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mutated := job.DeepCopy()
+			tt.mutate(mutated)
+			err := validateDGDRRunJobExecution(mutated, run, configMap.Name, execution)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validation error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+
+	t.Run("API defaulted cardinality remains compatible", func(t *testing.T) {
+		defaulted := job.DeepCopy()
+		defaulted.Spec.Parallelism = ptr.To[int32](1)
+		defaulted.Spec.Completions = ptr.To[int32](1)
+		defaulted.Spec.CompletionMode = ptr.To(batchv1.NonIndexedCompletion)
+		defaulted.Spec.Suspend = new(false)
+		defaulted.Spec.ManualSelector = new(false)
+		defaulted.Spec.PodReplacementPolicy = ptr.To(batchv1.TerminatingOrFailed)
+		defaulted.Spec.Template.Spec.ShareProcessNamespace = new(false)
+		defaulted.Spec.Template.Spec.Containers[0].SecurityContext.ProcMount = ptr.To(corev1.DefaultProcMount)
+		defaulted.Spec.Template.Spec.Containers[1].SecurityContext.ProcMount = ptr.To(corev1.DefaultProcMount)
+		if err := validateDGDRRunJobExecution(defaulted, run, configMap.Name, execution); err != nil {
+			t.Fatalf("validation error = %v, want API defaults accepted", err)
+		}
+	})
+}
+
+func TestV1beta2RunControllerStopsAllJobsBeforePermanentCompletion(t *testing.T) {
+	run := dgdrRunForTest(t, map[string]any{})
+	markerObservedByReconcile := false
+	deletedBeforeMarkerObservation := false
+	serveStaleMarkerOnce := false
+	f := newDGDRRunFixtureWithInterceptor(t, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, object, opts...); err != nil {
+				return err
+			}
+			if stored, ok := object.(*nvidiacomv1beta2.DynamoGraphDeploymentRun); ok {
+				if serveStaleMarkerOnce {
+					meta.RemoveStatusCondition(&stored.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+					serveStaleMarkerOnce = false
+				} else if dgdrRunPendingPermanentFailure(stored) != nil {
+					markerObservedByReconcile = true
+				}
+			}
+			return nil
+		},
+		Delete: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+			if _, ok := object.(*batchv1.Job); ok && !markerObservedByReconcile {
+				deletedBeforeMarkerObservation = true
+			}
+			return c.Delete(ctx, object, opts...)
+		},
+	}, run)
+	f.reconcile()
+	duplicate := f.job().DeepCopy()
+	duplicate.Name += "-duplicate"
+	duplicate.ResourceVersion = ""
+	duplicate.UID = ""
+	if err := f.client.Create(t.Context(), duplicate); err != nil {
+		t.Fatalf("create duplicate Job: %v", err)
+	}
+
+	t.Log("Record the permanent failure without acting on the locally patched marker")
+	result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+		t.Fatalf("marker result/error = %+v/%v, want durable state retry", result, err)
+	}
+	if jobs := f.jobs(); len(jobs) != 2 {
+		t.Fatalf("Jobs = %d, want no deletion before observing the marker", len(jobs))
+	}
+	if markerObservedByReconcile || deletedBeforeMarkerObservation {
+		t.Fatalf("marker observed/deleted early = %t/%t, want an observed-state barrier", markerObservedByReconcile, deletedBeforeMarkerObservation)
+	}
+	serveStaleMarkerOnce = true
+
+	t.Log("A reordered cache read cannot skip the marker-observation barrier")
+	result, err = f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+		t.Fatalf("stale-cache result/error = %+v/%v, want marker retry", result, err)
+	}
+	if jobs := f.jobs(); len(jobs) != 2 {
+		t.Fatalf("Jobs = %d, want no deletion from a stale marker read", len(jobs))
+	}
+	if markerObservedByReconcile || deletedBeforeMarkerObservation {
+		t.Fatalf("marker observed/deleted early = %t/%t after stale read", markerObservedByReconcile, deletedBeforeMarkerObservation)
+	}
+
+	t.Log("A later reconciliation observes the marker and deletes every owned Job")
+	result, err = f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+		t.Fatalf("cleanup result/error = %+v/%v, want deletion-observation retry", result, err)
+	}
+	if !markerObservedByReconcile || deletedBeforeMarkerObservation {
+		t.Fatalf("marker observed/deleted early = %t/%t, want deletion only after observation", markerObservedByReconcile, deletedBeforeMarkerObservation)
+	}
+	if jobs := f.jobs(); len(jobs) != 0 {
+		t.Fatalf("Jobs = %d, want all conflicting executions stopped", len(jobs))
+	}
+
+	t.Log("Finish the recorded failure after observing Job absence")
+	_, err = f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	if err == nil || !errors.Is(err, reconcile.TerminalError(nil)) {
+		t.Fatalf("terminal reconcile error = %v, want terminal failure", err)
+	}
+	condition := meta.FindStatusCondition(f.run().Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+	if condition == nil || condition.Status != metav1.ConditionTrue {
+		t.Fatalf("Completed condition = %+v, want True after cleanup", condition)
+	}
+}
+
+func TestV1beta2RunControllerConfirmsJobAbsenceThroughAPIReader(t *testing.T) {
+	f := newDGDRRunFixture(t, dgdrRunForTest(t, map[string]any{}))
+	f.reconcile()
+
+	run := f.run()
+	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type:               nvidiacomv1beta2.DGDRRunConditionCompleted,
+		Status:             metav1.ConditionFalse,
+		Reason:             dgdrRunReasonInvalidExecution,
+		Message:            "invalid immutable execution",
+		ObservedGeneration: run.Generation,
+	})
+	if err := f.client.Status().Update(t.Context(), run); err != nil {
+		t.Fatalf("record permanent failure marker: %v", err)
+	}
+
+	f.reconciler.Client = &staleJobListOnceClient{Client: f.client, hide: true}
+
+	t.Log("The informer misses the Job, but the API reader still observes and stops it")
+	result, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	if err != nil || result.RequeueAfter != dgdrRunExecutionCacheRetry {
+		t.Fatalf("cleanup result/error = %+v/%v, want uncached deletion retry", result, err)
+	}
+	if jobs := f.jobs(); len(jobs) != 0 {
+		t.Fatalf("Jobs = %d, want uncached live execution stopped", len(jobs))
+	}
+	condition := meta.FindStatusCondition(f.run().Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+	if condition == nil || condition.Status != metav1.ConditionFalse {
+		t.Fatalf("Completed condition = %+v, want False until uncached absence is observed", condition)
+	}
+
+	t.Log("Only a later uncached absence observation permits terminal completion")
+	_, err = f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	if err == nil || !strings.Contains(err.Error(), "invalid immutable execution") {
+		t.Fatalf("terminal reconcile error = %v, want recorded permanent failure", err)
+	}
+	condition = meta.FindStatusCondition(f.run().Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+	if condition == nil || condition.Status != metav1.ConditionTrue {
+		t.Fatalf("Completed condition = %+v, want True after uncached absence", condition)
 	}
 }
 
 func TestV1beta2RunControllerReportsImagePullSecretErrors(t *testing.T) {
-	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
+	f := newDGDRRunFixture(t, dgdrRunForTest(t, map[string]any{}))
 	f.reconciler.DockerSecretRetriever = &fixedRunSecrets{err: errors.New("registry index unavailable")}
 
 	t.Log("Verify execution is not frozen without resolving its image credentials")
@@ -689,22 +1169,28 @@ func TestV1beta2RunControllerReportsImagePullSecretErrors(t *testing.T) {
 	}
 }
 
-func TestV1beta2RunControllerRejectsDigestOnlyPlannerImage(t *testing.T) {
-	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
+func TestV1beta2RunControllerSeparatesDigestPinnedPlannerFromRuntimeSource(t *testing.T) {
+	f := newDGDRRunFixture(t, dgdrRunForTest(t, map[string]any{}))
 	f.reconciler.PlannerImage = "example.com/dynamo-planner@sha256:0123"
 	f.reconciler.DynamoVersion = "1.7.0"
 
-	t.Log("Reject the Planner before freezing an unrelated runtime release tag")
-	_, err := f.reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.run())})
-	if err == nil || !strings.Contains(err.Error(), "digest-only planner image cannot identify sibling runtime images") {
-		t.Fatalf("reconcile error = %v, want digest-only Planner rejection", err)
+	f.reconcile()
+
+	job := f.job()
+	planner := containerNamed(t, job.Spec.Template.Spec.Containers, dgdrRunSweeperContainer)
+	if planner.Image != f.reconciler.PlannerImage {
+		t.Fatalf("planner image = %q, want digest-pinned %q", planner.Image, f.reconciler.PlannerImage)
 	}
-	jobs := &batchv1.JobList{}
-	if err := f.client.List(t.Context(), jobs, client.InNamespace("default")); err != nil {
-		t.Fatalf("list Jobs: %v", err)
+	configMap := &corev1.ConfigMap{}
+	if err := f.client.Get(t.Context(), client.ObjectKeyFromObject(job), configMap); err != nil {
+		t.Fatalf("get execution ConfigMap: %v", err)
 	}
-	if len(jobs.Items) != 0 {
-		t.Fatalf("Jobs = %d, want none for an ambiguous runtime source", len(jobs.Items))
+	if got := configMap.Data[dgdrRunRuntimeImageSourceKey]; got != "example.com/dynamo-planner:1.7.0" {
+		t.Fatalf("runtime image source = %q, want normalized release tag", got)
+	}
+	input := dgdrRunInputFromConfigMap(t, f.client, job)
+	if got := input["dgdr_run"].(map[string]any)["runtime_image"]; got != "example.com/dynamo-planner:1.7.0" {
+		t.Fatalf("dgdr_run.runtime_image = %v, want normalized release tag", got)
 	}
 }
 
@@ -718,9 +1204,6 @@ func assertDGDRRunJobIsolation(
 	t.Helper()
 	if !metav1.IsControlledBy(job, run) {
 		t.Fatal("Job is not controlled by its Run")
-	}
-	if got := job.Annotations[dgdrRunGPUsPerNodeAnnotation]; got != "8" {
-		t.Fatalf("GPUs-per-node annotation = %q, want 8", got)
 	}
 	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 0 {
 		t.Fatalf("backoffLimit = %v, want 0", job.Spec.BackoffLimit)
@@ -760,6 +1243,26 @@ func assertDGDRRunJobIsolation(
 	}; !reflect.DeepEqual(sweeper.Args, want) {
 		t.Fatalf("sweeper args = %q, want %q", sweeper.Args, want)
 	}
+	assertDGDRRunPublisherIdentity(t, publisher, run, operatorImage)
+	if hasMount(sweeper.VolumeMounts, dgdrRunServiceAccountVolume) {
+		t.Fatal("sweeper unexpectedly receives the Kubernetes service-account token")
+	}
+	if !hasMount(publisher.VolumeMounts, dgdrRunServiceAccountVolume) {
+		t.Fatal("publisher does not receive its projected Kubernetes credentials")
+	}
+	if !hasMountAt(sweeper.VolumeMounts, dgdrRunSnapshotVolume, dgdrRunSnapshotPath) ||
+		!hasMountAt(publisher.VolumeMounts, dgdrRunSnapshotVolume, dgdrRunSnapshotPath) {
+		t.Fatal("sweeper and publisher do not share the frozen snapshot directory")
+	}
+}
+
+func assertDGDRRunPublisherIdentity(
+	t *testing.T,
+	publisher corev1.Container,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	operatorImage string,
+) {
+	t.Helper()
 	if publisher.Image != operatorImage || publisher.ImagePullPolicy != corev1.PullAlways {
 		t.Fatalf("publisher image = %q/%s, want configured operator image/Always", publisher.Image, publisher.ImagePullPolicy)
 	}
@@ -773,16 +1276,6 @@ func assertDGDRRunJobIsolation(
 		"--sweeper-container", dgdrRunSweeperContainer,
 	}; !reflect.DeepEqual(publisher.Args, want) {
 		t.Fatalf("publisher args = %q, want %q", publisher.Args, want)
-	}
-	if hasMount(sweeper.VolumeMounts, dgdrRunServiceAccountVolume) {
-		t.Fatal("sweeper unexpectedly receives the Kubernetes service-account token")
-	}
-	if !hasMount(publisher.VolumeMounts, dgdrRunServiceAccountVolume) {
-		t.Fatal("publisher does not receive its projected Kubernetes credentials")
-	}
-	if !hasMountAt(sweeper.VolumeMounts, dgdrRunSnapshotVolume, dgdrRunSnapshotPath) ||
-		!hasMountAt(publisher.VolumeMounts, dgdrRunSnapshotVolume, dgdrRunSnapshotPath) {
-		t.Fatal("sweeper and publisher do not share the frozen snapshot directory")
 	}
 }
 
@@ -826,7 +1319,7 @@ func TestDGDRRunStatusInputPreservesLargeIntegers(t *testing.T) {
 	}
 }
 
-func assertDGDRRunInput(t *testing.T, c client.Client, job *batchv1.Job, hardware *fixedRunHardware) {
+func assertDGDRRunInput(t *testing.T, c client.Client, job *batchv1.Job) {
 	t.Helper()
 	configMap := &corev1.ConfigMap{}
 	if err := c.Get(t.Context(), client.ObjectKeyFromObject(job), configMap); err != nil {
@@ -842,7 +1335,6 @@ func assertDGDRRunInput(t *testing.T, c client.Client, job *batchv1.Job, hardwar
 		dgdrRunPublisherImageKey:      "example.com/dynamo-operator:1.2.3",
 		dgdrRunPublisherPullPolicyKey: string(corev1.PullAlways),
 		dgdrRunDynamoVersionKey:       "1.2.3",
-		dgdrRunGPUsPerNodeKey:         "8",
 		dgdrRunSnapshotPathKey:        dgdrRunSnapshotPath,
 	} {
 		if got := configMap.Data[key]; got != want {
@@ -866,6 +1358,9 @@ func assertDGDRRunInput(t *testing.T, c client.Client, job *batchv1.Job, hardwar
 	if output["derive_runtime_images"] != true {
 		t.Fatalf("derive_runtime_images = %v, want true for a backend search", output["derive_runtime_images"])
 	}
+	if output["num_gpus_per_node"] != float64(8) {
+		t.Fatalf("num_gpus_per_node = %v, want typed hardware topology 8", output["num_gpus_per_node"])
+	}
 	if got := input["engine"].(map[string]any)["hardware"]; got != "h100_sxm" {
 		t.Fatalf("engine.hardware = %v, want authoritative input override h100_sxm", got)
 	}
@@ -873,9 +1368,19 @@ func assertDGDRRunInput(t *testing.T, c client.Client, job *batchv1.Job, hardwar
 	if got := constraints["max_candidate_gpus"]; got != float64(12) {
 		t.Fatalf("optimization.constraints.max_candidate_gpus = %v, want authoritative input override 12", got)
 	}
-	if !reflect.DeepEqual(hardware.calls, []nvidiacomv1beta1.GPUSKUType{"h200_sxm"}) {
-		t.Fatalf("hardware discovery calls = %v, want the admitted typed SKU h200_sxm", hardware.calls)
+}
+
+func dgdrRunInputFromConfigMap(t *testing.T, c client.Client, job *batchv1.Job) map[string]any {
+	t.Helper()
+	configMap := &corev1.ConfigMap{}
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(job), configMap); err != nil {
+		t.Fatalf("get input ConfigMap: %v", err)
 	}
+	var input map[string]any
+	if err := yaml.Unmarshal([]byte(configMap.Data[dgdrRunInputKey]), &input); err != nil {
+		t.Fatalf("decode input ConfigMap: %v", err)
+	}
+	return input
 }
 
 func TestDGDRRunInputResolvesRuntimeVersion(t *testing.T) {
@@ -891,8 +1396,8 @@ func TestDGDRRunInputResolvesRuntimeVersion(t *testing.T) {
 		{name: "v-prefixed planner tag", plannerImage: "example.com/dynamo-planner:v1.7.0", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:v1.7.0"},
 		{name: "prerelease planner tag", plannerImage: "example.com/dynamo-planner:1.7.0-rc.1", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:1.7.0-rc.1"},
 		{name: "build metadata planner tag", plannerImage: "example.com/dynamo-planner:1.7.0+build.5", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:1.7.0+build.5"},
-		{name: "tag and digest", plannerImage: "example.com/dynamo-planner:v1.7.0-rc.1@sha256:0123", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:v1.7.0-rc.1@sha256:0123"},
-		{name: "digest only", plannerImage: "example.com/dynamo-planner@sha256:0123", dynamoVersion: "1.7.0", wantErr: true},
+		{name: "tag and digest", plannerImage: "example.com/dynamo-planner:v1.7.0-rc.1@sha256:0123", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:v1.7.0-rc.1"},
+		{name: "digest only", plannerImage: "example.com/dynamo-planner@sha256:0123", dynamoVersion: "1.7.0", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:1.7.0"},
 		{name: "opaque CI tag", plannerImage: "example.com/dynamo-planner:git-sha", dynamoVersion: "1.7.0", wantOverride: "1.7.0", wantRuntime: "example.com/dynamo-planner:git-sha"},
 		{name: "untagged planner image", plannerImage: "example.com/dynamo-planner", dynamoVersion: "1.7.0", wantErr: true},
 		{name: "opaque tag without canonical version", plannerImage: "example.com/dynamo-planner:git-sha", dynamoVersion: "1.7", wantErr: true},
@@ -902,7 +1407,7 @@ func TestDGDRRunInputResolvesRuntimeVersion(t *testing.T) {
 			version, err := dgdrRunDynamoVersion(tt.plannerImage, tt.dynamoVersion)
 			var runtimeImage string
 			if err == nil {
-				runtimeImage, err = dgdrRunRuntimeImageSource(tt.plannerImage)
+				runtimeImage, err = dgdrRunRuntimeImageSource(tt.plannerImage, version)
 			}
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("resolve execution identity error = %v, wantErr %t", err, tt.wantErr)
@@ -910,7 +1415,7 @@ func TestDGDRRunInputResolvesRuntimeVersion(t *testing.T) {
 			if tt.wantErr {
 				return
 			}
-			input, err := dgdrRunInput(dgdrRunForTest(t, map[string]any{}), runtimeImage, version, 8)
+			input, err := dgdrRunInput(dgdrRunForTest(t, map[string]any{}), runtimeImage, version)
 			if err != nil {
 				t.Fatalf("lower input: %v", err)
 			}
@@ -956,8 +1461,7 @@ func assertDGDRRunPendingStatus(t *testing.T, stored *nvidiacomv1beta2.DynamoGra
 }
 
 func TestV1beta2RunControllerOwnsOnlyLifecycleStatus(t *testing.T) {
-	hardware := &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}
-	f := newDGDRRunFixture(t, hardware, dgdrRunForTest(t, map[string]any{}))
+	f := newDGDRRunFixture(t, dgdrRunForTest(t, map[string]any{}))
 	f.reconcile()
 	job := f.job()
 
@@ -1007,7 +1511,7 @@ func TestV1beta2RunControllerOwnsOnlyLifecycleStatus(t *testing.T) {
 }
 
 func TestV1beta2RunControllerClassifiesPublisherProtocolFailure(t *testing.T) {
-	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
+	f := newDGDRRunFixture(t, dgdrRunForTest(t, map[string]any{}))
 	f.reconcile()
 	job := f.job()
 	pod := &corev1.Pod{
@@ -1052,7 +1556,7 @@ func TestV1beta2RunControllerClassifiesPublisherProtocolFailure(t *testing.T) {
 }
 
 func TestV1beta2RunControllerPrefersPublisherOutcomeWhenBothContainersFail(t *testing.T) {
-	f := newDGDRRunFixture(t, &fixedRunHardware{info: gpu.GPUInfo{GPUsPerNode: 8}}, dgdrRunForTest(t, map[string]any{}))
+	f := newDGDRRunFixture(t, dgdrRunForTest(t, map[string]any{}))
 	f.reconcile()
 	job := f.job()
 	outcome, err := json.Marshal(dgdrrunpublisher.TerminalOutcome{

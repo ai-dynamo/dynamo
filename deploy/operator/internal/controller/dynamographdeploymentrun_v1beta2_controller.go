@@ -17,12 +17,10 @@ import (
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/aisimulate"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrrunpublisher"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -54,7 +52,6 @@ const (
 	dgdrRunPublisherImageKey       = "publisher-image"
 	dgdrRunPublisherPullPolicyKey  = "publisher-image-pull-policy"
 	dgdrRunDynamoVersionKey        = "dynamo-version"
-	dgdrRunGPUsPerNodeKey          = "gpus-per-node"
 	dgdrRunSnapshotPathKey         = "snapshot-path"
 	dgdrRunImagePullSecretsKey     = "image-pull-secrets.json"
 	dgdrRunInputMountPath          = "/etc/aisimulate"
@@ -67,7 +64,6 @@ const (
 	dgdrRunInputVolume             = "input"
 	dgdrRunSnapshotVolume          = "snapshot"
 	dgdrRunServiceAccountVolume    = "publisher-kube-api"
-	dgdrRunGPUsPerNodeAnnotation   = "nvidia.com/dgdr-gpus-per-node"
 	dgdrRunSnapshotPathAnnotation  = "nvidia.com/dgdr-snapshot-path"
 	dgdrRunResourceComponent       = "aisimulate"
 	dgdrRunServiceAccountTokenTTL  = int64(3600)
@@ -103,10 +99,6 @@ type dgdrRunRetryableError struct {
 func (e *dgdrRunRetryableError) Error() string { return e.cause.Error() }
 func (e *dgdrRunRetryableError) Unwrap() error { return e.cause }
 
-type dgdrRunHardwareDiscoverer interface {
-	Discover(context.Context, nvidiacomv1beta1.GPUSKUType) (*gpu.GPUInfo, error)
-}
-
 // DynamoGraphDeploymentRunV1beta2Reconciler executes one immutable Run as an
 // AISimulate Job. The publisher sidecar owns progress and candidate publication;
 // this controller owns the Job reference, execution phase, timestamps and Completed.
@@ -115,7 +107,6 @@ type DynamoGraphDeploymentRunV1beta2Reconciler struct {
 	APIReader               client.Reader
 	Config                  *configv1alpha1.OperatorConfiguration
 	RuntimeConfig           *commoncontroller.RuntimeConfig
-	Hardware                dgdrRunHardwareDiscoverer
 	PlannerImage            string
 	DynamoVersion           string
 	OperatorImage           string
@@ -130,7 +121,6 @@ type DynamoGraphDeploymentRunV1beta2Reconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentcandidates/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps;serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch
 
@@ -145,6 +135,9 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) Reconcile(
 	if run.DeletionTimestamp != nil || meta.IsStatusConditionTrue(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted) {
 		return ctrl.Result{}, nil
 	}
+	if condition := dgdrRunPendingPermanentFailure(run); condition != nil {
+		return r.finishPermanentFailure(ctx, run, condition.Reason, errors.New(condition.Message))
+	}
 	result, err := r.reconcileRun(ctx, run)
 	if err == nil || !dgdrRunIsPermanentError(err) {
 		return result, err
@@ -155,10 +148,67 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) Reconcile(
 	} else if apierrors.IsInvalid(err) {
 		reason = dgdrRunReasonInvalidResource
 	}
-	if statusErr := r.completeRun(ctx, run, reason, err.Error()); statusErr != nil {
-		return ctrl.Result{}, statusErr
+	return r.beginPermanentFailure(ctx, run, reason, err)
+}
+
+func dgdrRunPendingPermanentFailure(run *nvidiacomv1beta2.DynamoGraphDeploymentRun) *metav1.Condition {
+	condition := meta.FindStatusCondition(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
+	if condition == nil || condition.Status != metav1.ConditionFalse {
+		return nil
 	}
-	return ctrl.Result{}, reconcile.TerminalError(err)
+	switch condition.Reason {
+	case dgdrRunReasonInvalidExecution, dgdrRunReasonInvalidResource, commoncontroller.EventReasonOwnershipConflict:
+		return condition
+	default:
+		return nil
+	}
+}
+
+func (r *DynamoGraphDeploymentRunV1beta2Reconciler) beginPermanentFailure(
+	ctx context.Context,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	reason string,
+	cause error,
+) (ctrl.Result, error) {
+	original := run.DeepCopy()
+	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type:               nvidiacomv1beta2.DGDRRunConditionCompleted,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            cause.Error(),
+		ObservedGeneration: run.Generation,
+	})
+	if !apiequality.Semantic.DeepEqual(original.Status, run.Status) {
+		if err := r.Status().Patch(ctx, run, client.MergeFrom(original)); err != nil {
+			return ctrl.Result{}, &dgdrRunRetryableError{cause: fmt.Errorf("record permanent failure for Run %q: %w", run.Name, err)}
+		}
+	}
+	// Deletion is a later observed-state transition. Returning here ensures the
+	// controller never acts on a marker that only exists in this local object.
+	return ctrl.Result{RequeueAfter: dgdrRunExecutionCacheRetry}, nil
+}
+
+func (r *DynamoGraphDeploymentRunV1beta2Reconciler) finishPermanentFailure(
+	ctx context.Context,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	reason string,
+	cause error,
+) (ctrl.Result, error) {
+	jobs, err := r.ownedJobs(ctx, run)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	stopped, err := r.stopOwnedJobs(ctx, run, jobs, "after permanent failure")
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !stopped {
+		return ctrl.Result{RequeueAfter: dgdrRunExecutionCacheRetry}, nil
+	}
+	if err := r.completeRun(ctx, run, reason, cause.Error()); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, reconcile.TerminalError(cause)
 }
 
 func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileRun(
@@ -179,7 +229,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileRun(
 		job = &jobs[0]
 	}
 	if supersedingGeneration, cancelRequested := dgdrRunSupersedingGeneration(run); cancelRequested {
-		return ctrl.Result{}, r.cancelSupersededRun(ctx, run, job, supersedingGeneration)
+		return r.cancelSupersededRun(ctx, run, job, supersedingGeneration)
 	}
 	resourceName := dgdrRunResourceName(run.Name)
 	if err := r.reconcilePublisherAccess(ctx, run, resourceName); err != nil {
@@ -226,23 +276,51 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) cancelSupersededRun(
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
 	job *batchv1.Job,
 	supersedingGeneration string,
-) error {
+) (ctrl.Result, error) {
+	var cached []batchv1.Job
 	if job != nil {
-		if job.DeletionTimestamp.IsZero() {
-			err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationForeground))
-			if err != nil && !apierrors.IsNotFound(err) {
-				return fmt.Errorf("stop Job %q for superseded Run %q: %w", job.Name, run.Name, err)
-			}
-			if err == nil {
-				return nil
-			}
-		} else {
-			return nil
-		}
+		cached = []batchv1.Job{*job}
+	}
+	stopped, err := r.stopOwnedJobs(ctx, run, cached, "for supersession")
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !stopped {
+		return ctrl.Result{RequeueAfter: dgdrRunExecutionCacheRetry}, nil
 	}
 
-	return r.completeRun(ctx, run, dgdrRunReasonSuperseded,
+	return ctrl.Result{}, r.completeRun(ctx, run, dgdrRunReasonSuperseded,
 		fmt.Sprintf("Run was superseded by Request generation %s", supersedingGeneration))
+}
+
+// stopOwnedJobs stops every execution visible through either the informer cache or the API
+// server. Completion is safe only after the uncached reader also confirms absence.
+func (r *DynamoGraphDeploymentRunV1beta2Reconciler) stopOwnedJobs(
+	ctx context.Context,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	cached []batchv1.Job,
+	action string,
+) (bool, error) {
+	jobs := cached
+	if len(jobs) == 0 {
+		var err error
+		jobs, err = r.uncachedOwnedJobs(ctx, run)
+		if err != nil {
+			return false, err
+		}
+	}
+	if len(jobs) == 0 {
+		return true, nil
+	}
+	for i := range jobs {
+		if !jobs[i].DeletionTimestamp.IsZero() {
+			continue
+		}
+		if err := r.Delete(ctx, &jobs[i], client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("stop Job %q %s of Run %q: %w", jobs[i].Name, action, run.Name, err)
+		}
+	}
+	return false, nil
 }
 
 func (r *DynamoGraphDeploymentRunV1beta2Reconciler) completeRun(
@@ -289,6 +367,26 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) ownedJobs(
 	if err := r.List(ctx, list, client.InNamespace(run.Namespace),
 		client.MatchingFields{dgdrRunJobControllerUIDIndex: string(run.UID)}); err != nil {
 		return nil, fmt.Errorf("list Jobs of Run %q: %w", run.Name, err)
+	}
+	owned := make([]batchv1.Job, 0, len(list.Items))
+	for i := range list.Items {
+		if metav1.IsControlledBy(&list.Items[i], run) {
+			owned = append(owned, list.Items[i])
+		}
+	}
+	return owned, nil
+}
+
+func (r *DynamoGraphDeploymentRunV1beta2Reconciler) uncachedOwnedJobs(
+	ctx context.Context,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+) ([]batchv1.Job, error) {
+	if r.APIReader == nil {
+		return nil, errors.New("API reader is required to confirm Job absence")
+	}
+	list := &batchv1.JobList{}
+	if err := r.APIReader.List(ctx, list, client.InNamespace(run.Namespace)); err != nil {
+		return nil, fmt.Errorf("list Jobs of Run %q from the API: %w", run.Name, err)
 	}
 	owned := make([]batchv1.Job, 0, len(list.Items))
 	for i := range list.Items {
@@ -430,15 +528,11 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 	if execution.PublisherPullPolicy == "" {
 		execution.PublisherPullPolicy = corev1.PullIfNotPresent
 	}
-	execution.GPUsPerNode, err = r.discoverGPUsPerNode(ctx, run)
-	if err != nil {
-		return dgdrRunExecution{}, err
-	}
 	execution.DynamoVersion, err = dgdrRunDynamoVersion(execution.PlannerImage, r.DynamoVersion)
 	if err != nil {
 		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: err}
 	}
-	execution.RuntimeImageSource, err = dgdrRunRuntimeImageSource(execution.PlannerImage)
+	execution.RuntimeImageSource, err = dgdrRunRuntimeImageSource(execution.PlannerImage, execution.DynamoVersion)
 	if err != nil {
 		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: err}
 	}
@@ -447,7 +541,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 		return dgdrRunExecution{}, err
 	}
 
-	input, err := dgdrRunInput(run, execution.RuntimeImageSource, execution.DynamoVersion, execution.GPUsPerNode)
+	input, err := dgdrRunInput(run, execution.RuntimeImageSource, execution.DynamoVersion)
 	if err != nil {
 		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: err}
 	}
@@ -468,7 +562,6 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 		Name:      name,
 		Namespace: run.Namespace,
 		Annotations: map[string]string{
-			dgdrRunGPUsPerNodeAnnotation:  strconv.Itoa(execution.GPUsPerNode),
 			dgdrRunSnapshotPathAnnotation: execution.SnapshotPath,
 		},
 		Immutable: new(true),
@@ -480,7 +573,6 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 			dgdrRunPublisherImageKey:      execution.PublisherImage,
 			dgdrRunPublisherPullPolicyKey: string(execution.PublisherPullPolicy),
 			dgdrRunDynamoVersionKey:       execution.DynamoVersion,
-			dgdrRunGPUsPerNodeKey:         strconv.Itoa(execution.GPUsPerNode),
 			dgdrRunSnapshotPathKey:        execution.SnapshotPath,
 			dgdrRunImagePullSecretsKey:    string(pullSecrets),
 		},
@@ -513,12 +605,16 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) existingRunExecution(
 	if err := commoncontroller.CheckControllerOwnership(configMap, run, r.Scheme()); err != nil {
 		return dgdrRunExecution{}, err
 	}
+	if configMap.Immutable == nil || !*configMap.Immutable {
+		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: fmt.Errorf(
+			"execution ConfigMap %q must be immutable", configMap.Name)}
+	}
 	execution, err := dgdrRunExecutionFromConfigMap(configMap)
 	if err != nil {
 		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: fmt.Errorf("read ConfigMap %q: %w", configMap.Name, err)}
 	}
 	if job != nil {
-		if err := validateDGDRRunJobExecution(job, execution); err != nil {
+		if err := validateDGDRRunJobExecution(job, run, configMap.Name, execution); err != nil {
 			return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: fmt.Errorf(
 				"Job %q and ConfigMap %q disagree: %w", job.Name, configMap.Name, err)}
 		}
@@ -526,43 +622,10 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) existingRunExecution(
 	return execution, nil
 }
 
-func (r *DynamoGraphDeploymentRunV1beta2Reconciler) discoverGPUsPerNode(
-	ctx context.Context,
-	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
-) (int, error) {
-	if r.Hardware == nil {
-		return 0, &dgdrRunRetryableError{cause: errors.New("discover GPUs per node: hardware discoverer is not configured")}
-	}
-	if run.Spec.Hardware == nil || run.Spec.Hardware.GPU == nil || run.Spec.Hardware.GPU.SKU == nil {
-		return 0, &dgdrRunPermanentExecutionError{cause: errors.New(
-			"discover GPUs per node: spec.hardware.gpu.sku was not resolved by Request admission")}
-	}
-	sku := *run.Spec.Hardware.GPU.SKU
-	filterSKU := nvidiacomv1beta1.GPUSKUType("")
-	if aisimulate.IsKnownHardwareSKU(sku) {
-		filterSKU = nvidiacomv1beta1.GPUSKUType(sku)
-	}
-	info, err := r.Hardware.Discover(ctx, filterSKU)
-	if err != nil {
-		return 0, &dgdrRunRetryableError{cause: fmt.Errorf("discover GPUs per node: %w", err)}
-	}
-	if filterSKU == "" && info != nil && len(info.OtherModels) > 0 {
-		return 0, &dgdrRunRetryableError{cause: fmt.Errorf(
-			"discover GPUs per node for external AISimulate SKU %q: cluster discovery selected %q among multiple GPU models (%s)",
-			sku, info.Model, strings.Join(info.OtherModels, ", "),
-		)}
-	}
-	if info == nil || info.GPUsPerNode < 1 {
-		return 0, &dgdrRunRetryableError{cause: errors.New("discover GPUs per node: discovery returned no positive GPU count")}
-	}
-	return info.GPUsPerNode, nil
-}
-
 func dgdrRunInput(
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
 	runtimeImageSource string,
 	dynamoVersion string,
-	gpusPerNode int,
 ) (map[string]any, error) {
 	if run.Spec.Recommendation == nil || run.Spec.Recommendation.MaxCandidates < 1 {
 		return nil, errors.New("spec.recommendation.maxCandidates must be defaulted before the Run is created")
@@ -586,7 +649,9 @@ func dgdrRunInput(
 		"runtime_image":            runtimeImageSource,
 		"runtime_version_override": dynamoVersion,
 		"derive_runtime_images":    true,
-		"num_gpus_per_node":        int64(gpusPerNode),
+	}
+	if run.Spec.Hardware != nil && run.Spec.Hardware.NumGPUsPerNode != nil {
+		reserved["num_gpus_per_node"] = int64(*run.Spec.Hardware.NumGPUsPerNode)
 	}
 	for key, value := range reserved {
 		if err := unstructured.SetNestedField(input, value, "dgdr_run", key); err != nil {
@@ -597,7 +662,6 @@ func dgdrRunInput(
 }
 
 type dgdrRunExecution struct {
-	GPUsPerNode         int
 	SnapshotPath        string
 	PlannerImage        string
 	PlannerPullPolicy   corev1.PullPolicy
@@ -620,18 +684,15 @@ func dgdrRunDynamoVersion(plannerImage, dynamoVersion string) (string, error) {
 	return version.String(), nil
 }
 
-func dgdrRunRuntimeImageSource(plannerImage string) (string, error) {
+func dgdrRunRuntimeImageSource(plannerImage, dynamoVersion string) (string, error) {
 	ref := strings.TrimSpace(plannerImage)
 	nameAndTag, _, hasDigest := strings.Cut(ref, "@")
 	lastSlash, lastColon := strings.LastIndex(nameAndTag, "/"), strings.LastIndex(nameAndTag, ":")
 	if lastColon > lastSlash && lastColon < len(nameAndTag)-1 {
-		return ref, nil
+		return nameAndTag, nil
 	}
 	if hasDigest {
-		return "", fmt.Errorf(
-			"resolve runtime images for planner image %q: a digest-only planner image cannot identify sibling runtime images; configure a shared release tag, optionally with a digest",
-			plannerImage,
-		)
+		return nameAndTag + ":" + dynamoVersion, nil
 	}
 	return "", fmt.Errorf(
 		"resolve runtime images for planner image %q: a shared release tag is required, optionally with a repository-specific digest",
@@ -698,12 +759,8 @@ func dgdrRunExecutionFromConfigMap(configMap *corev1.ConfigMap) (dgdrRunExecutio
 		return dgdrRunExecution{}, fmt.Errorf("data key %q=%q is not a valid image pull policy", dgdrRunPublisherPullPolicyKey, execution.PublisherPullPolicy)
 	}
 
-	// Decode the immutable topology, credentials and effective input.
+	// Decode the immutable credentials and effective input.
 	var err error
-	execution.GPUsPerNode, err = positiveInteger(configMap.Data[dgdrRunGPUsPerNodeKey], "data key "+dgdrRunGPUsPerNodeKey)
-	if err != nil {
-		return dgdrRunExecution{}, err
-	}
 	if err := json.Unmarshal([]byte(configMap.Data[dgdrRunImagePullSecretsKey]), &execution.ImagePullSecrets); err != nil {
 		return dgdrRunExecution{}, fmt.Errorf("decode data key %q: %w", dgdrRunImagePullSecretsKey, err)
 	}
@@ -714,31 +771,243 @@ func dgdrRunExecutionFromConfigMap(configMap *corev1.ConfigMap) (dgdrRunExecutio
 	return execution, nil
 }
 
-func validateDGDRRunJobExecution(job *batchv1.Job, execution dgdrRunExecution) error {
-	jobGPUs, err := positiveAnnotation(job.Annotations, dgdrRunGPUsPerNodeAnnotation)
-	if err != nil {
-		return err
-	}
-	if jobGPUs != execution.GPUsPerNode {
-		return errors.New("GPU counts differ")
-	}
+func validateDGDRRunJobExecution(
+	job *batchv1.Job,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	inputConfigMapName string,
+	execution dgdrRunExecution,
+) error {
 	if job.Annotations[dgdrRunSnapshotPathAnnotation] != execution.SnapshotPath {
 		return errors.New("snapshot paths differ")
 	}
+	if err := validateDGDRRunJobSpec(&job.Spec); err != nil {
+		return err
+	}
+	pod := &job.Spec.Template.Spec
+	if pod.RestartPolicy != corev1.RestartPolicyNever {
+		return errors.New("pod restart policy differs")
+	}
+	if pod.HostPID || pod.HostIPC || pod.HostNetwork ||
+		(pod.ShareProcessNamespace != nil && *pod.ShareProcessNamespace) {
+		return errors.New("pod namespace isolation differs")
+	}
+	if len(pod.InitContainers) != 0 {
+		return errors.New("init containers are not allowed")
+	}
+	if err := validateDGDRRunPodSecurityContext(pod.SecurityContext); err != nil {
+		return err
+	}
+	if pod.ServiceAccountName != inputConfigMapName || pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+		return errors.New("publisher service-account identities differ")
+	}
+	if len(pod.Containers) != 2 {
+		return fmt.Errorf("container count differs: got %d, want 2", len(pod.Containers))
+	}
 
-	// Match both container identities and all credentials against the frozen artifact.
-	planner, found := dgdrRunContainer(job.Spec.Template.Spec.Containers, dgdrRunSweeperContainer)
-	if !found || planner.Image != execution.PlannerImage || planner.ImagePullPolicy != execution.PlannerPullPolicy {
+	// Match both container identities, their immutable bindings and all credentials.
+	planner, found := dgdrRunContainer(pod.Containers, dgdrRunSweeperContainer)
+	if !found {
 		return errors.New("planner image identities differ")
 	}
-	publisher, found := dgdrRunContainer(job.Spec.Template.Spec.Containers, dgdrRunPublisherContainer)
-	if !found || publisher.Image != execution.PublisherImage || publisher.ImagePullPolicy != execution.PublisherPullPolicy {
+	if err := validateDGDRRunPlannerContainer(&planner, execution); err != nil {
+		return err
+	}
+	publisher, found := dgdrRunContainer(pod.Containers, dgdrRunPublisherContainer)
+	if !found {
 		return errors.New("publisher image identities differ")
 	}
-	if !apiequality.Semantic.DeepEqual(job.Spec.Template.Spec.ImagePullSecrets, execution.ImagePullSecrets) {
+	if err := validateDGDRRunPublisherContainer(&publisher, run, execution); err != nil {
+		return err
+	}
+	if err := validateDGDRRunVolumes(pod.Volumes, inputConfigMapName); err != nil {
+		return err
+	}
+	if !apiequality.Semantic.DeepEqual(pod.ImagePullSecrets, execution.ImagePullSecrets) {
 		return errors.New("image pull secrets differ")
 	}
 	return nil
+}
+
+func validateDGDRRunPlannerContainer(planner *corev1.Container, execution dgdrRunExecution) error {
+	if planner.Image != execution.PlannerImage || planner.ImagePullPolicy != execution.PlannerPullPolicy {
+		return errors.New("planner image identities differ")
+	}
+	if err := validateDGDRRunContainerSecurityContext(planner.SecurityContext, ptr.To[int64](1000)); err != nil {
+		return fmt.Errorf("planner security context differs: %w", err)
+	}
+	if !apiequality.Semantic.DeepEqual(planner.Command, dgdrRunSweeperCommand()) ||
+		!apiequality.Semantic.DeepEqual(planner.Args, dgdrRunSweeperArgs(execution.SnapshotPath)) {
+		return errors.New("planner command or arguments differ")
+	}
+	if len(planner.Env) != 0 || len(planner.EnvFrom) != 0 {
+		return errors.New("planner environment differs")
+	}
+	if planner.Lifecycle != nil {
+		return errors.New("planner lifecycle differs")
+	}
+	if !apiequality.Semantic.DeepEqual(planner.VolumeMounts, dgdrRunSweeperVolumeMounts(execution.SnapshotPath)) {
+		return errors.New("planner volume mounts differ")
+	}
+	return nil
+}
+
+func validateDGDRRunPublisherContainer(
+	publisher *corev1.Container,
+	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
+	execution dgdrRunExecution,
+) error {
+	if publisher.Image != execution.PublisherImage || publisher.ImagePullPolicy != execution.PublisherPullPolicy {
+		return errors.New("publisher image identities differ")
+	}
+	if err := validateDGDRRunContainerSecurityContext(publisher.SecurityContext, nil); err != nil {
+		return fmt.Errorf("publisher security context differs: %w", err)
+	}
+	if !apiequality.Semantic.DeepEqual(publisher.Command, dgdrRunPublisherCommand()) ||
+		!apiequality.Semantic.DeepEqual(publisher.Args, dgdrRunPublisherArgs(run, execution.SnapshotPath)) {
+		return errors.New("publisher command, arguments or identity differ")
+	}
+	if err := validateDGDRRunPublisherEnv(publisher.Env); err != nil {
+		return err
+	}
+	if len(publisher.EnvFrom) != 0 {
+		return errors.New("publisher environment differs")
+	}
+	if publisher.Lifecycle != nil {
+		return errors.New("publisher lifecycle differs")
+	}
+	if !apiequality.Semantic.DeepEqual(publisher.VolumeMounts, dgdrRunPublisherVolumeMounts(execution.SnapshotPath)) {
+		return errors.New("publisher volume mounts differ")
+	}
+	return nil
+}
+
+func validateDGDRRunJobSpec(spec *batchv1.JobSpec) error {
+	if spec.BackoffLimit == nil || *spec.BackoffLimit != 0 {
+		return errors.New("Job backoff limit differs")
+	}
+	if (spec.Parallelism != nil && *spec.Parallelism != 1) ||
+		(spec.Completions != nil && *spec.Completions != 1) {
+		return errors.New("Job cardinality differs")
+	}
+	if spec.CompletionMode != nil && *spec.CompletionMode != batchv1.NonIndexedCompletion {
+		return errors.New("Job completion mode differs")
+	}
+	if (spec.Suspend != nil && *spec.Suspend) || (spec.ManualSelector != nil && *spec.ManualSelector) {
+		return errors.New("Job execution policy differs")
+	}
+	if spec.ActiveDeadlineSeconds != nil || spec.PodFailurePolicy != nil || spec.SuccessPolicy != nil ||
+		spec.BackoffLimitPerIndex != nil || spec.MaxFailedIndexes != nil ||
+		spec.TTLSecondsAfterFinished != nil ||
+		(spec.PodReplacementPolicy != nil && *spec.PodReplacementPolicy != batchv1.TerminatingOrFailed) ||
+		spec.ManagedBy != nil {
+		return errors.New("Job execution policy differs")
+	}
+	return nil
+}
+
+func validateDGDRRunPodSecurityContext(security *corev1.PodSecurityContext) error {
+	if security == nil || security.FSGroup == nil || *security.FSGroup != 65532 {
+		return errors.New("pod fsGroup differs")
+	}
+	if security.RunAsNonRoot == nil || !*security.RunAsNonRoot {
+		return errors.New("pod runAsNonRoot differs")
+	}
+	if security.SeccompProfile == nil || security.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		return errors.New("pod seccomp profile differs")
+	}
+	return nil
+}
+
+func validateDGDRRunContainerSecurityContext(security *corev1.SecurityContext, runAsUser *int64) error {
+	if security == nil || security.AllowPrivilegeEscalation == nil || *security.AllowPrivilegeEscalation {
+		return errors.New("allowPrivilegeEscalation must be false")
+	}
+	if security.Privileged != nil && *security.Privileged {
+		return errors.New("privileged must be false")
+	}
+	if security.RunAsNonRoot != nil && !*security.RunAsNonRoot {
+		return errors.New("runAsNonRoot cannot be disabled")
+	}
+	if security.SeccompProfile != nil && security.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		return errors.New("seccomp profile cannot weaken the pod default")
+	}
+	if security.ProcMount != nil && *security.ProcMount != corev1.DefaultProcMount {
+		return errors.New("procMount cannot weaken the container default")
+	}
+	if security.Capabilities == nil || len(security.Capabilities.Add) != 0 ||
+		!apiequality.Semantic.DeepEqual(security.Capabilities.Drop, []corev1.Capability{"ALL"}) {
+		return errors.New("all capabilities must be dropped")
+	}
+	if !apiequality.Semantic.DeepEqual(security.RunAsUser, runAsUser) {
+		return errors.New("runAsUser differs")
+	}
+	return nil
+}
+
+func validateDGDRRunPublisherEnv(env []corev1.EnvVar) error {
+	if len(env) != 2 {
+		return errors.New("publisher pod identity environment differs")
+	}
+	for name, fieldPath := range map[string]string{
+		"POD_NAMESPACE": "metadata.namespace",
+		"POD_NAME":      "metadata.name",
+	} {
+		found := false
+		for i := range env {
+			if env[i].Name == name && env[i].Value == "" && env[i].ValueFrom != nil &&
+				env[i].ValueFrom.FieldRef != nil && env[i].ValueFrom.FieldRef.FieldPath == fieldPath {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("publisher pod identity environment differs")
+		}
+	}
+	return nil
+}
+
+func validateDGDRRunVolumes(volumes []corev1.Volume, inputConfigMapName string) error {
+	if len(volumes) != 3 {
+		return errors.New("input, snapshot or publisher credential volumes differ")
+	}
+	input, found := dgdrRunVolume(volumes, dgdrRunInputVolume)
+	if !found || input.ConfigMap == nil || input.ConfigMap.Name != inputConfigMapName ||
+		len(input.ConfigMap.Items) != 0 || input.ConfigMap.Optional != nil || !dgdrRunDefaultMode(input.ConfigMap.DefaultMode) {
+		return errors.New("input, snapshot or publisher credential volumes differ")
+	}
+	snapshot, found := dgdrRunVolume(volumes, dgdrRunSnapshotVolume)
+	if !found || snapshot.EmptyDir == nil || !apiequality.Semantic.DeepEqual(snapshot.EmptyDir, &corev1.EmptyDirVolumeSource{}) {
+		return errors.New("input, snapshot or publisher credential volumes differ")
+	}
+	publisher, found := dgdrRunVolume(volumes, dgdrRunServiceAccountVolume)
+	if !found || publisher.Projected == nil ||
+		!dgdrRunDefaultMode(publisher.Projected.DefaultMode) ||
+		!apiequality.Semantic.DeepEqual(publisher.Projected.Sources, dgdrRunPublisherKubeAPIVolume().Projected.Sources) {
+		return errors.New("input, snapshot or publisher credential volumes differ")
+	}
+	return nil
+}
+
+func dgdrRunDefaultMode(mode *int32) bool {
+	return mode == nil || *mode == int32(0o644)
+}
+
+func dgdrRunVolume(volumes []corev1.Volume, name string) (corev1.Volume, bool) {
+	var found *corev1.Volume
+	for i := range volumes {
+		if volumes[i].Name != name {
+			continue
+		}
+		if found != nil {
+			return corev1.Volume{}, false
+		}
+		found = &volumes[i]
+	}
+	if found == nil {
+		return corev1.Volume{}, false
+	}
+	return *found, true
 }
 
 func dgdrRunContainer(containers []corev1.Container, name string) (corev1.Container, bool) {
@@ -765,18 +1034,6 @@ func dgdrRunStatusInput(contents string) (*runtime.RawExtension, error) {
 	return &runtime.RawExtension{Raw: raw}, nil
 }
 
-func positiveAnnotation(annotations map[string]string, key string) (int, error) {
-	return positiveInteger(annotations[key], "annotation "+key)
-}
-
-func positiveInteger(value, field string) (int, error) {
-	parsed, err := strconv.Atoi(value)
-	if err != nil || parsed < 1 {
-		return 0, fmt.Errorf("%s=%q is not a positive integer", field, value)
-	}
-	return parsed, nil
-}
-
 func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,
 	name string,
@@ -790,7 +1047,6 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 		Name:      name,
 		Namespace: run.Namespace,
 		Annotations: map[string]string{
-			dgdrRunGPUsPerNodeAnnotation:  strconv.Itoa(execution.GPUsPerNode),
 			dgdrRunSnapshotPathAnnotation: execution.SnapshotPath,
 		},
 		Spec: batchv1.JobSpec{
@@ -813,57 +1069,84 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) buildJob(
 							Name:            dgdrRunSweeperContainer,
 							Image:           execution.PlannerImage,
 							ImagePullPolicy: execution.PlannerPullPolicy,
-							Command:         []string{"aisimulate"},
-							Args: []string{
-								"recommend", "--stack", "dynamo",
-								"--config", dgdrRunInputPath,
-								"--output", "dgdr_run",
-								"--output-dir", execution.SnapshotPath,
-								"--overwrite",
-							},
+							Command:         dgdrRunSweeperCommand(),
+							Args:            dgdrRunSweeperArgs(execution.SnapshotPath),
 							SecurityContext: sweeperSecurityContext,
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: dgdrRunInputVolume, MountPath: dgdrRunInputMountPath, ReadOnly: true},
-								{Name: dgdrRunSnapshotVolume, MountPath: execution.SnapshotPath},
-							},
+							VolumeMounts:    dgdrRunSweeperVolumeMounts(execution.SnapshotPath),
 						},
 						{
 							Name:            dgdrRunPublisherContainer,
 							Image:           execution.PublisherImage,
 							ImagePullPolicy: execution.PublisherPullPolicy,
-							Command:         []string{dgdrRunPublisherBinary},
-							Args: []string{
-								"--snapshot-dir", execution.SnapshotPath,
-								"--run-name", run.Name,
-								"--run-uid", string(run.UID),
-								"--sweeper-container", dgdrRunSweeperContainer,
-							},
-							Env: []corev1.EnvVar{
-								{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
-								{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
-							},
+							Command:         dgdrRunPublisherCommand(),
+							Args:            dgdrRunPublisherArgs(run, execution.SnapshotPath),
+							Env:             dgdrRunPublisherEnv(),
 							SecurityContext: dgdrRunContainerSecurityContext(),
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: dgdrRunSnapshotVolume, MountPath: execution.SnapshotPath},
-								{Name: dgdrRunServiceAccountVolume, MountPath: dgdrRunServiceAccountMountPath, ReadOnly: true},
-							},
+							VolumeMounts:    dgdrRunPublisherVolumeMounts(execution.SnapshotPath),
 						},
 					},
-					Volumes: []corev1.Volume{
-						{
-							Name: dgdrRunInputVolume,
-							ConfigMap: &corev1.ConfigMapVolumeSource{
-								Name: name,
-							},
-						},
-						{Name: dgdrRunSnapshotVolume, EmptyDir: &corev1.EmptyDirVolumeSource{}},
-						dgdrRunPublisherKubeAPIVolume(),
-					},
+					Volumes: dgdrRunVolumes(name),
 				},
 			},
 		},
 	}
 	return job
+}
+
+func dgdrRunSweeperCommand() []string {
+	return []string{"aisimulate"}
+}
+
+func dgdrRunSweeperArgs(snapshotPath string) []string {
+	return []string{
+		"recommend", "--stack", "dynamo",
+		"--config", dgdrRunInputPath,
+		"--output", "dgdr_run",
+		"--output-dir", snapshotPath,
+		"--overwrite",
+	}
+}
+
+func dgdrRunPublisherCommand() []string {
+	return []string{dgdrRunPublisherBinary}
+}
+
+func dgdrRunPublisherArgs(run *nvidiacomv1beta2.DynamoGraphDeploymentRun, snapshotPath string) []string {
+	return []string{
+		"--snapshot-dir", snapshotPath,
+		"--run-name", run.Name,
+		"--run-uid", string(run.UID),
+		"--sweeper-container", dgdrRunSweeperContainer,
+	}
+}
+
+func dgdrRunPublisherEnv() []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
+		{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+	}
+}
+
+func dgdrRunSweeperVolumeMounts(snapshotPath string) []corev1.VolumeMount {
+	return []corev1.VolumeMount{
+		{Name: dgdrRunInputVolume, MountPath: dgdrRunInputMountPath, ReadOnly: true},
+		{Name: dgdrRunSnapshotVolume, MountPath: snapshotPath},
+	}
+}
+
+func dgdrRunPublisherVolumeMounts(snapshotPath string) []corev1.VolumeMount {
+	return []corev1.VolumeMount{
+		{Name: dgdrRunSnapshotVolume, MountPath: snapshotPath},
+		{Name: dgdrRunServiceAccountVolume, MountPath: dgdrRunServiceAccountMountPath, ReadOnly: true},
+	}
+}
+
+func dgdrRunVolumes(inputConfigMapName string) []corev1.Volume {
+	return []corev1.Volume{
+		{Name: dgdrRunInputVolume, ConfigMap: &corev1.ConfigMapVolumeSource{Name: inputConfigMapName}},
+		{Name: dgdrRunSnapshotVolume, EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		dgdrRunPublisherKubeAPIVolume(),
+	}
 }
 
 func dgdrRunContainerSecurityContext() *corev1.SecurityContext {
