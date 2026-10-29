@@ -432,6 +432,12 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
     **Notes:** Unified recipient-routed channels; `to=self` carries reasoning. No V1 reasoning parser exists. Backend guidance support is separate.
   </Accordion>
 
+  <Accordion title="Muse Spark">
+    **Parser:** `muse_spark` (alias `muse_spark_open`)
+
+    **Notes:** Unified recipient-routed channels: `to=self` carries reasoning and `commentary` remains visible text. No V1 reasoning parser exists.
+  </Accordion>
+
   <Accordion title="Inkling">
     **Parser:** `inkling`
 

@@ -115,17 +115,17 @@ the parser configuration, or the parser logic.
 
 ## Parser Generation Routing
 
-Set `DYN_PARSER_VERSION` on the frontend running the `dynamo` processor and on workers that build parser-dependent guidance. Workers publish `--dyn-tool-call-parser` and `--dyn-reasoning-parser`; the frontend runs parsing. Restart after changing the environment because version selection is cached. This revision pins `dynamo-parsers` `10.2.2` and `dynamo-parsers-v2` `0.7.35`.
+Set `DYN_PARSER_VERSION` on the frontend running the `dynamo` processor and on workers that build parser-dependent guidance. Workers publish `--dyn-tool-call-parser` and `--dyn-reasoning-parser`; the frontend runs parsing. Restart after changing the environment because version selection is cached. Dynamo uses the parser versions pinned in the workspace [Cargo.toml](https://github.com/ai-dynamo/dynamo/blob/main/Cargo.toml); [Cargo.lock](https://github.com/ai-dynamo/dynamo/blob/main/Cargo.lock) records the resolved versions. The frontend-crates library examples may target a newer release.
 
 | `DYN_PARSER_VERSION` | Compatible Unified configuration | Unavailable or incompatible configuration |
 | --- | --- | --- |
-| Unset or `auto` | V2, except reasoning-only `qwen3` below | Existing V1 route |
-| `1` | V1 if both configured names exist in V1 | Reject names unavailable in V1 |
+| Unset or `auto` | V2, except reasoning-only Qwen/Nemotron below | V1 if each configured name exists in its V1 registry; otherwise reject |
+| `1` | V1 if each configured name exists in its V1 registry | Reject names unavailable in V1 |
 | `2` | V2 | Reject; no V1 configuration fallback |
 
-Only `auto`, `1`, and `2` are accepted; `v1` and `v2` stop startup. Auto fallback still requires valid V1 names. Runtime V2 parse errors never retry through V1.
+Only `auto`, `1`, and `2` are accepted; `v1` and `v2` stop startup. Invalid combinations are rejected during model setup with an error naming the configured selectors and the missing implementation. Runtime V2 parse errors never retry through V1.
 
-Either selector can choose a Unified family below. If both are set, they must resolve to the same family. This table lists parser availability, not model/backend or GPU qualification.
+V2 uses one family grammar for reasoning, text, and tools. Either selector can usually choose that family; when both are set, they must resolve to the same family or a supported shared grammar. Auto requires both selectors to be `beam` for Beam. V1 uses separate reasoning and tool-call parsers, so it can mix formats when both names exist in their respective V1 registries. This table lists parser availability, not model/backend or GPU qualification.
 
 | Unified family | Accepted family names and Dynamo aliases |
 | --- | --- |
@@ -137,15 +137,22 @@ Either selector can choose a Unified family below. If both are set, they must re
 | Kimi K3 | `kimi_k3`, `kimi-k3` |
 | Qwen3 Coder | `qwen3`, `qwen3_coder` |
 | Muse Glimmer | `muse_glimmer`, `muse` |
+| Muse Spark | `muse_spark`, `muse_spark_open` |
 | Nemotron V3 | `nemotron_v3`, `nemotron3` |
 | Beam | `beam` |
 | GPT-OSS / Harmony | `gpt_oss`, `harmony` |
 
-Compatible pairs include `qwen3_coder` + `qwen3`, `glm47` + `glm45`, and `kimi_k2` + `kimi_k25`. `hermes` + `qwen3` and `qwen3_coder` + `deepseek_v4` are incompatible: auto uses V1 if available; explicit `2` rejects them. A single tool selector such as `qwen3_coder`, or reasoning selector such as `deepseek_v41`, selects the whole family grammar. The serving layer still enforces tool policy.
+Examples below list the tool-call selector first, then the reasoning selector:
 
-**Reasoning-only Qwen exception:** auto stays on V1 for `--dyn-reasoning-parser qwen3` without a tool selector. Qwen thinking/QwQ models can emit Hermes JSON tools rather than Coder XML. Explicit `2` selects the Coder Unified grammar even here; use it only for matching output.
+- `qwen3_coder` + `qwen3`, `glm47` + `glm45`, and `kimi_k2` + `kimi_k25` each resolve to one Unified family, so auto uses V2. `qwen3_coder` + `nemotron_v3` also uses V2 through Nemotron’s shared Qwen XML tool grammar.
+- `hermes` + `qwen3` and `qwen3_coder` + `deepseek_v4` mix different formats. Auto uses the V1 split pipeline; explicit `2` rejects them. Use `1` when you want to keep a valid V1 combination on V1.
+- `muse_glimmer` + `qwen3` is rejected: it has no matching Unified family and V1 has no `muse_glimmer` tool parser. With `auto` or `2`, use `muse_glimmer` in both selectors, or configure only one selector, to select its Unified grammar.
 
-**Deprecated setting:** replace `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` with `DYN_PARSER_VERSION`. Legacy `true` means explicit V2; `false` means auto, which now prefers compatible V2. Conflicting pairs (`true` + `1`, `false` + `2`) and malformed booleans reject. For rollback, unset the old variable and use `1` if both selectors exist in V1. Muse Glimmer, Beam, and DeepSeek V4.1 are Unified-only.
+A single tool selector such as `qwen3_coder`, or reasoning selector such as `deepseek_v41`, selects the whole Unified family grammar. The serving layer still enforces tool policy. Family aliases accepted by V2 are not necessarily registered in the corresponding V1 slot.
+
+**Reasoning-only exceptions:** without a tool selector, auto stays on V1 for `qwen3`, `nemotron_v3`, or `nemotron3` reasoning. Qwen thinking/QwQ models can emit Hermes JSON tools rather than Coder XML; a Nemotron reasoning name alone does not identify its tool grammar. Explicit `2` selects the corresponding Unified grammar; use it only for matching output.
+
+**Deprecated setting:** replace `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` with `DYN_PARSER_VERSION`. Legacy `true` means explicit V2; `false` means auto, which now prefers compatible V2. Conflicting pairs (`true` + `1`, `false` + `2`) and malformed booleans reject. For rollback, unset the old variable and use `1` if both selectors exist in V1. Muse Glimmer, Muse Spark, Beam, and DeepSeek V4.1 are Unified-only.
 
 Unified emits reasoning, text, and tools in source order. V1 extracts reasoning first and may buffer calls in the tool jail. Streaming exposes incremental output where the family and request mode support it; batch aggregates output into `content`, `reasoning_content`, and `tool_calls`. Both use the same selected generation. With `tool_choice: none`, Unified suppresses calls and decodes recognized markup. V1 bypasses the tool jail for parsers such as `qwen3_coder`, so raw markup may remain in `content`.
 

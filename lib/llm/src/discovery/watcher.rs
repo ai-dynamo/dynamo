@@ -3351,6 +3351,43 @@ request_classifier:
     }
 
     #[test]
+    fn auto_validates_parser_fallback_before_model_setup() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::auto_validates_parser_fallback_before_model_setup"
+            ),
+            &[("DYN_PARSER_VERSION", "auto")],
+        ) {
+            return;
+        }
+
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.model_type = ModelType::Chat;
+        card.runtime_config.tool_call_parser = Some("muse_glimmer".to_string());
+        card.runtime_config.reasoning_parser = Some("qwen3".to_string());
+        for role in [None, Some(WorkerType::Decode), Some(WorkerType::Encode)] {
+            card.worker_type = role;
+            let error = validate_card_parser_version(&card).unwrap_err().to_string();
+            assert!(error.contains("--dyn-tool-call-parser"), "{error}");
+            assert!(error.contains("muse_glimmer"), "{error}");
+        }
+
+        card.worker_type = Some(WorkerType::Prefill);
+        assert!(validate_card_parser_version(&card).is_ok());
+        card.worker_type = None;
+        card.model_type = ModelType::Embedding;
+        assert!(validate_card_parser_version(&card).is_ok());
+
+        card.model_type = ModelType::Chat;
+        card.runtime_config.tool_call_parser = Some("hermes".to_string());
+        assert!(validate_card_parser_version(&card).is_ok());
+        card.runtime_config.tool_call_parser = Some("muse_glimmer".to_string());
+        card.runtime_config.reasoning_parser = Some("muse_glimmer".to_string());
+        assert!(validate_card_parser_version(&card).is_ok());
+    }
+
+    #[test]
     fn parser_version_validation_applies_only_to_chat_surfaces() {
         let mut card = ModelDeploymentCard::with_name_only("model");
         card.runtime_config.tool_call_parser = Some("hermes".to_string());
