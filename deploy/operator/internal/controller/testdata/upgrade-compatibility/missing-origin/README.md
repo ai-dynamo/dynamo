@@ -38,6 +38,10 @@ Review the new capture and its provenance before replacing this fixture. Ordinar
 CI reads the committed snapshot and does not fetch or execute old releases.
 `TestClusterOperatorUpgrade/missing-origin` uses the shared permissive historical
 seeding phase before current admission. It checks independent takeover safety,
-origin immutability, capture/write/read preservation, and an intentional worker edit
-reaching the requested immediate Grove workload generation. Serving workloads remain
-blocked; these are CPU API/admission/controller checks, not inference tests.
+rejects an invented origin through the safety assertion, and verifies an intentional
+worker edit reaches the requested immediate Grove workload generation while origin
+stays absent. Serializer tests cover capture/write/read preservation; the admission
+validator tests cover rejection of origin materialization on update. The Python
+lifecycle test checks missing-origin preservation through regeneration. Serving
+workloads remain blocked; these are CPU API/admission/controller checks, not
+inference tests.

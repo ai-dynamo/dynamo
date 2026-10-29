@@ -6,7 +6,6 @@
 package controller
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -49,24 +48,8 @@ func testUpgradeMissingOrigin(t *testing.T) {
 	require.Eventually(t, func() bool { return completedUpgradeReconciles(t) > baseline }, 90*time.Second, 200*time.Millisecond)
 	after := captureUpgrade(t, env)
 	require.NoError(t, upgradeSafetyError(transition.hashChanged, before, after))
-	dgd = getOnlyClusterDGD(t, t.Context(), env.Client(), namespace)
-	require.NotContains(t, dgd.Annotations, consts.KubeAnnotationDynamoOperatorOriginVersion)
 
-	t.Log("Write the observed graph as the next replayable input without materializing an origin")
-	path := filepath.Join(t.TempDir(), "input.yaml")
-	require.NoError(t, golden.WriteManifests(path, after))
-	recorded, err := golden.ReadManifests(path)
-	require.NoError(t, err)
-	for _, object := range recorded {
-		if object.GetKind() == upgradeDynamoGraphDeploymentKind {
-			require.NotContains(t, object.GetAnnotations(), consts.KubeAnnotationDynamoOperatorOriginVersion)
-		}
-	}
-
-	t.Log("Current admission and the independent safety check reject inventing a historical origin")
-	invalid := dgd.DeepCopy()
-	invalid.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = "1.7.0"
-	require.ErrorContains(t, env.Client().Update(t.Context(), invalid), "field is immutable")
+	t.Log("The independent safety check rejects inventing a historical origin")
 	changed := make([]unstructured.Unstructured, len(after))
 	for i := range after {
 		changed[i] = *after[i].DeepCopy()
