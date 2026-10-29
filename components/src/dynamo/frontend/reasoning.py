@@ -10,8 +10,9 @@ from jinja2.exceptions import TemplateError
 def _requires_reasoning_string(
     render_template: Callable[..., str], has_tools: bool
 ) -> bool:
-    # Match the Rust renderer's probe: array repr escapes these control bytes,
-    # whereas a template that consumes the segments preserves them.
+    # Match the Rust renderer: Jinja interpolation and ~ stringify lists with
+    # literal "\\x01", not byte 0x01. Compare complete sentinels including the
+    # control bytes, not just their printable names.
     first = "\x01dynamo_reasoning_probe_first\x01"
     last = "\x01dynamo_reasoning_probe_last\x01"
     tool = {"type": "function", "function": {"name": "probe", "parameters": {}}}

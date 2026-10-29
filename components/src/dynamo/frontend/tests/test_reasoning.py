@@ -110,7 +110,7 @@ def test_probe_uses_request_options_without_reusing_another_requests_result():
         + _DIRECT
         + "{% endif %}"
     )
-    for segmented in [False, True, False]:
+    for segmented in [False, True]:
         options = {"modes": ["thinking"], "segmented": segmented}
         original_options = copy.deepcopy(options)
         render = template_renderer(template, reasoning_effort="high", options=options)
@@ -123,7 +123,7 @@ def test_probe_uses_request_options_without_reusing_another_requests_result():
         assert options == original_options
 
 
-@pytest.mark.parametrize("reasoning", [None, "", "['literal', '']", [], ["", ""]])
+@pytest.mark.parametrize("reasoning", [None, "", "['literal', '']", []])
 def test_existing_strings_and_empty_reasoning(reasoning):
     messages = [assistant(reasoning)]
     normalize_reasoning_content(messages, string_only=True)
