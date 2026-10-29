@@ -978,7 +978,6 @@ def build_sampling_params(
     # bridge pressure before chunks cross into Dynamo.
     sampling_params.detokenize = False
     sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
-    # Decode regulation (DYN_DECODE_REGULATION_MODE): whether the request is interactive.
     attach_regulation_class(sampling_params, request, _decode_regulation_config())
 
     # setattr skips __post_init__ (temperature clamp, _verify_args, greedy reset),
@@ -4124,6 +4123,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 enable_rl=self.config.enable_rl,
             )
         )
+        if engine_generate_input is not None:
+            # TITO requests bypass build_sampling_params.
+            attach_regulation_class(
+                sampling_params, request, _decode_regulation_config()
+            )
 
         if kv_params is not None:
             _update_kv_transfer_params(sampling_params, kv_params)

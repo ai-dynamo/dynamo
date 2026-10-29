@@ -322,7 +322,6 @@ class DecodeRegulationPolicy:
         t0 = self.predict(n, ctx) + extra
         limit = t0 + self.cfg.rho * max(0.0, d.tau_ms - t0)
         opp_ctx = 0
-        # most-skipped first, then cheapest context
         order = sorted(
             (c for c in managed if c.req_id not in base_ids),
             key=lambda c: (-c.skip_run, c.ctx, c.req_id),
@@ -486,11 +485,12 @@ class DecodeRegulationMixin:
             deque()
         )  # (output id, t_sched, pred_ms, decode_only, decision)
         self._reg_last_update = 0.0
-        self._reg_trace = (
-            open(self._reg_cfg.trace_path, "a")
-            if (self._reg_cfg.enabled and self._reg_cfg.trace_path)
-            else None
-        )
+        self._reg_trace = None
+        if self._reg_cfg.enabled and self._reg_cfg.trace_path:
+            try:
+                self._reg_trace = open(self._reg_cfg.trace_path, "a")
+            except OSError as e:
+                logger.warning("decode_regulation trace disabled: %s", e)
         self._reg_stats = _Stats()
         self._reg_static: dict = {}  # request id -> _Static
         self._reg_pinned = 0  # consecutive decode-only steps with bias at a clamp

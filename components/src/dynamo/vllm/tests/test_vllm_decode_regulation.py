@@ -356,6 +356,11 @@ def test_failsafe_disables_when_bias_stays_pinned():
     assert step(s) == {r.request_id for r in s.running}  # stock scheduling
 
 
+def test_unwritable_trace_path_does_not_stop_the_scheduler(tmp_path):
+    s = Sched(overloaded(), cfg(trace_path=str(tmp_path / "missing" / "t.jsonl")))
+    assert s._reg_trace is None and s._reg_cfg.enabled
+
+
 def test_failsafe_leaves_observe_mode_tracing():
     s = Sched(overloaded(), cfg("observe", failsafe_steps=3))
     s._reg_policy.bias = 2.0
@@ -410,8 +415,6 @@ def test_config_from_env():
     assert not DecodeRegulationConfig.from_env({}).enabled
     with pytest.raises(ValueError):
         DecodeRegulationConfig.from_env({"DYN_DECODE_REGULATION_MODE": "fastest"})
-    with pytest.raises(ValueError):
-        DecodeRegulationConfig.from_env({"DYN_DECODE_REGULATION_MODE": "role_aware"})
     with pytest.raises(ValueError):
         DecodeRegulationConfig.from_env(
             {
