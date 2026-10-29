@@ -1668,8 +1668,7 @@ fn is_idle_entry(entry: &Arc<ClientPoolEntry>) -> bool {
 
 /// A bundle's endpoint drivers and lane tasks run on the Tokio runtime that
 /// connected it and stop with that runtime, so only callers on the same Tokio
-/// runtime may share it. This is the QUIC counterpart of
-/// `velo_response::service_key`, keyed on the runtime that runs the tasks.
+/// runtime may share it.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct ConnectionKey {
     address: String,
