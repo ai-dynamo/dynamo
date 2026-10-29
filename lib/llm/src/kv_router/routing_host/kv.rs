@@ -243,7 +243,7 @@ impl RoutingHost {
     /// worker check already ran for that preview, so it runs here only for a
     /// route without one. The returned plan owns the booking until
     /// [`Self::dispatch_kv_plan`] moves it into the request guard, or
-    /// [`RoutePlan::abort_with_error`] releases it.
+    /// [`RoutePlan::abort`] releases it.
     pub(super) async fn plan_kv_route(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -392,29 +392,9 @@ impl RoutingHost {
         }
     }
 
-    /// Build the request guard for a selection a test drives by hand. Production
-    /// routes get their guard through [`Self::dispatch_kv_plan`].
-    #[cfg(test)]
-    pub(super) async fn track_selection(
-        &self,
-        request: &SingleIn<PreprocessedRequest>,
-        selection: &mut WorkerSelection,
-        phase: RequestPhase,
-        budget: &CleanupBudget,
-    ) -> Result<RequestGuard, Error> {
-        let cleanup = KvRequestCleanup::new(
-            Arc::clone(self.kv_router()),
-            request.context().id().to_string(),
-            selection.worker,
-            selection.booking.take(),
-        );
-        self.track_planned_selection(request, selection, phase, cleanup, budget)
-            .await
-    }
-
     /// Move a plan's booking into a [`RequestGuard`] and record the routing
     /// decision for `phase`.
-    async fn track_planned_selection(
+    pub(super) async fn track_planned_selection(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         selection: &mut WorkerSelection,
@@ -532,7 +512,7 @@ impl RoutingHost {
         .await;
 
         if let Err(error) = record_result {
-            guard.abort_with_error(Some(error.as_ref())).await;
+            guard.abort(Some(error.as_ref())).await;
             return Err(error);
         }
         Ok(guard)
@@ -614,7 +594,7 @@ impl RoutingHost {
                 if !crate::migration::is_migratable(error.as_ref())
                     || !guard.release_for_retry().await
                 {
-                    guard.abort_with_error(Some(error.as_ref())).await;
+                    guard.abort(Some(error.as_ref())).await;
                 }
                 return Err(error);
             }
@@ -626,7 +606,7 @@ impl RoutingHost {
                 Ok(Some(lease)) => guard.hold_affinity_lease(lease),
                 Ok(None) => {}
                 Err(error) => {
-                    guard.abort().await;
+                    guard.abort(None).await;
                     return Err(error);
                 }
             }
@@ -690,7 +670,7 @@ impl RoutingHost {
         let metadata = match prepare(&mut request, route_target(plan.worker())) {
             Ok(metadata) => metadata,
             Err(error) => {
-                plan.abort_with_error(Some(&error)).await;
+                plan.abort(Some(&error)).await;
                 return Err(error);
             }
         };

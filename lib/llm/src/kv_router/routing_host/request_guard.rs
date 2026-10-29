@@ -604,25 +604,9 @@ impl OutputBlockTracker {
     }
 }
 
-/// How a request's response stream ended, as reported to [`RequestGuard::on_terminal`].
-pub(super) enum TerminalOutcome<'a> {
-    /// The worker finished the response.
-    Completed,
-    /// The response did not finish: the client left, the worker failed, or the
-    /// host gave up. `cause` is the error the classifier should see, if any.
-    Aborted(Option<&'a AbortCause>),
-}
-
-/// Follows one request attempt from the moment it is booked to the moment its
-/// stream ends: scheduler cleanup, observability, streamed load tracking, and
-/// the session-affinity lease once the request has been sent.
-///
-/// Each stage of a request is one entry point. `begin_dispatch` and
-/// `on_dispatched` bracket the send. `on_item` observes each response item and
-/// fans out to one private step per concern. `on_terminal` ends the attempt.
-/// The affinity `Hold` stays with the route until the send succeeds; the
-/// committed `AffinityLease` then lives here and is released when the guard
-/// drops, that is, when the response stream is gone.
+/// One request attempt from booking to the end of its response stream: the
+/// scheduler and approximate-LRU cleanup, observability, streamed output-block
+/// tracking, and, once the worker accepted the send, the session-affinity lease.
 pub(super) struct RequestGuard {
     cleanup: RequestCleanup,
     observability: RequestObservability,
@@ -749,12 +733,6 @@ impl RequestGuard {
         self.observability.record_prefill_start(request);
     }
 
-    /// Opens the dispatch stage on its own, for tests that drive the stages by hand.
-    #[cfg(test)]
-    pub(super) fn start_dispatch(&mut self, phase_label: &str) {
-        self.observability.start_dispatch(phase_label);
-    }
-
     /// The worker accepted the request: close the dispatch stage and tell the
     /// classifier the request was sent.
     pub(super) fn on_dispatched(&mut self) {
@@ -806,7 +784,7 @@ impl RequestGuard {
     pub(super) async fn on_item(&mut self, item: &Annotated<LLMEngineOutput>) {
         self.observability.observe_response();
         let new_tokens = item.data.as_ref().map_or(0, |data| data.token_ids.len());
-        self.touch_lease(new_tokens);
+        self.touch_request_lease(new_tokens);
         self.observe_classifier(item, new_tokens);
         self.mark_prefill_on_first_tokens(item).await;
         self.materialize_output_hashes(item);
@@ -815,8 +793,8 @@ impl RequestGuard {
         self.observe_output_blocks().await;
     }
 
-    /// Output tokens prove the request is alive; the lease reaper reads this.
-    fn touch_lease(&self, new_tokens: usize) {
+    /// Output tokens prove the request is alive; the request-lease reaper reads this.
+    fn touch_request_lease(&self, new_tokens: usize) {
         if new_tokens > 0
             && let Some(lifecycle) = self.cleanup.lifecycle()
         {
@@ -824,8 +802,6 @@ impl RequestGuard {
         }
     }
 
-    /// Feed the request classifier's lifecycle: the request is responding, how
-    /// many tokens it produced, and its total context when the worker reports it.
     fn observe_classifier(&mut self, item: &Annotated<LLMEngineOutput>, new_tokens: usize) {
         let Some(lifecycle) = self.cleanup.request_lifecycle_mut() else {
             return;
@@ -872,8 +848,6 @@ impl RequestGuard {
         self.prefill_marked = true;
     }
 
-    /// Under approximate-LRU indexing, hash the output tokens into blocks the
-    /// index can account for.
     fn materialize_output_hashes(&mut self, item: &Annotated<LLMEngineOutput>) {
         if self
             .cleanup
@@ -901,7 +875,6 @@ impl RequestGuard {
         }
     }
 
-    /// At each output-block boundary, charge the new blocks to the booking.
     async fn observe_output_blocks(&mut self) {
         let cumulative_osl = self.observability.cumulative_osl();
         let Some(update) = self.output_blocks.observe(cumulative_osl) else {
@@ -928,37 +901,26 @@ impl RequestGuard {
         self.observability.observe_output_block_boundary();
     }
 
-    /// The attempt is over. Complete or abort the classifier lifecycle, record
-    /// the request's metrics, and release the booking.
-    pub(super) async fn on_terminal(&mut self, outcome: TerminalOutcome<'_>) {
-        match outcome {
-            TerminalOutcome::Completed => {
-                if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
-                    lifecycle.complete();
-                }
-                // Metrics must observe the completed request before cleanup releases its state.
-                self.observability
-                    .record_metrics(self.record_itl_at_completion);
-                self.cleanup.finish().await;
-            }
-            TerminalOutcome::Aborted(cause) => {
-                if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
-                    lifecycle.abort(
-                        cause.map(crate::protocols::common::preprocessor::owned_abort_error),
-                    );
-                }
-                self.cleanup.finish().await;
-            }
+    /// The worker finished the response: complete the classifier lifecycle,
+    /// record the request's metrics, and release the booking.
+    pub(super) async fn complete(&mut self) {
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.complete();
         }
+        // Metrics must observe the completed request before cleanup releases its state.
+        self.observability
+            .record_metrics(self.record_itl_at_completion);
+        self.cleanup.finish().await;
     }
 
-    #[cfg(test)]
-    pub(super) async fn finish(&mut self) {
-        self.on_terminal(TerminalOutcome::Completed).await;
-    }
-
-    pub(super) async fn abort(&mut self) {
-        self.on_terminal(TerminalOutcome::Aborted(None)).await;
+    /// The attempt did not finish: the client left, the worker failed, or the
+    /// host gave up. Abort the classifier lifecycle with `cause`, if any, and
+    /// release the booking.
+    pub(super) async fn abort(&mut self, cause: Option<&AbortCause>) {
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.abort(cause.map(crate::protocols::common::preprocessor::owned_abort_error));
+        }
+        self.cleanup.finish().await;
     }
 
     pub(super) async fn release_for_retry(&mut self) -> bool {
@@ -972,10 +934,6 @@ impl RequestGuard {
         migration_state.store_request_lifecycle(lifecycle);
         self.cleanup.finish().await;
         true
-    }
-
-    pub(super) async fn abort_with_error(&mut self, error: Option<&AbortCause>) {
-        self.on_terminal(TerminalOutcome::Aborted(error)).await;
     }
 
     /// Count a worker report once, even if the stream subsequently fails or is cancelled.
@@ -1005,10 +963,7 @@ impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.observability
             .record_metrics(self.record_itl_at_completion);
-        // The session binding outlives the request by exactly as long as its
-        // stream: the lease goes when the guard goes.
-        drop(self.affinity_lease.take());
-        // RequestCleanup drops immediately afterward and performs resource cleanup.
+        // The affinity lease and RequestCleanup drop with the fields and release their state.
     }
 }
 

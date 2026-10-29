@@ -63,7 +63,7 @@ use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cle
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;
-use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard, TerminalOutcome};
+use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
@@ -194,9 +194,7 @@ fn monitor_response_stream(
                                 .is_some_and(|error| crate::migration::is_migratable(error));
                             if !migratable || !guard.release_for_retry().await {
                                 guard
-                                    .on_terminal(TerminalOutcome::Aborted(
-                                        item.error.as_ref().map(|e| e as &AbortCause),
-                                    ))
+                                    .abort(item.error.as_ref().map(|e| e as &AbortCause))
                                     .await;
                             }
                             yield item;
@@ -244,13 +242,11 @@ fn monitor_response_stream(
             }
         };
 
-        guard
-            .on_terminal(if completed {
-                TerminalOutcome::Completed
-            } else {
-                TerminalOutcome::Aborted(None)
-            })
-            .await;
+        if completed {
+            guard.complete().await;
+        } else {
+            guard.abort(None).await;
+        }
         // Released only now: the drain proved it was last, and the booking is already gone.
         if let Some(pending) = pending_terminal.take() {
             yield pending;
@@ -327,7 +323,7 @@ pub struct RoutingHost {
 
 /// An admitted KV route awaiting dispatch: the selected worker, its booking,
 /// and the affinity hold, until [`RoutingHost::dispatch_kv_plan`] sends it or
-/// [`RoutePlan::abort_with_error`] gives it up.
+/// [`RoutePlan::abort`] gives it up.
 pub(crate) struct RoutePlan {
     /// The phase the worker was selected for; dispatch tracks under it rather
     /// than re-reading the request.
@@ -392,16 +388,11 @@ impl RoutePlan {
 
     /// Give the route up before dispatch: abort the classifier lifecycle with
     /// `error` as its cause, release the booking, and drop the affinity hold.
-    pub(crate) async fn abort_with_error(mut self, error: Option<&Error>) {
+    pub(crate) async fn abort(mut self, error: Option<&Error>) {
         if let Some(mut lifecycle) = self.selection.request_lifecycle.take() {
             lifecycle.abort(error.map(|error| owned_abort_error(error.as_ref())));
         }
         self.cleanup.finish().await;
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn abort(self) {
-        self.abort_with_error(None).await;
     }
 }
 

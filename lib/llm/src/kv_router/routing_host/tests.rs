@@ -169,7 +169,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         &request(),
     );
     assert_eq!(guard.retarget_worker(1), Some(1));
-    guard.abort().await;
+    guard.abort(None).await;
     assert_eq!(host.inner.occupancy_for_test(1), 0);
 
     drop(host);
@@ -951,6 +951,7 @@ async fn terminal_item_does_not_skip_transport_eof() {
             None,
         ),
         &request(),
+        RequestPhase::Aggregated,
         Some(RouteObservation {
             prompt_tokens: 1,
             best_router_tokens: 0,
@@ -1012,6 +1013,7 @@ async fn run_kv_hit_attempt(final_frame: LLMEngineOutput) -> (KvHitSnapshot, KvH
             None,
         ),
         &request(),
+        RequestPhase::Aggregated,
         Some(RouteObservation {
             prompt_tokens: 100,
             best_router_tokens: 75,
@@ -1109,6 +1111,7 @@ async fn kv_cache_hit_counts_immediately_once_in_selection_phase(#[case] reused:
             None,
         ),
         &req,
+        RequestPhase::Aggregated,
         Some(RouteObservation {
             prompt_tokens: 1,
             best_router_tokens: 1,
@@ -1141,7 +1144,7 @@ async fn kv_cache_hit_counts_immediately_once_in_selection_phase(#[case] reused:
             ..Default::default()
         }))
         .await;
-    guard.abort().await;
+    guard.abort(None).await;
     drop(guard);
     assert_eq!(
         metrics
@@ -1213,6 +1216,7 @@ async fn shutdown_cancellation_drains_trailing_engine_shutdown_error() {
             None,
         ),
         &request(),
+        RequestPhase::Aggregated,
         None,
         None,
     );
@@ -1263,6 +1267,7 @@ async fn client_cancellation_still_ends_stream_without_draining() {
             None,
         ),
         &request(),
+        RequestPhase::Aggregated,
         None,
         None,
     );
@@ -1305,6 +1310,7 @@ async fn drain_without_trailing_error_gives_up_at_the_deadline() {
             None,
         ),
         &request(),
+        RequestPhase::Aggregated,
         None,
         None,
     );
@@ -1364,6 +1370,7 @@ async fn trailing_error_within_the_drain_window_still_reaches_migration() {
             None,
         ),
         &request(),
+        RequestPhase::Aggregated,
         None,
         None,
     );
@@ -1414,6 +1421,7 @@ async fn always_ready_terminals_cannot_starve_the_drain_deadline() {
             None,
         ),
         &request(),
+        RequestPhase::Aggregated,
         None,
         None,
     );
@@ -1477,15 +1485,15 @@ async fn shutdown_cancellation_without_trailing_error_still_aborts() {
         .await
         .unwrap();
     let cancelled_worker = selection.worker;
-    let guard = router
-        .track_selection(
-            &cancelled_request,
-            &mut selection,
-            RequestPhase::Aggregated,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
+    let guard = track_selection(
+        &router,
+        &cancelled_request,
+        &mut selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
     let source = ResponseStream::new(
         Box::pin(stream::once(async { cancelled_frame() })),
         cancelled_request.context().clone(),
@@ -1525,16 +1533,16 @@ async fn shutdown_cancellation_without_trailing_error_still_aborts() {
         .await
         .unwrap();
     assert_eq!(retry_selection.worker, cancelled_worker);
-    let mut retry_guard = router
-        .track_selection(
-            &retry_request,
-            &mut retry_selection,
-            RequestPhase::Aggregated,
-            &CleanupBudget::default(),
-        )
-        .await
-        .expect("the booking must be released when the drain reaches transport EOF");
-    retry_guard.abort().await;
+    let mut retry_guard = track_selection(
+        &router,
+        &retry_request,
+        &mut retry_selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .expect("the booking must be released when the drain reaches transport EOF");
+    retry_guard.abort(None).await;
 
     drop(router);
     runtime.shutdown();
@@ -1557,15 +1565,15 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
         .await
         .unwrap();
     let failed_worker = failed_selection.worker;
-    let failed_guard = router
-        .track_selection(
-            &failed_request,
-            &mut failed_selection,
-            RequestPhase::Aggregated,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
+    let failed_guard = track_selection(
+        &router,
+        &failed_request,
+        &mut failed_selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
     let failure = Annotated {
         data: None,
         id: None,
@@ -1603,16 +1611,16 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
         .await
         .unwrap();
     assert_eq!(retry_selection.worker, failed_worker);
-    let mut retry_guard = router
-        .track_selection(
-            &retry_request,
-            &mut retry_selection,
-            RequestPhase::Aggregated,
-            &CleanupBudget::default(),
-        )
-        .await
-        .expect("same-worker booking must be released before yielding the error");
-    retry_guard.abort().await;
+    let mut retry_guard = track_selection(
+        &router,
+        &retry_request,
+        &mut retry_selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .expect("same-worker booking must be released before yielding the error");
+    retry_guard.abort(None).await;
 
     drop(router);
     runtime.shutdown();
@@ -1655,15 +1663,15 @@ async fn output_block_accounting_tracks_grouped_chunks() {
             )
             .await
             .unwrap();
-        let mut guard = router
-            .track_selection(
-                &input,
-                &mut selection,
-                RequestPhase::Aggregated,
-                &CleanupBudget::default(),
-            )
-            .await
-            .unwrap();
+        let mut guard = track_selection(
+            &router,
+            &input,
+            &mut selection,
+            RequestPhase::Aggregated,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
         let mut next_token = prompt_tokens as u32 + 1;
         let initial_loads = router
             .kv_router()
@@ -1712,7 +1720,7 @@ async fn output_block_accounting_tracks_grouped_chunks() {
             load.potential_decode_blocks
         );
         let observed_blocks = load.potential_decode_blocks;
-        guard.finish().await;
+        guard.complete().await;
         let loads = router
             .kv_router()
             .get_potential_loads(&[], None, None, None, None)
@@ -2000,10 +2008,15 @@ async fn admitted_request_stopped_before_dispatch(
         .select_with_affinity(&request, phase, false, &CleanupBudget::default())
         .await
         .unwrap();
-    let guard = router
-        .track_selection(&request, &mut selection, phase, &CleanupBudget::default())
-        .await
-        .unwrap();
+    let guard = track_selection(
+        router,
+        &request,
+        &mut selection,
+        phase,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
 
     // The client went away while the request was in flight upstream — for the
     // decode leg, while remote prefill was still running.
@@ -2570,15 +2583,15 @@ async fn classifier_uses_scheduler_token_basis() {
     assert_eq!(input_tokens, 8);
     assert_eq!(progress.context_tokens(), 8);
 
-    let mut guard = router
-        .track_selection(
-            &request,
-            &mut selection,
-            RequestPhase::Aggregated,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
+    let mut guard = track_selection(
+        &router,
+        &request,
+        &mut selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
     guard.on_dispatched();
     let output = LLMEngineOutput {
         completion_usage: Some(dynamo_protocols::types::CompletionUsage {
@@ -2593,11 +2606,31 @@ async fn classifier_uses_scheduler_token_basis() {
     guard.on_item(&Annotated::from_data(output)).await;
     assert_eq!(progress.context_tokens(), 11);
     assert!(completed_rx.try_recv().is_err());
-    guard.finish().await;
+    guard.complete().await;
     assert_eq!(completed_rx.recv().await, Some(11));
 
     drop(router);
     runtime.shutdown();
+}
+
+/// Build the guard for a selection a test drives by hand. Production routes get
+/// theirs through `dispatch_kv_plan`.
+async fn track_selection(
+    router: &RoutingHost,
+    request: &SingleIn<PreprocessedRequest>,
+    selection: &mut WorkerSelection,
+    phase: RequestPhase,
+    budget: &CleanupBudget,
+) -> Result<RequestGuard, Error> {
+    let cleanup = KvRequestCleanup::new(
+        Arc::clone(router.kv_router()),
+        request.context().id().to_string(),
+        selection.worker,
+        selection.booking.take(),
+    );
+    router
+        .track_planned_selection(request, selection, phase, cleanup, budget)
+        .await
 }
 
 async fn track_request(
@@ -2613,15 +2646,15 @@ async fn track_request(
         )
         .await
         .unwrap();
-    let guard = router
-        .track_selection(
-            &request,
-            &mut selection,
-            RequestPhase::Aggregated,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
+    let guard = track_selection(
+        router,
+        &request,
+        &mut selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
     (request, selection, guard)
 }
 
@@ -2677,7 +2710,7 @@ async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
     let admitted_loads = potential_loads(&router).await;
     assert_eq!(active_requests_for(&admitted_loads, 7, 0), 1);
 
-    plan.abort().await;
+    plan.abort(None).await;
     let released_loads = potential_loads(&router).await;
     assert!(
         released_loads.iter().all(|load| load.active_requests == 0),
@@ -2738,7 +2771,7 @@ async fn route_plan_from_preview_admits_the_previewed_worker() {
         1
     );
 
-    plan.abort().await;
+    plan.abort(None).await;
     drop(router);
     runtime.shutdown();
 }
@@ -2816,7 +2849,7 @@ async fn aborted_route_plan_drops_pending_affinity_initialization() {
         .plan_kv_route_from_preview(&request, preview)
         .await
         .unwrap()
-        .abort()
+        .abort(None)
         .await;
 
     let affinity = router.affinity.as_ref().unwrap();
@@ -2882,7 +2915,7 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     );
 
     // Admission remains counted even when the request aborts before dispatch.
-    cancelled_guard.abort().await;
+    cancelled_guard.abort(None).await;
     drop(cancelled_guard);
     assert_eq!(metrics.requests_started_total.get(), 1);
     assert_eq!(metrics.requests_total.get(), 0);
@@ -2906,15 +2939,15 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
         .await
         .unwrap();
     let failed_worker = failed_selection.worker.worker_id;
-    let failed_dispatch_guard = router
-        .track_selection(
-            &failed_request,
-            &mut failed_selection,
-            RequestPhase::Aggregated,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
+    let failed_dispatch_guard = track_selection(
+        &router,
+        &failed_request,
+        &mut failed_selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
     assert!(
         router
             .dispatch_selection(
@@ -2931,10 +2964,10 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     assert_eq!(metrics.requests_started_total.get(), 2);
     assert_eq!(metrics.requests_total.get(), 0);
 
-    let (_, _, mut completed_guard) = track_request(&router).await;
-    completed_guard.start_dispatch("aggregated");
+    let (completed_request, _, mut completed_guard) = track_request(&router).await;
+    completed_guard.begin_dispatch("aggregated", completed_request.content());
     completed_guard.on_dispatched();
-    completed_guard.finish().await;
+    completed_guard.complete().await;
     drop(completed_guard);
     assert_eq!(metrics.requests_started_total.get(), 3);
     assert_eq!(metrics.requests_total.get(), 1);
@@ -2942,15 +2975,15 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     let mut builtin_guard =
         RequestGuard::new_builtin(Arc::clone(&metrics), 7, None, None, &request());
     assert_eq!(metrics.requests_started_total.get(), 4);
-    builtin_guard.abort().await;
+    builtin_guard.abort(None).await;
     drop(builtin_guard);
     assert_eq!(metrics.requests_total.get(), 1);
 
     let (other_router, other_runtime) = router_with_workers(None, &[8]).await;
-    let (_, _, mut other_guard) = track_request(&other_router).await;
-    other_guard.start_dispatch("aggregated");
+    let (other_request, _, mut other_guard) = track_request(&other_router).await;
+    other_guard.begin_dispatch("aggregated", other_request.content());
     other_guard.on_dispatched();
-    other_guard.finish().await;
+    other_guard.complete().await;
     drop(other_guard);
     assert_eq!(metrics.requests_started_total.get(), 4);
     assert_eq!(metrics.requests_total.get(), 1);
@@ -3753,15 +3786,15 @@ async fn prefill_retry_preserves_parked_decode_classifier_lifecycle() {
         )
         .await
         .unwrap();
-    let mut guard = decode
-        .track_selection(
-            &request,
-            &mut selected,
-            RequestPhase::Decode,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
+    let mut guard = track_selection(
+        &decode,
+        &request,
+        &mut selected,
+        RequestPhase::Decode,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
     guard.on_dispatched();
     assert!(guard.release_for_retry().await);
     assert!(
@@ -3784,17 +3817,17 @@ async fn prefill_retry_preserves_parked_decode_classifier_lifecycle() {
         selected.request_lifecycle.is_none(),
         "prefill must not claim the decode lifecycle"
     );
-    let mut guard = prefill
-        .track_selection(
-            &request,
-            &mut selected,
-            RequestPhase::Prefill,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
+    let mut guard = track_selection(
+        &prefill,
+        &request,
+        &mut selected,
+        RequestPhase::Prefill,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
     guard.on_dispatched();
-    guard.finish().await;
+    guard.complete().await;
 
     let (mut selected, _) = decode
         .select_with_affinity(
@@ -3805,17 +3838,17 @@ async fn prefill_retry_preserves_parked_decode_classifier_lifecycle() {
         )
         .await
         .unwrap();
-    let mut guard = decode
-        .track_selection(
-            &request,
-            &mut selected,
-            RequestPhase::Decode,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
+    let mut guard = track_selection(
+        &decode,
+        &request,
+        &mut selected,
+        RequestPhase::Decode,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
     guard.on_dispatched();
-    guard.finish().await;
+    guard.complete().await;
     let observation = tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
         .await
         .unwrap()
@@ -4321,7 +4354,7 @@ async fn conditional_route_stages_share_one_cleanup_budget() {
         "time spent between stages must come out of the shared budget"
     );
 
-    plan.abort().await;
+    plan.abort(None).await;
     drop(router);
     runtime.shutdown();
 }

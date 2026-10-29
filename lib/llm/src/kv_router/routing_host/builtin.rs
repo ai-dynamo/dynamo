@@ -409,7 +409,7 @@ impl RoutingHost {
             let metadata = match prepare(&mut request, target) {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    guard.abort().await;
+                    guard.abort(Some(error.as_ref())).await;
                     return Err(error);
                 }
             };
@@ -484,7 +484,7 @@ impl RoutingHost {
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
                 guard.record_migration_failure(typed_error);
-                guard.abort().await;
+                guard.abort(Some(error.as_ref())).await;
                 return Err(error);
             }
         };
@@ -528,7 +528,7 @@ impl RoutingHost {
                 Ok(Some(lease)) => guard.hold_affinity_lease(lease),
                 Ok(None) => {}
                 Err(error) => {
-                    guard.abort().await;
+                    guard.abort(None).await;
                     return Err(error);
                 }
             }
