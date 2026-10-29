@@ -55,14 +55,7 @@ Send a stable `X-Dynamo-Session-ID` on every turn of an agent's reasoning and to
 
 Select both plugin roles. The classifier owns the program table and delays admission when a session is busy or paused. When it releases a request, it supplies a preferred worker/rank. The worker selector honors that target if it is eligible, falling back to the least-loaded eligible candidate otherwise. Soft session affinity allows this repacking; hard affinity would constrain the request before the selector can move it. The `Sent` event records the worker actually selected.
 
-```mermaid
-flowchart LR
-    A[Request and session ID] --> B[ThunderAgent classifier]
-    B -->|Released request and preferred worker| C[Dynamo policy queue]
-    C --> D[ThunderAgent worker selector]
-    D --> E[Aggregated worker]
-    E -->|Progress and lifecycle events| B
-```
+![A request with a session ID reaches the ThunderAgent classifier, which releases it with a preferred worker into the Dynamo policy queue. The worker selector then picks a worker. The aggregated worker sends progress and lifecycle events back to the classifier.](../../../assets/img/thunderagent-request-flow.svg)
 
 The classifier uses each worker/rank's published GPU KV-block capacity and a logical token estimate from active and retained programs. It observes context growth during generation, then pauses and repacks programs between turns. This estimate is not physical KV occupancy and does not deduplicate shared prefixes or include host/offload capacity. Running generation is allowed to finish.
 

@@ -9,17 +9,7 @@ A custom vision encoder lets an aggregated `dynamo.vllm` worker use an author-pr
 
 This is not encoder disaggregation: the encoder and language model run in the same worker process and share a GPU.
 
-```mermaid
-flowchart LR
-    subgraph Worker["Aggregated dynamo.vllm worker process"]
-        direction LR
-        Encoder["Custom vision encoder<br/>(ViT + projector)<br/>Shared GPU"]
-        Adapter["Decoder-selected adapter"]
-        vLLM["vLLM language model<br/>Shared GPU"]
-        Encoder -->|"Projected features"| Adapter
-        Adapter -->|"EmbedsPrompt or TokensPrompt"| vLLM
-    end
-```
+![A custom vision encoder, a decoder-selected adapter, and the vLLM language model run in one aggregated dynamo.vllm worker process on a shared GPU. The encoder sends projected features to the adapter, which sends a prompt to vLLM.](../../../assets/img/custom-encoder-worker.svg)
 
 ## Support Matrix
 
@@ -44,36 +34,7 @@ Subclass `dynamo.vllm.multimodal_utils.custom_encoder.VisionEncoderBackend` and 
 
 Dynamo owns concurrency, batching, and prompt preparation and calls each hook at the appropriate lifecycle stage.
 
-```mermaid
-flowchart TB
-    subgraph Startup["Worker startup"]
-        direction LR
-        Start["Worker starts"] --> Build["build(model_id)<br/><b>Required · once</b><br/>Load weights and initialize reusable resources"]
-    end
-
-    subgraph Requests["Repeated request path"]
-        direction LR
-        Input["Image inputs"] --> NeedsPrep{"Need CPU input preparation?"}
-        NeedsPrep -->|"Yes"| Preprocess["preprocess(raw)<br/><b>Optional · per image</b><br/>Fetch, decode, resize, or patchify"]
-        NeedsPrep -->|"No"| Ready["Ready encoder items"]
-        Preprocess --> Ready
-        Ready --> Batch["Dynamo groups ready items<br/>across concurrent requests"]
-        Batch --> Forward["forward_batch(items)<br/><b>Required · per batch</b><br/>Run the encoder and return ordered artifacts"]
-        Forward --> Adapter{"Decoder-selected adapter<br/>chosen at startup"}
-        Adapter -->|"Supported VLM"| Tokens["TokensPrompt<br/>Token IDs + multimodal features"]
-        Adapter -->|"Text-only LLM"| Embeds["EmbedsPrompt<br/>Token IDs + external embedding rows"]
-        Tokens --> vLLM["vLLM language model"]
-        Embeds --> vLLM
-    end
-
-    subgraph Shutdown["Worker shutdown"]
-        direction LR
-        Stop["Worker stops"] --> Close["close()<br/><b>Optional · once</b><br/>Release resources created by build()"]
-    end
-
-    Build --> Input
-    vLLM -.-> Stop
-```
+![Dynamo calls build once at worker startup. For each request, optional preprocess runs per image, Dynamo batches ready items across concurrent requests, forward_batch runs the encoder, and the decoder-selected adapter builds a TokensPrompt or EmbedsPrompt for vLLM. close runs once at shutdown.](../../../assets/img/custom-encoder-lifecycle.svg)
 
 ### Batching
 

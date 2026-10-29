@@ -1,64 +1,169 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1278" height="609" viewBox="36 9 1278 609" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
-  <title id="title">Three multimodal serving topologies</title>
-  <desc id="desc">Aggregated serving runs an aggregated worker on each of four identical GPUs. Colocated encoder runs encoder workers and a prefill and decode worker together on each of four identical GPUs using CUDA MPS. Disaggregated encoder puts encoder workers on two lower-tier GPUs and sends embeddings over NIXL to prefill and decode workers on four other GPUs.</desc>
-  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect x="36" y="9" width="1278" height="609" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="18.2" font-weight="700" letter-spacing="1.6" fill="#5A8F00">ENCODER PLACEMENT</text>
-  <text x="50" y="68" font-size="30.8" font-weight="700" fill="#1A1A1A">Three ways to place the vision encoder</text>
-  <rect x="50" y="100" width="390" height="504" rx="14" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="245.0" y="136" font-size="25.2" font-weight="700" fill="#1A1A1A" text-anchor="middle">Aggregated serving</text>
-  <text x="245.0" y="158" font-size="18.2" fill="#4B5563" text-anchor="middle">4 identical GPUs</text>
-  <rect x="480" y="100" width="390" height="504" rx="14" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="675.0" y="136" font-size="25.2" font-weight="700" fill="#1A1A1A" text-anchor="middle">Colocated encoder</text>
-  <text x="675.0" y="158" font-size="18.2" fill="#4B5563" text-anchor="middle">4 identical GPUs, colocate workers using MPS</text>
-  <rect x="910" y="100" width="390" height="504" rx="14" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="1105.0" y="136" font-size="25.2" font-weight="700" fill="#1A1A1A" text-anchor="middle">Disaggregated encoder</text>
-  <text x="1105.0" y="158" font-size="18.2" fill="#4B5563" text-anchor="middle">Mixed hardware, offload encoders to lower-tier</text>
-  <text x="1105.0" y="175" font-size="18.2" fill="#4B5563" text-anchor="middle">compute</text>
-  <rect x="70" y="190" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="84" y="225.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 0</text>
-  <text x="84" y="246.0" font-size="18.2" fill="#1A1A1A">Aggregated worker</text>
-  <rect x="500" y="190" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="514" y="225.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 0</text>
-  <text x="514" y="246.0" font-size="18.2" fill="#1A1A1A">Encoder workers + PD worker</text>
-  <rect x="70" y="288" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="84" y="323.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 1</text>
-  <text x="84" y="344.0" font-size="18.2" fill="#1A1A1A">Aggregated worker</text>
-  <rect x="500" y="288" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="514" y="323.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 1</text>
-  <text x="514" y="344.0" font-size="18.2" fill="#1A1A1A">Encoder workers + PD worker</text>
-  <rect x="70" y="386" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="84" y="421.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 2</text>
-  <text x="84" y="442.0" font-size="18.2" fill="#1A1A1A">Aggregated worker</text>
-  <rect x="500" y="386" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="514" y="421.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 2</text>
-  <text x="514" y="442.0" font-size="18.2" fill="#1A1A1A">Encoder workers + PD worker</text>
-  <rect x="70" y="484" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="84" y="519.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 3</text>
-  <text x="84" y="540.0" font-size="18.2" fill="#1A1A1A">Aggregated worker</text>
-  <rect x="500" y="484" width="350" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="514" y="519.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 3</text>
-  <text x="514" y="540.0" font-size="18.2" fill="#1A1A1A">Encoder workers + PD worker</text>
-  <rect x="930.0" y="190" width="168.0" height="72" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="944.0" y="219.0" font-size="18.2" font-weight="700" fill="#234CDA">GPU 0</text>
-  <text x="944.0" y="240.0" font-size="18.2" fill="#1A1A1A">Encoder workers</text>
-  <rect x="1112.0" y="190" width="168.0" height="72" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="1126.0" y="219.0" font-size="18.2" font-weight="700" fill="#234CDA">GPU 1</text>
-  <text x="1126.0" y="240.0" font-size="18.2" fill="#1A1A1A">Encoder workers</text>
-  <line x1="1014.0" y1="266" x2="1014.0" y2="302" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <line x1="1196.0" y1="266" x2="1196.0" y2="302" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <text x="1105.0" y="280" font-size="16.8" font-weight="700" fill="#4C7A00" text-anchor="middle">Embeddings</text>
-  <text x="1105.0" y="296" font-size="16.8" font-weight="700" fill="#4C7A00" text-anchor="middle">via NIXL</text>
-  <rect x="930" y="310.0" width="350" height="57" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="944" y="337.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 2</text>
-  <text x="944" y="358.0" font-size="18.2" fill="#1A1A1A">PD worker</text>
-  <rect x="930" y="377.0" width="350" height="57" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="944" y="404.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 3</text>
-  <text x="944" y="425.0" font-size="18.2" fill="#1A1A1A">PD worker</text>
-  <rect x="930" y="444.0" width="350" height="57" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="944" y="471.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 4</text>
-  <text x="944" y="492.0" font-size="18.2" fill="#1A1A1A">PD worker</text>
-  <rect x="930" y="511.0" width="350" height="57" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="944" y="538.0" font-size="18.2" font-weight="700" fill="#4C7A00">GPU 5</text>
-  <text x="944" y="559.0" font-size="18.2" fill="#1A1A1A">PD worker</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1058" height="525" viewBox="22 9 1058 525" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Three ways to place the vision encoder</title>
+  <desc id="desc">Three topologies. Aggregated serving runs an aggregated worker on each of four identical GPUs. Colocated encoder runs encoder workers and a PD worker on each of four identical GPUs using MPS. Disaggregated encoder runs encoder workers on two lower-tier GPUs and sends embeddings over NIXL to PD workers on four other GPUs.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect x="22" y="9" width="1058" height="525" fill="#FFFFFF"/>
+  <text x="36" y="36" font-size="14.9" font-weight="700" letter-spacing="1.6" fill="#5A8F00">ENCODER PLACEMENT</text>
+  <text x="36" y="66" font-size="25.3" font-weight="700" fill="#1A1A1A">Three ways to place the vision encoder</text>
+  <rect x="36" y="90" width="330" height="430" rx="12" fill="#FAFAFB" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="201" y="122" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="middle">Aggregated</text>
+  <text x="201" y="146" font-size="15" font-weight="400" fill="#5A6572" text-anchor="middle">4 identical GPUs</text>
+  <rect x="386" y="90" width="330" height="430" rx="12" fill="#FAFAFB" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="551" y="122" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="middle">Colocated encoder</text>
+  <text x="551" y="146" font-size="15" font-weight="400" fill="#5A6572" text-anchor="middle">4 GPUs, shared with MPS</text>
+  <rect x="736" y="90" width="330" height="430" rx="12" fill="#FAFAFB" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="901" y="122" font-size="20" font-weight="700" fill="#1A1A1A" text-anchor="middle">Disaggregated encoder</text>
+  <text x="901" y="146" font-size="15" font-weight="400" fill="#5A6572" text-anchor="middle">Mixed hardware</text>
+  <rect x="43" y="162" width="150" height="166" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <rect x="55.0" y="174.0" width="20" height="20" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="60.0" y="179.0" width="10.0" height="10.0" fill="#76B900"/>
+  <line x1="61.0" y1="169.0" x2="61.0" y2="174.0" stroke="#76B900" stroke-width="2"/><line x1="61.0" y1="194.0" x2="61.0" y2="199.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="50.0" y1="180.0" x2="55.0" y2="180.0" stroke="#76B900" stroke-width="2"/><line x1="75.0" y1="180.0" x2="80.0" y2="180.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="69.0" y1="169.0" x2="69.0" y2="174.0" stroke="#76B900" stroke-width="2"/><line x1="69.0" y1="194.0" x2="69.0" y2="199.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="50.0" y1="188.0" x2="55.0" y2="188.0" stroke="#76B900" stroke-width="2"/><line x1="75.0" y1="188.0" x2="80.0" y2="188.0" stroke="#76B900" stroke-width="2"/>
+  <text x="89" y="190" font-size="15" font-weight="700" fill="#374151" text-anchor="start">GPU 0</text>
+  <rect x="55" y="280" width="126" height="34" rx="7" fill="#76B900" fill-opacity="0.16" stroke="#76B900" stroke-width="1.5"/>
+  <text x="118.0" y="303" font-size="16" font-weight="700" fill="#3F6600" text-anchor="middle">Aggregated</text>
+  <rect x="209" y="162" width="150" height="166" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <rect x="221.0" y="174.0" width="20" height="20" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="226.0" y="179.0" width="10.0" height="10.0" fill="#76B900"/>
+  <line x1="227.0" y1="169.0" x2="227.0" y2="174.0" stroke="#76B900" stroke-width="2"/><line x1="227.0" y1="194.0" x2="227.0" y2="199.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="216.0" y1="180.0" x2="221.0" y2="180.0" stroke="#76B900" stroke-width="2"/><line x1="241.0" y1="180.0" x2="246.0" y2="180.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="235.0" y1="169.0" x2="235.0" y2="174.0" stroke="#76B900" stroke-width="2"/><line x1="235.0" y1="194.0" x2="235.0" y2="199.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="216.0" y1="188.0" x2="221.0" y2="188.0" stroke="#76B900" stroke-width="2"/><line x1="241.0" y1="188.0" x2="246.0" y2="188.0" stroke="#76B900" stroke-width="2"/>
+  <text x="255" y="190" font-size="15" font-weight="700" fill="#374151" text-anchor="start">GPU 1</text>
+  <rect x="221" y="280" width="126" height="34" rx="7" fill="#76B900" fill-opacity="0.16" stroke="#76B900" stroke-width="1.5"/>
+  <text x="284.0" y="303" font-size="16" font-weight="700" fill="#3F6600" text-anchor="middle">Aggregated</text>
+  <rect x="43" y="340" width="150" height="166" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <rect x="55.0" y="352.0" width="20" height="20" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="60.0" y="357.0" width="10.0" height="10.0" fill="#76B900"/>
+  <line x1="61.0" y1="347.0" x2="61.0" y2="352.0" stroke="#76B900" stroke-width="2"/><line x1="61.0" y1="372.0" x2="61.0" y2="377.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="50.0" y1="358.0" x2="55.0" y2="358.0" stroke="#76B900" stroke-width="2"/><line x1="75.0" y1="358.0" x2="80.0" y2="358.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="69.0" y1="347.0" x2="69.0" y2="352.0" stroke="#76B900" stroke-width="2"/><line x1="69.0" y1="372.0" x2="69.0" y2="377.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="50.0" y1="366.0" x2="55.0" y2="366.0" stroke="#76B900" stroke-width="2"/><line x1="75.0" y1="366.0" x2="80.0" y2="366.0" stroke="#76B900" stroke-width="2"/>
+  <text x="89" y="368" font-size="15" font-weight="700" fill="#374151" text-anchor="start">GPU 2</text>
+  <rect x="55" y="458" width="126" height="34" rx="7" fill="#76B900" fill-opacity="0.16" stroke="#76B900" stroke-width="1.5"/>
+  <text x="118.0" y="481" font-size="16" font-weight="700" fill="#3F6600" text-anchor="middle">Aggregated</text>
+  <rect x="209" y="340" width="150" height="166" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <rect x="221.0" y="352.0" width="20" height="20" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="226.0" y="357.0" width="10.0" height="10.0" fill="#76B900"/>
+  <line x1="227.0" y1="347.0" x2="227.0" y2="352.0" stroke="#76B900" stroke-width="2"/><line x1="227.0" y1="372.0" x2="227.0" y2="377.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="216.0" y1="358.0" x2="221.0" y2="358.0" stroke="#76B900" stroke-width="2"/><line x1="241.0" y1="358.0" x2="246.0" y2="358.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="235.0" y1="347.0" x2="235.0" y2="352.0" stroke="#76B900" stroke-width="2"/><line x1="235.0" y1="372.0" x2="235.0" y2="377.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="216.0" y1="366.0" x2="221.0" y2="366.0" stroke="#76B900" stroke-width="2"/><line x1="241.0" y1="366.0" x2="246.0" y2="366.0" stroke="#76B900" stroke-width="2"/>
+  <text x="255" y="368" font-size="15" font-weight="700" fill="#374151" text-anchor="start">GPU 3</text>
+  <rect x="221" y="458" width="126" height="34" rx="7" fill="#76B900" fill-opacity="0.16" stroke="#76B900" stroke-width="1.5"/>
+  <text x="284.0" y="481" font-size="16" font-weight="700" fill="#3F6600" text-anchor="middle">Aggregated</text>
+  <rect x="393" y="162" width="150" height="166" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <rect x="405.0" y="174.0" width="20" height="20" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="410.0" y="179.0" width="10.0" height="10.0" fill="#76B900"/>
+  <line x1="411.0" y1="169.0" x2="411.0" y2="174.0" stroke="#76B900" stroke-width="2"/><line x1="411.0" y1="194.0" x2="411.0" y2="199.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="400.0" y1="180.0" x2="405.0" y2="180.0" stroke="#76B900" stroke-width="2"/><line x1="425.0" y1="180.0" x2="430.0" y2="180.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="419.0" y1="169.0" x2="419.0" y2="174.0" stroke="#76B900" stroke-width="2"/><line x1="419.0" y1="194.0" x2="419.0" y2="199.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="400.0" y1="188.0" x2="405.0" y2="188.0" stroke="#76B900" stroke-width="2"/><line x1="425.0" y1="188.0" x2="430.0" y2="188.0" stroke="#76B900" stroke-width="2"/>
+  <text x="439" y="190" font-size="15" font-weight="700" fill="#374151" text-anchor="start">GPU 0</text>
+  <rect x="405" y="238" width="126" height="34" rx="7" fill="#234CDA" fill-opacity="0.16" stroke="#234CDA" stroke-width="1.5"/>
+  <text x="468.0" y="261" font-size="16" font-weight="700" fill="#1D3FB5" text-anchor="middle">Encoder</text>
+  <rect x="405" y="280" width="126" height="34" rx="7" fill="#76B900" fill-opacity="0.16" stroke="#76B900" stroke-width="1.5"/>
+  <text x="468.0" y="303" font-size="16" font-weight="700" fill="#3F6600" text-anchor="middle">PD</text>
+  <rect x="559" y="162" width="150" height="166" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <rect x="571.0" y="174.0" width="20" height="20" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="576.0" y="179.0" width="10.0" height="10.0" fill="#76B900"/>
+  <line x1="577.0" y1="169.0" x2="577.0" y2="174.0" stroke="#76B900" stroke-width="2"/><line x1="577.0" y1="194.0" x2="577.0" y2="199.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="566.0" y1="180.0" x2="571.0" y2="180.0" stroke="#76B900" stroke-width="2"/><line x1="591.0" y1="180.0" x2="596.0" y2="180.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="585.0" y1="169.0" x2="585.0" y2="174.0" stroke="#76B900" stroke-width="2"/><line x1="585.0" y1="194.0" x2="585.0" y2="199.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="566.0" y1="188.0" x2="571.0" y2="188.0" stroke="#76B900" stroke-width="2"/><line x1="591.0" y1="188.0" x2="596.0" y2="188.0" stroke="#76B900" stroke-width="2"/>
+  <text x="605" y="190" font-size="15" font-weight="700" fill="#374151" text-anchor="start">GPU 1</text>
+  <rect x="571" y="238" width="126" height="34" rx="7" fill="#234CDA" fill-opacity="0.16" stroke="#234CDA" stroke-width="1.5"/>
+  <text x="634.0" y="261" font-size="16" font-weight="700" fill="#1D3FB5" text-anchor="middle">Encoder</text>
+  <rect x="571" y="280" width="126" height="34" rx="7" fill="#76B900" fill-opacity="0.16" stroke="#76B900" stroke-width="1.5"/>
+  <text x="634.0" y="303" font-size="16" font-weight="700" fill="#3F6600" text-anchor="middle">PD</text>
+  <rect x="393" y="340" width="150" height="166" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <rect x="405.0" y="352.0" width="20" height="20" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="410.0" y="357.0" width="10.0" height="10.0" fill="#76B900"/>
+  <line x1="411.0" y1="347.0" x2="411.0" y2="352.0" stroke="#76B900" stroke-width="2"/><line x1="411.0" y1="372.0" x2="411.0" y2="377.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="400.0" y1="358.0" x2="405.0" y2="358.0" stroke="#76B900" stroke-width="2"/><line x1="425.0" y1="358.0" x2="430.0" y2="358.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="419.0" y1="347.0" x2="419.0" y2="352.0" stroke="#76B900" stroke-width="2"/><line x1="419.0" y1="372.0" x2="419.0" y2="377.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="400.0" y1="366.0" x2="405.0" y2="366.0" stroke="#76B900" stroke-width="2"/><line x1="425.0" y1="366.0" x2="430.0" y2="366.0" stroke="#76B900" stroke-width="2"/>
+  <text x="439" y="368" font-size="15" font-weight="700" fill="#374151" text-anchor="start">GPU 2</text>
+  <rect x="405" y="416" width="126" height="34" rx="7" fill="#234CDA" fill-opacity="0.16" stroke="#234CDA" stroke-width="1.5"/>
+  <text x="468.0" y="439" font-size="16" font-weight="700" fill="#1D3FB5" text-anchor="middle">Encoder</text>
+  <rect x="405" y="458" width="126" height="34" rx="7" fill="#76B900" fill-opacity="0.16" stroke="#76B900" stroke-width="1.5"/>
+  <text x="468.0" y="481" font-size="16" font-weight="700" fill="#3F6600" text-anchor="middle">PD</text>
+  <rect x="559" y="340" width="150" height="166" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <rect x="571.0" y="352.0" width="20" height="20" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="576.0" y="357.0" width="10.0" height="10.0" fill="#76B900"/>
+  <line x1="577.0" y1="347.0" x2="577.0" y2="352.0" stroke="#76B900" stroke-width="2"/><line x1="577.0" y1="372.0" x2="577.0" y2="377.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="566.0" y1="358.0" x2="571.0" y2="358.0" stroke="#76B900" stroke-width="2"/><line x1="591.0" y1="358.0" x2="596.0" y2="358.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="585.0" y1="347.0" x2="585.0" y2="352.0" stroke="#76B900" stroke-width="2"/><line x1="585.0" y1="372.0" x2="585.0" y2="377.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="566.0" y1="366.0" x2="571.0" y2="366.0" stroke="#76B900" stroke-width="2"/><line x1="591.0" y1="366.0" x2="596.0" y2="366.0" stroke="#76B900" stroke-width="2"/>
+  <text x="605" y="368" font-size="15" font-weight="700" fill="#374151" text-anchor="start">GPU 3</text>
+  <rect x="571" y="416" width="126" height="34" rx="7" fill="#234CDA" fill-opacity="0.16" stroke="#234CDA" stroke-width="1.5"/>
+  <text x="634.0" y="439" font-size="16" font-weight="700" fill="#1D3FB5" text-anchor="middle">Encoder</text>
+  <rect x="571" y="458" width="126" height="34" rx="7" fill="#76B900" fill-opacity="0.16" stroke="#76B900" stroke-width="1.5"/>
+  <text x="634.0" y="481" font-size="16" font-weight="700" fill="#3F6600" text-anchor="middle">PD</text>
+  <rect x="743" y="162" width="150" height="96" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <rect x="755.0" y="174.0" width="20" height="20" rx="4" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <rect x="760.0" y="179.0" width="10.0" height="10.0" fill="#234CDA"/>
+  <line x1="761.0" y1="169.0" x2="761.0" y2="174.0" stroke="#234CDA" stroke-width="2"/><line x1="761.0" y1="194.0" x2="761.0" y2="199.0" stroke="#234CDA" stroke-width="2"/>
+  <line x1="750.0" y1="180.0" x2="755.0" y2="180.0" stroke="#234CDA" stroke-width="2"/><line x1="775.0" y1="180.0" x2="780.0" y2="180.0" stroke="#234CDA" stroke-width="2"/>
+  <line x1="769.0" y1="169.0" x2="769.0" y2="174.0" stroke="#234CDA" stroke-width="2"/><line x1="769.0" y1="194.0" x2="769.0" y2="199.0" stroke="#234CDA" stroke-width="2"/>
+  <line x1="750.0" y1="188.0" x2="755.0" y2="188.0" stroke="#234CDA" stroke-width="2"/><line x1="775.0" y1="188.0" x2="780.0" y2="188.0" stroke="#234CDA" stroke-width="2"/>
+  <text x="789" y="190" font-size="15" font-weight="700" fill="#374151" text-anchor="start">GPU 0</text>
+  <rect x="755" y="210" width="126" height="34" rx="7" fill="#234CDA" fill-opacity="0.16" stroke="#234CDA" stroke-width="1.5"/>
+  <text x="818.0" y="233" font-size="16" font-weight="700" fill="#1D3FB5" text-anchor="middle">Encoder</text>
+  <rect x="909" y="162" width="150" height="96" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <rect x="921.0" y="174.0" width="20" height="20" rx="4" fill="#FFFFFF" stroke="#234CDA" stroke-width="2"/>
+  <rect x="926.0" y="179.0" width="10.0" height="10.0" fill="#234CDA"/>
+  <line x1="927.0" y1="169.0" x2="927.0" y2="174.0" stroke="#234CDA" stroke-width="2"/><line x1="927.0" y1="194.0" x2="927.0" y2="199.0" stroke="#234CDA" stroke-width="2"/>
+  <line x1="916.0" y1="180.0" x2="921.0" y2="180.0" stroke="#234CDA" stroke-width="2"/><line x1="941.0" y1="180.0" x2="946.0" y2="180.0" stroke="#234CDA" stroke-width="2"/>
+  <line x1="935.0" y1="169.0" x2="935.0" y2="174.0" stroke="#234CDA" stroke-width="2"/><line x1="935.0" y1="194.0" x2="935.0" y2="199.0" stroke="#234CDA" stroke-width="2"/>
+  <line x1="916.0" y1="188.0" x2="921.0" y2="188.0" stroke="#234CDA" stroke-width="2"/><line x1="941.0" y1="188.0" x2="946.0" y2="188.0" stroke="#234CDA" stroke-width="2"/>
+  <text x="955" y="190" font-size="15" font-weight="700" fill="#374151" text-anchor="start">GPU 1</text>
+  <rect x="921" y="210" width="126" height="34" rx="7" fill="#234CDA" fill-opacity="0.16" stroke="#234CDA" stroke-width="1.5"/>
+  <text x="984.0" y="233" font-size="16" font-weight="700" fill="#1D3FB5" text-anchor="middle">Encoder</text>
+  <line x1="818" y1="260" x2="818" y2="298" stroke="#76B900" stroke-width="3" marker-end="url(#arrow-green)"/>
+  <line x1="984" y1="260" x2="984" y2="298" stroke="#76B900" stroke-width="3" marker-end="url(#arrow-green)"/>
+  <rect x="874.32" y="266" width="53.36" height="26" rx="13" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="901" y="284" font-size="14" font-weight="700" fill="#4C7A00" text-anchor="middle">NIXL</text>
+  <rect x="743" y="302" width="150" height="96" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <rect x="755.0" y="314.0" width="20" height="20" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="760.0" y="319.0" width="10.0" height="10.0" fill="#76B900"/>
+  <line x1="761.0" y1="309.0" x2="761.0" y2="314.0" stroke="#76B900" stroke-width="2"/><line x1="761.0" y1="334.0" x2="761.0" y2="339.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="750.0" y1="320.0" x2="755.0" y2="320.0" stroke="#76B900" stroke-width="2"/><line x1="775.0" y1="320.0" x2="780.0" y2="320.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="769.0" y1="309.0" x2="769.0" y2="314.0" stroke="#76B900" stroke-width="2"/><line x1="769.0" y1="334.0" x2="769.0" y2="339.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="750.0" y1="328.0" x2="755.0" y2="328.0" stroke="#76B900" stroke-width="2"/><line x1="775.0" y1="328.0" x2="780.0" y2="328.0" stroke="#76B900" stroke-width="2"/>
+  <text x="789" y="330" font-size="15" font-weight="700" fill="#374151" text-anchor="start">GPU 2</text>
+  <rect x="755" y="350" width="126" height="34" rx="7" fill="#76B900" fill-opacity="0.16" stroke="#76B900" stroke-width="1.5"/>
+  <text x="818.0" y="373" font-size="16" font-weight="700" fill="#3F6600" text-anchor="middle">PD</text>
+  <rect x="909" y="302" width="150" height="96" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <rect x="921.0" y="314.0" width="20" height="20" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="926.0" y="319.0" width="10.0" height="10.0" fill="#76B900"/>
+  <line x1="927.0" y1="309.0" x2="927.0" y2="314.0" stroke="#76B900" stroke-width="2"/><line x1="927.0" y1="334.0" x2="927.0" y2="339.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="916.0" y1="320.0" x2="921.0" y2="320.0" stroke="#76B900" stroke-width="2"/><line x1="941.0" y1="320.0" x2="946.0" y2="320.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="935.0" y1="309.0" x2="935.0" y2="314.0" stroke="#76B900" stroke-width="2"/><line x1="935.0" y1="334.0" x2="935.0" y2="339.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="916.0" y1="328.0" x2="921.0" y2="328.0" stroke="#76B900" stroke-width="2"/><line x1="941.0" y1="328.0" x2="946.0" y2="328.0" stroke="#76B900" stroke-width="2"/>
+  <text x="955" y="330" font-size="15" font-weight="700" fill="#374151" text-anchor="start">GPU 3</text>
+  <rect x="921" y="350" width="126" height="34" rx="7" fill="#76B900" fill-opacity="0.16" stroke="#76B900" stroke-width="1.5"/>
+  <text x="984.0" y="373" font-size="16" font-weight="700" fill="#3F6600" text-anchor="middle">PD</text>
+  <rect x="743" y="408" width="150" height="96" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <rect x="755.0" y="420.0" width="20" height="20" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="760.0" y="425.0" width="10.0" height="10.0" fill="#76B900"/>
+  <line x1="761.0" y1="415.0" x2="761.0" y2="420.0" stroke="#76B900" stroke-width="2"/><line x1="761.0" y1="440.0" x2="761.0" y2="445.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="750.0" y1="426.0" x2="755.0" y2="426.0" stroke="#76B900" stroke-width="2"/><line x1="775.0" y1="426.0" x2="780.0" y2="426.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="769.0" y1="415.0" x2="769.0" y2="420.0" stroke="#76B900" stroke-width="2"/><line x1="769.0" y1="440.0" x2="769.0" y2="445.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="750.0" y1="434.0" x2="755.0" y2="434.0" stroke="#76B900" stroke-width="2"/><line x1="775.0" y1="434.0" x2="780.0" y2="434.0" stroke="#76B900" stroke-width="2"/>
+  <text x="789" y="436" font-size="15" font-weight="700" fill="#374151" text-anchor="start">GPU 4</text>
+  <rect x="755" y="456" width="126" height="34" rx="7" fill="#76B900" fill-opacity="0.16" stroke="#76B900" stroke-width="1.5"/>
+  <text x="818.0" y="479" font-size="16" font-weight="700" fill="#3F6600" text-anchor="middle">PD</text>
+  <rect x="909" y="408" width="150" height="96" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <rect x="921.0" y="420.0" width="20" height="20" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="926.0" y="425.0" width="10.0" height="10.0" fill="#76B900"/>
+  <line x1="927.0" y1="415.0" x2="927.0" y2="420.0" stroke="#76B900" stroke-width="2"/><line x1="927.0" y1="440.0" x2="927.0" y2="445.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="916.0" y1="426.0" x2="921.0" y2="426.0" stroke="#76B900" stroke-width="2"/><line x1="941.0" y1="426.0" x2="946.0" y2="426.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="935.0" y1="415.0" x2="935.0" y2="420.0" stroke="#76B900" stroke-width="2"/><line x1="935.0" y1="440.0" x2="935.0" y2="445.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="916.0" y1="434.0" x2="921.0" y2="434.0" stroke="#76B900" stroke-width="2"/><line x1="941.0" y1="434.0" x2="946.0" y2="434.0" stroke="#76B900" stroke-width="2"/>
+  <text x="955" y="436" font-size="15" font-weight="700" fill="#374151" text-anchor="start">GPU 5</text>
+  <rect x="921" y="456" width="126" height="34" rx="7" fill="#76B900" fill-opacity="0.16" stroke="#76B900" stroke-width="1.5"/>
+  <text x="984.0" y="479" font-size="16" font-weight="700" fill="#3F6600" text-anchor="middle">PD</text>
 </svg>

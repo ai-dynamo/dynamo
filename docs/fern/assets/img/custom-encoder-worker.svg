@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1012" height="281" viewBox="22 9 1012 281" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">A custom vision encoder runs inside the aggregated vLLM worker</title>
+  <desc id="desc">A custom vision encoder, a decoder-selected adapter and the vLLM language model run in one aggregated dynamo.vllm worker process and share one GPU. The encoder sends projected features to the adapter, which sends an EmbedsPrompt or TokensPrompt to vLLM.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect x="22" y="9" width="1012" height="281" fill="#FFFFFF"/>
+  <text x="36" y="36" font-size="14.9" font-weight="700" letter-spacing="1.6" fill="#5A8F00">CUSTOM VISION ENCODER</text>
+  <text x="36" y="66" font-size="25.3" font-weight="700" fill="#1A1A1A">The encoder and the language model share one worker</text>
+  <rect x="36" y="128" width="120" height="100" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2"/>
+  <rect x="78.0" y="150.0" width="36" height="28" rx="4" fill="#F3F4F6" stroke="#6B7280" stroke-width="2"/><circle cx="87.0" cy="158.0" r="3" fill="#6B7280"/><polygon points="82.0,174.0 92.0,165.0 98.0,170.0 104.0,164.0 110.0,174.0" fill="#6B7280"/>
+  <text x="96.0" y="212" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Images</text>
+  <line x1="158" y1="178" x2="214" y2="178" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <rect x="216" y="100" width="804" height="176" rx="12" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <text x="236" y="128" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">Aggregated dynamo.vllm worker</text>
+  <rect x="879.8" y="109" width="100.4" height="26" rx="13" fill="#FFF7ED" stroke="#D97706" stroke-width="1.5"/>
+  <text x="930" y="127" font-size="14" font-weight="700" fill="#92400E" text-anchor="middle">shared GPU</text>
+  <rect x="240" y="146" width="170" height="112" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <rect x="309.0" y="170.32" width="32" height="32" rx="6" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/><polyline points="317.0,180.32 333.0,180.32 325.0,194.32 317.0,180.32" fill="none" stroke="#234CDA" stroke-width="1.6"/><circle cx="317.0" cy="180.32" r="2.6" fill="#234CDA"/><circle cx="333.0" cy="180.32" r="2.6" fill="#234CDA"/><circle cx="325.0" cy="194.32" r="2.6" fill="#234CDA"/>
+  <text x="325.0" y="242" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Custom encoder</text>
+  <line x1="412" y1="202" x2="508" y2="202" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="460" y="190" font-size="15" font-weight="700" fill="#1D3FB5" text-anchor="middle">features</text>
+  <rect x="510" y="146" width="150" height="112" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2"/>
+  <circle cx="585.0" cy="186.32" r="8" fill="#F0F4FF" stroke="#6B7280" stroke-width="2"/><circle cx="585.0" cy="186.32" r="3" fill="#6B7280"/>
+  <line x1="594.0" y1="186.3" x2="598.0" y2="186.3" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="591.4" y1="192.7" x2="594.2" y2="195.5" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="585.0" y1="195.3" x2="585.0" y2="199.3" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="578.6" y1="192.7" x2="575.8" y2="195.5" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="576.0" y1="186.3" x2="572.0" y2="186.3" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="578.6" y1="180.0" x2="575.8" y2="177.1" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="585.0" y1="177.3" x2="585.0" y2="173.3" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="591.4" y1="180.0" x2="594.2" y2="177.1" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <text x="585.0" y="242" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Adapter</text>
+  <line x1="662" y1="202" x2="758" y2="202" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="710" y="190" font-size="15" font-weight="700" fill="#374151" text-anchor="middle">prompt</text>
+  <rect x="760" y="146" width="240" height="112" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <rect x="867.0" y="173.32" width="26" height="26" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="873.5" y="179.82" width="13.0" height="13.0" fill="#76B900"/>
+  <line x1="874.8" y1="168.32" x2="874.8" y2="173.32" stroke="#76B900" stroke-width="2"/><line x1="874.8" y1="199.32" x2="874.8" y2="204.32" stroke="#76B900" stroke-width="2"/>
+  <line x1="862.0" y1="181.12" x2="867.0" y2="181.12" stroke="#76B900" stroke-width="2"/><line x1="893.0" y1="181.12" x2="898.0" y2="181.12" stroke="#76B900" stroke-width="2"/>
+  <line x1="885.2" y1="168.32" x2="885.2" y2="173.32" stroke="#76B900" stroke-width="2"/><line x1="885.2" y1="199.32" x2="885.2" y2="204.32" stroke="#76B900" stroke-width="2"/>
+  <line x1="862.0" y1="191.51999999999998" x2="867.0" y2="191.51999999999998" stroke="#76B900" stroke-width="2"/><line x1="893.0" y1="191.51999999999998" x2="898.0" y2="191.51999999999998" stroke="#76B900" stroke-width="2"/>
+  <text x="880.0" y="242" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">vLLM language model</text>
+</svg>

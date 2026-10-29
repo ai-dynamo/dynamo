@@ -1,54 +1,102 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1350" height="538" viewBox="36 12 1350 538" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
-  <title id="title">How Dynamo handles a multimodal request, aggregated versus EPD</title>
-  <desc id="desc">In aggregated serving, a client sends a request over HTTP to the frontend, which routes and tokenizes it and sends it over TCP to one aggregated worker that does media decode, preprocessing, the vision encoder, prefill, and decode, streaming tokens back. In EPD serving, the frontend sends it to a prefill worker that checks the embedding cache first, calls encoder workers over NIXL on a miss, runs LLM prefill, and sends the KV cache over NIXL to a decode worker.</desc>
-  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect x="36" y="12" width="1350" height="538" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="16.2" font-weight="700" letter-spacing="1.6" fill="#5A8F00">ENCODER DISAGGREGATION</text>
-  <text x="50" y="68" font-size="27.5" font-weight="700" fill="#1A1A1A">Aggregated versus EPD serving</text>
-  <text x="50" y="104" font-size="15.0" font-weight="700" letter-spacing="1.2" fill="#4B5563">AGGREGATED</text>
-  <rect x="50" y="118" width="140" height="84" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="64" y="166.0" font-size="16.2" font-weight="700" fill="#374151">Client</text>
-  <rect x="260" y="118" width="200" height="84" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="274" y="153.0" font-size="16.2" font-weight="700" fill="#374151">Frontend</text>
-  <text x="274" y="174.0" font-size="16.2" fill="#1A1A1A">routing, tokenize</text>
-  <rect x="540" y="118" width="680" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="554" y="145" font-size="16.2" font-weight="700" fill="#4C7A00">Aggregated worker</text>
-  <text x="554" y="166" font-size="16.2" fill="#1A1A1A">media decode, preprocess, ViT, prefill, decode</text>
-  <text x="556" y="188" font-size="15.6" font-weight="700" fill="#92400E">one worker, one queue, one scheduler</text>
-  <line x1="192" y1="160" x2="256" y2="160" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
-  <text x="224" y="150" font-size="15.0" fill="#4B5563" text-anchor="middle">HTTP</text>
-  <line x1="462" y1="160" x2="536" y2="160" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
-  <text x="499" y="150" font-size="15.0" fill="#4B5563" text-anchor="middle">TCP</text>
-  <line x1="1222" y1="160" x2="1330" y2="160" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
-  <text x="1276" y="150" font-size="15.0" fill="#4B5563" text-anchor="middle">tokens (SSE)</text>
-  <text x="50" y="270" font-size="15.0" font-weight="700" letter-spacing="1.2" fill="#4B5563">EPD</text>
-  <rect x="50" y="284" width="140" height="84" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="64" y="332.0" font-size="16.2" font-weight="700" fill="#374151">Client</text>
-  <rect x="260" y="284" width="200" height="84" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
-  <text x="274" y="319.0" font-size="16.2" font-weight="700" fill="#374151">Frontend</text>
-  <text x="274" y="340.0" font-size="16.2" fill="#1A1A1A">routing, tokenize</text>
-  <rect x="540" y="284" width="420" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="554" y="311" font-size="16.2" font-weight="700" fill="#4C7A00">Prefill worker (P)</text>
-  <text x="554" y="332" font-size="16.2" fill="#1A1A1A">checks the embedding cache first, calls E on a miss,</text>
-  <text x="554" y="350" font-size="16.2" fill="#1A1A1A">then runs LLM prefill itself</text>
-  <rect x="1050" y="284" width="250" height="84" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <text x="1064" y="319.0" font-size="16.2" font-weight="700" fill="#4C7A00">Decode worker (D)</text>
-  <text x="1064" y="340.0" font-size="16.2" fill="#1A1A1A">token generation</text>
-  <line x1="192" y1="326" x2="256" y2="326" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
-  <text x="224" y="316" font-size="15.0" fill="#4B5563" text-anchor="middle">HTTP</text>
-  <line x1="462" y1="326" x2="536" y2="326" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
-  <text x="499" y="316" font-size="15.0" fill="#4B5563" text-anchor="middle">TCP</text>
-  <line x1="962" y1="326" x2="1046" y2="326" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
-  <text x="1004" y="316" font-size="15.0" fill="#4B5563" text-anchor="middle">NIXL KV</text>
-  <line x1="1302" y1="326" x2="1372" y2="326" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
-  <text x="1337" y="316" font-size="15.0" fill="#1A1A1A"></text>
-  <text x="1336" y="308" font-size="15.0" fill="#4B5563" text-anchor="middle">tokens</text>
-  <text x="1336" y="324" font-size="15.0" fill="#4B5563" text-anchor="middle">(SSE)</text>
-  <rect x="540" y="452" width="420" height="84" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <text x="554" y="479" font-size="16.2" font-weight="700" fill="#234CDA">Encoder workers (E)</text>
-  <text x="554" y="500" font-size="16.2" fill="#1A1A1A">media decode, preprocess, ViT. No LLM weights, no KV</text>
-  <text x="554" y="518" font-size="16.2" fill="#1A1A1A">cache.</text>
-  <line x1="750" y1="370" x2="750" y2="450" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)" marker-start="url(#arrow-green-start)"/>
-  <text x="764" y="404" font-size="15.0" font-weight="700" fill="#4C7A00">NIXL embedding</text>
-  <text x="764" y="422" font-size="15.0" fill="#4B5563">cache miss only</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1052" height="629" viewBox="22 9 1052 629" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Aggregated versus EPD serving</title>
+  <desc id="desc">In aggregated serving, one worker does media decode, preprocessing, the vision encoder, prefill, and decode. In EPD serving, a prefill worker checks the embedding cache first and calls encoder workers over NIXL on a miss, then runs LLM prefill and sends the KV cache over NIXL to a decode worker.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect x="22" y="9" width="1052" height="629" fill="#FFFFFF"/>
+  <text x="36" y="36" font-size="14.9" font-weight="700" letter-spacing="1.6" fill="#5A8F00">ENCODER DISAGGREGATION</text>
+  <text x="36" y="66" font-size="25.3" font-weight="700" fill="#1A1A1A">Split the vision encoder into its own workers</text>
+  <text x="36" y="108" font-size="15" font-weight="700" fill="#5A6572" text-anchor="start" letter-spacing="1.2">AGGREGATED</text>
+  <rect x="36" y="134" width="130" height="100" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2"/>
+  <rect x="84.0" y="157.0" width="34" height="23" rx="4" fill="#FFFFFF" stroke="#6B7280" stroke-width="2"/><line x1="93.0" y1="185.0" x2="109.0" y2="185.0" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <text x="101.0" y="218" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Client</text>
+  <line x1="168" y1="184" x2="214" y2="184" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <rect x="216" y="134" width="130" height="100" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2"/>
+  <circle cx="281.0" cy="170.0" r="9" fill="#F0F4FF" stroke="#6B7280" stroke-width="2"/><circle cx="281.0" cy="170.0" r="3" fill="#6B7280"/>
+  <line x1="291.0" y1="170.0" x2="295.0" y2="170.0" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="288.1" y1="177.1" x2="290.9" y2="179.9" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="281.0" y1="180.0" x2="281.0" y2="184.0" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="273.9" y1="177.1" x2="271.1" y2="179.9" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="271.0" y1="170.0" x2="267.0" y2="170.0" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="273.9" y1="162.9" x2="271.1" y2="160.1" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="281.0" y1="160.0" x2="281.0" y2="156.0" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="288.1" y1="162.9" x2="290.9" y2="160.1" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <text x="281.0" y="218" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Frontend</text>
+  <line x1="348" y1="184" x2="394" y2="184" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <rect x="396" y="124" width="664" height="120" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <text x="416" y="152" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">Aggregated worker</text>
+  <rect x="416" y="166" width="128" height="66" rx="8" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="463.0" y="179.0" width="34" height="26" rx="4" fill="#F3F4F6" stroke="#6B7280" stroke-width="2"/><circle cx="472.0" cy="187.0" r="3" fill="#6B7280"/><polygon points="467.0,201.0 477.0,192.0 483.0,197.0 489.0,191.0 493.0,201.0" fill="#6B7280"/>
+  <text x="480" y="224" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Media</text>
+  <line x1="546" y1="199" x2="572" y2="199" stroke="#9CA3AF" stroke-width="2" marker-end="url(#arrow-gray)"/>
+  <rect x="574" y="166" width="128" height="66" rx="8" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="624.0" y="178.0" width="28" height="28" rx="6" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/><polyline points="630,186 646,186 638,200 630,186" fill="none" stroke="#234CDA" stroke-width="1.6"/><circle cx="630" cy="186" r="2.6" fill="#234CDA"/><circle cx="646" cy="186" r="2.6" fill="#234CDA"/><circle cx="638" cy="200" r="2.6" fill="#234CDA"/>
+  <text x="638" y="224" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Encode</text>
+  <line x1="704" y1="199" x2="730" y2="199" stroke="#9CA3AF" stroke-width="2" marker-end="url(#arrow-gray)"/>
+  <rect x="732" y="166" width="128" height="66" rx="8" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="784.0" y="180.0" width="24" height="24" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="790.0" y="186.0" width="12.0" height="12.0" fill="#76B900"/>
+  <line x1="791.2" y1="175.0" x2="791.2" y2="180.0" stroke="#76B900" stroke-width="2"/><line x1="791.2" y1="204.0" x2="791.2" y2="209.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="779.0" y1="187.2" x2="784.0" y2="187.2" stroke="#76B900" stroke-width="2"/><line x1="808.0" y1="187.2" x2="813.0" y2="187.2" stroke="#76B900" stroke-width="2"/>
+  <line x1="800.8" y1="175.0" x2="800.8" y2="180.0" stroke="#76B900" stroke-width="2"/><line x1="800.8" y1="204.0" x2="800.8" y2="209.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="779.0" y1="196.8" x2="784.0" y2="196.8" stroke="#76B900" stroke-width="2"/><line x1="808.0" y1="196.8" x2="813.0" y2="196.8" stroke="#76B900" stroke-width="2"/>
+  <text x="796" y="224" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Prefill</text>
+  <line x1="862" y1="199" x2="888" y2="199" stroke="#9CA3AF" stroke-width="2" marker-end="url(#arrow-gray)"/>
+  <rect x="890" y="166" width="128" height="66" rx="8" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="942.0" y="180.0" width="24" height="24" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="948.0" y="186.0" width="12.0" height="12.0" fill="#76B900"/>
+  <line x1="949.2" y1="175.0" x2="949.2" y2="180.0" stroke="#76B900" stroke-width="2"/><line x1="949.2" y1="204.0" x2="949.2" y2="209.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="937.0" y1="187.2" x2="942.0" y2="187.2" stroke="#76B900" stroke-width="2"/><line x1="966.0" y1="187.2" x2="971.0" y2="187.2" stroke="#76B900" stroke-width="2"/>
+  <line x1="958.8" y1="175.0" x2="958.8" y2="180.0" stroke="#76B900" stroke-width="2"/><line x1="958.8" y1="204.0" x2="958.8" y2="209.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="937.0" y1="196.8" x2="942.0" y2="196.8" stroke="#76B900" stroke-width="2"/><line x1="966.0" y1="196.8" x2="971.0" y2="196.8" stroke="#76B900" stroke-width="2"/>
+  <text x="954" y="224" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Decode</text>
+  <rect x="913.72" y="135" width="92.56" height="26" rx="13" fill="#FFF7ED" stroke="#D97706" stroke-width="1.5"/>
+  <text x="960" y="153" font-size="14" font-weight="700" fill="#92400E" text-anchor="middle">one queue</text>
+  <text x="36" y="306" font-size="15" font-weight="700" fill="#5A6572" text-anchor="start" letter-spacing="1.2">E/PD DISAGGREGATED</text>
+  <rect x="36" y="332" width="130" height="100" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2"/>
+  <rect x="84.0" y="355.0" width="34" height="23" rx="4" fill="#FFFFFF" stroke="#6B7280" stroke-width="2"/><line x1="93.0" y1="383.0" x2="109.0" y2="383.0" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <text x="101.0" y="416" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Client</text>
+  <line x1="168" y1="382" x2="214" y2="382" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <rect x="216" y="332" width="130" height="100" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2"/>
+  <circle cx="281.0" cy="368.0" r="9" fill="#F0F4FF" stroke="#6B7280" stroke-width="2"/><circle cx="281.0" cy="368.0" r="3" fill="#6B7280"/>
+  <line x1="291.0" y1="368.0" x2="295.0" y2="368.0" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="288.1" y1="375.1" x2="290.9" y2="377.9" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="281.0" y1="378.0" x2="281.0" y2="382.0" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="273.9" y1="375.1" x2="271.1" y2="377.9" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="271.0" y1="368.0" x2="267.0" y2="368.0" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="273.9" y1="360.9" x2="271.1" y2="358.1" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="281.0" y1="358.0" x2="281.0" y2="354.0" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <line x1="288.1" y1="360.9" x2="290.9" y2="358.1" stroke="#6B7280" stroke-width="3" stroke-linecap="round"/>
+  <text x="281.0" y="416" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Frontend</text>
+  <line x1="348" y1="382" x2="394" y2="382" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <rect x="396" y="322" width="364" height="120" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <text x="416" y="350" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">PD workers</text>
+  <rect x="416" y="364" width="128" height="66" rx="8" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="468.0" y="378.0" width="24" height="24" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="474.0" y="384.0" width="12.0" height="12.0" fill="#76B900"/>
+  <line x1="475.2" y1="373.0" x2="475.2" y2="378.0" stroke="#76B900" stroke-width="2"/><line x1="475.2" y1="402.0" x2="475.2" y2="407.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="463.0" y1="385.2" x2="468.0" y2="385.2" stroke="#76B900" stroke-width="2"/><line x1="492.0" y1="385.2" x2="497.0" y2="385.2" stroke="#76B900" stroke-width="2"/>
+  <line x1="484.8" y1="373.0" x2="484.8" y2="378.0" stroke="#76B900" stroke-width="2"/><line x1="484.8" y1="402.0" x2="484.8" y2="407.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="463.0" y1="394.8" x2="468.0" y2="394.8" stroke="#76B900" stroke-width="2"/><line x1="492.0" y1="394.8" x2="497.0" y2="394.8" stroke="#76B900" stroke-width="2"/>
+  <text x="480" y="422" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Prefill</text>
+  <line x1="546" y1="397" x2="572" y2="397" stroke="#9CA3AF" stroke-width="2" marker-end="url(#arrow-gray)"/>
+  <rect x="574" y="364" width="128" height="66" rx="8" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="626.0" y="378.0" width="24" height="24" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="632.0" y="384.0" width="12.0" height="12.0" fill="#76B900"/>
+  <line x1="633.2" y1="373.0" x2="633.2" y2="378.0" stroke="#76B900" stroke-width="2"/><line x1="633.2" y1="402.0" x2="633.2" y2="407.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="621.0" y1="385.2" x2="626.0" y2="385.2" stroke="#76B900" stroke-width="2"/><line x1="650.0" y1="385.2" x2="655.0" y2="385.2" stroke="#76B900" stroke-width="2"/>
+  <line x1="642.8" y1="373.0" x2="642.8" y2="378.0" stroke="#76B900" stroke-width="2"/><line x1="642.8" y1="402.0" x2="642.8" y2="407.0" stroke="#76B900" stroke-width="2"/>
+  <line x1="621.0" y1="394.8" x2="626.0" y2="394.8" stroke="#76B900" stroke-width="2"/><line x1="650.0" y1="394.8" x2="655.0" y2="394.8" stroke="#76B900" stroke-width="2"/>
+  <text x="638" y="422" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Decode</text>
+  <line x1="564" y1="444" x2="564" y2="502" stroke="#76B900" stroke-width="3" marker-end="url(#arrow-green)" marker-start="url(#arrow-green-start)"/>
+  <text x="590" y="469" font-size="15" font-weight="700" fill="#374151" text-anchor="start">on cache miss</text>
+  <text x="590" y="491" font-size="15" font-weight="700" fill="#4C7A00" text-anchor="start">embeddings · NIXL</text>
+  <rect x="396" y="504" width="364" height="120" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <text x="416" y="532" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">Encoder workers</text>
+  <rect x="416" y="546" width="128" height="66" rx="8" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="463.0" y="559.0" width="34" height="26" rx="4" fill="#F3F4F6" stroke="#6B7280" stroke-width="2"/><circle cx="472.0" cy="567.0" r="3" fill="#6B7280"/><polygon points="467.0,581.0 477.0,572.0 483.0,577.0 489.0,571.0 493.0,581.0" fill="#6B7280"/>
+  <text x="480" y="604" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Media</text>
+  <line x1="546" y1="579" x2="572" y2="579" stroke="#9CA3AF" stroke-width="2" marker-end="url(#arrow-gray)"/>
+  <rect x="574" y="546" width="128" height="66" rx="8" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="1.5"/>
+  <rect x="624.0" y="558.0" width="28" height="28" rx="6" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/><polyline points="630,566 646,566 638,580 630,566" fill="none" stroke="#234CDA" stroke-width="1.6"/><circle cx="630" cy="566" r="2.6" fill="#234CDA"/><circle cx="646" cy="566" r="2.6" fill="#234CDA"/><circle cx="638" cy="580" r="2.6" fill="#234CDA"/>
+  <text x="638" y="604" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Encode</text>
 </svg>

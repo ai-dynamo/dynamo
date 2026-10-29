@@ -43,13 +43,7 @@ Live replay measures the real serving stack. Offline simulation predicts how a c
 
 The complete flow is:
 
-```mermaid
-flowchart LR
-    A["Agent harness"] --> F["Dynamo frontend"]
-    F --> C["request trace"]
-    C --> D["DynoSim"]
-    C --> W["Live replay trace"] --> P["AIPerf"] --> E["Dynamo endpoint"]
-```
+![The agent harness sends requests through the Dynamo frontend, which writes a request trace. The trace feeds DynoSim for offline simulation, or a live replay trace that AIPerf sends to a Dynamo endpoint.](../../../assets/img/agent-simulation-complete-flow.svg)
 
 <Steps toc={true}>
 <Step title="Capture a Real Agent Run" id="step-1-capture-a-real-agent-run">

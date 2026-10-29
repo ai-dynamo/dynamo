@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1066" height="480" viewBox="22 9 1066 480" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Where the custom encoder hooks run</title>
+  <desc id="desc">Worker startup calls build once. For each request, optional preprocess runs per image, Dynamo batches ready items across requests, forward_batch runs the encoder, and the decoder-selected adapter builds a TokensPrompt or EmbedsPrompt for vLLM. Worker shutdown calls close.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect x="22" y="9" width="1066" height="480" fill="#FFFFFF"/>
+  <text x="36" y="36" font-size="14.9" font-weight="700" letter-spacing="1.6" fill="#5A8F00">CUSTOM VISION ENCODER</text>
+  <text x="36" y="66" font-size="25.3" font-weight="700" fill="#1A1A1A">Dynamo calls your hooks at four points</text>
+  <text x="36" y="108" font-size="15" font-weight="700" fill="#5A6572" text-anchor="start" letter-spacing="1.2">WORKER STARTUP</text>
+  <text x="640" y="108" font-size="15" font-weight="700" fill="#5A6572" text-anchor="start" letter-spacing="1.2">WORKER SHUTDOWN</text>
+  <rect x="36" y="122" width="130" height="84" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2"/>
+  <rect x="90.0" y="141.24" width="22" height="22" rx="4" fill="#FFFFFF" stroke="#6B7280" stroke-width="2"/>
+  <rect x="95.5" y="146.74" width="11.0" height="11.0" fill="#6B7280"/>
+  <line x1="96.6" y1="136.24" x2="96.6" y2="141.24" stroke="#6B7280" stroke-width="2"/><line x1="96.6" y1="163.24" x2="96.6" y2="168.24" stroke="#6B7280" stroke-width="2"/>
+  <line x1="85.0" y1="147.84" x2="90.0" y2="147.84" stroke="#6B7280" stroke-width="2"/><line x1="112.0" y1="147.84" x2="117.0" y2="147.84" stroke="#6B7280" stroke-width="2"/>
+  <line x1="105.4" y1="136.24" x2="105.4" y2="141.24" stroke="#6B7280" stroke-width="2"/><line x1="105.4" y1="163.24" x2="105.4" y2="168.24" stroke="#6B7280" stroke-width="2"/>
+  <line x1="85.0" y1="156.64000000000001" x2="90.0" y2="156.64000000000001" stroke="#6B7280" stroke-width="2"/><line x1="112.0" y1="156.64000000000001" x2="117.0" y2="156.64000000000001" stroke="#6B7280" stroke-width="2"/>
+  <text x="101.0" y="190" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Worker starts</text>
+  <line x1="168" y1="164" x2="224" y2="164" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <rect x="226" y="122" width="230" height="84" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <rect x="328.0" y="139.24" width="26" height="26" rx="6" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/><polyline points="333.0,146.24 349.0,146.24 341.0,160.24 333.0,146.24" fill="none" stroke="#234CDA" stroke-width="1.6"/><circle cx="333.0" cy="146.24" r="2.6" fill="#234CDA"/><circle cx="349.0" cy="146.24" r="2.6" fill="#234CDA"/><circle cx="341.0" cy="160.24" r="2.6" fill="#234CDA"/>
+  <text x="341.0" y="192" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">build(model_id)</text>
+  <rect x="275.4" y="215" width="131.20000000000002" height="26" rx="13" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
+  <text x="341.0" y="233" font-size="13" font-weight="700" fill="#1D3FB5" text-anchor="middle">required · once</text>
+  <rect x="640" y="122" width="130" height="84" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2"/>
+  <rect x="694.0" y="141.24" width="22" height="22" rx="4" fill="#FFFFFF" stroke="#6B7280" stroke-width="2"/>
+  <rect x="699.5" y="146.74" width="11.0" height="11.0" fill="#6B7280"/>
+  <line x1="700.6" y1="136.24" x2="700.6" y2="141.24" stroke="#6B7280" stroke-width="2"/><line x1="700.6" y1="163.24" x2="700.6" y2="168.24" stroke="#6B7280" stroke-width="2"/>
+  <line x1="689.0" y1="147.84" x2="694.0" y2="147.84" stroke="#6B7280" stroke-width="2"/><line x1="716.0" y1="147.84" x2="721.0" y2="147.84" stroke="#6B7280" stroke-width="2"/>
+  <line x1="709.4" y1="136.24" x2="709.4" y2="141.24" stroke="#6B7280" stroke-width="2"/><line x1="709.4" y1="163.24" x2="709.4" y2="168.24" stroke="#6B7280" stroke-width="2"/>
+  <line x1="689.0" y1="156.64000000000001" x2="694.0" y2="156.64000000000001" stroke="#6B7280" stroke-width="2"/><line x1="716.0" y1="156.64000000000001" x2="721.0" y2="156.64000000000001" stroke="#6B7280" stroke-width="2"/>
+  <text x="705.0" y="190" font-size="15" font-weight="700" fill="#1A1A1A" text-anchor="middle">Worker stops</text>
+  <line x1="772" y1="164" x2="828" y2="164" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <rect x="830" y="122" width="220" height="84" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="2" stroke-dasharray="6 5"/>
+  <rect x="927.0" y="139.24" width="26" height="26" rx="6" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/><polyline points="932.0,146.24 948.0,146.24 940.0,160.24 932.0,146.24" fill="none" stroke="#234CDA" stroke-width="1.6"/><circle cx="932.0" cy="146.24" r="2.6" fill="#234CDA"/><circle cx="948.0" cy="146.24" r="2.6" fill="#234CDA"/><circle cx="940.0" cy="160.24" r="2.6" fill="#234CDA"/>
+  <text x="940.0" y="192" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">close()</text>
+  <rect x="874.4" y="215" width="131.20000000000002" height="26" rx="13" fill="#FFF7ED" stroke="#D97706" stroke-width="1.5"/>
+  <text x="940.0" y="233" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">optional · once</text>
+  <text x="36" y="262" font-size="15" font-weight="700" fill="#5A6572" text-anchor="start" letter-spacing="1.2">EACH REQUEST</text>
+  <rect x="36" y="276" width="110" height="90" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="2"/>
+  <rect x="74.0" y="295.4" width="34" height="26" rx="4" fill="#F3F4F6" stroke="#6B7280" stroke-width="2"/><circle cx="83.0" cy="303.4" r="3" fill="#6B7280"/><polygon points="78.0,317.4 88.0,308.4 94.0,313.4 100.0,307.4 104.0,317.4" fill="#6B7280"/>
+  <text x="91.0" y="350" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">Images</text>
+  <line x1="148" y1="321" x2="196" y2="321" stroke="#9CA3AF" stroke-width="2.5" marker-end="url(#arrow-gray)"/>
+  <rect x="198" y="276" width="200" height="90" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="2" stroke-dasharray="6 5"/>
+  <rect x="281.0" y="295.4" width="34" height="26" rx="4" fill="#F3F4F6" stroke="#234CDA" stroke-width="2"/><circle cx="290.0" cy="303.4" r="3" fill="#234CDA"/><polygon points="285.0,317.4 295.0,308.4 301.0,313.4 307.0,307.4 311.0,317.4" fill="#234CDA"/>
+  <text x="298.0" y="352" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">preprocess(raw)</text>
+  <rect x="214.2" y="375" width="167.60000000000002" height="26" rx="13" fill="#FFF7ED" stroke="#D97706" stroke-width="1.5"/>
+  <text x="298.0" y="393" font-size="13" font-weight="700" fill="#92400E" text-anchor="middle">optional · per image</text>
+  <line x1="400" y1="321" x2="494" y2="321" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <text x="447" y="304" font-size="15" font-weight="700" fill="#374151" text-anchor="middle">batched</text>
+  <rect x="496" y="276" width="220" height="90" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <rect x="591.0" y="293.4" width="30" height="30" rx="6" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/><polyline points="598.0,302.4 614.0,302.4 606.0,316.4 598.0,302.4" fill="none" stroke="#234CDA" stroke-width="1.6"/><circle cx="598.0" cy="302.4" r="2.6" fill="#234CDA"/><circle cx="614.0" cy="302.4" r="2.6" fill="#234CDA"/><circle cx="606.0" cy="316.4" r="2.6" fill="#234CDA"/>
+  <text x="606.0" y="352" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">forward_batch(items)</text>
+  <rect x="522.2" y="375" width="167.60000000000002" height="26" rx="13" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
+  <text x="606.0" y="393" font-size="13" font-weight="700" fill="#1D3FB5" text-anchor="middle">required · per batch</text>
+  <line x1="718" y1="321" x2="792" y2="321" stroke="#76B900" stroke-width="3" marker-end="url(#arrow-green)"/>
+  <rect x="794" y="276" width="130" height="90" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <circle cx="859.0" cy="308.4" r="8" fill="#F0F4FF" stroke="#76B900" stroke-width="2"/><circle cx="859.0" cy="308.4" r="3" fill="#76B900"/>
+  <line x1="868.0" y1="308.4" x2="872.0" y2="308.4" stroke="#76B900" stroke-width="3" stroke-linecap="round"/>
+  <line x1="865.4" y1="314.8" x2="868.2" y2="317.6" stroke="#76B900" stroke-width="3" stroke-linecap="round"/>
+  <line x1="859.0" y1="317.4" x2="859.0" y2="321.4" stroke="#76B900" stroke-width="3" stroke-linecap="round"/>
+  <line x1="852.6" y1="314.8" x2="849.8" y2="317.6" stroke="#76B900" stroke-width="3" stroke-linecap="round"/>
+  <line x1="850.0" y1="308.4" x2="846.0" y2="308.4" stroke="#76B900" stroke-width="3" stroke-linecap="round"/>
+  <line x1="852.6" y1="302.0" x2="849.8" y2="299.2" stroke="#76B900" stroke-width="3" stroke-linecap="round"/>
+  <line x1="859.0" y1="299.4" x2="859.0" y2="295.4" stroke="#76B900" stroke-width="3" stroke-linecap="round"/>
+  <line x1="865.4" y1="302.0" x2="868.2" y2="299.2" stroke="#76B900" stroke-width="3" stroke-linecap="round"/>
+  <text x="859.0" y="350" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">Adapter</text>
+  <line x1="926" y1="321" x2="972" y2="321" stroke="#76B900" stroke-width="3" marker-end="url(#arrow-green)"/>
+  <rect x="974" y="276" width="100" height="90" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <rect x="1012.0" y="296.4" width="24" height="24" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="1018.0" y="302.4" width="12.0" height="12.0" fill="#76B900"/>
+  <line x1="1019.2" y1="291.4" x2="1019.2" y2="296.4" stroke="#76B900" stroke-width="2"/><line x1="1019.2" y1="320.4" x2="1019.2" y2="325.4" stroke="#76B900" stroke-width="2"/>
+  <line x1="1007.0" y1="303.59999999999997" x2="1012.0" y2="303.59999999999997" stroke="#76B900" stroke-width="2"/><line x1="1036.0" y1="303.59999999999997" x2="1041.0" y2="303.59999999999997" stroke="#76B900" stroke-width="2"/>
+  <line x1="1028.8" y1="291.4" x2="1028.8" y2="296.4" stroke="#76B900" stroke-width="2"/><line x1="1028.8" y1="320.4" x2="1028.8" y2="325.4" stroke="#76B900" stroke-width="2"/>
+  <line x1="1007.0" y1="313.2" x2="1012.0" y2="313.2" stroke="#76B900" stroke-width="2"/><line x1="1036.0" y1="313.2" x2="1041.0" y2="313.2" stroke="#76B900" stroke-width="2"/>
+  <text x="1024.0" y="350" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">vLLM</text>
+  <rect x="782.48" y="379" width="153.04000000000002" height="26" rx="13" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="859" y="397" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">TokensPrompt · VLM</text>
+  <rect x="746.0799999999999" y="409" width="225.84000000000003" height="26" rx="13" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="859" y="427" font-size="13" font-weight="700" fill="#4C7A00" text-anchor="middle">EmbedsPrompt · text-only LLM</text>
+  <rect x="36" y="458" width="16" height="16" rx="3" fill="#F0F4FF" stroke="#234CDA" stroke-width="2"/>
+  <text x="60" y="471" font-size="15" font-weight="400" fill="#374151" text-anchor="start">Your hook</text>
+  <rect x="170" y="458" width="16" height="16" rx="3" fill="#F4F9E8" stroke="#76B900" stroke-width="2"/>
+  <text x="194" y="471" font-size="15" font-weight="400" fill="#374151" text-anchor="start">Dynamo</text>
+</svg>

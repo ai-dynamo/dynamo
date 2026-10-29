@@ -5,7 +5,7 @@ title: Encoder Disaggregation
 subtitle: Scale vision encoders separately from LLM workers
 ---
 
-![In aggregated serving, one worker does media decode, preprocessing, the vision encoder, prefill, and decode. In EPD serving, a prefill worker checks the embedding cache first and calls encoder workers over NIXL on a miss, then runs LLM prefill and sends the KV cache over NIXL to a decode worker.](../../../../assets/img/encoder-disaggregation.svg)
+![In aggregated serving, one worker does media decode, preprocessing, the vision encoder, prefill, and decode. In E/PD disaggregated serving, encoder workers do media decode, preprocessing, and the vision encoder, and send embeddings over NIXL to PD workers that run prefill and decode. A prefill worker checks the embedding cache first and calls the encoder workers only on a miss.](../../../../assets/img/encoder-disaggregation.svg)
 
 ## Overview
 
