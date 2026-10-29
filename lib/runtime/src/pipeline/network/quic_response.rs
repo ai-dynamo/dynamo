@@ -1990,8 +1990,11 @@ fn spawn_client_lane(
     let writer_connections = connections.clone();
     let writer_contexts = contexts.clone();
     let writer_healthy = healthy.clone();
+    // Each guard is built before its spawn, so a task dropped before its first
+    // poll still marks the bundle unhealthy.
+    let writer_unhealthy_on_exit = MarkUnhealthyOnDrop(healthy.clone());
     tokio::spawn(async move {
-        let _unhealthy_on_exit = MarkUnhealthyOnDrop(writer_healthy.clone());
+        let _unhealthy_on_exit = writer_unhealthy_on_exit;
         if let Err(error) = run_client_writer(
             send,
             receiver,
@@ -2013,8 +2016,9 @@ fn spawn_client_lane(
         }
     });
 
+    let reader_unhealthy_on_exit = MarkUnhealthyOnDrop(healthy.clone());
     tokio::spawn(async move {
-        let _unhealthy_on_exit = MarkUnhealthyOnDrop(healthy.clone());
+        let _unhealthy_on_exit = reader_unhealthy_on_exit;
         if let Err(error) = run_client_control_reader(recv, contexts.clone()).await {
             fail_client_connection_bundle(
                 &connections,
