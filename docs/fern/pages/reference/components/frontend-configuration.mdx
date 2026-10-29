@@ -717,7 +717,7 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 </ParamField>
 
 <ParamField path="--dyn-debug-perf" type="boolean" default="false">
-  Log per-function timing for preprocessing (vllm processor only).
+  Log in-flight request count and preprocessing/post-processing timing (sglang processor only).
 
   Environment variable: `DYN_DEBUG_PERF`
 </ParamField>
