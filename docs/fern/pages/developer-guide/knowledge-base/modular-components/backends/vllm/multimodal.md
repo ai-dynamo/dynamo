@@ -17,6 +17,9 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 
 ## Support Matrix
 
+<Tabs>
+<Tab title="NVIDIA GPU">
+
 | Modality | Aggregated | P/D | Separate encode worker |
 | --- | --- | --- | --- |
 | **Image** | Yes | Yes | Yes |
@@ -31,6 +34,18 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 > [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
 > `http`, `https`, `file://` and `data:` sources are all hardware-decoded; `file://`
 > additionally requires `DYN_MM_LOCAL_PATH` to permit local reads.
+
+</Tab>
+<Tab title="Intel GPU">
+
+| Modality | Aggregated | P/D | Separate encode worker |
+| --- | --- | --- | --- |
+| **Image** | Yes | E/P/D only | E/P/D |
+| **Video** | Yes | — | — |
+| **Audio** | Experimental | — | — |
+
+</Tab>
+</Tabs>
 
 ### Supported URL Formats
 
@@ -63,6 +78,7 @@ The main multimodal vLLM launchers in this repo are:
 | P/D | CUDA | `disagg_multimodal_p_d.sh` | Prefill/decode separation without a dedicated encoder |
 | E/PD (Encode + PD) | CUDA | `disagg_multimodal_e_pd.sh` | Separate encoder and embedding-cache workflows |
 | E/P/D (Full Disaggregation) | CUDA | `disagg_multimodal_epd.sh` | Separate encode, prefill, and decode workers |
+| E/P/D (Full Disaggregation) | XPU | `xpu/disagg_multimodal_epd_xpu.sh` | Separate encode, prefill, and decode workers |
 
 ### Custom Vision Encoders
 
@@ -100,12 +116,27 @@ By default, the frontend hashes the exact full URI: the complete `data:` URI str
 
 Exact video routing on this path requires `--frontend-decoding`. The frontend hashes sampled RGB frames and their model-visible metadata, then uses a model adapter to reproduce the worker's prompt expansion. Supported adapters cover Qwen3-VL, Qwen3.5, and Nemotron 3 Nano Omni. See [Multimodal KV Routing](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md#video-identity-and-token-layout) for setup, verification, and fallback behavior.
 
-Launch the default path:
+Launch the default path for your accelerator:
+
+<Tabs>
+<Tab title="NVIDIA GPU">
 
 ```bash
 cd $DYNAMO_HOME
 bash examples/backends/vllm/launch/agg_multimodal_router.sh
 ```
+
+</Tab>
+<Tab title="Intel GPU">
+
+```bash
+cd $DYNAMO_HOME
+ZE_AFFINITY_MASK=0,1 \
+  bash examples/backends/vllm/launch/xpu/agg_multimodal_router_xpu.sh
+```
+
+</Tab>
+</Tabs>
 
 Key settings:
 
@@ -121,10 +152,25 @@ Key settings:
 
 Use the Python path when the model is supported by vLLM but not by the Rust model registry, or when the frontend should preprocess media:
 
+<Tabs>
+<Tab title="NVIDIA GPU">
+
 ```bash
 cd $DYNAMO_HOME
 bash examples/backends/vllm/launch/agg_multimodal_router_chat_processor.sh
 ```
+
+</Tab>
+<Tab title="Intel GPU">
+
+```bash
+cd $DYNAMO_HOME
+ZE_AFFINITY_MASK=0,1 \
+  bash examples/backends/vllm/launch/xpu/agg_multimodal_router_chat_processor_xpu.sh
+```
+
+</Tab>
+</Tabs>
 
 This launcher sets `--dyn-chat-processor vllm`. The frontend runs vLLM's Hugging Face processor, extracts hashes and expanded multimodal inputs for images and videos, builds routing metadata, and transfers processed `mm_kwargs` to the selected worker. This path supports models handled by vLLM's multimodal processor.
 
@@ -146,15 +192,28 @@ Dynamo supports multimodal image and video requests for Vision Language Models (
 
 Use the single-worker aggregated launcher for the simplest image/video setup:
 
+<Tabs>
+<Tab title="NVIDIA GPU">
+
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
 
-# GPU deployment
 bash launch/agg_multimodal.sh --model Qwen/Qwen3-VL-2B-Instruct
-
-# XPU deployment
-bash launch/xpu/agg_multimodal_xpu.sh --model Qwen/Qwen3-VL-2B-Instruct
 ```
+
+</Tab>
+<Tab title="Intel GPU">
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+
+ZE_AFFINITY_MASK=0 \
+  bash launch/xpu/agg_multimodal_xpu.sh \
+  --model Qwen/Qwen3-VL-2B-Instruct
+```
+
+</Tab>
+</Tabs>
 
 **Image request:**
 
@@ -229,11 +288,28 @@ worker.
 For an aggregated worker, enable Dynamo's CPU embedding cache alongside the
 vLLM processor cache:
 
+<Tabs>
+<Tab title="NVIDIA GPU">
+
 ```bash
 bash launch/agg_multimodal.sh --model Qwen/Qwen3-VL-2B-Instruct \
   --mm-processor-cache-gb 4 \
   --multimodal-embedding-cache-capacity-gb 1
 ```
+
+</Tab>
+<Tab title="Intel GPU">
+
+```bash
+ZE_AFFINITY_MASK=0 \
+  bash launch/xpu/agg_multimodal_xpu.sh \
+  --model Qwen/Qwen3-VL-2B-Instruct \
+  --mm-processor-cache-gb 4 \
+  --multimodal-embedding-cache-capacity-gb 1
+```
+
+</Tab>
+</Tabs>
 
 The caches store different data. The vLLM processor cache retains the processed
 media metadata required to resolve a UUID-only request. Dynamo's embedding cache
@@ -301,7 +377,7 @@ router and worker.
 ### P/D Serving
 
 Use the P/D launcher to separate prefill and decode without deploying a
-dedicated multimodal encoder.
+dedicated multimodal encoder. This launcher is currently available for NVIDIA GPU only.
 
 In `--single-gpu` mode, each worker defaults to the first entry of `CUDA_VISIBLE_DEVICES`. Set it to the assigned GPU, for example `CUDA_VISIBLE_DEVICES=1`. Explicit `DYN_PREFILL_WORKER_GPU` and `DYN_DECODE_WORKER_GPU` values take precedence for their respective workers. If any worker needs the inherited default, an unset or empty first entry is an error.
 
@@ -327,7 +403,7 @@ model families use the expanded prompt token IDs produced during prefill.
 
 ### E/PD Serving (Encode + PD)
 
-Use `disagg_multimodal_e_pd.sh` when you want a separate encode worker and a combined prefill/decode worker. This path is primarily useful for image-centric workloads and embedding-cache experiments.
+Use `disagg_multimodal_e_pd.sh` when you want a separate encode worker and a combined prefill/decode worker. This NVIDIA GPU path is primarily useful for image-centric workloads and embedding-cache experiments.
 
 In `--single-gpu` mode, each worker defaults to the first entry of `CUDA_VISIBLE_DEVICES`. Set it to the assigned GPU, for example `CUDA_VISIBLE_DEVICES=1`. Explicit `DYN_ENCODE_WORKER_GPU` and `DYN_PD_WORKER_GPU` values take precedence for their respective workers. If any worker needs the inherited default, an unset or empty first entry is an error.
 
@@ -347,22 +423,36 @@ CUDA_VISIBLE_DEVICES=0 bash launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-
 
 ### E/P/D Serving (Full Disaggregation)
 
-Use `disagg_multimodal_epd.sh` when you want separate encode, prefill, and decode workers for multimodal workloads.
+Use the E/P/D launcher when you want separate encode, prefill, and decode workers for multimodal workloads.
 
 In `--single-gpu` mode, each worker defaults to the first entry of `CUDA_VISIBLE_DEVICES`. Set it to the assigned GPU, for example `CUDA_VISIBLE_DEVICES=1`. Explicit `DYN_ENCODE_WORKER_GPU`, `DYN_PREFILL_WORKER_GPU`, and `DYN_DECODE_WORKER_GPU` values take precedence for their respective workers. If any worker needs the inherited default, an unset or empty first entry is an error.
 
 > [!WARNING]
 > In the current vLLM implementation, the separate encode worker is only used for `image_url` inputs. `video_url` inputs are still processed on the prefill worker, not on the encode worker.
 
+<Tabs>
+<Tab title="NVIDIA GPU">
+
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
-
-# Multi-GPU deployment
 bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct
 
 # Single-GPU (functional testing with small models; select GPU 0 explicitly)
 CUDA_VISIBLE_DEVICES=0 bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
 ```
+
+</Tab>
+<Tab title="Intel GPU">
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+DEVICE_PLATFORM=xpu VLLM_TARGET_DEVICE=xpu \
+  bash launch/xpu/disagg_multimodal_epd_xpu.sh \
+  --model Qwen/Qwen3-VL-2B-Instruct
+```
+
+</Tab>
+</Tabs>
 
 ## Audio Serving
 
@@ -372,17 +462,32 @@ Dynamo supports `audio_url` requests for audio-capable models. Audio is loaded b
 
 Use the same aggregated multimodal launcher with an audio-capable model:
 
+<Tabs>
+<Tab title="NVIDIA GPU">
+
 ```bash
 pip install 'vllm[audio]'  # installs librosa and other audio dependencies
 cd $DYNAMO_HOME/examples/backends/vllm
 
-# GPU deployment
 bash launch/agg_multimodal.sh --model Qwen/Qwen3-Omni-30B-A3B-Instruct
-
-# XPU deployment
-DYN_CHAT_PROCESSOR=vllm \
-  bash launch/xpu/agg_multimodal_xpu.sh --model Qwen/Qwen3-Omni-30B-A3B-Instruct
 ```
+
+</Tab>
+<Tab title="Intel GPU">
+
+**Experimental.** Intel GPU audio serving is not covered by the XPU CI suite on `main`.
+
+```bash
+pip install 'vllm[audio]'  # installs librosa and other audio dependencies
+cd $DYNAMO_HOME/examples/backends/vllm
+
+ZE_AFFINITY_MASK=0 DYN_CHAT_PROCESSOR=vllm \
+  bash launch/xpu/agg_multimodal_xpu.sh \
+  --model Qwen/Qwen3-Omni-30B-A3B-Instruct
+```
+
+</Tab>
+</Tabs>
 
 ```mermaid
 flowchart LR
@@ -449,11 +554,26 @@ flowchart LR
 
 **Launch with Dynamo:**
 
+<Tabs>
+<Tab title="NVIDIA GPU">
+
 ```bash
 bash examples/backends/vllm/launch/agg_multimodal.sh \
     --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
     --multimodal-embedding-cache-capacity-gb 10
 ```
+
+</Tab>
+<Tab title="Intel GPU">
+
+```bash
+bash examples/backends/vllm/launch/xpu/agg_multimodal_xpu.sh \
+    --model Qwen/Qwen3-VL-2B-Instruct \
+    --multimodal-embedding-cache-capacity-gb 10
+```
+
+</Tab>
+</Tabs>
 
 `dynamo.vllm` automatically configures
 `ec_both` mode with `DynamoMultimodalEmbeddingCacheConnector` when capacity is
@@ -462,6 +582,8 @@ multimodal hashes are reused as cache identities so routing and embedding-cache
 lookups agree.
 
 **Launch with `vllm serve` (standalone, no Dynamo):**
+
+The standalone command below uses the NVIDIA GPU model configuration:
 
 ```bash
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
@@ -478,6 +600,8 @@ The `multimodal_embedding_cache_capacity_gb` parameter controls the CPU-side LRU
 ### Disaggregated Encoder (Embedding Cache in Prefill Worker)
 
 In the disaggregated setting, the Prefill Worker (P) owns a CPU-side LRU embedding cache (`EmbeddingCacheManager`). On each request P checks the cache first — on a hit, the Encode Worker is skipped entirely. On a miss, P routes to the Encode Worker (E), receives embeddings via NIXL, saves them to the cache, and then feeds the embeddings along with the request into the vLLM Instance for prefill.
+
+This E/PD launcher is currently available for NVIDIA GPU only.
 
 ```mermaid
 ---
