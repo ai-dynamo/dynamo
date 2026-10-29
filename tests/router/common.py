@@ -885,6 +885,80 @@ def _test_remote_indexer_decisions(
             dp_rank_b,
         )
 
+        async def wait_for_serving_indexers_live(
+            worker_id: int, dp_rank: Optional[int]
+        ) -> None:
+            """Send fresh pinned probes until every serving router indexes one.
+
+            Workers start their KV event publishers just after the generate
+            endpoint registers, so the first requests race KV source activation
+            in the serving routers. A new probe per attempt replaces any event
+            lost in that window instead of waiting for it.
+            """
+            key = (worker_id, dp_rank if dp_rank is not None else 0)
+            deadline = time.monotonic() + 45
+            attempt = 0
+            stale: dict[int, int] = {}
+            while time.monotonic() < deadline:
+                attempt += 1
+                probe = [random.randint(1, 10000) for _ in range(2 * block_size)]
+                try:
+                    await asyncio.wait_for(
+                        send_request_via_python_kv_router(
+                            kv_python_router=serving_routers[0],
+                            model_name=model_name,
+                            token_ids=probe,
+                            stop_conditions={"ignore_eos": True, "max_tokens": 2},
+                            worker_id=worker_id,
+                            dp_rank=dp_rank,
+                        ),
+                        timeout=max(deadline - time.monotonic(), 0.1),
+                    )
+                except asyncio.TimeoutError:
+                    raise AssertionError(
+                        f"Probe request for {key} outlived the readiness deadline "
+                        f"on attempt {attempt}"
+                    ) from None
+                probe_deadline = min(deadline, time.monotonic() + 2.0)
+                while True:
+                    stale = {}
+                    for idx, serving_router in enumerate(serving_routers):
+                        try:
+                            scores = await asyncio.wait_for(
+                                serving_router.get_overlap_scores(
+                                    probe, include_shared=False
+                                ),
+                                timeout=max(probe_deadline - time.monotonic(), 0.1),
+                            )
+                        except asyncio.TimeoutError:
+                            stale[idx] = -1
+                            continue
+                        blocks_by_rank = {
+                            (row["worker_id"], row["dp_rank"]): row["device_blocks"]
+                            for row in scores["workers"]
+                        }
+                        if blocks_by_rank.get(key, 0) < 2:
+                            stale[idx] = blocks_by_rank.get(key, 0)
+                    if not stale or time.monotonic() >= probe_deadline:
+                        break
+                    await asyncio.sleep(0.05)
+                if not stale:
+                    if attempt > 1:
+                        logger.warning(
+                            "Serving routers indexed %s only after %d probes",
+                            key,
+                            attempt,
+                        )
+                    return
+            raise AssertionError(
+                f"Serving routers {sorted(stale)} never indexed probes for {key} "
+                f"after {attempt} attempts: device_blocks={stale}"
+            )
+
+        if use_kv_events:
+            await wait_for_serving_indexers_live(worker_a_id, dp_rank_a)
+            await wait_for_serving_indexers_live(worker_b_id, dp_rank_b)
+
         blocks = [
             [random.randint(1, 10000) for _ in range(block_size)] for _ in range(7)
         ]

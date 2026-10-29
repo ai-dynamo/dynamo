@@ -376,7 +376,7 @@ Routing cache resources start only if a component requests `CACHE` or a scorer r
 
 | Accessor | Meaning |
 |---|---|
-| `prompt_tokens()` | Exact incoming prompt token count; zero when the request has no token IDs, such as embeddings-only input |
+| `isl_tokens()` | Input sequence length in tokens, the same value a request classifier reads; zero when the request has no token IDs, such as embeddings-only input |
 | `request_blocks()` | Incoming prompt size in KV blocks, rounded up |
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
@@ -426,8 +426,12 @@ The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examp
 | Accessor | Meaning |
 |---|---|
 | `WorkerCandidate::worker()` | Candidate worker ID and data-parallel rank |
+| `WorkerCandidate::info()` | Candidate `WorkerInfo` |
 | `ScoredWorkerCandidate::worker()` | Picker row worker ID and data-parallel rank |
 | `ScoredWorkerCandidate::cost()` | Sum of all scorer contributions for the picker row |
+| `WorkerInputView::info(row)` | Picker row `WorkerInfo`, or `None` for an out-of-range row |
+
+`WorkerInfo` holds static facts about a worker rank, so no component declares an input group to read it. `worker()` returns the worker ID and data-parallel rank. `max_num_batched_tokens()` and `total_kv_blocks()` return what the worker's runtime config advertises, or `None` when it is unreported or reported as zero (vLLM's Ray data-parallel backend registers a zero placeholder); `total_kv_blocks()` is capacity, not free blocks. The values change only when a worker registers again. For filters, scorers, and pickers Dynamo looks them up in its cached worker configs on each `info()` call, so a component that never calls it pays nothing. Classifier rows outlive that map, so they carry each rank's capacity (32 bytes per rank) whenever a classifier declares an input group.
 
 ### Optional Worker Inputs
 
@@ -436,7 +440,6 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | Group | Accessor | Meaning |
 |---|---|---|
 | `CACHE` | `device_overlap_blocks()` | Device-resident prefix overlap in blocks |
-| `CACHE` | `prefix_cache_read_allowed()` | Request-specific eligibility under the worker's declared adapter contract: `Some(false)` disables prefix cost credit; `None` means the request or worker contract is unknown |
 | `CACHE` | `host_overlap_blocks()` | Host-pinned prefix overlap in blocks |
 | `CACHE` | `disk_overlap_blocks()` | Disk prefix overlap in blocks |
 | `CACHE` | `accounting_cache_estimate()` | Accounting estimate as weighted KV blocks and rounded tokens; zero if missing, not clamped to prompt length |
@@ -444,6 +447,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `CACHE` | `shared_hits()` | `None` if no shared result was supplied; otherwise unweighted ranges with `total_hits` and `hits_beyond(prefix)` |
 | `LOAD` | `is_available()` | Whether the host supplied a load observation; distinguishes missing data from an observed idle worker |
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
+| `LOAD` | `active_decode_blocks()` | KV blocks the worker's active requests hold; excludes this request. Prompt blocks by default, plus the blocks generation adds only with `--router-track-output-blocks`; zero with `--no-router-track-active-blocks` |
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
@@ -452,22 +456,22 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
+`cache.prefix_cache_read_allowed()` reports the frontend's normalized request decision:
+`Some(false)` forbids prefix reuse, `Some(true)` permits reads, and `None` keeps the
+legacy estimate. Permission does not prove a cache hit. Raw device, host, disk and
+shared-cache observations remain available; scorers must give them no credit when
+reads are forbidden. The host also omits KV fetch sources for such a request.
+
+The aggregated token-based Python vLLM path publishes a capability for a typed
+internal cache-read control. The frontend normalizes prompt-logprob and explicit
+cache controls once, and the worker applies that decision. Precision requires a
+capable worker pool; mixed or legacy pools retain their existing translation and
+estimates. Multimodal, disaggregated and native Generate requests keep their existing
+handling. Model-default sampling policies are not inferred by this control.
+
+`BusyThresholds::has_room(load, info.capacity())` is the check Dynamo's router queue uses to decide whether a worker has room; a component that declares `LOAD` can run the same check.
+
 A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned views through `WorkerInputView`; its cache view supports `get(row)` and `iter()`. Each component must declare every group it reads; another component requesting a group does not grant access.
-
-`prefix_cache_read_allowed()` is resolved from immutable request controls and the
-worker configuration used for the current candidate callback. It has no weights or
-clamping. It does not prove cache membership, readiness, or liveness. When it is
-`Some(false)`, raw device/host/disk overlap remains available, while the host's
-accounting estimate is zero and the default scorer grants no cache credit.
-Cache-derived custom scorers should check this value before subtracting raw
-overlap. Missing declarations and unsupported adapter versions return `None` and
-preserve the previous estimates.
-
-The frontend currently recognizes declared request overrides on aggregated text
-Python vLLM workers: prompt logprobs (including width zero and the completion echo
-mapping) and explicit sampling cache-read controls. Native Generate, remote
-prefill, multimodal requests, and model-specific defaults are not inferred by
-this resolver. Ordinary requests without such controls retain the existing path.
 
 A scorer reads `KV_TRANSFER` through `WorkerCandidate::kv_transfer()`. Filters and pickers do not receive it, and declaring it there has no effect. The host picks each worker's source with the [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints) rules, including topology islands, and booking a worker attaches a fetch hint for that same source. Fetches are best effort: the source may no longer hold the blocks when the request runs.
 
@@ -493,6 +497,9 @@ impl WorkerScorer for UncoveredPromptScorer {
     ) -> Result<(), WorkerSelectionPolicyError> {
         for (candidate, cost) in candidates.iter().zip(costs) {
             let cached = candidate.cache().map_or(0.0, |cache| {
+                if cache.prefix_cache_read_allowed() == Some(false) {
+                    return 0.0;
+                }
                 cache.device_overlap_blocks()
                     + cache.host_overlap_blocks()
                     + cache.disk_overlap_blocks()
@@ -620,11 +627,12 @@ For example, a classifier can inspect the sequence while retaining the request i
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifyFuture, ClassifyRequest, RequestClassifier,
 };
+use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 
 struct InspectPrefixes;
 
 impl RequestClassifier for InspectPrefixes {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(&mut self, request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
         Box::pin(async move {
             let _tracked_blocks = request.sequence_hashes().map(|hashes| hashes.len());
             Ok(request)

@@ -29,7 +29,10 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, to_worker_selection_session_context},
+    kv_router::{
+        KvRouter, metrics::RouterRequestMetrics, request_lease::RequestAttemptRelease,
+        to_worker_selection_session_context,
+    },
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -65,6 +68,14 @@ const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
 /// Bounds the wait for a worker's trailing typed error after a terminal frame.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(crate) struct PrefillDispatch<M> {
+    pub(crate) metadata: M,
+    pub(crate) stream: ManyOut<Annotated<LLMEngineOutput>>,
+    /// Early release for the prefill's scheduler booking, held by `stream`
+    /// until prefill finishes. `None` when the routing policy books nothing.
+    pub(crate) booking: Option<RequestAttemptRelease>,
+}
 
 pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
@@ -754,7 +765,18 @@ impl RoutingHost {
         }
 
         let request_context = request.context();
-        let operation = self
+        let reacquire = || {
+            self.acquire_affinity_slot(
+                affinity,
+                &session_id,
+                None,
+                request_context.as_ref(),
+                phase,
+                staged_kv,
+                budget,
+            )
+        };
+        let mut operation = self
             .acquire_affinity_slot(
                 affinity,
                 &session_id,
@@ -765,6 +787,19 @@ impl RoutingHost {
                 budget,
             )
             .await?;
+        if self.session_affinity_mode == SessionAffinityMode::Soft
+            && explicit.is_none()
+            && matches!(
+                &self.policy,
+                RoutingPolicy::Builtin(_) | RoutingPolicy::DeviceAwareWeighted
+            )
+            && operation
+                .target()
+                .is_some_and(|target| !self.inner.client.is_instance_discovered(target.worker_id))
+        {
+            operation.invalidate();
+            operation = reacquire().await?;
+        }
         let target = operation.target().map(from_table);
         match select(target).await {
             Ok(selection) => Ok((selection, Some(operation))),
@@ -775,17 +810,7 @@ impl RoutingHost {
                     && target.is_some_and(|target| !self.affinity_target_is_valid(target)) =>
             {
                 operation.invalidate();
-                let retry = self
-                    .acquire_affinity_slot(
-                        affinity,
-                        &session_id,
-                        None,
-                        request_context.as_ref(),
-                        phase,
-                        staged_kv,
-                        budget,
-                    )
-                    .await?;
+                let retry = reacquire().await?;
                 let selection = select(retry.target().map(from_table)).await?;
                 Ok((selection, Some(retry)))
             }
@@ -797,7 +822,7 @@ impl RoutingHost {
         &self,
         request: SingleIn<PreprocessedRequest>,
         prepare: F,
-    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
+    ) -> Result<PrefillDispatch<M>, Error>
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
@@ -806,8 +831,14 @@ impl RoutingHost {
             RoutingPolicy::Builtin(_)
             | RoutingPolicy::Direct
             | RoutingPolicy::DeviceAwareWeighted => {
-                self.select_and_dispatch_builtin(request, RequestPhase::Prefill, prepare)
-                    .await
+                let (metadata, stream) = self
+                    .select_and_dispatch_builtin(request, RequestPhase::Prefill, prepare)
+                    .await?;
+                Ok(PrefillDispatch {
+                    metadata,
+                    stream,
+                    booking: None,
+                })
             }
         }
     }
@@ -842,12 +873,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     /// prefill/completion lifecycle for proper KV cache management.
     async fn generate(
         &self,
-        request: SingleIn<PreprocessedRequest>,
+        mut request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         // One cleanup budget for this request's whole route through the host.
         let budget = CleanupBudget::default();
+        let phase = request.phase();
+        self.normalize_prefix_cache_read_control(&mut request, phase);
         if !matches!(&self.policy, RoutingPolicy::Kv(_)) {
-            let phase = request.phase();
             return self
                 .select_and_dispatch_builtin(request, phase, |_, _| Ok(()))
                 .await
@@ -855,7 +887,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-        let phase = request.phase();
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let (mut selection, mut operation) = self

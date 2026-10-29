@@ -231,7 +231,6 @@ mod tests {
 
     fn schedulable(worker_id: WorkerId) -> WorkerRequest {
         WorkerRequest {
-            prefix_cache_read_policy: None,
             worker_id,
             endpoint: Some(format!("http://10.0.0.{worker_id}:8000")),
             block_size: Some(16),
@@ -243,7 +242,6 @@ mod tests {
     /// router or KV-event configuration.
     fn incomplete(worker_id: WorkerId) -> WorkerRequest {
         WorkerRequest {
-            prefix_cache_read_policy: None,
             block_size: Some(0),
             ..schedulable(worker_id)
         }

@@ -57,7 +57,6 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.cache_read_policy import publish_prefix_cache_read_policy
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
 from dynamo.vllm.worker_factory import WorkerFactory
@@ -71,6 +70,7 @@ from .args import (
 )
 from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
+from .cache_read_control import publish_prefix_cache_read_control_capability
 from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
@@ -166,6 +166,24 @@ def publish_vllm_structural_tag_reasoning_policy(
         TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
         json.dumps(has_reasoning_parser and not enable_in_reasoning),
     )
+
+
+def configure_muse_structural_tag_reasoning(
+    config: Config, vllm_config: VllmConfig
+) -> None:
+    """Activate Muse's native grammar before the model chooses a recipient.
+
+    Muse's engine reasoner leaves reasoning only after a tool channel opens.
+    Deferring a required/named grammar until then cannot force a call. The
+    Dynamo ATEM grammar includes the reasoning channel, so it owns that boundary.
+    Unguided requests are unaffected by this structured-output setting.
+    """
+    spark = ("muse_spark_open", "muse_spark")
+    # Match the frontend's effective parser selection for reasoning-only Spark.
+    if config.dyn_tool_call_parser in spark or (
+        config.dyn_tool_call_parser is None and config.dyn_reasoning_parser in spark
+    ):
+        vllm_config.structured_outputs_config.enable_in_reasoning = True
 
 
 def should_register_model_ignore_weights(config: Config) -> bool:
@@ -742,6 +760,7 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    configure_muse_structural_tag_reasoning(config, vllm_config)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
@@ -931,7 +950,7 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
-    publish_prefix_cache_read_policy(
+    publish_prefix_cache_read_control_capability(
         runtime_config, model_input, model_type, worker_type
     )
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)

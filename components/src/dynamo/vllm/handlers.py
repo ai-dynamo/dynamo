@@ -101,6 +101,7 @@ from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from .args import Config
 from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
+from .cache_read_control import publish_prefix_cache_read_control_capability
 from .capacity import publish_vllm_token_budget
 from .constants import MX_LOAD_FORMATS, DisaggregationMode, EmbeddingTransferMode
 from .dp_topology import get_dp_range_for_worker
@@ -939,6 +940,19 @@ def build_sampling_params(
         sampling_params.logprobs = logprobs
     if prompt_logprobs is not None:
         sampling_params.prompt_logprobs = prompt_logprobs
+
+    skip_reading_prefix_cache = request.get("skip_reading_prefix_cache")
+    if skip_reading_prefix_cache is not None:
+        if not isinstance(skip_reading_prefix_cache, bool):
+            raise InvalidArgument("skip_reading_prefix_cache must be a boolean")
+        # The frontend owns normalization. Apply its typed decision after the
+        # generic overlays, including an explicit False with prompt logprobs.
+        sampling_params.skip_reading_prefix_cache = skip_reading_prefix_cache
+    elif prompt_logprobs is not None:
+        # Compatibility with v1.5/v1.6 frontends and current request paths
+        # that do not normalize the cache-read decision in the frontend.
+        # TODO(v1.9): Remove only after v1.6 leaves N-2 and every supported
+        # request producer supplies the normalized decision.
         explicit_cache_setting = sampling_options.get(
             "skip_reading_prefix_cache",
             extra_args.get("skip_reading_prefix_cache")
@@ -2679,6 +2693,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if self.config.route_to_encoder:
             lora_needs_set.append(WorkerType.Encode)
 
+        publish_prefix_cache_read_control_capability(
+            runtime_config, ModelInput.Tokens, lora_model_type, lora_worker_type
+        )
         apply_data_parallel_runtime_config(runtime_config, self.dp_range)
         publish_kv_hint_capabilities(
             runtime_config,

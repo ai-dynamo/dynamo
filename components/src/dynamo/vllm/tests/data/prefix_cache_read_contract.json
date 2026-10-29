@@ -1,0 +1,547 @@
+[
+  {
+    "name": "prompt_zero",
+    "request": {
+      "model": "test",
+      "token_ids": [
+        1
+      ],
+      "stop_conditions": {
+        "max_tokens": null,
+        "stop": null,
+        "stop_token_ids": null,
+        "stop_token_ids_visible": null,
+        "stop_token_ids_hidden": null,
+        "min_tokens": null,
+        "ignore_eos": null,
+        "max_thinking_tokens": null
+      },
+      "sampling_options": {
+        "n": null,
+        "best_of": null,
+        "presence_penalty": null,
+        "frequency_penalty": null,
+        "repetition_penalty": null,
+        "temperature": null,
+        "top_p": null,
+        "top_k": null,
+        "min_p": null,
+        "use_beam_search": null,
+        "length_penalty": null,
+        "seed": null,
+        "include_stop_str_in_output": null,
+        "logit_bias": null,
+        "guided_decoding": null
+      },
+      "output_options": {
+        "logprobs": null,
+        "prompt_logprobs": 0,
+        "skip_special_tokens": null,
+        "formatted_prompt": null,
+        "return_tokens_as_token_ids": null
+      },
+      "skip_reading_prefix_cache": true,
+      "eos_token_ids": [],
+      "mdc_sum": null,
+      "annotations": [],
+      "router_config_override": null,
+      "extra_args": {
+        "sampling_options": {
+          "skip_reading_prefix_cache": true
+        }
+      }
+    },
+    "expected_skip": true,
+    "normalized": true
+  },
+  {
+    "name": "nested_false",
+    "request": {
+      "model": "test",
+      "token_ids": [
+        1
+      ],
+      "stop_conditions": {
+        "max_tokens": null,
+        "stop": null,
+        "stop_token_ids": null,
+        "stop_token_ids_visible": null,
+        "stop_token_ids_hidden": null,
+        "min_tokens": null,
+        "ignore_eos": null,
+        "max_thinking_tokens": null
+      },
+      "sampling_options": {
+        "n": null,
+        "best_of": null,
+        "presence_penalty": null,
+        "frequency_penalty": null,
+        "repetition_penalty": null,
+        "temperature": null,
+        "top_p": null,
+        "top_k": null,
+        "min_p": null,
+        "use_beam_search": null,
+        "length_penalty": null,
+        "seed": null,
+        "include_stop_str_in_output": null,
+        "logit_bias": null,
+        "guided_decoding": null
+      },
+      "output_options": {
+        "logprobs": null,
+        "prompt_logprobs": 0,
+        "skip_special_tokens": null,
+        "formatted_prompt": null,
+        "return_tokens_as_token_ids": null
+      },
+      "skip_reading_prefix_cache": false,
+      "eos_token_ids": [],
+      "mdc_sum": null,
+      "annotations": [],
+      "router_config_override": null,
+      "extra_args": {
+        "sampling_options": {
+          "skip_reading_prefix_cache": false
+        },
+        "skip_reading_prefix_cache": true
+      }
+    },
+    "expected_skip": false,
+    "normalized": true
+  },
+  {
+    "name": "direct_false",
+    "request": {
+      "model": "test",
+      "token_ids": [
+        1
+      ],
+      "stop_conditions": {
+        "max_tokens": null,
+        "stop": null,
+        "stop_token_ids": null,
+        "stop_token_ids_visible": null,
+        "stop_token_ids_hidden": null,
+        "min_tokens": null,
+        "ignore_eos": null,
+        "max_thinking_tokens": null
+      },
+      "sampling_options": {
+        "n": null,
+        "best_of": null,
+        "presence_penalty": null,
+        "frequency_penalty": null,
+        "repetition_penalty": null,
+        "temperature": null,
+        "top_p": null,
+        "top_k": null,
+        "min_p": null,
+        "use_beam_search": null,
+        "length_penalty": null,
+        "seed": null,
+        "include_stop_str_in_output": null,
+        "logit_bias": null,
+        "guided_decoding": null
+      },
+      "output_options": {
+        "logprobs": null,
+        "prompt_logprobs": 0,
+        "skip_special_tokens": null,
+        "formatted_prompt": null,
+        "return_tokens_as_token_ids": null
+      },
+      "skip_reading_prefix_cache": false,
+      "eos_token_ids": [],
+      "mdc_sum": null,
+      "annotations": [],
+      "router_config_override": null,
+      "extra_args": {
+        "skip_reading_prefix_cache": false,
+        "sampling_options": {
+          "skip_reading_prefix_cache": false
+        }
+      }
+    },
+    "expected_skip": false,
+    "normalized": true
+  },
+  {
+    "name": "typed_overrides_legacy",
+    "request": {
+      "model": "test",
+      "token_ids": [
+        1
+      ],
+      "stop_conditions": {
+        "max_tokens": null,
+        "stop": null,
+        "stop_token_ids": null,
+        "stop_token_ids_visible": null,
+        "stop_token_ids_hidden": null,
+        "min_tokens": null,
+        "ignore_eos": null,
+        "max_thinking_tokens": null
+      },
+      "sampling_options": {
+        "n": null,
+        "best_of": null,
+        "presence_penalty": null,
+        "frequency_penalty": null,
+        "repetition_penalty": null,
+        "temperature": null,
+        "top_p": null,
+        "top_k": null,
+        "min_p": null,
+        "use_beam_search": null,
+        "length_penalty": null,
+        "seed": null,
+        "include_stop_str_in_output": null,
+        "logit_bias": null,
+        "guided_decoding": null
+      },
+      "output_options": {
+        "logprobs": null,
+        "prompt_logprobs": 0,
+        "skip_special_tokens": null,
+        "formatted_prompt": null,
+        "return_tokens_as_token_ids": null
+      },
+      "skip_reading_prefix_cache": false,
+      "eos_token_ids": [],
+      "mdc_sum": null,
+      "annotations": [],
+      "router_config_override": null,
+      "extra_args": {
+        "sampling_options": {
+          "skip_reading_prefix_cache": false
+        }
+      }
+    },
+    "expected_skip": false,
+    "normalized": true
+  },
+  {
+    "name": "nested_field_null_masks_direct",
+    "request": {
+      "model": "test",
+      "token_ids": [
+        1
+      ],
+      "stop_conditions": {
+        "max_tokens": null,
+        "stop": null,
+        "stop_token_ids": null,
+        "stop_token_ids_visible": null,
+        "stop_token_ids_hidden": null,
+        "min_tokens": null,
+        "ignore_eos": null,
+        "max_thinking_tokens": null
+      },
+      "sampling_options": {
+        "n": null,
+        "best_of": null,
+        "presence_penalty": null,
+        "frequency_penalty": null,
+        "repetition_penalty": null,
+        "temperature": null,
+        "top_p": null,
+        "top_k": null,
+        "min_p": null,
+        "use_beam_search": null,
+        "length_penalty": null,
+        "seed": null,
+        "include_stop_str_in_output": null,
+        "logit_bias": null,
+        "guided_decoding": null
+      },
+      "output_options": {
+        "logprobs": null,
+        "prompt_logprobs": 0,
+        "skip_special_tokens": null,
+        "formatted_prompt": null,
+        "return_tokens_as_token_ids": null
+      },
+      "skip_reading_prefix_cache": true,
+      "eos_token_ids": [],
+      "mdc_sum": null,
+      "annotations": [],
+      "router_config_override": null,
+      "extra_args": {
+        "sampling_options": {
+          "skip_reading_prefix_cache": true
+        },
+        "skip_reading_prefix_cache": false
+      }
+    },
+    "expected_skip": true,
+    "normalized": true
+  },
+  {
+    "name": "ordinary",
+    "request": {
+      "model": "test",
+      "token_ids": [
+        1
+      ],
+      "stop_conditions": {
+        "max_tokens": null,
+        "stop": null,
+        "stop_token_ids": null,
+        "stop_token_ids_visible": null,
+        "stop_token_ids_hidden": null,
+        "min_tokens": null,
+        "ignore_eos": null,
+        "max_thinking_tokens": null
+      },
+      "sampling_options": {
+        "n": null,
+        "best_of": null,
+        "presence_penalty": null,
+        "frequency_penalty": null,
+        "repetition_penalty": null,
+        "temperature": null,
+        "top_p": null,
+        "top_k": null,
+        "min_p": null,
+        "use_beam_search": null,
+        "length_penalty": null,
+        "seed": null,
+        "include_stop_str_in_output": null,
+        "logit_bias": null,
+        "guided_decoding": null
+      },
+      "output_options": {
+        "logprobs": null,
+        "prompt_logprobs": null,
+        "skip_special_tokens": null,
+        "formatted_prompt": null,
+        "return_tokens_as_token_ids": null
+      },
+      "eos_token_ids": [],
+      "mdc_sum": null,
+      "annotations": [],
+      "router_config_override": null
+    },
+    "expected_skip": false,
+    "normalized": false
+  },
+  {
+    "name": "ordinary_direct_ignored",
+    "request": {
+      "model": "test",
+      "token_ids": [
+        1
+      ],
+      "stop_conditions": {
+        "max_tokens": null,
+        "stop": null,
+        "stop_token_ids": null,
+        "stop_token_ids_visible": null,
+        "stop_token_ids_hidden": null,
+        "min_tokens": null,
+        "ignore_eos": null,
+        "max_thinking_tokens": null
+      },
+      "sampling_options": {
+        "n": null,
+        "best_of": null,
+        "presence_penalty": null,
+        "frequency_penalty": null,
+        "repetition_penalty": null,
+        "temperature": null,
+        "top_p": null,
+        "top_k": null,
+        "min_p": null,
+        "use_beam_search": null,
+        "length_penalty": null,
+        "seed": null,
+        "include_stop_str_in_output": null,
+        "logit_bias": null,
+        "guided_decoding": null
+      },
+      "output_options": {
+        "logprobs": null,
+        "prompt_logprobs": null,
+        "skip_special_tokens": null,
+        "formatted_prompt": null,
+        "return_tokens_as_token_ids": null
+      },
+      "eos_token_ids": [],
+      "mdc_sum": null,
+      "annotations": [],
+      "router_config_override": null,
+      "extra_args": {
+        "skip_reading_prefix_cache": true
+      }
+    },
+    "expected_skip": false,
+    "normalized": false
+  },
+  {
+    "name": "ordinary_nested_true",
+    "request": {
+      "model": "test",
+      "token_ids": [
+        1
+      ],
+      "stop_conditions": {
+        "max_tokens": null,
+        "stop": null,
+        "stop_token_ids": null,
+        "stop_token_ids_visible": null,
+        "stop_token_ids_hidden": null,
+        "min_tokens": null,
+        "ignore_eos": null,
+        "max_thinking_tokens": null
+      },
+      "sampling_options": {
+        "n": null,
+        "best_of": null,
+        "presence_penalty": null,
+        "frequency_penalty": null,
+        "repetition_penalty": null,
+        "temperature": null,
+        "top_p": null,
+        "top_k": null,
+        "min_p": null,
+        "use_beam_search": null,
+        "length_penalty": null,
+        "seed": null,
+        "include_stop_str_in_output": null,
+        "logit_bias": null,
+        "guided_decoding": null
+      },
+      "output_options": {
+        "logprobs": null,
+        "prompt_logprobs": null,
+        "skip_special_tokens": null,
+        "formatted_prompt": null,
+        "return_tokens_as_token_ids": null
+      },
+      "skip_reading_prefix_cache": true,
+      "eos_token_ids": [],
+      "mdc_sum": null,
+      "annotations": [],
+      "router_config_override": null,
+      "extra_args": {
+        "sampling_options": {
+          "skip_reading_prefix_cache": true
+        }
+      }
+    },
+    "expected_skip": true,
+    "normalized": true
+  },
+  {
+    "name": "sampling_container_null",
+    "request": {
+      "model": "test",
+      "token_ids": [
+        1
+      ],
+      "stop_conditions": {
+        "max_tokens": null,
+        "stop": null,
+        "stop_token_ids": null,
+        "stop_token_ids_visible": null,
+        "stop_token_ids_hidden": null,
+        "min_tokens": null,
+        "ignore_eos": null,
+        "max_thinking_tokens": null
+      },
+      "sampling_options": {
+        "n": null,
+        "best_of": null,
+        "presence_penalty": null,
+        "frequency_penalty": null,
+        "repetition_penalty": null,
+        "temperature": null,
+        "top_p": null,
+        "top_k": null,
+        "min_p": null,
+        "use_beam_search": null,
+        "length_penalty": null,
+        "seed": null,
+        "include_stop_str_in_output": null,
+        "logit_bias": null,
+        "guided_decoding": null
+      },
+      "output_options": {
+        "logprobs": null,
+        "prompt_logprobs": 0,
+        "skip_special_tokens": null,
+        "formatted_prompt": null,
+        "return_tokens_as_token_ids": null
+      },
+      "skip_reading_prefix_cache": false,
+      "eos_token_ids": [],
+      "mdc_sum": null,
+      "annotations": [],
+      "router_config_override": null,
+      "extra_args": {
+        "sampling_options": {
+          "skip_reading_prefix_cache": false
+        },
+        "skip_reading_prefix_cache": false
+      }
+    },
+    "expected_skip": false,
+    "normalized": true
+  },
+  {
+    "name": "extra_args_null",
+    "request": {
+      "model": "test",
+      "token_ids": [
+        1
+      ],
+      "stop_conditions": {
+        "max_tokens": null,
+        "stop": null,
+        "stop_token_ids": null,
+        "stop_token_ids_visible": null,
+        "stop_token_ids_hidden": null,
+        "min_tokens": null,
+        "ignore_eos": null,
+        "max_thinking_tokens": null
+      },
+      "sampling_options": {
+        "n": null,
+        "best_of": null,
+        "presence_penalty": null,
+        "frequency_penalty": null,
+        "repetition_penalty": null,
+        "temperature": null,
+        "top_p": null,
+        "top_k": null,
+        "min_p": null,
+        "use_beam_search": null,
+        "length_penalty": null,
+        "seed": null,
+        "include_stop_str_in_output": null,
+        "logit_bias": null,
+        "guided_decoding": null
+      },
+      "output_options": {
+        "logprobs": null,
+        "prompt_logprobs": 0,
+        "skip_special_tokens": null,
+        "formatted_prompt": null,
+        "return_tokens_as_token_ids": null
+      },
+      "skip_reading_prefix_cache": true,
+      "eos_token_ids": [],
+      "mdc_sum": null,
+      "annotations": [],
+      "router_config_override": null,
+      "extra_args": {
+        "sampling_options": {
+          "skip_reading_prefix_cache": true
+        }
+      }
+    },
+    "expected_skip": true,
+    "normalized": true
+  }
+]

@@ -5,10 +5,16 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
+import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from dynamo.llm.exceptions import InvalidArgument
 
 pytestmark = [
     pytest.mark.unit,
@@ -216,18 +222,29 @@ class TestLogprobTokenIds:
     OpenAI adapters do, so `SamplingParams.verify()` accepts the pair."""
 
     @staticmethod
-    def _build(output_options, sampling_options=None, extra_args=None):
+    def _builder():
         from dynamo.vllm.handlers import build_sampling_params
 
-        return build_sampling_params(
+        return build_sampling_params
+
+    @staticmethod
+    def _build(
+        output_options,
+        sampling_options=None,
+        extra_args=None,
+        default_sampling_params=None,
+        **request_fields,
+    ):
+        return TestLogprobTokenIds._builder()(
             {
                 "token_ids": [1, 2, 3],
                 "sampling_options": sampling_options or {},
                 "stop_conditions": {},
                 "output_options": output_options,
                 "extra_args": extra_args or {},
+                **request_fields,
             },
-            {},
+            default_sampling_params or {},
         )
 
     def test_explicit_ids_null_requested_width(self):
@@ -262,6 +279,167 @@ class TestLogprobTokenIds:
             extra_args={"skip_reading_prefix_cache": False},
         )
         assert sp.skip_reading_prefix_cache is False
+
+
+class TestPrefixCacheReadControl:
+    """The typed frontend decision wins over preserved legacy request fields."""
+
+    @pytest.mark.parametrize("value", [0, "false"])
+    def test_typed_decision_rejects_non_boolean_values(self, value):
+        with pytest.raises(
+            InvalidArgument, match="skip_reading_prefix_cache must be a boolean"
+        ):
+            TestLogprobTokenIds._build({}, skip_reading_prefix_cache=value)
+
+    @pytest.mark.parametrize("skip_reading_prefix_cache", [False, True])
+    @pytest.mark.parametrize("prompt_logprobs", [None, 0, 1])
+    def test_typed_decision_overrides_conflicting_legacy_controls(
+        self, skip_reading_prefix_cache, prompt_logprobs
+    ):
+        legacy_value = not skip_reading_prefix_cache
+        extra_args = {
+            "skip_reading_prefix_cache": legacy_value,
+            "sampling_options": {"skip_reading_prefix_cache": legacy_value},
+            "opaque_backend_option": {"keep": True},
+        }
+        sp = TestLogprobTokenIds._build(
+            {"prompt_logprobs": prompt_logprobs},
+            sampling_options={"skip_reading_prefix_cache": legacy_value},
+            extra_args=extra_args,
+            default_sampling_params={"skip_reading_prefix_cache": legacy_value},
+            skip_reading_prefix_cache=skip_reading_prefix_cache,
+        )
+
+        assert sp.skip_reading_prefix_cache is skip_reading_prefix_cache
+        assert sp.prompt_logprobs == prompt_logprobs
+        assert extra_args == {
+            "skip_reading_prefix_cache": legacy_value,
+            "sampling_options": {"skip_reading_prefix_cache": legacy_value},
+            "opaque_backend_option": {"keep": True},
+        }
+
+    @pytest.mark.parametrize("skip_reading_prefix_cache", [False, True])
+    def test_typed_decision_wins_when_nested_legacy_control_is_null(
+        self, skip_reading_prefix_cache
+    ):
+        sp = TestLogprobTokenIds._build(
+            {"prompt_logprobs": 0},
+            extra_args={
+                "skip_reading_prefix_cache": not skip_reading_prefix_cache,
+                "sampling_options": {"skip_reading_prefix_cache": None},
+            },
+            skip_reading_prefix_cache=skip_reading_prefix_cache,
+        )
+
+        assert sp.prompt_logprobs == 0
+        assert sp.skip_reading_prefix_cache is skip_reading_prefix_cache
+
+    @pytest.mark.parametrize(
+        "request_fields", [{}, {"skip_reading_prefix_cache": None}]
+    )
+    @pytest.mark.parametrize(
+        "output_options,extra_args,expected",
+        [
+            ({}, {}, False),
+            ({"prompt_logprobs": 0}, {}, True),
+            (
+                {"prompt_logprobs": 0},
+                {"skip_reading_prefix_cache": False},
+                False,
+            ),
+            (
+                {"prompt_logprobs": 1},
+                {
+                    "skip_reading_prefix_cache": True,
+                    "sampling_options": {"skip_reading_prefix_cache": False},
+                },
+                False,
+            ),
+            (
+                {"prompt_logprobs": 1},
+                {
+                    "skip_reading_prefix_cache": False,
+                    "sampling_options": {"skip_reading_prefix_cache": None},
+                },
+                True,
+            ),
+        ],
+    )
+    def test_old_frontend_requests_retain_legacy_behavior(
+        self, request_fields, output_options, extra_args, expected
+    ):
+        sp = TestLogprobTokenIds._build(
+            output_options, extra_args=extra_args, **request_fields
+        )
+
+        assert sp.skip_reading_prefix_cache is expected
+
+    def test_unnormalized_request_retains_model_prompt_logprobs_default(self):
+        sp = TestLogprobTokenIds._build(
+            {},
+            default_sampling_params={"prompt_logprobs": 1},
+            skip_reading_prefix_cache=None,
+        )
+
+        assert sp.prompt_logprobs == 1
+        assert sp.skip_reading_prefix_cache is True
+
+
+@pytest.fixture
+def rust_cache_read_contract_cases():
+    """Read Rust's checked-in wire corpus or an explicitly exported rerun."""
+    fixture_path = Path(__file__).parent / "data" / "prefix_cache_read_contract.json"
+    if exported_path := os.environ.get("DYNAMO_CACHE_READ_CONTRACT_INPUT"):
+        fixture_path = Path(exported_path)
+    cases = json.loads(fixture_path.read_text())
+    assert cases, "Rust cache-read contract output must contain requests"
+    return cases
+
+
+def test_rust_cache_read_contract_reaches_sampling_params(
+    rust_cache_read_contract_cases,
+):
+    build = TestLogprobTokenIds._builder()
+    for case in rust_cache_read_contract_cases:
+        shadow = (case["request"].get("extra_args") or {}).get("sampling_options") or {}
+        if case["normalized"]:
+            assert (
+                case["request"]["skip_reading_prefix_cache"] is case["expected_skip"]
+            ), case["name"]
+            assert shadow["skip_reading_prefix_cache"] is case["expected_skip"], case[
+                "name"
+            ]
+        else:
+            assert "skip_reading_prefix_cache" not in case["request"], case["name"]
+            assert "skip_reading_prefix_cache" not in shadow, case["name"]
+        sp = build(case["request"], {})
+        assert sp.skip_reading_prefix_cache is case["expected_skip"], case["name"]
+
+
+def test_rust_cache_read_contract_reaches_legacy_worker(rust_cache_read_contract_cases):
+    baseline_path = os.environ.get("DYNAMO_CACHE_READ_CONTRACT_BASELINE_HANDLER")
+    if baseline_path is None:
+        pytest.skip(
+            "set DYNAMO_CACHE_READ_CONTRACT_BASELINE_HANDLER to old worker source"
+        )
+    # Execute the pristine worker's function with real backend dependencies,
+    # without importing another repository's worker module and startup hooks.
+    baseline_tree = ast.parse(Path(baseline_path).read_text())
+    baseline_builder = next(
+        node
+        for node in baseline_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "build_sampling_params"
+    )
+    namespace = dict(TestLogprobTokenIds._builder().__globals__)
+    exec(
+        compile(
+            ast.Module(body=[baseline_builder], type_ignores=[]), baseline_path, "exec"
+        ),
+        namespace,
+    )
+    for case in rust_cache_read_contract_cases:
+        sp = namespace["build_sampling_params"](case["request"], {})
+        assert sp.skip_reading_prefix_cache is case["expected_skip"], case["name"]
 
 
 class TestVllmXargs:

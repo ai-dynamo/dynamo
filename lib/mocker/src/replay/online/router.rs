@@ -283,6 +283,7 @@ impl KvReplayRouter {
             None,
             None,
             None,
+            None,
             config.router_queue_recheck_interval(),
             config.router_track_prefill_tokens,
             scheduler_cancel.clone(),
@@ -352,7 +353,7 @@ impl KvReplayRouter {
         let response = self
             .scheduler
             .schedule_request(ScheduleRequest {
-                prefix_cache_read_resolver: None,
+                prefix_cache_read_allowed: None,
                 mode: ScheduleMode::Tracked {
                     request_id: uuid.to_string(),
                 },

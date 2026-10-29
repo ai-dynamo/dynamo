@@ -23,6 +23,7 @@ use crate::local_model::runtime_config::{
 };
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
+use crate::utils::json::canonicalize_json_object_keys;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_kv_router::identity::{ExplicitIdentityMap, IndexerIdentitySpec};
@@ -59,19 +60,6 @@ fn append_runtime_contract_checksum(
     bytes.extend_from_slice(key.as_bytes());
     bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
     bytes.extend_from_slice(&value);
-}
-
-fn canonicalize_json_object_keys(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Array(values) => {
-            values.iter_mut().for_each(canonicalize_json_object_keys);
-        }
-        serde_json::Value::Object(map) => {
-            map.values_mut().for_each(canonicalize_json_object_keys);
-            map.sort_keys();
-        }
-        _ => {}
-    }
 }
 
 fn append_indexer_identity_checksum(bytes: &mut Vec<u8>, spec: &IndexerIdentitySpec) {
@@ -3627,14 +3615,18 @@ mod ownership_tests {
     }
 
     #[test]
-    fn prefix_cache_read_declaration_preserves_model_identity() {
-        let old_worker = ModelDeploymentCard::with_name_only("model");
-        let mut declared_worker = old_worker.clone();
-        declared_worker.runtime_config.runtime_data.insert(
-            crate::local_model::runtime_config::PREFIX_CACHE_READ_POLICY_RUNTIME_KEY.to_string(),
-            serde_json::json!("vllm_python_v1"),
-        );
-        assert_eq!(old_worker.mdcsum(), declared_worker.mdcsum());
+    fn prefix_cache_read_capability_preserves_card_cache_identity() {
+        let legacy = ModelDeploymentCard::with_name_only("model");
+        for value in [serde_json::json!(false), serde_json::json!(true)] {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config
+                .runtime_data
+                .insert("supports_prefix_cache_read_control".to_string(), value);
+            let decoded: ModelDeploymentCard =
+                serde_json::from_str(&card.to_json().unwrap()).unwrap();
+            assert_eq!(legacy.mdcsum(), decoded.mdcsum());
+            assert_eq!(legacy.local_dir(), decoded.local_dir());
+        }
     }
 
     #[test]
@@ -3784,12 +3776,32 @@ mod ownership_tests {
         );
         let nemotron = card_with_contract(
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"video_pruning_rate": 0.5}),
+            serde_json::json!({
+                "video_pruning_rate": 0.5,
+                "sampling": {"max_frames": 64, "fps": 2.0, "frames": [{"z": 1, "a": 2}, {"y": [3, 1, 2]}]},
+                "enabled": true,
+                "note": null,
+            }),
+        );
+        let same_nemotron = card_with_contract(
+            VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "note": null,
+                "enabled": true,
+                "sampling": {"frames": [{"a": 2, "z": 1}, {"y": [3, 1, 2]}], "fps": 2.0, "max_frames": 64},
+                "video_pruning_rate": 0.5,
+            }),
         );
         let different_nemotron = card_with_contract(
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            serde_json::json!({"video_pruning_rate": 0.25}),
+            serde_json::json!({
+                "video_pruning_rate": 0.5,
+                "sampling": {"max_frames": 64, "fps": 2.0, "frames": [{"z": 1, "a": 3}, {"y": [3, 1, 2]}]},
+                "enabled": true,
+                "note": null,
+            }),
         );
+
         let unrelated = card_with_contract("unrelated_runtime_metadata", serde_json::json!(true));
 
         assert_eq!(missing.mdcsum(), unrelated.mdcsum());
@@ -3801,6 +3813,12 @@ mod ownership_tests {
         assert_ne!(missing.mdcsum(), nemotron.mdcsum());
         assert_ne!(nemotron.mdcsum(), different_nemotron.mdcsum());
         assert_ne!(qwen.mdcsum(), nemotron.mdcsum());
+        assert_eq!(nemotron.mdcsum(), same_nemotron.mdcsum());
+        // Pins the separator, length framing, and canonical bytes of the contract.
+        assert_eq!(
+            nemotron.mdcsum(),
+            "88381ff5b5f10389bacc63e1e2bac947a76ffc5b32c4864b7499f0d10928a96e"
+        );
     }
 }
 

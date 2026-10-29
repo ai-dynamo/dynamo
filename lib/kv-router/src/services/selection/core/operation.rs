@@ -26,8 +26,8 @@ use super::super::input::PromptView;
 /// feeds worker selection, `session` says what the core does with the session
 /// table, `affinity_target` and `pinned_worker` are explicit steering.
 pub struct SelectionOperation<'a> {
-    /// Host-owned request resolver; no backend semantics are assumed by the scheduler.
-    pub prefix_cache_read_resolver: Option<crate::protocols::PrefixCacheReadResolver>,
+    /// Frontend-normalized permission; None retains legacy cache-credit estimates.
+    pub prefix_cache_read_allowed: Option<bool>,
     pub key: RoutingPartitionId,
     pub prompt: PromptView<'a>,
     pub router_config_override: Option<RouterConfigOverride>,

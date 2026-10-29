@@ -11,6 +11,7 @@ use std::{
 };
 
 use crate::kv_router::SelectionPolicySource;
+use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_kv_router::{
     config::KvRouterConfig,
     protocols::RoutingConstraints,
@@ -56,132 +57,6 @@ fn request() -> PreprocessedRequest {
         .output_options(Default::default())
         .build()
         .unwrap()
-}
-
-#[rstest::rstest]
-#[case::ordinary(None, None, false, 64)]
-#[case::prompt_zero(Some(0), None, false, 0)]
-#[case::prompt_one(Some(1), None, false, 0)]
-#[case::explicit_false(Some(1), Some(serde_json::json!({"sampling_options": {"skip_reading_prefix_cache": false}})), false, 64)]
-#[case::explicit_true(None, Some(serde_json::json!({"sampling_options": {"skip_reading_prefix_cache": true}})), false, 0)]
-#[case::direct_false(Some(1), Some(serde_json::json!({"skip_reading_prefix_cache": false})), false, 64)]
-#[case::ordinary_direct_extra_ignored(None, Some(serde_json::json!({"skip_reading_prefix_cache": true})), false, 64)]
-#[case::legacy_worker(Some(1), None, true, 64)]
-#[tokio::test]
-#[serial_test::serial]
-async fn prefix_cache_bypass_preserves_raw_overlap_but_books_fresh_work(
-    #[case] prompt_logprobs: Option<u32>,
-    #[case] extra_args: Option<serde_json::Value>,
-    #[case] legacy_worker: bool,
-    #[case] expected_cached: usize,
-) {
-    use dynamo_kv_router::protocols::{BlockHashOptions, StorageTier, compute_block_hash_for_seq};
-    let mut config = ModelRuntimeConfig::default();
-    if !legacy_worker {
-        config.runtime_data.insert(
-            "prefix_cache_read_policy".to_string(),
-            serde_json::json!("vllm_python_v1"),
-        );
-    }
-    let (host, runtime) = router_with_config(
-        None,
-        HashMap::from([(7, config)]),
-        KvRouterConfig {
-            // Apply the known STORE directly; no network event subscriber is
-            // needed for this request-plane regression.
-            use_kv_events: false,
-            skip_initial_worker_wait: true,
-            router_track_active_blocks: false,
-            router_track_prefill_tokens: true,
-            ..Default::default()
-        },
-    )
-    .await;
-    let prefix = vec![1; 64];
-    let hashes = compute_block_hash_for_seq(&prefix, 16, BlockHashOptions::default());
-    let event = crate::kv_router::indexer::test_util::store_event(
-        7,
-        0,
-        1,
-        &[],
-        &hashes.iter().map(|hash| hash.0).collect::<Vec<_>>(),
-        StorageTier::Device,
-    );
-    host.kv_router()
-        .indexer()
-        .apply_event_routed(event)
-        .await
-        .unwrap();
-    let mut req = request();
-    req.token_ids = Arc::new([prefix, vec![2]].concat());
-    let options = |admission| SelectionOptions {
-        pinned_target: None,
-        affinity_target: None,
-        planned_worker: None,
-        policy_class: None,
-        session_context: None,
-        admission,
-    };
-    // The real event-driven indexer must expose the physical prefix before we
-    // assert anything about this request's eligibility to read it.
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let selected = host
-                .select_worker_outcome(
-                    "cache-read-warm",
-                    &req,
-                    RoutingRequestParts::new(&req),
-                    RequestPhase::Aggregated,
-                    true,
-                    options(crate::kv_router::FindBestMatchAdmission::WithoutAdmission),
-                )
-                .await
-                .unwrap()
-                .into_result()
-                .unwrap();
-            if selected.overlap_amount == 4 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    req.output_options.prompt_logprobs = prompt_logprobs;
-    req.extra_args = extra_args;
-    let selected = host
-        .select_worker_outcome(
-            "cache-read-subject",
-            &req,
-            RoutingRequestParts::new(&req),
-            RequestPhase::Aggregated,
-            false,
-            options(crate::kv_router::FindBestMatchAdmission::WithAdmission),
-        )
-        .await
-        .unwrap()
-        .into_result()
-        .unwrap();
-    let loads = potential_loads(&host).await;
-    let observed = (
-        selected.cached_tokens,
-        selected.selected_raw_cached_tokens,
-        loads
-            .iter()
-            .find(|load| load.worker_id == 7)
-            .unwrap()
-            .potential_prefill_tokens,
-    );
-    drop(selected);
-    host.kv_router()
-        .selection
-        .scheduler()
-        .admission_barrier()
-        .await
-        .unwrap();
-    drop(host);
-    runtime.shutdown();
-    assert_eq!(observed, (expected_cached, Some(64), 65 - expected_cached));
 }
 
 async fn test_load_context(client: &Client) -> Arc<RoutingLoadContext> {
@@ -408,7 +283,7 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
         crate::session_affinity::SessionAffinityMode::Soft,
     );
     let session_id = SessionAffinityId::new("direct-soft-bound");
-    bind_affinity_target(&host, &session_id, AffinityTarget::worker(worker_id)).await;
+    bind_affinity_target(&host, &session_id, AffinityTarget::new(worker_id, Some(0))).await;
 
     let mut stream = host
         .generate(affinity_request("direct-soft-bound", None))
@@ -417,6 +292,7 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
     while stream.next().await.is_some() {}
 
     assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+    assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[Some(0)]);
     drop(host);
     runtime.shutdown();
 }
@@ -424,6 +300,7 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
 #[derive(Default)]
 struct CompletedBuiltinDispatch {
     worker_ids: Mutex<Vec<u64>>,
+    dp_ranks: Mutex<Vec<Option<u32>>>,
 }
 
 #[async_trait]
@@ -435,7 +312,11 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
         request: SingleIn<AddressedRequest<PreprocessedRequest>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (addressed, context) = request.transfer(());
-        let (_, _, instance) = addressed.into_parts();
+        let (content, _, instance) = addressed.into_parts();
+        self.dp_ranks
+            .lock()
+            .unwrap()
+            .push(content.routing.as_ref().and_then(|routing| routing.dp_rank));
         self.worker_ids
             .lock()
             .unwrap()
@@ -492,7 +373,7 @@ async fn builtin_hard_affinity_ignores_local_inhibition() {
     );
 
     let session_id = SessionAffinityId::new("local-inhibition");
-    bind_affinity_target(&host, &session_id, AffinityTarget::worker(worker_id)).await;
+    bind_affinity_target(&host, &session_id, AffinityTarget::new(worker_id, Some(1))).await;
 
     client.report_instance_down(worker_id);
     assert!(client.instance_ids().contains(&worker_id));
@@ -506,9 +387,10 @@ async fn builtin_hard_affinity_ignores_local_inhibition() {
     assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
     assert_eq!(
         affinity.query_target(&session_id, None).unwrap(),
-        Some(AffinityTarget::worker(worker_id))
+        Some(AffinityTarget::new(worker_id, Some(1)))
     );
 
+    assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[Some(1)]);
     drop(host);
     runtime.shutdown();
 }
@@ -660,6 +542,219 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
         );
     }
 
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let component = distributed
+        .namespace("builtin-soft-affinity-rank-fallback".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap();
+
+    for (index, (mode, transport_fallback)) in [
+        (RouterMode::RoundRobin, false),
+        (RouterMode::PowerOfTwoChoices, false),
+        (RouterMode::RoundRobin, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let endpoint = component.endpoint(format!("case-{index}"));
+        let mut client = endpoint.client().await.unwrap();
+        tokio::task::yield_now().await;
+        let id = endpoint.id();
+        let instances: Vec<_> = [101, 202]
+            .into_iter()
+            .map(|instance_id| Instance {
+                namespace: id.namespace.clone(),
+                component: id.component.clone(),
+                endpoint: id.name.clone(),
+                instance_id,
+                transport: dynamo_runtime::component::TransportType::Nats(format!(
+                    "rank-fallback.{index}.{instance_id}"
+                )),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .collect();
+        let (source_tx, source_rx) = watch::channel(instances.clone());
+        client.instance_source = Arc::new(source_rx);
+        client.override_discovered_instances(vec![101, 202]);
+        client.override_instance_avail(vec![101, 202]);
+        let load_context = test_load_context(&client).await;
+        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+        let inner = PushRouter::from_client_with_dispatch(
+            client.clone(),
+            mode,
+            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+        )
+        .await
+        .unwrap();
+        let (host, affinity) = builtin_host_with_affinity(
+            inner,
+            load_context,
+            crate::session_affinity::SessionAffinityMode::Soft,
+        );
+
+        let mut first = affinity_request("rank-fallback", Some(101));
+        first.routing_mut().dp_rank = Some(1);
+        let mut stream = host.generate(first).await.unwrap();
+        while stream.next().await.is_some() {}
+        let mut stream = host
+            .generate(affinity_request("rank-fallback", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[Some(1); 2]);
+
+        if transport_fallback {
+            // The selection view still contains A, but dispatch can only reach B.
+            source_tx.send(instances[1..].to_vec()).unwrap();
+            assert!(client.is_instance_discovered(101));
+            assert!(!client.is_instance_live(101));
+        } else {
+            client.set_overloaded_instances(&[101]);
+        }
+        let mut stream = host
+            .generate(affinity_request("rank-fallback", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.dp_ranks.lock().unwrap().as_slice(),
+            &[Some(1), Some(1), None],
+            "fallback must not inherit the original worker's rank"
+        );
+        assert_eq!(
+            affinity
+                .query_target(&SessionAffinityId::new("rank-fallback"), None)
+                .unwrap(),
+            Some(AffinityTarget::new(101, Some(1))),
+            "worker-only fallback must preserve the known ranked affinity target"
+        );
+
+        let mut stream = host
+            .generate(affinity_request("rank-fallback", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[101, 101, 202, 202]
+        );
+        assert_eq!(
+            dispatch.dp_ranks.lock().unwrap().as_slice(),
+            &[Some(1), Some(1), None, None],
+            "dispatched ranks for {mode:?}, transport_fallback={transport_fallback}"
+        );
+        if transport_fallback {
+            source_tx.send(instances).unwrap();
+        } else {
+            client.set_overloaded_instances(&[]);
+        }
+        let mut stream = host
+            .generate(affinity_request("rank-fallback", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(dispatch.worker_ids.lock().unwrap().last(), Some(&101));
+        assert_eq!(dispatch.dp_ranks.lock().unwrap().last(), Some(&Some(1)));
+        drop(host);
+    }
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_soft_affinity_rebinds_after_worker_exit() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let component = distributed
+        .namespace("builtin-soft-affinity-worker-exit".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap();
+
+    for (index, mode) in [RouterMode::RoundRobin, RouterMode::PowerOfTwoChoices]
+        .into_iter()
+        .enumerate()
+    {
+        let endpoint = component.endpoint(format!("case-{index}"));
+        let mut client = endpoint.client().await.unwrap();
+        tokio::task::yield_now().await;
+        let id = endpoint.id();
+        let instances: Vec<_> = [101, 202, 303]
+            .into_iter()
+            .map(|instance_id| Instance {
+                namespace: id.namespace.clone(),
+                component: id.component.clone(),
+                endpoint: id.name.clone(),
+                instance_id,
+                transport: dynamo_runtime::component::TransportType::Nats(format!(
+                    "worker-exit.{index}.{instance_id}"
+                )),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .collect();
+        let (source_tx, source_rx) = watch::channel(instances.clone());
+        client.instance_source = Arc::new(source_rx);
+        client.override_discovered_instances(vec![101, 202, 303]);
+        client.override_instance_avail(vec![101, 202, 303]);
+        let load_context = test_load_context(&client).await;
+        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+        let inner = PushRouter::from_client_with_dispatch(
+            client.clone(),
+            mode,
+            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+        )
+        .await
+        .unwrap();
+        let (host, affinity) = builtin_host_with_affinity(
+            inner,
+            load_context,
+            crate::session_affinity::SessionAffinityMode::Soft,
+        );
+        let session_id = SessionAffinityId::new("worker-exit");
+        bind_affinity_target(&host, &session_id, AffinityTarget::new(101, Some(1))).await;
+
+        source_tx.send(instances[1..].to_vec()).unwrap();
+        client.override_discovered_instances(vec![202, 303]);
+        client.override_instance_avail(vec![202, 303]);
+        let mut first = host
+            .generate(affinity_request("worker-exit", None))
+            .await
+            .unwrap();
+        while first.next().await.is_some() {}
+        let replacement = *dispatch.worker_ids.lock().unwrap().last().unwrap();
+        assert!([202, 303].contains(&replacement));
+        assert_eq!(
+            affinity.query_target(&session_id, None).unwrap(),
+            Some(AffinityTarget::worker(replacement))
+        );
+
+        for _ in 0..2 {
+            let mut stream = host
+                .generate(affinity_request("worker-exit", None))
+                .await
+                .unwrap();
+            while stream.next().await.is_some() {}
+        }
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[replacement; 3]
+        );
+        assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[None; 3]);
+    }
     runtime.shutdown();
 }
 
@@ -1727,6 +1822,8 @@ async fn router_with_config_and_classifier(
 #[derive(Default)]
 struct PendingThenCompletedDispatch {
     worker_ids: Mutex<Vec<u64>>,
+    cache_read_controls: Mutex<Vec<Option<bool>>>,
+    cache_read_shadows: Mutex<Vec<Option<bool>>>,
 }
 
 #[async_trait]
@@ -1739,7 +1836,19 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         tokio::task::yield_now().await;
         let (addressed, context) = request.transfer(());
-        let (_, _, instance) = addressed.into_parts();
+        let (content, _, instance) = addressed.into_parts();
+        self.cache_read_controls
+            .lock()
+            .unwrap()
+            .push(content.skip_reading_prefix_cache);
+        self.cache_read_shadows.lock().unwrap().push(
+            content
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra.get("sampling_options"))
+                .and_then(|sampling| sampling.get("skip_reading_prefix_cache"))
+                .and_then(serde_json::Value::as_bool),
+        );
         self.worker_ids
             .lock()
             .unwrap()
@@ -1776,6 +1885,34 @@ async fn router_with_recorded_dispatch_and_affinity(
     namespace: &str,
     session_affinity_ttl: Option<Duration>,
 ) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
+    router_with_recorded_dispatch_and_config(
+        namespace,
+        session_affinity_ttl,
+        ModelRuntimeConfig::default(),
+    )
+    .await
+}
+
+async fn router_with_recorded_dispatch_and_config(
+    namespace: &str,
+    session_affinity_ttl: Option<Duration>,
+    worker_config: ModelRuntimeConfig,
+) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
+    router_with_recorded_dispatch_and_classifier(
+        namespace,
+        session_affinity_ttl,
+        worker_config,
+        None::<RecordingClassifier>,
+    )
+    .await
+}
+
+async fn router_with_recorded_dispatch_and_classifier(
+    namespace: &str,
+    session_affinity_ttl: Option<Duration>,
+    worker_config: ModelRuntimeConfig,
+    classifier: Option<impl RequestClassifier>,
+) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -1789,7 +1926,7 @@ async fn router_with_recorded_dispatch_and_affinity(
     let client = endpoint.client().await.unwrap();
     endpoint.register_endpoint_instance().await.unwrap();
     let worker_id = client.wait_for_instances().await.unwrap()[0].id();
-    let workers = HashMap::from([(worker_id, ModelRuntimeConfig::default())]);
+    let workers = HashMap::from([(worker_id, worker_config)]);
     let (_workers_tx, workers) = watch::channel(workers);
     let config = KvRouterConfig {
         skip_initial_worker_wait: true,
@@ -1797,7 +1934,7 @@ async fn router_with_recorded_dispatch_and_affinity(
         router_track_active_blocks: false,
         ..Default::default()
     };
-    let chooser = KvRouter::new(
+    let mut chooser = KvRouter::new(
         endpoint,
         client.clone(),
         workers,
@@ -1814,6 +1951,9 @@ async fn router_with_recorded_dispatch_and_affinity(
     )
     .await
     .unwrap();
+    if let Some(classifier) = classifier {
+        chooser = chooser.with_request_classifier(classifier).unwrap();
+    }
     let dispatch = Arc::new(PendingThenCompletedDispatch::default());
     let inner = PushRouter::from_client_with_dispatch(
         client,
@@ -1824,6 +1964,343 @@ async fn router_with_recorded_dispatch_and_affinity(
     .unwrap();
     let router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
     (router, dispatch, worker_id, runtime)
+}
+
+fn cache_read_capable_config() -> ModelRuntimeConfig {
+    let mut config = ModelRuntimeConfig::default();
+    config.runtime_data.insert(
+        "supports_prefix_cache_read_control".to_string(),
+        serde_json::json!(true),
+    );
+    config
+}
+
+#[tokio::test]
+async fn frontend_prefix_cache_read_wire_contract() {
+    use serde_json::json;
+
+    let (host, runtime) =
+        router_with_worker_configs(None, HashMap::from([(7, cache_read_capable_config())])).await;
+    let mut corpus = Vec::new();
+    for (name, prompt_logprobs, extra, typed, expected_skip, normalized) in [
+        ("prompt_zero", Some(0), None, None, true, true),
+        (
+            "nested_false",
+            Some(0),
+            Some(
+                json!({"sampling_options": {"skip_reading_prefix_cache": false}, "skip_reading_prefix_cache": true}),
+            ),
+            None,
+            false,
+            true,
+        ),
+        (
+            "direct_false",
+            Some(0),
+            Some(json!({"skip_reading_prefix_cache": false})),
+            None,
+            false,
+            true,
+        ),
+        (
+            "typed_overrides_legacy",
+            Some(0),
+            Some(json!({"sampling_options": {"skip_reading_prefix_cache": true}})),
+            Some(false),
+            false,
+            true,
+        ),
+        (
+            "nested_field_null_masks_direct",
+            Some(0),
+            Some(
+                json!({"sampling_options": {"skip_reading_prefix_cache": null}, "skip_reading_prefix_cache": false}),
+            ),
+            None,
+            true,
+            true,
+        ),
+        ("ordinary", None, None, None, false, false),
+        (
+            "ordinary_direct_ignored",
+            None,
+            Some(json!({"skip_reading_prefix_cache": true})),
+            None,
+            false,
+            false,
+        ),
+        (
+            "ordinary_nested_true",
+            None,
+            Some(json!({"sampling_options": {"skip_reading_prefix_cache": true}})),
+            None,
+            true,
+            true,
+        ),
+        (
+            "sampling_container_null",
+            Some(0),
+            Some(json!({"sampling_options": null, "skip_reading_prefix_cache": false})),
+            None,
+            false,
+            true,
+        ),
+        (
+            "extra_args_null",
+            Some(0),
+            Some(json!(null)),
+            None,
+            true,
+            true,
+        ),
+    ] {
+        let mut input = request();
+        input.output_options.prompt_logprobs = prompt_logprobs;
+        input.extra_args = extra;
+        input.skip_reading_prefix_cache = typed;
+        host.normalize_prefix_cache_read_control(&mut input, RequestPhase::Aggregated);
+        let wire = serde_json::to_value(&input).unwrap();
+        if normalized {
+            assert_eq!(wire["skip_reading_prefix_cache"], expected_skip, "{name}");
+            assert_eq!(
+                wire["extra_args"]["sampling_options"]["skip_reading_prefix_cache"], expected_skip,
+                "{name}"
+            );
+        } else {
+            assert!(wire.get("skip_reading_prefix_cache").is_none(), "{name}");
+            assert!(
+                wire["extra_args"]["sampling_options"]
+                    .get("skip_reading_prefix_cache")
+                    .is_none(),
+                "{name}"
+            );
+        }
+        corpus.push(json!({
+            "name": name,
+            "request": wire,
+            "expected_skip": expected_skip,
+            "normalized": normalized,
+        }));
+    }
+    if let Some(output) = std::env::var_os("DYNAMO_CACHE_READ_CONTRACT_OUTPUT") {
+        std::fs::write(output, serde_json::to_vec_pretty(&corpus).unwrap()).unwrap();
+    }
+    // Read after exporting so the documented regeneration command can replace
+    // the fixture without comparing against a stale compile-time include.
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../components/src/dynamo/vllm/tests/data/prefix_cache_read_contract.json");
+    let expected: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
+    assert_eq!(
+        corpus, expected,
+        "regenerate the shared Rust/Python wire contract fixture"
+    );
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn prefix_cache_control_gates_mixed_pools_and_preserves_legacy_inputs() {
+    for (workers, expected) in [
+        (HashMap::new(), None),
+        (HashMap::from([(7, ModelRuntimeConfig::default())]), None),
+        (
+            HashMap::from([
+                (7, cache_read_capable_config()),
+                (8, ModelRuntimeConfig::default()),
+            ]),
+            None,
+        ),
+        (
+            HashMap::from([
+                (7, cache_read_capable_config()),
+                (8, cache_read_capable_config()),
+            ]),
+            Some(false),
+        ),
+    ] {
+        let (host, runtime) = router_with_worker_configs(None, workers).await;
+        let mut input = request();
+        input.output_options.prompt_logprobs = Some(0);
+        input.skip_reading_prefix_cache = Some(false);
+        input.extra_args = Some(serde_json::json!({
+            "sampling_options": {"skip_reading_prefix_cache": true, "temperature": 0.2},
+            "other": {"value": 7}
+        }));
+        host.normalize_prefix_cache_read_control(&mut input, RequestPhase::Aggregated);
+        assert_eq!(input.skip_reading_prefix_cache, expected);
+        assert_eq!(
+            input.extra_args,
+            Some(serde_json::json!({
+                "sampling_options": {"skip_reading_prefix_cache": false, "temperature": 0.2},
+                "other": {"value": 7}
+            }))
+        );
+
+        input.skip_reading_prefix_cache = Some(true);
+        input.extra_args = Some(serde_json::json!({"sampling_options": ["invalid"]}));
+        let invalid = input.extra_args.clone();
+        host.normalize_prefix_cache_read_control(&mut input, RequestPhase::Aggregated);
+        assert_eq!(input.skip_reading_prefix_cache, None);
+        assert_eq!(input.extra_args, invalid);
+        drop(host);
+        runtime.shutdown();
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn prefix_cache_control_reaches_native_query_selection_and_worker_dispatch() {
+    let (host, dispatch, worker_id, runtime) = router_with_recorded_dispatch_and_config(
+        "prefix-cache-read-control",
+        None,
+        cache_read_capable_config(),
+    )
+    .await;
+    let tokens = (0..32).collect::<Vec<_>>();
+    host.kv_router()
+        .record_routing_decision(
+            TokensWithHashes::new(tokens.clone(), 16),
+            WorkerWithDpRank::from_worker_id(worker_id),
+        )
+        .await
+        .unwrap();
+    let mut warm = request();
+    warm.token_ids = Arc::new(tokens.clone());
+    let warm = Context::new(warm);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (selection, _) = host
+                .select_with_affinity(
+                    &warm,
+                    RequestPhase::Aggregated,
+                    true,
+                    &CleanupBudget::default(),
+                )
+                .await
+                .unwrap();
+            if selection.cached_tokens == tokens.len() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("recorded prefix becomes visible");
+
+    for (prompt_logprobs, extra, typed, expected, cached_tokens, query_only) in [
+        (Some(0), None, None, Some(true), 0, true),
+        (
+            Some(0),
+            Some(serde_json::json!({"skip_reading_prefix_cache": false})),
+            None,
+            Some(false),
+            32,
+            false,
+        ),
+        (
+            None,
+            Some(serde_json::json!({"sampling_options": {"skip_reading_prefix_cache": true}})),
+            None,
+            Some(true),
+            0,
+            false,
+        ),
+        (None, None, None, None, 32, false),
+        (
+            Some(0),
+            Some(serde_json::json!({"sampling_options": {"skip_reading_prefix_cache": true}})),
+            Some(false),
+            Some(false),
+            32,
+            false,
+        ),
+    ] {
+        let tracker = Arc::new(RequestTracker::new());
+        let mut input = request();
+        input.token_ids = Arc::new(tokens.clone());
+        input.output_options.prompt_logprobs = prompt_logprobs;
+        input.extra_args = extra;
+        input.skip_reading_prefix_cache = typed;
+        input.tracker = Some(Arc::clone(&tracker));
+        if query_only {
+            input.annotations.push("query_instance_id:true".to_string());
+        }
+        let mut stream = host.generate(Context::new(input)).await.unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(tracker.cached_tokens(), Some(cached_tokens));
+        if !query_only {
+            assert_eq!(
+                *dispatch.cache_read_controls.lock().unwrap().last().unwrap(),
+                expected
+            );
+            // An N-2 worker ignoring the new field reads this same explicit decision.
+            assert_eq!(
+                *dispatch.cache_read_shadows.lock().unwrap().last().unwrap(),
+                expected
+            );
+        }
+    }
+    assert_eq!(dispatch.worker_ids.lock().unwrap().len(), 4);
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn prefix_cache_control_keeps_legacy_shadow_while_selection_waits() {
+    let entered = Arc::new(Notify::new());
+    let resumed = Arc::new(Notify::new());
+    let (mut host, dispatch, worker_id, runtime) = router_with_recorded_dispatch_and_classifier(
+        "prefix-cache-read-queue",
+        None,
+        cache_read_capable_config(),
+        Some(PausingClassifier {
+            entered: Arc::clone(&entered),
+            resumed: Arc::clone(&resumed),
+        }),
+    )
+    .await;
+    let RoutingPolicy::Kv(chooser) = &mut host.policy else {
+        unreachable!()
+    };
+    let (worker_configs_tx, worker_configs_rx) =
+        watch::channel(HashMap::from([(worker_id, cache_read_capable_config())]));
+    Arc::get_mut(chooser).unwrap().workers_with_configs = worker_configs_rx;
+    let mut input = request();
+    input.output_options.prompt_logprobs = Some(0);
+    input.extra_args = Some(serde_json::json!({"skip_reading_prefix_cache": false}));
+    let mut generate = Box::pin(host.generate(Context::new(input)));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            _ = entered.notified() => {},
+            result = &mut generate => panic!("selection must pause: {:?}", result.err()),
+        }
+    })
+    .await
+    .unwrap();
+    // A legacy worker may become eligible after the capability snapshot. The
+    // shadow remains sufficient even when that worker ignores the typed field.
+    worker_configs_tx
+        .send(HashMap::from([(worker_id, ModelRuntimeConfig::default())]))
+        .unwrap();
+    resumed.notify_one();
+    let mut stream = tokio::time::timeout(Duration::from_secs(5), &mut generate)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(generate);
+    while stream.next().await.is_some() {}
+    assert_eq!(
+        dispatch.cache_read_controls.lock().unwrap().as_slice(),
+        &[Some(false)]
+    );
+    assert_eq!(
+        dispatch.cache_read_shadows.lock().unwrap().as_slice(),
+        &[Some(false)]
+    );
+    drop(host);
+    runtime.shutdown();
 }
 
 /// Select and admit a request in the given phase, then stop its context, leaving
@@ -1924,7 +2401,11 @@ struct RecordingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for RecordingClassifier {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(async move { Ok(request) })
     }
@@ -1957,7 +2438,11 @@ struct RejectingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for RejectingClassifier {
-    fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        _request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(async { Err(Box::new(ClassifierRejected) as Box<ClassifierError>) })
     }
@@ -2027,7 +2512,11 @@ struct TypedRejectingClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for TypedRejectingClassifier {
-    fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        _request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let error_type = self.error_type;
         Box::pin(async move {
@@ -2226,7 +2715,11 @@ struct PausingClassifier {
 }
 
 impl RequestClassifier for PausingClassifier {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         let entered = Arc::clone(&self.entered);
         let resumed = Arc::clone(&self.resumed);
         Box::pin(async move {
@@ -2341,9 +2834,13 @@ struct TokenContractClassifier {
 
 #[async_trait::async_trait]
 impl RequestClassifier for TokenContractClassifier {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
         self.classified
-            .send((request.input_tokens(), request.progress().clone()))
+            .send((request.isl_tokens(), request.progress().clone()))
             .unwrap();
         Box::pin(async move { Ok(request) })
     }

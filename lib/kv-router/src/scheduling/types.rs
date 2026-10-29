@@ -399,8 +399,8 @@ impl SessionContext {
 
 /// Validated request accepted by [`LocalScheduler`](super::LocalScheduler).
 pub struct ScheduleRequest {
-    /// Host-owned request resolver; no backend semantics are assumed by the scheduler.
-    pub prefix_cache_read_resolver: Option<crate::protocols::PrefixCacheReadResolver>,
+    /// Frontend-normalized permission; None retains legacy cache-credit estimates.
+    pub prefix_cache_read_allowed: Option<bool>,
     pub mode: ScheduleMode,
     pub token_seq: Option<Vec<SequenceHash>>,
     pub block_hashes: Option<Vec<LocalBlockHash>>,
@@ -432,8 +432,8 @@ pub struct ScheduleRequest {
 /// scheduler owns this request and its sender. Dropping the caller's selection
 /// future closes that receiver, but cannot retract the request from the actor.
 pub struct SchedulingRequest {
-    /// Host-owned request resolver; no backend semantics are assumed by the scheduler.
-    pub prefix_cache_read_resolver: Option<crate::protocols::PrefixCacheReadResolver>,
+    /// Frontend-normalized permission; None retains legacy cache-credit estimates.
+    pub prefix_cache_read_allowed: Option<bool>,
     // Request identity and payload.
     pub mode: ScheduleMode,
     pub token_seq: Option<Vec<SequenceHash>>,
@@ -502,32 +502,25 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
     }
 
     pub fn best_cached_tokens(&self) -> usize {
+        if self.request.prefix_cache_read_allowed == Some(false) {
+            return 0;
+        }
         match self.eligibility.pinned_worker() {
             Some(worker) => self
                 .eligibility
                 .validate_worker_rank(self.workers, worker)
-                .map_or(0, |config| {
-                    self.request.effective_cached_tokens_for(
-                        worker,
-                        self.request.prefix_cache_read_allowed(config),
-                    )
-                }),
+                .map_or(0, |_| self.request.effective_cached_tokens_for(worker)),
             None => self
                 .request
                 .overlap
                 .effective_cached_tokens
-                .keys()
-                .filter_map(|worker| {
-                    let config = self.workers.get(&worker.worker_id)?;
-                    self.eligibility
-                        .allows_worker(worker.worker_id, config)
-                        .then(|| {
-                            self.request.effective_cached_tokens_for(
-                                *worker,
-                                self.request.prefix_cache_read_allowed(config),
-                            )
-                        })
+                .iter()
+                .filter(|(worker, _)| {
+                    self.workers.get(&worker.worker_id).is_some_and(|config| {
+                        self.eligibility.allows_worker(worker.worker_id, config)
+                    })
                 })
+                .map(|(_, cached_tokens)| *cached_tokens)
                 .max()
                 .unwrap_or(0),
         }
@@ -535,12 +528,6 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
 }
 
 impl SchedulingRequest {
-    pub(crate) fn prefix_cache_read_allowed(&self, config: &impl WorkerConfigLike) -> Option<bool> {
-        self.prefix_cache_read_resolver
-            .as_ref()
-            .and_then(|resolve| resolve(config.prefix_cache_read_policy()))
-    }
-
     #[inline]
     pub fn eligibility(&self) -> RoutingEligibility<'_> {
         self.eligibility_with_overloaded(None)
@@ -559,12 +546,8 @@ impl SchedulingRequest {
         )
     }
 
-    pub(crate) fn effective_cached_tokens_for(
-        &self,
-        worker: WorkerWithDpRank,
-        cache_read_allowed: Option<bool>,
-    ) -> usize {
-        if cache_read_allowed == Some(false) {
+    pub(crate) fn effective_cached_tokens_for(&self, worker: WorkerWithDpRank) -> usize {
+        if self.prefix_cache_read_allowed == Some(false) {
             return 0;
         }
 
@@ -596,12 +579,8 @@ impl SchedulingRequest {
         device.saturating_add(host_pinned)
     }
 
-    pub(crate) fn effective_overlap_blocks_for(
-        &self,
-        worker: WorkerWithDpRank,
-        cache_read_allowed: Option<bool>,
-    ) -> f64 {
-        if cache_read_allowed == Some(false) {
+    pub(crate) fn effective_overlap_blocks_for(&self, worker: WorkerWithDpRank) -> f64 {
+        if self.prefix_cache_read_allowed == Some(false) {
             return 0.0;
         }
 
@@ -616,13 +595,17 @@ impl SchedulingRequest {
         self.worker_loads
             .get(&worker)
             .copied()
-            .unwrap_or_else(|| WorkerLoadProjection {
-                // A configured worker can precede its load projection. With no
-                // active-prefix evidence, count the full tracked request rather
-                // than treating its blocks as already present on that worker.
-                additional_active_blocks: self.token_seq.as_ref().map_or(0, Vec::len),
-                ..Default::default()
-            })
+            .unwrap_or_else(|| self.unobserved_worker_load())
+    }
+
+    /// Load assumed for a configured worker that precedes its load projection. With no
+    /// active-prefix evidence, count the full tracked request rather than treating its
+    /// blocks as already present on that worker.
+    pub(crate) fn unobserved_worker_load(&self) -> WorkerLoadProjection {
+        WorkerLoadProjection {
+            additional_active_blocks: self.token_seq.as_ref().map_or(0, Vec::len),
+            ..Default::default()
+        }
     }
 
     pub(crate) fn request_blocks(&self, block_size: u32) -> u64 {
@@ -683,7 +666,7 @@ mod tests {
         );
 
         SchedulingRequest {
-            prefix_cache_read_resolver: None,
+            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -752,7 +735,7 @@ mod tests {
             SchedulingContext::new(&request, &workers).best_effective_prefill_tokens(),
             1
         );
-        request.prefix_cache_read_resolver = Some(Arc::new(|_| Some(false)));
+        request.prefix_cache_read_allowed = Some(false);
         let context = SchedulingContext::new(&request, &workers);
         assert_eq!(context.best_cached_tokens(), 0);
         assert_eq!(context.best_effective_prefill_tokens(), 65);

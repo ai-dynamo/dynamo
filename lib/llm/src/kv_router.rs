@@ -20,6 +20,7 @@ use dynamo_kv_router::{
         ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
     },
     kv_hints::KvHint,
+    plugins::worker_selection::WorkerInfo,
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, PrefillLoadHint, RouterEvent, RouterRequest,
@@ -28,7 +29,7 @@ use dynamo_kv_router::{
     },
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, PotentialLoad,
-        RequestClassifier, RequestClassifierContext, RequestClassifierWorker,
+        RejectThresholdsProvider, RequestClassifier, RequestClassifierContext,
         WorkerAvailabilityProvider, effective_prefill_tokens,
         overlap::cache_hit_estimates_from_tiered_matches,
         queue::{BookingHandle, SchedulerBookingDescriptor},
@@ -79,6 +80,7 @@ pub use plugins::{
     router_plugin_registry as worker_selection_policy_registry,
 };
 pub use prefill_router::PrefillRouter;
+pub(crate) use request_lease::RequestAttemptRelease;
 pub use routing_host::{KvPushRouter, RoutingHost};
 pub use routing_load::{
     ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,
@@ -526,7 +528,7 @@ fn cache_hit_for_worker(
 
 // for metric publishing (push-based)
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
-/// Router scheduler views of per-worker load, consumed by the KV DC Relay.
+/// Router scheduler views of per-worker load, consumed by the Pool Relay.
 ///
 /// Kept separate from [`KV_METRICS_SUBJECT`] so one router's view never
 /// overwrites another router's worker-overload state.
@@ -823,6 +825,13 @@ impl KvRouter {
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
+        // The queue checks the live busy thresholds against its own booked load at
+        // selection; the worker monitor keeps only the decode check on the engine-reported
+        // `kv_used_blocks`, the signal the queue cannot see.
+        let reject_thresholds = scheduler_load.route_busy_thresholds().map(|thresholds| {
+            Arc::new(move || thresholds.get().into()) as RejectThresholdsProvider
+        });
+
         let client_for_registration = client.clone();
         let registration_availability_provider: metrics::RegistrationAvailabilityProvider =
             Arc::new(move || client_for_registration.available_instance_ids());
@@ -873,6 +882,7 @@ impl KvRouter {
                 is_eagle,
                 prefill_load_estimator: prefill_load_estimator.clone(),
                 overloaded_worker_provider,
+                reject_thresholds,
                 available_worker_provider,
                 registration_availability_provider,
                 shared_cache: shared_cache.clone(),
@@ -949,10 +959,7 @@ impl KvRouter {
                     let start = config.data_parallel_start_rank();
                     let end = start.saturating_add(config.data_parallel_size());
                     (start..end).map(move |rank| {
-                        RequestClassifierWorker::new(
-                            WorkerWithDpRank::new(worker_id, rank),
-                            config.total_kv_blocks(),
-                        )
+                        WorkerInfo::of(WorkerWithDpRank::new(worker_id, rank), config)
                     })
                 })
                 .collect()
@@ -1322,7 +1329,7 @@ impl KvRouter {
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
         admission: FindBestMatchAdmission,
-        prefix_cache_read_resolver: Option<dynamo_kv_router::protocols::PrefixCacheReadResolver>,
+        prefix_cache_read_allowed: Option<bool>,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         let start = Instant::now();
         if update_states && context_id.is_none() {
@@ -1354,7 +1361,6 @@ impl KvRouter {
         } = self
             .selection
             .run_selection(SelectionOperation {
-                prefix_cache_read_resolver,
                 key: self.selection.partition_key().clone(),
                 prompt: PromptView {
                     token_ids: Some(tokens),
@@ -1369,6 +1375,7 @@ impl KvRouter {
                 },
                 router_config_override: router_config_override.cloned(),
                 expected_output_tokens,
+                prefix_cache_read_allowed,
                 priority_jump,
                 strict_priority,
                 policy_class,
@@ -2005,6 +2012,7 @@ impl Drop for KvRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
     use std::collections::{HashMap, HashSet};
 
     use async_trait::async_trait;
@@ -2301,6 +2309,7 @@ mod tests {
                 7,
                 ModelRuntimeConfig {
                     total_kv_blocks: Some(100),
+                    max_num_batched_tokens: Some(8192),
                     data_parallel_start_rank: 2,
                     data_parallel_size: 2,
                     ..Default::default()
@@ -2312,13 +2321,14 @@ mod tests {
         let context = router.request_classifier_context();
         assert_eq!(context.block_size(), 16);
         let mut snapshot = context.workers();
-        snapshot.sort_by_key(RequestClassifierWorker::worker);
+        snapshot.sort_by_key(WorkerInfo::worker);
+        let advertised = WorkerCapacity::new(Some(8192), Some(100));
         assert_eq!(
             snapshot,
             vec![
-                RequestClassifierWorker::new(WorkerWithDpRank::new(7, 2), Some(100)),
-                RequestClassifierWorker::new(WorkerWithDpRank::new(7, 3), Some(100)),
-                RequestClassifierWorker::new(WorkerWithDpRank::new(8, 0), None),
+                WorkerInfo::new(WorkerWithDpRank::new(7, 2), advertised),
+                WorkerInfo::new(WorkerWithDpRank::new(7, 3), advertised),
+                WorkerInfo::new(WorkerWithDpRank::new(8, 0), WorkerCapacity::default()),
             ]
         );
         tx.send(HashMap::from([(
@@ -2331,10 +2341,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             context.workers(),
-            vec![RequestClassifierWorker::new(
+            vec![WorkerInfo::new(
                 WorkerWithDpRank::new(8, 0),
-                Some(200)
-            ),]
+                WorkerCapacity::new(None, Some(200)),
+            )]
         );
         tx.send(HashMap::new()).unwrap();
         assert!(context.workers().is_empty());

@@ -21,7 +21,7 @@ use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
     NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, QueueLimitKind, QueueRejection,
-    WorkerAvailabilityProvider,
+    RejectThresholdsProvider, WorkerAvailabilityProvider,
 };
 use dynamo_kv_router::sequences::{LocalWorkerLoad, ReplicaWorkerPolicy};
 use dynamo_kv_router::services::selection::{
@@ -50,6 +50,8 @@ pub(crate) struct EmbeddedSelectionArgs {
     pub is_eagle: bool,
     pub prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     pub overloaded_worker_provider: OverloadedWorkerProvider,
+    /// Live busy thresholds the queue applies at selection.
+    pub reject_thresholds: Option<RejectThresholdsProvider>,
     pub available_worker_provider: WorkerAvailabilityProvider,
     pub registration_availability_provider: RegistrationAvailabilityProvider,
     pub shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>>,
@@ -267,6 +269,7 @@ impl EmbeddedSelection {
                 prefill_estimator: args.prefill_load_estimator,
                 overloaded_workers: Some(args.overloaded_worker_provider),
                 available_workers: Some(args.available_worker_provider),
+                reject_thresholds: args.reject_thresholds,
             },
             cache: HostCache {
                 shared: args.shared_cache,
@@ -480,7 +483,6 @@ pub(crate) fn worker_request_from_runtime_config(
         }
     }
     WorkerRequest {
-        prefix_cache_read_policy: config.prefix_cache_read_policy().map(str::to_owned),
         worker_id,
         model_name: key.model_name.clone(),
         routing_group: key.routing_group.clone(),

@@ -140,10 +140,6 @@ impl StructuralTagConfig {
 pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
 pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 
-/// Versioned worker declaration of request cache-read override semantics.
-/// Missing declarations preserve legacy estimates without affecting model identity.
-pub const PREFIX_CACHE_READ_POLICY_RUNTIME_KEY: &str = "prefix_cache_read_policy";
-
 /// Worker-advertised support for Dynamo's vLLM-compatible
 /// `POST /inference/v1/generate` adapter.
 ///
@@ -480,6 +476,22 @@ impl Default for ModelRuntimeConfig {
 }
 
 impl ModelRuntimeConfig {
+    /// The running worker honors the frontend's typed prefix-cache read decision.
+    pub(crate) fn supports_prefix_cache_read_control(&self) -> bool {
+        self.runtime_data
+            .get("supports_prefix_cache_read_control")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    }
+
+    /// Whether the configured grammar can replay distinct Responses phases.
+    pub fn preserves_response_message_phases(&self) -> bool {
+        crate::protocols::openai::chat_completions::unified_parser::configured_family(
+            self.tool_call_parser.as_deref(),
+            self.reasoning_parser.as_deref(),
+        ) == Some("muse_spark")
+    }
+
     /// Normalize older wire fields into the current policy and project it back for older readers
     pub(crate) fn normalize_structural_tag_compatibility(&mut self) {
         if self.structural_tag.is_none() && self.structural_tag_mode == StructuralTagMode::On {
@@ -532,12 +544,6 @@ impl ModelRuntimeConfig {
 }
 
 impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
-    fn prefix_cache_read_policy(&self) -> Option<&str> {
-        self.runtime_data
-            .get(PREFIX_CACHE_READ_POLICY_RUNTIME_KEY)
-            .and_then(serde_json::Value::as_str)
-    }
-
     fn data_parallel_start_rank(&self) -> u32 {
         self.data_parallel_start_rank
     }
@@ -890,6 +896,27 @@ mod tests {
     use super::*;
 
     use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
+
+    #[test]
+    fn prefix_cache_read_capability_requires_explicit_boolean_true() {
+        let mut config = ModelRuntimeConfig::default();
+        assert!(!config.supports_prefix_cache_read_control());
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!(false),
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::json!(true),
+        ] {
+            let expected = value == serde_json::json!(true);
+            config
+                .runtime_data
+                .insert("supports_prefix_cache_read_control".to_string(), value);
+            let decoded: ModelRuntimeConfig =
+                serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+            assert_eq!(decoded.supports_prefix_cache_read_control(), expected);
+        }
+    }
 
     #[test]
     fn structural_tag_config_accepts_future_wire_fields_and_rejects_unknown_input_fields() {

@@ -298,9 +298,11 @@ impl RoutingHost {
 
     pub(crate) async fn dispatch_kv_plan(
         &self,
-        request: SingleIn<PreprocessedRequest>,
+        mut request: SingleIn<PreprocessedRequest>,
         plan: RoutePlan,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        // Preview/plan dispatch is the disaggregated path, outside this contract.
+        request.skip_reading_prefix_cache = None;
         let RoutePlan {
             mut selection,
             cleanup,
@@ -652,12 +654,13 @@ impl RoutingHost {
         &self,
         mut request: SingleIn<PreprocessedRequest>,
         prepare: F,
-    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
+    ) -> Result<PrefillDispatch<M>, Error>
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
         let budget = CleanupBudget::default();
         let phase = RequestPhase::Prefill;
+        request.skip_reading_prefix_cache = None;
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
@@ -680,6 +683,7 @@ impl RoutingHost {
             }
         };
         drop(route_guard);
+        let booking = guard.attempt_release();
         let stream = match self
             .dispatch_selection(request, selection, guard, &budget)
             .await
@@ -695,9 +699,10 @@ impl RoutingHost {
                 return Err(error);
             }
         };
-        Ok((
+        Ok(PrefillDispatch {
             metadata,
-            self.bind_affinity(operation, selected_target, stream)?,
-        ))
+            stream: self.bind_affinity(operation, selected_target, stream)?,
+            booking,
+        })
     }
 }

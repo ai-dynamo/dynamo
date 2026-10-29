@@ -152,7 +152,7 @@ mod tests {
 
     fn request(affinity_target: Option<WorkerAffinityTarget>) -> SchedulingRequest {
         SchedulingRequest {
-            prefix_cache_read_resolver: None,
+            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
             isl_tokens: 16,

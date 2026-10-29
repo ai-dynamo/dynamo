@@ -5,7 +5,6 @@
 mod support;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use dynamo_custom_policy_builtin::default_factory;
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerWithDpRank};
@@ -25,9 +24,6 @@ impl WorkerConfigLike for OneRank {
     }
     fn total_kv_blocks(&self) -> Option<u64> {
         Some(1024)
-    }
-    fn prefix_cache_read_policy(&self) -> Option<&str> {
-        Some("contract-test")
     }
 }
 
@@ -75,17 +71,13 @@ fn default_scorer_does_not_credit_an_unreadable_warm_prefix() {
         .select_worker(support::selection_input(&workers, &request, 16))
         .unwrap();
     assert_eq!(normal.worker, warm);
-    request.prefix_cache_read_resolver = Some(Arc::new(|policy| {
-        (policy == Some("contract-test")).then_some(false)
-    }));
+    request.prefix_cache_read_allowed = Some(false);
     let bypass = policy
         .select_worker(support::selection_input(&workers, &request, 16))
         .unwrap();
     assert_eq!(bypass.worker, cold);
     assert_eq!(bypass.cached_tokens, 0);
-    request.prefix_cache_read_resolver = Some(Arc::new(|policy| {
-        (policy == Some("contract-test")).then_some(true)
-    }));
+    request.prefix_cache_read_allowed = Some(true);
     let allowed = policy
         .select_worker(support::selection_input(&workers, &request, 16))
         .unwrap();

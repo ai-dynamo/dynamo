@@ -17,8 +17,8 @@ use dynamo_kv_router::{
     indexer::TieredMatchDetails,
     protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank},
     scheduling::{
-        LocalScheduler, NoopOverlapScoresRefresh, OverlapAnalysis, PolicyProfile, ScheduleMode,
-        ScheduleRequest,
+        ClassifyFuture, ClassifyRequest, LocalScheduler, NoopOverlapScoresRefresh, OverlapAnalysis,
+        PolicyProfile, RequestClassifier, ScheduleMode, ScheduleRequest,
     },
 };
 use tokio::sync::watch;
@@ -40,12 +40,42 @@ impl WorkerConfigLike for Config {
     fn total_kv_blocks(&self) -> Option<u64> {
         Some(1024)
     }
-    fn prefix_cache_read_policy(&self) -> Option<&str> {
-        Some("contract-test")
-    }
 }
 
 struct Probe(Arc<AtomicBool>);
+
+struct ClassifierProbe(Arc<AtomicBool>);
+
+impl RequestClassifier for ClassifierProbe {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::CACHE
+    }
+
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
+        assert_eq!(workers.len(), 1);
+        let cache = workers
+            .get(0)
+            .unwrap()
+            .cache()
+            .expect("declared CACHE inputs");
+        let snapshot = (
+            cache.prefix_cache_read_allowed(),
+            cache.device_overlap_blocks(),
+            cache.accounting_cache_estimate(),
+        );
+        let seen = Arc::clone(&self.0);
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            assert_eq!(snapshot, (Some(false), 4.0, (0.0, 0)));
+            seen.store(true, Ordering::Release);
+            Ok(request)
+        })
+    }
+}
 
 impl WorkerScorer for Probe {
     fn required_worker_inputs(&self) -> WorkerInputs {
@@ -85,7 +115,7 @@ impl WorkerPicker for First {
 }
 
 #[tokio::test]
-async fn scorer_reads_eligibility_without_losing_raw_overlap() {
+async fn classifier_and_scorer_read_eligibility_without_losing_raw_overlap() {
     let worker = WorkerWithDpRank::new(1, 0);
     let config = KvRouterConfig::default();
     let mut tiered = TieredMatchDetails::default();
@@ -118,17 +148,25 @@ async fn scorer_reads_eligibility_without_losing_raw_overlap() {
         None::<Arc<NoopOverlapScoresRefresh>>,
         None,
         None,
+        None,
         Duration::from_secs(60),
         true,
         cancel.clone(),
         "contract",
         false,
     );
+    let classifier_seen = Arc::new(AtomicBool::new(false));
+    assert!(scheduler.install_request_classifier(
+        Box::new(ClassifierProbe(Arc::clone(&classifier_seen))),
+        cancel.clone(),
+    ));
+    let _lifecycle = scheduler
+        .begin_request_lifecycle("cache-read-contract")
+        .unwrap()
+        .unwrap();
     let response = scheduler
         .schedule_request_admitted(ScheduleRequest {
-            prefix_cache_read_resolver: Some(Arc::new(|policy| {
-                (policy == Some("contract-test")).then_some(false)
-            })),
+            prefix_cache_read_allowed: Some(false),
             mode: ScheduleMode::TrackedWithLifecycle {
                 request_id: "cache-read-contract".to_string(),
             },
@@ -153,6 +191,7 @@ async fn scorer_reads_eligibility_without_losing_raw_overlap() {
         })
         .await
         .unwrap();
+    assert!(classifier_seen.load(Ordering::Acquire));
     assert!(seen.load(Ordering::Acquire));
     assert_eq!(response.response.cached_tokens, 0);
     scheduler.free("cache-read-contract").await.unwrap();

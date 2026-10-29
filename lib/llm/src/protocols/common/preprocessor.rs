@@ -22,6 +22,7 @@ use super::extensions::{AgentContext, RouterParams};
 use super::llm_backend::DecoderCheckpoint;
 use super::timing::{RequestPhase, RequestTracker};
 use super::{OutputOptions, SamplingOptions, StopConditions};
+use crate::kv_router::RequestAttemptRelease;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -136,6 +137,7 @@ struct MigrationStateInner {
     excluded_worker_ids: Vec<WorkerId>,
     last_error: Option<DynamoError>,
     request_lifecycle: Option<Box<RequestLifecycle>>,
+    prefill_release: Option<RequestAttemptRelease>,
 }
 
 impl MigrationState {
@@ -224,6 +226,26 @@ impl MigrationState {
             return;
         };
         lifecycle.abort(error.map(owned_abort_error));
+    }
+
+    /// Park the latest attempt's remote prefill booking. Its prefill can
+    /// outlive a failed decode to serve an in-flight KV transfer, so only a
+    /// committed retry, which re-books the same request ID, releases it early.
+    pub(crate) fn store_prefill_release(&self, release: RequestAttemptRelease) {
+        self.inner
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prefill_release = Some(release);
+    }
+
+    pub(crate) fn take_prefill_release(&self) -> Option<RequestAttemptRelease> {
+        self.inner
+            .get()?
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prefill_release
+            .take()
     }
 }
 
@@ -440,6 +462,12 @@ pub struct PreprocessedRequest {
     /// to return log probabilities, or whether to skip special tokens in output.
     #[serde(default)]
     pub output_options: OutputOptions,
+
+    /// Frontend-resolved prefix-cache read decision for capable workers.
+    /// `None` leaves engine/model defaults and legacy request translation intact.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reading_prefix_cache: Option<bool>,
 
     /// The EOS token ID(s) for the Model
     /// Not every backend needs this, but those that do can find it here.
@@ -1190,6 +1218,21 @@ mod tests {
 
         let decoded: PreprocessedRequest = serde_json::from_str(&json).expect("deserializes");
         assert_eq!(decoded.token_ids.as_slice(), &[11, 22, 33]);
+    }
+
+    #[test]
+    fn prefix_cache_read_control_preserves_omission_and_explicit_false() {
+        let mut request = request_with_tokens(vec![1]);
+        let wire = serde_json::to_value(&request).unwrap();
+        assert!(wire.get("skip_reading_prefix_cache").is_none());
+        let decoded: PreprocessedRequest = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.skip_reading_prefix_cache, None);
+
+        request.skip_reading_prefix_cache = Some(false);
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire["skip_reading_prefix_cache"], false);
+        let decoded: PreprocessedRequest = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.skip_reading_prefix_cache, Some(false));
     }
 
     #[test]

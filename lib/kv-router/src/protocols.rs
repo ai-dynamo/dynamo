@@ -293,21 +293,10 @@ pub struct KvHintTransferWorkerMetadata<'a> {
     pub source_control_endpoint: Option<&'a str>,
 }
 
-/// Resolve request-specific prefix-cache-read eligibility from a worker declaration.
-/// None means that the worker/adapter contract is unknown; estimates retain their legacy behavior.
-/// The resolver must be pure for its immutable request controls and the supplied
-/// worker snapshot. It must not perform I/O or read a mutable external config.
-pub type PrefixCacheReadResolver =
-    std::sync::Arc<dyn Fn(Option<&str>) -> Option<bool> + Send + Sync + 'static>;
-
 /// Trait abstracting the worker configuration fields needed by the scheduling layer.
+///
 /// `ModelRuntimeConfig` (in `lib/llm`) implements this directly so no adapter type is needed.
 pub trait WorkerConfigLike {
-    /// Immutable adapter policy identifier advertised by this worker, if known.
-    fn prefix_cache_read_policy(&self) -> Option<&str> {
-        None
-    }
-
     fn data_parallel_start_rank(&self) -> u32;
     fn data_parallel_size(&self) -> u32;
     fn max_num_batched_tokens(&self) -> Option<u64>;
@@ -601,7 +590,7 @@ fn update_cache_owner_hash(hasher: &mut blake3::Hasher, owner: CacheOwnerId) {
     hasher.update(&[domain.cache_semantics().source() as u8]);
     hasher.update(&domain.routing_scope().digest());
     hasher.update(&[domain.routing_scope().source() as u8]);
-    hasher.update(&owner.pool().dc_id().get().to_be_bytes());
+    hasher.update(&owner.pool().cluster_id().get().to_be_bytes());
     hasher.update(&owner.slot().digest());
     hasher.update(&[owner.slot().source() as u8]);
 }

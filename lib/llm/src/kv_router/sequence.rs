@@ -493,7 +493,7 @@ pub(crate) fn start_scheduler_load_publisher(
     replica_sync: bool,
     cancellation_token: CancellationToken,
 ) {
-    if !crate::kv_dc_relay::serving_load_publishing_enabled() {
+    if !crate::pool_relay::serving_load_publishing_enabled() {
         return;
     }
     let group = if replica_sync {
@@ -1137,7 +1137,6 @@ mod tests {
         for worker_id in [42, 43] {
             service
                 .upsert_worker(WorkerRequest {
-                    prefix_cache_read_policy: None,
                     worker_id,
                     endpoint: Some("http://127.0.0.1:8000".into()),
                     block_size: Some(4),

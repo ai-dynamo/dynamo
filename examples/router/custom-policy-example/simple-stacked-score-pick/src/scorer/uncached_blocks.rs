@@ -25,12 +25,12 @@ impl WorkerScorer for UncachedBlocksScorer {
             let cache = candidate
                 .cache()
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
-            let reusable = if cache.prefix_cache_read_allowed() == Some(false) {
+            let cached = if cache.prefix_cache_read_allowed() == Some(false) {
                 0.0
             } else {
                 cache.device_overlap_blocks()
             };
-            *cost = (context.request_blocks() as f64 - reusable).max(0.0);
+            *cost = (context.request_blocks() as f64 - cached).max(0.0);
         }
         Ok(())
     }
