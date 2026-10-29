@@ -47,12 +47,12 @@ from .models.qwen import (
     build_qwen_embedding_params,
     load_qwen_grid_params,
 )
-from .models.qwen_video_handoff import (
-    QWEN_VIDEO_HANDOFF_KEY,
-    PreparedVideoHandoff,
-    QwenVideoHandoff,
-)
 from .prefill_worker_utils import parse_image_item
+from .processed_input_handoff import (
+    VIDEO_HANDOFF_KEY,
+    PreparedInputHandoff,
+    ProcessedInputHandoff,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -380,7 +380,7 @@ class VllmMultimodalRequestProcessor:
         self._qwen_grid_params: Optional[QwenGridParams] = None
         self._k3_expansion: Optional[tuple[int, list[int]]] = None
         self._k3_expansion_cached = False
-        self._qwen_video_handoff = QwenVideoHandoff()
+        self._video_handoff = ProcessedInputHandoff()
 
         if use_unified_vision_chunk is None:
             model_config = getattr(
@@ -597,31 +597,20 @@ class VllmMultimodalRequestProcessor:
             )
         return {"expanded_prompt_token_ids": prompt_token_ids}
 
-    def _supports_video_handoff(self) -> bool:
-        if self.engine_client is None:
-            return False
-        model_config = self.engine_client.vllm_config.model_config
-        return model_config.hf_config.model_type in {
-            "qwen3_vl",
-            "qwen3_vl_moe",
-            "cosmos3",
-            "cosmos3_omni",
-        }
-
     async def prepare_prefill_video_prompt(
         self, prompt: Any, multi_modal_data: Optional[dict[str, Any]]
-    ) -> tuple[Any, Optional[PreparedVideoHandoff]]:
+    ) -> tuple[Any, Optional[PreparedInputHandoff]]:
         """Render once and stage native inputs for KV reuse or recomputation."""
         if (
             not multi_modal_data
             or "video" not in multi_modal_data
             or set(multi_modal_data) - {"image", "video"}
-            or not self._supports_video_handoff()
+            or self.engine_client is None
         ):
             return prompt, None
         renderer = self.engine_client.input_processor.renderer
         (processed,) = await renderer.render_cmpl_async([prompt], skip_mm_cache=True)
-        return processed, await self._qwen_video_handoff.prepare(processed)
+        return processed, await self._video_handoff.prepare(processed)
 
     async def extract_multimodal_data(
         self,
@@ -966,20 +955,15 @@ class VllmMultimodalRequestProcessor:
             disaggregated_params = prefill_result.get("disaggregated_params") or {}
             embedding_params = disaggregated_params.get("embedding_params") or None
             video_state = (
-                embedding_params.get(QWEN_VIDEO_HANDOFF_KEY)
-                if embedding_params
-                else None
+                embedding_params.get(VIDEO_HANDOFF_KEY) if embedding_params else None
             )
-            if video_state is not None and self._supports_video_handoff():
+            if video_state is not None:
                 mm_map = request.get("multi_modal_data") or {}
                 model_config = self.engine_client.vllm_config.model_config
                 try:
-                    pre_rendered = await self._qwen_video_handoff.restore_for_decode(
+                    pre_rendered = await self._video_handoff.restore_for_decode(
                         video_state,
                         max_model_len=model_config.max_model_len,
-                        spatial_merge_size=(
-                            model_config.hf_config.vision_config.spatial_merge_size
-                        ),
                         media_counts={
                             "image": len(mm_map.get(IMAGE_URL_KEY, [])),
                             "video": len(mm_map.get(VIDEO_URL_KEY, [])),
@@ -988,7 +972,7 @@ class VllmMultimodalRequestProcessor:
                     )
                 except (ValueError, TypeError, KeyError) as exc:
                     raise MissingMultimodalHandoffError(
-                        f"Invalid Qwen video decode handoff: {exc}"
+                        f"Invalid video decode handoff: {exc}"
                     ) from exc
                 except (RuntimeError, TimeoutError) as exc:
                     raise MultimodalTransferError(
@@ -1003,11 +987,11 @@ class VllmMultimodalRequestProcessor:
                         mm_processor_kwargs=mm_processor_kwargs,
                         pre_rendered_prompt=pre_rendered,
                     )
-            if embedding_params and QWEN_VIDEO_HANDOFF_KEY in embedding_params:
+            if embedding_params and VIDEO_HANDOFF_KEY in embedding_params:
                 embedding_params = {
                     key: value
                     for key, value in embedding_params.items()
-                    if key != QWEN_VIDEO_HANDOFF_KEY
+                    if key != VIDEO_HANDOFF_KEY
                 } or None
             if self._model_family is ModelFamily.QWEN_VL:
                 if embedding_params is not None:

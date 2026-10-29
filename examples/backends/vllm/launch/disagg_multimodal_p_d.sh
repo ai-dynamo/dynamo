@@ -15,7 +15,7 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-WORKER_MODULE="dynamo.vllm"
+WORKER_MODULE="${WORKER_MODULE:-dynamo.vllm}"
 
 # Default values
 MODEL_NAME="Qwen/Qwen3-VL-2B-Instruct"
@@ -99,6 +99,8 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     PD_EXTRA_ARGS="--max-model-len 4096 \
 --limit-mm-per-prompt {\"image\":1,\"video\":0,\"audio\":0}"
 fi
+
+PD_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-$PD_EXTRA_ARGS}"
 
 PD_GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 if [[ -n "$PD_GPU_MEM_ARGS" ]]; then

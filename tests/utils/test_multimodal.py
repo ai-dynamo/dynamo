@@ -14,13 +14,38 @@ from tests.utils.multimodal import (
     UuidPassthroughChatPayload,
     make_mixed_image_video_payload,
     make_qwen35_custom_encoder_multi_image_payload,
+    make_video_pd_payload,
 )
+from tests.utils.payloads import DisaggregatedChatPayload, KvTransferPayload
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
 ]
+
+
+@pytest.mark.parametrize("logprobs", [False, True])
+def test_video_pd_payload_bounds_frames_and_exercises_recomputation(logprobs):
+    payload = make_video_pd_payload(
+        ["triangle"], repeat_count=2, prompt_logprobs=logprobs
+    )
+    assert payload.repeat_count == 2
+    assert payload.body["media_io_kwargs"] == {"video": {"num_frames": 4}}
+    assert payload.body.get("prompt_logprobs") == (1 if logprobs else None)
+    assert payload.expected_response == ["triangle"]
+    assert payload.body["nvext"] == {"extra_fields": ["worker_id"]}
+    assert isinstance(payload, DisaggregatedChatPayload)
+    assert isinstance(payload, KvTransferPayload) == (not logprobs)
+
+
+def test_video_transfer_payload_keeps_media_and_avoids_prefix_cache_hits():
+    payload = make_video_pd_payload(["triangle"])
+    first = payload.body_for_iteration(0)
+    second = payload.body_for_iteration(1)
+    assert first["messages"][0]["content"][0] != second["messages"][0]["content"][0]
+    assert first["messages"][0]["content"][1:] == payload.body["messages"][0]["content"]
+    assert len(payload.body["messages"][0]["content"]) == 2
 
 
 def _image_part(body: dict) -> dict:

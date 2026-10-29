@@ -120,8 +120,8 @@ from .multimodal_utils.custom_encoder.handoff import external_encoder_request_co
 from .multimodal_utils.custom_encoder.handoff_consumer import (
     ExternalEncoderHandoffConsumer,
 )
-from .multimodal_utils.models.qwen_video_handoff import QWEN_VIDEO_HANDOFF_KEY
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
+from .multimodal_utils.processed_input_handoff import VIDEO_HANDOFF_KEY
 from .multimodal_utils.request_processor import (
     IMAGE_URL_KEY,
     URL_VARIANT_KEY,
@@ -4583,7 +4583,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             if state["layout"]["prompt_token_ids"] == list(res.prompt_token_ids or []):
                 embedding_params = {
                     **(embedding_params or {}),
-                    QWEN_VIDEO_HANDOFF_KEY: state,
+                    VIDEO_HANDOFF_KEY: state,
                 }
             else:
                 logger.warning(

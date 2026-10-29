@@ -19,9 +19,16 @@ from tests.serve.conftest import (
     MULTIMODAL_VIDEO_URL,
     get_multimodal_test_image_bytes,
 )
+from tests.utils.engine_metrics import VllmMetricsChecker
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload
-from tests.utils.payloads import BasePayload, CachedTokensChatPayload, ChatPayload
+from tests.utils.payloads import (
+    BasePayload,
+    CachedTokensChatPayload,
+    ChatPayload,
+    DisaggregatedChatPayload,
+    KvTransferPayload,
+)
 
 # Same triangle clip the http fixtures use (see tests/serve/conftest.py), so the
 # local-file and NVDEC paths describe identical content and can assert the same
@@ -387,6 +394,35 @@ def make_video_payload(
         expected_response=expected_response,
         temperature=0.0,
         max_tokens=100,
+    )
+
+
+def make_video_pd_payload(
+    expected_response: list[str],
+    *,
+    repeat_count: int = 1,
+    prompt_logprobs: bool = False,
+) -> DisaggregatedChatPayload:
+    """Short video for P/D reuse and prompt-logprob recomputation checks."""
+    payload = make_video_payload(expected_response)
+    payload.body["media_io_kwargs"] = {"video": {"num_frames": 4}}
+    payload.body["nvext"] = {"extra_fields": ["worker_id"]}
+    if prompt_logprobs:
+        payload.body["prompt_logprobs"] = 1
+        return DisaggregatedChatPayload(
+            body=payload.body,
+            repeat_count=repeat_count,
+            expected_response=expected_response,
+            expected_log=[],
+        )
+    return KvTransferPayload(
+        body=payload.body,
+        repeat_count=repeat_count,
+        expected_response=expected_response,
+        expected_log=[],
+        prefill_metrics=VllmMetricsChecker("DYN_SYSTEM_PORT1"),
+        decode_metrics=VllmMetricsChecker("DYN_SYSTEM_PORT2"),
+        transfer_metrics=VllmMetricsChecker("DYN_SYSTEM_PORT2"),
     )
 
 

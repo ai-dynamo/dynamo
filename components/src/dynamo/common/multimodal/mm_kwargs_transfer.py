@@ -553,17 +553,20 @@ class MmKwargsNixlReceiver(MmKwargsReceiver):
         self._tensor_id_counter = 0
 
         # Pre-allocate and pre-register descriptors.
-        connection = run_async(self._connector._create_connection)
+        self._pool_connection = run_async(self._connector._create_connection)
         for _ in range(pool_size):
-            buf = torch.zeros(max_item_bytes, dtype=torch.uint8)
-            desc = nixl_connect.Descriptor(buf)
-            desc.register_with_connector(connection)
-            self._pool.put(desc)
+            self._pool.put(self._new_pooled_descriptor())
         logger.info(
             "MmKwargsNixlReceiver: pre-registered %d descriptors (%d bytes each)",
             pool_size,
             max_item_bytes,
         )
+
+    def _new_pooled_descriptor(self) -> Any:
+        buf = torch.zeros(self._max_item_bytes, dtype=torch.uint8)
+        desc = self._nixl_connect.Descriptor(buf)
+        desc.register_with_connector(self._pool_connection)
+        return desc
 
     def _acquire_descriptor(
         self, size_bytes: int
@@ -662,29 +665,50 @@ class MmKwargsNixlReceiver(MmKwargsReceiver):
             rollback.pop_all()
 
         async def _do_read(rm, desc):
-            read_op = await self._connector.begin_read(rm, desc)
-            await read_op.wait_for_completion()
+            with await self._connector.begin_read(rm, desc) as read_op:
+                await read_op.wait_for_completion()
 
-        await asyncio.gather(
-            *(_do_read(rm, desc) for rm, (desc, _, _) in zip(read_metadata, acquired))
-        )
+        tasks = [
+            asyncio.create_task(_do_read(rm, desc))
+            for rm, (desc, _, _) in zip(read_metadata, acquired)
+        ]
+        succeeded = False
+        try:
+            await asyncio.gather(*tasks)
 
-        # Collect results in spec order (not completion order).
-        results: dict[str, Any] = {}
-        for idx, name, tensor_view, sz in task_meta:
-            if name == "__pickled_kwargs_item__":
-                # One copy into a writable buffer: the decoder builds tensors
-                # over it, and PyTorch does not support tensors over read-only
-                # memory.
-                results.setdefault(name, []).append(bytearray(tensor_view[:sz].numpy()))
-            else:
-                results[name] = tensor_view[:sz]
-
-        # Release all descriptors back to pool.
-        for desc, is_dynamic, orig_size in acquired:
-            self._release_descriptor(desc, is_dynamic, orig_size)
-
-        return results
+            # Collect results in spec order (not completion order).
+            results: dict[str, Any] = {}
+            for idx, name, tensor_view, sz in task_meta:
+                if name == "__pickled_kwargs_item__":
+                    # The decoder needs writable storage independent of the pool.
+                    results.setdefault(name, []).append(
+                        bytearray(tensor_view[:sz].numpy())
+                    )
+                else:
+                    results[name] = tensor_view[:sz]
+            succeeded = True
+            return results
+        finally:
+            # Stop native reads before releasing any of their buffers.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for desc, is_dynamic, orig_size in acquired:
+                if not succeeded and not is_dynamic:
+                    # Tracebacks can retain old operations whose destructors
+                    # deregister their descriptors again. Do not reuse those.
+                    try:
+                        self._pool.put(self._new_pooled_descriptor())
+                    except (RuntimeError, MemoryError):
+                        # Preserve the request error; acquisition can fall back
+                        # to dynamic buffers if replenishment fails.
+                        logger.warning(
+                            "Failed to replenish mm_kwargs receiver buffer pool",
+                            exc_info=True,
+                        )
+                else:
+                    self._release_descriptor(desc, is_dynamic, orig_size)
 
 
 # ---------------------------------------------------------------------------
