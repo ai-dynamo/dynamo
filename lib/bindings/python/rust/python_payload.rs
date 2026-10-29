@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use dynamo_llm::admission_gate::{AdmissionRequest, AdmissionResponse, ResponseOutput};
+use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::pipeline::PipelineError;
 use dynamo_runtime::pipeline::network::{
     EncodedResponseFrame, IngressRequestDecoder, IngressResponseEncoder, NetworkStreamWrapper,
@@ -304,6 +305,9 @@ pub(crate) async fn encode_python_item(
     classify: bool,
 ) -> EncodedPythonResponse {
     tokio::task::spawn_blocking(move || {
+        // Runs inside the stream's next(), before worker.egress.chunk opens, so
+        // without its own range it reads as engine time in the inter-chunk gap.
+        let _nvtx = dynamo_nvtx_range!("pybridge.encode_response");
         encode_python_response(payload_codec, item.into_result(), classify)
     })
     .await
