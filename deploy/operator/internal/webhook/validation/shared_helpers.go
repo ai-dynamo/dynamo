@@ -259,11 +259,18 @@ func mainContainerIndex(containers []corev1.Container) int {
 }
 
 // restoreEntrypointInputs is the complete input of the checkpoint restore
-// entrypoint rule: the restore target and the launch it receives.
+// entrypoint rule for one restore destination: the Pod template that renders it,
+// the restore target and the launch it receives.
 type restoreEntrypointInputs struct {
+	// roleName names the role whose complete PodTemplate renders the destination;
+	// it is empty for the component-level PodTemplate.
+	roleName        string
 	targetContainer string
-	// containerIndex locates the target in the authored list for error paths only;
-	// the container keeps its identity when siblings are reordered or inserted.
+	// roleIndex and containerIndex locate the target in the authored lists for error
+	// paths only; the destination keeps its identity when siblings are reordered or
+	// inserted. roleIndex is -1 for the component-level PodTemplate and
+	// containerIndex is -1 when the target container is missing.
+	roleIndex      int
 	containerIndex int
 	command        []string
 	args           []string
@@ -274,50 +281,80 @@ func (i restoreEntrypointInputs) supported() bool {
 	return checkpoint.HasSupportedRestoreEntrypoint(&corev1.Container{Command: i.command, Args: i.args})
 }
 
-// equal compares the target identity and launch, treating nil and empty launch slices alike.
+// equal compares the destination identity and launch, treating nil and empty launch slices alike.
 func (i restoreEntrypointInputs) equal(other restoreEntrypointInputs) bool {
-	return i.targetContainer == other.targetContainer &&
+	return i.roleName == other.roleName &&
+		i.targetContainer == other.targetContainer &&
 		slices.Equal(i.command, other.command) &&
 		slices.Equal(i.args, other.args)
 }
 
-// restoreEntrypointInputsFor resolves the entrypoint that restore admission will
-// see for the checkpoint target container. It reports false when the component
-// does not enable checkpointing for a component type that supports it, or when the
-// launch is not authored by the user (intra-pod failover, role PodTemplates, and
-// native sidecars), which the authored container does not describe.
-// spec must not be nil.
-func restoreEntrypointInputsFor(
-	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-) (restoreEntrypointInputs, bool) {
-	if spec.Experimental == nil || spec.Experimental.Checkpoint == nil || !spec.Experimental.Checkpoint.Enabled {
-		return restoreEntrypointInputs{}, false
-	}
-	switch spec.ComponentType {
-	case nvidiacomv1beta1.ComponentTypeWorker, nvidiacomv1beta1.ComponentTypePrefill, nvidiacomv1beta1.ComponentTypeDecode:
-	default:
-		return restoreEntrypointInputs{}, false
-	}
-	if spec.Experimental.Failover != nil || dynamo.HasRolePodTemplates(spec) || dynamo.GetDynamoSidecar(spec) != nil {
-		return restoreEntrypointInputs{}, false
-	}
-
+// restoreEntrypointInputsForTemplate resolves the target container launch of one Pod template.
+// roleIndex is -1 for the component-level template; podTemplate may be nil.
+func restoreEntrypointInputsForTemplate(
+	podTemplate *corev1.PodTemplateSpec,
+	roleName string,
+	roleIndex int,
+	targetContainer string,
+) restoreEntrypointInputs {
 	inputs := restoreEntrypointInputs{
-		targetContainer: spec.Experimental.Checkpoint.TargetContainerName,
+		roleName:        roleName,
+		targetContainer: targetContainer,
+		roleIndex:       roleIndex,
 		containerIndex:  -1,
-	}
-	if inputs.targetContainer == "" {
-		inputs.targetContainer = consts.MainContainerName
 	}
 
 	// An authored command replaces the operator's /bin/sh -c default, so a missing one leaves the shell.
-	containers := podTemplateContainers(spec.PodTemplate)
+	containers := podTemplateContainers(podTemplate)
 	for i := range containers {
-		if containers[i].Name == inputs.targetContainer {
+		if containers[i].Name == targetContainer {
 			inputs.containerIndex = i
 			inputs.command = containers[i].Command
 			inputs.args = containers[i].Args
 			break
+		}
+	}
+	return inputs
+}
+
+// restoreEntrypointInputsFor resolves the entrypoint of every restore destination
+// that restore admission will see for the checkpoint target container. The
+// component-level PodTemplate is one destination; in role-template mode each role
+// with a complete PodTemplate is one, mirroring how rendering selects the template.
+// It reports false when the component does not enable checkpointing for a component
+// type that supports it, or when the launch is not authored by the user (intra-pod
+// failover and native sidecars), which the authored container does not describe.
+// spec must not be nil.
+func restoreEntrypointInputsFor(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) ([]restoreEntrypointInputs, bool) {
+	if spec.Experimental == nil || spec.Experimental.Checkpoint == nil || !spec.Experimental.Checkpoint.Enabled {
+		return nil, false
+	}
+	switch spec.ComponentType {
+	case nvidiacomv1beta1.ComponentTypeWorker, nvidiacomv1beta1.ComponentTypePrefill, nvidiacomv1beta1.ComponentTypeDecode:
+	default:
+		return nil, false
+	}
+	if spec.Experimental.Failover != nil || dynamo.GetDynamoSidecar(spec) != nil {
+		return nil, false
+	}
+
+	targetContainer := spec.Experimental.Checkpoint.TargetContainerName
+	if targetContainer == "" {
+		targetContainer = consts.MainContainerName
+	}
+
+	// A component-level PodTemplate is the complete source for every role.
+	if spec.PodTemplate != nil || !dynamo.HasRolePodTemplates(spec) {
+		return []restoreEntrypointInputs{restoreEntrypointInputsForTemplate(spec.PodTemplate, "", -1, targetContainer)}, true
+	}
+
+	// Role-template mode renders each role from its own complete PodTemplate.
+	inputs := make([]restoreEntrypointInputs, 0, len(spec.Roles))
+	for i := range spec.Roles {
+		if spec.Roles[i].PodTemplate != nil {
+			inputs = append(inputs, restoreEntrypointInputsForTemplate(spec.Roles[i].PodTemplate, spec.Roles[i].Name, i, targetContainer))
 		}
 	}
 	return inputs, true

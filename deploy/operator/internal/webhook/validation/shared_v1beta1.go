@@ -262,25 +262,33 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 	allErrs = append(allErrs, validateComponentPodTemplateMode(spec, fldPath)...)
 
-	// Reject a checkpoint target that restore admission would refuse. An unchanged stored
-	// violation survives only while the target identity and launch are identical.
-	if inputs, applies := restoreEntrypointInputsFor(spec); options.validateCheckpointRestoreEntrypoint && applies && !inputs.supported() {
-		unchanged := false
-		if options.oldComponent != nil {
-			oldInputs, oldApplies := restoreEntrypointInputsFor(options.oldComponent)
-			unchanged = oldApplies && inputs.equal(oldInputs)
+	// Reject each checkpoint restore destination that restore admission would refuse. An
+	// unchanged stored violation survives only while its role, target and launch are identical.
+	if options.validateCheckpointRestoreEntrypoint {
+		inputs, applies := restoreEntrypointInputsFor(spec)
+		var oldInputs []restoreEntrypointInputs
+		if applies && options.oldComponent != nil {
+			oldInputs, _ = restoreEntrypointInputsFor(options.oldComponent)
 		}
-		containersPath := fldPath.Child("podTemplate", "spec", "containers")
-		switch {
-		case unchanged:
-		case inputs.containerIndex < 0:
-			allErrs = append(allErrs, field.Required(
-				containersPath,
-				fmt.Sprintf("must contain the checkpoint target container %q that directly runs python -m <module>", inputs.targetContainer),
-			))
-		default:
+		for _, destination := range inputs {
+			if destination.supported() || slices.ContainsFunc(oldInputs, destination.equal) {
+				continue
+			}
+
+			templatePath := fldPath.Child("podTemplate")
+			if destination.roleIndex >= 0 {
+				templatePath = fldPath.Child("roles").Index(destination.roleIndex).Child("podTemplate")
+			}
+			containersPath := templatePath.Child("spec", "containers")
+			if destination.containerIndex < 0 {
+				allErrs = append(allErrs, field.Required(
+					containersPath,
+					fmt.Sprintf("must contain the checkpoint target container %q that directly runs python -m <module>", destination.targetContainer),
+				))
+				continue
+			}
 			allErrs = append(allErrs, field.Forbidden(
-				containersPath.Index(inputs.containerIndex).Child("command"),
+				containersPath.Index(destination.containerIndex).Child("command"),
 				"checkpoint restore requires the target container to directly run python -m <module>; "+
 					"shell wrappers and non-python launchers are not supported",
 			))

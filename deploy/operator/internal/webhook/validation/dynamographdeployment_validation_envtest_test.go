@@ -1996,6 +1996,53 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 
+		{
+			name:       "checkpoint admits role templates that directly run python modules",
+			deployment: betaCheckpointRoleTemplatesDGD(betaPythonModuleCommand("my_worker"), betaPythonModuleCommand("my_worker"), 1),
+		},
+		{
+			name:       "checkpoint rejects a shell wrapper in one role template at its role path",
+			deployment: betaCheckpointRoleTemplatesDGD(betaPythonModuleCommand("my_worker"), betaShellCommand(), 1),
+			wantWebhookErrs: []string{
+				betaRestoreEntrypointForbiddenAt("spec.components[1].roles[1].podTemplate.spec.containers[0].command"),
+			},
+		},
+		{
+			name:       "checkpoint checks every role template",
+			deployment: betaCheckpointRoleTemplatesDGD(betaShellCommand(), betaShellCommand(), 1),
+			wantWebhookErrs: []string{
+				betaRestoreEntrypointForbiddenAt("spec.components[1].roles[0].podTemplate.spec.containers[0].command"),
+				betaRestoreEntrypointForbiddenAt("spec.components[1].roles[1].podTemplate.spec.containers[0].command"),
+			},
+		},
+		{
+			name: "checkpoint requires the target container in each role template",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				setBetaCheckpointRoleTemplates(worker, betaPythonModuleCommand("my_worker"), betaPythonModuleCommand("my_worker"))
+				worker.Roles[0].PodTemplate.Spec.Containers[0].Name = "helper"
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].roles[0].podTemplate.spec.containers: Required value: must contain a container named "main"`,
+				`spec.components[1].roles[0].podTemplate.spec.containers: Required value: must contain the checkpoint target container "main" that directly runs python -m <module>`,
+			},
+		},
+		{
+			name:               "unchanged legacy shell role templates survive an unrelated update",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaCheckpointRoleTemplatesDGD(betaShellCommand(), betaShellCommand(), 1),
+			deployment:         betaCheckpointRoleTemplatesDGD(betaShellCommand(), betaShellCommand(), 2),
+		},
+		{
+			name:               "changing one legacy role launch to another shell is rejected for that role only",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaCheckpointRoleTemplatesDGD(betaShellCommand(), betaShellCommand(), 1),
+			deployment:         betaCheckpointRoleTemplatesDGD(betaShellCommand(), []string{"bash", "-c"}, 1),
+			wantWebhookErrs: []string{
+				betaRestoreEntrypointForbiddenAt("spec.components[1].roles[1].podTemplate.spec.containers[0].command"),
+			},
+		},
+
 		// KV-transfer CEL rules.
 		{
 			name: "v1beta1 conflicting KV-transfer selectors are rejected by CEL",
@@ -4739,6 +4786,35 @@ func betaCheckpointRestoreDGD(enabled bool, command []string, replicas int32) *n
 			Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: enabled},
 		}
 		useBetaRestoreEntrypoint(worker, command)
+	})
+}
+
+// betaRestoreEntrypointForbiddenAt is the restore entrypoint rejection reported at path.
+func betaRestoreEntrypointForbiddenAt(path string) string {
+	return path + ": Forbidden: checkpoint restore requires the target container to directly run python -m <module>; " +
+		"shell wrappers and non-python launchers are not supported"
+}
+
+// setBetaCheckpointRoleTemplates moves the worker to leader/worker role templates whose
+// checkpoint target launches the given commands.
+func setBetaCheckpointRoleTemplates(
+	worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	leaderCommand, workerCommand []string,
+) {
+	worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+		Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+	}
+	setBetaExplicitMultinodeRoleTemplates(worker, 2)
+	worker.Roles[0].PodTemplate.Spec.Containers[0].Command = leaderCommand
+	worker.Roles[1].PodTemplate.Spec.Containers[0].Command = workerCommand
+}
+
+// betaCheckpointRoleTemplatesDGD builds a multinode worker whose role templates launch the given commands.
+func betaCheckpointRoleTemplatesDGD(leaderCommand, workerCommand []string, replicas int32) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		worker := betaWorkerComponent(dgd)
+		worker.Replicas = &replicas
+		setBetaCheckpointRoleTemplates(worker, leaderCommand, workerCommand)
 	})
 }
 
