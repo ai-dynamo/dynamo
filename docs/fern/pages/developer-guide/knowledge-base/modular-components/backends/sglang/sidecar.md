@@ -27,7 +27,11 @@ for the architecture.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Data parallelism (DP>1) | Not yet |
+| Attention DP (`--attn-dp-size N`) | Yes, one sidecar per node |
+| Replica DP (`--dp-size N`) | Aggregated and decode; SGLang rejects it for prefill |
+
+SGLang's Rust server runs one listener per DP rank. One sidecar per node serves
+all of the node's listeners as one worker.
 
 ## Launch Locally
 
@@ -84,6 +88,8 @@ node holds the remaining TP ranks.
 
 ![When one SGLang engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../../../../assets/img/sidecar-sglang-multinode-tp.svg)
 
-### Data Parallelism
+### Multi-Node DP
 
-Not supported yet; see the [support matrix](#support-matrix).
+Attention DP across two nodes, with one sidecar per node.
+
+![With attention DP across two nodes, each node runs one Dynamo Sidecar that registers that node's DP ranks and calls its own SGLang listeners.](../../../../../../assets/img/sidecar-sglang-multinode-dp.svg)
