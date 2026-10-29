@@ -14,6 +14,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/kubejournal"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/workload"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // WorkloadBinding identifies one physical lifetime independently of its provider's native resources.
@@ -74,4 +75,9 @@ func (r *Reconciler) reconcileWorkload(ctx context.Context, group *api.DynamoGra
 		return true, err
 	}
 	return true, nil
+}
+
+// runtimeJournal scopes adapter evidence to the physical world, never merely to a logical name.
+func runtimeJournal(kubeClient client.Client, group *api.DynamoGraphDeploymentEngineGroup, worldID types.UID, suffix string) kubejournal.Store {
+	return kubejournal.NewStore(kubeClient, group.Namespace, group.Name, group.UID, suffix+"-"+string(worldID))
 }

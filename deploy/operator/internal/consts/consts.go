@@ -97,11 +97,13 @@ const (
 
 	// Engine Group labels correlate capacity and the allocation-count Scale selector.
 	KubeLabelDynamoEngineGroup            = "nvidia.com/dynamo-engine-group"
+	KubeLabelDynamoEngineGroupWorldIndex  = "nvidia.com/dynamo-engine-group-world-index"
+	KubeLabelDynamoEngineGroupRuntime     = "nvidia.com/dynamo-engine-group-runtime"
 	KubeLabelDynamoScaleRepresentative    = "nvidia.com/dynamo-scale-representative"
 	KubeLabelDynamoScaleRepresentativeYes = "true"
 
-	// Bind private recovery authority to an exact physical workload incarnation.
-	KubeAnnotationDynamoEngineGroupPodCliqueUID = "nvidia.com/dynamo-engine-group-pod-clique-uid"
+	// Engine Group profiles identify immutable native execution geometry.
+	KubeAnnotationDynamoEngineGroupProfile = "nvidia.com/dynamo-engine-group-profile"
 
 	// CheckpointAutoAnnotation marks operator-created checkpoints whose
 	// lifecycle is tied to an owning DGD generation.

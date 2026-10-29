@@ -607,7 +607,7 @@ func registerControllers(
 	}
 	if err := enginegroupcontroller.Setup(
 		mgr,
-		enginegroupcontroller.SetupOptions{GroveEnabled: runtimeConfig.Gate.Enabled(features.Grove)},
+		enginegroupcontroller.SetupOptions{},
 	); err != nil {
 		return err
 	}

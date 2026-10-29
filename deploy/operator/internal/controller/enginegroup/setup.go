@@ -9,7 +9,6 @@ import (
 	"fmt"
 
 	api "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	grove "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	controlleroptions "sigs.k8s.io/controller-runtime/pkg/controller"
@@ -23,7 +22,6 @@ import (
 type SetupOptions struct {
 	RuntimeProvider  RuntimeProvider
 	WorkloadProvider WorkloadProvider
-	GroveEnabled     bool
 }
 
 // Setup registers the Engine Group subsystem with the operator manager.
@@ -41,15 +39,15 @@ func Setup(mgr ctrl.Manager, opts SetupOptions) error {
 		Client:           mgr.GetClient(),
 		RuntimeProvider:  provider,
 		WorkloadProvider: workload,
-	}).SetupWithManager(mgr, opts.GroveEnabled); err != nil {
+	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeploymentEngineGroup controller: %w", err)
 	}
 	return nil
 }
 
 // SetupWithManager registers the Engine Group controller and its status/finalizer writes.
-func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, groveEnabled bool) error {
-	// Native clique deletion and recreation must wake the same logical world, even without Pod updates.
+func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Parent and allocation changes wake the same logical world independently of native engine polling.
 	controller := ctrl.NewControllerManagedBy(mgr).
 		WithOptions(controlleroptions.Options{MaxConcurrentReconciles: engineGroupConcurrentReconciles}).
 		For(&api.DynamoGraphDeploymentEngineGroup{}).
@@ -57,8 +55,5 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, groveEnabled bool) error
 		Watches(&api.DynamoGraphDeployment{}, handler.EnqueueRequestsFromMapFunc(r.engineGroupsForParent), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.engineGroupsForCapacity)).
 		Named("dynamographdeploymentenginegroup")
-	if groveEnabled {
-		controller = controller.Watches(&grove.PodClique{}, handler.EnqueueRequestsFromMapFunc(r.engineGroupsForCapacity))
-	}
 	return controller.Complete(r)
 }
