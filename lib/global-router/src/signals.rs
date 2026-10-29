@@ -61,8 +61,8 @@ pub struct PoolSignals {
 struct Report {
     report: LoadReport,
     expires: Instant,
-    /// This process's requests to the pool so far, when the report arrived.
-    started: u64,
+    /// This process's requests in flight to the pool when the report arrived.
+    ours: u64,
 }
 
 #[derive(Debug)]
@@ -89,7 +89,7 @@ impl PoolSignals {
         let current = Report {
             expires: Instant::now() + report.window * FRESH_WINDOWS,
             report,
-            started: self.in_flight.started(pool),
+            ours: self.in_flight.get(pool),
         };
         self.loads.insert(pool.clone(), current);
     }
@@ -118,13 +118,13 @@ impl PoolSignals {
     /// How full the pool is against its own capacity. `None` without a fresh
     /// report, or before the workers report how many requests they can run.
     ///
-    /// Requests this process has sent since the last report count as in
-    /// flight, so a burst between reports does not all go to one pool. The
-    /// KV side counts waiting requests at the blocks each running request
-    /// holds now, so it reaches 1 when the pool's KV cannot hold everything
-    /// it has. Workers report KV only when it changes, so a pool without
-    /// traffic may have no KV view yet; its slots alone then say how full it
-    /// is.
+    /// This process's own requests count as they are now, not as the report
+    /// saw them: a burst sent since the report does not all go to one pool,
+    /// and requests that finish between reports stop counting. The KV side
+    /// counts waiting requests at the blocks each running request holds now,
+    /// so it reaches 1 when the pool's KV cannot hold everything it has.
+    /// Workers report KV only when it changes, so a pool without traffic may
+    /// have no KV view yet; its slots alone then say how full it is.
     pub fn occupancy(&self, pool: &PoolId) -> Option<PoolOccupancy> {
         let now = Instant::now();
         let current = self
@@ -135,9 +135,8 @@ impl PoolSignals {
             .report
             .max_concurrency
             .filter(|capacity| *capacity > 0)?;
-        let in_flight = (current.report.in_flight
-            + self.in_flight.started(pool).saturating_sub(current.started))
-            as f64;
+        let in_flight = (current.report.in_flight + self.in_flight.get(pool))
+            .saturating_sub(current.ours) as f64;
         let generating = current.report.generating as f64;
         let slots = in_flight / capacity as f64;
         let kv = self
@@ -247,5 +246,24 @@ mod tests {
         assert!(signals.occupancy(&blue).is_some());
         std::thread::sleep(window * 4);
         assert_eq!(signals.occupancy(&blue), None);
+    }
+
+    #[test]
+    fn requests_that_finish_between_reports_stop_counting() {
+        let in_flight = Arc::new(InFlightTracker::new());
+        let signals = PoolSignals::new(in_flight.clone());
+        let blue = pool("blue", "qwen", &["http://blue:8000"]).id;
+        // One of the report's 64 is this process's.
+        let counted = in_flight.start(&blue);
+        signals.record_load(&blue, half_full());
+
+        // Short requests that start and finish before the next report.
+        for _ in 0..100 {
+            drop(in_flight.start(&blue));
+        }
+        assert_eq!(signals.occupancy(&blue).unwrap().slots, 0.5);
+
+        drop(counted);
+        assert_eq!(signals.occupancy(&blue).unwrap().slots, 63.0 / 128.0);
     }
 }
