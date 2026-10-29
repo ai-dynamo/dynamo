@@ -18,6 +18,21 @@ description: 从源代码构建 Dynamo，用于开发和贡献
 sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang-dev protobuf-compiler python3-dev cmake
 ```
 
+Dynamo 需要 `protoc` 3.15 或更高版本：
+
+- **Ubuntu 24.04：** 上面的 `protobuf-compiler` 软件包即可。
+- **Ubuntu 22.04：** 还需从 protobuf releases 安装 protoc 30.2：
+
+```bash
+sudo apt install -y unzip
+PROTOC_ZIP="protoc-30.2-linux-$(uname -m | sed s/aarch64/aarch_64/).zip"
+curl -fsSLO "https://github.com/protocolbuffers/protobuf/releases/download/v30.2/${PROTOC_ZIP}"
+unzip -o "${PROTOC_ZIP}" -d "$HOME/.local"
+rm "${PROTOC_ZIP}"
+export PATH="$HOME/.local/bin:$PATH"
+protoc --version
+```
+
 **macOS：**
 
 ```bash
@@ -42,10 +57,10 @@ source $HOME/.cargo/env
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-创建并激活虚拟环境：
+创建并激活 Python 3.12 虚拟环境。如果没有安装 Python 3.12，uv 会自动下载。
 
 ```bash
-uv venv .venv
+uv venv --python 3.12 .venv
 source .venv/bin/activate
 ```
 
@@ -59,10 +74,14 @@ uv pip install pip 'maturin[patchelf]'
 
 ## 5. 构建 Rust 绑定
 
+使用与[发布版 wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) 相同的 features 进行构建：
+
 ```bash
 cd lib/bindings/python
-maturin develop --uv
+maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3
 ```
+
+如需在 Nsight Systems profile 中添加标注，请在 feature 列表中加上 `nvtx`。
 
 ## 6. 安装 GPU Memory Service
 
@@ -122,6 +141,14 @@ pre-commit run --all-files
 ```bash
 sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang-dev protobuf-compiler python3-dev cmake
 ```
+
+**`protoc failed: relay.proto: This file contains proto3 optional fields`**
+
+按第 1 步安装 protoc 30.2，然后确认 `protoc --version` 输出 `libprotoc 30.2`。
+
+**`dynamo.indexer is not available in this build`**
+
+使用第 5 步中的 `--features` 列表重新构建绑定。
 
 **虚拟环境未激活**
 
