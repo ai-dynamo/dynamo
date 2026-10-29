@@ -66,7 +66,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrrunpublisher"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
@@ -150,11 +149,6 @@ func initConfigScheme() {
 
 //nolint:gocyclo
 func main() {
-	// Dispatch pod-scoped helpers before initializing the long-running operator manager.
-	if len(os.Args) > 1 && os.Args[1] == dgdrrunpublisher.Subcommand {
-		os.Exit(dgdrrunpublisher.RunSubcommand(os.Args[2:]))
-	}
-
 	initCRDSchemes()
 	initConfigScheme()
 
