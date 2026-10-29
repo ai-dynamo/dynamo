@@ -197,9 +197,6 @@ pub mod frontend_service {
     /// Total number of terminal semantic request failures.
     pub const FAILURES_TOTAL: &str = "failures_total";
 
-    /// Decision tasks that outlive the cancellation grace while retaining admission.
-    pub const DECISION_CLEANUP_OVERRUNS_TOTAL: &str = "decision_cleanup_overruns_total";
-
     /// Number of requests waiting in HTTP queue before receiving the first response (gauge)
     pub const QUEUED_REQUESTS: &str = "queued_requests";
 

@@ -109,8 +109,6 @@ class frontend_service:
     INPUT_TOKENS_TOTAL = "input_tokens_total"
     # Total number of terminal semantic request failures.
     FAILURES_TOTAL = "failures_total"
-    # Decision tasks that outlive the cancellation grace while retaining admission.
-    DECISION_CLEANUP_OVERRUNS_TOTAL = "decision_cleanup_overruns_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
     QUEUED_REQUESTS = "queued_requests"
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)

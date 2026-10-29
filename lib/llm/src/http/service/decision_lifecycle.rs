@@ -7,8 +7,6 @@ use dynamo_runtime::engine::AsyncEngineContext;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tracing::Instrument;
 
-use super::metrics::DECISION_CLEANUP_OVERRUNS_TOTAL;
-
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AdmissionError {
     InvalidBranchCount,
@@ -115,7 +113,6 @@ async fn drain_cancelled_task<T: Send + 'static>(mut task: tokio::task::JoinHand
     let result = match tokio::time::timeout(std::time::Duration::from_secs(1), &mut task).await {
         Ok(result) => result,
         Err(_) => {
-            DECISION_CLEANUP_OVERRUNS_TOTAL.inc();
             tracing::warn!(
                 "Decision task exceeded cancellation grace; retaining admission until completion"
             );
@@ -214,7 +211,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn overdue_cleanup_is_exposed_and_keeps_admission_until_work_finishes() {
+    async fn overdue_cleanup_is_logged_without_a_metric_and_keeps_admission() {
         let _interest_guard = crate::test_utils::tracing_interest_guard();
         let log = tempfile::NamedTempFile::new().unwrap();
         let subscriber = tracing_subscriber::fmt()
@@ -227,7 +224,12 @@ mod tests {
         super::super::metrics::Metrics::new()
             .register(&registry)
             .unwrap();
-        let initial_count = DECISION_CLEANUP_OVERRUNS_TOTAL.get();
+        assert!(
+            !registry
+                .gather()
+                .iter()
+                .any(|family| { family.name().ends_with("decision_cleanup_overruns_total") })
+        );
         let parent = Context::new(()).context();
         let admission = Arc::new(Semaphore::new(1));
         let permit = admission.clone().acquire_owned().await.unwrap();
@@ -246,7 +248,6 @@ mod tests {
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
-        assert!(DECISION_CLEANUP_OVERRUNS_TOTAL.get() > initial_count);
         let output = std::fs::read_to_string(log.path()).unwrap();
         assert!(output.contains("exceeded cancellation grace"), "{output}");
         assert!(
@@ -254,10 +255,6 @@ mod tests {
             "{output}"
         );
         assert_eq!(admission.available_permits(), 0);
-        assert!(registry.gather().iter().any(|family| {
-            family.name().ends_with("decision_cleanup_overruns_total")
-                && family.get_metric()[0].get_counter().value() > initial_count as f64
-        }));
         release_tx.send(()).unwrap();
         let permit = tokio::time::timeout(Duration::from_secs(1), admission.acquire_owned())
             .await
