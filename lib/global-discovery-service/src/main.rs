@@ -3,19 +3,30 @@
 
 //! Global Discovery Service. See `dynamo_global_discovery_service::service`.
 //!
+//! Two flags choose the backend behind the API:
+//! - `--pool-discovery`: where the pool and router lists come from. Either
+//!   the registrations PoolRelays send (`registrations`), or the
+//!   EndpointSlices that MCS imports, named the Karmada way (`karmada`) or
+//!   the standard way (`mcs`).
+//! - `--registration-storage`: where registrations are kept. Only `memory`
+//!   for now.
+//!
 //! ```bash
 //! cargo run -p dynamo-global-discovery-service -- \
-//!     --store memory --router aws-ohio/global-router-0=http://10.42.0.5:50051
+//!     --pool-discovery registrations --router aws-ohio/global-router-0=http://10.42.0.5:50051
 //! ```
 
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, ValueEnum};
+use clap::error::ErrorKind;
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dynamo_global_common::Lease;
 use dynamo_global_discovery_service::backends::kubernetes::{
     ExportedService, McsImplementation, McsPoolDirectory, McsReplicaDirectory,
@@ -24,30 +35,36 @@ use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, StaticR
 use dynamo_global_discovery_service::pool_discovery::{
     PoolDirectory, PoolRegistrar, RouterReplica, RouterReplicaId,
 };
-use dynamo_global_discovery_service::service::{self, DiscoveryStore, Tls};
+use dynamo_global_discovery_service::service::{self, DiscoveryBackend, Tls};
 use kube::Client;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
 /// The longest lease the service grants. `Lease` itself has no upper bound,
-/// and the stores add the lease to the current time, which a lease near
-/// `u64::MAX` seconds would overflow.
+/// and the registration storage adds the lease to the current time, which a
+/// lease near `u64::MAX` seconds would overflow.
 const MAX_LEASE_DURATION_SECS: u64 = 86_400;
 
 /// How long the Kubernetes client waits to connect to the API server, TLS
 /// included. kube's default is 30 s.
 const KUBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long the Kubernetes client waits for the API server to answer. The
-/// Kubernetes stores need this and [`KUBE_CONNECT_TIMEOUT`] to add up to
-/// under 90 s, so a server that stops answering shows up as failures; their
+/// How long the Kubernetes client waits for the API server to answer. Pool
+/// discovery from MCS needs this and [`KUBE_CONNECT_TIMEOUT`] to add up to
+/// under 90 s, so a server that stops answering shows up as failures; its
 /// watches end after 50 s, so a working watch never reaches it. kube's
 /// default is 295 s.
 const KUBE_READ_TIMEOUT: Duration = Duration::from_secs(75);
 const _: () = assert!(KUBE_CONNECT_TIMEOUT.as_secs() + KUBE_READ_TIMEOUT.as_secs() < 90);
 
-#[derive(Parser)]
+/// `--help` headings for the flags that work with only some `--pool-discovery`
+/// values. A flag under the heading of another value fails at startup, rather
+/// than being ignored.
+const WITH_REGISTRATIONS: &str = "With --pool-discovery registrations";
+const WITH_MCS: &str = "With --pool-discovery karmada or mcs";
+
+#[derive(Debug, Parser)]
 #[command(about = "Serve Global Router pool discovery over HTTP")]
 struct Args {
     /// Address to serve on. Use `[::]:8080` on clusters with IPv6 pods.
@@ -63,54 +80,68 @@ struct Args {
     /// (mTLS). Probes need one too, so probe readiness with TCP or a command.
     #[arg(long, requires = "tls_cert_path")]
     tls_client_ca_cert_path: Option<PathBuf>,
-    /// Where pools and router replicas come from.
-    #[arg(long, value_enum, default_value_t = Store::Memory)]
-    store: Store,
-    /// Memory store: how often a PoolRelay registers again.
-    #[arg(long, default_value_t = 5)]
+    /// Where the pool and router lists come from.
+    #[arg(long, value_enum, default_value_t = PoolDiscovery::Registrations)]
+    pool_discovery: PoolDiscovery,
+    /// Where registrations are kept.
+    #[arg(long, value_enum, default_value_t = RegistrationStorage::Memory)]
+    registration_storage: RegistrationStorage,
+    /// How often a PoolRelay registers again.
+    #[arg(long, default_value_t = 5, help_heading = WITH_REGISTRATIONS)]
     heartbeat_interval_secs: u64,
-    /// Memory store: how long a registration lasts. Longer than the
-    /// heartbeat interval, and at most a day.
+    /// How long a registration lasts. Longer than the heartbeat interval, and
+    /// at most a day.
     #[arg(
         long,
         default_value_t = 15,
-        value_parser = clap::value_parser!(u64).range(..=MAX_LEASE_DURATION_SECS)
+        value_parser = clap::value_parser!(u64).range(..=MAX_LEASE_DURATION_SECS),
+        help_heading = WITH_REGISTRATIONS
     )]
     lease_duration_secs: u64,
-    /// Memory store: a Global Router replica as `<id>=<url>`. Repeat it for
-    /// each replica.
-    #[arg(long = "router", value_parser = parse_router)]
+    /// A Global Router replica as `<id>=<url>`. Repeat it for each replica.
+    #[arg(long = "router", value_parser = parse_router, help_heading = WITH_REGISTRATIONS)]
     routers: Vec<RouterReplica>,
-    /// Kubernetes stores: each PoolRelay Service is named
-    /// `<DGD name><suffix>`.
+    /// Each PoolRelay Service is named `<DGD name><suffix>`.
     #[arg(
         long,
         default_value = "-pool-relay",
         allow_hyphen_values = true,
-        value_parser = clap::builder::NonEmptyStringValueParser::new()
+        value_parser = clap::builder::NonEmptyStringValueParser::new(),
+        help_heading = WITH_MCS
     )]
     pool_service_suffix: String,
-    /// Kubernetes stores: namespace of the Global Router Service.
-    #[arg(long)]
+    /// Namespace of the Global Router Service.
+    #[arg(long, help_heading = WITH_MCS)]
     router_namespace: Option<String>,
-    /// Kubernetes stores: the Global Router Service, exported through MCS.
-    #[arg(long)]
+    /// The Global Router Service, exported through MCS.
+    #[arg(long, help_heading = WITH_MCS)]
     router_service: Option<String>,
-    /// Kubernetes stores: the router Service's named port for state streams.
-    #[arg(long)]
+    /// The router Service's named port for state streams.
+    #[arg(long, help_heading = WITH_MCS)]
     router_port_name: Option<String>,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum Store {
-    /// Registrations in this process; router replicas from `--router`. Run
-    /// one replica: each keeps only the registrations it receives.
-    Memory,
-    /// Imported EndpointSlices, named the Karmada way. No registrations.
+/// Where the pool and router lists come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum PoolDiscovery {
+    /// The pools PoolRelays register (`POST /pools`), while their leases
+    /// last. Router replicas come from `--router`.
+    Registrations,
+    /// The pools whose PoolRelay Services Karmada imports, and the replicas
+    /// of the router Service, from EndpointSlices named the Karmada way.
+    /// Takes no registrations.
     Karmada,
-    /// Imported EndpointSlices with the standard `multicluster.kubernetes.io`
-    /// labels. No registrations.
+    /// As `karmada`, from EndpointSlices with the standard
+    /// `multicluster.kubernetes.io` labels.
     Mcs,
+}
+
+/// Where registrations are kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum RegistrationStorage {
+    /// In this process. Run one replica: each keeps only the registrations it
+    /// receives.
+    Memory,
 }
 
 fn parse_router(value: &str) -> Result<RouterReplica, String> {
@@ -127,14 +158,45 @@ fn parse_router(value: &str) -> Result<RouterReplica, String> {
     })
 }
 
+/// Parses the flags. A flag under the `--help` heading of another
+/// `--pool-discovery` value fails, as clap's own errors do.
+fn parse_args<I, T>(args: I) -> Result<Args, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let mut command = Args::command();
+    let matches = command.try_get_matches_from_mut(args)?;
+    let parsed = Args::from_arg_matches(&matches)?;
+    let refused = match parsed.pool_discovery {
+        PoolDiscovery::Registrations => WITH_MCS,
+        PoolDiscovery::Karmada | PoolDiscovery::Mcs => WITH_REGISTRATIONS,
+    };
+    let given = command
+        .get_arguments()
+        .find(|arg| {
+            arg.get_help_heading() == Some(refused)
+                && matches.value_source(arg.get_id().as_str()) == Some(ValueSource::CommandLine)
+        })
+        .and_then(|arg| arg.get_long())
+        .map(str::to_owned);
+    match given {
+        Some(flag) => Err(command.error(
+            ErrorKind::ArgumentConflict,
+            format!("--{flag} works only {}", refused.to_lowercase()),
+        )),
+        None => Ok(parsed),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     dynamo_runtime::logging::init();
-    let args = Args::parse();
-    let store = match args.store {
-        Store::Memory => memory_store(&args)?,
-        Store::Karmada => kubernetes_store(&args, McsImplementation::Karmada).await?,
-        Store::Mcs => kubernetes_store(&args, McsImplementation::Standard).await?,
+    let args = parse_args(std::env::args_os()).unwrap_or_else(|error| error.exit());
+    let backend = match args.pool_discovery {
+        PoolDiscovery::Registrations => registrations_backend(&args)?,
+        PoolDiscovery::Karmada => mcs_backend(&args, McsImplementation::Karmada).await?,
+        PoolDiscovery::Mcs => mcs_backend(&args, McsImplementation::Standard).await?,
     };
     let listener = TcpListener::bind(args.listen)
         .await
@@ -152,15 +214,18 @@ async fn main() -> Result<()> {
             key,
             client_ca: args.tls_client_ca_cert_path.clone(),
         });
-    service::serve(listener, store, tls, shutdown)
+    service::serve(listener, backend, tls, shutdown)
         .await
         .context("serve the Global Discovery Service")
 }
 
-fn memory_store(args: &Args) -> Result<DiscoveryStore> {
+/// Pools from registrations; router replicas from `--router`.
+fn registrations_backend(args: &Args) -> Result<DiscoveryBackend> {
     let lease = Lease::new(args.heartbeat_interval_secs, args.lease_duration_secs)
         .context("check --heartbeat-interval-secs and --lease-duration-secs")?;
-    let store = Arc::new(MemoryPoolStore::new(lease));
+    let registrations = match args.registration_storage {
+        RegistrationStorage::Memory => Arc::new(MemoryPoolStore::new(lease)),
+    };
     let mut ids = HashSet::new();
     if let Some(repeated) = args
         .routers
@@ -169,23 +234,26 @@ fn memory_store(args: &Args) -> Result<DiscoveryStore> {
     {
         bail!("--router {} is given twice", repeated.replica.0);
     }
-    let pools: Arc<PoolDirectory> = store.clone();
-    let registrar: Arc<dyn PoolRegistrar> = store;
-    Ok(DiscoveryStore {
+    let pools: Arc<PoolDirectory> = registrations.clone();
+    let registrar: Arc<dyn PoolRegistrar> = registrations;
+    Ok(DiscoveryBackend {
         pools,
         routers: Arc::new(StaticReplicaDirectory::new(args.routers.clone())),
         registrar: Some(registrar),
     })
 }
 
-async fn kubernetes_store(args: &Args, mcs: McsImplementation) -> Result<DiscoveryStore> {
+/// Pools from the PoolRelay Services that MCS imports, and router replicas
+/// from the router Service's.
+async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<DiscoveryBackend> {
     let (Some(namespace), Some(name), Some(port_name)) = (
         &args.router_namespace,
         &args.router_service,
         &args.router_port_name,
     ) else {
         bail!(
-            "the Kubernetes stores need --router-namespace, --router-service and --router-port-name"
+            "--pool-discovery karmada and mcs need --router-namespace, --router-service and \
+             --router-port-name"
         );
     };
     let client = kubernetes_client()
@@ -196,7 +264,7 @@ async fn kubernetes_store(args: &Args, mcs: McsImplementation) -> Result<Discove
         name: name.clone(),
         port_name: port_name.clone(),
     };
-    Ok(DiscoveryStore {
+    Ok(DiscoveryBackend {
         pools: Arc::new(McsPoolDirectory::new(
             client.clone(),
             mcs,
@@ -242,19 +310,78 @@ fn cancel_on_signal(shutdown: CancellationToken) -> Result<()> {
 mod tests {
     use super::*;
 
+    const ROUTER: &str = "--router=aws-ohio/global-router-0=http://10.42.0.5:50051";
+
+    #[test]
+    fn pools_come_from_registrations_kept_in_memory_by_default() {
+        let args = parse_args(["gds"]).unwrap();
+        assert_eq!(args.pool_discovery, PoolDiscovery::Registrations);
+        assert_eq!(args.registration_storage, RegistrationStorage::Memory);
+    }
+
+    #[test]
+    fn a_flag_for_another_pool_discovery_fails() {
+        assert!(parse_args(["gds", ROUTER]).is_ok());
+        let error = parse_args(["gds", "--pool-discovery", "karmada", ROUTER]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--router works only with --pool-discovery registrations"),
+            "{error}"
+        );
+        assert!(
+            parse_args([
+                "gds",
+                "--pool-discovery",
+                "mcs",
+                "--router-service",
+                "global-router"
+            ])
+            .is_ok()
+        );
+        assert!(parse_args(["gds", "--router-service", "global-router"]).is_err());
+        assert!(
+            parse_args([
+                "gds",
+                "--pool-discovery",
+                "karmada",
+                "--lease-duration-secs",
+                "30"
+            ])
+            .is_err()
+        );
+        // A flag left at its default is not refused.
+        assert!(parse_args(["gds", "--pool-discovery", "karmada"]).is_ok());
+    }
+
     #[test]
     fn pool_service_suffix_can_start_with_a_hyphen_but_not_be_empty() {
-        let args = Args::try_parse_from(["gds", "--pool-service-suffix", "-pool-gateway"]).unwrap();
+        let args = parse_args([
+            "gds",
+            "--pool-discovery",
+            "karmada",
+            "--pool-service-suffix",
+            "-pool-gateway",
+        ])
+        .unwrap();
         assert_eq!(args.pool_service_suffix, "-pool-gateway");
         // An empty suffix would make every imported Service a pool.
-        assert!(Args::try_parse_from(["gds", "--pool-service-suffix="]).is_err());
+        assert!(
+            parse_args([
+                "gds",
+                "--pool-discovery",
+                "karmada",
+                "--pool-service-suffix="
+            ])
+            .is_err()
+        );
     }
 
     #[test]
     fn a_lease_is_at_most_a_day() {
         let day = MAX_LEASE_DURATION_SECS.to_string();
-        assert!(Args::try_parse_from(["gds", "--lease-duration-secs", &day]).is_ok());
+        assert!(parse_args(["gds", "--lease-duration-secs", &day]).is_ok());
         let longer = (MAX_LEASE_DURATION_SECS + 1).to_string();
-        assert!(Args::try_parse_from(["gds", "--lease-duration-secs", &longer]).is_err());
+        assert!(parse_args(["gds", "--lease-duration-secs", &longer]).is_err());
     }
 }
