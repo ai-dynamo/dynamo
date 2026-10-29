@@ -95,5 +95,3 @@ Fill in every section of `.github/pull_request_template.md`, and title the PR pe
 **Validation.** Back each claim with evidence, ideally a table with one row per behavior: the case, what happened before, and what happens now. For bug fixes, explain what caused the problem and why the fix addresses it. Include performance data when the change claims or risks a performance impact. Name each key test added and the regression it catches. Do not list routine test runs, clippy or linter checks, or unnecessary detail.
 
 **Issues and Ongoing Work.** Reference the GitHub or Linear issue the PR implements, for example `Closes #8480` or `Closes DYN-1234`. List any similar PRs, issues, or code on `main` that the Existing work check found, each with one line on how this PR differs; if the search found nothing, say so. As the final step, run the `dynamo-issue-first` skill to validate the issue and its reference.
-
-**Authorship.** If an AI agent wrote or opened the PR, end the description with its model and harness, for example `Written by [Model Name] in [Harness]`.
