@@ -43,6 +43,13 @@ Frontend routing and GAIE routing are mutually exclusive for a given request pat
 selects a worker, the worker's Frontend sidecar must use `--router-mode direct`, not
 `--router-mode kv`.
 
+Gateway policies apply to all three paths below. The component that connects to the workers
+controls worker-facing retries, timeouts, and fallback; the KV router selects the worker.
+
+![Three Gateway request paths showing worker selection, transport ownership, and KV event sources](../../../assets/img/gateway-routing-comparison.svg)
+
+[View the diagram at full size](../../../assets/img/gateway-routing-comparison.svg).
+
 ## Dynamo Frontend Routing
 
 The Dynamo Frontend receives the client request, tokenizes it, scores eligible workers, and forwards
