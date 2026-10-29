@@ -87,7 +87,6 @@ def get_local_model_weight_size(
 
 # Checkpoint formats in the order vLLM's default loader prefers them.
 HUB_WEIGHT_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth")
-# Lists the safetensors files holding the weights when a repo has more.
 SAFETENSORS_INDEX_NAME = "model.safetensors.index.json"
 # Root files that are not model weights: PEFT adapters and training state,
 # as in vLLM's filter_files_not_needed_for_inference.
