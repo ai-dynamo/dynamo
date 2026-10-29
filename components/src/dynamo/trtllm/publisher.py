@@ -236,6 +236,19 @@ def _to_signed_i64(value: int | None) -> int | None:
     return value
 
 
+# TRT-LLM's KV cache manager v2 reports a multimodal item's first token as its
+# 32-byte content digest in hex (token_id is ``int | str``). TRT-LLM token ids
+# stay below 2**31 and router pad values below 1_100_000_000, so map digests
+# into [3 << 29, 2**31), which also fits the consolidator's i32 token ids.
+_DIGEST_TOKEN_ID_BASE = 3 << 29
+
+
+def _event_token_id(token_id: int | str) -> int:
+    if isinstance(token_id, str) and len(token_id) == 64:
+        return _DIGEST_TOKEN_ID_BASE | (int(token_id, 16) >> 227)
+    return int(token_id)
+
+
 class ZmqKvEventPublisher:
     """
     Pure Python ZMQ PUBLISHER for TensorRT-LLM KV events.
@@ -1082,7 +1095,10 @@ class Publisher:
                     break
                 num_block_tokens.append(token_num_in_block)
                 block_hashes.append(block_hash)
-                token_ids.extend(int(t["token_id"]) for t in block_tokens)
+                token_ids.extend(
+                    tid if type(tid := t["token_id"]) is int else _event_token_id(tid)
+                    for t in block_tokens
+                )
 
                 mm_keys = block.get("mm_keys")
                 if mm_keys:

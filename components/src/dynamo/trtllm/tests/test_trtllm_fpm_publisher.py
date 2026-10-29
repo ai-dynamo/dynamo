@@ -30,6 +30,7 @@ in ``test_invoke_handler_matches_publisher_keyword_set``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import queue
 import threading
@@ -955,6 +956,52 @@ def test_handle_kv_event_batch_propagates_malformed_event():
 
     with pytest.raises(KeyError, match="event_id"):
         pub._handle_kv_event_batch([{}])
+
+    publisher.publish_batch.assert_not_called()
+
+
+def test_handle_kv_event_batch_maps_multimodal_digest_token_ids():
+    pub = _publisher_for_kv_event_test()
+    publisher = MagicMock()
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
+    image_a = hashlib.sha256(b"image-a").hexdigest()
+    image_b = hashlib.sha256(b"image-b").hexdigest()
+    event = _stored_kv_event()
+    event["data"]["blocks"][0]["tokens"][1] = {"token_id": image_a}
+    event["data"]["blocks"].append(
+        {
+            "block_hash": 124,
+            "cache_salt": "tenant-a",
+            "tokens": [
+                {"token_id": image_b},
+                {"token_id": image_a},
+                {"token_id": 7},
+                {"token_id": 8},
+            ],
+        }
+    )
+
+    pub._handle_kv_event_batch([event])
+
+    publisher.publish_batch.assert_called_once()
+    (stored,) = publisher.publish_batch.call_args.args[0]
+    a, b = 1887588275, 1823468041  # (3 << 29) | top 29 bits of each digest
+    assert stored["block_hashes"] == [123, 124]
+    assert stored["token_ids"] == [1, a, 3, 4, b, a, 7, 8]
+    assert stored["block_mm_infos"] == [None, None]
+
+
+def test_handle_kv_event_batch_propagates_unknown_string_token_id():
+    pub = _publisher_for_kv_event_test()
+    publisher = MagicMock()
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
+    event = _stored_kv_event()
+    event["data"]["blocks"][0]["tokens"][1] = {"token_id": "not-a-token"}
+
+    with pytest.raises(ValueError, match="not-a-token"):
+        pub._handle_kv_event_batch([event])
 
     publisher.publish_batch.assert_not_called()
 
