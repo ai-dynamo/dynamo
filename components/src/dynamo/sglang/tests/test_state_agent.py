@@ -7,12 +7,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-pytest.importorskip("sglang")
-
 from dynamo.common import kv_state_agent
 from dynamo.common.constants import DisaggregationMode
-from dynamo.sglang import state_agent
-from dynamo.sglang.state_agent import StateAgentLifecycle, state_agent_descriptors
+
+pytest.importorskip("sglang")
+
+from dynamo.sglang import state_agent  # noqa: E402
+from dynamo.sglang.state_agent import (  # noqa: E402
+    StateAgentLifecycle,
+    state_agent_descriptors,
+)
 
 pytestmark = [
     pytest.mark.unit,
