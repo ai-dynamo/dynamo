@@ -1933,6 +1933,15 @@ async fn router_with_recorded_dispatch_and_affinity(
     namespace: &str,
     session_affinity_ttl: Option<Duration>,
 ) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
+    router_with_recorded_dispatch_affinity_and_classifier(namespace, session_affinity_ttl, None)
+        .await
+}
+
+async fn router_with_recorded_dispatch_affinity_and_classifier(
+    namespace: &str,
+    session_affinity_ttl: Option<Duration>,
+    classifier: Option<RecordingClassifier>,
+) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -1971,6 +1980,10 @@ async fn router_with_recorded_dispatch_and_affinity(
     )
     .await
     .unwrap();
+    let chooser = match classifier {
+        Some(classifier) => chooser.with_request_classifier(classifier).unwrap(),
+        None => chooser,
+    };
     let dispatch = Arc::new(PendingThenCompletedDispatch::default());
     let chooser = Arc::new(chooser);
     let affinity = session_affinity_ttl
@@ -4898,5 +4911,141 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
     assert!(matches!(operation, Some(Hold::Initialize(_))));
     assert_eq!(affinity.query_target(&group, None).unwrap(), None);
 
+    runtime.shutdown();
+}
+
+/// A prefill `prepare` failure gives the booking back before a guard exists, so
+/// the request never counts as started and leaves no load behind.
+#[tokio::test]
+#[serial_test::serial]
+async fn prefill_prepare_failure_releases_the_booking_before_the_request_counts() {
+    let (router, runtime) = router(None).await;
+    let started_before = router.request_metrics.requests_started_total.get();
+    let error = router
+        .select_and_dispatch_prefill(Context::new(request()), |_, _| -> Result<(), Error> {
+            Err(anyhow::anyhow!("prepare failed"))
+        })
+        .await
+        .err()
+        .expect("a failed prepare must fail the request");
+    assert!(format!("{error:#}").contains("prepare failed"));
+    assert_eq!(
+        router.request_metrics.requests_started_total.get(),
+        started_before
+    );
+    assert_eq!(
+        active_requests_for(&potential_loads(&router).await, 7, 0),
+        0
+    );
+    drop(router);
+    runtime.shutdown();
+}
+
+/// Hard affinity bound to one DP rank while the route lands on another: the worker
+/// accepts the send, then the session commit fails. The attempt must be aborted
+/// with that cause for the classifier, release its booking, stop the worker, and
+/// fail the request.
+#[tokio::test]
+#[serial_test::serial]
+async fn affinity_commit_failure_after_the_send_aborts_the_attempt() {
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, dispatch, worker_id, runtime) =
+        router_with_recorded_dispatch_affinity_and_classifier(
+            "kv-affinity-commit-failure",
+            Some(Duration::from_secs(60)),
+            Some(RecordingClassifier {
+                calls: Arc::new(AtomicUsize::new(0)),
+                observations: observations_tx,
+            }),
+        )
+        .await;
+    let session_id = SessionAffinityId::new("commit-failure");
+    bind_affinity_target(
+        &router,
+        &session_id,
+        AffinityTarget::new(worker_id, Some(2)),
+    )
+    .await;
+    let hold = router
+        .affinity
+        .as_ref()
+        .unwrap()
+        .acquire(&session_id, None)
+        .await
+        .unwrap();
+    assert!(matches!(hold, Hold::Bound { .. }));
+
+    let request = Context::new(request());
+    let context = request.context().clone();
+    let mut plan = router
+        .plan_kv_route(
+            &request,
+            RequestPhase::Aggregated,
+            None,
+            CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(plan.worker().dp_rank, 0);
+    plan.affinity = Some(hold);
+
+    assert!(
+        router.dispatch_kv_plan(request, plan).await.is_err(),
+        "a commit that fails after the send must fail the request"
+    );
+    assert_eq!(dispatch.worker_ids.lock().unwrap().clone(), vec![worker_id]);
+    assert!(
+        context.is_stopped(),
+        "the worker must be told to stop generating"
+    );
+    assert_eq!(
+        active_requests_for(&potential_loads(&router).await, worker_id, 0),
+        0
+    );
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+            .await
+            .expect("classifier abort event timed out"),
+        Some(ClassifierObservation::Aborted { .. })
+    ));
+    drop(router);
+    runtime.shutdown();
+}
+
+/// The committed session lease lives in the request guard: held while the
+/// response stream exists, even past the idle TTL, and released with a refreshed
+/// TTL when the stream is dropped.
+#[tokio::test]
+#[serial_test::serial]
+async fn committed_session_lease_lives_as_long_as_the_response_stream() {
+    let ttl = Duration::from_secs(1);
+    let (router, _dispatch, worker_id, runtime) =
+        router_with_recorded_dispatch_and_affinity("kv-affinity-lease-lifetime", Some(ttl)).await;
+    let affinity = router.affinity.clone().unwrap();
+    let session_id = SessionAffinityId::new("lease-lifetime");
+    let target = AffinityTarget::new(worker_id, Some(0));
+    bind_affinity_target(&router, &session_id, target).await;
+
+    let stream = router
+        .generate(affinity_request("lease-lifetime", None))
+        .await
+        .unwrap();
+    tokio::time::sleep(ttl + Duration::from_millis(300)).await;
+    assert_eq!(
+        affinity.query_target(&session_id, None).unwrap(),
+        Some(target)
+    );
+    let hold = affinity.acquire(&session_id, None).await.unwrap();
+    assert!(matches!(hold, Hold::Bound { .. }));
+    drop(hold);
+
+    drop(stream);
+    assert_eq!(
+        affinity.query_target(&session_id, None).unwrap(),
+        Some(target)
+    );
+    tokio::time::sleep(ttl + Duration::from_millis(300)).await;
+    assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
+    drop(router);
     runtime.shutdown();
 }

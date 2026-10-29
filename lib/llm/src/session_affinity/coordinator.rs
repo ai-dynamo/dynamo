@@ -8,31 +8,8 @@
 //! stream), and the runtime event plane that replicates bindings between
 //! frontends.
 
-#[cfg(test)]
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
-};
 use std::{sync::Arc, time::Duration};
 
-use dynamo_kv_router::services::selection::affinity::{
-    AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
-};
-use dynamo_runtime::{
-    engine::AsyncEngineContext,
-    error::{DynamoError, ErrorType},
-    pipeline::Error,
-};
-#[cfg(test)]
-use dynamo_runtime::{
-    engine::AsyncEngineContextProvider,
-    pipeline::{ManyOut, ResponseStream},
-};
-#[cfg(test)]
-use futures::Stream;
-
-#[cfg(test)]
-use super::LlmResponse;
 #[cfg(test)]
 use super::replica_sync::SessionAffinityUpdate;
 use super::{SessionAffinityMode, replica_sync::ReplicaSyncRuntime};
@@ -42,6 +19,14 @@ use crate::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         timing::RequestPhase,
     },
+};
+use dynamo_kv_router::services::selection::affinity::{
+    AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
+};
+use dynamo_runtime::{
+    engine::AsyncEngineContext,
+    error::{DynamoError, ErrorType},
+    pipeline::Error,
 };
 
 #[cfg(test)]
@@ -188,18 +173,6 @@ impl AffinityCoordinator {
             .map_err(affinity_error)
     }
 
-    /// [`Self::commit`], holding the lease until `stream` ends.
-    #[cfg(test)]
-    pub(super) fn commit_to_stream(
-        &self,
-        hold: Hold,
-        dispatched_target: AffinityTarget,
-        stream: ManyOut<LlmResponse>,
-    ) -> Result<ManyOut<LlmResponse>, Error> {
-        let lease = self.commit(hold, dispatched_target)?;
-        Ok(tracked_stream(lease, stream))
-    }
-
     #[cfg(test)]
     pub(super) fn entry_count(&self) -> usize {
         self.inner.table.entry_count()
@@ -297,43 +270,6 @@ impl AffinityCoordinator {
                 writer_id,
             },
         )
-    }
-}
-
-#[cfg(test)]
-pub(super) fn tracked_stream(
-    lease: AffinityLease,
-    stream: ManyOut<LlmResponse>,
-) -> ManyOut<LlmResponse> {
-    let context = stream.context();
-    ResponseStream::new(
-        Box::pin(AffinityTrackedStream {
-            stream,
-            lease: Some(lease),
-        }),
-        context,
-    )
-}
-
-#[cfg(test)]
-struct AffinityTrackedStream {
-    stream: ManyOut<LlmResponse>,
-    lease: Option<AffinityLease>,
-}
-
-#[cfg(test)]
-impl Stream for AffinityTrackedStream {
-    type Item = LlmResponse;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.stream).poll_next(cx) {
-            Poll::Ready(None) => {
-                drop(self.lease.take());
-                Poll::Ready(None)
-            }
-            Poll::Ready(Some(item)) => Poll::Ready(Some(item)),
-            poll => poll,
-        }
     }
 }
 
