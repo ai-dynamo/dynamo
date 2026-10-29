@@ -1,6 +1,6 @@
 {
   "captureSources": {
-    "hack/capture_missing_origin.py": "2b0a94224b4a31d4f34f2f9cf5d879ec9323e74017e13e552fd4884cfe087569",
+    "hack/capture_missing_origin.py": "102ffc3fd5d830c15fe1d610ee22355afaadfb76e686c049129fa59c984537a3",
     "hack/upgrade_capture_test.go.tmpl": "6d2e0b9bcb266ad0b72d719434f06b3686d230423486491493fb52c78e242206",
     "internal/testing/golden/capture.go": "73425c5e21c3f3da45cb79549f0e1d23ef43eee21a85981c0b4f3703b5d845cd"
   },
@@ -10,18 +10,18 @@
     "1.5.0": "ae270b7978a5eadfe7d6aa623de4b53af3ac6c7e7e087222aedd78dfcc1ecd6e",
     "1.6.0": "c545971a751d5803a5129454831836887d67ad862669308322272d54fecca0b9"
   },
-  "inputSHA256": "1f493b3711f8389dcdbf7ce5bf82978d87077e409a9def926601336aad13d7ea",
+  "inputSHA256": "6ac5fbc670bd13159bcb06fc969bf24b9f5ade5a87dad0d925613dbac6fd110f",
   "observations": {
     "1.4.0": {
-      "sha256": "a312699b7e95ed4f02ab3901c61aa2650c3c34f5b2f24d1d084814dec05c5585",
+      "sha256": "b9a5841cb5f70035fe42cf04578a4a733f6107084db0516be77e9306c6d79a77",
       "workerHash": "7df86e24"
     },
     "1.5.0": {
-      "sha256": "17b18ef839368342419d449bc81684ee4305ba541a41a82b5288d78aa548bff1",
+      "sha256": "7ca955df0b29f4c2871c1130e6d68eb9ba236cea1ffd3d44d58395b0a615b311",
       "workerHash": "7df86e24"
     },
     "1.6.0": {
-      "sha256": "13489e53e9669fd929a17262ebc563149f1b401415e91fd07aa39b1470eab247",
+      "sha256": "13a34a59cb358e24bfde01cc452bfa76cd728faf03ea6eedc9d8af567536f006",
       "workerHash": "7df86e24"
     }
   },

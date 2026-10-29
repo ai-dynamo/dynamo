@@ -150,7 +150,11 @@ def capture(destination):
                 container["command"] = ["python3"]
                 container["args"] = ["-m", "dynamo.frontend"]
         scenario = destination / "create.yaml"
-        scenario.write_text(yaml.safe_dump(dgd, sort_keys=False))
+        scenario.write_text(
+            "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n"
+            "# SPDX-License-Identifier: Apache-2.0\n"
+            + yaml.safe_dump(dgd, sort_keys=False)
+        )
         env = dict(
             os.environ,
             GOWORK="off",
