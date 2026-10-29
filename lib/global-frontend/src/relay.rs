@@ -59,8 +59,7 @@ pub async fn follow_relays(
             let keep = wanted.get(pool).is_some_and(|(want, _)| want == relay);
             if !keep {
                 subscription.cancel();
-                signals.forget_load(pool);
-                signals.forget_kv(pool);
+                signals.forget(pool);
             }
             keep
         });

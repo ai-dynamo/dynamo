@@ -8,8 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 An HTTP entry point that forwards requests to explicitly configured Dynamo pool
 frontends. It reads only each request's `model` and passes the request and the
 pool's response through as they are; the pool frontend owns validation,
-preprocessing, generation, and the response format. Shared pool identity and
-description types live in `dynamo-global-common`.
+preprocessing, generation, and the response format. Pool identity types live
+in `dynamo-global-common`, and pool selection in `dynamo-global-router`.
 
 ```bash
 cargo run -p dynamo-global-frontend -- --port 8000 \
@@ -93,9 +93,8 @@ zero.
 
 ## Limitations
 
-This first implementation uses static configuration. The catalog interface also
-accepts snapshots for embedding and tests, but there is no discovery client,
-polling, or registration. There is no automatic failover or retry: unreachable
+Pools are given on the command line; there is no discovery client, polling, or
+registration. There is no automatic failover or retry: unreachable
 pools return 503. The Global Frontend serves no `/metrics` of its own, and its
 listener has no TLS.
 
@@ -104,7 +103,7 @@ listener has no TLS.
 Run CPU-only tests with:
 
 ```bash
-cargo test -p dynamo-global-common -p dynamo-global-router -p dynamo-global-frontend --no-default-features
+cargo test -p dynamo-global-common -p dynamo-global-router -p dynamo-global-frontend
 ```
 
 The common `PoolId` identifies a DGD using its deployment coordinates. It is

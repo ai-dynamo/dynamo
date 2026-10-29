@@ -73,7 +73,7 @@ struct KvReport {
 }
 
 impl PoolSignals {
-    /// `in_flight` must be the tracker the forwarding engine counts its
+    /// `in_flight` must be the tracker the Global Frontend counts its
     /// requests in.
     pub fn new(in_flight: Arc<InFlightTracker>) -> Self {
         Self {
@@ -94,11 +94,6 @@ impl PoolSignals {
         self.loads.insert(pool.clone(), current);
     }
 
-    /// Drops a pool's load, for when the pool leaves or its Relay changes.
-    pub fn forget_load(&self, pool: &PoolId) {
-        self.loads.remove(pool);
-    }
-
     /// Records the KV blocks a pool's workers hold for running requests, and
     /// their total, as the pool's Relay reported once a `window`.
     pub fn record_kv(&self, pool: &PoolId, used: u64, total: u64, window: Duration) {
@@ -113,24 +108,23 @@ impl PoolSignals {
         );
     }
 
-    /// Drops a pool's KV report, for when the pool leaves or its Relay
-    /// changes.
-    pub fn forget_kv(&self, pool: &PoolId) {
+    /// Drops what a pool's Relay reported, for when the pool leaves or its
+    /// Relay changes.
+    pub fn forget(&self, pool: &PoolId) {
+        self.loads.remove(pool);
         self.kv.remove(pool);
     }
 
-    /// How full the pool is against its own capacity.
+    /// How full the pool is against its own capacity. `None` without a fresh
+    /// report, or before the workers report how many requests they can run.
     ///
-    /// The Relay reports about once a second, so requests this process has
-    /// sent since the last report count as in flight; otherwise a burst
-    /// would all go to the same pool. The KV side counts waiting requests
-    /// too, at the blocks each running request holds now, so it reaches 1
-    /// when the pool's KV cannot hold everything it has, even though the
-    /// blocks in use never exceed the total. Workers report KV only when it
-    /// changes, so a pool that has had no traffic may have no KV view yet;
-    /// its KV is then empty in practice, and its slots alone say how full it
-    /// is. `None` without a fresh report, or before the workers report how
-    /// many requests they can run.
+    /// Requests this process has sent since the last report count as in
+    /// flight, so a burst between reports does not all go to one pool. The
+    /// KV side counts waiting requests at the blocks each running request
+    /// holds now, so it reaches 1 when the pool's KV cannot hold everything
+    /// it has. Workers report KV only when it changes, so a pool without
+    /// traffic may have no KV view yet; its slots alone then say how full it
+    /// is.
     pub fn occupancy(&self, pool: &PoolId) -> Option<PoolOccupancy> {
         let now = Instant::now();
         let current = self

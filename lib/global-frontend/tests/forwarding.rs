@@ -5,36 +5,83 @@
 //! Most pools here are Dynamo's own HTTP service running the echo engine,
 //! which streams the prompt back one character at a time.
 
-mod common;
-
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{
-    MODEL, Server, bind, chat, chat_chunk, client, http_service, ok_json, pool, post,
-    scripted_pool_frontend, serve, sse_data,
+use axum::http::HeaderMap;
+use dynamo_global_common::PoolKey;
+use dynamo_global_frontend::PoolSnapshot;
+use dynamo_global_router::{
+    InFlightTracker, Pool, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
 };
-use dynamo_global_frontend::{
-    Pool, PoolSelector, PoolSnapshot, PoolTarget, RoundRobinSelector, RoutingRequest,
-};
-use dynamo_global_router::InFlightTracker;
 use dynamo_llm::endpoint_type::EndpointType;
 use dynamo_llm::engines::{StreamingEngineAdapter, make_echo_engine};
+use dynamo_llm::http::service::service_v2::HttpService;
 use futures::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
-struct GlobalFrontend {
-    server: Server,
-    pools: watch::Sender<Arc<PoolSnapshot>>,
+const MODEL: &str = "echo-model";
+
+/// A running HTTP server. Dropping it stops the server.
+struct Server {
+    url: Url,
+    cancel: CancellationToken,
 }
 
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap()
+}
+
+async fn bind() -> (TcpListener, Url) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (
+        listener,
+        format!("http://127.0.0.1:{port}/").parse().unwrap(),
+    )
+}
+
+/// Waits until `url` answers a GET with success.
+async fn wait_until_ok(url: &Url) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !client()
+            .get(url.clone())
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("server did not come up");
+}
+
+/// Dynamo's HTTP service serving the echo engine for chat, completions and
+/// Responses.
 async fn echo_pool_frontend() -> Server {
     let (listener, url) = bind().await;
-    let service = http_service(&url);
+    let service = HttpService::builder()
+        .host("127.0.0.1")
+        .port(url.port().unwrap())
+        .build()
+        .unwrap();
     let engine = Arc::new(StreamingEngineAdapter::new(make_echo_engine()));
     let manager = service.model_manager();
     manager
@@ -50,7 +97,10 @@ async fn echo_pool_frontend() -> Server {
     ] {
         service.enable_model_endpoint(endpoint, true).unwrap();
     }
-    serve(service, listener, url).await
+    let cancel = CancellationToken::new();
+    service.spawn_with_listener(cancel.clone(), listener).await;
+    wait_until_ok(&url.join("health").unwrap()).await;
+    Server { url, cancel }
 }
 
 /// A pool frontend serving `app`.
@@ -66,13 +116,102 @@ async fn pool_frontend(app: axum::Router) -> Server {
     Server { url, cancel }
 }
 
-/// A Global Frontend over a catalog the test can change.
+/// A pool frontend that records the headers of each chat request and answers
+/// with a fixed SSE body.
+async fn scripted_pool_frontend(sse: &'static str) -> (Server, Arc<Mutex<Vec<HeaderMap>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorder = seen.clone();
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move |headers: HeaderMap| {
+            recorder.lock().unwrap().push(headers);
+            async move { ([("content-type", "text/event-stream")], sse) }
+        }),
+    );
+    (pool_frontend(app).await, seen)
+}
+
+fn pool(dgd: &str, model: &str, frontend: &Url) -> Pool {
+    let key = PoolKey::new("ohio", "dynamo", dgd).unwrap();
+    Pool::new(&key, model, "us-east-2", vec![frontend.clone()])
+}
+
+/// A running Global Frontend, and the catalog it routes over.
+struct GlobalFrontend {
+    server: Server,
+    pools: watch::Sender<Arc<PoolSnapshot>>,
+}
+
+/// A Global Frontend that routes round robin over `pools`.
 async fn global_frontend(pools: Vec<Pool>) -> GlobalFrontend {
+    let selector = Arc::new(RoundRobinSelector::new());
+    global_frontend_with(pools, selector, Arc::new(InFlightTracker::new())).await
+}
+
+/// A Global Frontend that routes with `selector` over `pools`, counting
+/// requests in flight in `in_flight`.
+async fn global_frontend_with(
+    pools: Vec<Pool>,
+    selector: Arc<dyn PoolSelector>,
+    in_flight: Arc<InFlightTracker>,
+) -> GlobalFrontend {
     let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
+    let (listener, url) = bind().await;
+    let cancel = CancellationToken::new();
+    let app = dynamo_global_frontend::app(receiver, selector, in_flight, client());
+    tokio::spawn(dynamo_global_frontend::serve(listener, app, cancel.clone()));
+    wait_until_ok(&url.join("live").unwrap()).await;
     GlobalFrontend {
-        server: common::global_frontend(receiver).await,
+        server: Server { url, cancel },
         pools: sender,
     }
+}
+
+/// One chat completion chunk carrying `content`.
+fn chat_chunk(content: &str) -> Value {
+    json!({
+        "id": "chatcmpl-1",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": MODEL,
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": content}}],
+    })
+}
+
+fn chat(model: &str, prompt: &str, stream: bool) -> Value {
+    json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": stream,
+    })
+}
+
+async fn post(base: &Url, route: &str, body: &Value) -> reqwest::Response {
+    client()
+        .post(base.join(route).unwrap())
+        .json(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// The JSON body of a successful response. On failure, the panic shows the
+/// body, which carries the error.
+async fn ok_json(response: reqwest::Response) -> Value {
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+/// The `data:` payloads of an SSE body, up to `[DONE]`.
+fn sse_data(body: &str) -> Vec<Value> {
+    body.lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim)
+        .take_while(|data| *data != "[DONE]")
+        .map(|data| serde_json::from_str(data).unwrap())
+        .collect()
 }
 
 fn streamed_text(body: &str) -> String {
@@ -83,21 +222,55 @@ fn streamed_text(body: &str) -> String {
 }
 
 #[tokio::test]
-async fn streams_chat_completions_from_the_pool() {
+async fn forwards_each_route_to_the_pool() {
     let pool_frontend = echo_pool_frontend().await;
     let global = global_frontend(vec![pool("blue", MODEL, &pool_frontend.url)]).await;
 
-    let response = post(
-        &global.server.url,
-        "v1/chat/completions",
-        &chat(MODEL, "hello", true),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["content-type"], "text/event-stream");
-    let body = response.text().await.unwrap();
-    assert_eq!(streamed_text(&body), "hello");
-    assert!(body.trim_end().ends_with("data: [DONE]"), "{body}");
+    // Each case's route and request, and how to read the echoed text from
+    // the pool's response body.
+    type EchoedText = fn(&str) -> String;
+    let cases: [(&str, Value, EchoedText); 4] = [
+        ("v1/chat/completions", chat(MODEL, "hello", true), |body| {
+            assert!(body.trim_end().ends_with("data: [DONE]"), "{body}");
+            streamed_text(body)
+        }),
+        ("v1/chat/completions", chat(MODEL, "hello", false), |body| {
+            let body: Value = serde_json::from_str(body).unwrap();
+            body["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }),
+        (
+            "v1/completions",
+            json!({"model": MODEL, "prompt": "hello", "max_tokens": 16}),
+            |body| {
+                let body: Value = serde_json::from_str(body).unwrap();
+                body["choices"][0]["text"].as_str().unwrap().to_owned()
+            },
+        ),
+        (
+            "v1/responses",
+            json!({"model": MODEL, "input": "hello"}),
+            |body| {
+                let body: Value = serde_json::from_str(body).unwrap();
+                body["output"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|item| item["content"].as_array().cloned().unwrap_or_default())
+                    .filter_map(|part| part["text"].as_str().map(str::to_owned))
+                    .collect()
+            },
+        ),
+    ];
+    for (route, request, text) in cases {
+        let response = post(&global.server.url, route, &request).await;
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{route}: {body}");
+        assert_eq!(text(&body), "hello", "{route}: {body}");
+    }
 }
 
 #[tokio::test]
@@ -120,50 +293,6 @@ async fn passes_the_pool_stream_through_as_sent() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.text().await.unwrap(), sse);
-}
-
-#[tokio::test]
-async fn passes_non_streaming_responses_through() {
-    let pool_frontend = echo_pool_frontend().await;
-    let global = global_frontend(vec![pool("blue", MODEL, &pool_frontend.url)]).await;
-
-    let response = post(
-        &global.server.url,
-        "v1/chat/completions",
-        &chat(MODEL, "hello", false),
-    )
-    .await;
-    let body = ok_json(response).await;
-    assert_eq!(body["choices"][0]["message"]["content"], "hello", "{body}");
-}
-
-#[tokio::test]
-async fn forwards_completions() {
-    let pool_frontend = echo_pool_frontend().await;
-    let global = global_frontend(vec![pool("blue", MODEL, &pool_frontend.url)]).await;
-
-    let request = json!({"model": MODEL, "prompt": "hi there", "max_tokens": 16});
-    let response = post(&global.server.url, "v1/completions", &request).await;
-    let body = ok_json(response).await;
-    assert_eq!(body["choices"][0]["text"], "hi there", "{body}");
-}
-
-#[tokio::test]
-async fn forwards_the_responses_api_to_the_pool() {
-    let pool_frontend = echo_pool_frontend().await;
-    let global = global_frontend(vec![pool("blue", MODEL, &pool_frontend.url)]).await;
-
-    let request = json!({"model": MODEL, "input": "hello"});
-    let response = post(&global.server.url, "v1/responses", &request).await;
-    let body = ok_json(response).await;
-    let text = body["output"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|item| item["content"].as_array().cloned().unwrap_or_default())
-        .filter_map(|part| part["text"].as_str().map(str::to_owned))
-        .collect::<String>();
-    assert_eq!(text, "hello", "{body}");
 }
 
 #[tokio::test]
@@ -295,7 +424,11 @@ struct SessionRecorder {
 }
 
 impl PoolSelector for SessionRecorder {
-    fn select(&self, request: &RoutingRequest<'_>, candidates: &[&Pool]) -> Option<PoolTarget> {
+    fn select<'a>(
+        &self,
+        request: &RoutingRequest<'_>,
+        candidates: &[&'a Pool],
+    ) -> Option<PoolTarget<'a>> {
         let session = request.session.map(str::to_owned);
         self.sessions.lock().unwrap().push(session);
         self.inner.select(request, candidates)
@@ -307,13 +440,12 @@ async fn the_selector_sees_the_session() {
     let pool_frontend = echo_pool_frontend().await;
     let recorder = Arc::new(SessionRecorder::default());
     let blue = pool("blue", MODEL, &pool_frontend.url);
-    let (_pools, receiver) = watch::channel(Arc::new(PoolSnapshot::new(vec![blue])));
     let in_flight = Arc::new(InFlightTracker::new());
-    let global = common::global_frontend_with(receiver, recorder.clone(), in_flight).await;
+    let global = global_frontend_with(vec![blue], recorder.clone(), in_flight).await;
 
     for session in [Some("session-123"), None] {
         let mut request = client()
-            .post(global.url.join("v1/chat/completions").unwrap())
+            .post(global.server.url.join("v1/chat/completions").unwrap())
             .json(&chat(MODEL, "hi", false));
         if let Some(session) = session {
             request = request.header("x-dynamo-session-id", session);
@@ -338,12 +470,16 @@ async fn requests_count_in_flight_until_their_response_ends() {
     .await;
     let blue = pool("blue", MODEL, &endless.url);
     let id = blue.id.clone();
-    let (_pools, receiver) = watch::channel(Arc::new(PoolSnapshot::new(vec![blue])));
     let in_flight = Arc::new(InFlightTracker::new());
     let selector = Arc::new(RoundRobinSelector::new());
-    let global = common::global_frontend_with(receiver, selector, in_flight.clone()).await;
+    let global = global_frontend_with(vec![blue], selector, in_flight.clone()).await;
 
-    let response = post(&global.url, "v1/chat/completions", &chat(MODEL, "hi", true)).await;
+    let response = post(
+        &global.server.url,
+        "v1/chat/completions",
+        &chat(MODEL, "hi", true),
+    )
+    .await;
     let mut chunks = response.bytes_stream();
     assert!(chunks.next().await.is_some());
     assert_eq!(in_flight.get(&id), 1);
@@ -357,4 +493,36 @@ async fn requests_count_in_flight_until_their_response_ends() {
     })
     .await
     .expect("the request stayed in flight after the client left");
+}
+
+#[tokio::test]
+async fn rotates_across_pools_and_tracks_catalog_changes() {
+    let blue_sse = format!("data: {}\n\ndata: [DONE]\n\n", chat_chunk("blue"));
+    let green_sse = format!("data: {}\n\ndata: [DONE]\n\n", chat_chunk("green"));
+    let (blue, blue_requests) = scripted_pool_frontend(blue_sse.leak()).await;
+    let (green, green_requests) = scripted_pool_frontend(green_sse.leak()).await;
+    let blue_pool = pool("blue", MODEL, &blue.url);
+    let green_pool = pool("green", MODEL, &green.url);
+    let global = global_frontend(vec![blue_pool.clone()]).await;
+
+    async fn send(global: &GlobalFrontend, count: usize) {
+        for _ in 0..count {
+            let request = chat(MODEL, "hi", true);
+            let response = post(&global.server.url, "v1/chat/completions", &request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            response.text().await.unwrap();
+        }
+    }
+    send(&global, 1).await;
+    let both = PoolSnapshot::new(vec![blue_pool, green_pool.clone()]);
+    global.pools.send_replace(Arc::new(both));
+    send(&global, 4).await;
+    assert_eq!(blue_requests.lock().unwrap().len(), 3);
+    assert_eq!(green_requests.lock().unwrap().len(), 2);
+
+    let green_only = PoolSnapshot::new(vec![green_pool]);
+    global.pools.send_replace(Arc::new(green_only));
+    send(&global, 2).await;
+    assert_eq!(blue_requests.lock().unwrap().len(), 3);
+    assert_eq!(green_requests.lock().unwrap().len(), 4);
 }

@@ -11,16 +11,12 @@
 //! [`follow_relays`] fills from each pool's PoolRelay and
 //! [`measure_round_trips`] from the round trip to each region.
 
+mod catalog;
 mod proxy;
 mod relay;
 mod round_trip;
 
+pub use catalog::PoolSnapshot;
 pub use proxy::{app, serve};
 pub use relay::follow_relays;
 pub use round_trip::measure_round_trips;
-
-mod catalog;
-pub use catalog::{PoolCatalog, PoolSnapshot, StaticPoolCatalog};
-pub use dynamo_global_router::{
-    Pool, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
-};

@@ -37,18 +37,23 @@ impl<'a> RoutingRequest<'a> {
     }
 }
 
-/// Where to send one request.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PoolTarget {
-    pub pool: PoolId,
-    pub frontend: Url,
+/// Where to send one request: one of the candidates, and one of its
+/// frontends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolTarget<'a> {
+    pub pool: &'a Pool,
+    pub frontend: &'a Url,
 }
 
 /// Chooses a pool, and a frontend in it, for each request.
 pub trait PoolSelector: Send + Sync {
     /// `candidates` are the pools serving the request's model. `None` means
     /// none of them can take the request.
-    fn select(&self, request: &RoutingRequest<'_>, candidates: &[&Pool]) -> Option<PoolTarget>;
+    fn select<'a>(
+        &self,
+        request: &RoutingRequest<'_>,
+        candidates: &[&'a Pool],
+    ) -> Option<PoolTarget<'a>>;
 }
 
 /// Rotates through the pools serving each model, then through the chosen
@@ -70,7 +75,11 @@ impl RoundRobinSelector {
 }
 
 impl PoolSelector for RoundRobinSelector {
-    fn select(&self, request: &RoutingRequest<'_>, candidates: &[&Pool]) -> Option<PoolTarget> {
+    fn select<'a>(
+        &self,
+        request: &RoutingRequest<'_>,
+        candidates: &[&'a Pool],
+    ) -> Option<PoolTarget<'a>> {
         let reachable = || candidates.iter().copied().filter(|pool| reachable(pool));
         let position = self.pools.next(request.model, reachable().count())?;
         target(&self.frontends, reachable().nth(position)?)
@@ -92,7 +101,7 @@ pub struct LeastInFlightSelector {
 }
 
 impl LeastInFlightSelector {
-    /// `in_flight` must be the tracker the forwarding engine counts its
+    /// `in_flight` must be the tracker the Global Frontend counts its
     /// requests in.
     pub fn new(in_flight: Arc<InFlightTracker>) -> Self {
         Self {
@@ -104,7 +113,11 @@ impl LeastInFlightSelector {
 }
 
 impl PoolSelector for LeastInFlightSelector {
-    fn select(&self, _request: &RoutingRequest<'_>, candidates: &[&Pool]) -> Option<PoolTarget> {
+    fn select<'a>(
+        &self,
+        _request: &RoutingRequest<'_>,
+        candidates: &[&'a Pool],
+    ) -> Option<PoolTarget<'a>> {
         // Read each count once: requests start and finish while this runs.
         let counts = candidates
             .iter()
@@ -126,12 +139,9 @@ pub(crate) fn reachable(pool: &Pool) -> bool {
 }
 
 /// `pool`, with the next of its frontends in rotation.
-pub(crate) fn target(frontends: &Cursors<PoolId>, pool: &Pool) -> Option<PoolTarget> {
+pub(crate) fn target<'a>(frontends: &Cursors<PoolId>, pool: &'a Pool) -> Option<PoolTarget<'a>> {
     let frontend = &pool.frontends[frontends.next(&pool.id, pool.frontends.len())?];
-    Some(PoolTarget {
-        pool: pool.id.clone(),
-        frontend: frontend.clone(),
-    })
+    Some(PoolTarget { pool, frontend })
 }
 
 /// One rotating cursor per key.
@@ -240,7 +250,7 @@ pub(crate) mod tests {
 
         for _ in 0..3 {
             let target = selector.select(&request, &[&empty, &live]).unwrap();
-            assert_eq!(target.pool, live.id);
+            assert_eq!(target.pool.id, live.id);
         }
         assert_eq!(selector.select(&request, &[&empty]), None);
         assert_eq!(selector.select(&request, &[]), None);
@@ -258,7 +268,7 @@ pub(crate) mod tests {
         let _one = in_flight.start(&green.id);
         for _ in 0..10 {
             let target = selector.select(&request, &[&blue, &green]).unwrap();
-            assert_eq!(target.pool, green.id);
+            assert_eq!(target.pool.id, green.id);
         }
     }
 
@@ -276,6 +286,8 @@ pub(crate) mod tests {
                     .select(&request, &[&empty, &blue, &green])
                     .unwrap()
                     .pool
+                    .id
+                    .clone()
             })
             .collect::<Vec<_>>();
         let (blue, green) = (blue.id.clone(), green.id.clone());

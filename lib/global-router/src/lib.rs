@@ -11,7 +11,6 @@
 
 mod affinity;
 mod load;
-mod placement;
 mod pool;
 mod selector;
 mod signals;

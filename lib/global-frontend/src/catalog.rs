@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use dynamo_global_router::Pool;
-use tokio::sync::watch;
 
-/// Every pool a catalog knows about at one point in time.
+/// Every pool the Global Frontend knows about at one point in time. The
+/// Global Frontend reads the current snapshot from a `watch` channel, so a
+/// source of pools publishes a new one whenever a pool joins, leaves, or
+/// changes its frontends.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PoolSnapshot {
     pools: Vec<Pool>,
@@ -30,33 +31,6 @@ impl PoolSnapshot {
     /// Models served by at least one pool.
     pub fn models(&self) -> BTreeSet<&str> {
         self.pools.iter().map(|pool| pool.model.as_str()).collect()
-    }
-}
-
-/// A source of pools. An implementation publishes a new snapshot whenever a
-/// pool joins, leaves, or changes its frontends.
-pub trait PoolCatalog: Send + Sync {
-    /// The receiver holds the current snapshot, and its `changed()` waits for
-    /// the next one. It returns an error once the catalog is dropped.
-    fn subscribe(&self) -> watch::Receiver<Arc<PoolSnapshot>>;
-}
-
-/// A catalog that never changes, for pools given on the command line and
-/// for tests.
-pub struct StaticPoolCatalog {
-    snapshot: watch::Sender<Arc<PoolSnapshot>>,
-}
-
-impl StaticPoolCatalog {
-    pub fn new(pools: Vec<Pool>) -> Self {
-        let (snapshot, _) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
-        Self { snapshot }
-    }
-}
-
-impl PoolCatalog for StaticPoolCatalog {
-    fn subscribe(&self) -> watch::Receiver<Arc<PoolSnapshot>> {
-        self.snapshot.subscribe()
     }
 }
 
@@ -89,15 +63,5 @@ pub(crate) mod tests {
             .map(|pool| pool.frontends[0].host_str());
         assert_eq!(qwen.collect::<Vec<_>>(), [Some("blue"), Some("green")]);
         assert_eq!(snapshot.pools_for("missing").count(), 0);
-    }
-
-    #[test]
-    fn static_catalog_serves_its_pools_to_every_subscriber() {
-        let catalog = StaticPoolCatalog::new(vec![pool("blue", "qwen", &["http://blue:8000"])]);
-        let first = catalog.subscribe();
-        let second = catalog.subscribe();
-
-        assert_eq!(first.borrow().pools().len(), 1);
-        assert_eq!(*first.borrow(), *second.borrow());
     }
 }

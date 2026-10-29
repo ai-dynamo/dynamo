@@ -133,6 +133,9 @@ async fn forward(
             format!("model {model} is not served"),
         );
     }
+    remove_hop_headers(&mut headers);
+    headers.remove(header::HOST);
+    headers.insert(header::CONTENT_LENGTH, body.len().into());
     let session = headers
         .get(HEADER_DYNAMO_SESSION_ID)
         .and_then(|session| session.to_str().ok());
@@ -141,15 +144,12 @@ async fn forward(
         let message = format!("no pool can serve model {model}");
         return error(StatusCode::SERVICE_UNAVAILABLE, message);
     };
-    let in_flight = proxy.in_flight.start(&target.pool);
-    let Some(url) = route_url(&target.frontend, &uri) else {
+    let pool = &target.pool.id;
+    let in_flight = proxy.in_flight.start(pool);
+    let Some(url) = route_url(target.frontend, &uri) else {
         return error(StatusCode::BAD_REQUEST, "invalid route".to_owned());
     };
-
-    remove_hop_headers(&mut headers);
-    headers.remove(header::HOST);
-    headers.insert(header::CONTENT_LENGTH, body.len().into());
-    tracing::debug!(pool = %target.pool, %url, "forwarding request");
+    tracing::debug!(%pool, %url, "forwarding request");
     // A stream body cannot be copied, so reqwest keeps none for redirects,
     // and the bytes are freed once written to the pool.
     let upload = reqwest::Body::wrap_stream(futures::stream::once(futures::future::ready(Ok::<
@@ -176,7 +176,7 @@ async fn forward(
             // is in its sources.
             let failure = anyhow::Error::new(failure);
             tracing::warn!(
-                pool = %target.pool,
+                %pool,
                 %url,
                 error = format!("{failure:#}"),
                 "pool frontend failed"

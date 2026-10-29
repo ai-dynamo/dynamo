@@ -1,21 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Global Frontend. See `dynamo_global_frontend`.
-//!
-//! ```bash
-//! cargo run -p dynamo-global-frontend -- --port 8000 \
-//!     --pool ohio/dynamo/mocker-1=Qwen/Qwen3-0.6B@http://10.42.0.5:8000
-//! ```
-//!
-//! With session affinity, each pool's load comes from its PoolRelay:
-//!
-//! ```bash
-//! cargo run -p dynamo-global-frontend -- --port 8000 \
-//!     --router-policy affinity --region ohio \
-//!     --pool ohio/dynamo/mocker-1=Qwen/Qwen3-0.6B@http://10.42.0.5:8000 \
-//!     --pool-relay ohio/dynamo/mocker-1=http://10.42.0.6:50051
-//! ```
+//! Global Frontend. See `dynamo_global_frontend` and the crate's README.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -24,11 +10,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
-use dynamo_global_frontend::{
-    Pool, PoolCatalog, PoolSelector, RoundRobinSelector, StaticPoolCatalog,
+use dynamo_global_frontend::{PoolSnapshot, app, follow_relays, measure_round_trips, serve};
+use dynamo_global_router::{
+    AffinitySelector, InFlightTracker, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
+    RoundRobinSelector,
 };
-use dynamo_global_frontend::{app, follow_relays, measure_round_trips, serve};
-use dynamo_global_router::{AffinitySelector, InFlightTracker, LeastInFlightSelector, PoolSignals};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -183,7 +170,9 @@ async fn main() -> Result<()> {
         signal.cancel();
     });
 
-    let catalog = StaticPoolCatalog::new(args.pools);
+    // The pools never change; the sender must live as long as the process,
+    // since the Relay followers stop once it drops.
+    let (_catalog, pools) = watch::channel(Arc::new(PoolSnapshot::new(args.pools)));
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(args.connect_timeout_secs))
         .build()
@@ -202,12 +191,12 @@ async fn main() -> Result<()> {
             }
             let signals = Arc::new(PoolSignals::new(in_flight.clone()));
             tokio::spawn(follow_relays(
-                catalog.subscribe(),
+                pools.clone(),
                 signals.clone(),
                 shutdown.child_token(),
             ));
             tokio::spawn(measure_round_trips(
-                catalog.subscribe(),
+                pools.clone(),
                 signals.clone(),
                 ROUND_TRIP_INTERVAL,
                 shutdown.child_token(),
@@ -223,7 +212,7 @@ async fn main() -> Result<()> {
             selector
         }
     };
-    let app = app(catalog.subscribe(), selector, in_flight, http);
+    let app = app(pools, selector, in_flight, http);
     let address = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&address)
         .await
@@ -311,15 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn requires_explicit_pool_configuration() {
+    fn requires_a_pool() {
         assert!(Args::try_parse_from(["global-frontend"]).is_err());
-        assert!(
-            Args::try_parse_from([
-                "global-frontend",
-                "--discovery-url",
-                "http://discovery:8080"
-            ])
-            .is_err()
-        );
     }
 }

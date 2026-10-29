@@ -45,7 +45,7 @@ impl InFlightTracker {
 
     /// Requests ever started to `pool`. It only grows, so the difference
     /// between two reads counts the requests sent in between.
-    pub fn started(&self, pool: &PoolId) -> u64 {
+    pub(crate) fn started(&self, pool: &PoolId) -> u64 {
         self.pools
             .get(pool)
             .map_or(0, |count| count.started.load(Ordering::Relaxed))
