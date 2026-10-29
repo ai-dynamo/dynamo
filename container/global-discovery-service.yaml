@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Global Discovery Service with the Karmada store, applied directly to the hub
+# Global Discovery Service with pools from Karmada, applied directly to the hub
 # cluster (not through Karmada). Replace IMAGE with the pushed image, for example:
 #   sed "s#IMAGE#<registry>/global-discovery-service:<tag>#" global-discovery-service.yaml | kubectl apply -f -
 # It needs only read access to EndpointSlices. PoolRelays register their pools
@@ -18,9 +18,10 @@
 # every exported Service's slices, mount its kubeconfig from a Secret, point
 # KUBECONFIG at it, and grant the same read access there.
 #
-# One instance keeps only the registrations it receives. To run one in each
-# cluster, export this Service and add --peer-service=global-discovery-service,
-# so the instances share their registrations.
+# With the default --registration-storage=memory, one instance keeps only the
+# registrations it receives. To run one in each cluster, export this Service
+# and add --peer-service=global-discovery-service, so the instances share
+# their registrations.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -77,7 +78,7 @@ spec:
           image: IMAGE
           args:
             - --listen=0.0.0.0:8080
-            - --store=karmada
+            - --pool-discovery=karmada
             - --router-namespace=global-discovery
             - --router-service=global-router
             - --router-port-name=http

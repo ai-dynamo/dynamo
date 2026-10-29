@@ -5,17 +5,17 @@
 //!
 //! The contract comes first:
 //! - [`service`]: the HTTP API (`POST /pools`, `GET /pools`, `GET /routers`,
-//!   `GET /healthz`). Its JSON types are in `dynamo_global_common`.
-//! - [`pool_discovery`]: the store traits the service reads and writes
-//!   through.
+//!   `GET /healthz`), whose JSON types are in `dynamo_global_common`, and
+//!   [`DiscoveryBackend`], the backend behind it.
+//! - [`pool_discovery`]: the traits that backend is built from.
 //!
-//! [`backends`] holds the stores behind that contract: in memory, and MCS,
-//! which joins registrations with the EndpointSlices that SIG Multicluster
-//! imports. [`peers`] shares registrations between service instances.
+//! [`backends`] implements those traits: registrations kept in memory, and
+//! the EndpointSlices that SIG Multicluster (MCS) imports, joined with
+//! registrations. [`peers`] shares registrations between service instances.
 
 pub mod backends;
 pub mod peers;
 pub mod pool_discovery;
 pub mod service;
 
-pub use service::{DiscoveryStore, Tls, routes, serve};
+pub use service::{DiscoveryBackend, Tls, routes, serve};

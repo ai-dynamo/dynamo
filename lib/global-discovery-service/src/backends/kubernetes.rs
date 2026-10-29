@@ -37,14 +37,14 @@
 //! ```ignore
 //! let registrations = Arc::new(MemoryPoolStore::new(lease));
 //! let imported = McsPoolDirectory::new(client.clone(), mcs, suffix, frontends)?;
-//! let store = DiscoveryStore {
+//! let backend = DiscoveryBackend {
 //!     pools: Arc::new(RegisteredPoolDirectory::new(Arc::new(imported), registrations.clone(), lease)),
 //!     routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
 //!     registrar: Some(registrations),
 //!     // Or the `Sharing` from `crate::peers::PeerSync::new`.
 //!     sharing: None,
 //! };
-//! service::serve(listener, store, None, shutdown).await?;
+//! service::serve(listener, backend, None, shutdown).await?;
 //! ```
 
 mod cache;
