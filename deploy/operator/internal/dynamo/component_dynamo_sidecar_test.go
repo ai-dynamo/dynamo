@@ -584,7 +584,7 @@ func multinodeSidecarBackends() []multinodeSidecarBackend {
 				// The leader launches every MPI rank over SSH and serves OpenEngine; the worker
 				// only runs sshd. Attention DP adds a node-local relay sidecar, not launch flags.
 				if role == RoleWorker {
-					return []string{"exec /usr/sbin/sshd -D -e -f $HOME/.ssh/sshd_config"}
+					return []string{"exec /usr/sbin/sshd -D -e -o PermitUserEnvironment=yes"}
 				}
 				return []string{`mpirun -n 2 -H "$DYNAMO_LEADER_ADDRESS:1,${DYNAMO_LEADER_ADDRESS/-ldr-0./-wkr-0.}:1" bash -c 'trtllm-llmapi-launch trtllm-serve model --grpc --grpc-protocol openengine --host 0.0.0.0 --port 30001'`}
 			},

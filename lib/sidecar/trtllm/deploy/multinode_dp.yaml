@@ -97,6 +97,8 @@ spec:
           - name: main
             # Requires a TensorRT-LLM build with OpenEngine node-local discovery, native
             # KV events, and the grpc.health.v1 service (nightlies from 2026-10-27).
+            # The launch below relies on this image's Open MPI 5: it allows root, and
+            # its ssh launcher keeps the full -H hostname that Pod DNS needs.
             image: nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc2.dev202610270008@sha256:c1e774f48f8c9b5e06bb036c1798b80c9ab5201ebeb1013044ba4f865bb779a7
             # grpc.health.v1: `liveness` turns NOT_SERVING only on a fatal engine
             # failure; `inference` follows the executor health poll.
@@ -121,19 +123,6 @@ spec:
               periodSeconds: 10
               timeoutSeconds: 5
               failureThreshold: 3
-            env: &engineEnv
-            # Allow MPI startup as root in the release container (Open MPI 4 and 5 spellings).
-            - name: OMPI_ALLOW_RUN_AS_ROOT
-              value: "1"
-            - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
-              value: "1"
-            - name: PRTE_ALLOW_RUN_AS_ROOT
-              value: "1"
-            - name: PRTE_ALLOW_RUN_AS_ROOT_CONFIRM
-              value: "1"
-            # Keep fully qualified Pod hostnames so mpirun matches the -H list.
-            - name: OMPI_MCA_orte_keep_fqdn_hostnames
-              value: "1"
             envFrom:
             - secretRef:
                 name: hf-token-secret
@@ -148,16 +137,15 @@ spec:
             - /bin/bash
             - -c
             args:
-            # Ranks 0-1 must run on the leader so trtllm-serve binds OpenEngine here
-            # and each node holds a contiguous rank range; explicit slots fill the
-            # leader before the worker. mpirun -x forwards only what the worker
-            # ranks need; sshd does not inherit container env.
+            # -H slots fill in order, so ranks 0-1 land on the leader, where trtllm-serve
+            # binds OpenEngine, and each node holds a contiguous rank range. mpirun binds
+            # each rank to one core by default; the engine needs every core. The worker
+            # exports the container environment to its sshd sessions, so only HF_TOKEN
+            # travels with mpirun -x.
             - |
               set -euo pipefail
-              mkdir -p "$HOME/.ssh"
-              cp /ssh-pk/private.key "$HOME/.ssh/id_rsa"
-              chmod 600 "$HOME/.ssh/id_rsa"
-              SSH_OPTS="-p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i $HOME/.ssh/id_rsa"
+              # The operator mounts the key group-readable; ssh insists on 0600.
+              install -Dm600 /ssh-pk/private.key "$HOME/.ssh/id_rsa"
               # Grove swaps the role suffix in the leader hostname; LeaderWorkerSet appends
               # the worker index to the leader Pod name. Sized for nodeCount 2: list every
               # extra worker in -H and raise -n for larger groups.
@@ -165,19 +153,10 @@ spec:
                 *-ldr-0.*) WORKER="${DYNAMO_LEADER_ADDRESS/-ldr-0./-wkr-0.}" ;;
                 *) WORKER="${DYNAMO_LEADER_ADDRESS/./-1.}" ;;
               esac
-              deadline=$((SECONDS + 1200))
-              until ssh $SSH_OPTS -o ConnectTimeout=3 "$WORKER" true 2>/dev/null; do
-                [ "$SECONDS" -lt "$deadline" ] || { echo "sshd on $WORKER unreachable for 20 minutes; check the worker role" >&2; exit 1; }
-                echo "waiting for sshd on $WORKER"; sleep 3
-              done
-              EXPORTS=(-x PATH -x LD_LIBRARY_PATH -x OMPI_MCA_orte_keep_fqdn_hostnames)
-              for v in HF_TOKEN HF_HOME PRTE_ALLOW_RUN_AS_ROOT PRTE_ALLOW_RUN_AS_ROOT_CONFIRM; do
-                [ -n "${!v:-}" ] && EXPORTS+=(-x "$v")
-              done
-              exec mpirun --allow-run-as-root --map-by slot --bind-to none \
-                -n 4 -H "$DYNAMO_LEADER_ADDRESS:2,$WORKER:2" \
-                --mca pml ob1 --mca plm_rsh_args "$SSH_OPTS" "${EXPORTS[@]}" \
-                bash -c 'trtllm-llmapi-launch python3 -m tensorrt_llm.commands.serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+              until ssh -o StrictHostKeyChecking=no "$WORKER" true; do echo "waiting for sshd on $WORKER"; sleep 3; done
+              exec mpirun --bind-to none -n 4 -H "$DYNAMO_LEADER_ADDRESS:2,$WORKER:2" \
+                --mca pml ob1 ${HF_TOKEN:+-x HF_TOKEN} \
+                bash -c 'trtllm-llmapi-launch trtllm-serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
                   --grpc --grpc-protocol openengine --openengine-enable-load-metrics \
                   --host 0.0.0.0 --port 30001 --max_seq_len 2048 \
                   --extra_llm_api_options /config/config.yaml'
@@ -217,7 +196,6 @@ spec:
             # launched and supervised by the leader's mpirun, which the leader waits to
             # start until sshd answers. Killing sshd ends this container and the ranks
             # with it; the leader's mpirun then aborts and both containers restart.
-            env: *engineEnv
             resources:
               limits:
                 nvidia.com/gpu: "2"
@@ -227,36 +205,17 @@ spec:
             - /bin/bash
             - -c
             args:
+            # The release image ships no sshd. The package creates host keys but not
+            # its privilege-separation directory. sshd gives MPI ranks a login
+            # environment, not the container's, so export the container environment
+            # (CUDA include and library paths, PATH, Python) to every session; without
+            # it Triton JIT on this node cannot find cuda.h.
             - |
               set -euo pipefail
-              if ! command -v sshd >/dev/null; then
-                apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server
-              fi
-              mkdir -p "$HOME/.ssh/host_keys" /run/sshd
-              cp /ssh-pk/private.key.pub "$HOME/.ssh/authorized_keys"
-              chmod 600 "$HOME/.ssh/authorized_keys"
-              # sshd gives MPI ranks a login environment, not the container's. Export the
-              # image environment (CUDA include and library paths, PATH, Python) to every
-              # session so JIT compilation and imports on this node match the leader.
-              # Secrets stay out: the leader forwards HF_TOKEN with mpirun -x when set.
-              umask 077
-              env | grep -vE '^(HOME|SHELL|PWD|OLDPWD|SHLVL|TERM|_|HOSTNAME|HF_TOKEN|HUGGING_FACE_HUB_TOKEN|HF_HUB_TOKEN|KUBERNETES_.*|.*_SERVICE_(HOST|PORT).*|.*_PORT(_[0-9]+_(TCP|UDP).*)?)=' > "$HOME/.ssh/environment"
-              for t in rsa ecdsa ed25519; do
-                ssh-keygen -q -t "$t" -N '' -f "$HOME/.ssh/host_keys/ssh_host_${t}_key" </dev/null
-              done
-              cat > "$HOME/.ssh/sshd_config" <<EOF
-              Port 2222
-              HostKey $HOME/.ssh/host_keys/ssh_host_rsa_key
-              HostKey $HOME/.ssh/host_keys/ssh_host_ecdsa_key
-              HostKey $HOME/.ssh/host_keys/ssh_host_ed25519_key
-              PidFile $HOME/.ssh/sshd.pid
-              StrictModes no
-              PermitRootLogin yes
-              PasswordAuthentication no
-              PubkeyAuthentication yes
-              AuthorizedKeysFile $HOME/.ssh/authorized_keys
-              PermitUserEnvironment yes
-              EOF
-              exec /usr/sbin/sshd -D -e -f "$HOME/.ssh/sshd_config"
+              command -v sshd >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server; }
+              install -Dm600 /ssh-pk/private.key.pub "$HOME/.ssh/authorized_keys"
+              mkdir -p /run/sshd
+              env | grep -vE '^(HF_TOKEN|HUGGING_FACE_HUB_TOKEN|HF_HUB_TOKEN)=' > "$HOME/.ssh/environment"
+              exec /usr/sbin/sshd -D -e -o PermitUserEnvironment=yes
             volumeMounts: *engineMounts
           volumes: *engineVolumes
