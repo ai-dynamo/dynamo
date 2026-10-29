@@ -94,7 +94,7 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		}
 	}
 
-	dcdDefaulter := webhookdefaulting.NewDCDDefaulter()
+	dcdDefaulter := webhookdefaulting.NewDCDDefaulter(opts.OperatorVersion)
 	if err := dcdDefaulter.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoComponentDeployment defaulting webhook: %w", err)
 	}
