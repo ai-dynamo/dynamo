@@ -23,6 +23,7 @@ pub const DYNAMO_METADATA_HEADER_PREFIX_DEFAULT: &str = "x-dynamo-meta-";
 /// Environment variable that overrides [`DYNAMO_METADATA_HEADER_PREFIX_DEFAULT`].
 pub const DYNAMO_METADATA_HEADER_ENV: &str = "DYN_METADATA_HEADER";
 
+pub(super) const API_ORIGIN_METADATA_KEY: &str = "dynamo.frontend.api";
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const DYNAMO_METADATA_MAX_ENTRIES_DEFAULT: usize = 64;
 const DYNAMO_METADATA_MAX_TOTAL_BYTES_DEFAULT: usize = 64 * 1024;
@@ -60,8 +61,10 @@ fn insert_metadata_entry(
     raw_key: &str,
     raw_value: &str,
 ) -> Result<(), MetadataHeaderError> {
-    // Lifecycle capture is selected by the frontend, never by caller metadata.
-    if raw_key.eq_ignore_ascii_case(dynamo_runtime::telemetry::LIFECYCLE_ROOT_METADATA_KEY) {
+    // Lifecycle capture and API origin are selected by the frontend, never by caller metadata.
+    if raw_key.eq_ignore_ascii_case(dynamo_runtime::telemetry::LIFECYCLE_ROOT_METADATA_KEY)
+        || raw_key.eq_ignore_ascii_case(API_ORIGIN_METADATA_KEY)
+    {
         return Ok(());
     }
     if out.contains_key(raw_key) {
@@ -193,6 +196,21 @@ pub fn extract_metadata_from_grpc(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_origin_cannot_be_supplied_by_metadata_headers() {
+        let metadata = extract_metadata_from_pairs(
+            [
+                ("x-dynamo-meta-dynamo.frontend.api", "chat_completions"),
+                ("x-dynamo-meta-delta-tokenizer-session", "session"),
+            ],
+            DYNAMO_METADATA_HEADER_PREFIX_DEFAULT,
+        )
+        .unwrap();
+        assert!(!metadata.contains_key(API_ORIGIN_METADATA_KEY));
+        assert_eq!(metadata.get("delta-tokenizer-session").unwrap(), "session");
+    }
+
     use axum::http::HeaderName;
     use tonic::metadata::{MetadataKey, MetadataValue};
 

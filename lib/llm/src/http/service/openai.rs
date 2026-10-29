@@ -2570,6 +2570,7 @@ async fn handler_chat_completions(
                 return Err(error);
             }
         };
+    request.insert_metadata(super::metadata::API_ORIGIN_METADATA_KEY, "chat_completions");
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,

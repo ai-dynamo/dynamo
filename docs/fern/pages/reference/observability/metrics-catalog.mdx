@@ -553,3 +553,27 @@ Requires the client to request usage accounting on streaming calls (`"stream_opt
 - [Environment Variables](environment-variables.mdx) — variables that enable and configure metric emission.
 - [Operator Metrics](operator-metrics.mdx) — Kubernetes operator metrics catalog.
 - [Metrics Comparison](metrics-comparison.md) — engine pass-through metrics (`vllm:*`, `sglang:*`, `trtllm_*`).
+
+## Experimental delta tokenizer
+
+The fixed outcome vocabulary and three histogram paths produce at most 108
+Prometheus series per process, including counter/histogram creation timestamps.
+
+These aggregate process-local families are exposed through the frontend
+`/metrics` scrape when experimental delta tokenization is enabled. They have no
+model or session labels. Operators and the CPU benchmark use them to assess
+reuse, fallbacks, exactness and memory. They do not change existing L1 cache
+metrics.
+
+| Family | Type | Labels and meaning |
+| --- | --- | --- |
+| `dynamo_frontend_delta_tokenizer_events_total` | counter | Fixed `outcome` values for `cold`, `incremental`, `duplicate`, `verified`, `mismatches`, `expired`, `evicted`, invalidation reasons and reference-fallback reasons. `seed_error` reports an unexpected background-worker failure without publishing state. |
+| `dynamo_frontend_delta_tokenizer_seconds` | histogram | `path`: `reference`, `candidate` or `seed`. Seed preparation runs in the background. Candidate timing includes optional verification. |
+| `dynamo_frontend_delta_tokenizer_incremental_bytes_total` | counter | UTF-8 bytes submitted on successful append paths. |
+| `dynamo_frontend_delta_tokenizer_avoided_bytes_total` | counter | Previous-input UTF-8 bytes avoided on unsampled successful appends. Verification requests do not increment this counter. |
+| `dynamo_frontend_delta_tokenizer_entries` | gauge | Entries including active seed reservations. |
+| `dynamo_frontend_delta_tokenizer_retained_bytes` | gauge | Conservative approximate bytes, including reference snapshots, per-session tables and in-flight work. This is not an RSS limit. |
+
+Counters and histogram series appear when their outcomes occur. Entry and byte
+gauges include every manager in the process. TTL and eviction release completed
+entries immediately. In-flight native work stays charged until it exits.

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import inspect
 import json
 import logging
@@ -33,6 +34,7 @@ from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
+from .delta_tokenizer import DeltaTokenizer
 from .structural_tag_policy import (
     ToolChoiceKind,
     effective_tool_strict,
@@ -877,6 +879,10 @@ def preprocess_chat_request(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
+    delta_tokenizer: DeltaTokenizer | None = None,
+    delta_session_id: str | None = None,
+    delta_scope: str | None = None,
+    delta_cancelled: Any = lambda: False,
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
 
@@ -972,9 +978,47 @@ def preprocess_chat_request(
         template_messages = _normalize_messages_for_template(messages, tokenizer)
 
         try:
-            rendered = tokenizer.apply_chat_template(
-                template_messages, **template_kwargs
-            )
+            # Keep all unsupported template/tokenizer options on the original
+            # single-call path. HF renders the same text with tokenize=False and
+            # encodes chat text with add_special_tokens=False.
+            unsupported = {
+                "tokenizer_kwargs",
+                "return_tensors",
+                "return_dict",
+                "return_assistant_tokens_mask",
+                "padding",
+                "truncation",
+                "max_length",
+            }
+            if (
+                delta_tokenizer is not None
+                and delta_session_id
+                and delta_scope
+                and template_kwargs.get("tokenize") is True
+                and not unsupported.intersection(template_kwargs)
+                and all(
+                    isinstance(message.get("content"), (str, type(None)))
+                    for message in request.get("messages", [])
+                )
+            ):
+                render_kwargs = {**template_kwargs, "tokenize": False}
+                prompt_text = tokenizer.apply_chat_template(
+                    template_messages, **render_kwargs
+                )
+                template_identity = hashlib.sha256(
+                    repr((tokenizer.chat_template, template_kwargs)).encode()
+                ).hexdigest()
+                rendered = delta_tokenizer.tokenize(
+                    delta_session_id,
+                    prompt_text,
+                    scope=delta_scope,
+                    template_identity=template_identity,
+                    cancelled=delta_cancelled,
+                )
+            else:
+                rendered = tokenizer.apply_chat_template(
+                    template_messages, **template_kwargs
+                )
         except (TemplateError, TypeError) as exc:
             # Jinja filters such as tojson can raise TypeError for invalid inputs.
             raise PreprocessError(str(exc)) from exc

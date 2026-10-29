@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import uvloop
 from packaging.version import Version
+from prometheus_client import generate_latest
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
@@ -43,6 +44,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .cpu_affinity import warn_if_frontend_cpu_affinity_spans_numa_nodes
+from .delta_tokenizer import DEFAULT_METRICS
 from .frontend_args import FrontendArgGroup, FrontendConfig
 
 if TYPE_CHECKING:
@@ -484,6 +486,14 @@ async def async_main():
 
     if config.router_prefill_load_model == "ais":
         kwargs["ais_perf_config"] = AisPerfConfig(**config.ais_perf_kwargs())
+
+    if config.experimental_delta_tokenizer:
+        # An unserved endpoint contributes its registry to the frontend's combined
+        # /metrics scrape. This does not register a worker or start a service.
+        endpoint = runtime.endpoint("dynamo.frontend.delta-tokenizer")
+        endpoint.metrics.register_prometheus_expfmt_callback(
+            lambda: generate_latest(DEFAULT_METRICS.registry).decode()
+        )
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

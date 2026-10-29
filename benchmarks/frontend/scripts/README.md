@@ -357,3 +357,74 @@ artifacts/sweep_YYYYMMDD_HHMMSS/
             frontend.nsys-rep
             frontend.sqlite
 ```
+
+## Delta tokenizer CPU microbenchmark
+
+`benchmark_delta_tokenizer.py` measures the Python SGLang adapter's configured
+HF reference, warm appends, verification, invalidation, eviction and expiration.
+The existing Rust `lib/llm/benches/tokenizer_simple.rs` benchmarks the Rust
+backends; it does not exercise this Python-only adapter.
+
+Install the `delta-tokenizer` extra and stage tokenizer-only artifacts first.
+Pass an absolute local Hugging Face snapshot directory. The benchmark does not
+download artifacts, load model weights, start services or use GPUs.
+
+```bash
+python3 benchmarks/frontend/scripts/benchmark_delta_tokenizer.py \
+  --model-dir /absolute/path/to/tokenizer-snapshot \
+  --output /absolute/path/to/results.json
+```
+
+Warm runs wait for the initial background seed before timing requests. Expired
+and invalidated requests measure the reference response path and wait for seed
+work between iterations. Compare request latency separately from background
+seed CPU cost. The report includes exact parity counts, latency quantiles,
+throughput, CPU time, retained-byte estimates and peak RSS. Use enough iterations
+for useful tail estimates and pin the process to an otherwise idle CPU.
+
+These results are tokenizer microbenchmarks. Use `run_perf.sh` and mock workers
+for serving-level TTFT. A tokenizer speedup alone establishes no TTFT improvement.
+
+### Session contention and retention
+
+The session harness uses an explicitly staged tokenizer, multiple independent
+scopes sharing the same session ID, parallel warm conversations, and admission
+churn. It checks exact token parity and entry/estimated-byte bounds throughout,
+then verifies that closing the manager releases all reservations.
+
+```bash
+python3 benchmarks/frontend/scripts/benchmark_delta_sessions.py \
+  --model-dir /absolute/path/to/staged/tokenizer \
+  --active-sessions 4 --workers 4 --churn-sessions 32 --turns 20 \
+  --output /tmp/delta-sessions.json
+```
+
+Setup CPU, warm-request latency, churn, current RSS and peak RSS are reported
+separately. RSS can remain high after close because native/Python allocators
+retain freed pages. The configured byte budget bounds conservative reservations,
+rather than process RSS. External full-reference parity checks contribute to the
+reported workload CPU and wall time.
+
+### Rebuilt HTTP frontend parity and TTFT
+
+Build the Python bindings from the tested branch and install the optional SGLang
+and delta-tokenizer dependencies in an isolated environment. The HTTP harness
+starts its own frontend and deterministic token mock worker with temporary file
+discovery, TCP and ZMQ; it needs no etcd, NATS, model weights or GPU.
+
+```bash
+CUDA_VISIBLE_DEVICES= python3 benchmarks/frontend/scripts/benchmark_delta_http.py \
+  --model-dir /absolute/path/to/staged/tokenizer \
+  --turns 10 --repeats 3 --output /tmp/delta-http/results.json
+```
+
+Every returned digest must match the complete token IDs received by the backend
+against full HF tokenization. The harness interleaves disabled/enabled arms with
+fresh processes, verifies incremental counters through the real HTTP metrics
+endpoint, exercises missing/different scopes, and checks a follow-up request
+after disconnecting an SSE stream. It retains logs beside the JSON report.
+
+This harness uses an explicitly append-safe chat template to exercise warm reuse.
+TTFT includes loopback HTTP, the frontend, and digest generation by the mock;
+it does not predict GPU serving latency. Run it without concurrent compilation or
+other benchmarks. Use the AIPerf harness above for production workload sweeps.
