@@ -29,7 +29,7 @@ use kube::{
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast, watch};
+use tokio::sync::{OwnedRwLockWriteGuard, RwLock, broadcast, watch};
 
 fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
     if publisher_id > MAX_JSON_SAFE_PUBLISHER_ID {
@@ -85,6 +85,31 @@ pub struct KubeDiscoveryClient {
 }
 
 impl KubeDiscoveryClient {
+    async fn persist_metadata(
+        &self,
+        mut metadata: OwnedRwLockWriteGuard<DiscoveryMetadata>,
+        candidate: DiscoveryMetadata,
+    ) -> Result<()> {
+        let cr_name = self.pod_info.target.cr_name();
+        let cr = build_cr(
+            &cr_name,
+            &self.pod_info.pod_name,
+            &self.pod_info.pod_uid,
+            &candidate,
+        )?;
+        let kube_client = self.kube_client.clone();
+        let pod_namespace = self.pod_info.pod_namespace.clone();
+
+        // Keep the serialized remote write and local commit alive if the caller is cancelled.
+        tokio::spawn(async move {
+            apply_cr(&kube_client, &pod_namespace, &cr).await?;
+            *metadata = candidate;
+            Ok(())
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("discovery persistence task failed: {error}"))?
+    }
+
     /// Waits until the daemon holds its first complete view of the cluster.
     ///
     /// Fails when the daemon stopped or failed first, or when `cancel_token` fires.
@@ -221,9 +246,9 @@ impl Discovery for KubeDiscoveryClient {
 
         // Write to local metadata and persist to CR
         // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
-        let mut metadata = self.metadata.write().await;
+        let metadata = Arc::clone(&self.metadata).write_owned().await;
 
-        // Publish local state only after persistence succeeds, including on cancellation.
+        // Publish local state only after persistence succeeds.
         let mut candidate = metadata.clone();
 
         let registered_instance = match &instance {
@@ -275,18 +300,7 @@ impl Discovery for KubeDiscoveryClient {
             }
         };
 
-        // Build and apply the CR with the updated metadata
-        // This persists the metadata to Kubernetes for other pods to discover
-        let cr_name = self.pod_info.target.cr_name();
-        let cr = build_cr(
-            &cr_name,
-            &self.pod_info.pod_name,
-            &self.pod_info.pod_uid,
-            &candidate,
-        )?;
-
-        apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await?;
-        *metadata = candidate;
+        self.persist_metadata(metadata, candidate).await?;
 
         tracing::debug!("Persisted metadata to DynamoWorkerMetadata CR");
 
@@ -327,9 +341,9 @@ impl Discovery for KubeDiscoveryClient {
 
         // Write to local metadata and persist to CR
         // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
-        let mut metadata = self.metadata.write().await;
+        let metadata = Arc::clone(&self.metadata).write_owned().await;
 
-        // Publish local state only after persistence succeeds, including on cancellation.
+        // Publish local state only after persistence succeeds.
         let mut candidate = metadata.clone();
 
         match &instance {
@@ -378,18 +392,7 @@ impl Discovery for KubeDiscoveryClient {
             }
         }
 
-        // Build and apply the CR with the updated metadata
-        // This persists the removal to Kubernetes for other pods to see
-        let cr_name = self.pod_info.target.cr_name();
-        let cr = build_cr(
-            &cr_name,
-            &self.pod_info.pod_name,
-            &self.pod_info.pod_uid,
-            &candidate,
-        )?;
-
-        apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await?;
-        *metadata = candidate;
+        self.persist_metadata(metadata, candidate).await?;
 
         tracing::debug!("Persisted metadata removal to DynamoWorkerMetadata CR");
 

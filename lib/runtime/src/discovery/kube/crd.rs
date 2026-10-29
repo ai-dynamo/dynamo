@@ -191,7 +191,6 @@ pub async fn apply_cr(
                 .as_ref()
                 .and_then(|current| current.metadata.resource_version.clone());
             if current.is_some() {
-                // Retain the existing field ownership behavior, with a CAS precondition.
                 api.patch(
                     cr_name,
                     &PatchParams::apply(FIELD_MANAGER).force(),
