@@ -471,16 +471,18 @@ searches from the point it applied. To predict what an active Planner does, repl
 ## Simulate Retune (Experimental)
 
 <Warning>
-**Experimental.** Retune runs only in offline simulation in this release. A live Planner rejects a
-configuration that sets `retune` at startup.
+**Experimental.** This section covers replay retune, `retune.executor: local` (the default), which
+runs only in offline simulation; a live Planner rejects it at startup. To retune a live deployment
+on Kubernetes, which uses `executor: dgdr` and is for development clusters only, see
+[Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
 </Warning>
 
 Retune makes the Planner retune its router and Planner runtime parameters from the traffic of the
 last window. For the concept and the two scenarios, see
 [Periodic Retune](planner-guide.md#periodic-retune-experimental). For windows, scoring, and decision
-timing, see [Planner Design](planner-design.md#retune-experimental-simulation-only). For every
+timing, see [Planner Design](planner-design.md#retune-experimental). For every
 `retune` field, its default, and the search-domain syntax, see the
-[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only).
+[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental).
 
 ### Requirements
 
@@ -507,7 +509,7 @@ With `dynamo.replay.run_trace_replay`:
   `agent_context` (an agentic Dynamo trace). Retune windows drop tool rows. `execution_model` is
   accepted, because it applies only to agentic requests.
 - `router_mode="kv_router"` and a router configuration that meets the
-  [`retune.router` requirements](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only)
+  [`retune.router` requirements](../../../../reference/components/planner-configuration.mdx#retune-experimental)
   when `retune.router` is set.
 - With throughput scaling, retune reads `load_predictor_warmup_trace` as recorded history. It must
   then be a Dynamo request trace that ends at or before the first replayed request, on the same
@@ -712,7 +714,7 @@ decision lands. Choose the value by what the run is for:
 - A fixed number of seconds gives the same decision ticks on every run. Use it to compare
   configurations, and set it to the sweep time you expect on the host that will run sweeps.
 - `measured` charges the sweep's own wall-clock time on the replay host, as the
-  [`decision_latency_seconds` field](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only)
+  [`decision_latency_seconds` field](../../../../reference/components/planner-configuration.mdx#retune-experimental)
   defines it. Decision ticks then depend on the speed and load of the replay host, so two runs of
   the same config can switch at different ticks and report different results. Set
   `decision_latency_scale` above 1 to model a slower sweep host, or below 1 for a faster one. Above
@@ -911,7 +913,9 @@ Scenario 2 at about 4.5 GB with `max_parallel: 8`.
 
 ### Limitations
 
-- **Simulation only.** A live Planner rejects `retune` at startup.
+- **Simulation only.** A live Planner rejects `executor: local` at startup. Live retune uses
+  `executor: dgdr`; see
+  [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
 - **Open-loop Dynamo request traces only.** See [Requirements](#requirements).
 - **Cold window replays.** Each candidate replay starts with an empty KV cache and the replica
   counts at the window start, so prefix-cache reuse from before the window does not carry over.

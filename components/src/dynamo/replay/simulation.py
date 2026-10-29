@@ -395,6 +395,13 @@ class DynamoReplayRunner:
         # embedded value instead of imposing the synthetic-workload default.
         if trace_format not in {"weka", "dynamo"} and trace_block_size is None:
             trace_block_size = self.trace_block_size
+        # Common random numbers: every candidate of a trace sweep replays the
+        # same trace with ordinal request ids and the canonical router seed,
+        # so candidates differ only by their configuration and a score does
+        # not depend on the other candidates, the Run or the parallelism.
+        # Live planner retune compares candidates scored by different DGDR
+        # Runs of one window on that basis. The synthetic path has no such
+        # option.
         if deployment.deployment_mode == "agg":
             return run_trace_replay(
                 trace_files=trace_files,
@@ -409,6 +416,7 @@ class DynamoReplayRunner:
                 execution_model=execution_model,
                 extra_engine_args=self._engine_args(deployment, "aggregated"),
                 num_workers=deployment.num_workers,
+                _deterministic=True,
                 **common,
             )
         return run_trace_replay(
@@ -426,6 +434,7 @@ class DynamoReplayRunner:
             decode_engine_args=self._engine_args(deployment, "decode"),
             num_prefill_workers=deployment.num_prefill_workers,
             num_decode_workers=deployment.num_decode_workers,
+            _deterministic=True,
             **common,
         )
 

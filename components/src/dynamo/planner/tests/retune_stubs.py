@@ -50,21 +50,54 @@ class StubController:
     """Records the host's calls; returns one queued tick result per tick."""
 
     instances: list[StubController] = []
+    # Raised by the next construction, then cleared (live rebuild tests).
+    construct_error: Exception | None = None
 
-    def __init__(self, config, inputs, capabilities, clock, scale_interval_s):
+    def __init__(self, config, inputs, capabilities, clock, scale_interval_s, **hooks):
+        error = StubController.construct_error
+        if error is not None:
+            StubController.construct_error = None
+            raise error
         self.args = (config, inputs, capabilities, clock, scale_interval_s)
+        # Live hooks (sweep_fn, launch_gate, harvest_allowed, generation);
+        # empty when the host built the controller the replay way.
+        self.hooks = hooks
         self.config = config
         self.started: list[float] = []
+        # phase_s of each start(); None when the host passed none.
+        self.phases: list[float | None] = []
         self.ticks: list[tuple[float, Any]] = []
         # Searched planner values as the controller saw them on each tick.
         self.seen_planner_values: list[dict[str, Any]] = []
         self.results: list[StubTickResult] = []
         self.closed = 0
         self.close_error: Exception | None = None
+        self.dropped = 0
+        self.rewinds: list[int] = []
+        # Ordered lifecycle calls: "start", "rewind", "drop_pending", "close".
+        self.calls: list[str] = []
         StubController.instances.append(self)
 
-    def start(self, start_s: float) -> None:
+    @property
+    def generation(self) -> int:
+        return self.hooks.get("generation", 0)
+
+    def start(self, start_s: float, phase_s: float | None = None) -> None:
         self.started.append(start_s)
+        self.phases.append(phase_s)
+        self.calls.append("start")
+
+    def drop_pending(self) -> None:
+        self.dropped += 1
+        self.calls.append("drop_pending")
+
+    def rewind(self, last_decided_k: int) -> None:
+        self.rewinds.append(last_decided_k)
+        self.calls.append("rewind")
+
+    def running_future(self):
+        """No sweep thread: nothing for a successor to queue behind."""
+        return None
 
     async def on_tick(self, now_s, worker_counts):
         self.ticks.append((now_s, worker_counts))
@@ -78,6 +111,7 @@ class StubController:
 
     def close(self) -> None:
         self.closed += 1
+        self.calls.append("close")
         if self.close_error is not None:
             raise self.close_error
 
@@ -89,6 +123,7 @@ def install_stub_controller(monkeypatch) -> type[StubController]:
     module.RetuneController = StubController  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, CONTROLLER_MODULE, module)
     StubController.instances = []
+    StubController.construct_error = None
     return StubController
 
 
