@@ -55,7 +55,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
-	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 
 	semver "github.com/Masterminds/semver/v3"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -73,7 +72,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rbac"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
@@ -122,8 +120,6 @@ func initCRDSchemes() {
 	utilruntime.Must(nvidiacomv1beta2.AddToScheme(crdScheme))
 
 	utilruntime.Must(lwsscheme.AddToScheme(crdScheme))
-
-	utilruntime.Must(volcanoscheme.AddToScheme(crdScheme))
 
 	utilruntime.Must(grovev1alpha1.AddToScheme(crdScheme))
 
@@ -592,12 +588,9 @@ func registerControllers(
 		return err
 	}
 
-	rbacManager := rbac.NewManager(mgr.GetClient())
-
 	if err := controller.SetupDynamoGraphDeployment(mgr, controller.DynamoGraphDeploymentSetupOptions{
 		SetupOptions:          setupOptions,
 		DockerSecretRetriever: dockerSecretRetriever,
-		RBACManager:           rbacManager,
 		SSHKeyManager:         sshKeyManager,
 	}); err != nil {
 		return err
@@ -613,7 +606,6 @@ func registerControllers(
 	}
 	if err := controller.SetupDynamoGraphDeploymentRequest(mgr, controller.DynamoGraphDeploymentRequestSetupOptions{
 		SetupOptions:            setupOptions,
-		RBACManager:             rbacManager,
 		OperatorImage:           operatorImage,
 		OperatorImagePullPolicy: operatorPullPolicy,
 	}); err != nil {

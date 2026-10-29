@@ -50,7 +50,7 @@ fn exact_queue(
     requests: usize,
     is_dispatchable: impl Fn(usize) -> bool,
 ) -> PolicyQueue<BenchRequest> {
-    let mut queue = PolicyQueue::new(profile());
+    let mut queue = PolicyQueue::new(&profile());
     for request_index in 0..requests {
         let lane = request_index % lanes;
         queue
@@ -72,7 +72,7 @@ fn exact_queue(
 }
 
 fn shared_queue(requests: usize) -> PolicyQueue<BenchRequest> {
-    let mut queue = PolicyQueue::new(profile());
+    let mut queue = PolicyQueue::new(&profile());
     for request_index in 0..requests {
         queue
             .enqueue(
