@@ -38,17 +38,17 @@ use tokio_util::sync::CancellationToken;
 
 /// The backend behind the API: where the pool and router lists come from,
 /// and where registrations go.
-pub struct DiscoveryBackend {
+pub struct PoolDiscoveryBackend {
     pub pools: Arc<PoolDirectory>,
     pub routers: Arc<ReplicaDirectory>,
-    /// `None` when the service takes no registrations, as with pools from
-    /// MCS.
+    /// `None` when the backend takes no registrations: `POST /pools` then
+    /// answers `501`.
     pub registrar: Option<Arc<dyn PoolRegistrar>>,
 }
 
-impl fmt::Debug for DiscoveryBackend {
+impl fmt::Debug for PoolDiscoveryBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DiscoveryBackend")
+        f.debug_struct("PoolDiscoveryBackend")
             .field("takes_registrations", &self.registrar.is_some())
             .finish_non_exhaustive()
     }
@@ -64,7 +64,7 @@ pub struct Tls {
 }
 
 /// The service's HTTP routes.
-pub fn routes(backend: DiscoveryBackend) -> Router {
+pub fn routes(backend: PoolDiscoveryBackend) -> Router {
     Router::new()
         .route("/pools", get(list_pools).post(register_pool))
         .route("/routers", get(list_routers).post(register_router))
@@ -77,7 +77,7 @@ pub fn routes(backend: DiscoveryBackend) -> Router {
 /// (5 s by default) to finish.
 pub async fn serve(
     listener: TcpListener,
-    backend: DiscoveryBackend,
+    backend: PoolDiscoveryBackend,
     tls: Option<Tls>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -100,13 +100,13 @@ pub async fn serve(
 }
 
 async fn register_pool(
-    State(backend): State<Arc<DiscoveryBackend>>,
+    State(backend): State<Arc<PoolDiscoveryBackend>>,
     Json(registration): Json<PoolRegistration>,
 ) -> Response {
     let Some(registrar) = &backend.registrar else {
         return (
             StatusCode::NOT_IMPLEMENTED,
-            "this service takes no registrations: its pools come from MCS",
+            "this service takes no registrations",
         )
             .into_response();
     };
@@ -116,7 +116,7 @@ async fn register_pool(
     }
 }
 
-async fn list_pools(State(backend): State<Arc<DiscoveryBackend>>) -> Response {
+async fn list_pools(State(backend): State<Arc<PoolDiscoveryBackend>>) -> Response {
     match backend.pools.list().await {
         Ok(snapshot) => Json(PoolsResponse {
             complete: snapshot.completeness == Completeness::Exact,
@@ -127,7 +127,7 @@ async fn list_pools(State(backend): State<Arc<DiscoveryBackend>>) -> Response {
     }
 }
 
-async fn list_routers(State(backend): State<Arc<DiscoveryBackend>>) -> Response {
+async fn list_routers(State(backend): State<Arc<PoolDiscoveryBackend>>) -> Response {
     match backend.routers.list().await {
         Ok(snapshot) => Json(RoutersResponse {
             routers: snapshot.items,
@@ -145,9 +145,8 @@ async fn list_routers(State(backend): State<Arc<DiscoveryBackend>>) -> Response 
 async fn register_router() -> Response {
     (
         StatusCode::NOT_IMPLEMENTED,
-        "router registration is not implemented yet. With --pool-discovery karmada or mcs, \
-         router replicas come from the router Service's EndpointSlices, which MCS imports. \
-         With --pool-discovery registrations, they are the ones given with --router.",
+        "router registration is not implemented yet. Router replicas come from the router \
+         Service's EndpointSlices, which MCS imports, or from the service's configuration.",
     )
         .into_response()
 }
@@ -156,7 +155,7 @@ async fn register_router() -> Response {
 /// MCS, the backend answers from its cache once that has synced, so an API
 /// server outage does not turn every replica unready at once. The first probe
 /// also starts its watch.
-async fn healthz(State(backend): State<Arc<DiscoveryBackend>>) -> StatusCode {
+async fn healthz(State(backend): State<Arc<PoolDiscoveryBackend>>) -> StatusCode {
     let (pools, routers) = tokio::join!(backend.pools.list(), backend.routers.list());
     match pools.and(routers) {
         Ok(_) => StatusCode::OK,
@@ -210,9 +209,9 @@ mod tests {
         }
     }
 
-    fn registrations_backend() -> DiscoveryBackend {
+    fn registrations_backend() -> PoolDiscoveryBackend {
         let pools = Arc::new(MemoryPoolStore::new(Lease::new(5, 15).unwrap()));
-        DiscoveryBackend {
+        PoolDiscoveryBackend {
             pools: pools.clone(),
             routers: Arc::new(StaticReplicaDirectory::new(vec![router_replica()])),
             registrar: Some(pools),
@@ -220,7 +219,7 @@ mod tests {
     }
 
     /// Serves `backend` on a free local port and returns its base URL.
-    async fn start(backend: DiscoveryBackend) -> (String, CancellationToken) {
+    async fn start(backend: PoolDiscoveryBackend) -> (String, CancellationToken) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let shutdown = CancellationToken::new();
@@ -324,7 +323,13 @@ mod tests {
                 "{body}"
             );
             let reason = response.text().await.unwrap();
-            assert!(reason.contains("EndpointSlices") && reason.contains("--router"));
+            // The reason names no flags: the binary's flags are not this layer's.
+            assert!(
+                reason.starts_with("router registration is not implemented yet")
+                    && reason.contains("EndpointSlices")
+                    && !reason.contains("--"),
+                "{reason}"
+            );
         }
         shutdown.cancel();
     }
@@ -358,7 +363,7 @@ mod tests {
 
     #[tokio::test]
     async fn unreachable_backend_is_unavailable() {
-        let (base, shutdown) = start(DiscoveryBackend {
+        let (base, shutdown) = start(PoolDiscoveryBackend {
             pools: Arc::new(Down),
             routers: Arc::new(Down),
             registrar: None,
