@@ -6,7 +6,7 @@ sidebar-title: Disaggregated Serving
 description: Split prefill and decode across independent workers
 ---
 
-Disaggregated serving separates the prefill and decode phases of inference into independent workers, each scalable on its own and connected by a KV cache transport such as [NIXL](../../developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) or Mooncake (TokenSpeed only). This is the local equivalent of the disaggregated pattern in the [Kubernetes Disaggregated Serving guide](../../kubernetes/disaggregated-serving/overview.md) — the same architecture, driven by CLI flags instead of a DynamoGraphDeployment.
+Disaggregated serving separates the prefill and decode phases of inference into independent workers, each scalable on its own and connected by a KV cache transport such as [NIXL](../../developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) or Mooncake. This is the local equivalent of the disaggregated pattern in the [Kubernetes Disaggregated Serving guide](../../kubernetes/disaggregated-serving/overview.md) — the same architecture, driven by CLI flags instead of a DynamoGraphDeployment.
 
 For the architecture and when to use it, see [Disaggregated Serving](../../kubernetes/disaggregated-serving/overview.md).
 
@@ -60,6 +60,51 @@ To scale each pool and route requests by cache overlap, use the `disagg_router.s
 <Tip>
 With a disaggregated deployment running, try adding another prefill worker — the frontend discovers and uses it automatically.
 </Tip>
+
+## Configure UCX Transports
+
+These settings apply to NIXL with a UCX backend or another UCX KV-transfer path. They do not
+configure Mooncake, NCCL, or libfabric. Keep a working recipe's settings; leave `UCX_TLS` unset
+for automatic transport selection. For device placement, follow
+[Select Local NICs for RDMA KV Transfer](../operations/numa-binding.md#select-local-nics-for-rdma-kv-transfer).
+
+If the deployment needs reliable-connected (RC) RDMA and TCP, allow both the transports and
+their devices. For a worker whose verified local RDMA host channel adapter (HCA) is `mlx5_0`,
+port `1`, and whose reachable TCP interface is `eth0`:
+
+```bash
+export UCX_NET_DEVICES=mlx5_0:1,eth0
+export UCX_TLS=rc,cuda_ipc,cuda_copy,sm,self,tcp
+```
+
+Replace both device names for each prefill and decode worker. `UCX_NET_DEVICES` restricts device
+eligibility; `UCX_TLS` restricts transports. Neither binds CPU execution or host memory. If a
+NIXL backend `device_list` is set, it can override `UCX_NET_DEVICES`.
+
+For vLLM's per-rank NIC mapping, inherit only `UCX_NET_DEVICES=eth0` when TCP is needed, replacing
+`eth0` with the intended interface. vLLM then prepends each rank's selected HCA. Do not inherit
+a shared HCA list alongside that mapping; its other HCAs would remain eligible.
+
+The `rc` alias includes bootstrap transports and works over configured InfiniBand or RDMA over
+Converged Ethernet (RoCE) fabrics. `cuda_ipc` and `cuda_copy` enable CUDA IPC and copy paths,
+`sm` enables host shared memory, and `self` enables same-process communication. See the
+[UCX device and transport controls](https://github.com/openucx/ucx/blob/v1.21.0/docs/source/faq.md#which-transports-does-ucx-use).
+
+TCP needs both an eligible interface and the `tcp` transport. Some deployments use it for
+control, active-message (AM), or fallback traffic; AM can also run over RDMA. This example
+also permits payload traffic over TCP. Check `UCX_LOG_LEVEL=info` logs to confirm that KV
+transfers use RC/RDMA as intended. Preserve recipes that omit `tcp` to fail when RDMA is
+unavailable rather than fall back.
+
+### Tune UCX Rails
+
+Listing several HCAs makes them eligible; it does not guarantee that all carry a transfer.
+UCX `1.21` allows up to two rendezvous rails by default, controlled by `UCX_MAX_RNDV_RAILS`.
+NIXL's UCX backend uses remote memory access (RMA) operations, whose limit is
+`UCX_MAX_RMA_RAILS`; NIXL `1.5.0` sets it to two unless overridden. Tune the limit for the actual
+transfer path and measure the result. See
+[UCX multi-rail selection](https://github.com/openucx/ucx/blob/v1.21.0/docs/source/faq.md#multi-rail)
+and [NIXL's UCX defaults](https://github.com/ai-dynamo/nixl/blob/v1.5.0/src/plugins/ucx/ucx_utils.cpp#L484).
 
 ## Troubleshooting
 
