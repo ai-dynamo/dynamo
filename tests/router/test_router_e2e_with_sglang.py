@@ -38,37 +38,6 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = "silence09/DeepSeek-R1-Small-2layers"
 
 
-def _gpu0_compute_capability() -> Optional[tuple[int, int]]:
-    """Return GPU 0's CUDA compute capability, or None if it cannot be read."""
-    try:
-        import pynvml
-    except ImportError:
-        return None
-    try:
-        pynvml.nvmlInit()
-    except pynvml.NVMLError:
-        return None
-    try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        capability = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
-    except pynvml.NVMLError:
-        return None
-    finally:
-        pynvml.nvmlShutdown()
-    # Runs at import time, also under tests/report_pytest_markers.py, which
-    # replaces pynvml with a stub whose calls return placeholder objects.
-    if not isinstance(capability, tuple):
-        return None
-    major, minor = capability
-    return (int(major), int(minor))
-
-
-# MODEL_NAME's MoE gating needs flashinfer fused_topk_deepseek, which fails below
-# sm89 and kills the prefill worker in warmup. Unknown capability does not skip.
-_GPU0_CC = _gpu0_compute_capability()
-_GPU0_SM = f"sm{_GPU0_CC[0]}{_GPU0_CC[1]}" if _GPU0_CC else "unknown"
-_FUSED_TOPK_DEEPSEEK_UNSUPPORTED = _GPU0_CC is not None and _GPU0_CC < (8, 9)
-
 pytestmark = [
     pytest.mark.router,
     pytest.mark.sglang,
@@ -461,17 +430,12 @@ def test_router_decisions_sglang_dp(
 
 @pytest.mark.e2e
 @pytest.mark.model(MODEL_NAME)
+# DeepSeek's fused_topk_deepseek kernel is unsupported on the A10G runners.
+@pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
 @pytest.mark.timeout(600)
-@pytest.mark.skipif(
-    _FUSED_TOPK_DEEPSEEK_UNSUPPORTED,
-    reason=(
-        "flashinfer fused_topk_deepseek (DeepSeek MoE routing) requires sm89+; "
-        f"this GPU is {_GPU0_SM}"
-    ),
-)
 def test_router_decisions_sglang_disagg(
     request,
     runtime_services_dynamic_ports,
@@ -479,6 +443,7 @@ def test_router_decisions_sglang_disagg(
     set_ucx_tls_no_mm,
     request_plane,
 ):
+    """Check KV-aware routing across SGLang prefill and decode workers on H100."""
     run_disagg_router_decisions_test(
         engine_process_cls=SGLangProcess,
         engine_args_name="sglang_args",
