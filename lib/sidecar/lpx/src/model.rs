@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dynamo_backend_common::{
-    ComponentSnapshot, DisaggregationMode, DynamoError, EngineConfig, LlmRegistration, WorkerConfig,
+    DisaggregationMode, DynamoError, EngineConfig, LlmRegistration, WorkerConfig,
 };
 use dynamo_runtime::metrics::prometheus_names::labels;
 
@@ -50,9 +50,9 @@ pub(crate) struct DiscoveredEngine {
     pub(crate) max_batched_tokens: Option<u64>,
     pub(crate) tool_call_parser: Option<String>,
     pub(crate) reasoning_parser: Option<String>,
-    /// The load the engine reported at startup; the sidecar publishes load
-    /// only for an engine that reports it.
-    pub(crate) load: Option<ComponentSnapshot>,
+    /// The engine's validated `GetLoad` answer at startup, when it reports
+    /// load; the sidecar polls load only for such an engine.
+    pub(crate) load: Option<pb::LoadInfo>,
 }
 
 impl DiscoveredEngine {
@@ -127,11 +127,16 @@ impl DiscoveredEngine {
         })
     }
 
-    /// Keeps the load the engine reports at startup; `None` means it does not
-    /// implement `GetLoad`. Load is counted in the capacity's KV blocks, so it
-    /// needs a reported capacity.
+    /// Keeps the load the engine reports at startup. `None` means it does not
+    /// implement `GetLoad`, and an answer without counters or ranks reports
+    /// no load, as with the TensorRT-LLM sidecar. Load is counted in the
+    /// capacity's KV blocks, so it needs a reported capacity.
     pub(crate) fn with_load(mut self, load: Option<pb::LoadInfo>) -> Result<Self, DynamoError> {
-        let Some(load) = load else {
+        let Some(load) = load.filter(|load| {
+            load.used_kv_blocks.is_some()
+                || load.total_kv_blocks.is_some()
+                || !load.ranks.is_empty()
+        }) else {
             return Ok(self);
         };
         let engine = engine_label(&self.engine_name);
@@ -141,7 +146,8 @@ impl DiscoveredEngine {
                 "load requires positive kv_block_size and total_kv_blocks",
             ));
         }
-        self.load = Some(load::snapshot(engine, load)?);
+        load::snapshot(engine, load.clone())?;
+        self.load = Some(load);
         Ok(self)
     }
 

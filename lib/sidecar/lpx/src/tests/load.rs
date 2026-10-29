@@ -76,6 +76,7 @@ async fn reported_load_is_polled_into_the_publisher() {
     assert!(config.enable_kv_routing && !config.enable_local_indexer);
     assert_eq!(bindings.dp_ranks, [0]);
     start_publishing(&metrics, bindings);
+    assert_eq!(usage(&metrics), Some(0.25), "the fresh startup load");
 
     // The bootstrap and two polls have read the startup load, so only a
     // repeated poll can see the change.
@@ -86,7 +87,6 @@ async fn reported_load_is_polled_into_the_publisher() {
     })
     .await
     .expect("the poll repeats");
-    assert_eq!(usage(&metrics), Some(0.25));
     server.fake.set_load(Load::Used(128));
     tokio::time::timeout(Duration::from_secs(5), async {
         while usage(&metrics) != Some(0.5) {
