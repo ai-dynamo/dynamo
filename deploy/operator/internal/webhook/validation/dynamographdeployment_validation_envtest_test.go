@@ -145,7 +145,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			worker := dgd.GetComponentByName("worker")
 			enableBetaSnapshotFailover(worker, "vllm")
 			worker.Experimental.Checkpoint.TargetContainerName = "helper"
-		}), wantWebhookErrs: []string{`spec.components[1].experimental.checkpoint.targetContainerName: Invalid value: "helper": must be main for intra-pod failover`}},
+		}), wantWebhookErrs: []string{
+			`spec.components[1].experimental.checkpoint.targetContainerName: Invalid value: "helper": must be main for intra-pod failover`,
+			`spec.components[1].podTemplate.spec.containers: Required value: must contain the checkpoint target container "helper" that directly runs python -m <module>`,
+		}},
 		{name: "snapshot failover rejects multiple nodes", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 			enableBetaContainerDiscovery(dgd)
 			worker := dgd.GetComponentByName("worker")
@@ -2041,6 +2044,24 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{
 				betaRestoreEntrypointForbiddenAt("spec.components[1].roles[1].podTemplate.spec.containers[0].command"),
 			},
+		},
+
+		{
+			name:       "snapshot failover admits a main container that directly runs a python module",
+			deployment: betaSnapshotFailoverRestoreDGD(betaPythonModuleCommand("dynamo.vllm"), 1),
+		},
+		{
+			name:       "snapshot failover rejects a shell wrapper because both engines clone main",
+			deployment: betaSnapshotFailoverRestoreDGD(betaShellCommand(), 1),
+			wantWebhookErrs: []string{
+				betaRestoreEntrypointForbiddenAt("spec.components[1].podTemplate.spec.containers[0].command"),
+			},
+		},
+		{
+			name:               "unchanged legacy shell snapshot failover survives an unrelated update",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaSnapshotFailoverRestoreDGD(betaShellCommand(), 1),
+			deployment:         betaSnapshotFailoverRestoreDGD(betaShellCommand(), 2),
 		},
 
 		// KV-transfer CEL rules.
@@ -4815,6 +4836,18 @@ func betaCheckpointRoleTemplatesDGD(leaderCommand, workerCommand []string, repli
 		worker := betaWorkerComponent(dgd)
 		worker.Replicas = &replicas
 		setBetaCheckpointRoleTemplates(worker, leaderCommand, workerCommand)
+	})
+}
+
+// betaSnapshotFailoverRestoreDGD builds a vLLM snapshot-backed intra-pod failover worker whose main launches command.
+func betaSnapshotFailoverRestoreDGD(command []string, replicas int32) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		enableBetaContainerDiscovery(dgd)
+		dgd.Spec.BackendFramework = "vllm"
+		worker := betaWorkerComponent(dgd)
+		worker.Replicas = &replicas
+		enableBetaSnapshotFailover(worker, "vllm")
+		useBetaRestoreEntrypoint(worker, command)
 	})
 }
 

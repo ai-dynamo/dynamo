@@ -322,8 +322,9 @@ func restoreEntrypointInputsForTemplate(
 // component-level PodTemplate is one destination; in role-template mode each role
 // with a complete PodTemplate is one, mirroring how rendering selects the template.
 // It reports false when the component does not enable checkpointing for a component
-// type that supports it, or when the launch is not authored by the user (intra-pod
-// failover and native sidecars), which the authored container does not describe.
+// type that supports it, or when the launch is not authored by the user (native
+// sidecars), which the authored container does not describe. Intra-pod failover
+// clones main into its engine containers with the same launch, so main is checked.
 // spec must not be nil.
 func restoreEntrypointInputsFor(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -336,7 +337,7 @@ func restoreEntrypointInputsFor(
 	default:
 		return nil, false
 	}
-	if spec.Experimental.Failover != nil || dynamo.GetDynamoSidecar(spec) != nil {
+	if dynamo.GetDynamoSidecar(spec) != nil {
 		return nil, false
 	}
 
